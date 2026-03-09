@@ -1,8 +1,39 @@
-# CAIA Preprocessing Scripts
+# CAIA
 
 PySpark preprocessing pipelines for extracting longitudinal clinical lab data from OMOP CDM (Observational Medical Outcomes Partnership Common Data Model) for time-to-event modeling with SurvLatentODE.
 
 Data source: DFCI deidentified OMOP CDM via Snowflake (`dfci_ia_aistudio.omop_caia_denorm` for clinical data, `snowflake_aistudio_full_catalog.omop_cdm_deid` for vocabulary).
+
+## Repository Structure
+
+```text
+CAIA/
+├── COMPASS/                              # Prostate cancer workflow
+│   ├── rhino_preprocessing/
+│   │   ├── compass_preprocessing.py      # Main COMPASS preprocessing pipeline
+│   │   ├── compass_cohort_sensitivity.py # Cohort parameter sweep analysis
+│   │   └── compass_preprocessing_prostate_only_no_parp.py
+│   ├── ERIS_testing/
+│   │   ├── compile_prostate_data.py      # Data extraction utilities
+│   │   ├── compile_MRNs_for_manual_review.py
+│   │   └── extract_units.ipynb           # Unit analysis notebook
+│   └── COMPASS_Rhino Schema_v3.csv       # Output schema documentation
+├── IPIO/                                 # Immunotherapy workflow
+│   ├── rhino_preprocessing/
+│   │   └── ipio_preprocessing.py         # Main IPIO preprocessing pipeline
+│   └── IPIO_Rhino Schema.xlsx            # Output schema documentation
+├── common_OMOP/                          # Shared lookup tables
+│   └── all_common_OMOP_units.csv         # Allowed measurement/unit combinations
+└── README.md
+```
+
+## Tech Stack
+
+- **Language**: Python (PySpark)
+- **Compute**: Apache Spark (Databricks)
+- **Database**: Snowflake
+- **Data Standard**: OMOP CDM v5
+- **Downstream**: SurvLatentODE and other time-to-event models
 
 ---
 
@@ -128,5 +159,11 @@ Both pipelines share identical logic for:
 ## Output
 
 Each script produces a single long-format DataFrame (one row per patient per lab measurement per date) that is uploaded to Snowflake for downstream modeling. Summary statistics are printed at the end of each script covering cohort demographics, treatment distributions, lab measurement distributions, unit conversion audits, follow-up/survival, time-to-event variables, pre-diagnosis labs, and null value audits.
-# CAIA_preprocessing_scripts
-# CAIA_projects
+
+---
+
+## Supporting Scripts
+
+- **`compass_cohort_sensitivity.py`**: Parameter sweep over PSA concept sets and count thresholds (1–30) to show patient inclusion/exclusion at each filter step.
+- **`ERIS_testing/compile_prostate_data.py`**: Data extraction utilities for the DFCI prostate cohort (text notes, health history, medications, labs, somatic data).
+- **`ERIS_testing/extract_units.ipynb`**: Jupyter notebook for unit analysis and validation.
