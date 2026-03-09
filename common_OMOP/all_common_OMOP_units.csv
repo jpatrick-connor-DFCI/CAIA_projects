@@ -1,0 +1,554 @@
+MEASUREMENT_CONCEPT_ID,MEASUREMENT_CONCEPT_NAME,UNIT_CONCEPT_ID,UNIT_CONCEPT_NAME,UNIT_CONCEPT_CODE
+3000099,Nuclear Ab [Units/volume] in Serum by Immunoassay,8510,unit,[U]
+3000285,Sodium [Moles/volume] in Blood,8753,millimole per liter,mmol/L
+3000285,Sodium [Moles/volume] in Blood,9557,milliequivalent per liter,10*-3.eq/L
+3000483,Glucose [Mass/volume] in Blood,8840,milligram per deciliter,mg/dL
+3000905,Leukocytes [#/volume] in Blood by Automated count,8566,thousand,10*3
+3000905,Leukocytes [#/volume] in Blood by Automated count,8645,unit per liter,[U]/L
+3000905,Leukocytes [#/volume] in Blood by Automated count,8784,cells per microliter,{cells}/uL
+3000905,Leukocytes [#/volume] in Blood by Automated count,8785,per cubic millimeter,/mm3
+3000905,Leukocytes [#/volume] in Blood by Automated count,8848,thousand per microliter,10*3/uL
+3000905,Leukocytes [#/volume] in Blood by Automated count,8961,thousand per cubic millimeter,10*3/mm3
+3000905,Leukocytes [#/volume] in Blood by Automated count,9433,number ten,10*
+3000905,Leukocytes [#/volume] in Blood by Automated count,9435,thousand per liter,10*3/L
+3000905,Leukocytes [#/volume] in Blood by Automated count,9436,thousand per milliliter,10*3/mL
+3000905,Leukocytes [#/volume] in Blood by Automated count,9444,billion per liter,10*9/L
+3000905,Leukocytes [#/volume] in Blood by Automated count,9446,billion per microliter,10*9/uL
+3000963,Hemoglobin [Mass/volume] in Blood,8519,liter,L
+3000963,Hemoglobin [Mass/volume] in Blood,8554,percent,%
+3000963,Hemoglobin [Mass/volume] in Blood,8636,gram per liter,g/L
+3000963,Hemoglobin [Mass/volume] in Blood,8713,gram per deciliter,g/dL
+3000963,Hemoglobin [Mass/volume] in Blood,8840,milligram per deciliter,mg/dL
+3000963,Hemoglobin [Mass/volume] in Blood,8848,thousand per microliter,10*3/uL
+3000963,Hemoglobin [Mass/volume] in Blood,44777568,unit per deciliter,[U]/dL
+3001604,Monocytes [#/volume] in Blood,8784,cells per microliter,{cells}/uL
+3001604,Monocytes [#/volume] in Blood,8848,thousand per microliter,10*3/uL
+3001604,Monocytes [#/volume] in Blood,8961,thousand per cubic millimeter,10*3/mm3
+3001657,Leukocytes [#/volume] corrected for nucleated erythrocytes in Blood,8566,thousand,10*3
+3001775,Smith extractable nuclear Ab [Presence] in Serum by Immunoassay,8695,Ehrlich unit per milliliter,[EU]/mL
+3001775,Smith extractable nuclear Ab [Presence] in Serum by Immunoassay,45744813,clinical unit,{CU}
+3001784,Prostate Specific Ag Free/Prostate specific Ag.total in Serum or Plasma,8523,ratio,{ratio}
+3001784,Prostate Specific Ag Free/Prostate specific Ag.total in Serum or Plasma,8554,percent,%
+3001784,Prostate Specific Ag Free/Prostate specific Ag.total in Serum or Plasma,44777555,percent calculated,%{calc}
+3002030,Lymphocytes/100 leukocytes in Blood,8554,percent,%
+3002030,Lymphocytes/100 leukocytes in Blood,8784,cells per microliter,{cells}/uL
+3002131,Prostate specific Ag [Units/volume] in Serum or Plasma,8842,nanogram per milliliter,ng/mL
+3002385,Erythrocyte distribution width [Ratio],8554,percent,%
+3002417,Prothrombin time (PT) in Blood by Coagulation assay,8555,second,s
+3002971,Nuclear Ab [Titer] in Serum by Immunofluorescence,8525,titer,{titer}
+3003215,Lymphocytes [#/volume] in Blood by Manual count,8784,cells per microliter,{cells}/uL
+3003215,Lymphocytes [#/volume] in Blood by Manual count,8848,thousand per microliter,10*3/uL
+3003215,Lymphocytes [#/volume] in Blood by Manual count,8961,thousand per cubic millimeter,10*3/mm3
+3003332,Smith extractable nuclear Ab+Ribonucleoprotein extractable nuclear Ab [Units/volume] in Serum,8478,avidity index,{ai}
+3003338,MCHC [Mass/volume],8713,gram per deciliter,g/dL
+3003721,Smooth muscle Ab [Units/volume] in Serum,8510,unit,[U]
+3003785,Carcinoembryonic Ag [Mass/volume] in Serum or Plasma,8842,nanogram per milliliter,ng/mL
+3004119,Hemoglobin [Mass/volume] in Venous blood,8713,gram per deciliter,g/dL
+3004249,Systolic blood pressure,8876,millimeter mercury column,mm[Hg]
+3004295,Urea nitrogen [Mass/volume] in Blood,8840,milligram per deciliter,mg/dL
+3004327,Lymphocytes [#/volume] in Blood by Automated count,8554,percent,%
+3004327,Lymphocytes [#/volume] in Blood by Automated count,8647,per microliter,/uL
+3004327,Lymphocytes [#/volume] in Blood by Automated count,8784,cells per microliter,{cells}/uL
+3004327,Lymphocytes [#/volume] in Blood by Automated count,8848,thousand per microliter,10*3/uL
+3004327,Lymphocytes [#/volume] in Blood by Automated count,8961,thousand per cubic millimeter,10*3/mm3
+3004327,Lymphocytes [#/volume] in Blood by Automated count,9444,billion per liter,10*9/L
+3004501,Glucose [Mass/volume] in Serum or Plasma,8713,gram per deciliter,g/dL
+3004501,Glucose [Mass/volume] in Serum or Plasma,8751,milligram per liter,mg/L
+3004501,Glucose [Mass/volume] in Serum or Plasma,8753,millimole per liter,mmol/L
+3004501,Glucose [Mass/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3004722,Prolactin [Mass/volume] in Serum or Plasma,8842,nanogram per milliliter,ng/mL
+3005013,Prostate Specific Ag Free [Mass/volume] in Serum or Plasma,8842,nanogram per milliliter,ng/mL
+3005225,Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma by Pyruvate to lactate reaction,8645,unit per liter,[U]/L
+3005307,Sjogrens syndrome-B extractable nuclear Ab [Presence] in Serum by Immunoassay,8478,avidity index,{ai}
+3005307,Sjogrens syndrome-B extractable nuclear Ab [Presence] in Serum by Immunoassay,8590,O.D. unit,[OD'U]
+3005307,Sjogrens syndrome-B extractable nuclear Ab [Presence] in Serum by Immunoassay,8695,Ehrlich unit per milliliter,[EU]/mL
+3005307,Sjogrens syndrome-B extractable nuclear Ab [Presence] in Serum by Immunoassay,45744813,clinical unit,{CU}
+3005456,Potassium [Moles/volume] in Blood,8753,millimole per liter,mmol/L
+3005456,Potassium [Moles/volume] in Blood,9557,milliequivalent per liter,10*-3.eq/L
+3005755,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma by With P-5'-P,8923,international unit per liter,[iU]/L
+3006315,Basophils [#/volume] in Blood,8784,cells per microliter,{cells}/uL
+3006315,Basophils [#/volume] in Blood,8848,thousand per microliter,10*3/uL
+3006315,Basophils [#/volume] in Blood,8961,thousand per cubic millimeter,10*3/mm3
+3006504,Eosinophils/100 leukocytes in Blood,8554,percent,%
+3006588,Cancer Ag 15-3 [Units/volume] in Serum or Plasma,8763,unit per milliliter,[U]/mL
+3006906,Calcium [Mass/volume] in Serum or Plasma,8713,gram per deciliter,g/dL
+3006906,Calcium [Mass/volume] in Serum or Plasma,8751,milligram per liter,mg/L
+3006906,Calcium [Mass/volume] in Serum or Plasma,8753,millimole per liter,mmol/L
+3006906,Calcium [Mass/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3006923,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma,8645,unit per liter,[U]/L
+3006923,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma,8718,international unit,[iU]
+3006923,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma,8923,international unit per liter,[iU]/L
+3006923,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma,8985,international unit per milliliter,[iU]/mL
+3006923,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma,9254,per liter,/L
+3006999,Ribonucleoprotein extractable nuclear Ab [Units/volume] in Serum,8478,avidity index,{ai}
+3006999,Ribonucleoprotein extractable nuclear Ab [Units/volume] in Serum,8510,unit,[U]
+3006999,Ribonucleoprotein extractable nuclear Ab [Units/volume] in Serum,8590,O.D. unit,[OD'U]
+3007220,Creatine kinase [Enzymatic activity/volume] in Serum or Plasma,8645,unit per liter,[U]/L
+3007220,Creatine kinase [Enzymatic activity/volume] in Serum or Plasma,8923,international unit per liter,[iU]/L
+3007461,Platelets [#/volume] in Blood,8848,thousand per microliter,10*3/uL
+3007461,Platelets [#/volume] in Blood,8961,thousand per cubic millimeter,10*3/mm3
+3007835,Cancer Ag 125 [Presence] in Serum or Plasma,8763,unit per milliliter,[U]/mL
+3008342,Neutrophils/100 leukocytes in Blood by Automated count,8554,percent,%
+3008342,Neutrophils/Leukocytes in Blood by Automated count,8554,percent,%
+3008342,Neutrophils/100 leukocytes in Blood by Automated count,8784,cells per microliter,{cells}/uL
+3008342,Neutrophils/100 leukocytes in Blood by Automated count,8848,thousand per microliter,10*3/uL
+3008342,Neutrophils/Leukocytes in Blood by Automated count,8848,thousand per microliter,10*3/uL
+3008598,Thyroxine (T4) free [Mass/volume] in Serum or Plasma,8510,unit,[U]
+3008598,Thyroxine (T4) free [Mass/volume] in Serum or Plasma,8729,picomole per liter,pmol/L
+3008598,Thyroxine (T4) free [Mass/volume] in Serum or Plasma,8817,nanogram per deciliter,ng/dL
+3008598,Thyroxine (T4) free [Mass/volume] in Serum or Plasma,8837,microgram per deciliter,ug/dL
+3008598,Thyroxine (T4) free [Mass/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3008598,Thyroxine (T4) free [Mass/volume] in Serum or Plasma,8842,nanogram per milliliter,ng/mL
+3008598,Thyroxine (T4) free [Mass/volume] in Serum or Plasma,8845,picogram per milliliter,pg/mL
+3008893,Testosterone [Mass/volume] in Serum or Plasma,8817,nanogram per deciliter,ng/dL
+3009041,Cardiolipin IgG Ab [Units/volume] in Serum by Immunoassay,9100,IgG phospholipid unit,[GPL'U]
+3009201,Thyrotropin [Units/volume] in Serum or Plasma,8719,milliunit per milliliter,10*-3.[U]/mL
+3009201,Thyrotropin [Units/volume] in Serum or Plasma,8817,nanogram per deciliter,ng/dL
+3009201,Thyrotropin [Units/volume] in Serum or Plasma,8859,microgram per milliliter,ug/mL
+3009201,Thyrotropin [Units/volume] in Serum or Plasma,8860,microunit per milliliter,10*-6.[U]/mL
+3009201,Thyrotropin [Units/volume] in Serum or Plasma,8923,international unit per liter,[iU]/L
+3009201,Thyrotropin [Units/volume] in Serum or Plasma,8985,international unit per milliliter,[iU]/mL
+3009201,Thyrotropin [Units/volume] in Serum or Plasma,9040,milli-international unit per liter,10*-3.[iU]/L
+3009201,Thyrotropin [Units/volume] in Serum or Plasma,9093,micro-international unit per milliliter,10*-6.[iU]/mL
+3009201,Thyrotropin [Units/volume] in Serum or Plasma,9550,milli-international unit per milliliter,10*-3.[iU]/mL
+3009201,Thyrotropin [Units/volume] in Serum or Plasma,44777578,milliunit per liter,10*-3.[U]/L
+3009201,Thyrotropin [Units/volume] in Serum or Plasma,44777583,micro-international unit per liter,10*-6.[iU]/L
+3009214,Lutropin [Units/volume] in Serum or Plasma,8923,international unit per liter,[iU]/L
+3009214,Lutropin [Units/volume] in Serum or Plasma,9550,milli-international unit per milliliter,10*-3.[iU]/mL
+3009306,Alpha-1-Fetoprotein [Mass/volume] in Serum or Plasma,8842,nanogram per milliliter,ng/mL
+3009445,Proteinase 3 Ab [Units/volume] in Serum,8510,unit,[U]
+3009445,Proteinase 3 Ab [Units/volume] in Serum,8763,unit per milliliter,[U]/mL
+3009445,Proteinase 3 Ab [Units/volume] in Serum,8980,arbitrary unit per milliliter,[arb'U]/mL
+3009542,Hematocrit [Volume Fraction] of Blood,8554,percent,%
+3009542,Hematocrit [Volume Fraction] of Blood,8583,femtoliter,fL
+3009542,Hematocrit [Volume Fraction] of Blood,8713,gram per deciliter,g/dL
+3009682,Cortisol [Mass/volume] in Serum or Plasma,8837,microgram per deciliter,ug/dL
+3009682,Cortisol [Mass/volume] in Serum or Plasma,8859,microgram per milliliter,ug/mL
+3009744,MCHC [Mass/volume] by Automated count,8554,percent,%
+3009744,MCHC [Mass/volume] by Automated count,8564,picogram,pg
+3009744,MCHC [Mass/volume] by Automated count,8713,gram per deciliter,g/dL
+3009744,MCHC [Entitic Mass/volume] in Red Blood Cells by Automated count,8713,gram per deciliter,g/dL
+3009797,Basophils/100 leukocytes in Blood by Manual count,8554,percent,%
+3009797,Basophils/Leukocytes in Blood by Manual count,8554,percent,%
+3009894,Triiodothyronine (T3)/Triiodothyronine (T3) uptake index [Ratio] in Serum or Plasma,8554,percent,%
+3009932,Eosinophils [#/volume] in Blood by Manual count,8848,thousand per microliter,10*3/uL
+3009932,Eosinophils [#/volume] in Blood by Manual count,8961,thousand per cubic millimeter,10*3/mm3
+3010140,"Carbon dioxide, total [Moles/volume] in Venous blood",8753,millimole per liter,mmol/L
+3010156,C reactive protein [Mass/volume] in Serum or Plasma by High sensitivity method,8751,milligram per liter,mg/L
+3010156,C reactive protein [Mass/volume] in Serum or Plasma by High sensitivity method,8840,milligram per deciliter,mg/dL
+3010340,Triiodothyronine (T3) [Mass/volume] in Serum or Plasma,8554,percent,%
+3010340,Triiodothyronine (T3) [Mass/volume] in Serum or Plasma,8817,nanogram per deciliter,ng/dL
+3010340,Triiodothyronine (T3) [Mass/volume] in Serum or Plasma,8820,picogram per deciliter,pg/dL
+3010340,Triiodothyronine (T3) [Mass/volume] in Serum or Plasma,8842,nanogram per milliliter,ng/mL
+3010340,Triiodothyronine (T3) [Mass/volume] in Serum or Plasma,8845,picogram per milliliter,pg/mL
+3010457,Eosinophils/100 leukocytes in Blood by Automated count,8554,percent,%
+3010457,Eosinophils/Leukocytes in Blood by Automated count,8554,percent,%
+3010813,Leukocytes [#/volume] in Blood,8848,thousand per microliter,10*3/uL
+3011367,Oxygen saturation Calculated from oxygen partial pressure in Blood,8554,percent,%
+3011617,Mitochondria Ab [Units/volume] in Serum,8510,unit,[U]
+3011948,Monocytes/100 leukocytes in Blood by Automated count,8554,percent,%
+3011948,Monocytes/Leukocytes in Blood by Automated count,8554,percent,%
+3012030,MCH [Entitic mass] by Automated count,8564,picogram,pg
+3012030,MCH [Entitic mass] by Automated count,8704,picogram per cell,pg/{cell}
+3012030,MCH [Entitic mass] by Automated count,8713,gram per deciliter,g/dL
+3012718,DNA double strand Ab [Presence] in Serum,8876,millimeter mercury column,mm[Hg]
+3012888,Diastolic blood pressure,8876,millimeter mercury column,mm[Hg]
+3013115,Eosinophils [#/volume] in Blood,8784,cells per microliter,{cells}/uL
+3013115,Eosinophils [#/volume] in Blood,8848,thousand per microliter,10*3/uL
+3013115,Eosinophils [#/volume] in Blood,8961,thousand per cubic millimeter,10*3/mm3
+3013273,Insulin-like growth factor-I [Mass/volume] in Serum or Plasma,8842,nanogram per milliliter,ng/mL
+3013290,Carbon dioxide [Partial pressure] in Blood,8876,millimeter mercury column,mm[Hg]
+3013429,Basophils [#/volume] in Blood by Automated count,8784,cells per microliter,{cells}/uL
+3013429,Basophils [#/volume] in Blood by Automated count,8848,thousand per microliter,10*3/uL
+3013429,Basophils [#/volume] in Blood by Automated count,8961,thousand per cubic millimeter,10*3/mm3
+3013429,Basophils [#/volume] in Blood by Automated count,9444,billion per liter,10*9/L
+3013466,aPTT in Blood by Coagulation assay,8555,second,s
+3013502,Oxygen saturation in Blood,8554,percent,%
+3013603,Prostate specific Ag [Mass/volume] in Serum or Plasma,8842,nanogram per milliliter,ng/mL
+3013650,Neutrophils [#/volume] in Blood by Automated count,8784,cells per microliter,{cells}/uL
+3013650,Neutrophils [#/volume] in Blood by Automated count,8848,thousand per microliter,10*3/uL
+3013650,Neutrophils [#/volume] in Blood by Automated count,8961,thousand per cubic millimeter,10*3/mm3
+3013650,Neutrophils [#/volume] in Blood by Automated count,9444,billion per liter,10*9/L
+3013650,Neutrophils [#/volume] in Blood by Automated count,9665,microliter,uL
+3013682,Urea nitrogen [Mass/volume] in Serum or Plasma,8596,calculated,{calc}
+3013682,Urea nitrogen [Mass/volume] in Serum or Plasma,8753,millimole per liter,mmol/L
+3013682,Urea nitrogen [Mass/volume] in Serum or Plasma,8817,nanogram per deciliter,ng/dL
+3013682,Urea nitrogen [Mass/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3013682,Urea nitrogen [Mass/volume] in Serum or Plasma,9557,milliequivalent per liter,10*-3.eq/L
+3013707,Erythrocyte sedimentation rate by Westergren method,8588,millimeter,mm
+3013707,Erythrocyte sedimentation rate by Westergren method,8752,millimeter per hour,mm/h
+3013707,Erythrocyte sedimentation rate [Velocity] in Red Blood Cells by Westergren method,8752,millimeter per hour,mm/h
+3013721,Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma,8645,unit per liter,[U]/L
+3013721,Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma,8725,nanogram per liter,ng/L
+3013721,Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma,8923,international unit per liter,[iU]/L
+3013721,Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma,9254,per liter,/L
+3013762,Body weight Measured,9529,kilogram,kg
+3013826,Glucose [Moles/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3013869,Basophils/100 leukocytes in Blood by Automated count,8554,percent,%
+3013869,Basophils/Leukocytes in Blood by Automated count,8554,percent,%
+3014053,Glucose [Mass/volume] in Blood by Test strip manual,8840,milligram per deciliter,mg/dL
+3014094,"Carbon dioxide, total [Moles/volume] in Blood",8753,millimole per liter,mmol/L
+3014300,Beta 2 glycoprotein 1 IgM Ab [Units/volume] in Serum,8611,beta-2 GPI IgM Ab unit,[GPI'IgM'U]
+3014300,Beta 2 glycoprotein 1 IgM Ab [Units/volume] in Serum,8763,unit per milliliter,[U]/mL
+3014576,Chloride [Moles/volume] in Serum or Plasma,8753,millimole per liter,mmol/L
+3014576,Chloride [Moles/volume] in Serum or Plasma,9551,milliequivalent,10*-3.eq
+3014576,Chloride [Moles/volume] in Serum or Plasma,9557,milliequivalent per liter,10*-3.eq/L
+3015182,Erythrocyte distribution width [Entitic volume] by Automated count,8554,percent,%
+3015182,Erythrocyte distribution width [Entitic volume] by Automated count,8583,femtoliter,fL
+3015183,Erythrocyte sedimentation rate,8588,millimeter,mm
+3015183,Erythrocyte sedimentation rate,8752,millimeter per hour,mm/h
+3015377,Calcium [Moles/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3015481,Prolactin [Mass/volume] in Serum or Plasma by Immunoassay,8842,nanogram per milliliter,ng/mL
+3015632,"Carbon dioxide, total [Moles/volume] in Serum or Plasma",8736,nanomole per liter,nmol/L
+3015632,"Carbon dioxide, total [Moles/volume] in Serum or Plasma",8753,millimole per liter,mmol/L
+3015632,"Carbon dioxide, total [Moles/volume] in Serum or Plasma",8840,milligram per deciliter,mg/dL
+3015632,"Carbon dioxide, total [Moles/volume] in Serum or Plasma",9551,milliequivalent,10*-3.eq
+3015632,"Carbon dioxide, total [Moles/volume] in Serum or Plasma",9557,milliequivalent per liter,10*-3.eq/L
+3015813,Cardiolipin IgM Ab [Units/volume] in Serum by Immunoassay,9101,IgM phospholipid unit,[MPL'U]
+3015813,Cardiolipin IgM Ab [Units/volume] in Serum by Immunoassay,9158,IgM phospholipid unit per milliliter,[MPL'U]/mL
+3015956,Eosinophils/100 leukocytes in Blood by Manual count,8554,percent,%
+3015956,Eosinophils/Leukocytes in Blood by Manual count,8554,percent,%
+3016080,Myeloperoxidase Ab [Presence] in Serum,8980,arbitrary unit per milliliter,[arb'U]/mL
+3016407,Fibrinogen [Mass/volume] in Platelet poor plasma by Coagulation assay,8840,milligram per deciliter,mg/dL
+3016436,Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma,8645,unit per liter,[U]/L
+3016436,Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma,8923,international unit per liter,[iU]/L
+3016502,Oxygen saturation in Arterial blood,8554,percent,%
+3016628,Fibrinogen Ag [Mass/volume] in Platelet poor plasma by Immunoassay,8840,milligram per deciliter,mg/dL
+3016723,Creatinine [Mass/volume] in Serum or Plasma,8749,micromole per liter,umol/L
+3016723,Creatinine [Mass/volume] in Serum or Plasma,8751,milligram per liter,mg/L
+3016723,Creatinine [Mass/volume] in Serum or Plasma,8753,millimole per liter,mmol/L
+3016723,Creatinine [Mass/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3016921,Smith extractable nuclear Ab [Units/volume] in Serum,8478,avidity index,{ai}
+3016921,Smith extractable nuclear Ab [Units/volume] in Serum,8510,unit,[U]
+3016921,Smith extractable nuclear Ab [Units/volume] in Serum,8590,O.D. unit,[OD'U]
+3017044,Thyrotropin receptor Ab [Units/volume] in Serum,8738,percent inhibition,%{inhibition}
+3017044,Thyrotropin receptor Ab [Units/volume] in Serum,8923,international unit per liter,[iU]/L
+3017501,Neutrophils [#/volume] in Blood by Manual count,8848,thousand per microliter,10*3/uL
+3017501,Neutrophils [#/volume] in Blood by Manual count,8961,thousand per cubic millimeter,10*3/mm3
+3017732,Neutrophils [#/volume] in Blood,8784,cells per microliter,{cells}/uL
+3017732,Neutrophils [#/volume] in Blood,8848,thousand per microliter,10*3/uL
+3017732,Neutrophils [#/volume] in Blood,8888,cells per cubic millimeter,{cells}/mm3
+3017732,Neutrophils [#/volume] in Blood,8961,thousand per cubic millimeter,10*3/mm3
+3018010,Neutrophils/100 leukocytes in Blood,8554,percent,%
+3018311,Urea nitrogen/Creatinine [Mass Ratio] in Serum or Plasma,8523,ratio,{ratio}
+3018311,Urea nitrogen/Creatinine [Mass Ratio] in Serum or Plasma,8596,calculated,{calc}
+3018311,Urea nitrogen/Creatinine [Mass Ratio] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3018517,Mitochondria Ab [Presence] in Serum,8510,unit,[U]
+3018572,Chloride [Moles/volume] in Blood,8753,millimole per liter,mmol/L
+3018572,Chloride [Moles/volume] in Blood,9557,milliequivalent per liter,10*-3.eq/L
+3018658,Beta 2 glycoprotein 1 IgG Ab [Units/volume] in Serum,8610,beta-2 GPI IgG Ab unit,[GPI'IgG'U]
+3018658,Beta 2 glycoprotein 1 IgG Ab [Units/volume] in Serum,8763,unit per milliliter,[U]/mL
+3018677,aPTT in Platelet poor plasma by Coagulation assay,8555,second,s
+3019050,Tissue transglutaminase IgA Ab [Units/volume] in Serum,8510,unit,[U]
+3019050,Tissue transglutaminase IgA Ab [Units/volume] in Serum,8763,unit per milliliter,[U]/mL
+3019050,Tissue transglutaminase IgA Ab [Units/volume] in Serum,45744813,clinical unit,{CU}
+3019069,Monocytes/100 leukocytes in Blood,8554,percent,%
+3019170,Thyrotropin [Units/volume] in Serum or Plasma by Detection limit <= 0.005 mIU/L,9040,milli-international unit per liter,10*-3.[iU]/L
+3019170,Thyrotropin [Units/volume] in Serum or Plasma by Detection limit <= 0.005 mIU/L,9093,micro-international unit per milliliter,10*-6.[iU]/mL
+3019171,Body height Stated,9306,foot (international),[ft_i]
+3019171,Body height Stated,9330,inch (US),[in_us]
+3019198,Lymphocytes [#/volume] in Blood,8784,cells per microliter,{cells}/uL
+3019198,Lymphocytes [#/volume] in Blood,8848,thousand per microliter,10*3/uL
+3019198,Lymphocytes [#/volume] in Blood,8961,thousand per cubic millimeter,10*3/mm3
+3019550,Sodium [Moles/volume] in Serum or Plasma,8753,millimole per liter,mmol/L
+3019550,Sodium [Moles/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3019550,Sodium [Moles/volume] in Serum or Plasma,9551,milliequivalent,10*-3.eq
+3019550,Sodium [Moles/volume] in Serum or Plasma,9557,milliequivalent per liter,10*-3.eq/L
+3019633,Sjogrens syndrome-A extractable nuclear Ab [Presence] in Serum by Immunoassay,8590,O.D. unit,[OD'U]
+3019633,Sjogrens syndrome-A extractable nuclear Ab [Presence] in Serum by Immunoassay,8695,Ehrlich unit per milliliter,[EU]/mL
+3019762,Thyrotropin [Units/volume] in Serum or Plasma by Detection limit <= 0.05 mIU/L,9040,milli-international unit per liter,10*-3.[iU]/L
+3019762,Thyrotropin [Units/volume] in Serum or Plasma by Detection limit <= 0.05 mIU/L,9093,micro-international unit per milliliter,10*-6.[iU]/mL
+3019897,Erythrocyte distribution width [Ratio] by Automated count,8554,percent,%
+3019897,Erythrocyte [DistWidth] in Red Blood Cells by Automated count,8554,percent,%
+3019897,Erythrocyte distribution width [Ratio] by Automated count,8583,femtoliter,fL
+3019897,Erythrocyte [DistWidth] in Red Blood Cells by Automated count,8583,femtoliter,fL
+3019897,Erythrocyte distribution width [Ratio] by Automated count,8848,thousand per microliter,10*3/uL
+3019909,Hematocrit [Volume Fraction] of Blood by Centrifugation,8554,percent,%
+3019942,Ribonucleoprotein extractable nuclear Ab [Presence] in Serum by Immunoassay,8695,Ehrlich unit per milliliter,[EU]/mL
+3019942,Ribonucleoprotein extractable nuclear Ab [Presence] in Serum by Immunoassay,45744813,clinical unit,{CU}
+3020416,Erythrocytes [#/volume] in Blood by Automated count,8549,million,10*6
+3020416,Erythrocytes [#/volume] in Blood by Automated count,8554,percent,%
+3020416,Erythrocytes [#/volume] in Blood by Automated count,8734,trillion per liter,10*12/L
+3020416,Erythrocytes [#/volume] in Blood by Automated count,8784,cells per microliter,{cells}/uL
+3020416,Erythrocytes [#/volume] in Blood by Automated count,8785,per cubic millimeter,/mm3
+3020416,Erythrocytes [#/volume] in Blood by Automated count,8815,million per microliter,10*6/uL
+3020416,Erythrocytes [#/volume] in Blood by Automated count,8816,million per milliliter,10*6/mL
+3020416,Erythrocytes [#/volume] in Blood by Automated count,8848,thousand per microliter,10*3/uL
+3020416,Erythrocytes [#/volume] in Blood by Automated count,8931,million per cubic millimeter,10*6/mm3
+3020416,Erythrocytes [#/volume] in Blood by Automated count,9433,number ten,10*
+3020416,Erythrocytes [#/volume] in Blood by Automated count,9442,million per liter,10*6/L
+3020460,C reactive protein [Mass/volume] in Serum or Plasma,8751,milligram per liter,mg/L
+3020460,C reactive protein [Mass/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3020509,Albumin/Globulin [Mass Ratio] in Serum or Plasma,8523,ratio,{ratio}
+3020509,Albumin/Globulin [Mass Ratio] in Serum or Plasma,8596,calculated,{calc}
+3020630,Protein [Mass/volume] in Serum or Plasma,8636,gram per liter,g/L
+3020630,Protein [Mass/volume] in Serum or Plasma,8713,gram per deciliter,g/dL
+3020630,Protein [Mass/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3020891,Body temperature,8517,Farad,F
+3020891,Body temperature,9289,degree Fahrenheit,[degF]
+3020891,Body temperature,9484,degree,deg
+3020891,Body temperature,586323,degree Celsius,Cel
+3021391,Anion gap 3 in Serum or Plasma,8596,calculated,{calc}
+3021391,Anion gap 3 in Serum or Plasma,8753,millimole per liter,mmol/L
+3021391,Anion gap 3 in Serum or Plasma,9557,milliequivalent per liter,10*-3.eq/L
+3021447,Carbon dioxide [Partial pressure] in Venous blood,8876,millimeter mercury column,mm[Hg]
+3021513,Carbon dioxide [Partial pressure] in Mixed venous blood,8876,millimeter mercury column,mm[Hg]
+3021614,Rheumatoid factor [Units/volume] in Serum or Plasma,8985,international unit per milliliter,[iU]/mL
+3021886,Globulin [Mass/volume] in Serum,8596,calculated,{calc}
+3021886,Globulin [Mass/volume] in Serum,8713,gram per deciliter,g/dL
+3021886,Globulin [Mass/volume] in Serum,8950,gram per deciliter calculated,g/dL{calc}
+3021901,Oxygen saturation in Capillary blood,8554,percent,%
+3022096,Basophils/100 leukocytes in Blood,8554,percent,%
+3022217,INR in Platelet poor plasma by Coagulation assay,8523,ratio,{ratio}
+3022217,INR in Platelet poor plasma by Coagulation assay,8596,calculated,{calc}
+3022217,INR in Platelet poor plasma by Coagulation assay,8985,international unit per milliliter,[iU]/mL
+3022250,Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma by Lactate to pyruvate reaction,8554,percent,%
+3022250,Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma by Lactate to pyruvate reaction,8645,unit per liter,[U]/L
+3022250,Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma by Lactate to pyruvate reaction,8923,international unit per liter,[iU]/L
+3022407,Monocytes/100 leukocytes in Blood by Manual count,8554,percent,%
+3022407,Monocytes/Leukocytes in Blood by Manual count,8554,percent,%
+3022893,Aspartate aminotransferase/Alanine aminotransferase [Enzymatic activity ratio] in Serum or Plasma,8645,unit per liter,[U]/L
+3022914,Cancer Ag 19-9 [Units/volume] in Serum or Plasma,8763,unit per milliliter,[U]/mL
+3023103,Potassium [Moles/volume] in Serum or Plasma,8736,nanomole per liter,nmol/L
+3023103,Potassium [Moles/volume] in Serum or Plasma,8751,milligram per liter,mg/L
+3023103,Potassium [Moles/volume] in Serum or Plasma,8753,millimole per liter,mmol/L
+3023103,Potassium [Moles/volume] in Serum or Plasma,9551,milliequivalent,10*-3.eq
+3023103,Potassium [Moles/volume] in Serum or Plasma,9557,milliequivalent per liter,10*-3.eq/L
+3023150,Myeloperoxidase Ab [Units/volume] in Serum,8478,avidity index,{ai}
+3023150,Myeloperoxidase Ab [Units/volume] in Serum,8510,unit,[U]
+3023150,Myeloperoxidase Ab [Units/volume] in Serum,8763,unit per milliliter,[U]/mL
+3023150,Myeloperoxidase Ab [Units/volume] in Serum,8980,arbitrary unit per milliliter,[arb'U]/mL
+3023166,Body weight Stated,9346,pound force (avoirdupois),[lbf_av]
+3023297,Cortisol [Mass/volume] in Serum or Plasma --PM trough specimen,8817,nanogram per deciliter,ng/dL
+3023297,Cortisol [Mass/volume] in Serum or Plasma --PM trough specimen,8837,microgram per deciliter,ug/dL
+3023314,Hematocrit [Volume Fraction] of Blood by Automated count,8554,percent,%
+3023314,Hematocrit [Volume Fraction] of Blood by Automated count,8837,microgram per deciliter,ug/dL
+3023323,Follitropin [Units/volume] in Serum or Plasma,8923,international unit per liter,[iU]/L
+3023323,Follitropin [Units/volume] in Serum or Plasma,9550,milli-international unit per milliliter,10*-3.[iU]/mL
+3023420,DNA double strand Ab [Units/volume] in Serum,8718,international unit,[iU]
+3023420,DNA double strand Ab [Units/volume] in Serum,8985,international unit per milliliter,[iU]/mL
+3023540,Body height Measured,8582,centimeter,cm
+3023540,Body height Measured,9330,inch (US),[in_us]
+3023599,MCV [Entitic volume] by Automated count,8583,femtoliter,fL
+3023599,MCV [Entitic mean volume] in Red Blood Cells by Automated count,8583,femtoliter,fL
+3023709,Somatotropin [Mass/volume] in Serum or Plasma,8842,nanogram per milliliter,ng/mL
+3023939,Sjogrens syndrome-A extractable nuclear Ab [Units/volume] in Serum,8478,avidity index,{ai}
+3023939,Sjogrens syndrome-A extractable nuclear Ab [Units/volume] in Serum,8510,unit,[U]
+3024128,Bilirubin.total [Mass/volume] in Serum or Plasma,8645,unit per liter,[U]/L
+3024128,Bilirubin.total [Mass/volume] in Serum or Plasma,8713,gram per deciliter,g/dL
+3024128,Bilirubin.total [Mass/volume] in Serum or Plasma,8749,micromole per liter,umol/L
+3024128,Bilirubin.total [Mass/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3024128,Bilirubin.total [Mass/volume] in Serum or Plasma,8909,milligram per 24 hours,mg/(24.h)
+3024128,Bilirubin.total [Mass/volume] in Serum or Plasma,8923,international unit per liter,[iU]/L
+3024171,Respiratory rate,8483,counts per minute,{counts}/min
+3024171,Respiratory rate,8541,per minute,/min
+3024253,Rheumatoid factor [Titer] in Serum by Nephelometry,8985,international unit per milliliter,[iU]/mL
+3024370,Alpha-1-Fetoprotein [Multiple of the median] in Serum or Plasma,8494,multiple of the median,{MOM}
+3024552,Cancer Ag 19-9 [Presence] in Serum or Plasma,8763,unit per milliliter,[U]/mL
+3024561,Albumin [Mass/volume] in Serum or Plasma,8554,percent,%
+3024561,Albumin [Mass/volume] in Serum or Plasma,8636,gram per liter,g/L
+3024561,Albumin [Mass/volume] in Serum or Plasma,8713,gram per deciliter,g/dL
+3024561,Albumin [Mass/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3024675,Thyroxine (T4) free [Mass/volume] in Serum or Plasma by Dialysis,8817,nanogram per deciliter,ng/dL
+3024731,MCV [Entitic volume],8583,femtoliter,fL
+3024731,MCV [Entitic volume],8713,gram per deciliter,g/dL
+3024731,MCV [Entitic volume],8848,thousand per microliter,10*3/uL
+3024763,Rheumatoid factor [Units/volume] in Serum by Nephelometry,8985,international unit per milliliter,[iU]/mL
+3024928,Oxygen saturation in Venous blood,8554,percent,%
+3024929,Platelets [#/volume] in Blood by Automated count,8554,percent,%
+3024929,Platelets [#/volume] in Blood by Automated count,8566,thousand,10*3
+3024929,Platelets [#/volume] in Blood by Automated count,8713,gram per deciliter,g/dL
+3024929,Platelets [#/volume] in Blood by Automated count,8784,cells per microliter,{cells}/uL
+3024929,Platelets [#/volume] in Blood by Automated count,8785,per cubic millimeter,/mm3
+3024929,Platelets [#/volume] in Blood by Automated count,8815,million per microliter,10*6/uL
+3024929,Platelets [#/volume] in Blood by Automated count,8848,thousand per microliter,10*3/uL
+3024929,Platelets [#/volume] in Blood by Automated count,8931,million per cubic millimeter,10*6/mm3
+3024929,Platelets [#/volume] in Blood by Automated count,8961,thousand per cubic millimeter,10*3/mm3
+3024929,Platelets [#/volume] in Blood by Automated count,9433,number ten,10*
+3024929,Platelets [#/volume] in Blood by Automated count,9435,thousand per liter,10*3/L
+3024929,Platelets [#/volume] in Blood by Automated count,9436,thousand per milliliter,10*3/mL
+3024929,Platelets [#/volume] in Blood by Automated count,9444,billion per liter,10*9/L
+3024929,Platelets [#/volume] in Blood by Automated count,9446,billion per microliter,10*9/uL
+3024929,Platelets [#/volume] in Blood by Automated count,9523,kelvin,K
+3024929,Platelets [#/volume] in Blood by Automated count,710257,hundred,10*2
+3024929,Platelets [#/volume] in Blood by Automated count,44777660,billion,10*9
+3025315,Body weight,8739,pound (US),[lb_us]
+3025315,Body weight,9346,pound force (avoirdupois),[lbf_av]
+3025315,Body weight,9373,ounce (avoirdupois),[oz_av]
+3025315,Body weight,9529,kilogram,kg
+3025547,Thyroglobulin Ab [Units/volume] in Serum or Plasma,8763,unit per milliliter,[U]/mL
+3025547,Thyroglobulin Ab [Units/volume] in Serum or Plasma,8985,international unit per milliliter,[iU]/mL
+3025857,Cortisol [Mass/volume] in Serum or Plasma --AM peak specimen,8817,nanogram per deciliter,ng/dL
+3025857,Cortisol [Mass/volume] in Serum or Plasma --AM peak specimen,8837,microgram per deciliter,ug/dL
+3026131,Fibrinogen Ag/Fibrinogen [Mass Ratio] in Platelet poor plasma,8523,ratio,{ratio}
+3026361,Erythrocytes [#/volume] in Blood,8815,million per microliter,10*6/uL
+3026652,Mitochondria Ab [Titer] in Serum by Immunofluorescence,8525,titer,{titer}
+3026797,Rheumatoid factor [Titer] in Serum,8985,international unit per milliliter,[iU]/mL
+3027018,Heart rate,8483,counts per minute,{counts}/min
+3027018,Heart rate,8541,per minute,/min
+3027018,Heart rate,8876,millimeter mercury column,mm[Hg]
+3027113,Smith extractable nuclear Ab+Ribonucleoprotein extractable nuclear Ab [Units/volume] in Serum by Immunoassay,8510,unit,[U]
+3027219,Urea nitrogen [Mass/volume] in Venous blood,8840,milligram per deciliter,mg/dL
+3027368,Neutrophils/100 leukocytes in Blood by Manual count,8554,percent,%
+3027368,Neutrophils/Leukocytes in Blood by Manual count,8554,percent,%
+3027450,Sjogrens syndrome-B extractable nuclear Ab [Units/volume] in Serum,8478,avidity index,{ai}
+3027450,Sjogrens syndrome-B extractable nuclear Ab [Units/volume] in Serum,8510,unit,[U]
+3027484,Hemoglobin [Mass/volume] in Blood by calculation,8713,gram per deciliter,g/dL
+3027597,Bilirubin.direct [Mass/volume] in Serum or Plasma,8713,gram per deciliter,g/dL
+3027597,Bilirubin.direct [Mass/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3027651,Basophils [#/volume] in Blood by Manual count,8848,thousand per microliter,10*3/uL
+3027651,Basophils [#/volume] in Blood by Manual count,8961,thousand per cubic millimeter,10*3/mm3
+3027970,Globulin [Mass/volume] in Serum by calculation,8713,gram per deciliter,g/dL
+3027970,Globulin [Mass/volume] in Serum by calculation,8950,gram per deciliter calculated,g/dL{calc}
+3028286,Albumin [Mass/volume] in Serum or Plasma by Electrophoresis,8713,gram per deciliter,g/dL
+3028615,Eosinophils [#/volume] in Blood by Automated count,8554,percent,%
+3028615,Eosinophils [#/volume] in Blood by Automated count,8647,per microliter,/uL
+3028615,Eosinophils [#/volume] in Blood by Automated count,8686,cubic millimeter,mm3
+3028615,Eosinophils [#/volume] in Blood by Automated count,8784,cells per microliter,{cells}/uL
+3028615,Eosinophils [#/volume] in Blood by Automated count,8848,thousand per microliter,10*3/uL
+3028615,Eosinophils [#/volume] in Blood by Automated count,8938,thousandth per microliter,10*-3/uL
+3028615,Eosinophils [#/volume] in Blood by Automated count,8961,thousand per cubic millimeter,10*3/mm3
+3028615,Eosinophils [#/volume] in Blood by Automated count,9444,billion per liter,10*9/L
+3029483,DNA double strand Ab [Units/volume] in Serum by Immunoassay,8985,international unit per milliliter,[iU]/mL
+3030597,Calcium [Mass/volume] corrected for total protein in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3032080,INR in Blood by Coagulation assay,8523,ratio,{ratio}
+3032080,INR in Blood by Coagulation assay,8554,percent,%
+3032986,Glucose [Mass/volume] in Serum or Plasma --1st specimen,8840,milligram per deciliter,mg/dL
+3033203,Carbon dioxide [Partial pressure] adjusted to patient's actual temperature in Blood,8876,millimeter mercury column,mm[Hg]
+3033575,Monocytes [#/volume] in Blood by Automated count,8784,cells per microliter,{cells}/uL
+3033575,Monocytes [#/volume] in Blood by Automated count,8848,thousand per microliter,10*3/uL
+3033575,Monocytes [#/volume] in Blood by Automated count,8961,thousand per cubic millimeter,10*3/mm3
+3033575,Monocytes [#/volume] in Blood by Automated count,9444,billion per liter,10*9/L
+3033682,Smooth muscle Ab [Titer] in Serum by Immunofluorescence,8525,titer,{titer}
+3034107,Monocytes [#/volume] in Blood by Manual count,8848,thousand per microliter,10*3/uL
+3034107,Monocytes [#/volume] in Blood by Manual count,8961,thousand per cubic millimeter,10*3/mm3
+3034426,Prothrombin time (PT),8555,second,s
+3034548,Prostate specific Ag [Mass/volume] in Serum or Plasma by Detection limit <= 0.01 ng/mL,8842,nanogram per milliliter,ng/mL
+3034717,Cyclic citrullinated peptide Ab [Units/volume] in Serum by Immunoassay,9426,ELISA unit per milliliter,[ELU]/mL
+3034976,Hematocrit [Volume Fraction] of Venous blood,8554,percent,%
+3035285,Chloride [Moles/volume] in Venous blood,8753,millimole per liter,mmol/L
+3035285,Chloride [Moles/volume] in Venous blood,9557,milliequivalent per liter,10*-3.eq/L
+3035544,Cardiolipin IgG Ab [Units/volume] in Serum or Plasma,9100,IgG phospholipid unit,[GPL'U]
+3035544,Cardiolipin IgG Ab [Units/volume] in Serum or Plasma,9157,IgG phospholipid unit per milliliter,[GPL'U]/mL
+3035637,Corticotropin [Mass/volume] in Plasma,8845,picogram per milliliter,pg/mL
+3035941,MCH [Entitic mass],8564,picogram,pg
+3035995,Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma,8645,unit per liter,[U]/L
+3035995,Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma,8718,international unit,[iU]
+3035995,Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3035995,Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma,8923,international unit per liter,[iU]/L
+3035995,Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma,9254,per liter,/L
+3036086,Jo-1 extractable nuclear Ab [Units/volume] in Serum by Immunoassay,8510,unit,[U]
+3036277,Body height,8582,centimeter,cm
+3036277,Body height,9307,foot (US),[ft_us]
+3036277,Body height,9330,inch (US),[in_us]
+3036489,Thrombin time,8555,second,s
+3036535,Thyroglobulin [Mass/volume] in Serum or Plasma,8842,nanogram per milliliter,ng/mL
+3037081,Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma by With P-5'-P,8923,international unit per liter,[iU]/L
+3037492,Cardiolipin IgM Ab [Units/volume] in Serum or Plasma,9101,IgM phospholipid unit,[MPL'U]
+3037492,Cardiolipin IgM Ab [Units/volume] in Serum or Plasma,9158,IgM phospholipid unit per milliliter,[MPL'U]/mL
+3037511,Lymphocytes/100 leukocytes in Blood by Automated count,8554,percent,%
+3037511,Lymphocytes/Leukocytes in Blood by Automated count,8554,percent,%
+3037511,Lymphocytes/100 leukocytes in Blood by Automated count,8784,cells per microliter,{cells}/uL
+3037551,Cancer Ag 125 [Units/volume] in Serum or Plasma,8763,unit per milliliter,[U]/mL
+3037950,Fibrinogen Ag [Mass/volume] in Platelet poor plasma by Nephelometry,8840,milligram per deciliter,mg/dL
+3038058,Lymphocytes/100 leukocytes in Blood by Manual count,8554,percent,%
+3038058,Lymphocytes/Leukocytes in Blood by Manual count,8554,percent,%
+3038553,Body mass index (BMI) [Ratio],8554,percent,%
+3038553,Body mass index (BMI) [Ratio],9531,kilogram per square meter,kg/m2
+3038624,Choriogonadotropin.tumor marker [Units/volume] in Serum or Plasma,8923,international unit per liter,[iU]/L
+3038624,Choriogonadotropin.tumor marker [Units/volume] in Serum or Plasma,9550,milli-international unit per milliliter,10*-3.[iU]/mL
+3038630,Choriogonadotropin.tumor marker [Mass/volume] in Serum or Plasma,8923,international unit per liter,[iU]/L
+3039426,Oxygen saturation Calculated from oxygen partial pressure in Arterial blood,8554,percent,%
+3040891,Heart rate --resting,8541,per minute,/min
+3040891,Heart rate --resting,8876,millimeter mercury column,mm[Hg]
+3041232,aPTT in Platelet poor plasma by Coagulation assay --post heparin neutralization,8555,second,s
+3041290,Carbon dioxide [Partial pressure] adjusted to patient's actual temperature in Venous blood,8876,millimeter mercury column,mm[Hg]
+3041354,Potassium [Moles/volume] in Venous blood,8753,millimole per liter,mmol/L
+3041354,Potassium [Moles/volume] in Venous blood,9557,milliequivalent per liter,10*-3.eq/L
+3041942,Cyclic citrullinated peptide Ab [Units/volume] in Serum,8510,unit,[U]
+3041942,Cyclic citrullinated peptide Ab [Units/volume] in Serum,8763,unit per milliliter,[U]/mL
+3041942,Cyclic citrullinated peptide Ab [Units/volume] in Serum,8876,millimeter mercury column,mm[Hg]
+3042292,Heart rate --post exercise,8541,per minute,/min
+3042436,aPTT in Platelet poor plasma by Coagulation assay --baseline,8555,second,s
+3044355,Beta 2 glycoprotein 1 IgG Ab [Units/volume] in Serum or Plasma by Immunoassay,45744813,clinical unit,{CU}
+3044946,DNA double strand Ab [Titer] in Serum by Immunofluorescence (IF) Crithidia luciliae,8525,titer,{titer}
+3045716,Anion gap in Serum or Plasma,8753,millimole per liter,mmol/L
+3045716,Anion gap in Serum or Plasma by calculation,8753,millimole per liter,mmol/L
+3045716,Anion gap in Serum or Plasma,8837,microgram per deciliter,ug/dL
+3045716,Anion gap in Serum or Plasma,9557,milliequivalent per liter,10*-3.eq/L
+3045716,Anion gap in Serum or Plasma by calculation,9557,milliequivalent per liter,10*-3.eq/L
+3045961,aPTT in Platelet poor plasma by Coagulation 1:1 saline,8555,second,s
+3046171,Beta 2 glycoprotein 1 IgM Ab [Units/volume] in Serum or Plasma by Immunoassay,8611,beta-2 GPI IgM Ab unit,[GPI'IgM'U]
+3046171,Beta 2 glycoprotein 1 IgM Ab [Units/volume] in Serum or Plasma by Immunoassay,8763,unit per milliliter,[U]/mL
+3046171,Beta 2 glycoprotein 1 IgM Ab [Units/volume] in Serum or Plasma by Immunoassay,45744813,clinical unit,{CU}
+3046538,Tissue transglutaminase IgA Ab [Units/volume] in Serum by Immunoassay,8763,unit per milliliter,[U]/mL
+3046870,Tissue transglutaminase IgG Ab [Units/volume] in Serum,8510,unit,[U]
+3046870,Tissue transglutaminase IgG Ab [Units/volume] in Serum,8763,unit per milliliter,[U]/mL
+3046870,Tissue transglutaminase IgG Ab [Units/volume] in Serum,45744813,clinical unit,{CU}
+3046900,Leukocytes [#/volume] corrected for nucleated erythrocytes in Blood by Automated count,8848,thousand per microliter,10*3/uL
+3046948,Albumin/Globulin [Mass Ratio] in Serum or Plasma by Electrophoresis,8523,ratio,{ratio}
+3048415,Thrombin time in Platelet poor plasma by Coagulation assay --after addition of heparinase,8555,second,s
+3048689,Calprotectin [Mass/mass] in Stool,8720,microgram per gram,ug/g
+3049133,"Carbon dioxide, total [Moles/volume] in Venous blood by calculation",8753,millimole per liter,mmol/L
+3049133,"Carbon dioxide, total [Moles/volume] in Venous blood by calculation",8876,millimeter mercury column,mm[Hg]
+3049398,Myeloperoxidase Ab [Units/volume] in Serum by Immunoassay,8478,avidity index,{ai}
+3049398,Myeloperoxidase Ab [Units/volume] in Serum by Immunoassay,8763,unit per milliliter,[U]/mL
+3049555,Testosterone [Mass/volume] in Serum or Plasma by Detection limit <= 1.0 ng/dL,8817,nanogram per deciliter,ng/dL
+3051669,Proteinase 3 Ab [Units/volume] in Serum by Immunoassay,8478,avidity index,{ai}
+3051669,Proteinase 3 Ab [Units/volume] in Serum by Immunoassay,8763,unit per milliliter,[U]/mL
+3051669,Proteinase 3 Ab [Units/volume] in Serum by Immunoassay,8980,arbitrary unit per milliliter,[arb'U]/mL
+3051669,Proteinase 3 Ab [Units/volume] in Serum by Immunoassay,45744813,clinical unit,{CU}
+3051825,Creatinine [Mass/volume] in Blood,8840,milligram per deciliter,mg/dL
+40759657,Tissue transglutaminase IgG Ab [Units/volume] in Serum by Immunoassay,8985,international unit per milliliter,[iU]/mL
+40762499,Oxygen saturation in Arterial blood by Pulse oximetry,8554,percent,%
+40762499,Oxygen saturation in Arterial blood by Pulse oximetry,8728,percent saturation,%{sat}
+40762501,Oxygen saturation in Arterial blood by Pulse oximetry --on room air,9234,volume percent,%{vol}
+40762503,Oxygen saturation in Arterial blood by Pulse oximetry --post exercise,8554,percent,%
+40762508,Oxygen saturation in Arterial blood by Pulse oximetry --resting,8554,percent,%
+40762636,Body mass index (BMI) [Percentile],8554,percent,%
+40763912,Albumin [Mass/volume] in Serum or Plasma by Bromocresol green (BCG) dye binding method,8713,gram per deciliter,g/dL
+40764996,Albumin [Moles/volume] in Serum or Plasma by Bromocresol green (BCG) dye binding method,8713,gram per deciliter,g/dL
+40771525,Heart rate --sitting,8876,millimeter mercury column,mm[Hg]
+43533584,Insulin-like growth factor-I [Z-score] in Serum or Plasma,44777566,score,[score]
+44786762,Oxygen saturation Calculated from oxygen partial pressure in Mixed venous blood,8554,percent,%
+3000963,Hemoglobin [Mass/volume] in Blood,8645,unit per liter,[U]/L
+3001657,Leukocytes [#/volume] corrected for nucleated erythrocytes in Blood,8848,thousand per microliter,10*3/uL
+3001784,Prostate Specific Ag Free/Prostate specific Ag.total in Serum or Plasma,8842,nanogram per milliliter,ng/mL
+3004501,Glucose [Mass/volume] in Serum or Plasma,9557,milliequivalent per liter,10*-3.eq/L
+3005755,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma by With P-5'-P,8645,unit per liter,[U]/L
+3006906,Calcium [Mass/volume] in Serum or Plasma,9557,milliequivalent per liter,10*-3.eq/L
+3007220,Creatine kinase [Enzymatic activity/volume] in Serum or Plasma,8748,microgram per liter,ug/L
+3007220,Creatine kinase [Enzymatic activity/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3011424,Glucose [Mass/volume] in Blood by Automated test strip,8840,milligram per deciliter,mg/dL
+3013273,Insulin-like growth factor-I [Mass/volume] in Serum or Plasma,8845,picogram per milliliter,pg/mL
+3013429,Basophils [#/volume] in Blood by Automated count,8554,percent,%
+3013466,aPTT in Blood by Coagulation assay,9639,siemens,S
+3013650,Neutrophils [#/volume] in Blood by Automated count,8554,percent,%
+3013770,Testosterone [Mass/volume] adjusted for sex hormone binding globulin in Serum or Plasma,8842,nanogram per milliliter,ng/mL
+3014094,"Carbon dioxide, total [Moles/volume] in Blood",9557,milliequivalent per liter,10*-3.eq/L
+3014576,Chloride [Moles/volume] in Serum or Plasma,8713,gram per deciliter,g/dL
+3014576,Chloride [Moles/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3016436,Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma,8554,percent,%
+3016723,Creatinine [Mass/volume] in Serum or Plasma,8645,unit per liter,[U]/L
+3016723,Creatinine [Mass/volume] in Serum or Plasma,9557,milliequivalent per liter,10*-3.eq/L
+3018677,aPTT in Platelet poor plasma by Coagulation assay,9639,siemens,S
+3019897,Erythrocyte distribution width [Ratio] by Automated count,8713,gram per deciliter,g/dL
+3020416,Erythrocytes [#/volume] in Blood by Automated count,8645,unit per liter,[U]/L
+3020416,Erythrocytes [#/volume] in Blood by Automated count,8713,gram per deciliter,g/dL
+3020509,Albumin/Globulin [Mass Ratio] in Serum or Plasma,8713,gram per deciliter,g/dL
+3020509,Albumin/Globulin [Mass Ratio] in Serum or Plasma,8753,millimole per liter,mmol/L
+3020509,Albumin/Globulin [Mass Ratio] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3020630,Protein [Mass/volume] in Serum or Plasma,8753,millimole per liter,mmol/L
+3020630,Protein [Mass/volume] in Serum or Plasma,9557,milliequivalent per liter,10*-3.eq/L
+3023103,Potassium [Moles/volume] in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3024731,MCV [Entitic volume],8655,Farad per liter,F/L
+3027970,Globulin [Mass/volume] in Serum by calculation,8840,milligram per deciliter,mg/dL
+3031147,"Carbon dioxide, total [Moles/volume] in Blood by calculation",8753,millimole per liter,mmol/L
+3031147,"Carbon dioxide, total [Moles/volume] in Blood by calculation",9557,milliequivalent per liter,10*-3.eq/L
+3033575,Monocytes [#/volume] in Blood by Automated count,8554,percent,%
+3034426,Prothrombin time (PT),9639,siemens,S
+3039000,Anion gap in Blood,8753,millimole per liter,mmol/L
+3041232,aPTT in Platelet poor plasma by Coagulation assay --post heparin neutralization,9639,siemens,S
+3042436,aPTT in Platelet poor plasma by Coagulation assay --baseline,9639,siemens,S
+3045716,Anion gap in Serum or Plasma,8840,milligram per deciliter,mg/dL
+3048275,Hemoglobin [Mass/volume] in Blood --pre therapeutic phlebotomy,8713,gram per deciliter,g/dL
