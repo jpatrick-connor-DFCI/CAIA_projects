@@ -1,13 +1,15 @@
 # ===============================================================
 # COMPASS Cohort Sensitivity Analysis
 # ===============================================================
-# Sweeps key parameters to show how many patients are
-# included/excluded at each filtering step.
+# Sweeps exclusion filters and PSA count thresholds to show how
+# many patients are included/excluded at each filtering step.
 #
+# Fixed:
+#   - PSA concept set: all 27 variants
 # Parameters varied:
-#   1. PSA concept set: canonical only (3 IDs) vs all variants (27 IDs)
-#   2. PSA count threshold: 1, 3, 5, 10, 15, 20, 25, 30
-#   3. Exclusion filters: none, no other cancer, no PARP, both
+#   1. PSA count threshold: 1, 5, 10
+#   2. Exclusion filters: none, no primary non-prostate cancer,
+#      no PARP, both
 # ===============================================================
 
 # ---------------------------------------------------------------
@@ -27,8 +29,12 @@ FROM concept_ancestor
 WHERE ancestor_concept_id = 4163261
 """)
 
-# === Non-prostate malignant neoplasm concepts ===
-# All descendants of "Malignant neoplastic disease" (443392) MINUS prostate cancer descendants.
+# === Non-prostate PRIMARY malignant neoplasm concepts ===
+# All descendants of "Malignant neoplastic disease" (443392) MINUS:
+#   - prostate cancer descendants (4163261)
+#   - secondary/metastatic neoplasm descendants (432851)
+# This prevents metastatic prostate cancer (e.g. "Secondary malignant neoplasm
+# of bone") from being misclassified as a separate primary malignancy.
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_non_prostate_cancer_concepts AS
 SELECT descendant_concept_id AS concept_id
@@ -38,6 +44,11 @@ WHERE ancestor_concept_id = 443392
     SELECT descendant_concept_id
     FROM concept_ancestor
     WHERE ancestor_concept_id = 4163261
+  )
+  AND descendant_concept_id NOT IN (
+    SELECT descendant_concept_id
+    FROM concept_ancestor
+    WHERE ancestor_concept_id = 432851
   )
 """)
 
@@ -58,18 +69,9 @@ FROM concept_ancestor
 WHERE ancestor_concept_id IN (SELECT concept_id FROM temp_parp_ingredients)
 """)
 
-# === PSA concept sets (two versions) ===
-# Canonical only: the 3 primary PSA concept IDs
+# === PSA concepts: all 27 variants ===
 spark.sql("""
-CREATE OR REPLACE TEMP VIEW temp_psa_canonical AS
-SELECT concept_id
-FROM concept
-WHERE concept_id IN (3013603, 3002131, 3034548)
-""")
-
-# All variants: canonical + 24 additional PSA variant IDs
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW temp_psa_all_variants AS
+CREATE OR REPLACE TEMP VIEW temp_psa_concepts AS
 SELECT concept_id
 FROM concept
 WHERE concept_id IN (
@@ -120,15 +122,9 @@ WHERE de.drug_concept_id IN (SELECT drug_concept_id FROM temp_parp_drugs)
 # ---------------------------------------------------------------
 # Part 3: Parameter sweep
 # ---------------------------------------------------------------
-# Pre-compute PSA measurement counts per patient for each PSA concept set (post-dx only).
-# This avoids re-scanning dn_measurement for every threshold.
+# Pre-compute PSA measurement counts per patient (post-dx only).
 
-PSA_THRESHOLDS = [1, 3, 5, 10, 15, 20, 25, 30]
-
-psa_configs = [
-    ("canonical_3",     "temp_psa_canonical"),
-    ("all_variants_27", "temp_psa_all_variants"),
-]
+PSA_THRESHOLDS = [1, 5, 10]
 
 # Exclusion filter configs: (label, SQL WHERE clause to apply to person_id)
 exclusion_configs = [
@@ -139,38 +135,34 @@ exclusion_configs = [
                           "AND person_id NOT IN (SELECT person_id FROM temp_patients_with_parp)"),
 ]
 
+# Count PSA measurements per patient (single scan)
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW psa_counts AS
+SELECT f.person_id, COUNT(*) AS psa_count
+FROM first_prostate_diagnosis f
+JOIN dn_measurement_20251219 m
+  ON f.person_id = m.person_id
+WHERE m.measurement_concept_id IN (SELECT concept_id FROM temp_psa_concepts)
+  AND m.measurement_date > f.prostate_cancer_diagnosis_date
+GROUP BY f.person_id
+""")
+
 results = []
 
-for psa_label, psa_view in psa_configs:
-    # Count PSA measurements per patient (one scan per PSA config)
-    view_name = f"psa_counts_{psa_label}"
-    spark.sql(f"""
-    CREATE OR REPLACE TEMP VIEW {view_name} AS
-    SELECT f.person_id, COUNT(*) AS psa_count
-    FROM first_prostate_diagnosis f
-    JOIN dn_measurement_20251219 m
-      ON f.person_id = m.person_id
-    WHERE m.measurement_concept_id IN (SELECT concept_id FROM {psa_view})
-      AND m.measurement_date > f.prostate_cancer_diagnosis_date
-    GROUP BY f.person_id
-    """)
+for threshold in PSA_THRESHOLDS:
+    for excl_label, excl_filter in exclusion_configs:
+        row = spark.sql(f"""
+            SELECT COUNT(*) AS n_patients
+            FROM psa_counts
+            WHERE psa_count >= {threshold}
+              {excl_filter}
+        """).collect()[0]
 
-    # For each (threshold, exclusion) combo, count qualifying patients
-    for threshold in PSA_THRESHOLDS:
-        for excl_label, excl_filter in exclusion_configs:
-            row = spark.sql(f"""
-                SELECT COUNT(*) AS n_patients
-                FROM {view_name}
-                WHERE psa_count >= {threshold}
-                  {excl_filter}
-            """).collect()[0]
-
-            results.append({
-                "psa_concepts": psa_label,
-                "exclusions": excl_label,
-                "threshold": threshold,
-                "n_patients": row["n_patients"],
-            })
+        results.append({
+            "exclusions": excl_label,
+            "threshold": threshold,
+            "n_patients": row["n_patients"],
+        })
 
 # ---------------------------------------------------------------
 # Part 4: Display results
@@ -180,33 +172,27 @@ from pyspark.sql import Row
 results_df = spark.createDataFrame([Row(**r) for r in results])
 results_df.createOrReplaceTempView("sensitivity_results")
 
-# Pivot: thresholds as columns for easier comparison
+# Pivot: thresholds as columns
 print("=" * 90)
-print("PIVOT TABLE: Patients by (PSA concepts, exclusions, threshold)")
+print("PIVOT TABLE: Patients by (exclusion filter, PSA count threshold)")
 print("=" * 90)
 
 spark.sql("""
     SELECT
-        psa_concepts,
         exclusions,
         MAX(CASE WHEN threshold = 1  THEN n_patients END) AS `>=1`,
-        MAX(CASE WHEN threshold = 3  THEN n_patients END) AS `>=3`,
         MAX(CASE WHEN threshold = 5  THEN n_patients END) AS `>=5`,
-        MAX(CASE WHEN threshold = 10 THEN n_patients END) AS `>=10`,
-        MAX(CASE WHEN threshold = 15 THEN n_patients END) AS `>=15`,
-        MAX(CASE WHEN threshold = 20 THEN n_patients END) AS `>=20`,
-        MAX(CASE WHEN threshold = 25 THEN n_patients END) AS `>=25`,
-        MAX(CASE WHEN threshold = 30 THEN n_patients END) AS `>=30`
+        MAX(CASE WHEN threshold = 10 THEN n_patients END) AS `>=10`
     FROM sensitivity_results
-    GROUP BY psa_concepts, exclusions
-    ORDER BY psa_concepts, exclusions
+    GROUP BY exclusions
+    ORDER BY exclusions
 """).show(truncate=False)
 
 # ---------------------------------------------------------------
-# Part 5: PSA count distribution (production config: all_variants, no exclusions)
+# Part 5: PSA count distribution (no exclusions)
 # ---------------------------------------------------------------
 print("=" * 90)
-print("PSA COUNT DISTRIBUTION (all_variants_27, post_dx, no exclusions)")
+print("PSA COUNT DISTRIBUTION (post_dx, no exclusions)")
 print("=" * 90)
 
 spark.sql("""
@@ -224,13 +210,12 @@ spark.sql("""
         COUNT(*) AS n_patients,
         MIN(psa_count) AS min_psa,
         MAX(psa_count) AS max_psa
-    FROM psa_counts_all_variants_27
+    FROM psa_counts
     GROUP BY 1
     ORDER BY 1
 """).show(truncate=False)
 
-# Summary stats for both PSA concept sets
-print("--- PSA count summary (all_variants_27) ---")
+print("--- PSA count summary ---")
 spark.sql("""
     SELECT
         COUNT(*) AS n_patients_with_any_psa,
@@ -240,70 +225,35 @@ spark.sql("""
         PERCENTILE_APPROX(psa_count, 0.75) AS q3,
         MIN(psa_count) AS min,
         MAX(psa_count) AS max
-    FROM psa_counts_all_variants_27
-""").show(truncate=False)
-
-print("--- PSA count summary (canonical_3) ---")
-spark.sql("""
-    SELECT
-        COUNT(*) AS n_patients_with_any_psa,
-        ROUND(AVG(psa_count), 1) AS mean_psa_count,
-        PERCENTILE_APPROX(psa_count, 0.25) AS q1,
-        PERCENTILE_APPROX(psa_count, 0.50) AS median,
-        PERCENTILE_APPROX(psa_count, 0.75) AS q3,
-        MIN(psa_count) AS min,
-        MAX(psa_count) AS max
-    FROM psa_counts_canonical_3
+    FROM psa_counts
 """).show(truncate=False)
 
 # ---------------------------------------------------------------
-# Part 6: Impact of variant IDs — how many patients are gained?
+# Part 6: Exclusion filter impact (detailed)
 # ---------------------------------------------------------------
 print("=" * 90)
-print("VARIANT ID IMPACT: Patients gained by including 24 PSA variants (no exclusions)")
+print("EXCLUSION FILTER IMPACT")
 print("=" * 90)
 
-spark.sql("""
-    SELECT
-        c.threshold,
-        c.n_patients AS canonical_only,
-        v.n_patients AS with_variants,
-        (v.n_patients - c.n_patients) AS gained,
-        ROUND((v.n_patients - c.n_patients) * 100.0 / NULLIF(c.n_patients, 0), 1) AS pct_increase
-    FROM sensitivity_results c
-    JOIN sensitivity_results v
-      ON c.threshold = v.threshold AND c.exclusions = v.exclusions
-    WHERE c.psa_concepts = 'canonical_3'     AND c.exclusions = 'none'
-      AND v.psa_concepts = 'all_variants_27' AND v.exclusions = 'none'
-    ORDER BY c.threshold
-""").show(truncate=False)
+for threshold in PSA_THRESHOLDS:
+    baseline_n = [r for r in results
+                  if r["exclusions"] == "none"
+                  and r["threshold"] == threshold][0]["n_patients"]
 
-# ---------------------------------------------------------------
-# Part 7: Exclusion filter impact (at threshold=10, all_variants)
-# ---------------------------------------------------------------
-print("=" * 90)
-print("EXCLUSION FILTER IMPACT (all_variants_27, >=10 PSA)")
-print("=" * 90)
-
-baseline_10 = [r for r in results
-               if r["psa_concepts"] == "all_variants_27"
-               and r["exclusions"] == "none"
-               and r["threshold"] == 10][0]["n_patients"]
-
-print(f"{'Filter':<25} {'Patients':>10} {'Excluded':>10} {'% Remaining':>14}")
-print("-" * 60)
-for excl_label, _ in exclusion_configs:
-    n = [r for r in results
-         if r["psa_concepts"] == "all_variants_27"
-         and r["exclusions"] == excl_label
-         and r["threshold"] == 10][0]["n_patients"]
-    excluded = baseline_10 - n
-    pct = round(n * 100.0 / baseline_10, 1) if baseline_10 > 0 else 0
-    print(f"{excl_label:<25} {n:>10,} {excluded:>10,} {pct:>13.1f}%")
+    print(f"\n--- Threshold: >={threshold} PSA measurements ---")
+    print(f"{'Filter':<25} {'Patients':>10} {'Excluded':>10} {'% Remaining':>14}")
+    print("-" * 60)
+    for excl_label, _ in exclusion_configs:
+        n = [r for r in results
+             if r["exclusions"] == excl_label
+             and r["threshold"] == threshold][0]["n_patients"]
+        excluded = baseline_n - n
+        pct = round(n * 100.0 / baseline_n, 1) if baseline_n > 0 else 0
+        print(f"{excl_label:<25} {n:>10,} {excluded:>10,} {pct:>13.1f}%")
 print()
 
 # Full breakdown across all thresholds
-print("--- Exclusion impact across all thresholds (all_variants_27) ---")
+print("--- Exclusion impact across all thresholds ---")
 spark.sql("""
     SELECT
         b.threshold,
@@ -318,15 +268,15 @@ spark.sql("""
     JOIN sensitivity_results c  ON b.threshold = c.threshold
     JOIN sensitivity_results p  ON b.threshold = p.threshold
     JOIN sensitivity_results cp ON b.threshold = cp.threshold
-    WHERE b.psa_concepts  = 'all_variants_27' AND b.exclusions  = 'none'
-      AND c.psa_concepts  = 'all_variants_27' AND c.exclusions  = 'no_other_cancer'
-      AND p.psa_concepts  = 'all_variants_27' AND p.exclusions  = 'no_parp'
-      AND cp.psa_concepts = 'all_variants_27' AND cp.exclusions = 'no_cancer_no_parp'
+    WHERE b.exclusions  = 'none'
+      AND c.exclusions  = 'no_other_cancer'
+      AND p.exclusions  = 'no_parp'
+      AND cp.exclusions = 'no_cancer_no_parp'
     ORDER BY b.threshold
 """).show(truncate=False)
 
 # ---------------------------------------------------------------
-# Part 8: Exclusion overlap — how many patients hit both filters?
+# Part 7: Exclusion overlap — how many patients hit both filters?
 # ---------------------------------------------------------------
 print("=" * 90)
 print("EXCLUSION OVERLAP (among prostate cancer patients with >=1 post-dx PSA)")
@@ -341,6 +291,5 @@ spark.sql("""
                   AND person_id IN (SELECT person_id FROM temp_patients_with_parp) THEN 1 ELSE 0 END) AS has_both,
         SUM(CASE WHEN person_id NOT IN (SELECT person_id FROM temp_patients_with_other_cancer)
                   AND person_id NOT IN (SELECT person_id FROM temp_patients_with_parp) THEN 1 ELSE 0 END) AS has_neither
-    FROM psa_counts_all_variants_27
+    FROM psa_counts
 """).show(truncate=False)
-

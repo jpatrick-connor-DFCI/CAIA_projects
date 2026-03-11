@@ -398,14 +398,13 @@ LEFT JOIN {CONCEPT_TABLE} ec
 
 # === 13. Create the discontinuation dataframe ===
 # Groups ICI exposures into continuous treatment blocks (>60-day gap = new block).
-# Picks the FIRST block per patient (aligns with ici_start_date from step 9).
-# Classifies discontinuation cause using multiple signals:
+# Returns ALL blocks per patient with a block_number (1 = first block, 2 = second, etc.).
+# Classifies discontinuation cause using hierarchical signals:
 #   DEATH           — patient died during or before block end
-#   OBS_END         — lost to follow-up (last non-ICI clinical event ≤ block end)
 #   PROGRESSION     — new non-ICI antineoplastic started within 90 days after block end
-#   TOXICITY_LIKELY — systemic corticosteroid within ±14 days of block end, no new antineoplastic
-#   COMPLETED       — ICI block duration ≥ 330 days, none of the above signals
-#   UNDETERMINED    — none of the above
+#   TOXICITY        — systemic corticosteroid within ±14 days of block end, no new antineoplastic
+#   COMPLETED       — continued clinical activity >90 days after block end (evidence of elective stop)
+#   CENSORED        — no continued follow-up after block end (reason for stopping unknown)
 discontinuation_data = spark.sql(f"""
     WITH cohort_ids AS (
     SELECT person_id FROM temp_cancer_ici_patients
@@ -525,17 +524,14 @@ discontinuation_data = spark.sql(f"""
         CASE
         WHEN c.death_date IS NOT NULL AND c.death_date <= b.ici_end_date
             THEN 'DEATH'
-        WHEN c.observation_period_end_date IS NOT NULL
-             AND c.observation_period_end_date <= b.ici_end_date
-             AND (c.death_date IS NULL OR c.death_date > b.ici_end_date)
-            THEN 'OBS_END'
         WHEN nt.person_id IS NOT NULL
             THEN 'PROGRESSION'
-        WHEN su.person_id IS NOT NULL AND nt.person_id IS NULL
-            THEN 'TOXICITY_LIKELY'
-        WHEN DATEDIFF(b.ici_end_date, b.ici_block_start_date) >= 330
+        WHEN su.person_id IS NOT NULL
+            THEN 'TOXICITY'
+        WHEN c.observation_period_end_date IS NOT NULL
+             AND c.observation_period_end_date > b.ici_end_date + INTERVAL 90 DAY
             THEN 'COMPLETED'
-        ELSE 'UNDETERMINED'
+        ELSE 'CENSORED'
         END AS ici_discontinuation_cause,
         LEAST(
             b.ici_end_date,
@@ -548,31 +544,68 @@ discontinuation_data = spark.sql(f"""
     LEFT JOIN steroid_use su   ON b.person_id = su.person_id AND b.block_id = su.block_id
     ),
 
-    -- Pick the FIRST block per patient (aligns with ici_start_date from step 9)
-    ranked AS (
+    -- Number all blocks per patient (1 = first, 2 = second, etc.)
+    numbered AS (
     SELECT
         person_id,
+        ici_block_start_date,
         last_ici_cycle_start_date,
+        ici_end_date,
         ici_discontinuation_date,
         ici_discontinuation_cause,
         ROW_NUMBER() OVER (
             PARTITION BY person_id
-            ORDER BY ici_block_start_date ASC, ici_discontinuation_date ASC
-        ) AS rn
+            ORDER BY ici_block_start_date ASC
+        ) AS block_number
     FROM classified
     )
 
     SELECT
     person_id,
+    block_number,
+    ici_block_start_date,
     last_ici_cycle_start_date,
+    ici_end_date,
     ici_discontinuation_date,
     ici_discontinuation_cause
-    FROM ranked
-    WHERE rn = 1
+    FROM numbered
 """)
 
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
 # === 14. Merge discontinuation data with complete dataframe ===
-final_df_merged = final_df.join(discontinuation_data, on='person_id', how='left')
+# Each lab measurement is assigned to the block it falls within (between block start
+# and discontinuation date). Labs outside any block window are assigned to the nearest block.
+# This produces one row per (patient, block, lab measurement).
+final_df_merged = (
+    final_df
+    .join(discontinuation_data, on='person_id', how='left')
+    .withColumn(
+        "_in_block",
+        F.when(
+            (F.col("measurement_date") >= F.col("ici_block_start_date")) &
+            (F.col("measurement_date") <= F.col("ici_discontinuation_date")),
+            F.lit(1)
+        ).otherwise(F.lit(0))
+    )
+    .withColumn(
+        "_dist_to_block",
+        F.least(
+            F.abs(F.datediff(F.col("measurement_date"), F.col("ici_block_start_date"))),
+            F.abs(F.datediff(F.col("measurement_date"), F.col("ici_discontinuation_date")))
+        )
+    )
+    .withColumn(
+        "_rank",
+        F.row_number().over(
+            Window.partitionBy("person_id", "measurement_concept_id", "measurement_date", "lab_value")
+            .orderBy(F.desc("_in_block"), F.asc("_dist_to_block"))
+        )
+    )
+    .filter(F.col("_rank") == 1)
+    .drop("_in_block", "_dist_to_block", "_rank")
+)
 
 # === 14b. Remap variant measurement concepts to canonical IDs ===
 from pyspark.sql import functions as F, types as T
@@ -1043,12 +1076,12 @@ df_to_upload = (
     # --- Patient-level time-to-event variables ---
     .withColumn(
         "time_on_ici",
-        F.datediff(F.col("ici_discontinuation_date"), F.col("ici_start_date"))
+        F.datediff(F.col("ici_discontinuation_date"), F.col("ici_block_start_date"))
     )
     .withColumn(
         "event_ici_discontinued",
         F.when(
-            F.col("ici_discontinuation_cause").isin("DEATH", "OBS_END"), F.lit(0)
+            F.col("ici_discontinuation_cause").isin("DEATH", "CENSORED"), F.lit(0)
         ).otherwise(F.lit(1))
     )
     .withColumn(
@@ -1071,6 +1104,7 @@ int_cols = [
     "race_concept_id",
     "ethnicity_concept_id",
     "age_at_diagnosis",
+    "block_number",
     "is_deceased",
     "event_ici_discontinued",
     "time_on_ici",
@@ -1095,6 +1129,8 @@ date_cols = [
     "date_of_birth",
     "diagnosis_date",
     "ici_start_date",
+    "ici_block_start_date",
+    "ici_end_date",
     "last_ici_cycle_start_date",
     "ici_discontinuation_date",
     "last_followup_date",
@@ -1157,6 +1193,11 @@ expected_columns = [
     "ici_start_date",
     "last_ici_cycle_start_date",
     "ici_type",
+
+    # Treatment block info
+    "block_number",
+    "ici_block_start_date",
+    "ici_end_date",
 
     # Follow-up & death
     "last_followup_date",
@@ -1234,11 +1275,12 @@ df_to_upload.createOrReplaceTempView("final_cohort")
 row_count = df_to_upload.count()
 print(f"Cached final_cohort: {row_count:,} rows")
 
-# Pre-compute a patient-level view (one row per person) for demographic/treatment/follow-up queries.
-# This avoids repeated COUNT(DISTINCT person_id) over the full lab-level table.
+# Pre-compute a patient-block-level view (one row per person per block) for queries.
+# This avoids repeated aggregations over the full lab-level table.
 patient_df = spark.sql("""
     SELECT
         person_id,
+        block_number,
         FIRST(gender) AS gender,
         FIRST(race) AS race,
         FIRST(ethnicity) AS ethnicity,
@@ -1249,6 +1291,8 @@ patient_df = spark.sql("""
         FIRST(diagnosis_date) AS diagnosis_date,
         FIRST(ici_start_date) AS ici_start_date,
         FIRST(ici_type) AS ici_type,
+        FIRST(ici_block_start_date) AS ici_block_start_date,
+        FIRST(ici_end_date) AS ici_end_date,
         FIRST(last_ici_cycle_start_date) AS last_ici_cycle_start_date,
         FIRST(ici_discontinuation_date) AS ici_discontinuation_date,
         FIRST(ici_discontinuation_cause) AS ici_discontinuation_cause,
@@ -1259,12 +1303,13 @@ patient_df = spark.sql("""
         FIRST(event_ici_discontinued) AS event_ici_discontinued,
         FIRST(time_to_death_or_censor) AS time_to_death_or_censor
     FROM final_cohort
-    GROUP BY person_id
+    GROUP BY person_id, block_number
 """)
 patient_df.cache()
 patient_df.createOrReplaceTempView("patient_cohort")
-patient_count = patient_df.count()
-print(f"Cached patient_cohort: {patient_count:,} patients")
+patient_block_count = patient_df.count()
+patient_count = patient_df.select("person_id").distinct().count()
+print(f"Cached patient_cohort: {patient_count:,} patients, {patient_block_count:,} patient-blocks")
 
 # === 1. Overall cohort size ===
 print("=" * 60)
@@ -1277,8 +1322,8 @@ spark.sql(f"""
         {row_count} AS total_lab_records,
         (SELECT COUNT(DISTINCT cancer_type) FROM patient_cohort) AS distinct_cancer_types,
         (SELECT COUNT(DISTINCT ici_type) FROM patient_cohort) AS distinct_ici_types,
-        (SELECT COUNT(*) FROM patient_cohort WHERE is_deceased = 1) AS deceased_patients,
-        ROUND((SELECT COUNT(*) FROM patient_cohort WHERE is_deceased = 1) * 100.0
+        (SELECT COUNT(*) FROM patient_cohort WHERE is_deceased = 1 AND block_number = 1) AS deceased_patients,
+        ROUND((SELECT COUNT(*) FROM patient_cohort WHERE is_deceased = 1 AND block_number = 1) * 100.0
               / {patient_count}, 1) AS mortality_rate_pct
 """).show(truncate=False)
 
@@ -1292,6 +1337,7 @@ spark.sql(f"""
     SELECT gender, COUNT(*) AS n_patients,
            ROUND(COUNT(*) * 100.0 / {patient_count}, 1) AS pct
     FROM patient_cohort
+    WHERE block_number = 1
     GROUP BY gender
     ORDER BY n_patients DESC
 """).show(truncate=False)
@@ -1301,6 +1347,7 @@ spark.sql(f"""
     SELECT race, COUNT(*) AS n_patients,
            ROUND(COUNT(*) * 100.0 / {patient_count}, 1) AS pct
     FROM patient_cohort
+    WHERE block_number = 1
     GROUP BY race
     ORDER BY n_patients DESC
 """).show(truncate=False)
@@ -1310,6 +1357,7 @@ spark.sql(f"""
     SELECT ethnicity, COUNT(*) AS n_patients,
            ROUND(COUNT(*) * 100.0 / {patient_count}, 1) AS pct
     FROM patient_cohort
+    WHERE block_number = 1
     GROUP BY ethnicity
     ORDER BY n_patients DESC
 """).show(truncate=False)
@@ -1326,7 +1374,7 @@ spark.sql("""
         PERCENTILE_APPROX(age_at_diagnosis, 0.75) AS q3_age,
         MAX(age_at_diagnosis) AS max_age
     FROM patient_cohort
-    WHERE age_at_diagnosis IS NOT NULL
+    WHERE age_at_diagnosis IS NOT NULL AND block_number = 1
 """).show(truncate=False)
 
 # === 3. Cancer type & subtype distribution ===
@@ -1339,6 +1387,7 @@ spark.sql(f"""
     SELECT cancer_type, COUNT(*) AS n_patients,
            ROUND(COUNT(*) * 100.0 / {patient_count}, 1) AS pct
     FROM patient_cohort
+    WHERE block_number = 1
     GROUP BY cancer_type
     ORDER BY n_patients DESC
 """).show(50, truncate=False)
@@ -1347,6 +1396,7 @@ print("--- Top 20 Cancer Subtypes ---")
 spark.sql("""
     SELECT cancer_type, cancer_subtype, COUNT(*) AS n_patients
     FROM patient_cohort
+    WHERE block_number = 1
     GROUP BY cancer_type, cancer_subtype
     ORDER BY n_patients DESC
     LIMIT 20
@@ -1362,6 +1412,7 @@ spark.sql(f"""
     SELECT ici_type, COUNT(*) AS n_patients,
            ROUND(COUNT(*) * 100.0 / {patient_count}, 1) AS pct
     FROM patient_cohort
+    WHERE block_number = 1
     GROUP BY ici_type
     ORDER BY n_patients DESC
 """).show(truncate=False)
@@ -1382,7 +1433,7 @@ spark.sql("""
             person_id,
             DATEDIFF(ici_start_date, diagnosis_date) AS days_dx_to_ici
         FROM patient_cohort
-        WHERE ici_start_date IS NOT NULL
+        WHERE ici_start_date IS NOT NULL AND block_number = 1
     )
 """).show(truncate=False)
 
@@ -1394,7 +1445,7 @@ print("=" * 60)
 print("--- Discontinuation Cause ---")
 spark.sql("""
     SELECT ici_discontinuation_cause,
-           COUNT(*) AS n_patients,
+           COUNT(*) AS n_blocks,
            ROUND(COUNT(*) * 100.0
                  / (SELECT COUNT(*) FROM patient_cohort
                     WHERE ici_discontinuation_cause IS NOT NULL), 1) AS pct
@@ -1404,12 +1455,12 @@ spark.sql("""
     ORDER BY n_patients DESC
 """).show(truncate=False)
 
-print("--- ICI Discontinuation Event Indicator ---")
+print("--- ICI Discontinuation Event Indicator (all blocks) ---")
 spark.sql(f"""
     SELECT
         event_ici_discontinued,
-        COUNT(*) AS n_patients,
-        ROUND(COUNT(*) * 100.0 / {patient_count}, 1) AS pct
+        COUNT(*) AS n_blocks,
+        ROUND(COUNT(*) * 100.0 / {patient_block_count}, 1) AS pct
     FROM patient_cohort
     GROUP BY event_ici_discontinued
     ORDER BY event_ici_discontinued
@@ -1554,7 +1605,7 @@ spark.sql("""
             is_deceased,
             DATEDIFF(last_followup_date, diagnosis_date) AS followup_days
         FROM patient_cohort
-        WHERE last_followup_date IS NOT NULL
+        WHERE last_followup_date IS NOT NULL AND block_number = 1
     )
 """).show(truncate=False)
 
@@ -1575,6 +1626,9 @@ spark.sql("""
         SUM(CASE WHEN diagnosis_date IS NULL THEN 1 ELSE 0 END) AS null_diagnosis_date,
         SUM(CASE WHEN cancer_type IS NULL THEN 1 ELSE 0 END) AS null_cancer_type,
         SUM(CASE WHEN ici_start_date IS NULL THEN 1 ELSE 0 END) AS null_ici_start_date,
+        SUM(CASE WHEN block_number IS NULL THEN 1 ELSE 0 END) AS null_block_number,
+        SUM(CASE WHEN ici_block_start_date IS NULL THEN 1 ELSE 0 END) AS null_ici_block_start_date,
+        SUM(CASE WHEN ici_end_date IS NULL THEN 1 ELSE 0 END) AS null_ici_end_date,
         SUM(CASE WHEN last_ici_cycle_start_date IS NULL THEN 1 ELSE 0 END) AS null_last_ici_cycle_start_date,
         SUM(CASE WHEN ici_type IS NULL THEN 1 ELSE 0 END) AS null_ici_type,
         SUM(CASE WHEN ici_discontinuation_date IS NULL THEN 1 ELSE 0 END) AS null_ici_discontinuation_date,
