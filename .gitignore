@@ -1,0 +1,8 @@
+*.zip
+
+# Only track COMPASS and IPIO folders
+/*
+!COMPASS/
+!IPIO/
+!.gitignore
+!README.md
