@@ -13,13 +13,10 @@
 # Load vocabulary subset CSVs (replacing deprecated catalog)
 # ===============================================================
 import os
-
-_script_dir = os.path.dirname(os.path.abspath(__file__))
-_concept_csv = os.path.join(_script_dir, "concept_tables", "concept_subset.csv")
-_ancestor_csv = os.path.join(_script_dir, "concept_tables", "concept_ancestor_subset.csv")
-
-spark.read.csv(_concept_csv, header=True, inferSchema=True).createOrReplaceTempView("concept")
-spark.read.csv(_ancestor_csv, header=True, inferSchema=True).createOrReplaceTempView("concept_ancestor")
+import pandas as pd
+_cwd = os.getcwd()
+spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"))).createOrReplaceTempView("concept")
+spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"))).createOrReplaceTempView("concept_ancestor")
 
 CONCEPT_TABLE = "concept"
 
@@ -43,9 +40,10 @@ FROM concept
 WHERE concept_id IN (
   3013603, 3002131, 3034548,
   -- The following 24 PSA variant IDs are included here so they count toward the
-  -- ≥10 PSA eligibility threshold (step 7). They have no unit data in the CSV and
-  -- are silently dropped by the allowed_unit_combinations inner join in step 13,
-  -- so they do not appear in the final lab output.
+  -- ≥10 PSA eligibility threshold (step 8). Of these, 4272032 and 3052038 also
+  -- appear in the final lab output (remapped to 3013603 in step 16b). The
+  -- remaining 22 have no measurement data and are silently dropped by the
+  -- allowed_unit_combinations inner join in step 17.
   3037249, 3037774, 3002178, 44811982, 40762314, 3038011, 3032915, 42529229,
   40484164, 715972, 35917418, 40762312, 40480170, 3007273, 44811980, 35918474,
   715971, 44811981, 4272032, 4194418, 4215704, 40762321, 3052038, 44793131
@@ -137,7 +135,8 @@ WHERE concept_id IN (
   3016436, 3000905, 3004327, 3012030, 3009744, 3023599, 3033575, 3013650, 3024929,
   3023103, 3020630, 3034426, 3024171, 3019550, 3004249, 3008893, 3013682, 3013466,
   -- Category 1: Variant codings of existing labs (will be remapped post-extraction)
-  3002131, 3034548,  -- PSA variants -> 3013603
+  4272032, 3052038,  -- PSA SNOMED/LOINC variants -> 3013603
+  3002131, 3034548,  -- PSA LOINC variants -> 3013603
   3000285,           -- Sodium in Blood -> 3019550
   3000483,           -- Glucose in Blood -> 3004501
   3004295,           -- BUN in Blood -> 3013682
@@ -386,7 +385,7 @@ LEFT JOIN {CONCEPT_TABLE} ec
 JOIN dn_measurement_20251219 m
   ON p.person_id = m.person_id
   AND m.measurement_concept_id IN (
-    3013603, 3002131, 3034548,
+    3013603, 3002131, 3034548, 4272032, 3052038,
     3006923, 3024561, 3020509, 3035995, 3009306, 3013721, 3027597, 3024128, 3036277, 3020891,
     3025315, 3020460, 3006906, 3037551, 3022914, 3015632, 3003785, 3014576, 3007220, 3016723,
     3012888, 3019897, 3013707, 3020416, 3027970, 3004501, 3027018, 3023314, 3000963, 3022217,
@@ -472,7 +471,7 @@ from pyspark.sql import functions as F, types as T
 
 concept_remap = {
     # PSA variants
-    3002131: 3013603, 3034548: 3013603,
+    3002131: 3013603, 3034548: 3013603, 4272032: 3013603, 3052038: 3013603,
     # Chemistry variants (Blood -> Serum/Plasma)
     3000285: 3019550, 3000483: 3004501, 3004295: 3013682,
     3005456: 3023103, 3018572: 3014576, 3010140: 3015632,
@@ -907,8 +906,8 @@ physiologic_ranges = [
     (3016407, 0, 2000),       # Fibrinogen (mg/dL)
     # PSA (ng/mL) — only canonical ID needed; 3002131/3034548 are remapped to 3013603
     (3013603, 0, 10000),      # PSA
-    # The following 24 PSA variant IDs are commented out in temp_psa_concepts (no CSV unit data).
-    # Pre-remap IDs (3002131, 3034548) are also dead code here since they become 3013603.
+    # The remaining 22 PSA variant IDs have no measurement data in the dataset.
+    # Pre-remap IDs (3002131, 3034548, 4272032, 3052038) are dead code here since they become 3013603.
     # (3037249, 0, 10000),    # (3037774, 0, 10000),    # (3002178, 0, 10000),
     # (44811982, 0, 10000),   # (40762314, 0, 10000),   # (3002131, 0, 10000),
     # (3034548, 0, 10000),    # (3038011, 0, 10000),    # (3032915, 0, 10000),
