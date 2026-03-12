@@ -1,4 +1,15 @@
 # ===============================================================
+# COMPASS Cohort Preprocessing
+# ===============================================================
+# Inclusion/exclusion criteria:
+#   1. Prostate cancer diagnosis
+#   2. >= 10 PSA measurements (full 27-variant concept set) after diagnosis
+#   3. No other primary cancers (keeping metastatic disease, NMSC, and
+#      malignant neoplasm NOS)
+#   4. No PARP inhibitor exposure (olaparib, rucaparib, niraparib, talazoparib)
+# ===============================================================
+
+# ===============================================================
 # Part 1: Concept set generation (vocabulary catalog)
 # ===============================================================
 spark.sql("USE CATALOG snowflake_aistudio_full_catalog")
@@ -36,7 +47,78 @@ WHERE concept_id IN (
 )
 """)
 
-# === 3. Other lab measurement concepts (explicit list) ===
+# === 3. Non-prostate PRIMARY malignant neoplasm concepts (for exclusion) ===
+# All descendants of "Malignant neoplastic disease" (443392) MINUS:
+#   - prostate cancer descendants (4163261)
+#   - secondary/metastatic neoplasm descendants (432851)
+# This prevents metastatic prostate cancer (e.g. "Secondary malignant neoplasm
+# of bone") from being misclassified as a separate primary malignancy.
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_non_prostate_cancer_concepts AS
+SELECT descendant_concept_id AS concept_id
+FROM concept_ancestor
+WHERE ancestor_concept_id = 443392
+  AND descendant_concept_id NOT IN (
+    SELECT descendant_concept_id
+    FROM concept_ancestor
+    WHERE ancestor_concept_id = 4163261
+  )
+  AND descendant_concept_id NOT IN (
+    SELECT descendant_concept_id
+    FROM concept_ancestor
+    WHERE ancestor_concept_id = 432851
+  )
+""")
+
+# === 3b. Non-melanoma skin cancer (NMSC) concepts ===
+# Basal cell carcinoma (4112752) and squamous cell carcinoma of skin (4111921)
+# and all their descendants. These are generally indolent and unlikely to
+# confound prostate cancer outcomes.
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_nmsc_concepts AS
+SELECT DISTINCT descendant_concept_id AS concept_id
+FROM concept_ancestor
+WHERE ancestor_concept_id IN (
+    4112752,  -- Basal cell carcinoma of skin
+    4111921   -- Squamous cell carcinoma of skin
+)
+""")
+
+# === 3c. NOS malignant neoplasm concept ===
+# Concept 439392 ("Primary malignant neoplasm" with no site specified)
+# is likely a coding artifact and not a true second primary.
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_nos_malignant_neoplasm AS
+SELECT 439392 AS concept_id
+""")
+
+# === 3d. Relaxed non-prostate cancer view (allowing NMSC + NOS) ===
+# Exclude other primary cancers EXCEPT non-melanoma skin cancers and NOS.
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_non_prostate_cancer_concepts_allow_nmsc_nos AS
+SELECT concept_id FROM temp_non_prostate_cancer_concepts
+WHERE concept_id NOT IN (SELECT concept_id FROM temp_nmsc_concepts)
+  AND concept_id NOT IN (SELECT concept_id FROM temp_nos_malignant_neoplasm)
+""")
+
+# === 3e. PARP inhibitor drug concepts ===
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_parp_ingredients AS
+SELECT concept_id
+FROM concept
+WHERE LOWER(concept_name) IN ('olaparib', 'rucaparib', 'niraparib', 'talazoparib')
+  AND concept_class_id = 'Ingredient'
+  AND standard_concept = 'S'
+""")
+
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_parp_drugs AS
+SELECT DISTINCT descendant_concept_id AS drug_concept_id
+FROM concept_ancestor
+WHERE ancestor_concept_id IN (SELECT concept_id FROM temp_parp_ingredients)
+""")
+
+# === 4. Other lab measurement concepts (explicit list) ===
 # Includes canonical concepts + variant codings that will be remapped after extraction.
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_other_lab_concepts AS
@@ -124,7 +206,7 @@ WHERE concept_id IN (
 )
 """)
 
-# === 4. All labs (PSA UNION other labs) ===
+# === 5. All labs (PSA UNION other labs) ===
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_all_lab_concepts AS
 SELECT concept_id FROM temp_psa_concepts
@@ -132,7 +214,7 @@ UNION
 SELECT concept_id FROM temp_other_lab_concepts
 """)
 
-# === 5. Platinum drugs (descendants of carboplatin/cisplatin ingredients) ===
+# === 6. Platinum drugs (descendants of carboplatin/cisplatin ingredients) ===
 #    Expose both concept_id and drug_concept_id alias for downstream joins.
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_platinum_drugs AS
@@ -153,7 +235,7 @@ WHERE ancestor_concept_id IN (1344905, 1397599)
 spark.sql("USE CATALOG dfci_ia_aistudio")
 spark.sql("USE SCHEMA omop_caia_denorm")
 
-# === 6. First prostate cancer diagnosis per patient ===
+# === 7. First prostate cancer diagnosis per patient ===
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW first_prostate_diagnosis AS
 SELECT
@@ -164,7 +246,7 @@ WHERE co.condition_concept_id IN (SELECT concept_id FROM temp_prostate_cancer_co
 GROUP BY co.person_id
 """)
 
-# === 7. Patients with prostate cancer and ≥10 PSA measurements after diagnosis ===
+# === 8. Patients with prostate cancer and ≥10 PSA measurements after diagnosis ===
 # FIX: Joins against first_prostate_diagnosis (one row per patient) instead of
 # condition_occurrence (many rows per patient), preventing cross-product inflation
 # of the PSA count.
@@ -180,7 +262,32 @@ GROUP BY f.person_id
 HAVING COUNT(*) >= 10
 """)
 
-# === 8. First platinum drug exposure per patient (one row per patient) ===
+# === 9. Exclusion: patients with non-prostate primary cancer (allowing NMSC + NOS) ===
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_patients_with_other_cancer AS
+SELECT DISTINCT co.person_id
+FROM dn_condition_occurrence_20251219 co
+WHERE co.condition_concept_id IN (SELECT concept_id FROM temp_non_prostate_cancer_concepts_allow_nmsc_nos)
+""")
+
+# === 10. Exclusion: patients with PARP inhibitor exposure ===
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_patients_with_parp AS
+SELECT DISTINCT de.person_id
+FROM dn_drug_exposure_20251219 de
+WHERE de.drug_concept_id IN (SELECT drug_concept_id FROM temp_parp_drugs)
+""")
+
+# === 11. Combined eligible cohort: ≥10 PSA AND no other cancer AND no PARP ===
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_eligible_patients AS
+SELECT person_id
+FROM temp_prostate_psa10_patients
+WHERE person_id NOT IN (SELECT person_id FROM temp_patients_with_other_cancer)
+  AND person_id NOT IN (SELECT person_id FROM temp_patients_with_parp)
+""")
+
+# === 12. First platinum drug exposure per patient (one row per patient) ===
 #    Picks the earliest platinum exposure overall. Patients on both carboplatin
 #    and cisplatin get a single row for whichever came first, preventing
 #    duplicate lab rows in the downstream LEFT JOIN.
@@ -204,7 +311,7 @@ FROM ranked
 WHERE rn = 1
 """)
 
-# === 9. Combine PSA measurements with first drug info ===
+# === 13. Combine PSA measurements with first drug info ===
 spark.sql(f"""
 CREATE OR REPLACE TEMP VIEW prostate_lab_longitudinal AS
 SELECT
@@ -256,7 +363,7 @@ SELECT
   dp.drug_type,
   fe.first_drug_exposure_start_date AS drug_initiation_date
 
-FROM temp_prostate_psa10_patients p
+FROM temp_eligible_patients p
 JOIN first_prostate_diagnosis f
   ON p.person_id = f.person_id
 JOIN dn_person_20251219 per
@@ -305,12 +412,12 @@ LEFT JOIN temp_platinum_drugs dp
   ON fe.drug_concept_id = dp.drug_concept_id
 """)
 
-# === 10. Last contact / follow-up per patient ===
+# === 14. Last contact / follow-up per patient ===
 #     Derived from latest event across all denormalized tables + death.
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_followup AS
 WITH cohort_ids AS (
-  SELECT person_id FROM temp_prostate_psa10_patients
+  SELECT person_id FROM temp_eligible_patients
 ),
 last_clinical_event AS (
   SELECT person_id, MAX(event_date) AS last_event_date
@@ -338,7 +445,7 @@ LEFT JOIN dn_death_20251219 d
     ON lce.person_id = d.person_id
 """)
 
-# === 11. Merge longitudinal labs with follow-up info ===
+# === 15. Merge longitudinal labs with follow-up info ===
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW prostate_lab_longitudinal_with_followup AS
 SELECT
@@ -350,10 +457,10 @@ FROM prostate_lab_longitudinal l
 LEFT JOIN temp_followup f ON l.person_id = f.person_id
 """)
 
-# === 12. Materialize ===
+# === 16. Materialize ===
 final_df = spark.table("prostate_lab_longitudinal_with_followup")
 
-# === 12b. Remap variant measurement concept IDs to canonical IDs ===
+# === 16b. Remap variant measurement concept IDs to canonical IDs ===
 # This merges alternate LOINC codings into a single concept per lab type,
 # so that downstream unit filtering, conversions, and ranges apply uniformly.
 from pyspark.sql import functions as F, types as T
@@ -423,7 +530,7 @@ final_df = (
     .drop("old_concept_id", "new_concept_id")
 )
 
-# === 13. Limit allowed measurement, unit combinations ===
+# === 17. Limit allowed measurement, unit combinations ===
 allowed_unit_combinations = [
     (3006923, 0), (3006923, 8645), (3006923, 8718), (3006923, 8923), (3006923, 8985), (3006923, 9254),
     (3024561, 0), (3024561, 8636), (3024561, 8713), (3024561, 8840),
@@ -522,7 +629,7 @@ final_df_w_units_filtered = (
     .join(allowed_df, on=["measurement_concept_id", "unit_concept_id"], how="inner")
 ).cache()
 
-# === 14. Perform required unit conversions on subset of labs ===
+# === 18. Perform required unit conversions on subset of labs ===
 # Lookup table: (concept_id, from_unit, factor, to_unit)
 # factor=None for special conversions handled separately (temperature F->C)
 from pyspark.sql.types import StructType, StructField, IntegerType, DoubleType, LongType
@@ -717,7 +824,7 @@ final_df_w_conversions = (
     .join(unit_converted_names, on="unit_converted_id", how="left")
 )
 
-# === 14b. Exclude null/NaN and non-physiologic lab values ===
+# === 18b. Exclude null/NaN and non-physiologic lab values ===
 # 1) Remove rows where lab_value_final is null or NaN
 final_df_w_conversions = final_df_w_conversions.filter(
     F.col("lab_value_final").isNotNull() & ~F.isnan(F.col("lab_value_final"))
@@ -830,7 +937,7 @@ final_df_w_conversions = (
     .drop("physio_min", "physio_max")
 )
 
-# === 15. Compute days relative to events (positive = days after event) ===
+# === 19. Compute days relative to events (positive = days after event) ===
 df_to_upload = (
     final_df_w_conversions
     # --- Lab-level relative timing ---
@@ -869,7 +976,7 @@ df_to_upload = (
 
 from pyspark.sql import functions as F, types as T
 
-# === 16. Enforce canonical types + schema assertions ===
+# === 20. Enforce canonical types + schema assertions ===
 
 # ---- Define column groups ----
 int_cols = [

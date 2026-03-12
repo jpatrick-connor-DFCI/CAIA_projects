@@ -52,6 +52,44 @@ WHERE ancestor_concept_id = 443392
   )
 """)
 
+# === Non-melanoma skin cancer (NMSC) concepts ===
+# Basal cell carcinoma (4112752) and squamous cell carcinoma of skin (4111921)
+# and all their descendants. These are generally indolent and unlikely to
+# confound prostate cancer outcomes.
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_nmsc_concepts AS
+SELECT DISTINCT descendant_concept_id AS concept_id
+FROM concept_ancestor
+WHERE ancestor_concept_id IN (
+    4112752,  -- Basal cell carcinoma of skin
+    4111921   -- Squamous cell carcinoma of skin
+)
+""")
+
+# === NOS malignant neoplasm concept ===
+# Concept 439392 ("Primary malignant neoplasm" with no site specified)
+# is likely a coding artifact and not a true second primary.
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_nos_malignant_neoplasm AS
+SELECT 439392 AS concept_id
+""")
+
+# === Relaxed non-prostate cancer views (allowing back NMSC and/or NOS) ===
+# Version 1: Allow NMSC back in (exclude other cancers except skin BCC/SCC)
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_non_prostate_cancer_concepts_allow_nmsc AS
+SELECT concept_id FROM temp_non_prostate_cancer_concepts
+WHERE concept_id NOT IN (SELECT concept_id FROM temp_nmsc_concepts)
+""")
+
+# Version 2: Allow NMSC + NOS back in
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_non_prostate_cancer_concepts_allow_nmsc_nos AS
+SELECT concept_id FROM temp_non_prostate_cancer_concepts
+WHERE concept_id NOT IN (SELECT concept_id FROM temp_nmsc_concepts)
+  AND concept_id NOT IN (SELECT concept_id FROM temp_nos_malignant_neoplasm)
+""")
+
 # === PARP inhibitor drug concepts ===
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_parp_ingredients AS
@@ -119,6 +157,21 @@ FROM dn_drug_exposure_20251219 de
 WHERE de.drug_concept_id IN (SELECT drug_concept_id FROM temp_parp_drugs)
 """)
 
+# Relaxed exclusion sets: exclude patients with other cancer EXCEPT NMSC (and optionally NOS)
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_patients_with_other_cancer_allow_nmsc AS
+SELECT DISTINCT co.person_id
+FROM dn_condition_occurrence_20251219 co
+WHERE co.condition_concept_id IN (SELECT concept_id FROM temp_non_prostate_cancer_concepts_allow_nmsc)
+""")
+
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_patients_with_other_cancer_allow_nmsc_nos AS
+SELECT DISTINCT co.person_id
+FROM dn_condition_occurrence_20251219 co
+WHERE co.condition_concept_id IN (SELECT concept_id FROM temp_non_prostate_cancer_concepts_allow_nmsc_nos)
+""")
+
 # ---------------------------------------------------------------
 # Part 3: Parameter sweep
 # ---------------------------------------------------------------
@@ -133,6 +186,18 @@ exclusion_configs = [
     ("no_parp",           "AND person_id NOT IN (SELECT person_id FROM temp_patients_with_parp)"),
     ("no_cancer_no_parp", "AND person_id NOT IN (SELECT person_id FROM temp_patients_with_other_cancer) "
                           "AND person_id NOT IN (SELECT person_id FROM temp_patients_with_parp)"),
+    # Relaxed: allow NMSC back in
+    ("no_cancer_allow_nmsc",
+     "AND person_id NOT IN (SELECT person_id FROM temp_patients_with_other_cancer_allow_nmsc)"),
+    ("no_cancer_allow_nmsc_no_parp",
+     "AND person_id NOT IN (SELECT person_id FROM temp_patients_with_other_cancer_allow_nmsc) "
+     "AND person_id NOT IN (SELECT person_id FROM temp_patients_with_parp)"),
+    # Relaxed: allow NMSC + NOS malignant neoplasm back in
+    ("no_cancer_allow_nmsc_nos",
+     "AND person_id NOT IN (SELECT person_id FROM temp_patients_with_other_cancer_allow_nmsc_nos)"),
+    ("no_cancer_allow_nmsc_nos_no_parp",
+     "AND person_id NOT IN (SELECT person_id FROM temp_patients_with_other_cancer_allow_nmsc_nos) "
+     "AND person_id NOT IN (SELECT person_id FROM temp_patients_with_parp)"),
 ]
 
 # Count PSA measurements per patient (single scan)

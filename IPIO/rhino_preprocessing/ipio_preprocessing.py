@@ -1452,7 +1452,7 @@ spark.sql("""
     FROM patient_cohort
     WHERE ici_discontinuation_cause IS NOT NULL
     GROUP BY ici_discontinuation_cause
-    ORDER BY n_patients DESC
+    ORDER BY n_blocks DESC
 """).show(truncate=False)
 
 print("--- ICI Discontinuation Event Indicator (all blocks) ---")
@@ -1485,7 +1485,7 @@ print("--- Time on ICI by Discontinuation Cause ---")
 spark.sql("""
     SELECT
         ici_discontinuation_cause,
-        COUNT(*) AS n_patients,
+        COUNT(*) AS n_blocks,
         ROUND(AVG(time_on_ici), 1) AS mean_days,
         PERCENTILE_APPROX(time_on_ici, 0.50) AS median_days,
         MIN(time_on_ici) AS min_days,
@@ -1493,7 +1493,7 @@ spark.sql("""
     FROM patient_cohort
     WHERE time_on_ici IS NOT NULL
     GROUP BY ici_discontinuation_cause
-    ORDER BY n_patients DESC
+    ORDER BY n_blocks DESC
 """).show(truncate=False)
 
 print("--- Time to Death or Censor (days from diagnosis) ---")
