@@ -4,8 +4,8 @@
 import os
 import pandas as pd
 _cwd = os.getcwd()
-spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"))).createOrReplaceTempView("concept")
-spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"))).createOrReplaceTempView("concept_ancestor")
+spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"), sep="\t")).createOrReplaceTempView("concept")
+spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"), sep="\t")).createOrReplaceTempView("concept_ancestor")
 
 CONCEPT_TABLE = "concept"
 
@@ -60,122 +60,127 @@ LEFT JOIN cancer_labels l
 # === 4. ICI concepts ===
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_ICI_concepts AS
-SELECT concept_id
-FROM concept
-WHERE concept_id IN (741851,779239,1536789,1593273,1594034,35200783,40238188,42609339,42629079,45775965,45892628)
+SELECT concept_id FROM VALUES
+  (741851),    -- Nivolumab
+  (779239),    -- Ipilimumab
+  (1536789),   -- Durvalumab
+  (1593273),   -- Atezolizumab
+  (1594034),   -- Avelumab
+  (35200783),  -- Pembrolizumab
+  (40238188),  -- Cemiplimab
+  (42609339),  -- Tremelimumab
+  (42629079),  -- Dostarlimab
+  (45775965),  -- Retifanlimab
+  (45892628)   -- Toripalimab
+AS t(concept_id)
 """)
 
 # === 5. Non-ICI antineoplastic drug concepts (ATC L01 descendants, excluding ICI) ===
 # Used to detect therapy switches (progression signal) after ICI discontinuation.
+# ATC L01 "Antineoplastic agents" = concept_id 21601387
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_antineoplastic_non_ici AS
 SELECT DISTINCT ca.descendant_concept_id AS drug_concept_id
 FROM concept_ancestor ca
-JOIN concept c
-  ON ca.ancestor_concept_id = c.concept_id
-WHERE c.vocabulary_id = 'ATC'
-  AND c.concept_code = 'L01'
+WHERE ca.ancestor_concept_id = 21601387
   AND ca.descendant_concept_id NOT IN (SELECT concept_id FROM temp_ICI_concepts)
 """)
 
 # === 6. Systemic corticosteroid concepts (ATC H02AB descendants) ===
 # Used to detect irAE treatment (toxicity signal) around ICI discontinuation.
+# ATC H02AB "Glucocorticoids" = concept_id 21602728
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_systemic_corticosteroids AS
 SELECT DISTINCT ca.descendant_concept_id AS drug_concept_id
 FROM concept_ancestor ca
-JOIN concept c
-  ON ca.ancestor_concept_id = c.concept_id
-WHERE c.vocabulary_id = 'ATC'
-  AND c.concept_code = 'H02AB'
+WHERE ca.ancestor_concept_id = 21602728
 """)
 
-# === 7. Lab measurement concepts (FIX: added 3008893 and 3013603) ===
+# === 7. Lab measurement concepts ===
+# Hardcoded via VALUES so the view is independent of the concept CSV for filtering.
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_lab_concepts AS
-SELECT concept_id
-FROM concept
-WHERE concept_id IN (
+SELECT concept_id FROM VALUES
   -- Canonical lab concepts
-  3006923, 3024561, 3020509, 3035995, 3009306, 3013721, 3027597, 3024128, 3036277, 3020891,
-  3025315, 3020460, 3006906, 3037551, 3022914, 3015632, 3003785, 3014576, 3007220, 3016723,
-  3012888, 3019897, 3013707, 3020416, 3027970, 3004501, 3027018, 3023314, 3000963, 3022217,
-  3016436, 3000905, 3004327, 3012030, 3009744, 3023599, 3033575, 3013650, 3024929,
-  3023103, 3020630, 3034426, 3024171, 3019550, 3004249, 3008893, 3013682, 3013466,
-  3013603,
+  (3006923), (3024561), (3020509), (3035995), (3009306), (3013721), (3027597), (3024128), (3036277), (3020891),
+  (3025315), (3020460), (3006906), (3037551), (3022914), (3015632), (3003785), (3014576), (3007220), (3016723),
+  (3012888), (3019897), (3013707), (3020416), (3027970), (3004501), (3027018), (3023314), (3000963), (3022217),
+  (3016436), (3000905), (3004327), (3012030), (3009744), (3023599), (3033575), (3013650), (3024929),
+  (3023103), (3020630), (3034426), (3024171), (3019550), (3004249), (3008893), (3013682), (3013466),
+  (3013603),
   -- Category 1: Variant codings of existing labs (will be remapped post-extraction)
-  3002131, 3034548,  -- PSA variants -> 3013603
-  3000285,           -- Sodium in Blood -> 3019550
-  3000483,           -- Glucose in Blood -> 3004501
-  3004295,           -- BUN in Blood -> 3013682
-  3005456,           -- Potassium in Blood -> 3023103
-  3018572,           -- Chloride in Blood -> 3014576
-  3004119, 3027484,  -- Hemoglobin variants -> 3000963
-  3009542,           -- Hematocrit -> 3023314
-  3003338,           -- MCHC -> 3009744
-  3024731,           -- MCV -> 3023599
-  3035941,           -- MCH -> 3012030
-  3002385,           -- RDW -> 3019897
-  3010813,           -- Leukocytes in Blood -> 3000905
-  3019198,           -- Lymphocytes in Blood -> 3004327
-  3017732,           -- Neutrophils in Blood -> 3013650
-  3001604,           -- Monocytes in Blood -> 3033575
-  3007461,           -- Platelets in Blood -> 3024929
-  3026361,           -- Erythrocytes in Blood -> 3020416
-  3015183,           -- ESR -> 3013707
-  3010156,           -- CRP high-sensitivity -> 3020460
-  3022250,           -- LDH lactate->pyruvate -> 3016436
-  3005225,           -- LDH pyruvate->lactate -> 3016436
-  3018677,           -- aPTT in PPP -> 3013466
-  3005755,           -- ALT with P-5'-P -> 3006923
-  3037081,           -- AST with P-5'-P -> 3013721
-  3010140,           -- CO2 in Venous -> 3015632
-  3002417,           -- PT in Blood -> 3034426
-  3032080,           -- INR in Blood -> 3022217
-  3049555,           -- Testosterone low-detect -> 3008893
-  3021886,           -- Globulin in Serum -> 3027970
-  3013762,           -- Body weight Measured -> 3025315
-  3023540,           -- Body height Measured -> 3036277
-  3003215,           -- Lymphocytes manual count -> 3004327
-  3017501,           -- Neutrophils manual count -> 3013650
-  3027651,           -- Basophils manual count -> 3013429
-  3009932,           -- Eosinophils manual count -> 3028615
-  3034107,           -- Monocytes manual count -> 3033575
-  3019909,           -- Hematocrit centrifugation -> 3023314
-  3034976,           -- Hematocrit venous -> 3023314
-  3001657,           -- WBC corrected -> 3000905
-  3046900,           -- WBC corrected automated -> 3000905
-  3048275,           -- Hemoglobin pre-phlebotomy -> 3000963
-  3028286,           -- Albumin electrophoresis -> 3024561
-  40763912,          -- Albumin BCG -> 3024561
-  3046948,           -- A/G ratio electrophoresis -> 3020509
-  3011424,           -- Glucose automated strip -> 3004501
-  3014053,           -- Glucose manual strip -> 3004501
-  3032986,           -- Glucose 1st specimen -> 3004501
-  3013826,           -- Glucose mmol/L -> 3004501
-  3027219,           -- BUN venous -> 3013682
-  3051825,           -- Creatinine blood -> 3016723
-  3035285,           -- Chloride venous -> 3014576
-  3041354,           -- Potassium venous -> 3023103
-  3030597,           -- Calcium corrected -> 3006906
-  3015377,           -- Calcium mmol/L -> 3006906
-  3019170,           -- TSH sensitive 0.005 -> 3009201
-  3019762,           -- TSH sensitive 0.05 -> 3009201
-  3024675,           -- Free T4 dialysis -> 3008598
-  3019171,           -- Body height Stated -> 3036277
-  3023166,           -- Body weight Stated -> 3025315
-  3040891,           -- Heart rate resting -> 3027018
-  3042292,           -- Heart rate post-exercise -> 3027018
-  40771525,          -- Heart rate sitting -> 3027018
-  3016628,           -- Fibrinogen Ag immunoassay -> 3016407
-  3037950,           -- Fibrinogen Ag nephelometry -> 3016407
+  (3002131), (3034548),  -- PSA variants -> 3013603
+  (3000285),             -- Sodium in Blood -> 3019550
+  (3000483),             -- Glucose in Blood -> 3004501
+  (3004295),             -- BUN in Blood -> 3013682
+  (3005456),             -- Potassium in Blood -> 3023103
+  (3018572),             -- Chloride in Blood -> 3014576
+  (3004119), (3027484),  -- Hemoglobin variants -> 3000963
+  (3009542),             -- Hematocrit -> 3023314
+  (3003338),             -- MCHC -> 3009744
+  (3024731),             -- MCV -> 3023599
+  (3035941),             -- MCH -> 3012030
+  (3002385),             -- RDW -> 3019897
+  (3010813),             -- Leukocytes in Blood -> 3000905
+  (3019198),             -- Lymphocytes in Blood -> 3004327
+  (3017732),             -- Neutrophils in Blood -> 3013650
+  (3001604),             -- Monocytes in Blood -> 3033575
+  (3007461),             -- Platelets in Blood -> 3024929
+  (3026361),             -- Erythrocytes in Blood -> 3020416
+  (3015183),             -- ESR -> 3013707
+  (3010156),             -- CRP high-sensitivity -> 3020460
+  (3022250),             -- LDH lactate->pyruvate -> 3016436
+  (3005225),             -- LDH pyruvate->lactate -> 3016436
+  (3018677),             -- aPTT in PPP -> 3013466
+  (3005755),             -- ALT with P-5'-P -> 3006923
+  (3037081),             -- AST with P-5'-P -> 3013721
+  (3010140),             -- CO2 in Venous -> 3015632
+  (3002417),             -- PT in Blood -> 3034426
+  (3032080),             -- INR in Blood -> 3022217
+  (3049555),             -- Testosterone low-detect -> 3008893
+  (3021886),             -- Globulin in Serum -> 3027970
+  (3013762),             -- Body weight Measured -> 3025315
+  (3023540),             -- Body height Measured -> 3036277
+  (3003215),             -- Lymphocytes manual count -> 3004327
+  (3017501),             -- Neutrophils manual count -> 3013650
+  (3027651),             -- Basophils manual count -> 3013429
+  (3009932),             -- Eosinophils manual count -> 3028615
+  (3034107),             -- Monocytes manual count -> 3033575
+  (3019909),             -- Hematocrit centrifugation -> 3023314
+  (3034976),             -- Hematocrit venous -> 3023314
+  (3001657),             -- WBC corrected -> 3000905
+  (3046900),             -- WBC corrected automated -> 3000905
+  (3048275),             -- Hemoglobin pre-phlebotomy -> 3000963
+  (3028286),             -- Albumin electrophoresis -> 3024561
+  (40763912),            -- Albumin BCG -> 3024561
+  (3046948),             -- A/G ratio electrophoresis -> 3020509
+  (3011424),             -- Glucose automated strip -> 3004501
+  (3014053),             -- Glucose manual strip -> 3004501
+  (3032986),             -- Glucose 1st specimen -> 3004501
+  (3013826),             -- Glucose mmol/L -> 3004501
+  (3027219),             -- BUN venous -> 3013682
+  (3051825),             -- Creatinine blood -> 3016723
+  (3035285),             -- Chloride venous -> 3014576
+  (3041354),             -- Potassium venous -> 3023103
+  (3030597),             -- Calcium corrected -> 3006906
+  (3015377),             -- Calcium mmol/L -> 3006906
+  (3019170),             -- TSH sensitive 0.005 -> 3009201
+  (3019762),             -- TSH sensitive 0.05 -> 3009201
+  (3024675),             -- Free T4 dialysis -> 3008598
+  (3019171),             -- Body height Stated -> 3036277
+  (3023166),             -- Body weight Stated -> 3025315
+  (3040891),             -- Heart rate resting -> 3027018
+  (3042292),             -- Heart rate post-exercise -> 3027018
+  (40771525),            -- Heart rate sitting -> 3027018
+  (3016628),             -- Fibrinogen Ag immunoassay -> 3016407
+  (3037950),             -- Fibrinogen Ag nephelometry -> 3016407
   -- Category 2: New lab types
-  3013429, 3006315,  -- Basophils (automated + generic; 3006315 remapped -> 3013429)
-  3028615, 3013115,  -- Eosinophils (automated + generic; 3013115 remapped -> 3028615)
-  3009201,           -- TSH
-  3008598,           -- Free T4
-  3016407            -- Fibrinogen
-)
+  (3013429), (3006315),  -- Basophils (automated + generic; 3006315 remapped -> 3013429)
+  (3028615), (3013115),  -- Eosinophils (automated + generic; 3013115 remapped -> 3028615)
+  (3009201),             -- TSH
+  (3008598),             -- Free T4
+  (3016407)              -- Fibrinogen
+AS t(concept_id)
 """)
 
 # ===============================================================
@@ -315,11 +320,11 @@ SELECT
         ELSE NULL
     END AS date_of_birth,
     per.gender_concept_id,
-    gc.concept_name AS gender,
+    per.gender_concept_name AS gender,
     per.race_concept_id,
-    rc.concept_name AS race,
+    per.race_concept_name AS race,
     per.ethnicity_concept_id,
-    ec.concept_name AS ethnicity,
+    per.ethnicity_concept_name AS ethnicity,
 
     FLOOR(
         DATEDIFF(
@@ -387,15 +392,9 @@ LEFT JOIN {CONCEPT_TABLE} c
 LEFT JOIN {CONCEPT_TABLE} cu
     ON m.unit_concept_id = cu.concept_id
 
--- Demographic joins
+-- Demographics
 JOIN dn_person_20251219 per
     ON p.person_id = per.person_id
-LEFT JOIN {CONCEPT_TABLE} gc
-    ON per.gender_concept_id = gc.concept_id
-LEFT JOIN {CONCEPT_TABLE} rc
-    ON per.race_concept_id = rc.concept_id
-LEFT JOIN {CONCEPT_TABLE} ec
-    ON per.ethnicity_concept_id = ec.concept_id
 """)
 
 # === 13. Create the discontinuation dataframe ===

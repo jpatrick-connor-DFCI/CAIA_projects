@@ -17,7 +17,7 @@
 import os
 import pandas as pd
 _cwd = os.getcwd()
-spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"))).createOrReplaceTempView("concept")
+spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"), sep="\t")).createOrReplaceTempView("concept")
 
 # === NSCLC condition concepts (pre-expanded descendants, used directly) ===
 spark.sql("""
@@ -31,9 +31,19 @@ FROM (VALUES
 # === ICI drug concepts (same as IPIO pipeline) ===
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_ici_concepts AS
-SELECT concept_id
-FROM concept
-WHERE concept_id IN (741851,779239,1536789,1593273,1594034,35200783,40238188,42609339,42629079,45775965,45892628)
+SELECT concept_id FROM VALUES
+  (741851),    -- Nivolumab
+  (779239),    -- Ipilimumab
+  (1536789),   -- Durvalumab
+  (1593273),   -- Atezolizumab
+  (1594034),   -- Avelumab
+  (35200783),  -- Pembrolizumab
+  (40238188),  -- Cemiplimab
+  (42609339),  -- Tremelimumab
+  (42629079),  -- Dostarlimab
+  (45775965),  -- Retifanlimab
+  (45892628)   -- Toripalimab
+AS t(concept_id)
 """)
 
 # ---------------------------------------------------------------

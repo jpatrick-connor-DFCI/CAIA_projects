@@ -16,8 +16,8 @@
 import os
 import pandas as pd
 _cwd = os.getcwd()
-spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"))).createOrReplaceTempView("concept")
-spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"))).createOrReplaceTempView("concept_ancestor")
+spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"), sep="\t")).createOrReplaceTempView("concept")
+spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"), sep="\t")).createOrReplaceTempView("concept_ancestor")
 
 # The 3 PSA concepts already in the final output (have allowed unit combos)
 CANONICAL_PSA_IDS = [3013603, 3002131, 3034548]

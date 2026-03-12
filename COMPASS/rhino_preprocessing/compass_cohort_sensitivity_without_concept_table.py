@@ -18,8 +18,8 @@
 import os
 import pandas as pd
 _cwd = os.getcwd()
-spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"))).createOrReplaceTempView("concept")
-spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"))).createOrReplaceTempView("concept_ancestor")
+spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"), sep="\t")).createOrReplaceTempView("concept")
+spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"), sep="\t")).createOrReplaceTempView("concept_ancestor")
 
 # === Prostate cancer concepts ===
 spark.sql("""
@@ -91,13 +91,15 @@ WHERE concept_id NOT IN (SELECT concept_id FROM temp_nmsc_concepts)
 """)
 
 # === PARP inhibitor drug concepts ===
+# Hardcoded ingredient IDs via VALUES; descendants looked up from local concept_ancestor CSV.
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_parp_ingredients AS
-SELECT concept_id
-FROM concept
-WHERE LOWER(concept_name) IN ('olaparib', 'rucaparib', 'niraparib', 'talazoparib')
-  AND concept_class_id = 'Ingredient'
-  AND standard_concept = 'S'
+SELECT concept_id FROM VALUES
+  (45892579),  -- Olaparib
+  (1718850),   -- Rucaparib
+  (1593861),   -- Niraparib
+  (35201068)   -- Talazoparib
+AS t(concept_id)
 """)
 
 spark.sql("""
@@ -110,14 +112,12 @@ WHERE ancestor_concept_id IN (SELECT concept_id FROM temp_parp_ingredients)
 # === PSA concepts: all 27 variants ===
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_psa_concepts AS
-SELECT concept_id
-FROM concept
-WHERE concept_id IN (
-  3013603, 3002131, 3034548,
-  3037249, 3037774, 3002178, 44811982, 40762314, 3038011, 3032915, 42529229,
-  40484164, 715972, 35917418, 40762312, 40480170, 3007273, 44811980, 35918474,
-  715971, 44811981, 4272032, 4194418, 4215704, 40762321, 3052038, 44793131
-)
+SELECT concept_id FROM VALUES
+  (3013603), (3002131), (3034548),
+  (3037249), (3037774), (3002178), (44811982), (40762314), (3038011), (3032915), (42529229),
+  (40484164), (715972), (35917418), (40762312), (40480170), (3007273), (44811980), (35918474),
+  (715971), (44811981), (4272032), (4194418), (4215704), (40762321), (3052038), (44793131)
+AS t(concept_id)
 """)
 
 # ---------------------------------------------------------------
