@@ -3,10 +3,11 @@
 # ===============================================================
 # Inclusion/exclusion criteria:
 #   1. Prostate cancer diagnosis
-#   2. >= 10 PSA measurements (full 27-variant concept set) after diagnosis
-#   3. No other primary cancers (keeping metastatic disease, NMSC, and
+#   2. Male sex (gender_concept_id = 8507)
+#   3. >= 10 PSA measurements (full 27-variant concept set) after diagnosis
+#   4. No other primary cancers (keeping metastatic disease, NMSC, and
 #      malignant neoplasm NOS)
-#   4. No PARP inhibitor exposure (olaparib, rucaparib, niraparib, talazoparib)
+#   5. No PARP inhibitor exposure (olaparib, rucaparib, niraparib, talazoparib)
 # ===============================================================
 
 # ===============================================================
@@ -282,13 +283,15 @@ FROM dn_drug_exposure_20251219 de
 WHERE de.drug_concept_id IN (SELECT drug_concept_id FROM temp_parp_drugs)
 """)
 
-# === 11. Combined eligible cohort: ≥10 PSA AND no other cancer AND no PARP ===
+# === 11. Combined eligible cohort: male AND ≥10 PSA AND no other cancer AND no PARP ===
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_eligible_patients AS
-SELECT person_id
-FROM temp_prostate_psa10_patients
-WHERE person_id NOT IN (SELECT person_id FROM temp_patients_with_other_cancer)
-  AND person_id NOT IN (SELECT person_id FROM temp_patients_with_parp)
+SELECT t.person_id
+FROM temp_prostate_psa10_patients t
+JOIN dn_person_20251219 p ON t.person_id = p.person_id
+WHERE p.gender_concept_id = 8507  -- Male
+  AND t.person_id NOT IN (SELECT person_id FROM temp_patients_with_other_cancer)
+  AND t.person_id NOT IN (SELECT person_id FROM temp_patients_with_parp)
 """)
 
 # === 12. First platinum drug exposure per patient (one row per patient) ===
@@ -375,27 +378,10 @@ JOIN dn_person_20251219 per
 
 -- Demographics (names from denormalized person table)
 
--- Labs
+-- Labs (all concepts from temp_all_lab_concepts = PSA + other labs)
 JOIN dn_measurement_20251219 m
   ON p.person_id = m.person_id
-  AND m.measurement_concept_id IN (
-    3013603, 3002131, 3034548, 4272032, 3052038,
-    3006923, 3024561, 3020509, 3035995, 3009306, 3013721, 3027597, 3024128, 3036277, 3020891,
-    3025315, 3020460, 3006906, 3037551, 3022914, 3015632, 3003785, 3014576, 3007220, 3016723,
-    3012888, 3019897, 3013707, 3020416, 3027970, 3004501, 3027018, 3023314, 3000963, 3022217,
-    3016436, 3000905, 3004327, 3012030, 3009744, 3023599, 3033575, 3013650, 3024929,
-    3023103, 3020630, 3034426, 3024171, 3019550, 3004249, 3008893, 3013682, 3013466,
-    3000285, 3000483, 3004295, 3005456, 3018572,
-    3004119, 3027484, 3009542, 3003338, 3024731, 3035941, 3002385, 3010813,
-    3019198, 3017732, 3001604, 3007461, 3026361, 3015183, 3010156, 3022250, 3005225,
-    3018677, 3005755, 3037081, 3010140, 3002417, 3032080, 3049555, 3021886,
-    3013762, 3023540, 3003215, 3017501, 3027651, 3009932, 3034107,
-    3019909, 3034976, 3001657, 3046900, 3048275, 3028286, 40763912, 3046948,
-    3011424, 3014053, 3032986, 3013826, 3027219, 3051825, 3035285, 3041354,
-    3030597, 3015377, 3019170, 3019762, 3024675, 3019171, 3023166,
-    3040891, 3042292, 40771525, 3016628, 3037950,
-    3013429, 3006315, 3028615, 3013115, 3009201, 3008598, 3016407
-  )
+  AND m.measurement_concept_id IN (SELECT concept_id FROM temp_all_lab_concepts)
 LEFT JOIN {CONCEPT_TABLE} c
   ON m.measurement_concept_id = c.concept_id
 LEFT JOIN {CONCEPT_TABLE} cu
