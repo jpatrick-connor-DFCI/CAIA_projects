@@ -57,22 +57,30 @@ LEFT JOIN cancer_labels l
     ON c.concept_id = l.concept_id
 """)
 
-# === 4. ICI concepts ===
+# === 4. ICI ingredient concepts ===
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_ICI_ingredients AS
+SELECT concept_id FROM VALUES
+  (45892628),  -- Nivolumab
+  (45775965),  -- Pembrolizumab
+  (42629079),  -- Atezolizumab
+  (1594034),   -- Durvalumab
+  (40238188),  -- Ipilimumab
+  (35200783),  -- Cemiplimab
+  (1593273),   -- Avelumab
+  (741851),    -- Tremelimumab
+  (1536789),   -- Dostarlimab
+  (1302024),   -- Retifanlimab
+  (747052)     -- Toripalimab
+AS t(concept_id)
+""")
+
+# === 4b. Expand ICI ingredients to all descendant drug products ===
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_ICI_concepts AS
-SELECT concept_id FROM VALUES
-  (741851),    -- Nivolumab
-  (779239),    -- Ipilimumab
-  (1536789),   -- Durvalumab
-  (1593273),   -- Atezolizumab
-  (1594034),   -- Avelumab
-  (35200783),  -- Pembrolizumab
-  (40238188),  -- Cemiplimab
-  (42609339),  -- Tremelimumab
-  (42629079),  -- Dostarlimab
-  (45775965),  -- Retifanlimab
-  (45892628)   -- Toripalimab
-AS t(concept_id)
+SELECT DISTINCT ca.descendant_concept_id AS concept_id
+FROM concept_ancestor ca
+WHERE ca.ancestor_concept_id IN (SELECT concept_id FROM temp_ICI_ingredients)
 """)
 
 # === 5. Non-ICI antineoplastic drug concepts (ATC L01 descendants, excluding ICI) ===

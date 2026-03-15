@@ -1,8 +1,9 @@
 # ===============================================================
 # NSCLC Patient Audit: ICI+ vs ICI-
 # ===============================================================
-# Extracts all NSCLC patients in the dataset (regardless of ICI
-# status) and labels each as ICI+ or ICI-.
+# Extracts all NSCLC patients in the dataset and labels each as
+# ICI+ or ICI- based on any ICI exposure regardless of timing
+# relative to NSCLC diagnosis.
 #
 # Uses the same NSCLC concept set and ICI concept set as the
 # main IPIO preprocessing pipeline.
@@ -11,13 +12,11 @@
 # ===============================================================
 # Load vocabulary subset CSVs (replacing deprecated catalog)
 # ===============================================================
-# Note: concept_ancestor is NOT needed for this script — the NSCLC
-# concept IDs below are already pre-expanded descendants from the
-# original catalog and are used directly as condition concept IDs.
 import os
 import pandas as pd
 _cwd = os.getcwd()
 spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"), sep="\t")).createOrReplaceTempView("concept")
+spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"), sep="\t")).createOrReplaceTempView("concept_ancestor")
 
 # === NSCLC condition concepts (pre-expanded descendants, used directly) ===
 spark.sql("""
@@ -28,22 +27,30 @@ FROM (VALUES
 ) AS t(concept_id)
 """)
 
-# === ICI drug concepts (same as IPIO pipeline) ===
+# === ICI ingredient concepts (same as IPIO pipeline) ===
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_ici_ingredients AS
+SELECT concept_id FROM VALUES
+  (45892628),  -- Nivolumab
+  (45775965),  -- Pembrolizumab
+  (42629079),  -- Atezolizumab
+  (1594034),   -- Durvalumab
+  (40238188),  -- Ipilimumab
+  (35200783),  -- Cemiplimab
+  (1593273),   -- Avelumab
+  (741851),    -- Tremelimumab
+  (1536789),   -- Dostarlimab
+  (1302024),   -- Retifanlimab
+  (747052)     -- Toripalimab
+AS t(concept_id)
+""")
+
+# === Expand ICI ingredients to all descendant drug products ===
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_ici_concepts AS
-SELECT concept_id FROM VALUES
-  (741851),    -- Nivolumab
-  (779239),    -- Ipilimumab
-  (1536789),   -- Durvalumab
-  (1593273),   -- Atezolizumab
-  (1594034),   -- Avelumab
-  (35200783),  -- Pembrolizumab
-  (40238188),  -- Cemiplimab
-  (42609339),  -- Tremelimumab
-  (42629079),  -- Dostarlimab
-  (45775965),  -- Retifanlimab
-  (45892628)   -- Toripalimab
-AS t(concept_id)
+SELECT DISTINCT ca.descendant_concept_id AS concept_id
+FROM concept_ancestor ca
+WHERE ca.ancestor_concept_id IN (SELECT concept_id FROM temp_ici_ingredients)
 """)
 
 # ---------------------------------------------------------------
@@ -71,30 +78,18 @@ FROM dn_drug_exposure_20251219 de
 WHERE de.drug_concept_id IN (SELECT concept_id FROM temp_ici_concepts)
 """)
 
-# Patients with ICI exposure AFTER NSCLC diagnosis
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW ici_after_nsclc AS
-SELECT DISTINCT de.person_id
-FROM dn_drug_exposure_20251219 de
-JOIN nsclc_patients n ON de.person_id = n.person_id
-WHERE de.drug_concept_id IN (SELECT concept_id FROM temp_ici_concepts)
-  AND de.drug_exposure_start_date >= n.nsclc_diagnosis_date
-""")
-
-# Combined view: all NSCLC patients with ICI label
+# Combined view: all NSCLC patients with ICI label (any ICI exposure regardless of timing)
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW nsclc_ici_labeled AS
 SELECT
     n.person_id,
     n.nsclc_diagnosis_date,
     CASE
-        WHEN ici_any.person_id IS NOT NULL AND ici_post.person_id IS NOT NULL THEN 'ICI+ (post-dx)'
-        WHEN ici_any.person_id IS NOT NULL THEN 'ICI+ (pre-dx only)'
+        WHEN ici.person_id IS NOT NULL THEN 'ICI+'
         ELSE 'ICI-'
     END AS ici_status
 FROM nsclc_patients n
-LEFT JOIN ici_patients ici_any ON n.person_id = ici_any.person_id
-LEFT JOIN ici_after_nsclc ici_post ON n.person_id = ici_post.person_id
+LEFT JOIN ici_patients ici ON n.person_id = ici.person_id
 """)
 
 # ---------------------------------------------------------------
