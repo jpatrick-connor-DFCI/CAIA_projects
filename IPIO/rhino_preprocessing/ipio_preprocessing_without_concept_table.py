@@ -7,6 +7,13 @@ _cwd = os.getcwd()
 spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"), sep="\t")).createOrReplaceTempView("concept")
 spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"), sep="\t")).createOrReplaceTempView("concept_ancestor")
 
+# ===============================================================
+# Performance settings
+# ===============================================================
+spark.conf.set("spark.sql.shuffle.partitions", "400")
+spark.conf.set("spark.sql.autoBroadcastJoinThreshold", str(50 * 1024 * 1024))  # 50 MB
+spark.sparkContext.setCheckpointDir("dbfs:/tmp/caia_checkpoints")
+
 CONCEPT_TABLE = "concept"
 
 # === 1. Define complete cancer type concepts ===
@@ -21,7 +28,6 @@ JOIN concept c
   ON ca.descendant_concept_id = c.concept_id
 WHERE ca.ancestor_concept_id IN (443392)
   AND c.invalid_reason IS NULL
-ORDER BY c.concept_name
 """)
 
 # === 2. Define pre-determined cancer type sets ===
@@ -46,7 +52,7 @@ SELECT descendant_concept_id AS concept_id, 'Melanoma' AS cancer_type FROM conce
 # all other cancers fall back to the OMOP concept_name as cancer_type.
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW cancer_concepts_labeled AS
-SELECT
+SELECT /*+ BROADCAST(l) */
     c.concept_id,
     c.concept_name,
     c.domain_id,
@@ -90,8 +96,9 @@ spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_antineoplastic_non_ici AS
 SELECT DISTINCT ca.descendant_concept_id AS drug_concept_id
 FROM concept_ancestor ca
+LEFT JOIN temp_ICI_concepts ici ON ca.descendant_concept_id = ici.concept_id
 WHERE ca.ancestor_concept_id = 21601387
-  AND ca.descendant_concept_id NOT IN (SELECT concept_id FROM temp_ICI_concepts)
+  AND ici.concept_id IS NULL
 """)
 
 # === 6. Systemic corticosteroid concepts (ATC H02AB descendants) ===
@@ -282,6 +289,13 @@ FROM (
 WHERE rn = 1
 """)
 
+# Checkpoint breaks the multi-level concept/eligibility lineage so all downstream
+# views (followup, labs, discontinuation) plan against a materialized result.
+_ici_patients_df = spark.table("temp_cancer_ici_patients").checkpoint()
+_ici_patients_df.cache()
+_ici_patients_df.count()  # trigger materialization
+_ici_patients_df.createOrReplaceTempView("temp_cancer_ici_patients")
+
 # === 11. Add death and last observation (LTFU) info ===
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_followup AS
@@ -394,169 +408,159 @@ JOIN dn_person_20251219 per
 #   TOXICITY        — systemic corticosteroid within ±14 days of block end, no new antineoplastic
 #   COMPLETED       — continued clinical activity >90 days after block end (evidence of elective stop)
 #   CENSORED        — no continued follow-up after block end (reason for stopping unknown)
-discontinuation_data = spark.sql(f"""
-    WITH cohort_ids AS (
-    SELECT person_id FROM temp_cancer_ici_patients
-    ),
+#
+# Materialized as three intermediate temp views to break the deep CTE lineage and
+# allow Spark to optimize each stage independently.
 
-    ici_exposures AS (
+# === 13a. ICI treatment blocks ===
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_ici_block_summary AS
+WITH ici_exposures AS (
     SELECT
         de.person_id,
         de.drug_exposure_start_date,
         COALESCE(de.drug_exposure_end_date, de.drug_exposure_start_date) AS drug_exposure_end_date
     FROM dn_drug_exposure_20251219 de
-    JOIN temp_ICI_concepts ici
-        ON de.drug_concept_id = ici.concept_id
-    WHERE de.person_id IN (SELECT person_id FROM cohort_ids)
-    ),
-
-    gaps AS (
+    JOIN temp_ICI_concepts ici ON de.drug_concept_id = ici.concept_id
+    WHERE de.person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
+),
+gaps AS (
     SELECT
         person_id,
         drug_exposure_start_date,
         drug_exposure_end_date,
         CASE
-        WHEN LAG(drug_exposure_end_date) OVER (PARTITION BY person_id ORDER BY drug_exposure_start_date)
-            < drug_exposure_start_date - INTERVAL 60 DAY THEN 1
-        ELSE 0
+            WHEN LAG(drug_exposure_end_date) OVER (PARTITION BY person_id ORDER BY drug_exposure_start_date)
+                < drug_exposure_start_date - INTERVAL 60 DAY THEN 1
+            ELSE 0
         END AS new_block_flag
     FROM ici_exposures
-    ),
-
-    blocks AS (
+),
+blocks AS (
     SELECT
         person_id,
         drug_exposure_start_date,
         drug_exposure_end_date,
         SUM(new_block_flag) OVER (
-        PARTITION BY person_id ORDER BY drug_exposure_start_date
-        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            PARTITION BY person_id ORDER BY drug_exposure_start_date
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
         ) AS block_id
     FROM gaps
-    ),
+)
+SELECT
+    person_id,
+    block_id,
+    MIN(drug_exposure_start_date) AS ici_block_start_date,
+    MAX(drug_exposure_start_date) AS last_ici_cycle_start_date,
+    MAX(drug_exposure_end_date)   AS ici_end_date
+FROM blocks
+GROUP BY person_id, block_id
+""")
+spark.table("temp_ici_block_summary").cache().count()
 
-    block_summary AS (
-    SELECT
-        person_id,
-        block_id,
-        MIN(drug_exposure_start_date) AS ici_block_start_date,
-        MAX(drug_exposure_start_date) AS last_ici_cycle_start_date,
-        MAX(drug_exposure_end_date)   AS ici_end_date
-    FROM blocks
-    GROUP BY person_id, block_id
-    ),
-
-    censor_dates AS (
-    -- Exclude ICI drug exposures so the censor date reflects non-ICI clinical activity.
-    SELECT
-        lce.person_id,
-        lce.last_event_date AS observation_period_end_date,
-        d.death_date
+# === 13b. Censor dates per patient (non-ICI clinical activity) ===
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_ici_censor_dates AS
+SELECT
+    lce.person_id,
+    lce.last_event_date AS observation_period_end_date,
+    d.death_date
+FROM (
+    SELECT person_id, MAX(event_date) AS last_event_date
     FROM (
-        SELECT person_id, MAX(event_date) AS last_event_date
-        FROM (
-            SELECT person_id, condition_start_date AS event_date FROM dn_condition_occurrence_20251219 WHERE person_id IN (SELECT person_id FROM cohort_ids)
-            UNION ALL
-            SELECT person_id, measurement_date AS event_date FROM dn_measurement_20251219              WHERE person_id IN (SELECT person_id FROM cohort_ids)
-            UNION ALL
-            SELECT de.person_id, de.drug_exposure_start_date AS event_date
-            FROM dn_drug_exposure_20251219 de
-            LEFT JOIN temp_ICI_concepts ici ON de.drug_concept_id = ici.concept_id
-            WHERE ici.concept_id IS NULL AND de.person_id IN (SELECT person_id FROM cohort_ids)
-            UNION ALL
-            SELECT person_id, procedure_date AS event_date FROM dn_procedure_occurrence_20251219       WHERE person_id IN (SELECT person_id FROM cohort_ids)
-            UNION ALL
-            SELECT person_id, visit_start_date AS event_date FROM dn_visit_occurrence_20251219         WHERE person_id IN (SELECT person_id FROM cohort_ids)
-        ) events
-        GROUP BY person_id
-    ) lce
-    LEFT JOIN dn_death_20251219 d ON lce.person_id = d.person_id
-    ),
+        SELECT person_id, condition_start_date AS event_date FROM dn_condition_occurrence_20251219 WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
+        UNION ALL
+        SELECT person_id, measurement_date AS event_date FROM dn_measurement_20251219              WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
+        UNION ALL
+        SELECT de.person_id, de.drug_exposure_start_date AS event_date
+        FROM dn_drug_exposure_20251219 de
+        LEFT JOIN temp_ICI_concepts ici ON de.drug_concept_id = ici.concept_id
+        WHERE ici.concept_id IS NULL AND de.person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
+        UNION ALL
+        SELECT person_id, procedure_date AS event_date FROM dn_procedure_occurrence_20251219       WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
+        UNION ALL
+        SELECT person_id, visit_start_date AS event_date FROM dn_visit_occurrence_20251219         WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
+    ) events
+    GROUP BY person_id
+) lce
+LEFT JOIN dn_death_20251219 d ON lce.person_id = d.person_id
+""")
+spark.table("temp_ici_censor_dates").cache().count()
 
-    -- Detect new non-ICI antineoplastic therapy within 90 days after block end (progression signal)
-    cohort_drug_exposures AS (
-    SELECT person_id, drug_concept_id, drug_exposure_start_date
-    FROM dn_drug_exposure_20251219
-    WHERE person_id IN (SELECT person_id FROM cohort_ids)
-    ),
+# === 13c. Cohort drug exposures (pre-filtered to cohort, reused by new_therapy and steroid_use) ===
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_cohort_drug_exposures AS
+SELECT person_id, drug_concept_id, drug_exposure_start_date
+FROM dn_drug_exposure_20251219
+WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
+""")
+spark.table("temp_cohort_drug_exposures").cache().count()
 
-    new_therapy AS (
-    SELECT DISTINCT bs.person_id, bs.block_id
-    FROM block_summary bs
-    JOIN cohort_drug_exposures de
-        ON bs.person_id = de.person_id
-    JOIN temp_antineoplastic_non_ici anic
-        ON de.drug_concept_id = anic.drug_concept_id
-    WHERE de.drug_exposure_start_date > bs.ici_end_date
-      AND de.drug_exposure_start_date <= bs.ici_end_date + INTERVAL 90 DAY
+# === 13d. Classify each block and assign block numbers ===
+discontinuation_data = spark.sql("""
+    WITH new_therapy AS (
+        SELECT DISTINCT bs.person_id, bs.block_id
+        FROM temp_ici_block_summary bs
+        JOIN temp_cohort_drug_exposures de ON bs.person_id = de.person_id
+        JOIN temp_antineoplastic_non_ici anic ON de.drug_concept_id = anic.drug_concept_id
+        WHERE de.drug_exposure_start_date > bs.ici_end_date
+          AND de.drug_exposure_start_date <= bs.ici_end_date + INTERVAL 90 DAY
     ),
-
-    -- Detect systemic corticosteroid within ±14 days of block end (toxicity/irAE signal)
     steroid_use AS (
-    SELECT DISTINCT bs.person_id, bs.block_id
-    FROM block_summary bs
-    JOIN cohort_drug_exposures de
-        ON bs.person_id = de.person_id
-    JOIN temp_systemic_corticosteroids cs
-        ON de.drug_concept_id = cs.drug_concept_id
-    WHERE de.drug_exposure_start_date >= bs.ici_end_date - INTERVAL 14 DAY
-      AND de.drug_exposure_start_date <= bs.ici_end_date + INTERVAL 14 DAY
+        SELECT DISTINCT bs.person_id, bs.block_id
+        FROM temp_ici_block_summary bs
+        JOIN temp_cohort_drug_exposures de ON bs.person_id = de.person_id
+        JOIN temp_systemic_corticosteroids cs ON de.drug_concept_id = cs.drug_concept_id
+        WHERE de.drug_exposure_start_date >= bs.ici_end_date - INTERVAL 14 DAY
+          AND de.drug_exposure_start_date <= bs.ici_end_date + INTERVAL 14 DAY
     ),
-
     classified AS (
-    SELECT
-        b.person_id,
-        b.block_id,
-        b.ici_block_start_date,
-        b.last_ici_cycle_start_date,
-        b.ici_end_date,
-        CASE
-        WHEN c.death_date IS NOT NULL AND c.death_date <= b.ici_end_date
-            THEN 'DEATH'
-        WHEN nt.person_id IS NOT NULL
-            THEN 'PROGRESSION'
-        WHEN su.person_id IS NOT NULL
-            THEN 'TOXICITY'
-        WHEN c.observation_period_end_date IS NOT NULL
-             AND c.observation_period_end_date > b.ici_end_date + INTERVAL 90 DAY
-            THEN 'COMPLETED'
-        ELSE 'CENSORED'
-        END AS ici_discontinuation_cause,
-        LEAST(
+        SELECT
+            b.person_id,
+            b.block_id,
+            b.ici_block_start_date,
+            b.last_ici_cycle_start_date,
             b.ici_end_date,
-            COALESCE(c.death_date, DATE '9999-12-31'),
-            COALESCE(c.observation_period_end_date, DATE '9999-12-31')
-        ) AS ici_discontinuation_date
-    FROM block_summary b
-    LEFT JOIN censor_dates c   ON b.person_id = c.person_id
-    LEFT JOIN new_therapy nt   ON b.person_id = nt.person_id AND b.block_id = nt.block_id
-    LEFT JOIN steroid_use su   ON b.person_id = su.person_id AND b.block_id = su.block_id
+            CASE
+                WHEN c.death_date IS NOT NULL AND c.death_date <= b.ici_end_date THEN 'DEATH'
+                WHEN nt.person_id IS NOT NULL                                    THEN 'PROGRESSION'
+                WHEN su.person_id IS NOT NULL                                    THEN 'TOXICITY'
+                WHEN c.observation_period_end_date IS NOT NULL
+                     AND c.observation_period_end_date > b.ici_end_date + INTERVAL 90 DAY
+                                                                                 THEN 'COMPLETED'
+                ELSE 'CENSORED'
+            END AS ici_discontinuation_cause,
+            LEAST(
+                b.ici_end_date,
+                COALESCE(c.death_date, DATE '9999-12-31'),
+                COALESCE(c.observation_period_end_date, DATE '9999-12-31')
+            ) AS ici_discontinuation_date
+        FROM temp_ici_block_summary b
+        LEFT JOIN temp_ici_censor_dates c ON b.person_id = c.person_id
+        LEFT JOIN new_therapy nt ON b.person_id = nt.person_id AND b.block_id = nt.block_id
+        LEFT JOIN steroid_use su ON b.person_id = su.person_id AND b.block_id = su.block_id
     ),
-
-    -- Number all blocks per patient (1 = first, 2 = second, etc.)
     numbered AS (
+        SELECT
+            person_id,
+            ici_block_start_date,
+            last_ici_cycle_start_date,
+            ici_end_date,
+            ici_discontinuation_date,
+            ici_discontinuation_cause,
+            ROW_NUMBER() OVER (
+                PARTITION BY person_id ORDER BY ici_block_start_date ASC
+            ) AS block_number
+        FROM classified
+    )
     SELECT
         person_id,
+        block_number,
         ici_block_start_date,
         last_ici_cycle_start_date,
         ici_end_date,
         ici_discontinuation_date,
-        ici_discontinuation_cause,
-        ROW_NUMBER() OVER (
-            PARTITION BY person_id
-            ORDER BY ici_block_start_date ASC
-        ) AS block_number
-    FROM classified
-    )
-
-    SELECT
-    person_id,
-    block_number,
-    ici_block_start_date,
-    last_ici_cycle_start_date,
-    ici_end_date,
-    ici_discontinuation_date,
-    ici_discontinuation_cause
+        ici_discontinuation_cause
     FROM numbered
 """)
 
@@ -1155,25 +1159,18 @@ string_cols = [
 ]
 
 # ---- 1) Canonical casts ----
-# Canonical integer type: BIGINT (LongType)
-for col in int_cols:
-    if col in df_to_upload.columns:
-        df_to_upload = df_to_upload.withColumn(col, F.col(col).cast("bigint"))
-
-# Canonical float type: DOUBLE (DoubleType)
-for col in float_cols:
-    if col in df_to_upload.columns:
-        df_to_upload = df_to_upload.withColumn(col, F.col(col).cast("double"))
-
-# Enforce DATE for date-like columns
-for col in date_cols:
-    if col in df_to_upload.columns:
-        df_to_upload = df_to_upload.withColumn(col, F.col(col).cast("date"))
-
-# Enforce STRING for string-like columns
-for col in string_cols:
-    if col in df_to_upload.columns:
-        df_to_upload = df_to_upload.withColumn(col, F.col(col).cast("string"))
+# Single select() replaces iterative withColumn() loops — each loop iteration
+# added a new plan node; one select() emits a single projection stage.
+_cast_map = (
+    {c: "bigint"  for c in int_cols}
+    | {c: "double" for c in float_cols}
+    | {c: "date"   for c in date_cols}
+    | {c: "string" for c in string_cols}
+)
+df_to_upload = df_to_upload.select(
+    *[F.col(c).cast(_cast_map[c]).alias(c) if c in _cast_map else F.col(c)
+      for c in df_to_upload.columns]
+)
 
 # ---- 2) Column presence assertion ----
 # FIX: added death_date

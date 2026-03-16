@@ -19,6 +19,13 @@ _cwd = os.getcwd()
 spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"), sep="\t")).createOrReplaceTempView("concept")
 spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"), sep="\t")).createOrReplaceTempView("concept_ancestor")
 
+# ===============================================================
+# Performance settings
+# ===============================================================
+spark.conf.set("spark.sql.shuffle.partitions", "400")
+spark.conf.set("spark.sql.autoBroadcastJoinThreshold", str(50 * 1024 * 1024))  # 50 MB
+spark.sparkContext.setCheckpointDir("dbfs:/tmp/caia_checkpoints")
+
 CONCEPT_TABLE = "concept"
 
 # ===============================================================
@@ -58,19 +65,17 @@ AS t(concept_id)
 # of bone") from being misclassified as a separate primary malignancy.
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_non_prostate_cancer_concepts AS
-SELECT descendant_concept_id AS concept_id
-FROM concept_ancestor
-WHERE ancestor_concept_id = 443392
-  AND descendant_concept_id NOT IN (
-    SELECT descendant_concept_id
-    FROM concept_ancestor
-    WHERE ancestor_concept_id = 4163261
-  )
-  AND descendant_concept_id NOT IN (
-    SELECT descendant_concept_id
-    FROM concept_ancestor
-    WHERE ancestor_concept_id = 432851
-  )
+SELECT ca.descendant_concept_id AS concept_id
+FROM concept_ancestor ca
+LEFT JOIN concept_ancestor excl_prostate
+  ON ca.descendant_concept_id = excl_prostate.descendant_concept_id
+  AND excl_prostate.ancestor_concept_id = 4163261
+LEFT JOIN concept_ancestor excl_meta
+  ON ca.descendant_concept_id = excl_meta.descendant_concept_id
+  AND excl_meta.ancestor_concept_id = 432851
+WHERE ca.ancestor_concept_id = 443392
+  AND excl_prostate.descendant_concept_id IS NULL
+  AND excl_meta.descendant_concept_id IS NULL
 """)
 
 # === 3b. Non-melanoma skin cancer (NMSC) concepts ===
@@ -99,9 +104,12 @@ SELECT 439392 AS concept_id
 # Exclude other primary cancers EXCEPT non-melanoma skin cancers and NOS.
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_non_prostate_cancer_concepts_allow_nmsc_nos AS
-SELECT concept_id FROM temp_non_prostate_cancer_concepts
-WHERE concept_id NOT IN (SELECT concept_id FROM temp_nmsc_concepts)
-  AND concept_id NOT IN (SELECT concept_id FROM temp_nos_malignant_neoplasm)
+SELECT np.concept_id
+FROM temp_non_prostate_cancer_concepts np
+LEFT JOIN temp_nmsc_concepts nmsc ON np.concept_id = nmsc.concept_id
+LEFT JOIN temp_nos_malignant_neoplasm nos ON np.concept_id = nos.concept_id
+WHERE nmsc.concept_id IS NULL
+  AND nos.concept_id IS NULL
 """)
 
 # === 3e. PARP inhibitor drug concepts ===
@@ -289,10 +297,19 @@ CREATE OR REPLACE TEMP VIEW temp_eligible_patients AS
 SELECT t.person_id
 FROM temp_prostate_psa10_patients t
 JOIN dn_person_20251219 p ON t.person_id = p.person_id
+LEFT JOIN temp_patients_with_other_cancer excl_cancer ON t.person_id = excl_cancer.person_id
+LEFT JOIN temp_patients_with_parp excl_parp ON t.person_id = excl_parp.person_id
 WHERE p.gender_concept_id = 8507  -- Male
-  AND t.person_id NOT IN (SELECT person_id FROM temp_patients_with_other_cancer)
-  AND t.person_id NOT IN (SELECT person_id FROM temp_patients_with_parp)
+  AND excl_cancer.person_id IS NULL
+  AND excl_parp.person_id IS NULL
 """)
+
+# Checkpoint breaks the deep concept-view lineage so downstream jobs plan against
+# a materialized result rather than re-evaluating all exclusion logic each time.
+_eligible_df = spark.table("temp_eligible_patients").checkpoint()
+_eligible_df.cache()
+_eligible_df.count()  # trigger materialization
+_eligible_df.createOrReplaceTempView("temp_eligible_patients")
 
 # === 12. First platinum drug exposure per patient (one row per patient) ===
 #    Picks the earliest platinum exposure overall. Patients on both carboplatin
@@ -321,7 +338,7 @@ WHERE rn = 1
 # === 13. Combine PSA measurements with first drug info ===
 spark.sql(f"""
 CREATE OR REPLACE TEMP VIEW prostate_lab_longitudinal AS
-SELECT
+SELECT /*+ BROADCAST(dp) */
   p.person_id,
   f.prostate_cancer_diagnosis_date,
 
@@ -1020,25 +1037,18 @@ string_cols = [
 ]
 
 # ---- 1) Canonical casts ----
-# Canonical integer type: BIGINT (LongType)
-for col in int_cols:
-    if col in df_to_upload.columns:
-        df_to_upload = df_to_upload.withColumn(col, F.col(col).cast("bigint"))
-
-# Canonical float type: DOUBLE (DoubleType)
-for col in float_cols:
-    if col in df_to_upload.columns:
-        df_to_upload = df_to_upload.withColumn(col, F.col(col).cast("double"))
-
-# (Optional but nice) enforce DATE for date columns
-for col in date_cols:
-    if col in df_to_upload.columns:
-        df_to_upload = df_to_upload.withColumn(col, F.col(col).cast("date"))
-
-# (Optional) enforce STRING for string columns
-for col in string_cols:
-    if col in df_to_upload.columns:
-        df_to_upload = df_to_upload.withColumn(col, F.col(col).cast("string"))
+# Single select() replaces iterative withColumn() loops — each loop iteration
+# added a new plan node; one select() emits a single projection stage.
+_cast_map = (
+    {c: "bigint"  for c in int_cols}
+    | {c: "double" for c in float_cols}
+    | {c: "date"   for c in date_cols}
+    | {c: "string" for c in string_cols}
+)
+df_to_upload = df_to_upload.select(
+    *[F.col(c).cast(_cast_map[c]).alias(c) if c in _cast_map else F.col(c)
+      for c in df_to_upload.columns]
+)
 
 # ---- 2) Column presence assertion ----
 expected_columns = [
