@@ -4,7 +4,7 @@
 # Inclusion/exclusion criteria:
 #   1. Prostate cancer diagnosis
 #   2. Male sex (gender_concept_id = 8507)
-#   3. >= 10 PSA measurements (full 27-variant concept set) after diagnosis
+#   3. >= 5 PSA measurements (full 27-variant concept set) after diagnosis
 #   4. No other primary cancers (keeping metastatic disease, NMSC, and
 #      malignant neoplasm NOS)
 #   5. No PARP inhibitor exposure (olaparib, rucaparib, niraparib, talazoparib)
@@ -47,7 +47,7 @@ CREATE OR REPLACE TEMP VIEW temp_psa_concepts AS
 SELECT concept_id FROM VALUES
   (3013603), (3002131), (3034548),
   -- The following 24 PSA variant IDs are included here so they count toward the
-  -- ≥10 PSA eligibility threshold (step 8). Of these, 4272032 and 3052038 also
+  -- ≥5 PSA eligibility threshold (step 8). Of these, 4272032 and 3052038 also
   -- appear in the final lab output (remapped to 3013603 in step 16b). The
   -- remaining 22 have no measurement data and are silently dropped by the
   -- allowed_unit_combinations inner join in step 17.
@@ -259,12 +259,12 @@ WHERE co.condition_concept_id IN (SELECT concept_id FROM temp_prostate_cancer_co
 GROUP BY co.person_id
 """)
 
-# === 8. Patients with prostate cancer and ≥10 PSA measurements after diagnosis ===
+# === 8. Patients with prostate cancer and ≥5 PSA measurements after diagnosis ===
 # FIX: Joins against first_prostate_diagnosis (one row per patient) instead of
 # condition_occurrence (many rows per patient), preventing cross-product inflation
 # of the PSA count.
 spark.sql("""
-CREATE OR REPLACE TEMP VIEW temp_prostate_psa10_patients AS
+CREATE OR REPLACE TEMP VIEW temp_prostate_psa5_patients AS
 SELECT f.person_id
 FROM first_prostate_diagnosis f
 JOIN dn_measurement_20251219 m
@@ -272,7 +272,7 @@ JOIN dn_measurement_20251219 m
 WHERE m.measurement_concept_id IN (SELECT concept_id FROM temp_psa_concepts)
   AND m.measurement_date > f.prostate_cancer_diagnosis_date
 GROUP BY f.person_id
-HAVING COUNT(*) >= 10
+HAVING COUNT(*) >= 5
 """)
 
 # === 9. Exclusion: patients with non-prostate primary cancer (allowing NMSC + NOS) ===
@@ -291,11 +291,11 @@ FROM dn_drug_exposure_20251219 de
 WHERE de.drug_concept_id IN (SELECT drug_concept_id FROM temp_parp_drugs)
 """)
 
-# === 11. Combined eligible cohort: male AND ≥10 PSA AND no other cancer AND no PARP ===
+# === 11. Combined eligible cohort: male AND ≥5 PSA AND no other cancer AND no PARP ===
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_eligible_patients AS
 SELECT t.person_id
-FROM temp_prostate_psa10_patients t
+FROM temp_prostate_psa5_patients t
 JOIN dn_person_20251219 p ON t.person_id = p.person_id
 LEFT JOIN temp_patients_with_other_cancer excl_cancer ON t.person_id = excl_cancer.person_id
 LEFT JOIN temp_patients_with_parp excl_parp ON t.person_id = excl_parp.person_id
