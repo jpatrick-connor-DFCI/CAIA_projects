@@ -24,7 +24,6 @@ spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_
 # ===============================================================
 spark.conf.set("spark.sql.shuffle.partitions", "400")
 spark.conf.set("spark.sql.autoBroadcastJoinThreshold", str(50 * 1024 * 1024))  # 50 MB
-spark.sparkContext.setCheckpointDir("dbfs:/tmp/caia_checkpoints")
 
 CONCEPT_TABLE = "concept"
 
@@ -304,10 +303,9 @@ WHERE p.gender_concept_id = 8507  -- Male
   AND excl_parp.person_id IS NULL
 """)
 
-# Checkpoint breaks the deep concept-view lineage so downstream jobs plan against
-# a materialized result rather than re-evaluating all exclusion logic each time.
-_eligible_df = spark.table("temp_eligible_patients").checkpoint()
-_eligible_df.cache()
+# Cache the eligibility result so downstream views (labs, drugs, follow-up) all
+# read from memory rather than re-evaluating all exclusion logic each time.
+_eligible_df = spark.table("temp_eligible_patients").cache()
 _eligible_df.count()  # trigger materialization
 _eligible_df.createOrReplaceTempView("temp_eligible_patients")
 

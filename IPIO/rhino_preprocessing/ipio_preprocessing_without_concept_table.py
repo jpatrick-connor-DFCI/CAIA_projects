@@ -12,7 +12,6 @@ spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_
 # ===============================================================
 spark.conf.set("spark.sql.shuffle.partitions", "400")
 spark.conf.set("spark.sql.autoBroadcastJoinThreshold", str(50 * 1024 * 1024))  # 50 MB
-spark.sparkContext.setCheckpointDir("dbfs:/tmp/caia_checkpoints")
 
 CONCEPT_TABLE = "concept"
 
@@ -289,10 +288,9 @@ FROM (
 WHERE rn = 1
 """)
 
-# Checkpoint breaks the multi-level concept/eligibility lineage so all downstream
-# views (followup, labs, discontinuation) plan against a materialized result.
-_ici_patients_df = spark.table("temp_cancer_ici_patients").checkpoint()
-_ici_patients_df.cache()
+# Cache the eligibility result so downstream views (followup, labs, discontinuation)
+# all read from memory rather than re-evaluating concept/eligibility logic each time.
+_ici_patients_df = spark.table("temp_cancer_ici_patients").cache()
 _ici_patients_df.count()  # trigger materialization
 _ici_patients_df.createOrReplaceTempView("temp_cancer_ici_patients")
 
