@@ -362,7 +362,7 @@ SELECT
   m.measurement_date,
   m.value_as_number AS lab_value,
   m.unit_concept_id,
-  cu.concept_name AS lab_unit_name,
+  m.unit_concept_name AS lab_unit_name,
 
   -- ==== Drug info ====
   fe.drug_concept_id,
@@ -384,9 +384,6 @@ JOIN dn_measurement_20251219 m
   AND m.measurement_concept_id IN (SELECT concept_id FROM temp_all_lab_concepts)
 LEFT JOIN {CONCEPT_TABLE} c
   ON m.measurement_concept_id = c.concept_id
-LEFT JOIN {CONCEPT_TABLE} cu
-  ON m.unit_concept_id = cu.concept_id
-
 -- Drugs
 LEFT JOIN first_platinum_exposure fe
   ON p.person_id = fe.person_id
@@ -795,17 +792,31 @@ final_df_w_conversions = (
     )
 )
 
-# Look up the human-readable name for the converted unit
-unit_converted_names = (
-    spark.table(CONCEPT_TABLE)
-    .select(
-        F.col("concept_id").alias("unit_converted_id"),
-        F.col("concept_name").alias("unit_converted_name"),
-    )
-)
+# Look up the human-readable name for the converted unit.
+# Unit concepts are not in concept_subset.csv, so we use:
+#   - lab_unit_name directly when no conversion was applied (unit_converted_id == unit_concept_id)
+#   - a small hardcoded lookup for the fixed set of conversion target units
+_target_unit_names = spark.createDataFrame([
+    (8582,   "centimeter"),
+    (8645,   "international unit per liter"),
+    (8713,   "gram per deciliter"),
+    (8753,   "milliequivalent per liter"),
+    (8815,   "million per microliter"),
+    (8817,   "nanogram per deciliter"),
+    (8840,   "milligram per deciliter"),
+    (8848,   "thousand per microliter"),
+    (9040,   "milli-international unit per liter"),
+    (9529,   "kilogram"),
+    (586323, "degree Celsius"),
+], schema=["unit_converted_id", "unit_converted_name"])
+
 final_df_w_conversions = (
     final_df_w_conversions
-    .join(unit_converted_names, on="unit_converted_id", how="left")
+    .join(F.broadcast(_target_unit_names), on="unit_converted_id", how="left")
+    .withColumn(
+        "unit_converted_name",
+        F.coalesce(F.col("unit_converted_name"), F.col("lab_unit_name")),
+    )
 )
 
 # === 18b. Exclude null/NaN and non-physiologic lab values ===
