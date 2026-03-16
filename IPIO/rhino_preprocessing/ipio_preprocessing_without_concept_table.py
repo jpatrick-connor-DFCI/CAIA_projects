@@ -3,6 +3,9 @@
 # ===============================================================
 import os
 import pandas as pd
+from pyspark.sql import functions as F, types as T
+from pyspark.sql import Window
+from pyspark.sql.types import StructType, StructField, IntegerType, DoubleType, LongType
 _cwd = os.getcwd()
 spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"), sep="\t")).createOrReplaceTempView("concept")
 spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"), sep="\t")).createOrReplaceTempView("concept_ancestor")
@@ -11,7 +14,6 @@ spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_
 # Performance settings
 # ===============================================================
 spark.conf.set("spark.sql.shuffle.partitions", "400")
-spark.conf.set("spark.sql.autoBroadcastJoinThreshold", str(50 * 1024 * 1024))  # 50 MB
 
 CONCEPT_TABLE = "concept"
 
@@ -330,20 +332,8 @@ final_df = spark.sql(f"""
 SELECT
     -- Demographics
     p.person_id,
-    CASE
-        WHEN per.year_of_birth IS NOT NULL THEN
-            make_date(
-                per.year_of_birth,
-                COALESCE(per.month_of_birth, 6),
-                COALESCE(per.day_of_birth, 15)
-            )
-        ELSE NULL
-    END AS date_of_birth,
-    per.gender_concept_id,
     per.gender_concept_name AS gender,
-    per.race_concept_id,
     per.race_concept_name AS race,
-    per.ethnicity_concept_id,
     per.ethnicity_concept_name AS ethnicity,
 
     FLOOR(
@@ -379,7 +369,7 @@ SELECT
     m.measurement_date,
     m.value_as_number AS lab_value,
     m.unit_concept_id,
-    m.unit_concept_name AS lab_unit_name
+    m.unit_concept_name AS lab_unit_name,
 
 FROM temp_cancer_ici_patients p
 LEFT JOIN temp_followup f
@@ -396,9 +386,11 @@ LEFT JOIN {CONCEPT_TABLE} c
 JOIN dn_person_20251219 per
     ON p.person_id = per.person_id
 """)
+final_df = final_df.cache()
+final_df.count()  # trigger materialization before discontinuation fan-out join
 
 # === 13. Create the discontinuation dataframe ===
-# Groups ICI exposures into continuous treatment blocks (>60-day gap = new block).
+# Groups ICI exposures into continuous treatment blocks (>90-day gap = new block).
 # Returns ALL blocks per patient with a block_number (1 = first block, 2 = second, etc.).
 # Classifies discontinuation cause using hierarchical signals:
 #   DEATH           — patient died during or before block end
@@ -417,10 +409,11 @@ WITH ici_exposures AS (
     SELECT
         de.person_id,
         de.drug_exposure_start_date,
-        COALESCE(de.drug_exposure_end_date, de.drug_exposure_start_date) AS drug_exposure_end_date
+        MAX(COALESCE(de.drug_exposure_end_date, de.drug_exposure_start_date)) AS drug_exposure_end_date
     FROM dn_drug_exposure_20251219 de
     JOIN temp_ICI_concepts ici ON de.drug_concept_id = ici.concept_id
     WHERE de.person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
+    GROUP BY de.person_id, de.drug_exposure_start_date
 ),
 gaps AS (
     SELECT
@@ -429,7 +422,7 @@ gaps AS (
         drug_exposure_end_date,
         CASE
             WHEN LAG(drug_exposure_end_date) OVER (PARTITION BY person_id ORDER BY drug_exposure_start_date)
-                < drug_exposure_start_date - INTERVAL 60 DAY THEN 1
+                < drug_exposure_start_date - INTERVAL 90 DAY THEN 1
             ELSE 0
         END AS new_block_flag
     FROM ici_exposures
@@ -555,15 +548,12 @@ discontinuation_data = spark.sql("""
         person_id,
         block_number,
         ici_block_start_date,
-        last_ici_cycle_start_date,
-        ici_end_date,
         ici_discontinuation_date,
         ici_discontinuation_cause
     FROM numbered
 """)
-
-from pyspark.sql import functions as F
-from pyspark.sql.window import Window
+discontinuation_data = discontinuation_data.cache()
+discontinuation_data.count()  # trigger materialization before fan-out join
 
 # === 14. Merge discontinuation data with complete dataframe ===
 # Each lab measurement is assigned to the block it falls within (between block start
@@ -597,10 +587,10 @@ final_df_merged = (
     .filter(F.col("_rank") == 1)
     .drop("_in_block", "_dist_to_block", "_rank")
 )
+final_df_merged = final_df_merged.cache()
+final_df_merged.count()  # materialize after window dedup before remap join
 
 # === 14b. Remap variant measurement concepts to canonical IDs ===
-from pyspark.sql import functions as F, types as T
-
 concept_remap = {
     3002131: 3013603, 3034548: 3013603,  # PSA variants
     3000285: 3019550, 3000483: 3004501, 3004295: 3013682,  # Chemistry
@@ -750,11 +740,10 @@ final_df_w_units_filtered = (
     df_cast
     .join(F.broadcast(allowed_df), on=["measurement_concept_id", "unit_concept_id"], how="inner")
 ).cache()
+final_df_w_units_filtered.count()  # trigger materialization
 
 # === 16. Convert units when required ===
 # Lookup table: (concept_id, from_unit, factor, to_unit)
-from pyspark.sql.types import StructType, StructField, IntegerType, DoubleType, LongType
-
 _conversion_schema = StructType([
     StructField("conv_concept_id", LongType()),
     StructField("conv_from_unit", LongType()),
@@ -1078,6 +1067,7 @@ df_to_upload = (
         "days_relative_to_last_followup",
         F.datediff(F.col("measurement_date"), F.col("last_followup_date"))
     )
+
     # --- Patient-level time-to-event variables ---
     .withColumn(
         "time_on_ici",
@@ -1096,27 +1086,24 @@ df_to_upload = (
             F.col("diagnosis_date")
         )
     )
+    .drop(
+        "measurement_concept_id",
+        "unit_concept_id", "unit_converted_id",
+        "lab_value", "lab_values_converted", "lab_unit_name",
+    )
 )
-
-from pyspark.sql import functions as F, types as T
 
 # === 18. Enforce canonical types + schema assertions ===
 
 # ---- Define column groups ----
 int_cols = [
     "person_id",
-    "gender_concept_id",
-    "race_concept_id",
-    "ethnicity_concept_id",
     "age_at_diagnosis",
     "block_number",
     "is_deceased",
     "event_ici_discontinued",
     "time_on_ici",
     "time_to_death_or_censor",
-    "measurement_concept_id",
-    "unit_concept_id",
-    "unit_converted_id",
     "days_relative_to_diagnosis",
     "days_relative_to_ici_start",
     "days_relative_to_ici_discontinuation",
@@ -1124,19 +1111,13 @@ int_cols = [
 ]
 
 float_cols = [
-    "lab_value",
-    "lab_values_converted",
     "lab_value_final",
 ]
 
-# FIX: added death_date
 date_cols = [
-    "date_of_birth",
     "diagnosis_date",
     "ici_start_date",
     "ici_block_start_date",
-    "ici_end_date",
-    "last_ici_cycle_start_date",
     "ici_discontinuation_date",
     "last_followup_date",
     "death_date",
@@ -1151,7 +1132,6 @@ string_cols = [
     "cancer_subtype",
     "ici_type",
     "lab_name",
-    "lab_unit_name",
     "unit_converted_name",
     "ici_discontinuation_cause",
 ]
@@ -1175,12 +1155,8 @@ df_to_upload = df_to_upload.select(
 expected_columns = [
     # IDs / demographics
     "person_id",
-    "date_of_birth",
-    "gender_concept_id",
     "gender",
-    "race_concept_id",
     "race",
-    "ethnicity_concept_id",
     "ethnicity",
     "age_at_diagnosis",
 
@@ -1189,20 +1165,18 @@ expected_columns = [
     "cancer_subtype",
     "diagnosis_date",
     "ici_start_date",
-    "last_ici_cycle_start_date",
     "ici_type",
 
     # Treatment block info
     "block_number",
     "ici_block_start_date",
-    "ici_end_date",
+    "ici_discontinuation_date",
+    "ici_discontinuation_cause",
 
     # Follow-up & death
     "last_followup_date",
     "death_date",
     "is_deceased",
-    "ici_discontinuation_date",
-    "ici_discontinuation_cause",
 
     # Time-to-event variables
     "time_on_ici",
@@ -1210,14 +1184,8 @@ expected_columns = [
     "time_to_death_or_censor",
 
     # Lab info
-    "measurement_concept_id",
     "lab_name",
     "measurement_date",
-    "lab_value",
-    "unit_concept_id",
-    "lab_unit_name",
-    "lab_values_converted",
-    "unit_converted_id",
     "unit_converted_name",
     "lab_value_final",
 
@@ -1283,15 +1251,12 @@ patient_df = spark.sql("""
         FIRST(race) AS race,
         FIRST(ethnicity) AS ethnicity,
         FIRST(age_at_diagnosis) AS age_at_diagnosis,
-        FIRST(date_of_birth) AS date_of_birth,
         FIRST(cancer_type) AS cancer_type,
         FIRST(cancer_subtype) AS cancer_subtype,
         FIRST(diagnosis_date) AS diagnosis_date,
         FIRST(ici_start_date) AS ici_start_date,
         FIRST(ici_type) AS ici_type,
         FIRST(ici_block_start_date) AS ici_block_start_date,
-        FIRST(ici_end_date) AS ici_end_date,
-        FIRST(last_ici_cycle_start_date) AS last_ici_cycle_start_date,
         FIRST(ici_discontinuation_date) AS ici_discontinuation_date,
         FIRST(ici_discontinuation_cause) AS ici_discontinuation_cause,
         FIRST(last_followup_date) AS last_followup_date,
@@ -1518,7 +1483,6 @@ print("--- Records per Lab Type ---")
 spark.sql(f"""
     SELECT
         lab_name,
-        measurement_concept_id,
         COUNT(*) AS n_records,
         ROUND(AVG(lab_value_final), 2) AS mean_value,
         ROUND(STDDEV(lab_value_final), 2) AS std_value,
@@ -1526,11 +1490,10 @@ spark.sql(f"""
         ROUND(PERCENTILE_APPROX(lab_value_final, 0.50), 2) AS median_value,
         ROUND(PERCENTILE_APPROX(lab_value_final, 0.75), 2) AS q3_value,
         ROUND(MIN(lab_value_final), 2) AS min_value,
-        ROUND(MAX(lab_value_final), 2) AS max_value,
-        SUM(CASE WHEN lab_values_converted IS NOT NULL THEN 1 ELSE 0 END) AS n_converted
+        ROUND(MAX(lab_value_final), 2) AS max_value
     FROM final_cohort
     WHERE lab_value_final IS NOT NULL
-    GROUP BY lab_name, measurement_concept_id
+    GROUP BY lab_name
     ORDER BY n_records DESC
 """).show(100, truncate=False)
 
@@ -1553,33 +1516,11 @@ spark.sql("""
         SELECT
             person_id,
             COUNT(*) AS n_labs,
-            COUNT(DISTINCT measurement_concept_id) AS n_lab_types
+            COUNT(DISTINCT lab_name) AS n_lab_types
         FROM final_cohort
         GROUP BY person_id
     )
 """).show(truncate=False)
-
-# === 7. Unit conversion audit ===
-print("=" * 60)
-print("UNIT CONVERSION AUDIT")
-print("=" * 60)
-
-spark.sql("""
-    SELECT
-        lab_name,
-        measurement_concept_id,
-        unit_concept_id AS original_unit_id,
-        lab_unit_name AS original_unit_name,
-        unit_converted_id,
-        unit_converted_name,
-        COUNT(*) AS n_records,
-        ROUND(AVG(lab_value), 2) AS mean_original,
-        ROUND(AVG(lab_value_final), 2) AS mean_converted
-    FROM final_cohort
-    WHERE lab_values_converted IS NOT NULL
-    GROUP BY lab_name, measurement_concept_id, unit_concept_id, lab_unit_name, unit_converted_id, unit_converted_name
-    ORDER BY n_records DESC
-""").show(100, truncate=False)
 
 # === 8. Follow-up / survival summary ===
 print("=" * 60)
@@ -1620,27 +1561,19 @@ spark.sql("""
         SUM(CASE WHEN race IS NULL THEN 1 ELSE 0 END) AS null_race,
         SUM(CASE WHEN ethnicity IS NULL THEN 1 ELSE 0 END) AS null_ethnicity,
         SUM(CASE WHEN age_at_diagnosis IS NULL THEN 1 ELSE 0 END) AS null_age_at_diagnosis,
-        SUM(CASE WHEN date_of_birth IS NULL THEN 1 ELSE 0 END) AS null_date_of_birth,
         SUM(CASE WHEN diagnosis_date IS NULL THEN 1 ELSE 0 END) AS null_diagnosis_date,
         SUM(CASE WHEN cancer_type IS NULL THEN 1 ELSE 0 END) AS null_cancer_type,
         SUM(CASE WHEN ici_start_date IS NULL THEN 1 ELSE 0 END) AS null_ici_start_date,
         SUM(CASE WHEN block_number IS NULL THEN 1 ELSE 0 END) AS null_block_number,
         SUM(CASE WHEN ici_block_start_date IS NULL THEN 1 ELSE 0 END) AS null_ici_block_start_date,
-        SUM(CASE WHEN ici_end_date IS NULL THEN 1 ELSE 0 END) AS null_ici_end_date,
-        SUM(CASE WHEN last_ici_cycle_start_date IS NULL THEN 1 ELSE 0 END) AS null_last_ici_cycle_start_date,
         SUM(CASE WHEN ici_type IS NULL THEN 1 ELSE 0 END) AS null_ici_type,
         SUM(CASE WHEN ici_discontinuation_date IS NULL THEN 1 ELSE 0 END) AS null_ici_discontinuation_date,
         SUM(CASE WHEN ici_discontinuation_cause IS NULL THEN 1 ELSE 0 END) AS null_ici_discontinuation_cause,
         SUM(CASE WHEN last_followup_date IS NULL THEN 1 ELSE 0 END) AS null_last_followup_date,
         SUM(CASE WHEN death_date IS NULL THEN 1 ELSE 0 END) AS null_death_date,
-        SUM(CASE WHEN measurement_concept_id IS NULL THEN 1 ELSE 0 END) AS null_measurement_concept_id,
         SUM(CASE WHEN lab_name IS NULL THEN 1 ELSE 0 END) AS null_lab_name,
         SUM(CASE WHEN measurement_date IS NULL THEN 1 ELSE 0 END) AS null_measurement_date,
-        SUM(CASE WHEN lab_value IS NULL THEN 1 ELSE 0 END) AS null_lab_value,
         SUM(CASE WHEN lab_value_final IS NULL THEN 1 ELSE 0 END) AS null_lab_value_final,
-        SUM(CASE WHEN lab_values_converted IS NULL THEN 1 ELSE 0 END) AS null_lab_values_converted,
-        SUM(CASE WHEN unit_concept_id IS NULL THEN 1 ELSE 0 END) AS null_unit_concept_id,
-        SUM(CASE WHEN lab_unit_name IS NULL THEN 1 ELSE 0 END) AS null_lab_unit_name,
         SUM(CASE WHEN unit_converted_name IS NULL THEN 1 ELSE 0 END) AS null_unit_converted_name,
         SUM(CASE WHEN time_on_ici IS NULL THEN 1 ELSE 0 END) AS null_time_on_ici,
         SUM(CASE WHEN event_ici_discontinued IS NULL THEN 1 ELSE 0 END) AS null_event_ici_discontinued,
@@ -1650,10 +1583,6 @@ spark.sql("""
         SUM(CASE WHEN days_relative_to_ici_discontinuation IS NULL THEN 1 ELSE 0 END) AS null_days_rel_ici_discontinuation,
         SUM(CASE WHEN days_relative_to_last_followup IS NULL THEN 1 ELSE 0 END) AS null_days_rel_followup,
         SUM(CASE WHEN cancer_subtype IS NULL THEN 1 ELSE 0 END) AS null_cancer_subtype,
-        SUM(CASE WHEN gender_concept_id IS NULL THEN 1 ELSE 0 END) AS null_gender_concept_id,
-        SUM(CASE WHEN race_concept_id IS NULL THEN 1 ELSE 0 END) AS null_race_concept_id,
-        SUM(CASE WHEN ethnicity_concept_id IS NULL THEN 1 ELSE 0 END) AS null_ethnicity_concept_id,
-        SUM(CASE WHEN unit_converted_id IS NULL THEN 1 ELSE 0 END) AS null_unit_converted_id,
         SUM(CASE WHEN is_deceased IS NULL THEN 1 ELSE 0 END) AS null_is_deceased
     FROM final_cohort
 """).show(truncate=False)

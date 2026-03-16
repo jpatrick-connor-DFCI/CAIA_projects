@@ -15,6 +15,8 @@
 # ===============================================================
 import os
 import pandas as pd
+from pyspark.sql import functions as F, types as T
+from pyspark.sql.types import StructType, StructField, IntegerType, DoubleType, LongType
 _cwd = os.getcwd()
 spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"), sep="\t")).createOrReplaceTempView("concept")
 spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"), sep="\t")).createOrReplaceTempView("concept_ancestor")
@@ -23,7 +25,6 @@ spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_
 # Performance settings
 # ===============================================================
 spark.conf.set("spark.sql.shuffle.partitions", "400")
-spark.conf.set("spark.sql.autoBroadcastJoinThreshold", str(50 * 1024 * 1024))  # 50 MB
 
 CONCEPT_TABLE = "concept"
 
@@ -333,6 +334,21 @@ FROM ranked
 WHERE rn = 1
 """)
 
+# === 12b. Earliest metastatic condition per patient ===
+# Captures all descendants of "Secondary malignant neoplasm" (432851).
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_metastatic_disease AS
+SELECT
+    co.person_id,
+    MIN(co.condition_start_date) AS metastasis_date
+FROM dn_condition_occurrence_20251219 co
+JOIN concept_ancestor ca
+    ON co.condition_concept_id = ca.descendant_concept_id
+WHERE ca.ancestor_concept_id = 432851
+  AND co.person_id IN (SELECT person_id FROM temp_eligible_patients)
+GROUP BY co.person_id
+""")
+
 # === 13. Combine PSA measurements with first drug info ===
 spark.sql(f"""
 CREATE OR REPLACE TEMP VIEW prostate_lab_longitudinal AS
@@ -341,20 +357,8 @@ SELECT /*+ BROADCAST(dp) */
   f.prostate_cancer_diagnosis_date,
 
   -- ==== Demographics ====
-  CASE
-    WHEN per.year_of_birth IS NOT NULL THEN
-      make_date(
-        per.year_of_birth,
-        COALESCE(per.month_of_birth, 6),
-        COALESCE(per.day_of_birth, 15)
-      )
-    ELSE NULL
-  END AS date_of_birth,
-  per.gender_concept_id,
   per.gender_concept_name  AS gender,
-  per.race_concept_id,
   per.race_concept_name  AS race,
-  per.ethnicity_concept_id,
   per.ethnicity_concept_name  AS ethnicity,
   FLOOR(
     DATEDIFF(
@@ -380,10 +384,13 @@ SELECT /*+ BROADCAST(dp) */
   m.unit_concept_name AS lab_unit_name,
 
   -- ==== Drug info ====
-  fe.drug_concept_id,
   d.concept_name AS drug_name,
   dp.drug_type,
-  fe.first_drug_exposure_start_date AS drug_initiation_date
+  fe.first_drug_exposure_start_date AS drug_initiation_date,
+
+  -- ==== Metastatic disease ====
+  met.metastasis_date,
+  CASE WHEN met.metastasis_date IS NOT NULL THEN 1 ELSE 0 END AS is_metastatic
 
 FROM temp_eligible_patients p
 JOIN first_prostate_diagnosis f
@@ -406,6 +413,9 @@ LEFT JOIN {CONCEPT_TABLE} d
   ON fe.drug_concept_id = d.concept_id
 LEFT JOIN temp_platinum_drugs dp
   ON fe.drug_concept_id = dp.drug_concept_id
+-- Metastatic disease
+LEFT JOIN temp_metastatic_disease met
+  ON p.person_id = met.person_id
 """)
 
 # === 14. Last contact / follow-up per patient ===
@@ -454,13 +464,12 @@ LEFT JOIN temp_followup f ON l.person_id = f.person_id
 """)
 
 # === 16. Materialize ===
-final_df = spark.table("prostate_lab_longitudinal_with_followup")
+final_df = spark.table("prostate_lab_longitudinal_with_followup").cache()
+final_df.count()  # trigger materialization before remap join
 
 # === 16b. Remap variant measurement concept IDs to canonical IDs ===
 # This merges alternate LOINC codings into a single concept per lab type,
 # so that downstream unit filtering, conversions, and ranges apply uniformly.
-from pyspark.sql import functions as F, types as T
-
 concept_remap = {
     # PSA variants
     3002131: 3013603, 3034548: 3013603, 4272032: 3013603, 3052038: 3013603,
@@ -624,12 +633,11 @@ final_df_w_units_filtered = (
     df_cast
     .join(allowed_df, on=["measurement_concept_id", "unit_concept_id"], how="inner")
 ).cache()
+final_df_w_units_filtered.count()  # trigger materialization before conversion chain
 
 # === 18. Perform required unit conversions on subset of labs ===
 # Lookup table: (concept_id, from_unit, factor, to_unit)
 # factor=None for special conversions handled separately (temperature F->C)
-from pyspark.sql.types import StructType, StructField, IntegerType, DoubleType, LongType
-
 _conversion_schema = StructType([
     StructField("conv_concept_id", LongType()),
     StructField("conv_from_unit", LongType()),
@@ -963,6 +971,14 @@ df_to_upload = (
         "days_relative_to_last_followup",
         F.datediff(F.col("measurement_date"), F.col("last_followup_date"))
     )
+    # --- Metastatic disease timing ---
+    .withColumn(
+        "days_diagnosis_to_metastasis",
+        F.when(
+            F.col("metastasis_date").isNotNull(),
+            F.datediff(F.col("metastasis_date"), F.col("prostate_cancer_diagnosis_date"))
+        ).otherwise(F.lit(None).cast("int"))
+    )
     # --- Patient-level time-to-event variables ---
     .withColumn(
         "event_platinum",
@@ -982,41 +998,37 @@ df_to_upload = (
             F.col("prostate_cancer_diagnosis_date")
         )
     )
+    .drop(
+        "measurement_concept_id",
+        "unit_concept_id", "unit_converted_id",
+        "lab_value", "lab_values_converted", "lab_unit_name",
+    )
 )
-
-from pyspark.sql import functions as F, types as T
 
 # === 20. Enforce canonical types + schema assertions ===
 
 # ---- Define column groups ----
 int_cols = [
     "person_id",
-    "gender_concept_id",
-    "race_concept_id",
-    "ethnicity_concept_id",
-    "measurement_concept_id",
-    "unit_concept_id",
-    "unit_converted_id",
-    "drug_concept_id",
     "age_at_diagnosis",
     "is_deceased",
+    "is_metastatic",
     "event_platinum",
     "time_to_platinum_or_censor",
     "time_to_death_or_censor",
+    "days_diagnosis_to_metastasis",
     "days_relative_to_diagnosis",
     "days_relative_to_platinum_chemo_start",
     "days_relative_to_last_followup",
 ]
 
 float_cols = [
-    "lab_value",
-    "lab_values_converted",
     "lab_value_final",
 ]
 
 date_cols = [
-    "date_of_birth",
     "prostate_cancer_diagnosis_date",
+    "metastasis_date",
     "measurement_date",
     "drug_initiation_date",
     "last_followup_date",
@@ -1028,7 +1040,6 @@ string_cols = [
     "race",
     "ethnicity",
     "lab_name",
-    "lab_unit_name",
     "unit_converted_name",
     "drug_name",
     "drug_type",
@@ -1055,29 +1066,18 @@ expected_columns = [
     "prostate_cancer_diagnosis_date",
 
     # Demographics
-    "date_of_birth",
-    "gender_concept_id",
     "gender",
-    "race_concept_id",
     "race",
-    "ethnicity_concept_id",
     "ethnicity",
     "age_at_diagnosis",
 
     # Lab info
-    "measurement_concept_id",
     "lab_name",
     "measurement_date",
-    "lab_value",
-    "unit_concept_id",
-    "lab_unit_name",
-    "lab_values_converted",
-    "unit_converted_id",
     "unit_converted_name",
     "lab_value_final",
 
     # Drug info
-    "drug_concept_id",
     "drug_name",
     "drug_type",
     "drug_initiation_date",
@@ -1086,6 +1086,11 @@ expected_columns = [
     "last_followup_date",
     "death_date",
     "is_deceased",
+
+    # Metastatic disease
+    "metastasis_date",
+    "is_metastatic",
+    "days_diagnosis_to_metastasis",
 
     # Time-to-event variables
     "event_platinum",
@@ -1152,9 +1157,7 @@ patient_df = spark.sql("""
         FIRST(race) AS race,
         FIRST(ethnicity) AS ethnicity,
         FIRST(age_at_diagnosis) AS age_at_diagnosis,
-        FIRST(date_of_birth) AS date_of_birth,
         FIRST(prostate_cancer_diagnosis_date) AS prostate_cancer_diagnosis_date,
-        FIRST(drug_concept_id) AS drug_concept_id,
         FIRST(drug_name) AS drug_name,
         FIRST(drug_type) AS drug_type,
         FIRST(drug_initiation_date) AS drug_initiation_date,
@@ -1181,7 +1184,7 @@ spark.sql(f"""
     SELECT
         {patient_count} AS total_patients,
         {row_count} AS total_lab_records,
-        (SELECT COUNT(*) FROM patient_cohort WHERE drug_concept_id IS NOT NULL) AS patients_with_platinum,
+        (SELECT COUNT(*) FROM patient_cohort WHERE event_platinum = 1) AS patients_with_platinum,
         (SELECT COUNT(*) FROM patient_cohort WHERE is_deceased = 1) AS deceased_patients,
         ROUND((SELECT COUNT(*) FROM patient_cohort WHERE is_deceased = 1) * 100.0
               / {patient_count}, 1) AS mortality_rate_pct
@@ -1258,7 +1261,7 @@ spark.sql("""
             drug_name,
             DATEDIFF(drug_initiation_date, prostate_cancer_diagnosis_date) AS days_dx_to_drug
         FROM patient_cohort
-        WHERE drug_concept_id IS NOT NULL
+        WHERE event_platinum = 1
     )
     GROUP BY drug_type, drug_name
     ORDER BY n_patients DESC
@@ -1273,7 +1276,6 @@ print("--- Records per Lab Type ---")
 spark.sql(f"""
     SELECT
         lab_name,
-        measurement_concept_id,
         COUNT(*) AS n_records,
         ROUND(AVG(lab_value_final), 2) AS mean_value,
         ROUND(STDDEV(lab_value_final), 2) AS std_value,
@@ -1281,11 +1283,10 @@ spark.sql(f"""
         ROUND(PERCENTILE_APPROX(lab_value_final, 0.50), 2) AS median_value,
         ROUND(PERCENTILE_APPROX(lab_value_final, 0.75), 2) AS q3_value,
         ROUND(MIN(lab_value_final), 2) AS min_value,
-        ROUND(MAX(lab_value_final), 2) AS max_value,
-        SUM(CASE WHEN lab_values_converted IS NOT NULL THEN 1 ELSE 0 END) AS n_converted
+        ROUND(MAX(lab_value_final), 2) AS max_value
     FROM final_cohort
     WHERE lab_value_final IS NOT NULL
-    GROUP BY lab_name, measurement_concept_id
+    GROUP BY lab_name
     ORDER BY n_records DESC
 """).show(100, truncate=False)
 
@@ -1308,7 +1309,7 @@ spark.sql("""
         SELECT
             person_id,
             COUNT(*) AS n_labs,
-            COUNT(DISTINCT measurement_concept_id) AS n_lab_types
+            COUNT(DISTINCT lab_name) AS n_lab_types
         FROM final_cohort
         GROUP BY person_id
     )
@@ -1328,32 +1329,10 @@ spark.sql("""
     FROM (
         SELECT person_id, COUNT(*) AS psa_count
         FROM final_cohort
-        WHERE measurement_concept_id = 3013603
+        WHERE lab_name LIKE '%Prostate specific%'
         GROUP BY person_id
     )
 """).show(truncate=False)
-
-# === 5. Unit conversion audit ===
-print("=" * 60)
-print("UNIT CONVERSION AUDIT")
-print("=" * 60)
-
-spark.sql("""
-    SELECT
-        lab_name,
-        measurement_concept_id,
-        unit_concept_id AS original_unit_id,
-        lab_unit_name AS original_unit_name,
-        unit_converted_id,
-        unit_converted_name,
-        COUNT(*) AS n_records,
-        ROUND(AVG(lab_value), 2) AS mean_original,
-        ROUND(AVG(lab_value_final), 2) AS mean_converted
-    FROM final_cohort
-    WHERE lab_values_converted IS NOT NULL
-    GROUP BY lab_name, measurement_concept_id, unit_concept_id, lab_unit_name, unit_converted_id, unit_converted_name
-    ORDER BY n_records DESC
-""").show(100, truncate=False)
 
 # === 6. Follow-up / survival summary ===
 print("=" * 60)
@@ -1440,18 +1419,11 @@ spark.sql("""
         SUM(CASE WHEN race IS NULL THEN 1 ELSE 0 END) AS null_race,
         SUM(CASE WHEN ethnicity IS NULL THEN 1 ELSE 0 END) AS null_ethnicity,
         SUM(CASE WHEN age_at_diagnosis IS NULL THEN 1 ELSE 0 END) AS null_age_at_diagnosis,
-        SUM(CASE WHEN date_of_birth IS NULL THEN 1 ELSE 0 END) AS null_date_of_birth,
         SUM(CASE WHEN prostate_cancer_diagnosis_date IS NULL THEN 1 ELSE 0 END) AS null_diagnosis_date,
-        SUM(CASE WHEN measurement_concept_id IS NULL THEN 1 ELSE 0 END) AS null_measurement_concept_id,
         SUM(CASE WHEN lab_name IS NULL THEN 1 ELSE 0 END) AS null_lab_name,
         SUM(CASE WHEN measurement_date IS NULL THEN 1 ELSE 0 END) AS null_measurement_date,
-        SUM(CASE WHEN lab_value IS NULL THEN 1 ELSE 0 END) AS null_lab_value,
         SUM(CASE WHEN lab_value_final IS NULL THEN 1 ELSE 0 END) AS null_lab_value_final,
-        SUM(CASE WHEN lab_values_converted IS NULL THEN 1 ELSE 0 END) AS null_lab_values_converted,
-        SUM(CASE WHEN unit_concept_id IS NULL THEN 1 ELSE 0 END) AS null_unit_concept_id,
-        SUM(CASE WHEN lab_unit_name IS NULL THEN 1 ELSE 0 END) AS null_lab_unit_name,
         SUM(CASE WHEN unit_converted_name IS NULL THEN 1 ELSE 0 END) AS null_unit_converted_name,
-        SUM(CASE WHEN drug_concept_id IS NULL THEN 1 ELSE 0 END) AS null_drug_concept_id,
         SUM(CASE WHEN last_followup_date IS NULL THEN 1 ELSE 0 END) AS null_last_followup_date,
         SUM(CASE WHEN death_date IS NULL THEN 1 ELSE 0 END) AS null_death_date,
         SUM(CASE WHEN event_platinum IS NULL THEN 1 ELSE 0 END) AS null_event_platinum,
@@ -1460,10 +1432,6 @@ spark.sql("""
         SUM(CASE WHEN days_relative_to_diagnosis IS NULL THEN 1 ELSE 0 END) AS null_days_rel_diagnosis,
         SUM(CASE WHEN days_relative_to_platinum_chemo_start IS NULL THEN 1 ELSE 0 END) AS null_days_rel_platinum,
         SUM(CASE WHEN days_relative_to_last_followup IS NULL THEN 1 ELSE 0 END) AS null_days_rel_followup,
-        SUM(CASE WHEN gender_concept_id IS NULL THEN 1 ELSE 0 END) AS null_gender_concept_id,
-        SUM(CASE WHEN race_concept_id IS NULL THEN 1 ELSE 0 END) AS null_race_concept_id,
-        SUM(CASE WHEN ethnicity_concept_id IS NULL THEN 1 ELSE 0 END) AS null_ethnicity_concept_id,
-        SUM(CASE WHEN unit_converted_id IS NULL THEN 1 ELSE 0 END) AS null_unit_converted_id,
         SUM(CASE WHEN drug_name IS NULL THEN 1 ELSE 0 END) AS null_drug_name,
         SUM(CASE WHEN drug_type IS NULL THEN 1 ELSE 0 END) AS null_drug_type,
         SUM(CASE WHEN drug_initiation_date IS NULL THEN 1 ELSE 0 END) AS null_drug_initiation_date,
