@@ -349,10 +349,47 @@ WHERE ca.ancestor_concept_id = 432851
 GROUP BY co.person_id
 """)
 
-# === 13. Combine PSA measurements with first drug info ===
+# === 12c. Last contact / follow-up per patient ===
+#     Derived from latest event across all denormalized tables + death.
+#     Computed and cached before step 13 so it can be broadcast-joined there.
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_followup AS
+WITH cohort_ids AS (
+  SELECT person_id FROM temp_eligible_patients
+),
+last_clinical_event AS (
+  SELECT person_id, MAX(event_date) AS last_event_date
+  FROM (
+    SELECT person_id, condition_start_date     AS event_date FROM dn_condition_occurrence_20251219 WHERE person_id IN (SELECT person_id FROM cohort_ids)
+    UNION ALL
+    SELECT person_id, measurement_date         AS event_date FROM dn_measurement_20251219          WHERE person_id IN (SELECT person_id FROM cohort_ids)
+    UNION ALL
+    SELECT person_id, drug_exposure_start_date AS event_date FROM dn_drug_exposure_20251219        WHERE person_id IN (SELECT person_id FROM cohort_ids)
+    UNION ALL
+    SELECT person_id, procedure_date           AS event_date FROM dn_procedure_occurrence_20251219 WHERE person_id IN (SELECT person_id FROM cohort_ids)
+    UNION ALL
+    SELECT person_id, visit_start_date         AS event_date FROM dn_visit_occurrence_20251219     WHERE person_id IN (SELECT person_id FROM cohort_ids)
+  ) events
+  GROUP BY person_id
+)
+SELECT
+    lce.person_id,
+    lce.last_event_date,
+    d.death_date,
+    COALESCE(d.death_date, lce.last_event_date) AS last_followup_date,
+    CASE WHEN d.death_date IS NOT NULL THEN 1 ELSE 0 END AS is_deceased
+FROM last_clinical_event lce
+LEFT JOIN dn_death_20251219 d
+    ON lce.person_id = d.person_id
+""")
+_followup_df = spark.table("temp_followup").cache()
+_followup_df.count()
+_followup_df.createOrReplaceTempView("temp_followup")
+
+# === 13. Combine labs with demographics, drugs, metastatic, and follow-up ===
 spark.sql(f"""
 CREATE OR REPLACE TEMP VIEW prostate_lab_longitudinal AS
-SELECT /*+ BROADCAST(dp) */
+SELECT /*+ BROADCAST(p), BROADCAST(f), BROADCAST(per), BROADCAST(dp), BROADCAST(fe), BROADCAST(d), BROADCAST(met), BROADCAST(c), BROADCAST(lc), BROADCAST(fu) */
   p.person_id,
   f.prostate_cancer_diagnosis_date,
 
@@ -390,7 +427,12 @@ SELECT /*+ BROADCAST(dp) */
 
   -- ==== Metastatic disease ====
   met.metastasis_date,
-  CASE WHEN met.metastasis_date IS NOT NULL THEN 1 ELSE 0 END AS is_metastatic
+  CASE WHEN met.metastasis_date IS NOT NULL THEN 1 ELSE 0 END AS is_metastatic,
+
+  -- ==== Follow-up ====
+  fu.last_followup_date,
+  fu.death_date,
+  fu.is_deceased
 
 FROM temp_eligible_patients p
 JOIN first_prostate_diagnosis f
@@ -398,12 +440,11 @@ JOIN first_prostate_diagnosis f
 JOIN dn_person_20251219 per
   ON p.person_id = per.person_id
 
--- Demographics (names from denormalized person table)
-
 -- Labs (all concepts from temp_all_lab_concepts = PSA + other labs)
 JOIN dn_measurement_20251219 m
   ON p.person_id = m.person_id
-  AND m.measurement_concept_id IN (SELECT concept_id FROM temp_all_lab_concepts)
+JOIN temp_all_lab_concepts lc
+  ON m.measurement_concept_id = lc.concept_id
 LEFT JOIN {CONCEPT_TABLE} c
   ON m.measurement_concept_id = c.concept_id
 -- Drugs
@@ -416,56 +457,19 @@ LEFT JOIN temp_platinum_drugs dp
 -- Metastatic disease
 LEFT JOIN temp_metastatic_disease met
   ON p.person_id = met.person_id
+-- Follow-up (cached)
+LEFT JOIN temp_followup fu
+  ON p.person_id = fu.person_id
 """)
 
-# === 14. Last contact / follow-up per patient ===
-#     Derived from latest event across all denormalized tables + death.
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW temp_followup AS
-WITH cohort_ids AS (
-  SELECT person_id FROM temp_eligible_patients
-),
-last_clinical_event AS (
-  SELECT person_id, MAX(event_date) AS last_event_date
-  FROM (
-    SELECT person_id, condition_start_date     AS event_date FROM dn_condition_occurrence_20251219 WHERE person_id IN (SELECT person_id FROM cohort_ids)
-    UNION ALL
-    SELECT person_id, measurement_date         AS event_date FROM dn_measurement_20251219          WHERE person_id IN (SELECT person_id FROM cohort_ids)
-    UNION ALL
-    SELECT person_id, drug_exposure_start_date AS event_date FROM dn_drug_exposure_20251219        WHERE person_id IN (SELECT person_id FROM cohort_ids)
-    UNION ALL
-    SELECT person_id, procedure_date           AS event_date FROM dn_procedure_occurrence_20251219 WHERE person_id IN (SELECT person_id FROM cohort_ids)
-    UNION ALL
-    SELECT person_id, visit_start_date         AS event_date FROM dn_visit_occurrence_20251219     WHERE person_id IN (SELECT person_id FROM cohort_ids)
-  ) events
-  GROUP BY person_id
-)
-SELECT
-    lce.person_id,
-    lce.last_event_date,
-    d.death_date,
-    COALESCE(d.death_date, lce.last_event_date) AS last_followup_date,
-    CASE WHEN d.death_date IS NOT NULL THEN 1 ELSE 0 END AS is_deceased
-FROM last_clinical_event lce
-LEFT JOIN dn_death_20251219 d
-    ON lce.person_id = d.person_id
-""")
-
-# === 15. Merge longitudinal labs with follow-up info ===
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW prostate_lab_longitudinal_with_followup AS
-SELECT
-  l.*,
-  f.last_followup_date,
-  f.death_date,
-  f.is_deceased
-FROM prostate_lab_longitudinal l
-LEFT JOIN temp_followup f ON l.person_id = f.person_id
-""")
-
-# === 16. Materialize ===
-final_df = spark.table("prostate_lab_longitudinal_with_followup").cache()
+# === 14. Materialize ===
+# Follow-up is already joined in step 13 (via cached temp_followup).
+# No separate step 15 view needed.
+final_df = spark.table("prostate_lab_longitudinal").cache()
 final_df.count()  # trigger materialization before remap join
+
+# Free followup cache — already consumed by the materialization above
+_followup_df.unpersist()
 
 # === 16b. Remap variant measurement concept IDs to canonical IDs ===
 # This merges alternate LOINC codings into a single concept per lab type,
@@ -634,6 +638,9 @@ final_df_w_units_filtered = (
     .join(allowed_df, on=["measurement_concept_id", "unit_concept_id"], how="inner")
 ).cache()
 final_df_w_units_filtered.count()  # trigger materialization before conversion chain
+
+# Free final_df cache — consumed by unit filter above
+final_df.unpersist()
 
 # === 18. Perform required unit conversions on subset of labs ===
 # Lookup table: (concept_id, from_unit, factor, to_unit)
@@ -1147,6 +1154,9 @@ df_to_upload.cache()
 df_to_upload.createOrReplaceTempView("final_cohort")
 row_count = df_to_upload.count()
 print(f"Cached final_cohort: {row_count:,} rows")
+
+# Free intermediate cache — fully consumed by df_to_upload
+final_df_w_units_filtered.unpersist()
 
 # Pre-compute a patient-level view (one row per person) for demographic/treatment/follow-up queries.
 # This avoids repeated COUNT(DISTINCT person_id) over the full lab-level table.

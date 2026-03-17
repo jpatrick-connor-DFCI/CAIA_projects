@@ -296,40 +296,69 @@ _ici_patients_df = spark.table("temp_cancer_ici_patients").cache()
 _ici_patients_df.count()  # trigger materialization
 _ici_patients_df.createOrReplaceTempView("temp_cancer_ici_patients")
 
-# === 11. Add death and last observation (LTFU) info ===
+# === 11. Add death, last observation (LTFU), and censor info ===
+# Computes BOTH the overall last-event date (for followup) and the non-ICI
+# last-event date (for discontinuation censoring) in a single pass over the
+# five OMOP event tables, avoiding a redundant second scan in step 13b.
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_followup AS
 WITH cohort_ids AS (
     SELECT person_id FROM temp_cancer_ici_patients
 ),
-last_clinical_event AS (
-    SELECT person_id, MAX(event_date) AS last_event_date
+all_events AS (
+    SELECT person_id, event_date, 1 AS is_non_ici
     FROM (
         SELECT person_id, condition_start_date AS event_date FROM dn_condition_occurrence_20251219 WHERE person_id IN (SELECT person_id FROM cohort_ids)
         UNION ALL
         SELECT person_id, measurement_date AS event_date FROM dn_measurement_20251219              WHERE person_id IN (SELECT person_id FROM cohort_ids)
         UNION ALL
-        SELECT person_id, drug_exposure_start_date AS event_date FROM dn_drug_exposure_20251219    WHERE person_id IN (SELECT person_id FROM cohort_ids)
-        UNION ALL
         SELECT person_id, procedure_date AS event_date FROM dn_procedure_occurrence_20251219       WHERE person_id IN (SELECT person_id FROM cohort_ids)
         UNION ALL
         SELECT person_id, visit_start_date AS event_date FROM dn_visit_occurrence_20251219         WHERE person_id IN (SELECT person_id FROM cohort_ids)
-    ) events
+    ) non_drug
+
+    UNION ALL
+
+    -- Non-ICI drug exposures (for censor date)
+    SELECT de.person_id, de.drug_exposure_start_date AS event_date, 1 AS is_non_ici
+    FROM dn_drug_exposure_20251219 de
+    LEFT JOIN temp_ICI_concepts ici ON de.drug_concept_id = ici.concept_id
+    WHERE ici.concept_id IS NULL AND de.person_id IN (SELECT person_id FROM cohort_ids)
+
+    UNION ALL
+
+    -- ICI drug exposures (only for overall last-event, not for censor)
+    SELECT de.person_id, de.drug_exposure_start_date AS event_date, 0 AS is_non_ici
+    FROM dn_drug_exposure_20251219 de
+    JOIN temp_ICI_concepts ici ON de.drug_concept_id = ici.concept_id
+    WHERE de.person_id IN (SELECT person_id FROM cohort_ids)
+),
+aggregated AS (
+    SELECT
+        person_id,
+        MAX(event_date) AS last_event_date,
+        MAX(CASE WHEN is_non_ici = 1 THEN event_date END) AS last_non_ici_event_date
+    FROM all_events
     GROUP BY person_id
 )
 SELECT
-    lce.person_id,
-    lce.last_event_date,
+    a.person_id,
     d.death_date,
-    COALESCE(d.death_date, lce.last_event_date) AS last_followup_date,
-    CASE WHEN d.death_date IS NOT NULL THEN 1 ELSE 0 END AS is_deceased
-FROM last_clinical_event lce
-LEFT JOIN dn_death_20251219 d ON lce.person_id = d.person_id
+    COALESCE(d.death_date, a.last_event_date) AS last_followup_date,
+    CASE WHEN d.death_date IS NOT NULL THEN 1 ELSE 0 END AS is_deceased,
+    a.last_non_ici_event_date AS observation_period_end_date
+FROM aggregated a
+LEFT JOIN dn_death_20251219 d ON a.person_id = d.person_id
 """)
+_followup_df = spark.table("temp_followup").cache()
+_followup_df.count()
+_followup_df.createOrReplaceTempView("temp_followup")
 
 # === 12. Pull target lab measurements, add demographics & follow-up ===
+# BROADCAST hints on small tables (cohort ~13k rows, followup ~13k, concept ~few hundred)
+# ensure the massive dn_measurement table is the probe side, never shuffled.
 final_df = spark.sql(f"""
-SELECT
+SELECT /*+ BROADCAST(p), BROADCAST(f), BROADCAST(per), BROADCAST(c), BROADCAST(lc) */
     -- Demographics
     p.person_id,
     per.gender_concept_name AS gender,
@@ -369,16 +398,17 @@ SELECT
     m.measurement_date,
     m.value_as_number AS lab_value,
     m.unit_concept_id,
-    m.unit_concept_name AS lab_unit_name,
+    m.unit_concept_name AS lab_unit_name
 
 FROM temp_cancer_ici_patients p
 LEFT JOIN temp_followup f
     ON p.person_id = f.person_id
 
--- Restrict to target lab concepts only, after diagnosis
+-- Restrict to target lab concepts via explicit join (replaces IN subquery for better push-down)
 JOIN dn_measurement_20251219 m
     ON p.person_id = m.person_id
-    AND m.measurement_concept_id IN (SELECT concept_id FROM temp_lab_concepts)
+JOIN temp_lab_concepts lc
+    ON m.measurement_concept_id = lc.concept_id
 
 LEFT JOIN {CONCEPT_TABLE} c
     ON m.measurement_concept_id = c.concept_id
@@ -388,6 +418,9 @@ JOIN dn_person_20251219 per
 """)
 final_df = final_df.cache()
 final_df.count()  # trigger materialization before discontinuation fan-out join
+
+# Free followup cache — already consumed by the SQL above
+_followup_df.unpersist()
 
 # === 13. Create the discontinuation dataframe ===
 # Groups ICI exposures into continuous treatment blocks (>90-day gap = new block).
@@ -449,41 +482,22 @@ GROUP BY person_id, block_id
 """)
 spark.table("temp_ici_block_summary").cache().count()
 
-# === 13b. Censor dates per patient (non-ICI clinical activity) ===
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW temp_ici_censor_dates AS
-SELECT
-    lce.person_id,
-    lce.last_event_date AS observation_period_end_date,
-    d.death_date
-FROM (
-    SELECT person_id, MAX(event_date) AS last_event_date
-    FROM (
-        SELECT person_id, condition_start_date AS event_date FROM dn_condition_occurrence_20251219 WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
-        UNION ALL
-        SELECT person_id, measurement_date AS event_date FROM dn_measurement_20251219              WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
-        UNION ALL
-        SELECT de.person_id, de.drug_exposure_start_date AS event_date
-        FROM dn_drug_exposure_20251219 de
-        LEFT JOIN temp_ICI_concepts ici ON de.drug_concept_id = ici.concept_id
-        WHERE ici.concept_id IS NULL AND de.person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
-        UNION ALL
-        SELECT person_id, procedure_date AS event_date FROM dn_procedure_occurrence_20251219       WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
-        UNION ALL
-        SELECT person_id, visit_start_date AS event_date FROM dn_visit_occurrence_20251219         WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
-    ) events
-    GROUP BY person_id
-) lce
-LEFT JOIN dn_death_20251219 d ON lce.person_id = d.person_id
-""")
-spark.table("temp_ici_censor_dates").cache().count()
+# === 13b. Censor dates — now sourced from temp_followup (computed in step 11) ===
+# No additional query needed; temp_followup already has observation_period_end_date
+# and death_date from the single-pass event scan.
 
-# === 13c. Cohort drug exposures (pre-filtered to cohort, reused by new_therapy and steroid_use) ===
+# === 13c. Cohort drug exposures (pre-filtered to cohort AND relevant drug sets) ===
+# Only cache antineoplastic non-ICI and corticosteroid exposures — the only two
+# drug sets used downstream. This avoids caching millions of irrelevant drug rows.
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_cohort_drug_exposures AS
 SELECT person_id, drug_concept_id, drug_exposure_start_date
 FROM dn_drug_exposure_20251219
 WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
+  AND (
+      drug_concept_id IN (SELECT drug_concept_id FROM temp_antineoplastic_non_ici)
+   OR drug_concept_id IN (SELECT drug_concept_id FROM temp_systemic_corticosteroids)
+  )
 """)
 spark.table("temp_cohort_drug_exposures").cache().count()
 
@@ -527,7 +541,7 @@ discontinuation_data = spark.sql("""
                 COALESCE(c.observation_period_end_date, DATE '9999-12-31')
             ) AS ici_discontinuation_date
         FROM temp_ici_block_summary b
-        LEFT JOIN temp_ici_censor_dates c ON b.person_id = c.person_id
+        LEFT JOIN temp_followup c ON b.person_id = c.person_id
         LEFT JOIN new_therapy nt ON b.person_id = nt.person_id AND b.block_id = nt.block_id
         LEFT JOIN steroid_use su ON b.person_id = su.person_id AND b.block_id = su.block_id
     ),
@@ -561,7 +575,7 @@ discontinuation_data.count()  # trigger materialization before fan-out join
 # This produces one row per (patient, block, lab measurement).
 final_df_merged = (
     final_df
-    .join(discontinuation_data, on='person_id', how='left')
+    .join(F.broadcast(discontinuation_data), on='person_id', how='left')
     .withColumn(
         "_in_block",
         F.when(
@@ -589,6 +603,12 @@ final_df_merged = (
 )
 final_df_merged = final_df_merged.cache()
 final_df_merged.count()  # materialize after window dedup before remap join
+
+# Free intermediate caches — final_df and discontinuation_data are fully consumed
+final_df.unpersist()
+discontinuation_data.unpersist()
+spark.catalog.uncacheTable("temp_ici_block_summary")
+spark.catalog.uncacheTable("temp_cohort_drug_exposures")
 
 # === 14b. Remap variant measurement concepts to canonical IDs ===
 concept_remap = {
@@ -741,6 +761,9 @@ final_df_w_units_filtered = (
     .join(F.broadcast(allowed_df), on=["measurement_concept_id", "unit_concept_id"], how="inner")
 ).cache()
 final_df_w_units_filtered.count()  # trigger materialization
+
+# Free merged cache — consumed by unit filter above
+final_df_merged.unpersist()
 
 # === 16. Convert units when required ===
 # Lookup table: (concept_id, from_unit, factor, to_unit)
@@ -1240,6 +1263,9 @@ df_to_upload.cache()
 df_to_upload.createOrReplaceTempView("final_cohort")
 row_count = df_to_upload.count()
 print(f"Cached final_cohort: {row_count:,} rows")
+
+# Free intermediate cache — fully consumed by df_to_upload
+final_df_w_units_filtered.unpersist()
 
 # Pre-compute a patient-block-level view (one row per person per block) for queries.
 # This avoids repeated aggregations over the full lab-level table.
