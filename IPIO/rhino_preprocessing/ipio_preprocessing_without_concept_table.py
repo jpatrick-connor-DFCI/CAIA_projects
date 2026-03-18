@@ -5,7 +5,7 @@ import os
 from pyspark.sql import functions as F, types as T
 from pyspark.sql import Window
 from pyspark.sql.types import StructType, StructField, IntegerType, DoubleType, LongType
-_cwd = os.getcwd()
+_cwd = "file:" + os.getcwd()
 spark.read.option("header", "true").option("sep", "\t").option("inferSchema", "true") \
     .csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv")) \
     .createOrReplaceTempView("concept")
@@ -1532,7 +1532,61 @@ spark.sql("""
     WHERE time_to_death_or_censor IS NOT NULL
 """).show(truncate=False)
 
-# === 6. Lab measurement summary (using converted values) ===
+# === 6. Blocks per patient ===
+print("=" * 60)
+print("BLOCKS PER PATIENT")
+print("=" * 60)
+
+print("--- Distribution of ICI blocks per patient ---")
+spark.sql(f"""
+    SELECT
+        n_blocks,
+        COUNT(*) AS n_patients,
+        ROUND(COUNT(*) * 100.0 / {patient_count}, 1) AS pct
+    FROM (
+        SELECT person_id, MAX(block_number) AS n_blocks
+        FROM patient_cohort
+        GROUP BY person_id
+    )
+    GROUP BY n_blocks
+    ORDER BY n_blocks
+""").show(truncate=False)
+
+print("--- Summary of blocks per patient ---")
+spark.sql("""
+    SELECT
+        ROUND(AVG(n_blocks), 2) AS mean_blocks,
+        ROUND(STDDEV(n_blocks), 2) AS std_blocks,
+        MIN(n_blocks) AS min_blocks,
+        PERCENTILE_APPROX(n_blocks, 0.25) AS q1_blocks,
+        PERCENTILE_APPROX(n_blocks, 0.50) AS median_blocks,
+        PERCENTILE_APPROX(n_blocks, 0.75) AS q3_blocks,
+        MAX(n_blocks) AS max_blocks
+    FROM (
+        SELECT person_id, MAX(block_number) AS n_blocks
+        FROM patient_cohort
+        GROUP BY person_id
+    )
+""").show(truncate=False)
+
+print("--- Blocks per patient by cancer type (block_number = 1 patients only) ---")
+spark.sql(f"""
+    SELECT
+        cancer_type,
+        COUNT(DISTINCT person_id) AS n_patients,
+        ROUND(AVG(n_blocks), 2) AS mean_blocks,
+        PERCENTILE_APPROX(n_blocks, 0.50) AS median_blocks,
+        MAX(n_blocks) AS max_blocks
+    FROM (
+        SELECT person_id, cancer_type, MAX(block_number) AS n_blocks
+        FROM patient_cohort
+        GROUP BY person_id, cancer_type
+    )
+    GROUP BY cancer_type
+    ORDER BY n_patients DESC
+""").show(50, truncate=False)
+
+# === 7. Lab measurement summary (using converted values) ===
 print("=" * 60)
 print("LAB MEASUREMENTS (converted values)")
 print("=" * 60)

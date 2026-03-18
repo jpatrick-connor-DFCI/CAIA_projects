@@ -16,7 +16,7 @@
 import os
 from pyspark.sql import functions as F, types as T
 from pyspark.sql.types import StructType, StructField, IntegerType, DoubleType, LongType
-_cwd = os.getcwd()
+_cwd = "file:" + os.getcwd()
 spark.read.option("header", "true").option("sep", "\t").option("inferSchema", "true") \
     .csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv")) \
     .createOrReplaceTempView("concept")

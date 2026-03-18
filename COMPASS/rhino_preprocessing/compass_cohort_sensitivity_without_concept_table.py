@@ -16,10 +16,13 @@
 # Load vocabulary subset CSVs (replacing deprecated catalog)
 # ===============================================================
 import os
-import pandas as pd
-_cwd = os.getcwd()
-spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"), sep="\t")).createOrReplaceTempView("concept")
-spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"), sep="\t")).createOrReplaceTempView("concept_ancestor")
+_cwd = "file:" + os.getcwd()
+spark.read.option("header", "true").option("sep", "\t").option("inferSchema", "true") \
+    .csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv")) \
+    .createOrReplaceTempView("concept")
+spark.read.option("header", "true").option("sep", "\t").option("inferSchema", "true") \
+    .csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv")) \
+    .createOrReplaceTempView("concept_ancestor")
 
 # === Prostate cancer concepts ===
 spark.sql("""
