@@ -2,18 +2,24 @@
 # Load vocabulary subset CSVs (replacing deprecated catalog)
 # ===============================================================
 import os
-import pandas as pd
 from pyspark.sql import functions as F, types as T
 from pyspark.sql import Window
 from pyspark.sql.types import StructType, StructField, IntegerType, DoubleType, LongType
 _cwd = os.getcwd()
-spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"), sep="\t")).createOrReplaceTempView("concept")
-spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"), sep="\t")).createOrReplaceTempView("concept_ancestor")
+spark.read.option("header", "true").option("sep", "\t").option("inferSchema", "true") \
+    .csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv")) \
+    .createOrReplaceTempView("concept")
+spark.read.option("header", "true").option("sep", "\t").option("inferSchema", "true") \
+    .csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv")) \
+    .createOrReplaceTempView("concept_ancestor")
 
 # ===============================================================
 # Performance settings
 # ===============================================================
 spark.conf.set("spark.sql.shuffle.partitions", "400")
+spark.conf.set("spark.sql.adaptive.enabled", "true")
+spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
 
 CONCEPT_TABLE = "concept"
 
@@ -51,6 +57,9 @@ SELECT descendant_concept_id AS concept_id, 'Melanoma' AS cancer_type FROM conce
 # LEFT JOIN so ALL cancer concepts are retained.
 # The 4 pre-defined types (NSCLC, Bladder, Kidney, Melanoma) get their label;
 # all other cancers fall back to the OMOP concept_name as cancer_type.
+# Text-based fallback: cancer concepts whose names match NSCLC patterns
+# but weren't in the pre-expanded NSCLC concept ID list.
+# Excludes "small cell" to avoid SCLC contamination.
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW cancer_concepts_labeled AS
 SELECT /*+ BROADCAST(l) */
@@ -58,7 +67,18 @@ SELECT /*+ BROADCAST(l) */
     c.concept_name,
     c.domain_id,
     c.vocabulary_id,
-    COALESCE(l.cancer_type, c.concept_name) AS cancer_type
+    COALESCE(
+        l.cancer_type,
+        CASE
+            WHEN (LOWER(c.concept_name) LIKE '%lung%'
+               OR LOWER(c.concept_name) LIKE '%bronch%'
+               OR LOWER(c.concept_name) LIKE '%pulmonary%'
+               OR LOWER(c.concept_name) LIKE '%respiratory%')
+              AND LOWER(c.concept_name) NOT LIKE '%small cell%'
+            THEN 'NSCLC'
+            ELSE c.concept_name
+        END
+    ) AS cancer_type
 FROM cancer_concepts c
 LEFT JOIN cancer_labels l
     ON c.concept_id = l.concept_id
@@ -296,6 +316,19 @@ _ici_patients_df = spark.table("temp_cancer_ici_patients").cache()
 _ici_patients_df.count()  # trigger materialization
 _ici_patients_df.createOrReplaceTempView("temp_cancer_ici_patients")
 
+# === 10b. Pre-filter all drug exposures for cohort patients (single table scan) ===
+# Caching this avoids repeated full scans of dn_drug_exposure_20251219 in steps 11, 13a, and 13c.
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_cohort_drug_exposures_all AS
+SELECT de.person_id, de.drug_concept_id, de.drug_exposure_start_date,
+       COALESCE(de.drug_exposure_end_date, de.drug_exposure_start_date) AS drug_exposure_end_date
+FROM dn_drug_exposure_20251219 de
+WHERE de.person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
+""")
+_cohort_drugs_df = spark.table("temp_cohort_drug_exposures_all").cache()
+_cohort_drugs_df.count()
+_cohort_drugs_df.createOrReplaceTempView("temp_cohort_drug_exposures_all")
+
 # === 11. Add death, last observation (LTFU), and censor info ===
 # Computes BOTH the overall last-event date (for followup) and the non-ICI
 # last-event date (for discontinuation censoring) in a single pass over the
@@ -319,19 +352,18 @@ all_events AS (
 
     UNION ALL
 
-    -- Non-ICI drug exposures (for censor date)
+    -- Non-ICI drug exposures (for censor date) — reads from cached cohort drug view
     SELECT de.person_id, de.drug_exposure_start_date AS event_date, 1 AS is_non_ici
-    FROM dn_drug_exposure_20251219 de
+    FROM temp_cohort_drug_exposures_all de
     LEFT JOIN temp_ICI_concepts ici ON de.drug_concept_id = ici.concept_id
-    WHERE ici.concept_id IS NULL AND de.person_id IN (SELECT person_id FROM cohort_ids)
+    WHERE ici.concept_id IS NULL
 
     UNION ALL
 
     -- ICI drug exposures (only for overall last-event, not for censor)
     SELECT de.person_id, de.drug_exposure_start_date AS event_date, 0 AS is_non_ici
-    FROM dn_drug_exposure_20251219 de
+    FROM temp_cohort_drug_exposures_all de
     JOIN temp_ICI_concepts ici ON de.drug_concept_id = ici.concept_id
-    WHERE de.person_id IN (SELECT person_id FROM cohort_ids)
 ),
 aggregated AS (
     SELECT
@@ -419,8 +451,7 @@ JOIN dn_person_20251219 per
 final_df = final_df.cache()
 final_df.count()  # trigger materialization before discontinuation fan-out join
 
-# Free followup cache — already consumed by the SQL above
-_followup_df.unpersist()
+# followup + cohort drugs freed after discontinuation materialization below
 
 # === 13. Create the discontinuation dataframe ===
 # Groups ICI exposures into continuous treatment blocks (>90-day gap = new block).
@@ -442,10 +473,9 @@ WITH ici_exposures AS (
     SELECT
         de.person_id,
         de.drug_exposure_start_date,
-        MAX(COALESCE(de.drug_exposure_end_date, de.drug_exposure_start_date)) AS drug_exposure_end_date
-    FROM dn_drug_exposure_20251219 de
+        MAX(de.drug_exposure_end_date) AS drug_exposure_end_date
+    FROM temp_cohort_drug_exposures_all de
     JOIN temp_ICI_concepts ici ON de.drug_concept_id = ici.concept_id
-    WHERE de.person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
     GROUP BY de.person_id, de.drug_exposure_start_date
 ),
 gaps AS (
@@ -480,26 +510,21 @@ SELECT
 FROM blocks
 GROUP BY person_id, block_id
 """)
-spark.table("temp_ici_block_summary").cache().count()
+# temp_ici_block_summary: not cached — only used once in step 13d below
 
 # === 13b. Censor dates — now sourced from temp_followup (computed in step 11) ===
 # No additional query needed; temp_followup already has observation_period_end_date
 # and death_date from the single-pass event scan.
 
-# === 13c. Cohort drug exposures (pre-filtered to cohort AND relevant drug sets) ===
-# Only cache antineoplastic non-ICI and corticosteroid exposures — the only two
-# drug sets used downstream. This avoids caching millions of irrelevant drug rows.
+# === 13c. Cohort drug exposures (pre-filtered to relevant drug sets) ===
+# Reads from the cached cohort drug view instead of re-scanning dn_drug_exposure.
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_cohort_drug_exposures AS
 SELECT person_id, drug_concept_id, drug_exposure_start_date
-FROM dn_drug_exposure_20251219
-WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
-  AND (
-      drug_concept_id IN (SELECT drug_concept_id FROM temp_antineoplastic_non_ici)
+FROM temp_cohort_drug_exposures_all
+WHERE drug_concept_id IN (SELECT drug_concept_id FROM temp_antineoplastic_non_ici)
    OR drug_concept_id IN (SELECT drug_concept_id FROM temp_systemic_corticosteroids)
-  )
 """)
-spark.table("temp_cohort_drug_exposures").cache().count()
 
 # === 13d. Classify each block and assign block numbers ===
 discontinuation_data = spark.sql("""
@@ -569,12 +594,16 @@ discontinuation_data = spark.sql("""
 discontinuation_data = discontinuation_data.cache()
 discontinuation_data.count()  # trigger materialization before fan-out join
 
-# === 14. Merge discontinuation data with complete dataframe ===
-# Each lab measurement is assigned to the block it falls within (between block start
-# and discontinuation date). Labs outside any block window are assigned to the nearest block.
-# This produces one row per (patient, block, lab measurement).
-final_df_merged = (
+# Free caches consumed by discontinuation materialization
+_followup_df.unpersist()
+_cohort_drugs_df.unpersist()
+
+# === 14. Pre-assign each measurement to its best ICI block ===
+# Uses only narrow key columns for the fan-out + window dedup, avoiding shuffle
+# of the full wide DataFrame. The block assignment is then joined back 1:1.
+_block_assignment = (
     final_df
+    .select("person_id", "measurement_concept_id", "measurement_date", "lab_value")
     .join(F.broadcast(discontinuation_data), on='person_id', how='left')
     .withColumn(
         "_in_block",
@@ -601,14 +630,19 @@ final_df_merged = (
     .filter(F.col("_rank") == 1)
     .drop("_in_block", "_dist_to_block", "_rank")
 )
-final_df_merged = final_df_merged.cache()
-final_df_merged.count()  # materialize after window dedup before remap join
 
-# Free intermediate caches — final_df and discontinuation_data are fully consumed
-final_df.unpersist()
-discontinuation_data.unpersist()
-spark.catalog.uncacheTable("temp_ici_block_summary")
-spark.catalog.uncacheTable("temp_cohort_drug_exposures")
+# Join block assignment back to full DF (1:1 on measurement key).
+# dropDuplicates preserves the original dedup behavior for any duplicate measurement rows.
+final_df_merged = (
+    final_df.join(
+        _block_assignment,
+        on=["person_id", "measurement_concept_id", "measurement_date", "lab_value"],
+        how="left"
+    )
+    .dropDuplicates(["person_id", "measurement_concept_id", "measurement_date", "lab_value"])
+)
+
+# final_df + discontinuation_data freed after df_to_upload materialization below
 
 # === 14b. Remap variant measurement concepts to canonical IDs ===
 concept_remap = {
@@ -759,11 +793,8 @@ df_cast = (final_df_merged
 final_df_w_units_filtered = (
     df_cast
     .join(F.broadcast(allowed_df), on=["measurement_concept_id", "unit_concept_id"], how="inner")
-).cache()
-final_df_w_units_filtered.count()  # trigger materialization
-
-# Free merged cache — consumed by unit filter above
-final_df_merged.unpersist()
+)
+# No intermediate cache — flows through conversion + range filter to df_to_upload.cache()
 
 # === 16. Convert units when required ===
 # Lookup table: (concept_id, from_unit, factor, to_unit)
@@ -1264,8 +1295,9 @@ df_to_upload.createOrReplaceTempView("final_cohort")
 row_count = df_to_upload.count()
 print(f"Cached final_cohort: {row_count:,} rows")
 
-# Free intermediate cache — fully consumed by df_to_upload
-final_df_w_units_filtered.unpersist()
+# Free base data caches — fully consumed by df_to_upload
+final_df.unpersist()
+discontinuation_data.unpersist()
 
 # Pre-compute a patient-block-level view (one row per person per block) for queries.
 # This avoids repeated aggregations over the full lab-level table.

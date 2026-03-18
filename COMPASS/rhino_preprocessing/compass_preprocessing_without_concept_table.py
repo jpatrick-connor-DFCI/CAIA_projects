@@ -14,17 +14,23 @@
 # Load vocabulary subset CSVs (replacing deprecated catalog)
 # ===============================================================
 import os
-import pandas as pd
 from pyspark.sql import functions as F, types as T
 from pyspark.sql.types import StructType, StructField, IntegerType, DoubleType, LongType
 _cwd = os.getcwd()
-spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv"), sep="\t")).createOrReplaceTempView("concept")
-spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"), sep="\t")).createOrReplaceTempView("concept_ancestor")
+spark.read.option("header", "true").option("sep", "\t").option("inferSchema", "true") \
+    .csv(os.path.join(_cwd, "concept_tables", "concept_subset.csv")) \
+    .createOrReplaceTempView("concept")
+spark.read.option("header", "true").option("sep", "\t").option("inferSchema", "true") \
+    .csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv")) \
+    .createOrReplaceTempView("concept_ancestor")
 
 # ===============================================================
 # Performance settings
 # ===============================================================
 spark.conf.set("spark.sql.shuffle.partitions", "400")
+spark.conf.set("spark.sql.adaptive.enabled", "true")
+spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
 
 CONCEPT_TABLE = "concept"
 
@@ -310,6 +316,18 @@ _eligible_df = spark.table("temp_eligible_patients").cache()
 _eligible_df.count()  # trigger materialization
 _eligible_df.createOrReplaceTempView("temp_eligible_patients")
 
+# === 11b. Pre-filter all drug exposures for cohort patients (single table scan) ===
+# Caching this avoids repeated full scans of dn_drug_exposure_20251219 in steps 12 and 12c.
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_cohort_drug_exposures_all AS
+SELECT de.person_id, de.drug_concept_id, de.drug_exposure_start_date
+FROM dn_drug_exposure_20251219 de
+WHERE de.person_id IN (SELECT person_id FROM temp_eligible_patients)
+""")
+_cohort_drugs_df = spark.table("temp_cohort_drug_exposures_all").cache()
+_cohort_drugs_df.count()
+_cohort_drugs_df.createOrReplaceTempView("temp_cohort_drug_exposures_all")
+
 # === 12. First platinum drug exposure per patient (one row per patient) ===
 #    Picks the earliest platinum exposure overall. Patients on both carboplatin
 #    and cisplatin get a single row for whichever came first, preventing
@@ -325,7 +343,7 @@ WITH ranked AS (
       PARTITION BY de.person_id
       ORDER BY de.drug_exposure_start_date, de.drug_concept_id
     ) AS rn
-  FROM dn_drug_exposure_20251219 de
+  FROM temp_cohort_drug_exposures_all de
   WHERE de.drug_concept_id IN (SELECT drug_concept_id FROM temp_platinum_drugs)
 )
 SELECT person_id, drug_concept_id,
@@ -364,7 +382,7 @@ last_clinical_event AS (
     UNION ALL
     SELECT person_id, measurement_date         AS event_date FROM dn_measurement_20251219          WHERE person_id IN (SELECT person_id FROM cohort_ids)
     UNION ALL
-    SELECT person_id, drug_exposure_start_date AS event_date FROM dn_drug_exposure_20251219        WHERE person_id IN (SELECT person_id FROM cohort_ids)
+    SELECT person_id, drug_exposure_start_date AS event_date FROM temp_cohort_drug_exposures_all
     UNION ALL
     SELECT person_id, procedure_date           AS event_date FROM dn_procedure_occurrence_20251219 WHERE person_id IN (SELECT person_id FROM cohort_ids)
     UNION ALL
@@ -382,9 +400,7 @@ FROM last_clinical_event lce
 LEFT JOIN dn_death_20251219 d
     ON lce.person_id = d.person_id
 """)
-_followup_df = spark.table("temp_followup").cache()
-_followup_df.count()
-_followup_df.createOrReplaceTempView("temp_followup")
+# temp_followup: not cached separately — used only once in step 13 below
 
 # === 13. Combine labs with demographics, drugs, metastatic, and follow-up ===
 spark.sql(f"""
@@ -468,8 +484,8 @@ LEFT JOIN temp_followup fu
 final_df = spark.table("prostate_lab_longitudinal").cache()
 final_df.count()  # trigger materialization before remap join
 
-# Free followup cache — already consumed by the materialization above
-_followup_df.unpersist()
+# Free cohort drug cache — consumed by platinum + followup views above
+_cohort_drugs_df.unpersist()
 
 # === 16b. Remap variant measurement concept IDs to canonical IDs ===
 # This merges alternate LOINC codings into a single concept per lab type,
@@ -636,11 +652,8 @@ allowed_df = F.broadcast(spark.createDataFrame(
 final_df_w_units_filtered = (
     df_cast
     .join(allowed_df, on=["measurement_concept_id", "unit_concept_id"], how="inner")
-).cache()
-final_df_w_units_filtered.count()  # trigger materialization before conversion chain
-
-# Free final_df cache — consumed by unit filter above
-final_df.unpersist()
+)
+# No intermediate cache — flows through conversion + range filter to df_to_upload.cache()
 
 # === 18. Perform required unit conversions on subset of labs ===
 # Lookup table: (concept_id, from_unit, factor, to_unit)
@@ -1155,8 +1168,8 @@ df_to_upload.createOrReplaceTempView("final_cohort")
 row_count = df_to_upload.count()
 print(f"Cached final_cohort: {row_count:,} rows")
 
-# Free intermediate cache — fully consumed by df_to_upload
-final_df_w_units_filtered.unpersist()
+# Free base data cache — fully consumed by df_to_upload
+final_df.unpersist()
 
 # Pre-compute a patient-level view (one row per person) for demographic/treatment/follow-up queries.
 # This avoids repeated COUNT(DISTINCT person_id) over the full lab-level table.

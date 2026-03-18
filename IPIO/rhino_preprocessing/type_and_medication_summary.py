@@ -1,12 +1,8 @@
 # ===============================================================
-# IPIO Cohort Audit: Cancer Types & Discontinuation Causes
+# IPIO Cohort Audit: Cancer Types & ICI Medications
 # ===============================================================
 # Builds the IPIO cohort (cancer dx + ICI exposure) inline and
-# computes ICI treatment blocks with discontinuation classification.
-# Outputs summary statistics on cancer types and discontinuation.
-#
-# Uses the same concept sets and 90-day block logic as the main
-# IPIO preprocessing pipeline.
+# outputs summary statistics on cancer types and ICI medications.
 # ===============================================================
 
 import os
@@ -16,7 +12,7 @@ spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_
 spark.createDataFrame(pd.read_csv(os.path.join(_cwd, "concept_tables", "concept_ancestor_subset.csv"), sep="\t")).createOrReplaceTempView("concept_ancestor")
 
 # ===============================================================
-# Part 1: Concept sets (same as IPIO pipeline)
+# Part 1: Concept sets
 # ===============================================================
 
 # === 1. Cancer concepts (all descendants of malignant neoplastic disease 443392) ===
@@ -43,12 +39,26 @@ UNION ALL
 SELECT descendant_concept_id AS concept_id, 'Melanoma' AS cancer_type FROM concept_ancestor WHERE ancestor_concept_id IN (4162276,40391314)
 """)
 
+# Text-based fallback: cancer concepts whose names match NSCLC patterns
+# but weren't in the pre-expanded NSCLC concept ID list.
+# Excludes "small cell" to avoid SCLC contamination.
 spark.sql("""
 CREATE OR REPLACE TEMP VIEW cancer_concepts_labeled AS
 SELECT
     c.concept_id,
     c.concept_name,
-    COALESCE(l.cancer_type, c.concept_name) AS cancer_type
+    COALESCE(
+        l.cancer_type,
+        CASE
+            WHEN (LOWER(c.concept_name) LIKE '%lung%'
+               OR LOWER(c.concept_name) LIKE '%bronch%'
+               OR LOWER(c.concept_name) LIKE '%pulmonary%'
+               OR LOWER(c.concept_name) LIKE '%respiratory%')
+              AND LOWER(c.concept_name) NOT LIKE '%small cell%'
+            THEN 'NSCLC'
+            ELSE c.concept_name
+        END
+    ) AS cancer_type
 FROM cancer_concepts c
 LEFT JOIN cancer_labels l ON c.concept_id = l.concept_id
 """)
@@ -69,26 +79,8 @@ FROM concept_ancestor ca
 WHERE ca.ancestor_concept_id IN (SELECT concept_id FROM temp_ICI_ingredients)
 """)
 
-# === 4. Non-ICI antineoplastic drugs (ATC L01 minus ICI) ===
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW temp_antineoplastic_non_ici AS
-SELECT DISTINCT ca.descendant_concept_id AS drug_concept_id
-FROM concept_ancestor ca
-LEFT JOIN temp_ICI_concepts ici ON ca.descendant_concept_id = ici.concept_id
-WHERE ca.ancestor_concept_id = 21601387
-  AND ici.concept_id IS NULL
-""")
-
-# === 5. Systemic corticosteroids (ATC H02AB) ===
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW temp_systemic_corticosteroids AS
-SELECT DISTINCT ca.descendant_concept_id AS drug_concept_id
-FROM concept_ancestor ca
-WHERE ca.ancestor_concept_id = 21602728
-""")
-
 # ===============================================================
-# Part 2: Build cohort and treatment blocks
+# Part 2: Build cohort
 # ===============================================================
 spark.sql("USE CATALOG dfci_ia_aistudio")
 spark.sql("USE SCHEMA omop_caia_denorm")
@@ -132,110 +124,28 @@ FROM (
 WHERE rn = 1
 """)
 
+# === First ICI drug name per patient (ingredient-level) ===
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_ici_first_drug AS
+SELECT person_id, ici_drug_name
+FROM (
+    SELECT
+        de.person_id,
+        ing.concept_name AS ici_drug_name,
+        ROW_NUMBER() OVER (PARTITION BY de.person_id ORDER BY de.drug_exposure_start_date, de.drug_concept_id) AS rn
+    FROM dn_drug_exposure_20251219 de
+    JOIN temp_ICI_concepts ici ON de.drug_concept_id = ici.concept_id
+    JOIN concept_ancestor ca ON de.drug_concept_id = ca.descendant_concept_id
+    JOIN concept ing ON ca.ancestor_concept_id = ing.concept_id
+    WHERE ing.concept_id IN (SELECT concept_id FROM temp_ICI_ingredients)
+) ranked
+WHERE rn = 1
+""")
+
 _cohort = spark.table("temp_cancer_ici_patients").cache()
 cohort_size = _cohort.count()
 _cohort.createOrReplaceTempView("temp_cancer_ici_patients")
 print(f"Cohort size: {cohort_size:,} patients")
-
-# === ICI treatment blocks (90-day gap) ===
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW temp_ici_block_summary AS
-WITH ici_exposures AS (
-    SELECT de.person_id, de.drug_exposure_start_date,
-           MAX(COALESCE(de.drug_exposure_end_date, de.drug_exposure_start_date)) AS drug_exposure_end_date
-    FROM dn_drug_exposure_20251219 de
-    JOIN temp_ICI_concepts ici ON de.drug_concept_id = ici.concept_id
-    WHERE de.person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
-    GROUP BY de.person_id, de.drug_exposure_start_date
-),
-gaps AS (
-    SELECT *, CASE WHEN LAG(drug_exposure_end_date) OVER (PARTITION BY person_id ORDER BY drug_exposure_start_date)
-                        < drug_exposure_start_date - INTERVAL 90 DAY THEN 1 ELSE 0 END AS new_block_flag
-    FROM ici_exposures
-),
-blocks AS (
-    SELECT *, SUM(new_block_flag) OVER (PARTITION BY person_id ORDER BY drug_exposure_start_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS block_id
-    FROM gaps
-)
-SELECT person_id, block_id,
-       MIN(drug_exposure_start_date) AS ici_block_start_date,
-       MAX(drug_exposure_end_date) AS ici_end_date
-FROM blocks
-GROUP BY person_id, block_id
-""")
-
-# === Censor dates (last non-ICI clinical event) ===
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW temp_censor_dates AS
-WITH events AS (
-    SELECT person_id, MAX(event_date) AS last_event_date
-    FROM (
-        SELECT person_id, condition_start_date AS event_date FROM dn_condition_occurrence_20251219 WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
-        UNION ALL
-        SELECT person_id, measurement_date FROM dn_measurement_20251219 WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
-        UNION ALL
-        SELECT de.person_id, de.drug_exposure_start_date FROM dn_drug_exposure_20251219 de
-            LEFT JOIN temp_ICI_concepts ici ON de.drug_concept_id = ici.concept_id
-            WHERE ici.concept_id IS NULL AND de.person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
-        UNION ALL
-        SELECT person_id, procedure_date FROM dn_procedure_occurrence_20251219 WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
-        UNION ALL
-        SELECT person_id, visit_start_date FROM dn_visit_occurrence_20251219 WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
-    ) e
-    GROUP BY person_id
-)
-SELECT ev.person_id, ev.last_event_date AS observation_period_end_date, d.death_date
-FROM events ev
-LEFT JOIN dn_death_20251219 d ON ev.person_id = d.person_id
-""")
-
-# === Cohort drug exposures (antineoplastic + corticosteroid only) ===
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW temp_cohort_drug_exposures AS
-SELECT person_id, drug_concept_id, drug_exposure_start_date
-FROM dn_drug_exposure_20251219
-WHERE person_id IN (SELECT person_id FROM temp_cancer_ici_patients)
-  AND (drug_concept_id IN (SELECT drug_concept_id FROM temp_antineoplastic_non_ici)
-    OR drug_concept_id IN (SELECT drug_concept_id FROM temp_systemic_corticosteroids))
-""")
-
-# === Classify discontinuation per block ===
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW temp_discontinuation AS
-WITH new_therapy AS (
-    SELECT DISTINCT bs.person_id, bs.block_id
-    FROM temp_ici_block_summary bs
-    JOIN temp_cohort_drug_exposures de ON bs.person_id = de.person_id
-    JOIN temp_antineoplastic_non_ici anic ON de.drug_concept_id = anic.drug_concept_id
-    WHERE de.drug_exposure_start_date > bs.ici_end_date
-      AND de.drug_exposure_start_date <= bs.ici_end_date + INTERVAL 90 DAY
-),
-steroid_use AS (
-    SELECT DISTINCT bs.person_id, bs.block_id
-    FROM temp_ici_block_summary bs
-    JOIN temp_cohort_drug_exposures de ON bs.person_id = de.person_id
-    JOIN temp_systemic_corticosteroids cs ON de.drug_concept_id = cs.drug_concept_id
-    WHERE de.drug_exposure_start_date >= bs.ici_end_date - INTERVAL 14 DAY
-      AND de.drug_exposure_start_date <= bs.ici_end_date + INTERVAL 14 DAY
-),
-classified AS (
-    SELECT b.person_id, b.block_id, b.ici_block_start_date, b.ici_end_date,
-        CASE
-            WHEN c.death_date IS NOT NULL AND c.death_date <= b.ici_end_date THEN 'DEATH'
-            WHEN nt.person_id IS NOT NULL THEN 'PROGRESSION'
-            WHEN su.person_id IS NOT NULL THEN 'TOXICITY'
-            WHEN c.observation_period_end_date IS NOT NULL
-                 AND c.observation_period_end_date > b.ici_end_date + INTERVAL 90 DAY THEN 'COMPLETED'
-            ELSE 'CENSORED'
-        END AS ici_discontinuation_cause,
-        ROW_NUMBER() OVER (PARTITION BY b.person_id ORDER BY b.ici_block_start_date) AS block_number
-    FROM temp_ici_block_summary b
-    LEFT JOIN temp_censor_dates c ON b.person_id = c.person_id
-    LEFT JOIN new_therapy nt ON b.person_id = nt.person_id AND b.block_id = nt.block_id
-    LEFT JOIN steroid_use su ON b.person_id = su.person_id AND b.block_id = su.block_id
-)
-SELECT * FROM classified
-""")
 
 # ===============================================================
 # Part 3: Summary Statistics
@@ -253,77 +163,31 @@ spark.sql(f"""
 """).show(50, truncate=False)
 
 print("=" * 60)
-print("DISCONTINUATION CAUSE — ALL BLOCKS")
-print("=" * 60)
-spark.sql("""
-    SELECT ici_discontinuation_cause, COUNT(*) AS n_blocks,
-           ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM temp_discontinuation), 1) AS pct
-    FROM temp_discontinuation
-    GROUP BY ici_discontinuation_cause
-    ORDER BY n_blocks DESC
-""").show(truncate=False)
-
-print("=" * 60)
-print("DISCONTINUATION CAUSE — BLOCK 1 ONLY")
+print("ICI MEDICATION — OVERALL (FIRST ICI PER PATIENT)")
 print("=" * 60)
 spark.sql(f"""
-    SELECT ici_discontinuation_cause, COUNT(*) AS n_patients,
+    SELECT d.ici_drug_name, COUNT(*) AS n_patients,
            ROUND(COUNT(*) * 100.0 / {cohort_size}, 1) AS pct
-    FROM temp_discontinuation
-    WHERE block_number = 1
-    GROUP BY ici_discontinuation_cause
+    FROM temp_ici_first_drug d
+    JOIN temp_cancer_ici_patients p ON d.person_id = p.person_id
+    GROUP BY d.ici_drug_name
     ORDER BY n_patients DESC
-""").show(truncate=False)
+""").show(20, truncate=False)
 
 print("=" * 60)
-print("DISCONTINUATION CAUSE BY CANCER TYPE (BLOCK 1)")
+print("ICI MEDICATION BY CANCER TYPE")
 print("=" * 60)
 spark.sql("""
-    SELECT p.cancer_type, d.ici_discontinuation_cause,
+    SELECT p.cancer_type, d.ici_drug_name,
            COUNT(*) AS n_patients,
-           ROUND(COUNT(*) * 100.0 / ct_total.n, 1) AS pct_within_type
-    FROM temp_discontinuation d
+           ROUND(COUNT(*) * 100.0 / ct.n, 1) AS pct_within_type
+    FROM temp_ici_first_drug d
     JOIN temp_cancer_ici_patients p ON d.person_id = p.person_id
     JOIN (
         SELECT cancer_type, COUNT(*) AS n
         FROM temp_cancer_ici_patients
         GROUP BY cancer_type
-    ) ct_total ON p.cancer_type = ct_total.cancer_type
-    WHERE d.block_number = 1
-    GROUP BY p.cancer_type, d.ici_discontinuation_cause, ct_total.n
+    ) ct ON p.cancer_type = ct.cancer_type
+    GROUP BY p.cancer_type, d.ici_drug_name, ct.n
     ORDER BY p.cancer_type, n_patients DESC
-""").show(50, truncate=False)
-
-print("=" * 60)
-print("BLOCKS PER PATIENT")
-print("=" * 60)
-spark.sql(f"""
-    SELECT n_blocks, COUNT(*) AS n_patients,
-           ROUND(COUNT(*) * 100.0 / {cohort_size}, 1) AS pct
-    FROM (
-        SELECT person_id, MAX(block_number) AS n_blocks
-        FROM temp_discontinuation
-        GROUP BY person_id
-    )
-    GROUP BY n_blocks
-    ORDER BY n_blocks
-""").show(20, truncate=False)
-
-print("=" * 60)
-print("MULTI-BLOCK RATE BY CANCER TYPE")
-print("=" * 60)
-spark.sql("""
-    SELECT p.cancer_type,
-           COUNT(DISTINCT p.person_id) AS n_patients,
-           SUM(CASE WHEN blk.n_blocks > 1 THEN 1 ELSE 0 END) AS n_multi_block,
-           ROUND(SUM(CASE WHEN blk.n_blocks > 1 THEN 1 ELSE 0 END) * 100.0
-                 / COUNT(DISTINCT p.person_id), 1) AS pct_multi_block
-    FROM temp_cancer_ici_patients p
-    JOIN (
-        SELECT person_id, MAX(block_number) AS n_blocks
-        FROM temp_discontinuation
-        GROUP BY person_id
-    ) blk ON p.person_id = blk.person_id
-    GROUP BY p.cancer_type
-    ORDER BY n_patients DESC
 """).show(50, truncate=False)
