@@ -110,6 +110,30 @@ FROM concept_ancestor ca
 WHERE ca.ancestor_concept_id IN (SELECT concept_id FROM temp_ICI_ingredients)
 """)
 
+# === 4c. Map ICI drug products to their broad mechanism class ===
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW temp_ici_drug_class AS
+SELECT DISTINCT
+    ca.descendant_concept_id AS drug_concept_id,
+    cl.ici_class
+FROM concept_ancestor ca
+JOIN (
+    SELECT concept_id, ici_class FROM VALUES
+      (45892628, 'PD-1'),    -- Nivolumab
+      (45775965, 'PD-1'),    -- Pembrolizumab
+      (42629079, 'PD-L1'),   -- Atezolizumab
+      (1594034,  'PD-L1'),   -- Durvalumab
+      (40238188, 'CTLA-4'),  -- Ipilimumab
+      (35200783, 'PD-1'),    -- Cemiplimab
+      (1593273,  'PD-L1'),   -- Avelumab
+      (741851,   'CTLA-4'),  -- Tremelimumab
+      (1536789,  'PD-1'),    -- Dostarlimab
+      (1302024,  'PD-1'),    -- Retifanlimab
+      (747052,   'PD-1')     -- Toripalimab
+    AS t(concept_id, ici_class)
+) cl ON ca.ancestor_concept_id = cl.concept_id
+""")
+
 # === 5. Non-ICI antineoplastic drug concepts (ATC L01 descendants, excluding ICI) ===
 # Used to detect therapy switches (progression signal) after ICI discontinuation.
 # ATC L01 "Antineoplastic agents" = concept_id 21601387
@@ -252,19 +276,20 @@ GROUP BY person_id, cancer_type
 
 # === 9. Identify ICI treatments ===
 # FIX: Deduplicate to one row per patient by picking the earliest ICI exposure.
-spark.sql(f"""
+# Uses the broad mechanism class (PD-1, PD-L1, CTLA-4) instead of the specific drug product name.
+spark.sql("""
 CREATE OR REPLACE TEMP VIEW temp_ici_treatment AS
 SELECT
     person_id,
     ici_start_date,
     drug_concept_id,
-    ici_name
+    ici_type
 FROM (
     SELECT
         de.person_id,
         de.drug_exposure_start_date AS ici_start_date,
         de.drug_concept_id,
-        c.concept_name AS ici_name,
+        dc.ici_class AS ici_type,
         ROW_NUMBER() OVER (
             PARTITION BY de.person_id
             ORDER BY de.drug_exposure_start_date, de.drug_concept_id
@@ -272,8 +297,8 @@ FROM (
     FROM dn_drug_exposure_20251219 de
     JOIN temp_ICI_concepts ici
         ON de.drug_concept_id = ici.concept_id
-    JOIN {CONCEPT_TABLE} c
-        ON de.drug_concept_id = c.concept_id
+    LEFT JOIN temp_ici_drug_class dc
+        ON de.drug_concept_id = dc.drug_concept_id
 ) ranked
 WHERE rn = 1
 """)
@@ -297,7 +322,7 @@ FROM (
         dx.cancer_subtype,
         dx.diagnosis_date,
         ici.ici_start_date,
-        ici.ici_name AS ici_type,
+        ici.ici_type,
         ROW_NUMBER() OVER (
             PARTITION BY dx.person_id
             ORDER BY dx.diagnosis_date, dx.cancer_type
@@ -416,12 +441,10 @@ SELECT /*+ BROADCAST(p), BROADCAST(f), BROADCAST(per), BROADCAST(c), BROADCAST(l
     p.cancer_type,
     p.cancer_subtype,
     p.diagnosis_date,
-    p.ici_start_date,
     p.ici_type,
 
     -- Follow-up
     f.last_followup_date,
-    f.death_date,
     f.is_deceased,
 
     -- Lab info
@@ -966,7 +989,7 @@ final_df_w_conversions = (
     )
     .drop("conv_concept_id", "conv_from_unit", "conv_factor", "conv_to_unit")
     .withColumn(
-        "lab_value_final",
+        "lab_value",
         F.when(F.col("lab_values_converted").isNotNull(), F.col("lab_values_converted"))
          .otherwise(F.col("lab_value"))
     )
@@ -1001,9 +1024,9 @@ final_df_w_conversions = (
 )
 
 # === 16b. Exclude null/NaN and non-physiologic lab values ===
-# 1) Remove rows where lab_value_final is null or NaN
+# 1) Remove rows where lab_value is null or NaN
 final_df_w_conversions = final_df_w_conversions.filter(
-    F.col("lab_value_final").isNotNull() & ~F.isnan(F.col("lab_value_final"))
+    F.col("lab_value").isNotNull() & ~F.isnan(F.col("lab_value"))
 )
 
 # 2) Remove values outside physiologic bounds (per measurement concept, after unit conversion)
@@ -1094,8 +1117,8 @@ final_df_w_conversions = (
     .filter(
         F.col("physio_min").isNull()
         | (
-            (F.col("lab_value_final") >= F.col("physio_min"))
-            & (F.col("lab_value_final") <= F.col("physio_max"))
+            (F.col("lab_value") >= F.col("physio_min"))
+            & (F.col("lab_value") <= F.col("physio_max"))
         )
     )
     .drop("physio_min", "physio_max")
@@ -1108,10 +1131,6 @@ df_to_upload = (
     .withColumn(
         "days_relative_to_diagnosis",
         F.datediff(F.col("measurement_date"), F.col("diagnosis_date"))
-    )
-    .withColumn(
-        "days_relative_to_ici_start",
-        F.datediff(F.col("measurement_date"), F.col("ici_start_date"))
     )
     .withColumn(
         "days_relative_to_ici_discontinuation",
@@ -1136,7 +1155,7 @@ df_to_upload = (
     .withColumn(
         "time_to_death_or_censor",
         F.datediff(
-            F.coalesce(F.col("death_date"), F.col("last_followup_date")),
+            F.col("last_followup_date"),
             F.col("diagnosis_date")
         )
     )
@@ -1145,6 +1164,8 @@ df_to_upload = (
         "unit_concept_id", "unit_converted_id",
         "lab_value", "lab_values_converted", "lab_unit_name",
     )
+    .withColumnRenamed("lab_value", "lab_value")
+    .withColumnRenamed("unit_converted_name", "lab_unit")
 )
 
 # === 18. Enforce canonical types + schema assertions ===
@@ -1159,22 +1180,19 @@ int_cols = [
     "time_on_ici",
     "time_to_death_or_censor",
     "days_relative_to_diagnosis",
-    "days_relative_to_ici_start",
     "days_relative_to_ici_discontinuation",
     "days_relative_to_last_followup",
 ]
 
 float_cols = [
-    "lab_value_final",
+    "lab_value",
 ]
 
 date_cols = [
     "diagnosis_date",
-    "ici_start_date",
     "ici_block_start_date",
     "ici_discontinuation_date",
     "last_followup_date",
-    "death_date",
     "measurement_date",
 ]
 
@@ -1186,66 +1204,44 @@ string_cols = [
     "cancer_subtype",
     "ici_type",
     "lab_name",
-    "unit_converted_name",
+    "lab_unit",
     "ici_discontinuation_cause",
 ]
 
-# ---- 1) Canonical casts ----
-# Single select() replaces iterative withColumn() loops — each loop iteration
-# added a new plan node; one select() emits a single projection stage.
-_cast_map = (
-    {c: "bigint"  for c in int_cols}
-    | {c: "double" for c in float_cols}
-    | {c: "date"   for c in date_cols}
-    | {c: "string" for c in string_cols}
-)
-df_to_upload = df_to_upload.select(
-    *[F.col(c).cast(_cast_map[c]).alias(c) if c in _cast_map else F.col(c)
-      for c in df_to_upload.columns]
-)
-
-# ---- 2) Column presence assertion ----
-# FIX: added death_date
+# ---- 1) Column order + presence assertion ----
 expected_columns = [
-    # IDs / demographics
+    # Patient & Demographics
     "person_id",
     "gender",
     "race",
     "ethnicity",
     "age_at_diagnosis",
 
-    # Cancer / ICI info
+    # Clinical Timeline
     "cancer_type",
     "cancer_subtype",
     "diagnosis_date",
-    "ici_start_date",
     "ici_type",
-
-    # Treatment block info
     "block_number",
     "ici_block_start_date",
     "ici_discontinuation_date",
     "ici_discontinuation_cause",
-
-    # Follow-up & death
     "last_followup_date",
-    "death_date",
     "is_deceased",
 
-    # Time-to-event variables
+    # Lab Measurements
+    "lab_name",
+    "measurement_date",
+    "lab_value",
+    "lab_unit",
+
+    # Derived — Patient-level time-to-event
     "time_on_ici",
     "event_ici_discontinued",
     "time_to_death_or_censor",
 
-    # Lab info
-    "lab_name",
-    "measurement_date",
-    "unit_converted_name",
-    "lab_value_final",
-
-    # Lab-level relative timing
+    # Derived — Lab-level relative timing
     "days_relative_to_diagnosis",
-    "days_relative_to_ici_start",
     "days_relative_to_ici_discontinuation",
     "days_relative_to_last_followup",
 ]
@@ -1256,6 +1252,19 @@ extra   = set(actual_columns) - set(expected_columns)
 
 assert not missing, f"df_to_upload is missing columns: {sorted(missing)}"
 assert not extra,   f"df_to_upload has unexpected extra columns: {sorted(extra)}"
+
+# ---- 2) Canonical casts + reorder ----
+# Single select() casts types and enforces column order in one projection stage.
+_cast_map = (
+    {c: "bigint"  for c in int_cols}
+    | {c: "double" for c in float_cols}
+    | {c: "date"   for c in date_cols}
+    | {c: "string" for c in string_cols}
+)
+df_to_upload = df_to_upload.select(
+    *[F.col(c).cast(_cast_map[c]).alias(c) if c in _cast_map else F.col(c)
+      for c in expected_columns]
+)
 
 # ---- 3) Type assertions: all int-like are BIGINT, all float-like are DOUBLE ----
 schema_dict = {f.name: f.dataType for f in df_to_upload.schema.fields}
@@ -1312,19 +1321,18 @@ patient_df = spark.sql("""
         FIRST(cancer_type) AS cancer_type,
         FIRST(cancer_subtype) AS cancer_subtype,
         FIRST(diagnosis_date) AS diagnosis_date,
-        FIRST(ici_start_date) AS ici_start_date,
         FIRST(ici_type) AS ici_type,
         FIRST(ici_block_start_date) AS ici_block_start_date,
         FIRST(ici_discontinuation_date) AS ici_discontinuation_date,
         FIRST(ici_discontinuation_cause) AS ici_discontinuation_cause,
         FIRST(last_followup_date) AS last_followup_date,
-        FIRST(death_date) AS death_date,
         FIRST(is_deceased) AS is_deceased,
         FIRST(time_on_ici) AS time_on_ici,
         FIRST(event_ici_discontinued) AS event_ici_discontinued,
         FIRST(time_to_death_or_censor) AS time_to_death_or_censor
     FROM final_cohort
     GROUP BY person_id, block_number
+    ORDER BY person_id, block_number
 """)
 patient_df.cache()
 patient_df.createOrReplaceTempView("patient_cohort")
@@ -1452,9 +1460,9 @@ spark.sql("""
     FROM (
         SELECT
             person_id,
-            DATEDIFF(ici_start_date, diagnosis_date) AS days_dx_to_ici
+            DATEDIFF(ici_block_start_date, diagnosis_date) AS days_dx_to_ici
         FROM patient_cohort
-        WHERE ici_start_date IS NOT NULL AND block_number = 1
+        WHERE ici_block_start_date IS NOT NULL AND block_number = 1
     )
 """).show(truncate=False)
 
@@ -1596,15 +1604,15 @@ spark.sql(f"""
     SELECT
         lab_name,
         COUNT(*) AS n_records,
-        ROUND(AVG(lab_value_final), 2) AS mean_value,
-        ROUND(STDDEV(lab_value_final), 2) AS std_value,
-        ROUND(PERCENTILE_APPROX(lab_value_final, 0.25), 2) AS q1_value,
-        ROUND(PERCENTILE_APPROX(lab_value_final, 0.50), 2) AS median_value,
-        ROUND(PERCENTILE_APPROX(lab_value_final, 0.75), 2) AS q3_value,
-        ROUND(MIN(lab_value_final), 2) AS min_value,
-        ROUND(MAX(lab_value_final), 2) AS max_value
+        ROUND(AVG(lab_value), 2) AS mean_value,
+        ROUND(STDDEV(lab_value), 2) AS std_value,
+        ROUND(PERCENTILE_APPROX(lab_value, 0.25), 2) AS q1_value,
+        ROUND(PERCENTILE_APPROX(lab_value, 0.50), 2) AS median_value,
+        ROUND(PERCENTILE_APPROX(lab_value, 0.75), 2) AS q3_value,
+        ROUND(MIN(lab_value), 2) AS min_value,
+        ROUND(MAX(lab_value), 2) AS max_value
     FROM final_cohort
-    WHERE lab_value_final IS NOT NULL
+    WHERE lab_value IS NOT NULL
     GROUP BY lab_name
     ORDER BY n_records DESC
 """).show(100, truncate=False)
@@ -1675,26 +1683,23 @@ spark.sql("""
         SUM(CASE WHEN age_at_diagnosis IS NULL THEN 1 ELSE 0 END) AS null_age_at_diagnosis,
         SUM(CASE WHEN diagnosis_date IS NULL THEN 1 ELSE 0 END) AS null_diagnosis_date,
         SUM(CASE WHEN cancer_type IS NULL THEN 1 ELSE 0 END) AS null_cancer_type,
-        SUM(CASE WHEN ici_start_date IS NULL THEN 1 ELSE 0 END) AS null_ici_start_date,
+        SUM(CASE WHEN cancer_subtype IS NULL THEN 1 ELSE 0 END) AS null_cancer_subtype,
+        SUM(CASE WHEN ici_type IS NULL THEN 1 ELSE 0 END) AS null_ici_type,
         SUM(CASE WHEN block_number IS NULL THEN 1 ELSE 0 END) AS null_block_number,
         SUM(CASE WHEN ici_block_start_date IS NULL THEN 1 ELSE 0 END) AS null_ici_block_start_date,
-        SUM(CASE WHEN ici_type IS NULL THEN 1 ELSE 0 END) AS null_ici_type,
         SUM(CASE WHEN ici_discontinuation_date IS NULL THEN 1 ELSE 0 END) AS null_ici_discontinuation_date,
         SUM(CASE WHEN ici_discontinuation_cause IS NULL THEN 1 ELSE 0 END) AS null_ici_discontinuation_cause,
         SUM(CASE WHEN last_followup_date IS NULL THEN 1 ELSE 0 END) AS null_last_followup_date,
-        SUM(CASE WHEN death_date IS NULL THEN 1 ELSE 0 END) AS null_death_date,
+        SUM(CASE WHEN is_deceased IS NULL THEN 1 ELSE 0 END) AS null_is_deceased,
         SUM(CASE WHEN lab_name IS NULL THEN 1 ELSE 0 END) AS null_lab_name,
         SUM(CASE WHEN measurement_date IS NULL THEN 1 ELSE 0 END) AS null_measurement_date,
-        SUM(CASE WHEN lab_value_final IS NULL THEN 1 ELSE 0 END) AS null_lab_value_final,
-        SUM(CASE WHEN unit_converted_name IS NULL THEN 1 ELSE 0 END) AS null_unit_converted_name,
+        SUM(CASE WHEN lab_value IS NULL THEN 1 ELSE 0 END) AS null_lab_value,
+        SUM(CASE WHEN lab_unit IS NULL THEN 1 ELSE 0 END) AS null_lab_unit,
         SUM(CASE WHEN time_on_ici IS NULL THEN 1 ELSE 0 END) AS null_time_on_ici,
         SUM(CASE WHEN event_ici_discontinued IS NULL THEN 1 ELSE 0 END) AS null_event_ici_discontinued,
         SUM(CASE WHEN time_to_death_or_censor IS NULL THEN 1 ELSE 0 END) AS null_time_to_death_or_censor,
         SUM(CASE WHEN days_relative_to_diagnosis IS NULL THEN 1 ELSE 0 END) AS null_days_rel_diagnosis,
-        SUM(CASE WHEN days_relative_to_ici_start IS NULL THEN 1 ELSE 0 END) AS null_days_rel_ici_start,
         SUM(CASE WHEN days_relative_to_ici_discontinuation IS NULL THEN 1 ELSE 0 END) AS null_days_rel_ici_discontinuation,
-        SUM(CASE WHEN days_relative_to_last_followup IS NULL THEN 1 ELSE 0 END) AS null_days_rel_followup,
-        SUM(CASE WHEN cancer_subtype IS NULL THEN 1 ELSE 0 END) AS null_cancer_subtype,
-        SUM(CASE WHEN is_deceased IS NULL THEN 1 ELSE 0 END) AS null_is_deceased
+        SUM(CASE WHEN days_relative_to_last_followup IS NULL THEN 1 ELSE 0 END) AS null_days_rel_followup
     FROM final_cohort
 """).show(truncate=False)
