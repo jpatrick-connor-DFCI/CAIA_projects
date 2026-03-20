@@ -1162,9 +1162,8 @@ df_to_upload = (
     .drop(
         "measurement_concept_id",
         "unit_concept_id", "unit_converted_id",
-        "lab_value", "lab_values_converted", "lab_unit_name",
+        "lab_values_converted", "lab_unit_name",
     )
-    .withColumnRenamed("lab_value", "lab_value")
     .withColumnRenamed("unit_converted_name", "lab_unit")
 )
 
