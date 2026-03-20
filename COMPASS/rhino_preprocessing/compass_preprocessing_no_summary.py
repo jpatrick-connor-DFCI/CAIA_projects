@@ -352,22 +352,7 @@ FROM ranked
 WHERE rn = 1
 """)
 
-# === 12b. Earliest metastatic condition per patient ===
-# Captures all descendants of "Secondary malignant neoplasm" (432851).
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW temp_metastatic_disease AS
-SELECT
-    co.person_id,
-    MIN(co.condition_start_date) AS metastasis_date
-FROM dn_condition_occurrence_20251219 co
-JOIN concept_ancestor ca
-    ON co.condition_concept_id = ca.descendant_concept_id
-WHERE ca.ancestor_concept_id = 432851
-  AND co.person_id IN (SELECT person_id FROM temp_eligible_patients)
-GROUP BY co.person_id
-""")
-
-# === 12c. Last contact / follow-up per patient ===
+# === 12b. Last contact / follow-up per patient ===
 #     Derived from latest event across all denormalized tables + death.
 #     Computed and cached before step 13 so it can be broadcast-joined there.
 spark.sql("""
@@ -392,8 +377,6 @@ last_clinical_event AS (
 )
 SELECT
     lce.person_id,
-    lce.last_event_date,
-    d.death_date,
     COALESCE(d.death_date, lce.last_event_date) AS last_followup_date,
     CASE WHEN d.death_date IS NOT NULL THEN 1 ELSE 0 END AS is_deceased
 FROM last_clinical_event lce
@@ -402,15 +385,12 @@ LEFT JOIN dn_death_20251219 d
 """)
 # temp_followup: not cached separately — used only once in step 13 below
 
-# === 13. Combine labs with demographics, drugs, metastatic, and follow-up ===
+# === 13. Combine labs with demographics, drugs, and follow-up ===
 spark.sql(f"""
 CREATE OR REPLACE TEMP VIEW prostate_lab_longitudinal AS
-SELECT /*+ BROADCAST(p), BROADCAST(f), BROADCAST(per), BROADCAST(dp), BROADCAST(fe), BROADCAST(d), BROADCAST(met), BROADCAST(c), BROADCAST(lc), BROADCAST(fu) */
+SELECT /*+ BROADCAST(p), BROADCAST(f), BROADCAST(per), BROADCAST(dp), BROADCAST(fe), BROADCAST(c), BROADCAST(lc), BROADCAST(fu) */
+  -- ==== Patient & Demographics ====
   p.person_id,
-  f.prostate_cancer_diagnosis_date,
-
-  -- ==== Demographics ====
-  per.gender_concept_name  AS gender,
   per.race_concept_name  AS race,
   per.ethnicity_concept_name  AS ethnicity,
   FLOOR(
@@ -428,27 +408,20 @@ SELECT /*+ BROADCAST(p), BROADCAST(f), BROADCAST(per), BROADCAST(dp), BROADCAST(
     ) / 365.25
   ) AS age_at_diagnosis,
 
-  -- ==== Lab info ====
+  -- ==== Clinical Timeline ====
+  f.prostate_cancer_diagnosis_date AS diagnosis_date,
+  dp.drug_type AS platinum_type,
+  fe.first_drug_exposure_start_date AS platinum_start_date,
+  fu.last_followup_date,
+  fu.is_deceased,
+
+  -- ==== Lab Measurements ====
   m.measurement_concept_id,
   c.concept_name AS lab_name,
   m.measurement_date,
   m.value_as_number AS lab_value,
   m.unit_concept_id,
-  m.unit_concept_name AS lab_unit_name,
-
-  -- ==== Drug info ====
-  d.concept_name AS drug_name,
-  dp.drug_type,
-  fe.first_drug_exposure_start_date AS drug_initiation_date,
-
-  -- ==== Metastatic disease ====
-  met.metastasis_date,
-  CASE WHEN met.metastasis_date IS NOT NULL THEN 1 ELSE 0 END AS is_metastatic,
-
-  -- ==== Follow-up ====
-  fu.last_followup_date,
-  fu.death_date,
-  fu.is_deceased
+  m.unit_concept_name AS lab_unit_name
 
 FROM temp_eligible_patients p
 JOIN first_prostate_diagnosis f
@@ -466,13 +439,8 @@ LEFT JOIN {CONCEPT_TABLE} c
 -- Drugs
 LEFT JOIN first_platinum_exposure fe
   ON p.person_id = fe.person_id
-LEFT JOIN {CONCEPT_TABLE} d
-  ON fe.drug_concept_id = d.concept_id
 LEFT JOIN temp_platinum_drugs dp
   ON fe.drug_concept_id = dp.drug_concept_id
--- Metastatic disease
-LEFT JOIN temp_metastatic_disease met
-  ON p.person_id = met.person_id
 -- Follow-up (cached)
 LEFT JOIN temp_followup fu
   ON p.person_id = fu.person_id
@@ -829,7 +797,7 @@ final_df_w_conversions = (
     .drop("conv_concept_id", "conv_from_unit", "conv_factor", "conv_to_unit")
     # single "final" lab value: converted where available, otherwise original
     .withColumn(
-        "lab_value_final",
+        "lab_value",
         F.when(F.col("lab_values_converted").isNotNull(), F.col("lab_values_converted"))
          .otherwise(F.col("lab_value"))
     )
@@ -863,9 +831,9 @@ final_df_w_conversions = (
 )
 
 # === 18b. Exclude null/NaN and non-physiologic lab values ===
-# 1) Remove rows where lab_value_final is null or NaN
+# 1) Remove rows where lab_value is null or NaN
 final_df_w_conversions = final_df_w_conversions.filter(
-    F.col("lab_value_final").isNotNull() & ~F.isnan(F.col("lab_value_final"))
+    F.col("lab_value").isNotNull() & ~F.isnan(F.col("lab_value"))
 )
 
 # 2) Remove values outside physiologic bounds (per measurement concept, after unit conversion)
@@ -968,8 +936,8 @@ final_df_w_conversions = (
     .filter(
         F.col("physio_min").isNull()
         | (
-            (F.col("lab_value_final") >= F.col("physio_min"))
-            & (F.col("lab_value_final") <= F.col("physio_max"))
+            (F.col("lab_value") >= F.col("physio_min"))
+            & (F.col("lab_value") <= F.col("physio_max"))
         )
     )
     .drop("physio_min", "physio_max")
@@ -981,41 +949,33 @@ df_to_upload = (
     # --- Lab-level relative timing ---
     .withColumn(
         "days_relative_to_diagnosis",
-        F.datediff(F.col("measurement_date"), F.col("prostate_cancer_diagnosis_date"))
+        F.datediff(F.col("measurement_date"), F.col("diagnosis_date"))
     )
     .withColumn(
-        "days_relative_to_platinum_chemo_start",
-        F.datediff(F.col("measurement_date"), F.col("drug_initiation_date"))
+        "days_relative_to_platinum_start",
+        F.datediff(F.col("measurement_date"), F.col("platinum_start_date"))
     )
     .withColumn(
         "days_relative_to_last_followup",
         F.datediff(F.col("measurement_date"), F.col("last_followup_date"))
     )
-    # --- Metastatic disease timing ---
-    .withColumn(
-        "days_diagnosis_to_metastasis",
-        F.when(
-            F.col("metastasis_date").isNotNull(),
-            F.datediff(F.col("metastasis_date"), F.col("prostate_cancer_diagnosis_date"))
-        ).otherwise(F.lit(None).cast("int"))
-    )
     # --- Patient-level time-to-event variables ---
     .withColumn(
         "event_platinum",
-        F.when(F.col("drug_initiation_date").isNotNull(), F.lit(1)).otherwise(F.lit(0))
+        F.when(F.col("platinum_start_date").isNotNull(), F.lit(1)).otherwise(F.lit(0))
     )
     .withColumn(
         "time_to_platinum_or_censor",
         F.datediff(
-            F.coalesce(F.col("drug_initiation_date"), F.col("last_followup_date")),
-            F.col("prostate_cancer_diagnosis_date")
+            F.coalesce(F.col("platinum_start_date"), F.col("last_followup_date")),
+            F.col("diagnosis_date")
         )
     )
     .withColumn(
         "time_to_death_or_censor",
         F.datediff(
-            F.coalesce(F.col("death_date"), F.col("last_followup_date")),
-            F.col("prostate_cancer_diagnosis_date")
+            F.col("last_followup_date"),
+            F.col("diagnosis_date")
         )
     )
     .drop(
@@ -1023,6 +983,8 @@ df_to_upload = (
         "unit_concept_id", "unit_converted_id",
         "lab_value", "lab_values_converted", "lab_unit_name",
     )
+    .withColumnRenamed("lab_value", "lab_value")
+    .withColumnRenamed("unit_converted_name", "lab_unit")
 )
 
 # === 20. Enforce canonical types + schema assertions ===
@@ -1032,94 +994,62 @@ int_cols = [
     "person_id",
     "age_at_diagnosis",
     "is_deceased",
-    "is_metastatic",
     "event_platinum",
     "time_to_platinum_or_censor",
     "time_to_death_or_censor",
-    "days_diagnosis_to_metastasis",
     "days_relative_to_diagnosis",
-    "days_relative_to_platinum_chemo_start",
+    "days_relative_to_platinum_start",
     "days_relative_to_last_followup",
 ]
 
 float_cols = [
-    "lab_value_final",
+    "lab_value",
 ]
 
 date_cols = [
-    "prostate_cancer_diagnosis_date",
-    "metastasis_date",
+    "diagnosis_date",
     "measurement_date",
-    "drug_initiation_date",
+    "platinum_start_date",
     "last_followup_date",
-    "death_date",
 ]
 
 string_cols = [
-    "gender",
     "race",
     "ethnicity",
     "lab_name",
-    "unit_converted_name",
-    "drug_name",
-    "drug_type",
+    "lab_unit",
+    "platinum_type",
 ]
 
-# ---- 1) Canonical casts ----
-# Single select() replaces iterative withColumn() loops — each loop iteration
-# added a new plan node; one select() emits a single projection stage.
-_cast_map = (
-    {c: "bigint"  for c in int_cols}
-    | {c: "double" for c in float_cols}
-    | {c: "date"   for c in date_cols}
-    | {c: "string" for c in string_cols}
-)
-df_to_upload = df_to_upload.select(
-    *[F.col(c).cast(_cast_map[c]).alias(c) if c in _cast_map else F.col(c)
-      for c in df_to_upload.columns]
-)
-
-# ---- 2) Column presence assertion ----
+# ---- 1) Column order + presence assertion ----
 expected_columns = [
-    # IDs / keys
+    # Patient & Demographics
     "person_id",
-    "prostate_cancer_diagnosis_date",
-
-    # Demographics
-    "gender",
     "race",
     "ethnicity",
     "age_at_diagnosis",
 
-    # Lab info
-    "lab_name",
-    "measurement_date",
-    "unit_converted_name",
-    "lab_value_final",
-
-    # Drug info
-    "drug_name",
-    "drug_type",
-    "drug_initiation_date",
-
-    # Follow-up
+    # Clinical Timeline
+    "diagnosis_date",
+    "platinum_type",
+    "platinum_start_date",
     "last_followup_date",
-    "death_date",
     "is_deceased",
 
-    # Metastatic disease
-    "metastasis_date",
-    "is_metastatic",
-    "days_diagnosis_to_metastasis",
+    # Lab Measurements
+    "lab_name",
+    "measurement_date",
+    "lab_value",
+    "lab_unit",
 
-    # Time-to-event variables
+    # Derived — Patient-level time-to-event
     "event_platinum",
     "time_to_platinum_or_censor",
     "time_to_death_or_censor",
 
-    # Lab-level relative time variables
+    # Derived — Lab-level relative timing
     "days_relative_to_diagnosis",
-    "days_relative_to_platinum_chemo_start",
+    "days_relative_to_platinum_start",
     "days_relative_to_last_followup",
 ]
 
@@ -1129,6 +1059,19 @@ extra   = set(actual_columns) - set(expected_columns)
 
 assert not missing, f"df_to_upload is missing columns: {sorted(missing)}"
 assert not extra,   f"df_to_upload has unexpected extra columns: {sorted(extra)}"
+
+# ---- 2) Canonical casts + reorder ----
+# Single select() casts types and enforces column order in one projection stage.
+_cast_map = (
+    {c: "bigint"  for c in int_cols}
+    | {c: "double" for c in float_cols}
+    | {c: "date"   for c in date_cols}
+    | {c: "string" for c in string_cols}
+)
+df_to_upload = df_to_upload.select(
+    *[F.col(c).cast(_cast_map[c]).alias(c) if c in _cast_map else F.col(c)
+      for c in expected_columns]
+)
 
 # ---- 3) Type assertions: all int-like are BIGINT, all float-like are DOUBLE ----
 schema_dict = {f.name: f.dataType for f in df_to_upload.schema.fields}

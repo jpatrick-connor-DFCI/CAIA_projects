@@ -989,7 +989,7 @@ final_df_w_conversions = (
     )
     .drop("conv_concept_id", "conv_from_unit", "conv_factor", "conv_to_unit")
     .withColumn(
-        "lab_value_final",
+        "lab_value",
         F.when(F.col("lab_values_converted").isNotNull(), F.col("lab_values_converted"))
          .otherwise(F.col("lab_value"))
     )
@@ -1024,9 +1024,9 @@ final_df_w_conversions = (
 )
 
 # === 16b. Exclude null/NaN and non-physiologic lab values ===
-# 1) Remove rows where lab_value_final is null or NaN
+# 1) Remove rows where lab_value is null or NaN
 final_df_w_conversions = final_df_w_conversions.filter(
-    F.col("lab_value_final").isNotNull() & ~F.isnan(F.col("lab_value_final"))
+    F.col("lab_value").isNotNull() & ~F.isnan(F.col("lab_value"))
 )
 
 # 2) Remove values outside physiologic bounds (per measurement concept, after unit conversion)
@@ -1117,8 +1117,8 @@ final_df_w_conversions = (
     .filter(
         F.col("physio_min").isNull()
         | (
-            (F.col("lab_value_final") >= F.col("physio_min"))
-            & (F.col("lab_value_final") <= F.col("physio_max"))
+            (F.col("lab_value") >= F.col("physio_min"))
+            & (F.col("lab_value") <= F.col("physio_max"))
         )
     )
     .drop("physio_min", "physio_max")
@@ -1164,7 +1164,7 @@ df_to_upload = (
         "unit_concept_id", "unit_converted_id",
         "lab_value", "lab_values_converted", "lab_unit_name",
     )
-    .withColumnRenamed("lab_value_final", "lab_value")
+    .withColumnRenamed("lab_value", "lab_value")
     .withColumnRenamed("unit_converted_name", "lab_unit")
 )
 
