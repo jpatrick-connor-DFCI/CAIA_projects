@@ -31,10 +31,13 @@ This is medical documentation, not patient-generated content.
 """
 synthesized_responses = []
 candidate_LLM_text_df = pd.read_csv(os.path.join(DATA_PATH, 'LLM_candidate_text_data.csv'))
-for cur_mrn in candidate_LLM_text_df['DFCI_MRN'].unique():
+unique_mrns = candidate_LLM_text_df['DFCI_MRN'].unique()
+for i, cur_mrn in enumerate(unique_mrns):
     mrn_df = candidate_LLM_text_df.loc[candidate_LLM_text_df['DFCI_MRN'] == cur_mrn]
 
+    completed_runs = 0; failed_runs = 0;
     mrn_responses = []
+    print(f'Starting Patient {i + 1} out of {len(unique_mrns)}:')
     for idx, row in tqdm(list(mrn_df.iterrows())):
         try:
             response = client.chat.completions.create(model=model_name, 
@@ -42,10 +45,15 @@ for cur_mrn in candidate_LLM_text_df['DFCI_MRN'].unique():
                                                                 {'role': 'user', 'content': "Note Date: " + row['EVENT_DATE'] + clinical_wrapper + " Note Text: " + row['CLINICAL_TEXT']}], 
                                                     temperature=0).choices[0].message.content.strip()
             mrn_responses.append(json.loads(response))
+            completed_runs += 1
         except:
+            failed_runs += 1
             continue
-    synthesized_responses.append(json.loads(client.chat.completions.create(model=model_name, messages=[{'role' : 'system', 'content' : prompt.prompt_patient_synthesis}, 
-                                                                                    {'role' : 'user', 'content' : mrn_responses}]).choices[0].message.content.strip()))
+    px_result = json.loads(client.chat.completions.create(model=model_name, messages=[{'role' : 'system', 'content' : prompt.prompt_platinum_classification},
+                                                                                      {'role' : 'user', 'content' : json.dumps(mrn_responses)}],
+                                                          temperature=0).choices[0].message.content.strip())
+    px_result['DFCI_MRN'] = int(cur_mrn)
+    synthesized_responses.append(px_result)
     
-synthesized_df = pd.DataFrame([item for sublist in synthesized_responses for item in sublist])
-synthesized_df.to_csv(os.path.join(DATA_PATH, 'LLM_generated_labels.csv'), index=False)
+synthesized_df = pd.DataFrame(synthesized_responses)
+synthesized_df.to_csv(os.path.join(DATA_PATH, 'LLM_generated_labels.tsv'), index=False, sep='\t')
