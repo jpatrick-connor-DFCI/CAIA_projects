@@ -39,6 +39,7 @@ A JSON array of per-note extractions in chronological order by `note_date`.
 - Base answers ONLY on what is explicitly documented. Never infer or speculate.
 - For histopathology, use the most recent note that mentions histology.
 - For dates, use the earliest explicit mention across notes.
+- If the histology is neuroendocrine, small_cell, or mixed, OR if transformation from adenocarcinoma to any of those subtypes occurred, then `platinum_reason` MUST be "aggressive_variant". The aggressive subtype itself is the reason for platinum use.
 - Use null when information is not available.
 
 ## OUTPUT FORMAT
@@ -58,7 +59,6 @@ Return ONLY valid JSON. No markdown fencing, no commentary.
 }
 
 Field `platinum_reason` must be one of:
-  - "histologic_transformation"
   - "aggressive_variant"
   - "disease_progression"
   - "biomarker_driven"

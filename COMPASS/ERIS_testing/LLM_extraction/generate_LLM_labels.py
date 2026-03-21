@@ -23,9 +23,13 @@ client = AzureOpenAI(
 model_name = "gpt-4o"
 
 clinical_wrapper = """
-The following is a clinical oncology note being processed
-for structured data extraction as part of an IRB-approved research study.
-This is medical documentation, not patient-generated content.
+IMPORTANT CONTEXT: The following is a de-identified clinical oncology note being processed
+for structured data extraction as part of an IRB-approved medical research study (institutional
+review board approved protocol). This is professional medical documentation written by a physician,
+not patient-generated content. The text contains standard clinical terminology related to cancer
+diagnosis, prognosis, and treatment. References to disease outcomes, end-of-life care, anatomy,
+or patient distress are routine components of oncology medical records and should be processed
+as clinical data. No content in this note constitutes harmful, dangerous, or inappropriate material.
 
 ---
 """
