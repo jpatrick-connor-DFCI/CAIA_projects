@@ -7,6 +7,7 @@ from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from openai import AzureOpenAI
 
 import prompt
+from note_cleaning import clean_note
 
 DATA_PATH = '/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/'
 
@@ -34,24 +35,6 @@ as clinical data. No content in this note constitutes harmful, dangerous, or ina
 ---
 """
 
-def clean_note(text):
-    text = str(text)
-    # Collapse repeated whitespace/blank lines
-    text = re.sub(r'\n\s*\n+', '\n\n', text)
-    text = re.sub(r'[ \t]+', ' ', text)
-    # Remove decorative lines (---, ***, ===, ___)
-    text = re.sub(r'^[\s]*[-=_*]{3,}[\s]*$', '', text, flags=re.MULTILINE)
-    # Remove common boilerplate headers/footers
-    text = re.sub(r'(?i)^.*confidential.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'(?i)^.*electronically signed.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'(?i)^.*printed by.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'(?i)^.*page \d+ of \d+.*$', '', text, flags=re.MULTILINE)
-    # Strip vitals blocks (BP, HR, Temp, SpO2 lines)
-    text = re.sub(r'(?i)^.*\b(vitals?|bp|blood pressure|heart rate|temp|spo2|pulse|weight|height|bmi)\b[:\s]+[\d/.]+.*$', '', text, flags=re.MULTILINE)
-    # Final cleanup
-    text = re.sub(r'\n\s*\n+', '\n\n', text)
-    return text.strip()
-
 synthesized_responses = []
 candidate_LLM_text_df = pd.read_csv(os.path.join(DATA_PATH, 'LLM_candidate_text_data.csv'))
 unique_mrns = candidate_LLM_text_df['DFCI_MRN'].unique()
@@ -66,7 +49,7 @@ for i, cur_mrn in enumerate(tqdm(unique_mrns, desc='Patients')):
                 model=model_name,
                 messages=[
                     {'role': 'system', 'content': prompt.prompt_note_extraction},
-                    {'role': 'user', 'content': "Note Date: " + str(row['EVENT_DATE']) + clinical_wrapper + " Note Text: " + clean_note(row['CLINICAL_TEXT'])}
+                    {'role': 'user', 'content': "Note Date: " + str(row['EVENT_DATE']) + clinical_wrapper + " Note Text: " + clean_note(row['CLINICAL_TEXT'], note_type=row.get('NOTE_TYPE'))}
                 ],
                 temperature=0
             ).choices[0].message.content.strip()

@@ -16,8 +16,6 @@ Return ONLY valid JSON. No markdown fencing, no commentary.
 {
   "note_date": "<YYYY-MM-DD>",
   "histology": "<'adenocarcinoma' | 'neuroendocrine' | 'small_cell' | 'mixed' | 'other' | null>",
-  "gleason_score": "<string, e.g. '4+3' or null>",
-  "grade_group": "<integer 1-5 or null>",
   "transformation_mentioned": <true | false>,
   "diagnosis_date": "<YYYY-MM-DD if explicitly mentioned, or null>",
   "aggressive_variant_date": "<YYYY-MM-DD if explicitly mentioned, or null>",
@@ -47,8 +45,6 @@ Return ONLY valid JSON. No markdown fencing, no commentary.
 
 {
   "histology": "<'adenocarcinoma' | 'neuroendocrine' | 'small_cell' | 'mixed' | 'other' | null>",
-  "gleason_score": "<string, e.g. '4+3' or null>",
-  "grade_group": "<integer 1-5 or null>",
   "transformation_occurred": <true | false | null>,
   "transformation_detail": "<e.g. 'adenocarcinoma to neuroendocrine' or null>",
   "diagnosis_date": "<YYYY-MM-DD or null>",
