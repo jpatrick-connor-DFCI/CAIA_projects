@@ -21,8 +21,8 @@ NOTES_PER_TYPE = 15  # how many notes to sample per NOTE_TYPE
 RANDOM_SEED = 42
 
 # Load full text data (has NOTE_TYPE)
-text_df = pd.read_csv(os.path.join(DATA_PATH, 'prostate_text_data.csv'))
-text_df['TEXT_LENGTH'] = text_df['CLINICAL_TEXT'].astype(str).apply(len)
+text_df = pd.read_csv(os.path.join(DATA_PATH, 'LLM_candidate_text_data.csv'))
+text_df['TEXT_LENGTH'] = text_df['CLINICAL_TEXT'].fillna('').astype(str).str.len()
 
 # Assign length tercile within each NOTE_TYPE
 text_df['LENGTH_BIN'] = text_df.groupby('NOTE_TYPE')['TEXT_LENGTH'].transform(
@@ -45,13 +45,5 @@ for note_type in text_df['NOTE_TYPE'].unique():
     sampled_frames.append(sampled)
 
 sample_df = pd.concat(sampled_frames, ignore_index=True)
-sample_df = sample_df[['NOTE_TYPE', 'EVENT_DATE', 'TEXT_LENGTH', 'LENGTH_BIN', 'CLINICAL_TEXT']]
+sample_df = sample_df[['NOTE_TYPE', 'EVENT_DATE', 'TEXT_LENGTH', 'CLINICAL_TEXT']]
 sample_df = sample_df.sort_values(by=['NOTE_TYPE', 'TEXT_LENGTH'])
-
-sample_df.to_csv(OUTPUT_PATH, sep='\t', index=False)
-
-print(f'Sampled {len(sample_df)} notes across {text_df["NOTE_TYPE"].nunique()} NOTE_TYPEs')
-for nt in sample_df['NOTE_TYPE'].unique():
-    n = (sample_df['NOTE_TYPE'] == nt).sum()
-    print(f'  {nt}: {n} notes')
-print(f'Saved to {OUTPUT_PATH}')

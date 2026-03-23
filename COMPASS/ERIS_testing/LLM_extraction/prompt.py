@@ -1,14 +1,17 @@
-prompt_regex_creation = """
-You are helping me build a regex-based text preprocessing pipeline for clinical oncology notes. These notes come from an EHR system and contain useful clinical information mixed with boilerplate formatting, system-generated text, and structural noise. My goal is to clean these notes BEFORE sending them to an LLM for structured data extraction about platinum chemotherapy use in prostate cancer patients.
+### Regex Generation Prompts
+prompt_regex_clinician = """
+You are helping me build a regex-based text preprocessing pipeline for clinical oncology notes from an EHR system. These notes contain useful clinical information mixed with boilerplate formatting, system-generated text, and structural noise. My goal is to clean these notes BEFORE sending them to an LLM for structured data extraction about platinum chemotherapy use in prostate cancer patients.
 
-I have three NOTE_TYPEs: Clinician, Imaging, and Pathology. I am providing you with a sample of notes from each type.
+You are analyzing **Clinician** notes only.
 
 ## Your Task
 
-For EACH NOTE_TYPE, analyze the sample notes and produce:
+Analyze the sample notes below and produce:
 
-### 1. UNIVERSAL RULES (apply to all note types)
-Identify boilerplate patterns that appear across all note types, such as:
+### 1. BOILERPLATE REMOVAL RULES
+Identify patterns that are clearly non-clinical boilerplate in Clinician notes.
+
+**Universal patterns** (likely shared across note types):
 - Signature blocks, attestation lines, electronic signature footers
 - Confidentiality/disclaimer banners
 - Pagination markers (e.g., "Page X of Y")
@@ -16,15 +19,7 @@ Identify boilerplate patterns that appear across all note types, such as:
 - Decorative separators (dashes, equals signs, asterisks)
 - Repeated whitespace / formatting artifacts
 
-For each pattern, provide:
-- A Python-compatible regex (using `re` module syntax with appropriate flags)
-- An example of what it matches
-- What to replace it with (empty string, newline, etc.)
-
-### 2. NOTE_TYPE-SPECIFIC RULES
-For each of Clinician, Imaging, and Pathology, identify type-specific boilerplate:
-
-**Clinician notes** — look for:
+**Clinician-specific patterns** — look especially for:
 - Vitals blocks (BP, HR, Temp, SpO2, weight, height, BMI)
 - Medication list dumps that are not narrative discussion
 - Allergy lists
@@ -32,55 +27,43 @@ For each of Clinician, Imaging, and Pathology, identify type-specific boilerplat
 - Review of systems (ROS) template text with blanks or checkboxes
 - After-visit summary / patient instruction boilerplate
 
-**Imaging notes** — look for:
-- Standardized report headers (EXAM, CLINICAL INDICATION, COMPARISON, TECHNIQUE)
-- Technical parameters (contrast type, dose, scanner info)
-- Standardized footer/addendum blocks
-- Accession numbers, order IDs
+For each pattern, provide:
+- A Python-compatible regex (using `re` module syntax with appropriate flags)
+- An example of what it matches from the sample notes
+- What to replace it with (empty string, newline, etc.)
 
-**Pathology notes** — look for:
-- Specimen labeling/accessioning boilerplate
-- Gross description templates
-- Synoptic report formatting artifacts
-- Addendum/amendment blocks
-- Staining protocol details (immunohistochemistry method boilerplate, NOT results)
-
-### 3. EXTRACTABLE STRUCTURED ELEMENTS
-Identify regex patterns to PRE-EXTRACT clinically relevant structured information from the text, such as:
+### 2. EXTRACTABLE STRUCTURED ELEMENTS
+Identify regex patterns to PRE-EXTRACT clinically relevant structured information from Clinician notes, such as:
 - Histology type mentions (e.g., "small cell carcinoma", "neuroendocrine differentiation")
 - Platinum drug mentions with context (e.g., "started on carboplatin", "cisplatin-based")
 - PSA values (e.g., "PSA 45.2", "PSA: >100")
 - Dates associated with diagnoses or treatment changes
-
-For each, provide a Python regex and note which NOTE_TYPE(s) it is most relevant to.
+- Any other structured clinical data points you can reliably extract from these notes
 
 ## Output Format
 
-Return your response as a Python dictionary structure that I can directly paste into a module, like this:
-
+Return your response as a Python dictionary structure:
 ```python
-UNIVERSAL_RULES = [
+BOILERPLATE_RULES = [
     {
         'name': 'rule_name',
         'pattern': r'regex_pattern_here',
         'replacement': '',
         'flags': 're.MULTILINE | re.IGNORECASE',
-        'description': 'What this removes'
+        'description': 'What this removes',
+        'example_match': 'Example text this would match',
+        'source': 'universal' | 'clinician'
     },
     ...
 ]
 
-CLINICIAN_RULES = [...]
-IMAGING_RULES = [...]
-PATHOLOGY_RULES = [...]
-
 EXTRACTION_PATTERNS = [
     {
-        'name': 'histology_neuroendocrine',
+        'name': 'pattern_name',
         'pattern': r'regex_pattern_here',
         'flags': 're.IGNORECASE',
-        'note_types': ['Clinician', 'Imaging', 'Pathology'],
-        'description': 'Extracts neuroendocrine/small cell mentions'
+        'description': 'What this extracts',
+        'example_match': 'Example text this would match'
     },
     ...
 ]
@@ -92,14 +75,279 @@ EXTRACTION_PATTERNS = [
 - Specify flags explicitly (re.MULTILINE, re.IGNORECASE, etc.)
 - Be conservative: when in doubt, do NOT remove text. It is better to leave noise in than to accidentally strip clinical content relevant to platinum chemotherapy rationale, neuroendocrine/small cell transformation, or histologic findings.
 - Focus on HIGH-CONFIDENCE patterns that are clearly boilerplate, not clinical narrative.
+- Ground every rule in an actual example from the sample notes below.
 
-## Sample Notes
+## Sample Clinician Notes
 
-The notes below are separated by NOTE_TYPE. Each note is delimited by `===NOTE START===` and `===NOTE END===`.
-
-[PASTE YOUR SAMPLED NOTES HERE — the output from sample_notes_for_regex_generation.py]
+{notes}
 """
 
+prompt_regex_imaging = """
+You are helping me build a regex-based text preprocessing pipeline for clinical oncology notes from an EHR system. These notes contain useful clinical information mixed with boilerplate formatting, system-generated text, and structural noise. My goal is to clean these notes BEFORE sending them to an LLM for structured data extraction about platinum chemotherapy use in prostate cancer patients.
+
+You are analyzing **Imaging** notes only.
+
+## Your Task
+
+Analyze the sample notes below and produce:
+
+### 1. BOILERPLATE REMOVAL RULES
+Identify patterns that are clearly non-clinical boilerplate in Imaging notes.
+
+**Universal patterns** (likely shared across note types):
+- Signature blocks, attestation lines, electronic signature footers
+- Confidentiality/disclaimer banners
+- Pagination markers (e.g., "Page X of Y")
+- System-generated headers with timestamps, encounter IDs, etc.
+- Decorative separators (dashes, equals signs, asterisks)
+- Repeated whitespace / formatting artifacts
+
+**Imaging-specific patterns** — look especially for:
+- Standardized report headers (EXAM, CLINICAL INDICATION, COMPARISON, TECHNIQUE)
+- Technical parameters (contrast type, dose, scanner info)
+- Standardized footer/addendum blocks
+- Accession numbers, order IDs
+
+For each pattern, provide:
+- A Python-compatible regex (using `re` module syntax with appropriate flags)
+- An example of what it matches from the sample notes
+- What to replace it with (empty string, newline, etc.)
+
+### 2. EXTRACTABLE STRUCTURED ELEMENTS
+Identify regex patterns to PRE-EXTRACT clinically relevant structured information from Imaging notes, such as:
+- Histology type mentions (e.g., "small cell carcinoma", "neuroendocrine differentiation")
+- Platinum drug mentions with context (e.g., "started on carboplatin", "cisplatin-based")
+- PSA values (e.g., "PSA 45.2", "PSA: >100")
+- Dates associated with diagnoses or treatment changes
+- Any other structured clinical data points you can reliably extract from these notes
+
+## Output Format
+
+Return your response as a Python dictionary structure:
+```python
+BOILERPLATE_RULES = [
+    {
+        'name': 'rule_name',
+        'pattern': r'regex_pattern_here',
+        'replacement': '',
+        'flags': 're.MULTILINE | re.IGNORECASE',
+        'description': 'What this removes',
+        'example_match': 'Example text this would match',
+        'source': 'universal' | 'imaging'
+    },
+    ...
+]
+
+EXTRACTION_PATTERNS = [
+    {
+        'name': 'pattern_name',
+        'pattern': r'regex_pattern_here',
+        'flags': 're.IGNORECASE',
+        'description': 'What this extracts',
+        'example_match': 'Example text this would match'
+    },
+    ...
+]
+```
+
+## Important Notes
+- All regexes must be valid Python `re` module syntax
+- Use raw strings (r'...') for all patterns
+- Specify flags explicitly (re.MULTILINE, re.IGNORECASE, etc.)
+- Be conservative: when in doubt, do NOT remove text. It is better to leave noise in than to accidentally strip clinical content relevant to platinum chemotherapy rationale, neuroendocrine/small cell transformation, or histologic findings.
+- Focus on HIGH-CONFIDENCE patterns that are clearly boilerplate, not clinical narrative.
+- Ground every rule in an actual example from the sample notes below.
+
+## Sample Imaging Notes
+
+{notes}
+"""
+
+prompt_regex_pathology = """
+You are helping me build a regex-based text preprocessing pipeline for clinical oncology notes from an EHR system. These notes contain useful clinical information mixed with boilerplate formatting, system-generated text, and structural noise. My goal is to clean these notes BEFORE sending them to an LLM for structured data extraction about platinum chemotherapy use in prostate cancer patients.
+
+You are analyzing **Pathology** notes only.
+
+## Your Task
+
+Analyze the sample notes below and produce:
+
+### 1. BOILERPLATE REMOVAL RULES
+Identify patterns that are clearly non-clinical boilerplate in Pathology notes.
+
+**Universal patterns** (likely shared across note types):
+- Signature blocks, attestation lines, electronic signature footers
+- Confidentiality/disclaimer banners
+- Pagination markers (e.g., "Page X of Y")
+- System-generated headers with timestamps, encounter IDs, etc.
+- Decorative separators (dashes, equals signs, asterisks)
+- Repeated whitespace / formatting artifacts
+
+**Pathology-specific patterns** — look especially for:
+- Specimen labeling/accessioning boilerplate
+- Gross description templates
+- Synoptic report formatting artifacts
+- Addendum/amendment blocks
+- Staining protocol details (immunohistochemistry method boilerplate, NOT results)
+
+For each pattern, provide:
+- A Python-compatible regex (using `re` module syntax with appropriate flags)
+- An example of what it matches from the sample notes
+- What to replace it with (empty string, newline, etc.)
+
+### 2. EXTRACTABLE STRUCTURED ELEMENTS
+Identify regex patterns to PRE-EXTRACT clinically relevant structured information from Pathology notes, such as:
+- Histology type mentions (e.g., "small cell carcinoma", "neuroendocrine differentiation")
+- Platinum drug mentions with context (e.g., "started on carboplatin", "cisplatin-based")
+- PSA values (e.g., "PSA 45.2", "PSA: >100")
+- Gleason scores / Grade Groups
+- Dates associated with diagnoses or treatment changes
+- Any other structured clinical data points you can reliably extract from these notes
+
+## Output Format
+
+Return your response as a Python dictionary structure:
+```python
+BOILERPLATE_RULES = [
+    {
+        'name': 'rule_name',
+        'pattern': r'regex_pattern_here',
+        'replacement': '',
+        'flags': 're.MULTILINE | re.IGNORECASE',
+        'description': 'What this removes',
+        'example_match': 'Example text this would match',
+        'source': 'universal' | 'pathology'
+    },
+    ...
+]
+
+EXTRACTION_PATTERNS = [
+    {
+        'name': 'pattern_name',
+        'pattern': r'regex_pattern_here',
+        'flags': 're.IGNORECASE',
+        'description': 'What this extracts',
+        'example_match': 'Example text this would match'
+    },
+    ...
+]
+```
+
+## Important Notes
+- All regexes must be valid Python `re` module syntax
+- Use raw strings (r'...') for all patterns
+- Specify flags explicitly (re.MULTILINE, re.IGNORECASE, etc.)
+- Be conservative: when in doubt, do NOT remove text. It is better to leave noise in than to accidentally strip clinical content relevant to platinum chemotherapy rationale, neuroendocrine/small cell transformation, or histologic findings.
+- Focus on HIGH-CONFIDENCE patterns that are clearly boilerplate, not clinical narrative.
+- Ground every rule in an actual example from the sample notes below.
+
+## Sample Pathology Notes
+
+{notes}
+"""
+
+prompt_regex_synthesis = """
+You are finalizing a regex-based text preprocessing pipeline for clinical oncology notes. I ran a per-note-type analysis on three note types (Clinician, Imaging, Pathology) and got candidate regex rules from each. Your job is to deduplicate, reconcile, and organize them into a single production-ready Python module.
+
+## Inputs
+
+Below are the raw outputs from each per-note-type analysis:
+
+### Clinician Analysis
+{clinician_output}
+
+### Imaging Analysis
+{imaging_output}
+
+### Pathology Analysis
+{pathology_output}
+
+## Your Task
+
+### 1. Deduplicate & Merge Boilerplate Rules
+- Identify rules tagged as `'source': 'universal'` or that appear in multiple note-type outputs (e.g., signature blocks, disclaimers, separators). Merge these into a single UNIVERSAL_RULES list, picking the most general regex that covers all observed variants.
+- If two note types produced slightly different regexes for the same pattern, unify into one regex that handles both, or keep the broader one.
+- Place note-type-specific rules (those that only appeared in one type, or that would be harmful to apply to other types) into CLINICIAN_RULES, IMAGING_RULES, or PATHOLOGY_RULES.
+
+### 2. Deduplicate & Merge Extraction Patterns
+- Merge extraction patterns across note types. For each pattern, note which note_types it applies to.
+- If two analyses produced overlapping extraction regexes (e.g., both found PSA patterns), pick the most robust one or merge them.
+
+### 3. Validate & Tighten
+- Check that no rule would accidentally strip clinical narrative about platinum chemotherapy, histology, neuroendocrine transformation, treatment rationale, Gleason scores, or pathologic findings.
+- Flag any rules you consider borderline risky and mark them with `'confidence': 'low'` so I can review them manually. All other rules should be marked `'confidence': 'high'`.
+- Ensure all regexes are valid Python `re` syntax.
+
+## Output Format
+
+Return the final module as a single Python code block I can paste directly into a .py file:
+```python
+import re
+
+# =============================================================================
+# UNIVERSAL BOILERPLATE RULES
+# Applied to ALL note types before type-specific rules.
+# N rules covering: [brief category summary]
+# =============================================================================
+UNIVERSAL_RULES = [
+    {
+        'name': 'rule_name',
+        'pattern': r'regex_pattern_here',
+        'replacement': '',
+        'flags': 're.MULTILINE | re.IGNORECASE',
+        'description': 'What this removes',
+        'confidence': 'high' | 'low'
+    },
+    ...
+]
+
+# =============================================================================
+# CLINICIAN-SPECIFIC BOILERPLATE RULES
+# Applied only to Clinician notes, after universal rules.
+# N rules covering: [brief category summary]
+# =============================================================================
+CLINICIAN_RULES = [...]
+
+# =============================================================================
+# IMAGING-SPECIFIC BOILERPLATE RULES
+# Applied only to Imaging notes, after universal rules.
+# N rules covering: [brief category summary]
+# =============================================================================
+IMAGING_RULES = [...]
+
+# =============================================================================
+# PATHOLOGY-SPECIFIC BOILERPLATE RULES
+# Applied only to Pathology notes, after universal rules.
+# N rules covering: [brief category summary]
+# =============================================================================
+PATHOLOGY_RULES = [...]
+
+# =============================================================================
+# EXTRACTION PATTERNS
+# Run on cleaned text to pre-extract structured clinical data points.
+# N patterns covering: [brief category summary]
+# =============================================================================
+EXTRACTION_PATTERNS = [
+    {
+        'name': 'pattern_name',
+        'pattern': r'regex_pattern_here',
+        'flags': 're.IGNORECASE',
+        'note_types': ['Clinician', 'Imaging', 'Pathology'],
+        'description': 'What this extracts'
+    },
+    ...
+]
+```
+
+## Important Notes
+- All regexes must be valid Python `re` module syntax with raw strings (r'...')
+- Be conservative: if the per-note analyses disagreed on whether something is boilerplate, err on the side of NOT removing it
+- The pipeline will apply UNIVERSAL_RULES first, then the appropriate note-type-specific rules, then run EXTRACTION_PATTERNS on the cleaned text
+- Do NOT invent new rules beyond what the three analyses provided — your job is to merge, deduplicate, and validate, not to add new patterns
+- Fill in the comment headers with actual counts and category summaries based on the final merged lists
+"""
+
+### NEPC Extraction Prompts
 prompt_note_extraction = """
 You are a clinical data extraction system reading oncology notes for prostate cancer patients who received platinum-based chemotherapy. Extract features that explain WHY platinum was used, as this is not standard first-line treatment for prostate cancer.
 
