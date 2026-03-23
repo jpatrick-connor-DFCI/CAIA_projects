@@ -111,7 +111,7 @@ CLINICIAN_RULES = [
 IMAGING_RULES = [
     {
         'name': 'system_generated_headers',
-        'pattern': r'(?:Exam Number|Report Status|Type|Date/Time|Ordering Provider|Accession number).*',
+        'pattern': r'(?:Exam Number|Report Status|Ordering Provider|Accession number)[:\s].*',
         'replacement': '',
         'flags': re.MULTILINE | re.IGNORECASE,
         'confidence': 'high',
@@ -126,30 +126,22 @@ IMAGING_RULES = [
         'description': 'Removes technical parameters related to imaging techniques.'
     },
     {
-        'name': 'standardized_report_headers',
-        'pattern': r'(?:INDICATION|COMPARISON|FINDINGS|IMPRESSION).*',
+        'name': 'standardized_report_header_labels',
+        'pattern': r'^[ \t]*(INDICATION|COMPARISON|FINDINGS|IMPRESSION|TECHNIQUE|EXAM)[ \t]*:[ \t]*(?=\S)',
         'replacement': '',
         'flags': re.MULTILINE | re.IGNORECASE,
-        'confidence': 'low',
-        'description': 'Removes standardized report headers. Borderline rule flagged for review.'
+        'confidence': 'high',
+        'description': 'Removes section header labels when inline with content (e.g. "FINDINGS: ..."), preserving the content itself.'
     }
 ]
 
 # Pathology-specific rules: These apply only to pathology notes.
 PATHOLOGY_RULES = [
     {
-        'name': 'specimen_labeling_boilerplate',
-        'pattern': r'(Received in formalin.*?submitted in toto.*?cassette.*?pieces)',
-        'replacement': '',
-        'flags': re.MULTILINE | re.IGNORECASE,
-        'confidence': 'high',
-        'description': 'Removes specimen labeling and accessioning boilerplate.'
-    },
-    {
         'name': 'gross_description_boilerplate',
         'pattern': r'(GROSS DESCRIPTION.*?submitted in toto.*?Dictated by.*?Physician)',
         'replacement': '',
-        'flags': re.MULTILINE | re.IGNORECASE,
+        'flags': re.MULTILINE | re.DOTALL | re.IGNORECASE,
         'confidence': 'high',
         'description': 'Removes gross description templates.'
     },
@@ -157,18 +149,10 @@ PATHOLOGY_RULES = [
         'name': 'staining_protocol_boilerplate',
         'pattern': r'(Immunohistochemistry performed.*?FDA has determined.*?not necessary)',
         'replacement': '',
-        'flags': re.MULTILINE | re.IGNORECASE,
+        'flags': re.MULTILINE | re.DOTALL | re.IGNORECASE,
         'confidence': 'high',
         'description': 'Removes immunohistochemistry method boilerplate.'
     },
-    {
-        'name': 'addendum_boilerplate',
-        'pattern': r'(Addendum.*?Electronically signed.*?\d{2}:\d{2}:\d{2}(?:AM|PM))',
-        'replacement': '',
-        'flags': re.MULTILINE | re.IGNORECASE,
-        'confidence': 'high',
-        'description': 'Removes addendum/amendment blocks.'
-    }
 ]
 
 TYPE_SPECIFIC_RULES = {
