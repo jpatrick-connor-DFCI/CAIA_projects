@@ -19,106 +19,192 @@ rules into the dictionaries below.
 
 import re
 
-# ---------------------------------------------------------------------------
-# UNIVERSAL RULES — applied to all note types
-# ---------------------------------------------------------------------------
+```python
+import re
+
+# Universal rules: These apply across all note types and are deduplicated from the analyses.
 UNIVERSAL_RULES = [
     {
-        'name': 'collapse_blank_lines',
-        'pattern': r'\n\s*\n+',
-        'replacement': '\n\n',
-        'flags': 0,
+        'name': 'signature_block',
+        'pattern': r'(?:Staff Surgeon|MD|PhD|NP|RN|DMD|MSN|Instructor in Medicine|Physician).*?(?:Dana Farber Cancer Institute|DFCI|Harvard Medical School|450 Brookline Avenue).*|(?:Signed by|This report was electronically signed by).*|By his/her signature.*?Electronically signed.*?\d{2}:\d{2}:\d{2}(?:AM|PM)',
+        'replacement': '',
+        'flags': re.MULTILINE | re.IGNORECASE,
+        'confidence': 'high',
+        'description': 'Removes signature blocks and institutional affiliations.'
     },
     {
-        'name': 'collapse_whitespace',
-        'pattern': r'[ \t]+',
-        'replacement': ' ',
-        'flags': 0,
+        'name': 'confidentiality_disclaimer',
+        'pattern': r'(?:DANA FARBER CANCER INSTITUTE|LANK CENTER FOR GENITOURINARY ONCOLOGY).*?(?:Boston, MA|Brookline Avenue).*|This report is limited to the body part and modality requested.*|Massachusetts General Physicians Organization.*?www\.mydermpath\.org',
+        'replacement': '',
+        'flags': re.MULTILINE | re.IGNORECASE,
+        'confidence': 'high',
+        'description': 'Removes confidentiality disclaimers and institutional headers.'
     },
     {
-        'name': 'decorative_lines',
-        'pattern': r'^[\s]*[-=_*]{3,}[\s]*$',
+        'name': 'pagination_marker',
+        'pattern': r'Page \d+ of \d+|\[Length: \d+ chars\]',
+        'replacement': '',
+        'flags': re.MULTILINE | re.IGNORECASE,
+        'confidence': 'high',
+        'description': 'Removes pagination markers.'
+    },
+    {
+        'name': 'decorative_separator',
+        'pattern': r'[=*-]{3,}',
         'replacement': '',
         'flags': re.MULTILINE,
+        'confidence': 'high',
+        'description': 'Removes decorative separators.'
     },
     {
-        'name': 'confidential_line',
-        'pattern': r'^.*confidential.*$',
-        'replacement': '',
-        'flags': re.MULTILINE | re.IGNORECASE,
-    },
-    {
-        'name': 'electronically_signed',
-        'pattern': r'^.*electronically signed.*$',
-        'replacement': '',
-        'flags': re.MULTILINE | re.IGNORECASE,
-    },
-    {
-        'name': 'printed_by',
-        'pattern': r'^.*printed by.*$',
-        'replacement': '',
-        'flags': re.MULTILINE | re.IGNORECASE,
-    },
-    {
-        'name': 'page_numbers',
-        'pattern': r'^.*page \d+ of \d+.*$',
-        'replacement': '',
-        'flags': re.MULTILINE | re.IGNORECASE,
-    },
-    # ---- ADD MORE UNIVERSAL RULES FROM GPT OUTPUT BELOW ----
+        'name': 'repeated_whitespace',
+        'pattern': r'\s{2,}',
+        'replacement': ' ',
+        'flags': re.MULTILINE,
+        'confidence': 'high',
+        'description': 'Removes repeated whitespace and formatting artifacts.'
+    }
 ]
 
-# ---------------------------------------------------------------------------
-# NOTE_TYPE-SPECIFIC RULES
-# ---------------------------------------------------------------------------
+# Clinician-specific rules: These apply only to clinician notes.
 CLINICIAN_RULES = [
     {
         'name': 'vitals_block',
-        'pattern': r'^.*\b(vitals?|bp|blood pressure|heart rate|temp|spo2|pulse|weight|height|bmi)\b[:\s]+[\d/.]+.*$',
+        'pattern': r'(?:BP|Pulse|Temp|Resp|Ht|Wt|BMI).*?(?:kg|lb|cm|m|C|F)',
         'replacement': '',
         'flags': re.MULTILINE | re.IGNORECASE,
+        'confidence': 'high',
+        'description': 'Removes vitals blocks.'
     },
-    # ---- ADD MORE CLINICIAN RULES FROM GPT OUTPUT BELOW ----
+    {
+        'name': 'medication_list',
+        'pattern': r'(?:Current Outpatient Prescriptions|Medications Reviewed).*?(?:tablet|capsule|injection|spray).*',
+        'replacement': '',
+        'flags': re.MULTILINE | re.IGNORECASE,
+        'confidence': 'high',
+        'description': 'Removes medication list dumps.'
+    },
+    {
+        'name': 'allergy_list',
+        'pattern': r'(?:Allergies).*?(?:No Known Allergies|NKDA).*',
+        'replacement': '',
+        'flags': re.MULTILINE | re.IGNORECASE,
+        'confidence': 'high',
+        'description': 'Removes allergy lists.'
+    },
+    {
+        'name': 'review_of_systems',
+        'pattern': r'(?:Review of Systems).*?(?:negative|denies).*',
+        'replacement': '',
+        'flags': re.MULTILINE | re.IGNORECASE,
+        'confidence': 'high',
+        'description': 'Removes review of systems template text.'
+    },
+    {
+        'name': 'problem_list',
+        'pattern': r'(?:Problem List Items Addressed This Visit|Active Problem List).*',
+        'replacement': '',
+        'flags': re.MULTILINE | re.IGNORECASE,
+        'confidence': 'high',
+        'description': 'Removes problem list headers.'
+    }
 ]
 
+# Imaging-specific rules: These apply only to imaging notes.
 IMAGING_RULES = [
-    # ---- ADD IMAGING-SPECIFIC RULES FROM GPT OUTPUT BELOW ----
-    # Examples: technique/protocol lines, accession numbers, contrast details
+    {
+        'name': 'system_generated_headers',
+        'pattern': r'(?:Exam Number|Report Status|Type|Date/Time|Ordering Provider|Accession number).*',
+        'replacement': '',
+        'flags': re.MULTILINE | re.IGNORECASE,
+        'confidence': 'high',
+        'description': 'Removes system-generated headers with metadata.'
+    },
+    {
+        'name': 'technical_parameters',
+        'pattern': r'(?:TECHNIQUE|CTDIvol|DLP|Dose|MRI COIL CHARGE).*',
+        'replacement': '',
+        'flags': re.MULTILINE | re.IGNORECASE,
+        'confidence': 'high',
+        'description': 'Removes technical parameters related to imaging techniques.'
+    },
+    {
+        'name': 'standardized_report_headers',
+        'pattern': r'(?:INDICATION|COMPARISON|FINDINGS|IMPRESSION).*',
+        'replacement': '',
+        'flags': re.MULTILINE | re.IGNORECASE,
+        'confidence': 'low',
+        'description': 'Removes standardized report headers. Borderline rule flagged for review.'
+    }
 ]
 
+# Pathology-specific rules: These apply only to pathology notes.
 PATHOLOGY_RULES = [
-    # ---- ADD PATHOLOGY-SPECIFIC RULES FROM GPT OUTPUT BELOW ----
-    # Examples: specimen labeling boilerplate, staining method boilerplate
+    {
+        'name': 'specimen_labeling_boilerplate',
+        'pattern': r'(Received in formalin.*?submitted in toto.*?cassette.*?pieces)',
+        'replacement': '',
+        'flags': re.MULTILINE | re.IGNORECASE,
+        'confidence': 'high',
+        'description': 'Removes specimen labeling and accessioning boilerplate.'
+    },
+    {
+        'name': 'gross_description_boilerplate',
+        'pattern': r'(GROSS DESCRIPTION.*?submitted in toto.*?Dictated by.*?Physician)',
+        'replacement': '',
+        'flags': re.MULTILINE | re.IGNORECASE,
+        'confidence': 'high',
+        'description': 'Removes gross description templates.'
+    },
+    {
+        'name': 'staining_protocol_boilerplate',
+        'pattern': r'(Immunohistochemistry performed.*?FDA has determined.*?not necessary)',
+        'replacement': '',
+        'flags': re.MULTILINE | re.IGNORECASE,
+        'confidence': 'high',
+        'description': 'Removes immunohistochemistry method boilerplate.'
+    },
+    {
+        'name': 'addendum_boilerplate',
+        'pattern': r'(Addendum.*?Electronically signed.*?\d{2}:\d{2}:\d{2}(?:AM|PM))',
+        'replacement': '',
+        'flags': re.MULTILINE | re.IGNORECASE,
+        'confidence': 'high',
+        'description': 'Removes addendum/amendment blocks.'
+    }
 ]
 
-TYPE_SPECIFIC_RULES = {
-    'Clinician': CLINICIAN_RULES,
-    'Imaging': IMAGING_RULES,
-    'Pathology': PATHOLOGY_RULES,
-}
-
-# ---------------------------------------------------------------------------
-# EXTRACTION PATTERNS — for pre-extracting structured clinical elements
-# ---------------------------------------------------------------------------
+# Extraction patterns: Deduplicated and merged across note types.
 EXTRACTION_PATTERNS = [
     {
-        'name': 'histology_neuroendocrine',
-        'pattern': r'(?i)\b(neuroendocrine\s+(?:differentiation|carcinoma|features|component|transformation)|small\s+cell\s+(?:carcinoma|component|features|transformation))\b',
-        'note_types': ['Clinician', 'Imaging', 'Pathology'],
+        'name': 'histology_type',
+        'pattern': r'\b(small cell carcinoma|neuroendocrine differentiation|prostatic adenocarcinoma|ductal type|acinar carcinoma)\b',
+        'note_types': ['clinician', 'imaging', 'pathology'],
+        'flags': re.IGNORECASE,
+        'description': 'Extracts histology type mentions.'
     },
     {
-        'name': 'platinum_mention',
-        'pattern': r'(?i)\b((?:carbo|cis)platin\b.{0,80})',
-        'note_types': ['Clinician'],
+        'name': 'platinum_drug_mentions',
+        'pattern': r'\b(carboplatin|cisplatin|oxaliplatin)(?:-based)?\b.*?(?:started|initiated|administered|used)',
+        'note_types': ['clinician', 'imaging', 'pathology'],
+        'flags': re.IGNORECASE,
+        'description': 'Extracts mentions of platinum drugs with context.'
     },
     {
-        'name': 'psa_value',
-        'pattern': r'(?i)\bPSA[:\s]+([><=]?\s*[\d,.]+)',
-        'note_types': ['Clinician'],
+        'name': 'psa_values',
+        'pattern': r'\bPSA[:\s]*(?:>|<)?\d+(\.\d+)?\b',
+        'note_types': ['clinician', 'imaging', 'pathology'],
+        'flags': re.IGNORECASE,
+        'description': 'Extracts PSA values.'
     },
-    # ---- ADD MORE EXTRACTION PATTERNS FROM GPT OUTPUT BELOW ----
+    {
+        'name': 'dates',
+        'pattern': r'\b(?:\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2})\b',
+        'note_types': ['clinician', 'imaging', 'pathology'],
+        'flags': re.IGNORECASE,
+        'description': 'Extracts dates associated with diagnoses or treatment changes.'
+    }
 ]
-
 
 def clean_note(text, note_type=None):
     """Clean a clinical note by applying universal and type-specific regex rules.
