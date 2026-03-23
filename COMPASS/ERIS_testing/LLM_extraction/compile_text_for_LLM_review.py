@@ -20,8 +20,5 @@ LLM_text_df = text_df.merge(candidate_patients, on='DFCI_MRN', how='inner')
 event_dt = pd.to_datetime(LLM_text_df['EVENT_DATE'], errors='coerce', utc=True)
 med_dt = pd.to_datetime(LLM_text_df['MEDICATION_START_TIME'], errors='coerce', utc=True)
 
-LLM_text_df['NOTE_TIME_REL_PLATINUM_START'] = event_dt - med_dt
-LLM_text_df['NOTE_TIME_REL_PLATINUM_START'] = LLM_text_df['NOTE_TIME_REL_PLATINUM_START'].apply(lambda x : x.days)
-candidate_LLM_text_df = LLM_text_df.loc[np.abs(LLM_text_df['NOTE_TIME_REL_PLATINUM_START']) <= np.inf,
-                                        ['EVENT_DATE', 'DFCI_MRN', 'NOTE_TYPE', 'CLINICAL_TEXT']].sort_values(by=['DFCI_MRN', 'EVENT_DATE'])
+candidate_LLM_text_df = LLM_text_df[['EVENT_DATE', 'DFCI_MRN', 'NOTE_TYPE', 'CLINICAL_TEXT']].sort_values(by=['DFCI_MRN', 'EVENT_DATE'])
 candidate_LLM_text_df.to_csv(os.path.join(DATA_PATH, 'LLM_candidate_text_data.csv'), index=False)

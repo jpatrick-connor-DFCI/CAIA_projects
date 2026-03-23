@@ -54,12 +54,20 @@ UNIVERSAL_RULES = [
         'description': 'Removes decorative separators.'
     },
     {
-        'name': 'repeated_whitespace',
-        'pattern': r'\s{2,}',
-        'replacement': ' ',
-        'flags': re.MULTILINE,
+        'name': 'collapse_blank_lines',
+        'pattern': r'\n\s*\n+',
+        'replacement': '\n\n',
+        'flags': 0,
         'confidence': 'high',
-        'description': 'Removes repeated whitespace and formatting artifacts.'
+        'description': 'Collapses multiple blank lines into one, preserving paragraph structure.'
+    },
+    {
+        'name': 'collapse_horizontal_whitespace',
+        'pattern': r'[ \t]{2,}',
+        'replacement': ' ',
+        'flags': 0,
+        'confidence': 'high',
+        'description': 'Collapses repeated spaces/tabs on the same line.'
     }
 ]
 

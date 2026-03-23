@@ -164,71 +164,56 @@ EXTRACTION_PATTERNS = [
 - Pipeline order: UNIVERSAL_RULES → type-specific rules → EXTRACTION_PATTERNS on cleaned text.
 """
 
-### NEPC Extraction Prompts
-prompt_note_extraction = """
-You are a clinical data extraction system reading oncology notes for prostate cancer patients who received platinum-based chemotherapy. Extract features that explain WHY platinum was used, as this is not standard first-line treatment for prostate cancer.
-
-## INPUT
-1. **Note Date** — YYYY-MM-DD.
-2. **Note Text** — full text of one clinical note.
-
-## RULES
-- Extract ONLY what is explicitly stated. Never infer or speculate.
-- Use null when information is absent.
-- Quote must be verbatim, ≤30 words.
-
-## OUTPUT FORMAT
-Return ONLY valid JSON. No markdown fencing, no commentary.
-
-{
-  "note_date": "<YYYY-MM-DD>",
-  "histology": "<'adenocarcinoma' | 'neuroendocrine' | 'small_cell' | 'mixed' | 'other' | null>",
-  "transformation_mentioned": <true | false>,
-  "diagnosis_date": "<YYYY-MM-DD if explicitly mentioned, or null>",
-  "aggressive_variant_date": "<YYYY-MM-DD if explicitly mentioned, or null>",
-  "platinum_reason": "<brief stated rationale for platinum use, or null>",
-  "quote": "<most relevant verbatim quote or null>"
-}
-
-Now extract from the following note:
-"""
-
-
+### Platinum Reason Classification Prompt (single-stage)
 prompt_platinum_classification = """
-You are a clinical data synthesis system. You receive per-note extractions for a prostate cancer patient who received platinum-based chemotherapy. All patients in this cohort received carboplatin or cisplatin. Your task is to determine WHY platinum was used, as this is not standard first-line treatment for prostate cancer.
+You are a clinical data extraction system for an IRB-approved research study. You will receive ALL clinical notes (chronologically ordered) for a prostate cancer patient who received platinum-based chemotherapy (carboplatin or cisplatin).
 
-## INPUT
-A JSON array of per-note extractions in chronological order by `note_date`.
+## CLINICAL CONTEXT
+Platinum chemotherapy is NOT standard treatment for prostate cancer. When a prostate cancer patient receives platinum, there is always a specific clinical reason. We are studying whether platinum initiation can serve as a proxy for aggressive disease phenotypes. Common reasons include:
+- **Neuroendocrine or small cell transformation** — the most clinically significant. The tumor has changed from adenocarcinoma to a neuroendocrine or small cell phenotype, which is treated with platinum-based regimens (similar to small cell lung cancer).
+- **De novo small cell / neuroendocrine prostate cancer** — rare cases where the initial diagnosis is small cell or neuroendocrine, not a transformation from adenocarcinoma.
+- **Clinical trial enrollment** — the patient is receiving platinum as part of a trial protocol.
+- **Disease progression on standard therapies** — platinum used empirically after exhausting standard options (e.g., enzalutamide, abiraterone, docetaxel, cabazitaxel), without documented histologic transformation.
+- **Non-prostate primary** — the platinum is actually being given for a different cancer (e.g., bladder, lung) in a patient who also has prostate cancer.
+- **Biomarker-driven** — platinum selected based on genomic findings (e.g., BRCA2, HRD, MSI-H).
+
+## YOUR TASK
+Read all the notes and determine WHY this patient received platinum chemotherapy.
 
 ## RULES
-- Base answers ONLY on what is explicitly documented. Never infer or speculate.
-- For histopathology, use the most recent note that mentions histology.
-- For dates, use the earliest explicit mention across notes.
-- If the histology is neuroendocrine, small_cell, or mixed, OR if transformation from adenocarcinoma to any of those subtypes occurred, then `platinum_reason` MUST be "aggressive_variant". The aggressive subtype itself is the reason for platinum use.
-- Use null when information is not available.
+- Base your answer ONLY on what is explicitly documented in the notes. Do not infer or speculate.
+- Weigh evidence by source: pathology reports are the most authoritative for histology; clinician notes are most authoritative for treatment rationale; imaging notes provide disease burden context.
+- If notes contradict each other on histology, prefer the most recent pathology report. If no pathology report exists, use the most recent clinician note.
+- If multiple reasons apply (e.g., transformation AND clinical trial), report the PRIMARY reason that drove the platinum decision.
+- Use null when the notes do not provide enough information to determine the answer.
 
 ## OUTPUT FORMAT
 Return ONLY valid JSON. No markdown fencing, no commentary.
 
 {
-  "histology": "<'adenocarcinoma' | 'neuroendocrine' | 'small_cell' | 'mixed' | 'other' | null>",
-  "transformation_occurred": <true | false | null>,
-  "transformation_detail": "<e.g. 'adenocarcinoma to neuroendocrine' or null>",
-  "diagnosis_date": "<YYYY-MM-DD or null>",
-  "aggressive_variant_date": "<YYYY-MM-DD or null>",
   "platinum_reason": "<enum or null>",
-  "platinum_reason_detail": "<one-sentence explanation drawn from the notes, or null>",
-  "supporting_quote": "<verbatim quote from notes, ≤30 words, or null>"
+  "platinum_reason_detail": "<one-sentence explanation grounded in the notes, or null>",
+  "histology_at_platinum_start": "<'adenocarcinoma' | 'neuroendocrine' | 'small_cell' | 'mixed' | 'other' | null>",
+  "transformation_documented": <true | false | null>,
+  "transformation_detail": "<e.g. 'adenocarcinoma to small cell carcinoma' or null>",
+  "supporting_quotes": ["<verbatim quote 1, ≤30 words>", "<verbatim quote 2, ≤30 words>"],
+  "confidence": "<'high' | 'medium' | 'low'>"
 }
 
 Field `platinum_reason` must be one of:
-  - "aggressive_variant"
-  - "disease_progression"
-  - "biomarker_driven"
-  - "clinical_trial"
-  - "physician_judgment"
-  - "other"
-  - null
+  - "neuroendocrine_transformation" — documented transformation to neuroendocrine or small cell
+  - "de_novo_neuroendocrine" — initial diagnosis was neuroendocrine or small cell, no prior adenocarcinoma
+  - "clinical_trial" — platinum given as part of a clinical trial
+  - "disease_progression" — empiric platinum after progression on standard therapies, no histologic transformation documented
+  - "non_prostate_primary" — platinum is for a different cancer, not the prostate cancer
+  - "biomarker_driven" — platinum selected based on genomic/molecular findings
+  - "other" — documented reason that does not fit the above categories
+  - null — notes do not contain enough information to determine the reason
 
-Now synthesize the following note-level extractions:
+Field `confidence`:
+  - "high" — the reason is explicitly stated or clearly documented
+  - "medium" — the reason is strongly implied by the clinical context but not explicitly stated
+  - "low" — ambiguous or insufficient documentation; best guess from available evidence
+
+Now classify the following patient's notes:
 """
