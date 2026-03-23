@@ -19,9 +19,6 @@ rules into the dictionaries below.
 
 import re
 
-```python
-import re
-
 # Universal rules: These apply across all note types and are deduplicated from the analyses.
 UNIVERSAL_RULES = [
     {
@@ -173,6 +170,12 @@ PATHOLOGY_RULES = [
         'description': 'Removes addendum/amendment blocks.'
     }
 ]
+
+TYPE_SPECIFIC_RULES = {
+    'Clinician': CLINICIAN_RULES,
+    'Imaging': IMAGING_RULES,
+    'Pathology': PATHOLOGY_RULES,
+}
 
 # Extraction patterns: Deduplicated and merged across note types.
 EXTRACTION_PATTERNS = [
