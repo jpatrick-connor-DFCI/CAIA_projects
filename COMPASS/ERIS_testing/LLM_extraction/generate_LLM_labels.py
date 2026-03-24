@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import time
 import pandas as pd
@@ -8,6 +9,8 @@ from openai import AzureOpenAI, APIError, RateLimitError, APITimeoutError
 
 import prompt
 from note_cleaning import clean_note
+
+RETRY_MODE = '--retry-failures' in sys.argv
 
 DATA_PATH = '/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/'
 OUTPUT_PATH = os.path.join(DATA_PATH, 'LLM_generated_labels.tsv')
@@ -120,17 +123,46 @@ if os.path.exists(OUTPUT_PATH):
     existing_df = pd.read_csv(OUTPUT_PATH, sep='\t')
     completed_mrns = set(existing_df['DFCI_MRN'].unique())
 
-# Skip patients that already failed with content_filter
-failed_mrns = set()
-if os.path.exists(FAILURES_PATH):
-    failed_df = pd.read_csv(FAILURES_PATH, sep='\t')
-    failed_mrns = set(failed_df.loc[
-        failed_df['error_type'].str.contains('content_filter', na=False), 'DFCI_MRN'
-    ].unique())
+if RETRY_MODE:
+    # Retry all previously failed patients — clear their stale extractions
+    # so they re-run from scratch through both stages
+    if not os.path.exists(FAILURES_PATH):
+        print("No failures file found, nothing to retry.")
+        sys.exit(0)
 
-remaining_mrns = [m for m in unique_mrns if m not in completed_mrns and m not in failed_mrns]
-print(f"Processing {len(remaining_mrns)} patients "
-      f"({len(completed_mrns)} done, {len(failed_mrns)} content-filtered)\n")
+    failed_df = pd.read_csv(FAILURES_PATH, sep='\t')
+    retry_mrns = set(failed_df['DFCI_MRN'].unique())
+
+    # Remove stale extractions for failed patients
+    for mrn in retry_mrns:
+        extractions_by_mrn.pop(mrn, None)
+    with open(EXTRACTIONS_PATH, 'w') as f:
+        json.dump({str(k): v for k, v in extractions_by_mrn.items()}, f)
+
+    # Remove their rows from output if any made it partially through
+    if os.path.exists(OUTPUT_PATH):
+        existing_df = existing_df.loc[~existing_df['DFCI_MRN'].isin(retry_mrns)]
+        existing_df.to_csv(OUTPUT_PATH, sep='\t', index=False)
+        completed_mrns -= retry_mrns
+
+    # Clear the failures file so retries get a clean slate
+    os.remove(FAILURES_PATH)
+
+    remaining_mrns = [m for m in unique_mrns if m in retry_mrns]
+    print(f"RETRY MODE: re-processing {len(remaining_mrns)} previously failed patients\n")
+
+else:
+    # Normal mode — skip completed and content-filtered patients
+    failed_mrns = set()
+    if os.path.exists(FAILURES_PATH):
+        failed_df = pd.read_csv(FAILURES_PATH, sep='\t')
+        failed_mrns = set(failed_df.loc[
+            failed_df['error_type'].str.contains('content_filter', na=False), 'DFCI_MRN'
+        ].unique())
+
+    remaining_mrns = [m for m in unique_mrns if m not in completed_mrns and m not in failed_mrns]
+    print(f"Processing {len(remaining_mrns)} patients "
+          f"({len(completed_mrns)} done, {len(failed_mrns)} content-filtered)\n")
 
 # =========================================================================
 # Main loop: extract then synthesize per patient
