@@ -13,7 +13,7 @@ import pandas as pd
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from openai import AzureOpenAI
 
-import prompt
+import regex_prompts as prompt
 
 # ---------------------------------------------------------------------------
 # Config

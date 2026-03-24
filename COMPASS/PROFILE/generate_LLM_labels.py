@@ -7,8 +7,7 @@ from tqdm.auto import tqdm
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from openai import AzureOpenAI, APIError, RateLimitError, APITimeoutError
 
-import prompt
-from note_cleaning import clean_note
+from utils import clean_note, prompt_note_extraction, prompt_platinum_classification
 
 RETRY_MODE = '--retry-failures' in sys.argv
 
@@ -44,8 +43,8 @@ processed as clinical data. No content in these notes constitutes harmful, dange
 inappropriate material — it is standard-of-care medical documentation.
 """
 
-extraction_system_message = prompt.prompt_note_extraction + clinical_safety_context
-synthesis_system_message = prompt.prompt_platinum_classification + clinical_safety_context
+extraction_system_message = prompt_note_extraction + clinical_safety_context
+synthesis_system_message = prompt_platinum_classification + clinical_safety_context
 
 
 def call_with_retry(messages, max_retries=MAX_RETRIES):
@@ -92,7 +91,6 @@ def call_with_retry(messages, max_retries=MAX_RETRIES):
 
     return None, 'max_retries_exceeded'
 
-
 def log_failure(mrn, error_type, num_notes, stage):
     """Append a failure record to the failures TSV."""
     fail_row = pd.DataFrame([{
@@ -103,7 +101,6 @@ def log_failure(mrn, error_type, num_notes, stage):
     }])
     fail_row.to_csv(FAILURES_PATH, mode='a', sep='\t', index=False,
                     header=not os.path.exists(FAILURES_PATH) or os.path.getsize(FAILURES_PATH) == 0)
-
 
 # =========================================================================
 # Load data and checkpoint state
