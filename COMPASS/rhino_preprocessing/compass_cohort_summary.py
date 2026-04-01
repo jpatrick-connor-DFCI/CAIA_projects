@@ -1387,3 +1387,261 @@ spark.sql("""
         SUM(CASE WHEN is_deceased IS NULL THEN 1 ELSE 0 END) AS null_is_deceased
     FROM final_cohort
 """).show(truncate=False)
+
+# ===============================================================
+# Export Summary Statistics as CSVs
+# ===============================================================
+import pandas as pd
+
+_summary_dir = os.path.join(os.getcwd(), "summary_csvs")
+os.makedirs(_summary_dir, exist_ok=True)
+
+
+def _melt_to_long(spark_df, section, subsection_col=None):
+    """Convert a Spark DataFrame into a list of (section, subsection, metric, value) tuples."""
+    rows = spark_df.collect()
+    result = []
+    for row in rows:
+        row_dict = row.asDict()
+        subsection = row_dict.pop(subsection_col, None) if subsection_col else None
+        for metric, value in row_dict.items():
+            if value is None:
+                str_value = None
+            else:
+                try:
+                    float_val = float(value)
+                    if pd.isna(float_val):
+                        str_value = None
+                    else:
+                        str_value = str(value)
+                except (ValueError, TypeError):
+                    str_value = str(value)
+            result.append((section, subsection, metric, str_value))
+    return result
+
+
+# --- cohort_summary.csv ---
+_all_rows = []
+
+# cohort_overview
+_overview_df = spark.sql(f"""
+    SELECT
+        {patient_count} AS total_patients,
+        {row_count} AS total_lab_records,
+        SUM(CASE WHEN event_platinum = 1 THEN 1 ELSE 0 END) AS patients_with_platinum,
+        SUM(CASE WHEN is_deceased = 1 THEN 1 ELSE 0 END) AS deceased_patients,
+        ROUND(SUM(CASE WHEN is_deceased = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS mortality_rate_pct
+    FROM patient_cohort
+""")
+_all_rows.extend(_melt_to_long(_overview_df, "cohort_overview"))
+
+# age_at_diagnosis
+_age_df = spark.sql("""
+    SELECT
+        COUNT(*) AS n_patients,
+        ROUND(AVG(age_at_diagnosis), 2) AS mean_age,
+        ROUND(STDDEV(age_at_diagnosis), 2) AS std_age,
+        MIN(age_at_diagnosis) AS min_age,
+        ROUND(PERCENTILE_APPROX(age_at_diagnosis, 0.25), 2) AS q1_age,
+        ROUND(PERCENTILE_APPROX(age_at_diagnosis, 0.50), 2) AS median_age,
+        ROUND(PERCENTILE_APPROX(age_at_diagnosis, 0.75), 2) AS q3_age,
+        MAX(age_at_diagnosis) AS max_age
+    FROM patient_cohort
+    WHERE age_at_diagnosis IS NOT NULL
+""")
+_all_rows.extend(_melt_to_long(_age_df, "age_at_diagnosis"))
+
+# platinum_treatment (grouped by platinum_type)
+_plat_df = spark.sql("""
+    SELECT
+        platinum_type,
+        COUNT(*) AS n_patients,
+        ROUND(AVG(DATEDIFF(platinum_start_date, diagnosis_date)), 2) AS mean_days_dx_to_drug,
+        ROUND(STDDEV(DATEDIFF(platinum_start_date, diagnosis_date)), 2) AS std_days_dx_to_drug,
+        MIN(DATEDIFF(platinum_start_date, diagnosis_date)) AS min_days,
+        ROUND(PERCENTILE_APPROX(DATEDIFF(platinum_start_date, diagnosis_date), 0.25), 2) AS q1_days,
+        ROUND(PERCENTILE_APPROX(DATEDIFF(platinum_start_date, diagnosis_date), 0.50), 2) AS median_days,
+        ROUND(PERCENTILE_APPROX(DATEDIFF(platinum_start_date, diagnosis_date), 0.75), 2) AS q3_days,
+        MAX(DATEDIFF(platinum_start_date, diagnosis_date)) AS max_days
+    FROM patient_cohort
+    WHERE event_platinum = 1
+    GROUP BY platinum_type
+""")
+_all_rows.extend(_melt_to_long(_plat_df, "platinum_treatment", subsection_col="platinum_type"))
+
+# psa_per_patient
+_psa_df = spark.sql("""
+    SELECT
+        COUNT(*) AS n_patients,
+        ROUND(AVG(psa_count), 2) AS mean_psa_per_patient,
+        MIN(psa_count) AS min_psa,
+        ROUND(PERCENTILE_APPROX(psa_count, 0.25), 2) AS q1_psa,
+        ROUND(PERCENTILE_APPROX(psa_count, 0.50), 2) AS median_psa,
+        ROUND(PERCENTILE_APPROX(psa_count, 0.75), 2) AS q3_psa,
+        MAX(psa_count) AS max_psa
+    FROM (
+        SELECT person_id, COUNT(*) AS psa_count
+        FROM final_cohort
+        WHERE lab_name LIKE '%Prostate specific%'
+        GROUP BY person_id
+    )
+""")
+_all_rows.extend(_melt_to_long(_psa_df, "psa_per_patient"))
+
+# labs_per_patient
+_labs_df = spark.sql("""
+    SELECT
+        ROUND(AVG(lab_count), 2) AS mean_labs_per_patient,
+        ROUND(PERCENTILE_APPROX(lab_count, 0.25), 2) AS q1_labs,
+        ROUND(PERCENTILE_APPROX(lab_count, 0.50), 2) AS median_labs,
+        ROUND(PERCENTILE_APPROX(lab_count, 0.75), 2) AS q3_labs,
+        MIN(lab_count) AS min_labs,
+        MAX(lab_count) AS max_labs,
+        ROUND(AVG(distinct_lab_types), 2) AS mean_distinct_lab_types,
+        ROUND(PERCENTILE_APPROX(distinct_lab_types, 0.25), 2) AS q1_lab_types,
+        ROUND(PERCENTILE_APPROX(distinct_lab_types, 0.50), 2) AS median_lab_types,
+        ROUND(PERCENTILE_APPROX(distinct_lab_types, 0.75), 2) AS q3_lab_types,
+        MIN(distinct_lab_types) AS min_lab_types,
+        MAX(distinct_lab_types) AS max_lab_types
+    FROM (
+        SELECT person_id,
+               COUNT(*) AS lab_count,
+               COUNT(DISTINCT lab_name) AS distinct_lab_types
+        FROM final_cohort
+        GROUP BY person_id
+    )
+""")
+_all_rows.extend(_melt_to_long(_labs_df, "labs_per_patient"))
+
+# followup_survival
+_followup_df = spark.sql("""
+    SELECT
+        COUNT(*) AS n_patients,
+        SUM(CASE WHEN is_deceased = 1 THEN 1 ELSE 0 END) AS n_deceased,
+        ROUND(SUM(CASE WHEN is_deceased = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS mortality_pct,
+        ROUND(AVG(followup_days), 2) AS mean_followup_days,
+        ROUND(AVG(followup_days) / 365.25, 2) AS mean_followup_years,
+        ROUND(PERCENTILE_APPROX(followup_days, 0.50), 2) AS median_followup_days,
+        ROUND(PERCENTILE_APPROX(followup_days, 0.50) / 365.25, 2) AS median_followup_years,
+        MIN(followup_days) AS min_followup_days,
+        MAX(followup_days) AS max_followup_days
+    FROM (
+        SELECT person_id, is_deceased,
+               DATEDIFF(last_followup_date, diagnosis_date) AS followup_days
+        FROM patient_cohort
+        WHERE last_followup_date IS NOT NULL
+    )
+""")
+_all_rows.extend(_melt_to_long(_followup_df, "followup_survival"))
+
+# tte_platinum
+_tte_plat_df = spark.sql("""
+    SELECT
+        COUNT(*) AS n_patients,
+        ROUND(AVG(time_to_platinum_or_censor), 2) AS mean_days,
+        ROUND(STDDEV(time_to_platinum_or_censor), 2) AS std_days,
+        MIN(time_to_platinum_or_censor) AS min_days,
+        ROUND(PERCENTILE_APPROX(time_to_platinum_or_censor, 0.25), 2) AS q1_days,
+        ROUND(PERCENTILE_APPROX(time_to_platinum_or_censor, 0.50), 2) AS median_days,
+        ROUND(PERCENTILE_APPROX(time_to_platinum_or_censor, 0.75), 2) AS q3_days,
+        MAX(time_to_platinum_or_censor) AS max_days
+    FROM patient_cohort
+    WHERE time_to_platinum_or_censor IS NOT NULL
+""")
+_all_rows.extend(_melt_to_long(_tte_plat_df, "tte_platinum"))
+
+# tte_death
+_tte_death_df = spark.sql("""
+    SELECT
+        COUNT(*) AS n_patients,
+        ROUND(AVG(time_to_death_or_censor), 2) AS mean_days,
+        ROUND(STDDEV(time_to_death_or_censor), 2) AS std_days,
+        MIN(time_to_death_or_censor) AS min_days,
+        ROUND(PERCENTILE_APPROX(time_to_death_or_censor, 0.25), 2) AS q1_days,
+        ROUND(PERCENTILE_APPROX(time_to_death_or_censor, 0.50), 2) AS median_days,
+        ROUND(PERCENTILE_APPROX(time_to_death_or_censor, 0.75), 2) AS q3_days,
+        MAX(time_to_death_or_censor) AS max_days
+    FROM patient_cohort
+    WHERE time_to_death_or_censor IS NOT NULL
+""")
+_all_rows.extend(_melt_to_long(_tte_death_df, "tte_death"))
+
+# null_audit
+_null_audit_df = spark.sql("""
+    SELECT
+        COUNT(*) AS total_rows,
+        SUM(CASE WHEN person_id IS NULL THEN 1 ELSE 0 END) AS null_person_id,
+        SUM(CASE WHEN race IS NULL THEN 1 ELSE 0 END) AS null_race,
+        SUM(CASE WHEN ethnicity IS NULL THEN 1 ELSE 0 END) AS null_ethnicity,
+        SUM(CASE WHEN age_at_diagnosis IS NULL THEN 1 ELSE 0 END) AS null_age_at_diagnosis,
+        SUM(CASE WHEN diagnosis_date IS NULL THEN 1 ELSE 0 END) AS null_diagnosis_date,
+        SUM(CASE WHEN lab_name IS NULL THEN 1 ELSE 0 END) AS null_lab_name,
+        SUM(CASE WHEN measurement_date IS NULL THEN 1 ELSE 0 END) AS null_measurement_date,
+        SUM(CASE WHEN lab_value IS NULL THEN 1 ELSE 0 END) AS null_lab_value,
+        SUM(CASE WHEN lab_unit IS NULL THEN 1 ELSE 0 END) AS null_lab_unit,
+        SUM(CASE WHEN last_followup_date IS NULL THEN 1 ELSE 0 END) AS null_last_followup_date,
+        SUM(CASE WHEN event_platinum IS NULL THEN 1 ELSE 0 END) AS null_event_platinum,
+        SUM(CASE WHEN time_to_platinum_or_censor IS NULL THEN 1 ELSE 0 END) AS null_time_to_platinum_or_censor,
+        SUM(CASE WHEN time_to_death_or_censor IS NULL THEN 1 ELSE 0 END) AS null_time_to_death_or_censor,
+        SUM(CASE WHEN days_relative_to_diagnosis IS NULL THEN 1 ELSE 0 END) AS null_days_rel_diagnosis,
+        SUM(CASE WHEN days_relative_to_platinum_start IS NULL THEN 1 ELSE 0 END) AS null_days_rel_platinum,
+        SUM(CASE WHEN days_relative_to_last_followup IS NULL THEN 1 ELSE 0 END) AS null_days_rel_followup,
+        SUM(CASE WHEN platinum_type IS NULL THEN 1 ELSE 0 END) AS null_platinum_type,
+        SUM(CASE WHEN platinum_start_date IS NULL THEN 1 ELSE 0 END) AS null_platinum_start_date,
+        SUM(CASE WHEN is_deceased IS NULL THEN 1 ELSE 0 END) AS null_is_deceased
+    FROM final_cohort
+""")
+_all_rows.extend(_melt_to_long(_null_audit_df, "null_audit"))
+
+# Save cohort_summary.csv
+_cohort_summary_pdf = pd.DataFrame(_all_rows, columns=["section", "subsection", "metric", "value"])
+_cohort_summary_pdf.to_csv(os.path.join(_summary_dir, "cohort_summary.csv"), index=False)
+
+# --- categorical_distributions.csv ---
+_race_pdf = spark.sql(f"""
+    SELECT 'race' AS category, race AS value,
+           COUNT(*) AS n, ROUND(COUNT(*) * 100.0 / {patient_count}, 1) AS pct
+    FROM patient_cohort
+    GROUP BY race
+    ORDER BY n DESC
+""").toPandas()
+
+_ethnicity_pdf = spark.sql(f"""
+    SELECT 'ethnicity' AS category, ethnicity AS value,
+           COUNT(*) AS n, ROUND(COUNT(*) * 100.0 / {patient_count}, 1) AS pct
+    FROM patient_cohort
+    GROUP BY ethnicity
+    ORDER BY n DESC
+""").toPandas()
+
+_plat_event_pdf = spark.sql(f"""
+    SELECT 'platinum_event' AS category, CAST(event_platinum AS STRING) AS value,
+           COUNT(*) AS n, ROUND(COUNT(*) * 100.0 / {patient_count}, 1) AS pct
+    FROM patient_cohort
+    GROUP BY event_platinum
+    ORDER BY event_platinum
+""").toPandas()
+
+_categorical_pdf = pd.concat([_race_pdf, _ethnicity_pdf, _plat_event_pdf], ignore_index=True)
+_categorical_pdf.to_csv(os.path.join(_summary_dir, "categorical_distributions.csv"), index=False)
+
+# --- lab_summary_by_type.csv ---
+_lab_summary_pdf = spark.sql("""
+    SELECT
+        lab_name,
+        COUNT(*) AS n_records,
+        ROUND(AVG(lab_value), 2) AS mean_value,
+        ROUND(STDDEV(lab_value), 2) AS std_value,
+        ROUND(PERCENTILE_APPROX(lab_value, 0.25), 2) AS q1_value,
+        ROUND(PERCENTILE_APPROX(lab_value, 0.50), 2) AS median_value,
+        ROUND(PERCENTILE_APPROX(lab_value, 0.75), 2) AS q3_value,
+        ROUND(MIN(lab_value), 2) AS min_value,
+        ROUND(MAX(lab_value), 2) AS max_value
+    FROM final_cohort
+    WHERE lab_value IS NOT NULL
+    GROUP BY lab_name
+    ORDER BY n_records DESC
+""").toPandas()
+_lab_summary_pdf.to_csv(os.path.join(_summary_dir, "lab_summary_by_type.csv"), index=False)
+
+print(f"\nSummary CSVs saved to: {_summary_dir}")
