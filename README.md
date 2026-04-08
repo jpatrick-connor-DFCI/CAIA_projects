@@ -1,169 +1,162 @@
 # CAIA
 
-PySpark preprocessing pipelines for extracting longitudinal clinical lab data from OMOP CDM (Observational Medical Outcomes Partnership Common Data Model) for time-to-event modeling with SurvLatentODE.
+Current repository for the CAIA prostate profiling workflow. The active code in this repo is focused on assembling a prostate cancer cohort from local DFCI/Profile exports, preparing note text for manual or LLM review, and generating patient-level labels about why platinum chemotherapy was used.
 
-Data source: DFCI deidentified OMOP CDM via Snowflake (`dfci_ia_aistudio.omop_caia_denorm` for clinical data, `snowflake_aistudio_full_catalog.omop_cdm_deid` for vocabulary).
+This is no longer the older OMOP/PySpark preprocessing repository described in prior versions of the README. The current checked-in code is mostly pandas-based and lives under `COMPASS/PROFILE/`.
 
-## Repository Structure
+## Current Repository Structure
 
 ```text
 CAIA/
-├── COMPASS/                              # Prostate cancer workflow
-│   ├── rhino_preprocessing/
-│   │   ├── compass_preprocessing.py      # Main COMPASS preprocessing pipeline
-│   │   ├── compass_cohort_sensitivity.py # Cohort parameter sweep analysis
-│   │   └── compass_preprocessing_prostate_only_no_parp.py
-│   ├── ERIS_testing/
-│   │   ├── compile_prostate_data.py      # Data extraction utilities
-│   │   ├── compile_MRNs_for_manual_review.py
-│   │   └── extract_units.ipynb           # Unit analysis notebook
-│   └── COMPASS_Rhino Schema_v3.csv       # Output schema documentation
-├── IPIO/                                 # Immunotherapy workflow
-│   ├── rhino_preprocessing/
-│   │   └── ipio_preprocessing.py         # Main IPIO preprocessing pipeline
-│   └── IPIO_Rhino Schema.xlsx            # Output schema documentation
-├── common_OMOP/                          # Shared lookup tables
-│   └── all_common_OMOP_units.csv         # Allowed measurement/unit combinations
+├── COMPASS/
+│   ├── COMPASS_Cohort_Report.docx
+│   ├── COMPASS_Exclusion_and_Threshold_Analysis.docx
+│   └── PROFILE/
+│       ├── data_preprocessing/
+│       │   ├── compile_prostate_data.py
+│       │   ├── compile_MRNs_for_manual_review.py
+│       │   └── compile_text_for_LLM_review.py
+│       ├── regex_generation/
+│       │   ├── generate_regex_rules.py
+│       │   └── regex_prompts.py
+│       ├── generate_LLM_labels.py
+│       └── utils.py
+├── IPIO/
+│   └── IPIO_Cohort_Report.docx
 └── README.md
 ```
 
-## Tech Stack
+## What Is In Scope Right Now
 
-- **Language**: Python (PySpark)
-- **Compute**: Apache Spark (Databricks)
-- **Database**: Snowflake
-- **Data Standard**: OMOP CDM v5
-- **Downstream**: SurvLatentODE and other time-to-event models
+The active workflow supports retrospective review of prostate cancer patients who received platinum chemotherapy, with an emphasis on identifying likely neuroendocrine or small-cell transformation and other clinical reasons for platinum use.
 
----
+The main pieces are:
 
-## COMPASS (`compass_preprocessing.py`)
+- Cohort and source-data compilation from local Profile / OncDRS / embedding-project exports
+- Heuristic filtering for prostate patients, PSA records, and platinum exposures
+- Candidate-patient selection for manual review
+- Note-window extraction for LLM review around platinum start
+- Regex-based note cleaning for clinician, imaging, and pathology notes
+- Two-stage LLM labeling: per-note extraction followed by patient-level synthesis
 
-### Problem Formulation
+## Active Workflow
 
-Predict survival and/or transformation to neuroendocrine prostate cancer (NEPC) in prostate cancer patients using routine clinical laboratory measurements as irregular time series input to SurvLatentODE or other time-to-event models.
+### 1. Build the prostate cohort data bundle
 
-**Proxy for NEPC transformation**: Initiation of platinum-based chemotherapy (cisplatin, carboplatin, oxaliplatin) is used as a proxy event for NEPC transformation. This proxy is currently being stress-tested on internal DFCI data.
+`COMPASS/PROFILE/data_preprocessing/compile_prostate_data.py`
 
-### Cohort Definition
+This script:
 
-- **Cancer**: Prostate cancer (OMOP condition concepts for malignant neoplasm of prostate and variants)
-- **Eligibility**: Patients with >= 10 PSA measurements after (or before) their first prostate cancer diagnosis
-- **Event**: First platinum-based chemotherapy exposure (one row per patient via ROW_NUMBER)
+- pulls prostate MRNs from `first_treatments_dfci_w_inferred_cancers.csv`
+- loads note metadata and batch JSON note files from the clinical text embedding project
+- writes a prostate-only note table to `prostate_text_data.csv`
+- filters related ICD, health history, medication, lab, and somatic datasets to the same MRNs
+- creates convenience outputs for total PSA records and first platinum exposure records
 
-### Data Extraction
+Key implementation detail: paths are hard-coded to shared filesystem locations under `/data/gusev/...`.
 
-1. **Concept sets**: Prostate cancer diagnoses, PSA measurements (27 concept variants), routine clinical labs (46 measurements + 32 variant codings), platinum-based drugs (cisplatin, carboplatin, oxaliplatin)
-2. **First prostate diagnosis**: Earliest condition_occurrence per patient (ROW_NUMBER, one row per patient)
-3. **PSA eligibility filter**: Patients with >= 10 PSA measurements
-4. **First platinum exposure**: Earliest platinum drug exposure per patient (ROW_NUMBER, one row per patient)
-5. **Lab extraction**: All routine clinical labs for eligible patients (including pre-diagnosis labs)
-6. **Follow-up**: Last observation date from the latest of: measurement, condition, drug exposure, visit, or death dates
-7. **Concept remapping**: 38 variant LOINC concept IDs remapped to canonical IDs (e.g., PSA variants → 3013603, basophils generic → automated)
-8. **Unit filtering**: Inner join on allowed measurement/unit combinations to exclude clearly erroneous unit pairings
-9. **Unit conversion**: Conversion rules standardizing lab values to canonical units (e.g., g/L to g/dL, umol/L to mg/dL, pmol/L to ng/dL, cells/uL to 10^3/uL)
-10. **Physiologic range filtering**: Left join with concept-specific physiologic ranges to remove implausible values
-11. **Time-to-event columns**: `event_platinum` (0/1), `time_to_platinum_or_censor`, `time_to_death_or_censor`
+### 2. Prepare manual review candidates
 
-### Output Schema (33 columns)
+`COMPASS/PROFILE/data_preprocessing/compile_MRNs_for_manual_review.py`
 
-| Category | Columns |
-|---|---|
-| Patient demographics | `person_id`, `gender`, `race`, `ethnicity`, `age_at_diagnosis`, `date_of_birth` |
-| Cancer | `prostate_cancer_diagnosis_date` |
-| Treatment | `drug_concept_id`, `drug_name`, `drug_type`, `drug_initiation_date` |
-| Follow-up & death | `last_followup_date`, `death_date`, `is_deceased` |
-| Time-to-event | `event_platinum`, `time_to_platinum_or_censor`, `time_to_death_or_censor` |
-| Lab info | `measurement_concept_id`, `lab_name`, `measurement_date`, `lab_value`, `unit_concept_id`, `lab_unit_name`, `lab_values_converted`, `unit_converted_id`, `unit_converted_name`, `lab_value_final` |
-| Relative timing | `days_relative_to_diagnosis`, `days_relative_to_platinum_chemo_start`, `days_relative_to_last_followup` |
+This script combines the derived prostate datasets to create a review table for platinum-treated patients. It adds:
 
-### Time-to-Event Variables
+- note counts by note type
+- whether platinum drug names appear in notes
+- non-prostate primary malignancy flags from ICD-10 codes
+- PARP inhibitor exposure
+- BRCA2-related somatic columns from the somatic data table
 
-- **`event_platinum`**: Binary indicator (1 = patient received platinum chemotherapy, 0 = censored)
-- **`time_to_platinum_or_censor`**: Days from prostate cancer diagnosis to platinum initiation (if event) or last follow-up (if censored)
-- **`time_to_death_or_censor`**: Days from prostate cancer diagnosis to death (if deceased) or last follow-up (if alive)
+Primary output:
 
----
+- `prostate_pxs_for_review_v2.csv`
 
-## IPIO (`ipio_preprocessing.py`)
+### 3. Prepare note text for LLM review
 
-### Problem Formulation
+`COMPASS/PROFILE/data_preprocessing/compile_text_for_LLM_review.py`
 
-Predict survival and/or immunotherapy toxicities in multi-cancer patients receiving immune checkpoint inhibitor (ICI) therapy, using routine clinical laboratory measurements as irregular time series input to SurvLatentODE or other time-to-event models.
+This script:
 
-**Proxy for immunotherapy toxicity**: ICI discontinuation and time on ICI are used as proxies for toxicity or patient tolerance, due to lack of structured toxicity documentation. A multi-signal discontinuation classification system infers the likely reason for ICI discontinuation.
+- reads existing annotation data from `baca_lab_patient_annotations.tsv`
+- keeps patients whose platinum indication is still unlabeled
+- joins those patients to the full prostate note table
+- keeps notes within +/-90 days of platinum start
+- writes the result to `LLM_candidate_text_data.csv`
 
-### Cohort Definition
+### 4. Generate regex cleaning rules
 
-- **Cancer types**: NSCLC, Bladder, Kidney, Melanoma, and other solid tumors
-- **Treatment**: Patients who received at least one ICI (PD-1, PD-L1, CTLA-4, LAG-3 inhibitors: nivolumab, pembrolizumab, atezolizumab, durvalumab, avelumab, ipilimumab, tremelimumab, relatlimab)
-- **Event**: ICI discontinuation with inferred cause classification
+`COMPASS/PROFILE/regex_generation/generate_regex_rules.py`
 
-### ICI Discontinuation Classification
+This script samples notes by `NOTE_TYPE`, sends the samples to an Azure OpenAI deployment, and asks the model to propose:
 
-Treatment blocks are identified using a gap-and-island technique (>60-day gap between ICI exposures = new treatment block). The **first** treatment block per patient is selected. Discontinuation cause is classified with the following priority:
+- boilerplate-removal regexes
+- regex patterns for extracting structured note elements
 
-| Priority | Cause | Definition |
-|---|---|---|
-| 1 | `DEATH` | Patient died within 60 days of last ICI cycle |
-| 2 | `OBS_END` | Last ICI cycle is within 60 days of observation period end (right-censored) |
-| 3 | `PROGRESSION` | Non-ICI antineoplastic therapy (ATC L01, excluding ICI) started within 90 days after ICI block end |
-| 4 | `TOXICITY_LIKELY` | Systemic corticosteroid (ATC H02AB) administered within +/-14 days of ICI block end |
-| 5 | `COMPLETED` | ICI treatment duration >= 330 days (~1 year, typical course length) |
-| 6 | `UNDETERMINED` | None of the above signals detected |
+Outputs are written under the data directory configured in the script, including:
 
-### Data Extraction
+- per-note-type GPT responses
+- a synthesized `generated_rules.py`
 
-1. **Concept sets**: Cancer diagnoses (by type), ICI drugs, non-ICI antineoplastics (ATC L01 hierarchy via concept_ancestor), systemic corticosteroids (ATC H02AB hierarchy via concept_ancestor), routine clinical labs (46 measurements + 32 variant codings)
-2. **Cancer diagnosis**: Earliest diagnosis per patient per cancer type (ROW_NUMBER)
-3. **ICI treatment blocks**: Gap-and-island detection of treatment blocks, first block selected
-4. **Discontinuation inference**: Multi-signal classification (see above)
-5. **Lab extraction**: All routine clinical labs for eligible patients (including pre-diagnosis labs)
-6. **Follow-up**: Last observation date excluding ICI drug exposures (prevents self-referential censoring)
-7. **Concept remapping**: 38 variant LOINC concept IDs remapped to canonical IDs (e.g., PSA variants → 3013603, basophils generic → automated)
-8. **Unit filtering**: Inner join on allowed measurement/unit combinations
-9. **Unit conversion**: Conversion rules standardizing to canonical units (e.g., g/L to g/dL, cells/uL to 10^3/uL, pmol/L to ng/dL)
-10. **Physiologic range filtering**: Concept-specific physiologic ranges to remove implausible values
-11. **Time-to-event columns**: `event_ici_discontinued` (0/1), `time_on_ici`, `time_to_death_or_censor`
+The prompt templates for this step live in `COMPASS/PROFILE/regex_generation/regex_prompts.py`.
 
-### Output Schema (37 columns)
+### 5. Clean notes and run LLM labeling
 
-| Category | Columns |
-|---|---|
-| Patient demographics | `person_id`, `gender`, `race`, `ethnicity`, `age_at_diagnosis`, `date_of_birth` |
-| Cancer | `cancer_type`, `cancer_subtype`, `diagnosis_date` |
-| ICI treatment | `ici_start_date`, `last_ici_cycle_start_date`, `ici_type` |
-| Follow-up & death | `last_followup_date`, `death_date`, `is_deceased`, `ici_discontinuation_date`, `ici_discontinuation_cause` |
-| Time-to-event | `time_on_ici`, `event_ici_discontinued`, `time_to_death_or_censor` |
-| Lab info | `measurement_concept_id`, `lab_name`, `measurement_date`, `lab_value`, `unit_concept_id`, `lab_unit_name`, `lab_values_converted`, `unit_converted_id`, `unit_converted_name`, `lab_value_final` |
-| Relative timing | `days_relative_to_diagnosis`, `days_relative_to_ici_start`, `days_relative_to_ici_discontinuation`, `days_relative_to_last_followup` |
+`COMPASS/PROFILE/generate_LLM_labels.py`
 
-### Time-to-Event Variables
+This is the main labeling script. It:
 
-- **`event_ici_discontinued`**: Binary indicator (1 = ICI was actively discontinued [PROGRESSION, TOXICITY_LIKELY, COMPLETED, UNDETERMINED], 0 = censored [DEATH, OBS_END])
-- **`time_on_ici`**: Days from ICI start date to ICI discontinuation date
-- **`time_to_death_or_censor`**: Days from cancer diagnosis to death (if deceased) or last follow-up (if alive)
+- reads `LLM_candidate_text_data.csv`
+- cleans note text with `clean_note(...)` from `COMPASS/PROFILE/utils.py`
+- runs per-note extraction prompts against an Azure OpenAI `gpt-4o` deployment
+- checkpoints note-level JSON extractions
+- runs a second synthesis prompt per patient to infer the primary reason platinum was used
+- appends patient-level results to a TSV output
+- tracks failures separately and supports `--retry-failures`
 
----
+Configured outputs:
 
-## Shared Processing Steps
+- `LLM_generated_labels.tsv`
+- `LLM_note_extractions.json`
+- `LLM_failed_patients.tsv`
 
-Both pipelines share identical logic for:
+## `utils.py`
 
-- **Concept remapping**: 38 variant LOINC concept IDs are remapped to canonical IDs post-extraction (e.g., multiple PSA codings → 3013603, basophils/eosinophils generic → automated counts). This consolidates equivalent measurements before unit filtering.
-- **Allowed unit combinations** (`all_common_OMOP_units.csv`): Validated measurement/unit pairings used to filter out erroneous unit assignments
-- **Unit conversions**: Rules converting non-standard units to canonical forms (e.g., g/L -> g/dL for albumin, umol/L -> mg/dL for creatinine/bilirubin, cells/uL -> 10^3/uL for differentials, pmol/L -> ng/dL for Free T4, various TSH units -> mIU/L)
-- **Physiologic range filtering**: Concept-specific plausible ranges to remove data entry errors and instrument artifacts
-- **Lab value finalization**: `lab_value_final = COALESCE(lab_values_converted, lab_value)` -- uses converted value when available, otherwise the original
+`COMPASS/PROFILE/utils.py` contains:
 
-## Output
+- regex cleaning rules shared across note types plus note-type-specific rules
+- helper function `clean_note(text, note_type=None)`
+- the per-note extraction prompt
+- the patient-level platinum-classification synthesis prompt
 
-Each script produces a single long-format DataFrame (one row per patient per lab measurement per date) that is uploaded to Snowflake for downstream modeling. Summary statistics are printed at the end of each script covering cohort demographics, treatment distributions, lab measurement distributions, unit conversion audits, follow-up/survival, time-to-event variables, pre-diagnosis labs, and null value audits.
+The current prompts are designed for de-identified oncology notes and classify platinum rationale into categories such as:
 
----
+- neuroendocrine transformation
+- de novo neuroendocrine disease
+- clinical trial
+- CRPC
+- disease progression
+- non-prostate primary
+- biomarker-driven use
 
-## Supporting Scripts
+## Dependencies and Runtime Assumptions
 
-- **`compass_cohort_sensitivity.py`**: Parameter sweep over PSA concept sets and count thresholds (1–30) to show patient inclusion/exclusion at each filter step.
-- **`ERIS_testing/compile_prostate_data.py`**: Data extraction utilities for the DFCI prostate cohort (text notes, health history, medications, labs, somatic data).
-- **`ERIS_testing/extract_units.ipynb`**: Jupyter notebook for unit analysis and validation.
+There is no packaged environment definition in this repo at the moment. The checked-in scripts assume access to:
+
+- Python with `pandas`, `numpy`, and `tqdm`
+- `openai`
+- `azure-identity`
+- local/shared CSV and JSON data files under `/data/gusev/...`
+- valid Azure credentials for `DefaultAzureCredential`
+- access to the Azure OpenAI endpoint hard-coded in the LLM scripts
+
+Because paths and endpoints are currently embedded directly in the scripts, this repo is best understood as a research workflow snapshot rather than a portable package.
+
+## Current State of `IPIO`
+
+`IPIO/` currently contains only `IPIO_Cohort_Report.docx`. The older IPIO preprocessing code referenced by earlier README versions is not present in this checkout.
+
+## Notes
+
+- Hidden `.ipynb_checkpoints` and `.DS_Store` files exist in the tree but are not part of the intended workflow.
+- Several scripts read and write data outside the repository root.
+- If this repo is going to be used by others, the next cleanup step would be to externalize paths, add an environment file, and document the expected input tables explicitly.
