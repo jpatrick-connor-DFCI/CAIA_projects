@@ -77,11 +77,11 @@ COUNT_RULES_WITH_PER_UL = merge_unit_rules(
 
 RULES_BY_MEASUREMENT = {
     "WBC": {
-        "canonical_unit": "K/uL",
+        "canonical_unit": "thousand per microliter",
         "unit_factors": COUNT_1E3_PER_UL,
     },
     "Hemoglobin": {
-        "canonical_unit": "g/dL",
+        "canonical_unit": "gram per deciliter",
         "unit_factors": merge_unit_rules(
             MASS_G_DL,
             {
@@ -90,60 +90,68 @@ RULES_BY_MEASUREMENT = {
         ),
     },
     "CEA": {
-        "canonical_unit": "ng/mL",
+        "canonical_unit": "nanogram per milliliter",
         "unit_factors": {
             "ng/ml": 1.0,
         },
     },
     "Lymphocytes absolute": {
-        "canonical_unit": "K/uL",
+        "canonical_unit": "thousand per microliter",
         "unit_factors": COUNT_RULES_WITH_PER_UL,
     },
     "Glucose": {
-        "canonical_unit": "mg/dL",
+        "canonical_unit": "milligram per deciliter",
         "unit_factors": MASS_MG_DL,
     },
     "Calcium": {
-        "canonical_unit": "mg/dL",
+        "canonical_unit": "milligram per deciliter",
         "unit_factors": MASS_MG_DL,
     },
     "ALT": {
-        "canonical_unit": "U/L",
+        "canonical_unit": "international unit per liter",
         "unit_factors": ACTIVITY_UL,
         "extra_prefixes": {"ALT"},
     },
     "Creatine kinase": {
-        "canonical_unit": "U/L",
+        "canonical_unit": "international unit per liter",
         "unit_factors": ACTIVITY_UL,
     },
     "Free T4": {
-        "canonical_unit": "ng/dL",
+        "canonical_unit": "nanogram per deciliter",
         "unit_factors": {
             "ng/dl": 1.0,
+            "pmol/l": 1.0 / 12.871,
+            "pg/ml": 0.1,
         },
         "extra_prefixes": {"FT"},
     },
     "Testosterone": {
-        "canonical_unit": "ng/dL",
+        "canonical_unit": "nanogram per deciliter",
         "unit_factors": {
             "ng/dl": 1.0,
         },
     },
     "TSH": {
-        "canonical_unit": "uIU/mL",
+        "canonical_unit": "milli-international unit per liter",
         "unit_factors": {
             "uiu/ml": 1.0,
             "miu/l": 1.0,
+            "iu/ml": 1000000.0,
+            "mu/ml": 1000.0,
+            "uu/ml": 1.0,
+            "miu/ml": 1000.0,
+            "mu/l": 1.0,
+            "uiu/l": 0.001,
         },
     },
     "AFP": {
-        "canonical_unit": "ng/mL",
+        "canonical_unit": "nanogram per milliliter",
         "unit_factors": {
             "ng/ml": 1.0,
         },
     },
     "MCHC": {
-        "canonical_unit": "g/dL",
+        "canonical_unit": "gram per deciliter",
         # MCHC is historically reported as either g/dL or percent with the same numeric scale.
         "unit_factors": merge_unit_rules(
             MASS_G_DL,
@@ -153,46 +161,46 @@ RULES_BY_MEASUREMENT = {
         ),
     },
     "MCH": {
-        "canonical_unit": "pg",
+        "canonical_unit": "picogram",
         "unit_factors": {
             "pg": 1.0,
         },
     },
     "Basophils absolute": {
-        "canonical_unit": "K/uL",
+        "canonical_unit": "thousand per microliter",
         "unit_factors": COUNT_1E3_PER_UL,
     },
     "aPTT": {
-        "canonical_unit": "sec",
+        "canonical_unit": "second",
         "unit_factors": TIME_SECONDS,
     },
     "PSA": {
-        "canonical_unit": "ng/mL",
+        "canonical_unit": "nanogram per milliliter",
         "unit_factors": {
             "ng/ml": 1.0,
         },
     },
     "Neutrophils absolute": {
-        "canonical_unit": "K/uL",
+        "canonical_unit": "thousand per microliter",
         "unit_factors": COUNT_RULES_WITH_PER_UL,
     },
     "BUN": {
-        "canonical_unit": "mg/dL",
+        "canonical_unit": "milligram per deciliter",
         "unit_factors": MASS_MG_DL,
     },
     "ESR": {
-        "canonical_unit": "mm/hr",
+        "canonical_unit": "millimeter per hour",
         "unit_factors": {
             "mm/hr": 1.0,
             "mm/h": 1.0,
         },
     },
     "AST": {
-        "canonical_unit": "U/L",
+        "canonical_unit": "international unit per liter",
         "unit_factors": ACTIVITY_UL,
     },
     "Chloride": {
-        "canonical_unit": "mmol/L",
+        "canonical_unit": "milliequivalent per liter",
         "unit_factors": {
             "mmol/l": 1.0,
             "meq/l": 1.0,
@@ -200,27 +208,28 @@ RULES_BY_MEASUREMENT = {
         "extra_prefixes": {"PCL"},
     },
     "CO2": {
-        "canonical_unit": "mmol/L",
+        "canonical_unit": "milliequivalent per liter",
         "unit_factors": {
             "mmol/l": 1.0,
             "meq/l": 1.0,
+            "nmol/l": 0.000001,
         },
         "extra_prefixes": {"PLCO2"},
     },
     "Fibrinogen": {
-        "canonical_unit": "mg/dL",
+        "canonical_unit": "milligram per deciliter",
         "unit_factors": MASS_MG_DL,
     },
     "LDH": {
-        "canonical_unit": "U/L",
+        "canonical_unit": "international unit per liter",
         "unit_factors": ACTIVITY_UL,
     },
     "Creatinine": {
-        "canonical_unit": "mg/dL",
+        "canonical_unit": "milligram per deciliter",
         "unit_factors": MASS_MG_DL,
     },
     "Sodium": {
-        "canonical_unit": "mmol/L",
+        "canonical_unit": "milliequivalent per liter",
         "unit_factors": {
             "mmol/l": 1.0,
             "meq/l": 1.0,
@@ -234,19 +243,20 @@ RULES_BY_MEASUREMENT = {
         },
     },
     "RDW": {
-        "canonical_unit": "%",
+        "canonical_unit": "percent",
         "unit_factors": {
             "%": 1.0,
         },
     },
     "RBC": {
-        "canonical_unit": "M/uL",
+        "canonical_unit": "million per microliter",
         "unit_factors": RBC_1E6_PER_UL,
     },
     "CRP": {
-        "canonical_unit": "mg/L",
+        "canonical_unit": "milligram per deciliter",
         "unit_factors": {
-            "mg/l": 1.0,
+            "mg/dl": 1.0,
+            "mg/l": 0.1,
         },
     },
     "Albumin/globulin ratio": {
@@ -257,7 +267,7 @@ RULES_BY_MEASUREMENT = {
         },
     },
     "Total protein": {
-        "canonical_unit": "g/dL",
+        "canonical_unit": "gram per deciliter",
         "unit_factors": MASS_G_DL,
     },
     "INR": {
@@ -267,37 +277,38 @@ RULES_BY_MEASUREMENT = {
         },
     },
     "CA19-9": {
-        "canonical_unit": "U/mL",
+        "canonical_unit": "unit per milliliter",
         "unit_factors": {
             "u/ml": 1.0,
             "iu/ml": 1.0,
         },
     },
     "Potassium": {
-        "canonical_unit": "mmol/L",
+        "canonical_unit": "milliequivalent per liter",
         "unit_factors": {
             "mmol/l": 1.0,
             "meq/l": 1.0,
+            "nmol/l": 0.000001,
         },
     },
     "Hematocrit": {
-        "canonical_unit": "%",
+        "canonical_unit": "percent",
         "unit_factors": {
             "%": 1.0,
         },
     },
     "MCV": {
-        "canonical_unit": "fL",
+        "canonical_unit": "femtoliter",
         "unit_factors": {
             "fl": 1.0,
         },
     },
     "Total bilirubin": {
-        "canonical_unit": "mg/dL",
+        "canonical_unit": "milligram per deciliter",
         "unit_factors": MASS_MG_DL,
     },
     "Respiratory rate": {
-        "canonical_unit": "breaths/minute",
+        "canonical_unit": "breaths per minute",
         "unit_factors": {
             "rr": 1.0,
             "breaths/minute": 1.0,
@@ -306,15 +317,15 @@ RULES_BY_MEASUREMENT = {
         "extra_test_names": {"Respiratory rate"},
     },
     "Albumin": {
-        "canonical_unit": "g/dL",
+        "canonical_unit": "gram per deciliter",
         "unit_factors": MASS_G_DL,
     },
     "Platelets": {
-        "canonical_unit": "K/uL",
+        "canonical_unit": "thousand per microliter",
         "unit_factors": COUNT_1E3_PER_UL,
     },
     "Heart rate": {
-        "canonical_unit": "beats/minute",
+        "canonical_unit": "beats per minute",
         "unit_factors": {
             "bpm": 1.0,
             "beats/minute": 1.0,
@@ -323,11 +334,11 @@ RULES_BY_MEASUREMENT = {
         "extra_test_names": {"Pulse"},
     },
     "Direct bilirubin": {
-        "canonical_unit": "mg/dL",
+        "canonical_unit": "milligram per deciliter",
         "unit_factors": MASS_MG_DL,
     },
     "Globulin": {
-        "canonical_unit": "g/dL",
+        "canonical_unit": "gram per deciliter",
         "unit_factors": merge_unit_rules(
             MASS_G_DL,
             {
@@ -336,11 +347,11 @@ RULES_BY_MEASUREMENT = {
         ),
     },
     "Eosinophils absolute": {
-        "canonical_unit": "K/uL",
+        "canonical_unit": "thousand per microliter",
         "unit_factors": COUNT_1E3_PER_UL,
     },
     "Monocytes absolute": {
-        "canonical_unit": "K/uL",
+        "canonical_unit": "thousand per microliter",
         "unit_factors": merge_unit_rules(
             COUNT_1E3_PER_UL,
             {
@@ -349,21 +360,21 @@ RULES_BY_MEASUREMENT = {
         ),
     },
     "PT": {
-        "canonical_unit": "sec",
+        "canonical_unit": "second",
         "unit_factors": TIME_SECONDS,
     },
     "Alkaline phosphatase": {
-        "canonical_unit": "U/L",
+        "canonical_unit": "international unit per liter",
         "unit_factors": ACTIVITY_UL,
     },
     "CA125": {
-        "canonical_unit": "U/mL",
+        "canonical_unit": "unit per milliliter",
         "unit_factors": {
             "u/ml": 1.0,
         },
     },
     "Systolic blood pressure": {
-        "canonical_unit": "mmHg",
+        "canonical_unit": "millimeter of mercury",
         "unit_factors": {
             "millimeterofmercury": 1.0,
             "mmhg": 1.0,
@@ -371,7 +382,7 @@ RULES_BY_MEASUREMENT = {
         "extra_test_names": {"Systolic-Epic"},
     },
     "Diastolic blood pressure": {
-        "canonical_unit": "mmHg",
+        "canonical_unit": "millimeter of mercury",
         "unit_factors": {
             "millimeterofmercury": 1.0,
             "mmhg": 1.0,
@@ -379,33 +390,41 @@ RULES_BY_MEASUREMENT = {
         "extra_test_names": {"Diastolic-Epic"},
     },
     "Body temperature": {
-        "canonical_unit": "degree Fahrenheit",
+        "canonical_unit": "degree Celsius",
         "unit_factors": {
             "degreefahrenheit": 1.0,
             "fahrenheit": 1.0,
             "degf": 1.0,
+            "degreecelsius": 1.0,
+            "celsius": 1.0,
+            "degc": 1.0,
         },
         "extra_test_names": {"Temperature"},
     },
     "Body weight": {
-        "canonical_unit": "pound",
+        "canonical_unit": "kilogram",
         "unit_factors": {
-            "pound": 1.0,
-            "pounds": 1.0,
-            "lb": 1.0,
-            "lbs": 1.0,
-            "kilograms": 2.20462262185,
-            "kg": 2.20462262185,
+            "kilogram": 1.0,
+            "kilograms": 1.0,
+            "kg": 1.0,
+            "pound": 0.45359237,
+            "pounds": 0.45359237,
+            "lb": 0.45359237,
+            "lbs": 0.45359237,
+            "oz": 0.028349523,
         },
         "extra_test_names": {"Weight"},
     },
     "Body height": {
-        "canonical_unit": "inch",
+        "canonical_unit": "centimeter",
         "unit_factors": {
-            "inch": 1.0,
-            "inches": 1.0,
-            "centimeters": 0.3937007874,
-            "cm": 0.3937007874,
+            "centimeter": 1.0,
+            "centimeters": 1.0,
+            "cm": 1.0,
+            "inch": 2.54,
+            "inches": 2.54,
+            "feet": 30.48,
+            "foot": 30.48,
         },
         "extra_test_names": {"Height"},
     },
@@ -768,6 +787,37 @@ def convert_value(value: float, factor: float) -> float:
     return value * factor
 
 
+def convert_measurement_value(
+    collapsed_measurement: str,
+    normalized_unit: str,
+    numeric_value: float,
+    canonical_unit: str,
+    unit_factors: dict[str, float],
+) -> tuple[float | None, float | None, str]:
+    if collapsed_measurement == "Body temperature":
+        if normalized_unit in {"degreefahrenheit", "fahrenheit", "degf"}:
+            converted_value = (numeric_value - 32.0) * 5.0 / 9.0
+            return converted_value, None, "mapped_value_converted"
+
+        if normalized_unit in {"degreecelsius", "celsius", "degc"}:
+            canonical_normalized = normalize_unit(canonical_unit)
+            if normalized_unit != canonical_normalized:
+                return numeric_value, 1.0, "mapped_unit_normalized"
+            return numeric_value, 1.0, "mapped_no_change"
+
+    factor = unit_factors.get(normalized_unit)
+    if factor is None:
+        return None, None, "unsupported_unit"
+
+    standardized_value = convert_value(numeric_value, factor)
+    canonical_normalized = normalize_unit(canonical_unit)
+    if factor != 1.0:
+        return standardized_value, factor, "mapped_value_converted"
+    if normalized_unit != canonical_normalized:
+        return standardized_value, factor, "mapped_unit_normalized"
+    return standardized_value, factor, "mapped_no_change"
+
+
 def consolidate_dfci_labs(
     labs_df: pd.DataFrame,
     mapping_df: pd.DataFrame,
@@ -867,26 +917,24 @@ def consolidate_dfci_labs(
 
         normalized_unit = row["normalized_result_uom_nm"]
         unit_factors = metadata["unit_factors"]
-        factor = unit_factors.get(normalized_unit)
+        standardized_value, factor, status = convert_measurement_value(
+            collapsed_measurement=metadata["collapsed_measurement"],
+            normalized_unit=normalized_unit,
+            numeric_value=numeric_value,
+            canonical_unit=metadata["canonical_unit"],
+            unit_factors=unit_factors,
+        )
 
-        if factor is None:
+        if status == "unsupported_unit":
             base_row["conversion_factor"] = pd.NA
             base_row["numeric_result_standardized"] = pd.NA
-            base_row["conversion_status"] = "unsupported_unit"
+            base_row["conversion_status"] = status
             output_rows.append(base_row)
             continue
 
-        standardized_value = convert_value(numeric_value, factor)
-        base_row["conversion_factor"] = factor
+        base_row["conversion_factor"] = factor if factor is not None else pd.NA
         base_row["numeric_result_standardized"] = standardized_value
-
-        canonical_normalized = normalize_unit(metadata["canonical_unit"])
-        if factor != 1.0:
-            base_row["conversion_status"] = "mapped_value_converted"
-        elif normalized_unit != canonical_normalized:
-            base_row["conversion_status"] = "mapped_unit_normalized"
-        else:
-            base_row["conversion_status"] = "mapped_no_change"
+        base_row["conversion_status"] = status
 
         output_rows.append(base_row)
 
