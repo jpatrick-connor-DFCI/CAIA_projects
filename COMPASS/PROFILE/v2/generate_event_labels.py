@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -23,6 +24,13 @@ except ImportError as error:
     RateLimitError = Exception
     AZURE_IMPORT_ERROR = error
 
+try:
+    import tiktoken
+    TIKTOKEN_IMPORT_ERROR = None
+except ImportError as error:
+    tiktoken = None
+    TIKTOKEN_IMPORT_ERROR = error
+
 CURRENT_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = CURRENT_DIR.parent
 if str(PROFILE_DIR) not in sys.path:
@@ -38,6 +46,7 @@ from config import (
     DEFAULT_OUTPUT_DIR,
 )
 from prompts import (
+    BUNDLED_EVENT_EXTRACTION_SYSTEM_PROMPT,
     CLINICAL_SAFETY_CONTEXT,
     EVENT_EXTRACTION_SYSTEM_PROMPT,
     PATIENT_SYNTHESIS_SYSTEM_PROMPT,
@@ -67,6 +76,18 @@ def parse_args():
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--limit-mrns", type=int, default=None)
+    parser.add_argument(
+        "--bundle-max-tokens",
+        type=int,
+        default=None,
+        help="If set, group cleaned notes into extraction bundles up to this approximate token limit.",
+    )
+    parser.add_argument(
+        "--bundle-max-notes",
+        type=int,
+        default=None,
+        help="Optional cap on notes per extraction bundle.",
+    )
     parser.add_argument("--retry-failures", action="store_true")
     parser.add_argument(
         "--overwrite-existing",
@@ -140,6 +161,18 @@ def build_client():
         azure_endpoint=DEFAULT_AZURE_OPENAI_ENDPOINT,
         azure_ad_token_provider=token_provider,
     )
+
+
+def build_token_encoder(model_name):
+    if tiktoken is None:
+        return None
+    try:
+        return tiktoken.encoding_for_model(model_name)
+    except Exception:  # noqa: BLE001
+        try:
+            return tiktoken.get_encoding("o200k_base")
+        except Exception:  # noqa: BLE001
+            return None
 
 
 def call_with_retry(client, model_name, messages, max_retries):
@@ -258,6 +291,159 @@ def extract_note(client, model_name, max_retries, extraction_system_message, row
         extraction.setdefault("note_date", to_iso_date(row.get("EVENT_DATE")))
         extraction.setdefault("note_type", row.get("NOTE_TYPE", "Unknown"))
     return extraction, None
+
+
+def estimate_tokens(text, token_encoder=None):
+    if token_encoder is not None:
+        return len(token_encoder.encode(text))
+    rough_words = len(re.findall(r"\S+", text))
+    return max(1, math.ceil(rough_words * 1.35))
+
+
+def build_cleaned_note_payloads(mrn_df, token_encoder=None):
+    cleaned_notes = []
+    for note_index, row in enumerate(mrn_df.to_dict(orient="records")):
+        cleaned = clean_note(row["CLINICAL_TEXT"], note_type=row.get("NOTE_TYPE"))
+        if not cleaned:
+            continue
+
+        payload = {
+            "note_index": note_index,
+            "note_date": to_iso_date(row.get("EVENT_DATE")),
+            "note_type": row.get("NOTE_TYPE", "Unknown"),
+            "note_text": cleaned,
+            "source_row": row,
+        }
+        token_payload = {
+            "note_index": payload["note_index"],
+            "note_date": payload["note_date"],
+            "note_type": payload["note_type"],
+            "note_text": payload["note_text"],
+        }
+        payload["estimated_tokens"] = estimate_tokens(json.dumps(token_payload, ensure_ascii=False), token_encoder)
+        cleaned_notes.append(payload)
+    return cleaned_notes
+
+
+def bundle_cleaned_notes(cleaned_notes, bundle_max_tokens=None, bundle_max_notes=None):
+    if not cleaned_notes:
+        return []
+    if bundle_max_tokens is None and bundle_max_notes is None:
+        return [[note] for note in cleaned_notes]
+
+    bundles = []
+    current_bundle = []
+    current_tokens = 0
+
+    for note in cleaned_notes:
+        note_tokens = note.get("estimated_tokens", 0)
+        exceeds_token_limit = (
+            bundle_max_tokens is not None
+            and current_bundle
+            and current_tokens + note_tokens > bundle_max_tokens
+        )
+        exceeds_note_limit = (
+            bundle_max_notes is not None
+            and current_bundle
+            and len(current_bundle) >= bundle_max_notes
+        )
+
+        if exceeds_token_limit or exceeds_note_limit:
+            bundles.append(current_bundle)
+            current_bundle = []
+            current_tokens = 0
+
+        current_bundle.append(note)
+        current_tokens += note_tokens
+
+    if current_bundle:
+        bundles.append(current_bundle)
+
+    return bundles
+
+
+def empty_note_extraction(note_payload):
+    return {
+        "note_date": note_payload.get("note_date"),
+        "note_type": note_payload.get("note_type"),
+        "histology_mentions": [],
+        "metastatic_mentions": [],
+        "platinum_mentions": [],
+        "transformation_mentions": [],
+        "adt_nonresponse_mentions": [],
+        "biomarker_mentions": [],
+        "other_cancer_mentions": [],
+        "trial_context_mentioned": False,
+        "overall_relevance": "low",
+    }
+
+
+def normalize_bundle_extractions(bundle_response, note_bundle):
+    if isinstance(bundle_response, dict) and "note_extractions" in bundle_response:
+        bundle_response = bundle_response["note_extractions"]
+
+    note_defaults = {
+        note["note_index"]: empty_note_extraction(note)
+        for note in note_bundle
+    }
+    note_order = [note["note_index"] for note in note_bundle]
+    normalized = {idx: value.copy() for idx, value in note_defaults.items()}
+
+    if isinstance(bundle_response, list):
+        for item in bundle_response:
+            if not isinstance(item, dict):
+                continue
+            note_index = pd.to_numeric(item.get("note_index"), errors="coerce")
+            if pd.isna(note_index):
+                continue
+            note_index = int(note_index)
+            if note_index not in normalized:
+                continue
+            merged = normalized[note_index].copy()
+            merged.update(item)
+            merged["note_date"] = merged.get("note_date") or note_defaults[note_index]["note_date"]
+            merged["note_type"] = merged.get("note_type") or note_defaults[note_index]["note_type"]
+            normalized[note_index] = merged
+
+    ordered = []
+    for note_index in note_order:
+        item = normalized[note_index].copy()
+        item.pop("note_index", None)
+        ordered.append(item)
+    return ordered
+
+
+def extract_note_bundle(
+    client,
+    model_name,
+    max_retries,
+    bundled_extraction_system_message,
+    note_bundle,
+):
+    bundle_payload = [
+        {
+            "note_index": note["note_index"],
+            "note_date": note["note_date"],
+            "note_type": note["note_type"],
+            "note_text": note["note_text"],
+        }
+        for note in note_bundle
+    ]
+
+    response_text, error_type = call_with_retry(
+        client,
+        model_name,
+        [
+            {"role": "system", "content": bundled_extraction_system_message},
+            {"role": "user", "content": json.dumps(bundle_payload, ensure_ascii=False)},
+        ],
+        max_retries,
+    )
+    if error_type:
+        return None, error_type
+
+    extraction = parse_json_response(response_text)
+    return normalize_bundle_extractions(extraction, note_bundle), None
 
 
 def default_patient_result(mrn, structured_context, num_notes_reviewed):
@@ -392,7 +578,9 @@ def main():
     )
 
     client = build_client()
+    token_encoder = build_token_encoder(args.model)
     extraction_system_message = EVENT_EXTRACTION_SYSTEM_PROMPT + CLINICAL_SAFETY_CONTEXT
+    bundled_extraction_system_message = BUNDLED_EVENT_EXTRACTION_SYSTEM_PROMPT + CLINICAL_SAFETY_CONTEXT
     synthesis_system_message = PATIENT_SYNTHESIS_SYSTEM_PROMPT + CLINICAL_SAFETY_CONTEXT
 
     for mrn in tqdm(remaining_mrns, desc="V2 patients"):
@@ -405,26 +593,51 @@ def main():
         else:
             note_extractions = []
             if not mrn_df.empty:
-                rows = mrn_df.to_dict(orient="records")
-                max_workers = max(1, min(args.max_workers, len(rows)))
+                cleaned_notes = build_cleaned_note_payloads(mrn_df, token_encoder)
+                note_bundles = bundle_cleaned_notes(
+                    cleaned_notes,
+                    bundle_max_tokens=args.bundle_max_tokens,
+                    bundle_max_notes=args.bundle_max_notes,
+                )
+                max_workers = max(1, min(args.max_workers, len(note_bundles)))
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {
-                        executor.submit(
-                            extract_note,
-                            client,
-                            args.model,
-                            args.max_retries,
-                            extraction_system_message,
-                            row,
-                        ): row
-                        for row in rows
-                    }
+                    if args.bundle_max_tokens is not None or args.bundle_max_notes is not None:
+                        futures = {
+                            executor.submit(
+                                extract_note_bundle,
+                                client,
+                                args.model,
+                                args.max_retries,
+                                bundled_extraction_system_message,
+                                bundle,
+                            ): bundle
+                            for bundle in note_bundles
+                        }
+                    else:
+                        futures = {
+                            executor.submit(
+                                extract_note,
+                                client,
+                                args.model,
+                                args.max_retries,
+                                extraction_system_message,
+                                bundle[0]["source_row"],
+                            ): bundle[0]
+                            for bundle in note_bundles
+                        }
                     for future in as_completed(futures):
-                        row = futures[future]
+                        submitted_item = futures[future]
                         try:
                             extraction, error_type = future.result()
                         except json.JSONDecodeError as error:
-                            print(f"    JSON parse failed for note {row.get('EVENT_DATE')} of {mrn}: {error}")
+                            if isinstance(submitted_item, list):
+                                bundle_dates = [note.get("note_date") for note in submitted_item]
+                                print(f"    JSON parse failed for bundled extraction of {mrn}: {bundle_dates} ({error})")
+                            else:
+                                print(
+                                    f"    JSON parse failed for note {submitted_item.get('EVENT_DATE')} "
+                                    f"of {mrn}: {error}"
+                                )
                             continue
                         except Exception as error:  # noqa: BLE001
                             print(f"    Note extraction failed unexpectedly for {mrn}: {error}")
@@ -432,16 +645,22 @@ def main():
 
                         if error_type:
                             if "content_filter" in error_type:
-                                print(
-                                    f"    Note filtered for {mrn} "
-                                    f"({row.get('NOTE_TYPE')} {to_iso_date(row.get('EVENT_DATE'))})"
-                                )
+                                if isinstance(submitted_item, list):
+                                    print(f"    Bundle filtered for {mrn} ({len(submitted_item)} notes)")
+                                else:
+                                    print(
+                                        f"    Note filtered for {mrn} "
+                                        f"({submitted_item.get('NOTE_TYPE')} {to_iso_date(submitted_item.get('EVENT_DATE'))})"
+                                    )
                                 continue
                             print(f"    Note extraction failed for {mrn}: {error_type}")
                             continue
 
                         if extraction:
-                            note_extractions.append(extraction)
+                            if isinstance(extraction, list):
+                                note_extractions.extend(extraction)
+                            else:
+                                note_extractions.append(extraction)
 
             note_extractions = sorted(
                 note_extractions,

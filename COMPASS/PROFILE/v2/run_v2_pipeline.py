@@ -25,6 +25,8 @@ def parse_args():
     parser.add_argument("--model", default=None)
     parser.add_argument("--max-workers", type=int, default=None)
     parser.add_argument("--limit-mrns", type=int, default=None)
+    parser.add_argument("--bundle-max-tokens", type=int, default=None)
+    parser.add_argument("--bundle-max-notes", type=int, default=None)
     parser.add_argument("--retry-failures", action="store_true")
     parser.add_argument("--overwrite-existing", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
@@ -108,6 +110,8 @@ def main():
     append_optional_arg(label_cmd, "--model", args.model)
     append_optional_arg(label_cmd, "--max-workers", args.max_workers)
     append_optional_arg(label_cmd, "--limit-mrns", args.limit_mrns)
+    append_optional_arg(label_cmd, "--bundle-max-tokens", args.bundle_max_tokens)
+    append_optional_arg(label_cmd, "--bundle-max-notes", args.bundle_max_notes)
     if args.retry_failures:
         label_cmd.append("--retry-failures")
     if args.overwrite_existing:
