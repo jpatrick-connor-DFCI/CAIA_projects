@@ -6,6 +6,7 @@ This directory contains a parallel v2 arm of the LLM extraction workflow. The or
 
 - Broadens the target cohort to all prostate cancer patients present in the local prostate bundle
 - Builds a patient context table from notes, meds, and PSA data
+- Can load notes either from the compiled `prostate_text_data.csv` bundle or directly from raw OncDRS JSON files
 - Selects candidate notes with trigger-based retrieval instead of only using a `+/-90` day platinum window
 - Extracts patient-level events instead of only asking why platinum was used
 - Treats `clinical_trial` as context rather than a primary platinum-reason label
@@ -32,6 +33,7 @@ You can override the base data or output locations with:
 
 - `CAIA_COMPASS_DATA_PATH`
 - `CAIA_COMPASS_V2_OUTPUT_DIR`
+- `CAIA_ONCDRS_RAW_TEXT_PATH`
 
 ## Run
 
@@ -46,6 +48,19 @@ One-command version:
 python COMPASS/PROFILE/v2/run_v2_pipeline.py --max-workers 4
 ```
 
+Raw OncDRS mode with a predefined MRN list:
+
+```bash
+python COMPASS/PROFILE/v2/run_v2_pipeline.py \
+  --text-source raw \
+  --raw-text-path /data/gusev/PROFILE/CLINICAL/OncDRS/CLINICAL_TEXTS_2025_11 \
+  --mrn-file path/to/mrns.txt \
+  --output-dir /data/gusev/USERS/jpconnor/data/CAIA/COMPASS/LLM_v2 \
+  --max-workers 4
+```
+
+`--mrn-file` can be a plain-text list, CSV, or TSV. In raw mode, an MRN list is required.
+
 Useful debug options:
 
 ```bash
@@ -53,6 +68,7 @@ python COMPASS/PROFILE/v2/generate_event_labels.py --limit-mrns 25
 python COMPASS/PROFILE/v2/generate_event_labels.py --retry-failures
 python COMPASS/PROFILE/v2/run_v2_pipeline.py --mrns 12345,67890 --max-workers 4
 python COMPASS/PROFILE/v2/run_v2_pipeline.py --mrn-file path/to/mrns.txt --max-workers 4
+python COMPASS/PROFILE/v2/prepare_event_candidates.py --text-source raw --mrn-file path/to/mrns.txt
 ```
 
 ## Comparison framing

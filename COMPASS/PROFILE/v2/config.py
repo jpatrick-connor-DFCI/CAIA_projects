@@ -7,6 +7,12 @@ DEFAULT_DATA_PATH = Path(
 DEFAULT_OUTPUT_DIR = Path(
     os.environ.get("CAIA_COMPASS_V2_OUTPUT_DIR", str(DEFAULT_DATA_PATH / "v2_outputs"))
 )
+DEFAULT_RAW_TEXT_PATH = Path(
+    os.environ.get(
+        "CAIA_ONCDRS_RAW_TEXT_PATH",
+        "/data/gusev/PROFILE/CLINICAL/OncDRS/CLINICAL_TEXTS_2025_11/",
+    )
+)
 
 DEFAULT_AZURE_OPENAI_ENDPOINT = os.environ.get(
     "CAIA_AZURE_OPENAI_ENDPOINT",

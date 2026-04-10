@@ -1,4 +1,5 @@
 import argparse
+import json
 import hashlib
 import re
 from pathlib import Path
@@ -12,6 +13,7 @@ from config import (
     DEFAULT_DATA_PATH,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_PLATINUM_WINDOW_DAYS,
+    DEFAULT_RAW_TEXT_PATH,
     NOTE_TRIGGER_REGEX,
     NOTE_TYPE_LIMITS,
     PARP_MEDS,
@@ -26,6 +28,18 @@ def parse_args():
     )
     parser.add_argument("--data-path", type=Path, default=DEFAULT_DATA_PATH)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--text-source",
+        choices=["compiled", "raw"],
+        default="compiled",
+        help="Use the compiled prostate_text_data.csv bundle or load raw OncDRS JSON notes directly.",
+    )
+    parser.add_argument(
+        "--raw-text-path",
+        type=Path,
+        default=DEFAULT_RAW_TEXT_PATH,
+        help="Directory containing raw OncDRS clinical text JSON files.",
+    )
     parser.add_argument(
         "--mrns",
         default=None,
@@ -120,6 +134,118 @@ def load_selected_mrns(mrns_arg=None, mrn_file=None):
 
 def normalize_med_names(series):
     return series.astype(str).str.upper().str.strip()
+
+
+def deduplicate_texts(text_entries):
+    seen = set()
+    deduped = []
+    for entry in text_entries:
+        if entry is None:
+            continue
+        text = str(entry).strip()
+        if not text or text.lower() == "nan":
+            continue
+        if text not in seen:
+            seen.add(text)
+            deduped.append(text)
+    return deduped
+
+
+def basic_clean_text(text):
+    cleaned = str(text).replace("\r\n", "\n").replace("\r", "\n").replace("\x00", " ")
+    cleaned = cleaned.replace("\xa0", " ")
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n\s*\n+", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def infer_note_type_from_filename(path):
+    name = path.name.lower()
+    if "imaging" in name:
+        return "Imaging"
+    if "prognote" in name or "progress" in name or "clinic" in name:
+        return "Clinician"
+    if "pathology" in name or re.search(r"(^|[-_])path(?:[-_.]|$)", name):
+        return "Pathology"
+    return None
+
+
+def discover_raw_text_files(raw_text_path):
+    discovered = []
+    for path in sorted(raw_text_path.rglob("*.json")):
+        note_type = infer_note_type_from_filename(path)
+        if note_type is not None:
+            discovered.append((path, note_type))
+    return discovered
+
+
+def extract_raw_docs(payload):
+    if isinstance(payload, dict):
+        response = payload.get("response")
+        if isinstance(response, dict) and isinstance(response.get("docs"), list):
+            return response["docs"]
+        if isinstance(payload.get("docs"), list):
+            return payload["docs"]
+    if isinstance(payload, list):
+        return payload
+    return []
+
+
+def build_raw_note_row(note, note_type, source_file):
+    mrn = pd.to_numeric(note.get("DFCI_MRN"), errors="coerce")
+    if pd.isna(mrn):
+        return None
+
+    text_entries = [value for key, value in note.items() if "TEXT" in str(key).upper()]
+    text_to_save = basic_clean_text(" ".join(deduplicate_texts(text_entries)))
+    if not text_to_save:
+        return None
+
+    event_date = note.get("EVENT_DATE") or note.get("RPT_DATE")
+    return {
+        "DFCI_MRN": int(mrn),
+        "EVENT_DATE": event_date,
+        "NOTE_TYPE": note_type,
+        "CLINICAL_TEXT": text_to_save,
+        "RAW_SOURCE_FILE": source_file.name,
+        "RAW_NOTE_ID": note.get("id"),
+        "RPT_DATE": note.get("RPT_DATE"),
+        "RPT_TYPE": note.get("RPT_TYPE"),
+        "SOURCE_STR": note.get("SOURCE_STR"),
+        "PROC_DESC_STR": note.get("PROC_DESC_STR"),
+        "ENCOUNTER_TYPE_DESC_STR": note.get("ENCOUNTER_TYPE_DESC_STR"),
+    }
+
+
+def load_raw_text_notes(raw_text_path, selected_mrns):
+    if not raw_text_path.exists():
+        raise FileNotFoundError(f"Raw text directory does not exist: {raw_text_path}")
+    if selected_mrns is None:
+        raise ValueError("Raw text mode requires --mrns or --mrn-file.")
+
+    raw_files = discover_raw_text_files(raw_text_path)
+    if not raw_files:
+        raise FileNotFoundError(f"No supported raw JSON note files were found under {raw_text_path}")
+
+    rows = []
+    for file_path, note_type in tqdm(raw_files, desc="Loading raw text files"):
+        with open(file_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        docs = extract_raw_docs(payload)
+
+        for note in docs:
+            mrn = pd.to_numeric(note.get("DFCI_MRN"), errors="coerce")
+            if pd.isna(mrn) or int(mrn) not in selected_mrns:
+                continue
+            row = build_raw_note_row(note, note_type, file_path)
+            if row is not None:
+                rows.append(row)
+
+    raw_df = pd.DataFrame(rows)
+    raw_df = normalize_mrn_column(raw_df)
+    if raw_df.empty:
+        raise ValueError("No raw notes were found for the requested MRNs.")
+    return raw_df
 
 
 def build_first_med_summary(meds_df, med_names, date_col="MED_START_DT"):
@@ -402,14 +528,17 @@ def main():
     total_psa_path = args.data_path / "total_psa_records.csv"
     fallback_labs_path = args.data_path / "prostate_labs_data.csv"
 
-    text_df = normalize_mrn_column(safe_read_csv(text_path))
     meds_df = normalize_mrn_column(safe_read_csv(meds_path))
     psa_df = normalize_mrn_column(safe_read_csv(total_psa_path))
     if psa_df.empty:
         psa_df = normalize_mrn_column(safe_read_csv(fallback_labs_path))
 
-    if text_df.empty:
-        raise FileNotFoundError(f"Could not load note data from {text_path}")
+    if args.text_source == "raw":
+        text_df = load_raw_text_notes(args.raw_text_path, selected_mrns)
+    else:
+        text_df = normalize_mrn_column(safe_read_csv(text_path))
+        if text_df.empty:
+            raise FileNotFoundError(f"Could not load note data from {text_path}")
 
     if selected_mrns is not None:
         text_df = text_df.loc[text_df["DFCI_MRN"].isin(selected_mrns)].copy()
@@ -464,6 +593,7 @@ def main():
     print(f"Patients in context: {context_df['DFCI_MRN'].nunique()}")
     print(f"Patients with selected notes: {candidate_df['DFCI_MRN'].nunique()}")
     print(f"Selected notes: {len(candidate_df)}")
+    print(f"Text source: {args.text_source}")
     if selected_mrns is not None:
         print(f"Requested MRNs: {len(selected_mrns)}")
 
