@@ -1,4 +1,6 @@
 *.zip
+__pycache__/
+*.py[cod]
 
 # Only track COMPASS and IPIO folders
 /*
