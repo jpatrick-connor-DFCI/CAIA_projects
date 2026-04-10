@@ -1,0 +1,68 @@
+# PROFILE LLM Extraction v2
+
+This directory contains a parallel v2 arm of the LLM extraction workflow. The original platinum-focused scripts under `COMPASS/PROFILE/` are unchanged.
+
+## What v2 changes
+
+- Broadens the target cohort to all prostate cancer patients present in the local prostate bundle
+- Builds a patient context table from notes, meds, and PSA data
+- Selects candidate notes with trigger-based retrieval instead of only using a `+/-90` day platinum window
+- Extracts patient-level events instead of only asking why platinum was used
+- Treats `clinical_trial` as context rather than a primary platinum-reason label
+
+## Files
+
+- `prepare_event_candidates.py`: builds v2 candidate notes and patient context
+- `generate_event_labels.py`: runs the two-stage LLM extraction and synthesis workflow
+- `run_v2_pipeline.py`: convenience wrapper that runs both steps in sequence
+- `prompts.py`: v2 extraction and synthesis prompts
+- `config.py`: default paths, medication groups, and trigger rules
+
+## Default outputs
+
+By default, v2 writes to `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/v2_outputs/`.
+
+- `LLM_v2_candidate_text_data.csv`
+- `LLM_v2_patient_context.csv`
+- `LLM_v2_generated_labels.tsv`
+- `LLM_v2_note_extractions.json`
+- `LLM_v2_failed_patients.tsv`
+
+You can override the base data or output locations with:
+
+- `CAIA_COMPASS_DATA_PATH`
+- `CAIA_COMPASS_V2_OUTPUT_DIR`
+
+## Run
+
+```bash
+python COMPASS/PROFILE/v2/prepare_event_candidates.py
+python COMPASS/PROFILE/v2/generate_event_labels.py --max-workers 4
+```
+
+One-command version:
+
+```bash
+python COMPASS/PROFILE/v2/run_v2_pipeline.py --max-workers 4
+```
+
+Useful debug options:
+
+```bash
+python COMPASS/PROFILE/v2/generate_event_labels.py --limit-mrns 25
+python COMPASS/PROFILE/v2/generate_event_labels.py --retry-failures
+```
+
+## Comparison framing
+
+v1 remains the platinum-rationale pipeline:
+
+- note selection anchored to unlabeled platinum-treated patients
+- notes limited to `+/-90` days around platinum start
+- patient-level output focused on platinum indication
+
+v2 is the broader event pipeline:
+
+- patient context built for the broader prostate cohort
+- note selection based on histology, metastasis, platinum, ADT-resistance, biomarker, and trial-context triggers
+- patient-level output focused on metastatic date, platinum date, transformation date, histology, and ADT nonresponse evidence

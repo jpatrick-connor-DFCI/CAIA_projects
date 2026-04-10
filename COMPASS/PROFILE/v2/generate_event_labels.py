@@ -1,0 +1,437 @@
+import argparse
+import json
+import os
+import re
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+import pandas as pd
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from openai import APIError, APITimeoutError, AzureOpenAI, RateLimitError
+from tqdm.auto import tqdm
+
+CURRENT_DIR = Path(__file__).resolve().parent
+PROFILE_DIR = CURRENT_DIR.parent
+if str(PROFILE_DIR) not in sys.path:
+    sys.path.insert(0, str(PROFILE_DIR))
+
+from utils import clean_note
+
+from config import (
+    DEFAULT_AZURE_OPENAI_API_VERSION,
+    DEFAULT_AZURE_OPENAI_ENDPOINT,
+    DEFAULT_DATA_PATH,
+    DEFAULT_MODEL_NAME,
+    DEFAULT_OUTPUT_DIR,
+)
+from prompts import (
+    CLINICAL_SAFETY_CONTEXT,
+    EVENT_EXTRACTION_SYSTEM_PROMPT,
+    PATIENT_SYNTHESIS_SYSTEM_PROMPT,
+)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run the v2 broad prostate event extraction pipeline."
+    )
+    parser.add_argument("--data-path", type=Path, default=DEFAULT_DATA_PATH)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--candidate-path", type=Path, default=None)
+    parser.add_argument("--context-path", type=Path, default=None)
+    parser.add_argument("--model", default=DEFAULT_MODEL_NAME)
+    parser.add_argument("--max-retries", type=int, default=3)
+    parser.add_argument("--max-workers", type=int, default=4)
+    parser.add_argument("--limit-mrns", type=int, default=None)
+    parser.add_argument("--retry-failures", action="store_true")
+    return parser.parse_args()
+
+
+def normalize_mrn_column(df):
+    if df.empty or "DFCI_MRN" not in df.columns:
+        return df
+    work = df.copy()
+    work["DFCI_MRN"] = pd.to_numeric(work["DFCI_MRN"], errors="coerce")
+    work = work.dropna(subset=["DFCI_MRN"])
+    work["DFCI_MRN"] = work["DFCI_MRN"].astype(int)
+    return work
+
+
+def build_client():
+    token_provider = get_bearer_token_provider(
+        DefaultAzureCredential(),
+        "https://cognitiveservices.azure.com/.default",
+    )
+    return AzureOpenAI(
+        api_version=DEFAULT_AZURE_OPENAI_API_VERSION,
+        azure_endpoint=DEFAULT_AZURE_OPENAI_ENDPOINT,
+        azure_ad_token_provider=token_provider,
+    )
+
+
+def call_with_retry(client, model_name, messages, max_retries):
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0,
+            )
+            finish_reason = response.choices[0].finish_reason
+            if finish_reason == "content_filter":
+                return None, "content_filter_response"
+            return response.choices[0].message.content.strip(), None
+        except RateLimitError:
+            wait = 2 ** attempt * 5
+            print(f"    Rate limited, waiting {wait}s (attempt {attempt + 1}/{max_retries})")
+            time.sleep(wait)
+        except APITimeoutError:
+            wait = 2 ** attempt * 3
+            print(f"    Timeout, waiting {wait}s (attempt {attempt + 1}/{max_retries})")
+            time.sleep(wait)
+        except APIError as error:
+            error_body = str(error)
+            if "content_filter" in error_body.lower() or "content_management" in error_body.lower():
+                return None, "content_filter_input"
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            return None, f"api_error: {error_body[:200]}"
+        except Exception as error:  # noqa: BLE001
+            return None, f"unexpected: {type(error).__name__}: {str(error)[:200]}"
+    return None, "max_retries_exceeded"
+
+
+def parse_json_response(response_text):
+    if response_text is None:
+        return None
+    try:
+        return json.loads(response_text)
+    except json.JSONDecodeError:
+        match = re.search(r"(\{.*\}|\[.*\])", response_text, flags=re.DOTALL)
+        if match:
+            return json.loads(match.group(1))
+        raise
+
+
+def log_failure(path, mrn, error_type, num_notes, stage):
+    fail_row = pd.DataFrame(
+        [
+            {
+                "DFCI_MRN": int(mrn),
+                "error_type": error_type,
+                "stage": stage,
+                "num_notes": num_notes,
+            }
+        ]
+    )
+    fail_row.to_csv(
+        path,
+        mode="a",
+        sep="\t",
+        index=False,
+        header=not path.exists() or path.stat().st_size == 0,
+    )
+
+
+def to_iso_date(value):
+    if pd.isna(value):
+        return None
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.strftime("%Y-%m-%d")
+
+
+def build_structured_context(context_row):
+    context = {}
+    for key, value in context_row.items():
+        if pd.isna(value):
+            continue
+        if isinstance(value, pd.Timestamp):
+            context[key] = value.strftime("%Y-%m-%d")
+        elif isinstance(value, bool):
+            context[key] = bool(value)
+        elif isinstance(value, (int, float, str)):
+            context[key] = value
+        else:
+            context[key] = str(value)
+    return context
+
+
+def extract_note(client, model_name, max_retries, extraction_system_message, row):
+    cleaned = clean_note(row["CLINICAL_TEXT"], note_type=row.get("NOTE_TYPE"))
+    if not cleaned:
+        return None, None
+
+    user_content = (
+        f"Note Type: {row.get('NOTE_TYPE', 'Unknown')}\n"
+        f"Note Date: {to_iso_date(row.get('EVENT_DATE')) or row.get('EVENT_DATE')}\n\n"
+        f"{cleaned}"
+    )
+
+    response_text, error_type = call_with_retry(
+        client,
+        model_name,
+        [
+            {"role": "system", "content": extraction_system_message},
+            {"role": "user", "content": user_content},
+        ],
+        max_retries,
+    )
+    if error_type:
+        return None, error_type
+
+    extraction = parse_json_response(response_text)
+    if isinstance(extraction, dict):
+        extraction.setdefault("note_date", to_iso_date(row.get("EVENT_DATE")))
+        extraction.setdefault("note_type", row.get("NOTE_TYPE", "Unknown"))
+    return extraction, None
+
+
+def default_patient_result(mrn, structured_context, num_notes_reviewed):
+    first_platinum_date = structured_context.get("FIRST_PLATINUM_DATE")
+    return {
+        "DFCI_MRN": int(mrn),
+        "metastatic_date": None,
+        "metastatic_date_confidence": "low",
+        "metastatic_sites": "",
+        "first_platinum_date": first_platinum_date,
+        "first_platinum_source": "structured_meds" if first_platinum_date else None,
+        "transformation_suspected_date": None,
+        "transformation_confirmed_date": None,
+        "ever_histologies": "",
+        "current_histology": None,
+        "adt_nonresponse_present": None,
+        "adt_nonresponse_reasons": "",
+        "trial_context_mentioned": None,
+        "other_cancer_present": None,
+        "biomarker_flags": "",
+        "supporting_quotes": "",
+        "supporting_quote_dates": "",
+        "confidence": "low",
+        "num_notes_reviewed": num_notes_reviewed,
+        "num_note_extractions": 0,
+    }
+
+
+def serialize_list_fields(result_row):
+    list_fields = [
+        "metastatic_sites",
+        "ever_histologies",
+        "adt_nonresponse_reasons",
+        "biomarker_flags",
+        "supporting_quotes",
+        "supporting_quote_dates",
+    ]
+    for field in list_fields:
+        if isinstance(result_row.get(field), list):
+            result_row[field] = " | ".join(str(item) for item in result_row[field])
+    return result_row
+
+
+def main():
+    args = parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    candidate_path = args.candidate_path or args.output_dir / "LLM_v2_candidate_text_data.csv"
+    context_path = args.context_path or args.output_dir / "LLM_v2_patient_context.csv"
+    output_path = args.output_dir / "LLM_v2_generated_labels.tsv"
+    extractions_path = args.output_dir / "LLM_v2_note_extractions.json"
+    failures_path = args.output_dir / "LLM_v2_failed_patients.tsv"
+
+    candidate_df = normalize_mrn_column(pd.read_csv(candidate_path)) if candidate_path.exists() else pd.DataFrame()
+    context_df = normalize_mrn_column(pd.read_csv(context_path))
+    if "DFCI_MRN" not in context_df.columns:
+        raise ValueError(f"Context file is missing DFCI_MRN: {context_path}")
+
+    for date_col in [
+        "EVENT_DATE",
+        "FIRST_PLATINUM_DATE",
+        "FIRST_ADT_DATE",
+        "FIRST_ARSI_DATE",
+        "FIRST_PARP_DATE",
+        "LATEST_PSA_DATE",
+    ]:
+        if date_col in candidate_df.columns:
+            candidate_df[date_col] = pd.to_datetime(candidate_df[date_col], errors="coerce")
+        if date_col in context_df.columns:
+            context_df[date_col] = pd.to_datetime(context_df[date_col], errors="coerce")
+
+    unique_mrns = context_df["DFCI_MRN"].dropna().astype(int).unique().tolist()
+    if args.limit_mrns is not None:
+        unique_mrns = unique_mrns[: args.limit_mrns]
+
+    extractions_by_mrn = {}
+    if extractions_path.exists():
+        with open(extractions_path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        extractions_by_mrn = {int(key): value for key, value in raw.items()}
+
+    completed_mrns = set()
+    if output_path.exists():
+        existing_df = pd.read_csv(output_path, sep="\t")
+        completed_mrns = set(existing_df["DFCI_MRN"].dropna().astype(int).unique())
+
+    if args.retry_failures:
+        if not failures_path.exists():
+            print("No failures file found, nothing to retry.")
+            return
+        failed_df = pd.read_csv(failures_path, sep="\t")
+        retry_mrns = set(failed_df["DFCI_MRN"].dropna().astype(int).unique())
+        for mrn in retry_mrns:
+            extractions_by_mrn.pop(mrn, None)
+        with open(extractions_path, "w", encoding="utf-8") as handle:
+            json.dump({str(key): value for key, value in extractions_by_mrn.items()}, handle)
+        if output_path.exists():
+            existing_df = existing_df.loc[~existing_df["DFCI_MRN"].isin(retry_mrns)]
+            existing_df.to_csv(output_path, sep="\t", index=False)
+            completed_mrns -= retry_mrns
+        failures_path.unlink(missing_ok=True)
+        remaining_mrns = [mrn for mrn in unique_mrns if mrn in retry_mrns]
+        print(f"RETRY MODE: re-processing {len(remaining_mrns)} previously failed patients\n")
+    else:
+        remaining_mrns = [mrn for mrn in unique_mrns if mrn not in completed_mrns]
+        print(f"Processing {len(remaining_mrns)} v2 patients ({len(completed_mrns)} done)\n")
+
+    context_lookup = context_df.set_index("DFCI_MRN").to_dict(orient="index")
+    candidate_groups = (
+        {int(mrn): group.sort_values("EVENT_DATE") for mrn, group in candidate_df.groupby("DFCI_MRN")}
+        if not candidate_df.empty
+        else {}
+    )
+
+    client = build_client()
+    extraction_system_message = EVENT_EXTRACTION_SYSTEM_PROMPT + CLINICAL_SAFETY_CONTEXT
+    synthesis_system_message = PATIENT_SYNTHESIS_SYSTEM_PROMPT + CLINICAL_SAFETY_CONTEXT
+
+    for mrn in tqdm(remaining_mrns, desc="V2 patients"):
+        context_row = context_lookup.get(mrn, {})
+        structured_context = build_structured_context(context_row)
+        mrn_df = candidate_groups.get(mrn, pd.DataFrame())
+
+        if mrn in extractions_by_mrn:
+            note_extractions = extractions_by_mrn[mrn].get("note_extractions", [])
+        else:
+            note_extractions = []
+            if not mrn_df.empty:
+                rows = mrn_df.to_dict(orient="records")
+                max_workers = max(1, min(args.max_workers, len(rows)))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(
+                            extract_note,
+                            client,
+                            args.model,
+                            args.max_retries,
+                            extraction_system_message,
+                            row,
+                        ): row
+                        for row in rows
+                    }
+                    for future in as_completed(futures):
+                        row = futures[future]
+                        try:
+                            extraction, error_type = future.result()
+                        except json.JSONDecodeError as error:
+                            print(f"    JSON parse failed for note {row.get('EVENT_DATE')} of {mrn}: {error}")
+                            continue
+                        except Exception as error:  # noqa: BLE001
+                            print(f"    Note extraction failed unexpectedly for {mrn}: {error}")
+                            continue
+
+                        if error_type:
+                            if "content_filter" in error_type:
+                                print(
+                                    f"    Note filtered for {mrn} "
+                                    f"({row.get('NOTE_TYPE')} {to_iso_date(row.get('EVENT_DATE'))})"
+                                )
+                                continue
+                            print(f"    Note extraction failed for {mrn}: {error_type}")
+                            continue
+
+                        if extraction:
+                            note_extractions.append(extraction)
+
+            note_extractions = sorted(
+                note_extractions,
+                key=lambda item: (item.get("note_date") is None, item.get("note_date")),
+            )
+            extractions_by_mrn[mrn] = {
+                "structured_context": structured_context,
+                "note_extractions": note_extractions,
+            }
+            with open(extractions_path, "w", encoding="utf-8") as handle:
+                json.dump({str(key): value for key, value in extractions_by_mrn.items()}, handle)
+
+        synthesis_payload = {
+            "structured_context": structured_context,
+            "note_extractions": note_extractions,
+        }
+
+        if not note_extractions and not structured_context:
+            result_row = default_patient_result(mrn, structured_context, num_notes_reviewed=0)
+        else:
+            response_text, error_type = call_with_retry(
+                client,
+                args.model,
+                [
+                    {"role": "system", "content": synthesis_system_message},
+                    {"role": "user", "content": json.dumps(synthesis_payload)},
+                ],
+                args.max_retries,
+            )
+            if error_type:
+                print(f"  Synthesis failed for {mrn}: {error_type}")
+                log_failure(failures_path, mrn, error_type, len(note_extractions), "synthesis")
+                if not note_extractions:
+                    result_row = default_patient_result(
+                        mrn,
+                        structured_context,
+                        num_notes_reviewed=len(mrn_df),
+                    )
+                else:
+                    continue
+            else:
+                try:
+                    result_row = parse_json_response(response_text)
+                except json.JSONDecodeError as error:
+                    print(f"  Synthesis JSON parse failed for {mrn}: {error}")
+                    log_failure(
+                        failures_path,
+                        mrn,
+                        f"json_parse: {str(error)[:200]}",
+                        len(note_extractions),
+                        "synthesis",
+                    )
+                    if not note_extractions:
+                        result_row = default_patient_result(
+                            mrn,
+                            structured_context,
+                            num_notes_reviewed=len(mrn_df),
+                        )
+                    else:
+                        continue
+
+        result_row["DFCI_MRN"] = int(mrn)
+        result_row["num_notes_reviewed"] = int(len(mrn_df))
+        result_row["num_note_extractions"] = int(len(note_extractions))
+        result_row = serialize_list_fields(result_row)
+
+        row_df = pd.DataFrame([result_row])
+        row_df.to_csv(
+            output_path,
+            mode="a",
+            sep="\t",
+            index=False,
+            header=not output_path.exists() or output_path.stat().st_size == 0,
+        )
+
+    n_success = len(pd.read_csv(output_path, sep="\t")) if output_path.exists() else 0
+    print(f"\nCompleted v2 synthesis for {n_success} patients")
+
+
+if __name__ == "__main__":
+    main()
