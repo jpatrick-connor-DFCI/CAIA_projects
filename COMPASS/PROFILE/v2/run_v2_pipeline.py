@@ -1,7 +1,10 @@
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
+
+import pandas as pd
 
 
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -23,6 +26,7 @@ def parse_args():
     parser.add_argument("--max-workers", type=int, default=None)
     parser.add_argument("--limit-mrns", type=int, default=None)
     parser.add_argument("--retry-failures", action="store_true")
+    parser.add_argument("--overwrite-existing", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--label-only", action="store_true")
     return parser.parse_args()
@@ -44,6 +48,40 @@ def append_optional_args(command, name, values):
 def run_command(command):
     print("Running:", " ".join(command))
     subprocess.run(command, check=True)
+
+
+def summarize_output_dir(output_dir):
+    output_path = output_dir / "LLM_v2_generated_labels.tsv"
+    extractions_path = output_dir / "LLM_v2_note_extractions.json"
+    failures_path = output_dir / "LLM_v2_failed_patients.tsv"
+
+    labels_count = 0
+    extraction_count = 0
+    failure_count = 0
+
+    if output_path.exists() and output_path.stat().st_size > 0:
+        labels_df = pd.read_csv(output_path, sep="\t")
+        if "DFCI_MRN" in labels_df.columns:
+            labels_count = labels_df["DFCI_MRN"].dropna().astype(int).nunique()
+
+    if extractions_path.exists() and extractions_path.stat().st_size > 0:
+        with open(extractions_path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        extraction_count = len(raw)
+
+    if failures_path.exists() and failures_path.stat().st_size > 0:
+        failures_df = pd.read_csv(failures_path, sep="\t")
+        if "DFCI_MRN" in failures_df.columns:
+            failure_count = failures_df["DFCI_MRN"].dropna().astype(int).nunique()
+
+    return {
+        "labels_path": output_path.exists(),
+        "labels_count": labels_count,
+        "extractions_path": extractions_path.exists(),
+        "extractions_count": extraction_count,
+        "failures_path": failures_path.exists(),
+        "failures_count": failure_count,
+    }
 
 
 def main():
@@ -72,6 +110,21 @@ def main():
     append_optional_arg(label_cmd, "--limit-mrns", args.limit_mrns)
     if args.retry_failures:
         label_cmd.append("--retry-failures")
+    if args.overwrite_existing:
+        label_cmd.append("--overwrite-existing")
+
+    output_dir = Path(args.output_dir) if args.output_dir is not None else None
+    if output_dir is not None:
+        summary = summarize_output_dir(output_dir)
+        if summary["labels_path"] or summary["extractions_path"] or summary["failures_path"]:
+            mode_label = "overwrite" if args.overwrite_existing else "resume"
+            print(
+                "Existing output-dir state:",
+                f"mode={mode_label}",
+                f"labels_mrns={summary['labels_count']}",
+                f"checkpoint_mrns={summary['extractions_count']}",
+                f"failed_mrns={summary['failures_count']}",
+            )
 
     if not args.label_only:
         run_command(prepare_cmd)

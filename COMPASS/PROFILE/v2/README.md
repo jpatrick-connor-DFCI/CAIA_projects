@@ -81,10 +81,13 @@ Useful debug options:
 ```bash
 python COMPASS/PROFILE/v2/generate_event_labels.py --limit-mrns 25
 python COMPASS/PROFILE/v2/generate_event_labels.py --retry-failures
+python COMPASS/PROFILE/v2/generate_event_labels.py --overwrite-existing
 python COMPASS/PROFILE/v2/run_v2_pipeline.py --mrns 12345,67890 --max-workers 4
 python COMPASS/PROFILE/v2/run_v2_pipeline.py --mrn-file path/to/mrns.txt --max-workers 4
 python COMPASS/PROFILE/v2/prepare_event_candidates.py --text-source raw --mrn-file path/to/mrns.txt
 ```
+
+By default, `generate_event_labels.py` resumes from any existing `LLM_v2_generated_labels.tsv` and `LLM_v2_note_extractions.json` in the output directory. Use `--overwrite-existing` to ignore and replace those files.
 
 ## Comparison framing
 

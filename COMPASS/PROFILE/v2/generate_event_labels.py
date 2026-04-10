@@ -68,6 +68,11 @@ def parse_args():
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--limit-mrns", type=int, default=None)
     parser.add_argument("--retry-failures", action="store_true")
+    parser.add_argument(
+        "--overwrite-existing",
+        action="store_true",
+        help="Ignore and replace existing label/checkpoint files in the output directory.",
+    )
     return parser.parse_args()
 
 
@@ -296,6 +301,11 @@ def serialize_list_fields(result_row):
     return result_row
 
 
+def remove_existing_result_files(paths):
+    for path in paths:
+        path.unlink(missing_ok=True)
+
+
 def main():
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -306,6 +316,9 @@ def main():
     output_path = args.output_dir / "LLM_v2_generated_labels.tsv"
     extractions_path = args.output_dir / "LLM_v2_note_extractions.json"
     failures_path = args.output_dir / "LLM_v2_failed_patients.tsv"
+
+    if args.overwrite_existing:
+        remove_existing_result_files([output_path, extractions_path, failures_path])
 
     candidate_df = normalize_mrn_column(pd.read_csv(candidate_path)) if candidate_path.exists() else pd.DataFrame()
     context_df = normalize_mrn_column(pd.read_csv(context_path))
@@ -346,6 +359,9 @@ def main():
     if output_path.exists():
         existing_df = pd.read_csv(output_path, sep="\t")
         completed_mrns = set(existing_df["DFCI_MRN"].dropna().astype(int).unique())
+
+    if args.overwrite_existing:
+        print("OVERWRITE MODE: ignoring existing labels, checkpoints, and failures in output_dir\n")
 
     if args.retry_failures:
         if not failures_path.exists():
