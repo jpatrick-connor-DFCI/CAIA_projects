@@ -11,6 +11,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run the full PROFILE v2 extraction pipeline.")
     parser.add_argument("--data-path", default=None)
     parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--mrns", default=None)
+    parser.add_argument("--mrn-file", default=None)
     parser.add_argument("--platinum-window-days", type=int, default=None)
     parser.add_argument("--max-clinician-notes", type=int, default=None)
     parser.add_argument("--max-imaging-notes", type=int, default=None)
@@ -46,6 +48,8 @@ def main():
     for command in (prepare_cmd, label_cmd):
         append_optional_arg(command, "--data-path", args.data_path)
         append_optional_arg(command, "--output-dir", args.output_dir)
+        append_optional_arg(command, "--mrns", args.mrns)
+        append_optional_arg(command, "--mrn-file", args.mrn_file)
 
     append_optional_arg(prepare_cmd, "--platinum-window-days", args.platinum_window_days)
     append_optional_arg(prepare_cmd, "--max-clinician-notes", args.max_clinician_notes)

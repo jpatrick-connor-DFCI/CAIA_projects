@@ -8,9 +8,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-from openai import APIError, APITimeoutError, AzureOpenAI, RateLimitError
 from tqdm.auto import tqdm
+
+try:
+    from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+    from openai import APIError, APITimeoutError, AzureOpenAI, RateLimitError
+    AZURE_IMPORT_ERROR = None
+except ImportError as error:
+    DefaultAzureCredential = None
+    get_bearer_token_provider = None
+    AzureOpenAI = None
+    APIError = Exception
+    APITimeoutError = Exception
+    RateLimitError = Exception
+    AZURE_IMPORT_ERROR = error
 
 CURRENT_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = CURRENT_DIR.parent
@@ -41,6 +52,17 @@ def parse_args():
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--candidate-path", type=Path, default=None)
     parser.add_argument("--context-path", type=Path, default=None)
+    parser.add_argument(
+        "--mrns",
+        default=None,
+        help="Comma-separated DFCI_MRN values to include.",
+    )
+    parser.add_argument(
+        "--mrn-file",
+        type=Path,
+        default=None,
+        help="Optional text/CSV/TSV file containing DFCI_MRN values.",
+    )
     parser.add_argument("--model", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--max-workers", type=int, default=4)
@@ -63,7 +85,47 @@ def parse_datetime_series(series):
     return pd.to_datetime(series, errors="coerce", utc=True).dt.tz_localize(None)
 
 
+def parse_mrn_values(values):
+    mrns = set()
+    for value in values:
+        if pd.isna(value):
+            continue
+        tokens = re.split(r"[\s,|]+", str(value).strip())
+        for token in tokens:
+            if not token:
+                continue
+            mrn = pd.to_numeric(token, errors="coerce")
+            if pd.notna(mrn):
+                mrns.add(int(mrn))
+    return mrns
+
+
+def load_selected_mrns(mrns_arg=None, mrn_file=None):
+    selected = set()
+    if mrns_arg:
+        selected.update(parse_mrn_values([mrns_arg]))
+
+    if mrn_file:
+        suffix = mrn_file.suffix.lower()
+        if suffix in {".csv", ".tsv"}:
+            sep = "\t" if suffix == ".tsv" else ","
+            mrn_df = pd.read_csv(mrn_file, sep=sep, low_memory=False)
+            if "DFCI_MRN" in mrn_df.columns:
+                selected.update(parse_mrn_values(mrn_df["DFCI_MRN"]))
+            elif not mrn_df.empty:
+                selected.update(parse_mrn_values(mrn_df.iloc[:, 0]))
+        else:
+            with open(mrn_file, "r", encoding="utf-8") as handle:
+                selected.update(parse_mrn_values(handle.readlines()))
+
+    return selected or None
+
+
 def build_client():
+    if AZURE_IMPORT_ERROR is not None:
+        raise ImportError(
+            "generate_event_labels.py requires azure-identity and openai in the active environment."
+        ) from AZURE_IMPORT_ERROR
     token_provider = get_bearer_token_provider(
         DefaultAzureCredential(),
         "https://cognitiveservices.azure.com/.default",
@@ -89,11 +151,9 @@ def call_with_retry(client, model_name, messages, max_retries):
             return response.choices[0].message.content.strip(), None
         except RateLimitError:
             wait = 2 ** attempt * 5
-            print(f"    Rate limited, waiting {wait}s (attempt {attempt + 1}/{max_retries})")
             time.sleep(wait)
         except APITimeoutError:
             wait = 2 ** attempt * 3
-            print(f"    Timeout, waiting {wait}s (attempt {attempt + 1}/{max_retries})")
             time.sleep(wait)
         except APIError as error:
             error_body = str(error)
@@ -239,6 +299,7 @@ def serialize_list_fields(result_row):
 def main():
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
 
     candidate_path = args.candidate_path or args.output_dir / "LLM_v2_candidate_text_data.csv"
     context_path = args.context_path or args.output_dir / "LLM_v2_patient_context.csv"
@@ -250,6 +311,13 @@ def main():
     context_df = normalize_mrn_column(pd.read_csv(context_path))
     if "DFCI_MRN" not in context_df.columns:
         raise ValueError(f"Context file is missing DFCI_MRN: {context_path}")
+
+    if selected_mrns is not None:
+        context_df = context_df.loc[context_df["DFCI_MRN"].isin(selected_mrns)].copy()
+        if not candidate_df.empty:
+            candidate_df = candidate_df.loc[candidate_df["DFCI_MRN"].isin(selected_mrns)].copy()
+        if context_df.empty:
+            raise ValueError("No patients remained after applying the requested MRN filter.")
 
     for date_col in [
         "EVENT_DATE",

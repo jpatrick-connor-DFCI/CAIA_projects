@@ -27,6 +27,17 @@ def parse_args():
     parser.add_argument("--data-path", type=Path, default=DEFAULT_DATA_PATH)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument(
+        "--mrns",
+        default=None,
+        help="Comma-separated DFCI_MRN values to include.",
+    )
+    parser.add_argument(
+        "--mrn-file",
+        type=Path,
+        default=None,
+        help="Optional text/CSV/TSV file containing DFCI_MRN values.",
+    )
+    parser.add_argument(
         "--platinum-window-days",
         type=int,
         default=DEFAULT_PLATINUM_WINDOW_DAYS,
@@ -69,6 +80,42 @@ def normalize_mrn_column(df):
 
 def parse_datetime_series(series):
     return pd.to_datetime(series, errors="coerce", utc=True).dt.tz_localize(None)
+
+
+def parse_mrn_values(values):
+    mrns = set()
+    for value in values:
+        if pd.isna(value):
+            continue
+        tokens = re.split(r"[\s,|]+", str(value).strip())
+        for token in tokens:
+            if not token:
+                continue
+            mrn = pd.to_numeric(token, errors="coerce")
+            if pd.notna(mrn):
+                mrns.add(int(mrn))
+    return mrns
+
+
+def load_selected_mrns(mrns_arg=None, mrn_file=None):
+    selected = set()
+    if mrns_arg:
+        selected.update(parse_mrn_values([mrns_arg]))
+
+    if mrn_file:
+        suffix = mrn_file.suffix.lower()
+        if suffix in {".csv", ".tsv"}:
+            sep = "\t" if suffix == ".tsv" else ","
+            mrn_df = pd.read_csv(mrn_file, sep=sep, low_memory=False)
+            if "DFCI_MRN" in mrn_df.columns:
+                selected.update(parse_mrn_values(mrn_df["DFCI_MRN"]))
+            elif not mrn_df.empty:
+                selected.update(parse_mrn_values(mrn_df.iloc[:, 0]))
+        else:
+            with open(mrn_file, "r", encoding="utf-8") as handle:
+                selected.update(parse_mrn_values(handle.readlines()))
+
+    return selected or None
 
 
 def normalize_med_names(series):
@@ -348,6 +395,7 @@ def select_patient_notes(patient_df, context_row, args):
 def main():
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
 
     text_path = args.data_path / "prostate_text_data.csv"
     meds_path = args.data_path / "prostate_medications_data.csv"
@@ -362,6 +410,15 @@ def main():
 
     if text_df.empty:
         raise FileNotFoundError(f"Could not load note data from {text_path}")
+
+    if selected_mrns is not None:
+        text_df = text_df.loc[text_df["DFCI_MRN"].isin(selected_mrns)].copy()
+        if not meds_df.empty:
+            meds_df = meds_df.loc[meds_df["DFCI_MRN"].isin(selected_mrns)].copy()
+        if not psa_df.empty:
+            psa_df = psa_df.loc[psa_df["DFCI_MRN"].isin(selected_mrns)].copy()
+        if text_df.empty:
+            raise ValueError("No notes remained after applying the requested MRN filter.")
 
     context_df = build_patient_context(text_df, meds_df, psa_df)
     annotated_text_df = annotate_text_triggers(text_df)
@@ -407,6 +464,8 @@ def main():
     print(f"Patients in context: {context_df['DFCI_MRN'].nunique()}")
     print(f"Patients with selected notes: {candidate_df['DFCI_MRN'].nunique()}")
     print(f"Selected notes: {len(candidate_df)}")
+    if selected_mrns is not None:
+        print(f"Requested MRNs: {len(selected_mrns)}")
 
 
 if __name__ == "__main__":
