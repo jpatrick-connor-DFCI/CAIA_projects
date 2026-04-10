@@ -53,6 +53,7 @@ def parse_args():
 def safe_read_csv(path, **kwargs):
     if not path.exists():
         return pd.DataFrame()
+    kwargs.setdefault("low_memory", False)
     return pd.read_csv(path, **kwargs)
 
 
@@ -64,6 +65,10 @@ def normalize_mrn_column(df):
     work = work.dropna(subset=["DFCI_MRN"])
     work["DFCI_MRN"] = work["DFCI_MRN"].astype(int)
     return work
+
+
+def parse_datetime_series(series):
+    return pd.to_datetime(series, errors="coerce", utc=True).dt.tz_localize(None)
 
 
 def normalize_med_names(series):
@@ -83,7 +88,7 @@ def build_first_med_summary(meds_df, med_names, date_col="MED_START_DT"):
         return pd.DataFrame(columns=["DFCI_MRN", "medication", "med_start_date"])
 
     work["medication"] = normalize_med_names(work["NCI_PREFERRED_MED_NM"])
-    work["med_start_date"] = pd.to_datetime(work[date_col], errors="coerce")
+    work["med_start_date"] = parse_datetime_series(work[date_col])
     work = work.dropna(subset=["DFCI_MRN", "med_start_date"]).sort_values(["DFCI_MRN", "med_start_date"])
     return work.drop_duplicates(subset=["DFCI_MRN"], keep="first")[["DFCI_MRN", "medication", "med_start_date"]]
 
@@ -105,7 +110,7 @@ def summarize_psa(psa_df):
             columns=["DFCI_MRN", "LATEST_PSA_DATE", "LATEST_PSA_VALUE", "MAX_PSA_VALUE"]
         )
 
-    work["PSA_DATE"] = pd.to_datetime(work[date_col], errors="coerce")
+    work["PSA_DATE"] = parse_datetime_series(work[date_col])
     work["PSA_VALUE"] = pd.to_numeric(work[value_col], errors="coerce")
     work = work.dropna(subset=["DFCI_MRN", "PSA_DATE", "PSA_VALUE"])
     work = work.loc[work["PSA_VALUE"] != 9999999.0]
@@ -217,7 +222,7 @@ def build_patient_context(text_df, meds_df, psa_df):
 def annotate_text_triggers(text_df):
     work = text_df.copy()
     work["NOTE_TYPE"] = work["NOTE_TYPE"].fillna("Unknown")
-    work["EVENT_DATE"] = pd.to_datetime(work["EVENT_DATE"], errors="coerce")
+    work["EVENT_DATE"] = parse_datetime_series(work["EVENT_DATE"])
     work["CLINICAL_TEXT"] = work["CLINICAL_TEXT"].fillna("").astype(str)
     normalized_text = work["CLINICAL_TEXT"].str.lower()
 

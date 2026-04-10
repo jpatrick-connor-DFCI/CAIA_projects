@@ -59,6 +59,10 @@ def normalize_mrn_column(df):
     return work
 
 
+def parse_datetime_series(series):
+    return pd.to_datetime(series, errors="coerce", utc=True).dt.tz_localize(None)
+
+
 def build_client():
     token_provider = get_bearer_token_provider(
         DefaultAzureCredential(),
@@ -256,9 +260,9 @@ def main():
         "LATEST_PSA_DATE",
     ]:
         if date_col in candidate_df.columns:
-            candidate_df[date_col] = pd.to_datetime(candidate_df[date_col], errors="coerce")
+            candidate_df[date_col] = parse_datetime_series(candidate_df[date_col])
         if date_col in context_df.columns:
-            context_df[date_col] = pd.to_datetime(context_df[date_col], errors="coerce")
+            context_df[date_col] = parse_datetime_series(context_df[date_col])
 
     unique_mrns = context_df["DFCI_MRN"].dropna().astype(int).unique().tolist()
     if args.limit_mrns is not None:

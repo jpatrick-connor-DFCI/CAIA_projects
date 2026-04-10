@@ -57,29 +57,29 @@ TOTAL_PSA_LABELS = {"PSA", "PSAR", "PSATOTSCRN", "CPSA", "PSAMON", "PSAULT", "PS
 
 NOTE_TRIGGER_REGEX = {
     "histology": (
-        r"\b("
+        r"\b(?:"
         r"small cell|small-cell|neuroendocrine|scnc|histology|histologic|"
         r"transformation|transformed|ductal|adenocarcinoma|anaplastic"
         r")\b"
     ),
     "metastatic": (
-        r"\b("
+        r"\b(?:"
         r"metast|metastatic|osseous|bone lesion|bone mets|bone metast|"
         r"lymph node|lymphadenopathy|nodal disease|liver lesion|hepatic lesion|"
         r"lung nodule|pulmonary nodule|visceral|brain metast|soft tissue metast"
         r")\b"
     ),
-    "platinum": r"\b(carboplatin|cisplatin|platinum)\b",
+    "platinum": r"\b(?:carboplatin|cisplatin|platinum)\b",
     "adt_nonresponse": (
-        r"\b("
+        r"\b(?:"
         r"castration resistant|crpc|castrate resistant|androgen deprivation|"
         r"adt|lupron|eligard|goserelin|degarelix|relugolix|orchiectomy|"
         r"abiraterone|enzalutamide|apalutamide|darolutamide|"
         r"progression on|progressed on|rising psa|psa progression"
         r")\b"
     ),
-    "biomarker": r"\b(brca1|brca2|hrd|msi|mismatch repair|cdk12|rb1|tp53|pten)\b",
-    "trial": r"\b(trial|protocol|study|clinical trial)\b",
+    "biomarker": r"\b(?:brca1|brca2|hrd|msi|mismatch repair|cdk12|rb1|tp53|pten)\b",
+    "trial": r"\b(?:trial|protocol|study|clinical trial)\b",
 }
 
 NOTE_TYPE_LIMITS = {
