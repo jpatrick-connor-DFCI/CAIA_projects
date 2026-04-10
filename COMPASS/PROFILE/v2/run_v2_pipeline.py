@@ -12,7 +12,7 @@ def parse_args():
     parser.add_argument("--data-path", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--text-source", choices=["compiled", "raw"], default=None)
-    parser.add_argument("--raw-text-path", default=None)
+    parser.add_argument("--raw-text-path", action="append", default=None)
     parser.add_argument("--mrns", default=None)
     parser.add_argument("--mrn-file", default=None)
     parser.add_argument("--platinum-window-days", type=int, default=None)
@@ -32,6 +32,13 @@ def append_optional_arg(command, name, value):
     if value is None:
         return
     command.extend([name, str(value)])
+
+
+def append_optional_args(command, name, values):
+    if values is None:
+        return
+    for value in values:
+        command.extend([name, str(value)])
 
 
 def run_command(command):
@@ -54,7 +61,7 @@ def main():
         append_optional_arg(command, "--mrn-file", args.mrn_file)
 
     append_optional_arg(prepare_cmd, "--text-source", args.text_source)
-    append_optional_arg(prepare_cmd, "--raw-text-path", args.raw_text_path)
+    append_optional_args(prepare_cmd, "--raw-text-path", args.raw_text_path)
     append_optional_arg(prepare_cmd, "--platinum-window-days", args.platinum_window_days)
     append_optional_arg(prepare_cmd, "--max-clinician-notes", args.max_clinician_notes)
     append_optional_arg(prepare_cmd, "--max-imaging-notes", args.max_imaging_notes)

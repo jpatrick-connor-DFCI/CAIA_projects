@@ -13,7 +13,7 @@ from config import (
     DEFAULT_DATA_PATH,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_PLATINUM_WINDOW_DAYS,
-    DEFAULT_RAW_TEXT_PATH,
+    DEFAULT_RAW_TEXT_PATHS,
     NOTE_TRIGGER_REGEX,
     NOTE_TYPE_LIMITS,
     PARP_MEDS,
@@ -37,8 +37,9 @@ def parse_args():
     parser.add_argument(
         "--raw-text-path",
         type=Path,
-        default=DEFAULT_RAW_TEXT_PATH,
-        help="Directory containing raw OncDRS clinical text JSON files.",
+        action="append",
+        default=None,
+        help="Raw OncDRS note directory. Repeat this flag to search multiple directories.",
     )
     parser.add_argument(
         "--mrns",
@@ -132,6 +133,20 @@ def load_selected_mrns(mrns_arg=None, mrn_file=None):
     return selected or None
 
 
+def resolve_raw_text_paths(raw_text_paths_arg=None):
+    if raw_text_paths_arg:
+        ordered_paths = []
+        seen = set()
+        for path in raw_text_paths_arg:
+            normalized = Path(path)
+            key = str(normalized)
+            if key not in seen:
+                seen.add(key)
+                ordered_paths.append(normalized)
+        return ordered_paths
+    return list(DEFAULT_RAW_TEXT_PATHS)
+
+
 def normalize_med_names(series):
     return series.astype(str).str.upper().str.strip()
 
@@ -170,12 +185,18 @@ def infer_note_type_from_filename(path):
     return None
 
 
-def discover_raw_text_files(raw_text_path):
+def discover_raw_text_files(raw_text_paths):
     discovered = []
-    for path in sorted(raw_text_path.rglob("*.json")):
-        note_type = infer_note_type_from_filename(path)
-        if note_type is not None:
-            discovered.append((path, note_type))
+    seen_files = set()
+    for raw_text_path in raw_text_paths:
+        if not raw_text_path.exists():
+            continue
+        for path in sorted(raw_text_path.rglob("*.json")):
+            note_type = infer_note_type_from_filename(path)
+            path_key = str(path)
+            if note_type is not None and path_key not in seen_files:
+                seen_files.add(path_key)
+                discovered.append((path, note_type))
     return discovered
 
 
@@ -217,15 +238,14 @@ def build_raw_note_row(note, note_type, source_file):
     }
 
 
-def load_raw_text_notes(raw_text_path, selected_mrns):
-    if not raw_text_path.exists():
-        raise FileNotFoundError(f"Raw text directory does not exist: {raw_text_path}")
+def load_raw_text_notes(raw_text_paths, selected_mrns):
     if selected_mrns is None:
         raise ValueError("Raw text mode requires --mrns or --mrn-file.")
 
-    raw_files = discover_raw_text_files(raw_text_path)
+    raw_files = discover_raw_text_files(raw_text_paths)
     if not raw_files:
-        raise FileNotFoundError(f"No supported raw JSON note files were found under {raw_text_path}")
+        joined_paths = ", ".join(str(path) for path in raw_text_paths)
+        raise FileNotFoundError(f"No supported raw JSON note files were found under: {joined_paths}")
 
     rows = []
     for file_path, note_type in tqdm(raw_files, desc="Loading raw text files"):
@@ -522,6 +542,7 @@ def main():
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
+    raw_text_paths = resolve_raw_text_paths(args.raw_text_path)
 
     text_path = args.data_path / "prostate_text_data.csv"
     meds_path = args.data_path / "prostate_medications_data.csv"
@@ -534,7 +555,7 @@ def main():
         psa_df = normalize_mrn_column(safe_read_csv(fallback_labs_path))
 
     if args.text_source == "raw":
-        text_df = load_raw_text_notes(args.raw_text_path, selected_mrns)
+        text_df = load_raw_text_notes(raw_text_paths, selected_mrns)
     else:
         text_df = normalize_mrn_column(safe_read_csv(text_path))
         if text_df.empty:
@@ -594,6 +615,8 @@ def main():
     print(f"Patients with selected notes: {candidate_df['DFCI_MRN'].nunique()}")
     print(f"Selected notes: {len(candidate_df)}")
     print(f"Text source: {args.text_source}")
+    if args.text_source == "raw":
+        print(f"Raw text directories searched: {', '.join(str(path) for path in raw_text_paths)}")
     if selected_mrns is not None:
         print(f"Requested MRNs: {len(selected_mrns)}")
 

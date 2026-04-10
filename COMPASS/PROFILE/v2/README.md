@@ -34,6 +34,7 @@ You can override the base data or output locations with:
 - `CAIA_COMPASS_DATA_PATH`
 - `CAIA_COMPASS_V2_OUTPUT_DIR`
 - `CAIA_ONCDRS_RAW_TEXT_PATH`
+- `CAIA_ONCDRS_RAW_TEXT_PATHS`
 
 ## Run
 
@@ -53,13 +54,27 @@ Raw OncDRS mode with a predefined MRN list:
 ```bash
 python COMPASS/PROFILE/v2/run_v2_pipeline.py \
   --text-source raw \
-  --raw-text-path /data/gusev/PROFILE/CLINICAL/OncDRS/CLINICAL_TEXTS_2025_11 \
   --mrn-file path/to/mrns.txt \
   --output-dir /data/gusev/USERS/jpconnor/data/CAIA/COMPASS/LLM_v2 \
   --max-workers 4
 ```
 
+By default, raw mode searches the union of:
+
+- `/data/gusev/PROFILE/CLINICAL/OncDRS/CLINICAL_TEXTS_2024_03`
+- `/data/gusev/PROFILE/CLINICAL/OncDRS/CLINICAL_TEXTS_2025_03`
+- `/data/gusev/PROFILE/CLINICAL/OncDRS/CLINICAL_TEXTS_2025_11`
+
 `--mrn-file` can be a plain-text list, CSV, or TSV. In raw mode, an MRN list is required.
+If you want to override the defaults, repeat `--raw-text-path`:
+
+```bash
+python COMPASS/PROFILE/v2/run_v2_pipeline.py \
+  --text-source raw \
+  --raw-text-path /path/to/dir1 \
+  --raw-text-path /path/to/dir2 \
+  --mrn-file path/to/mrns.txt
+```
 
 Useful debug options:
 
