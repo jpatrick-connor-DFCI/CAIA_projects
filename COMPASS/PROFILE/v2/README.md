@@ -7,14 +7,15 @@ This directory contains a parallel v2 arm of the LLM extraction workflow. The or
 - Broadens the target cohort to all prostate cancer patients present in the local prostate bundle
 - Builds a patient context table from notes, meds, and PSA data
 - Can load notes either from the compiled `prostate_text_data.csv` bundle or directly from raw OncDRS JSON files
-- Selects candidate notes with trigger-based retrieval instead of only using a `+/-90` day platinum window
-- Extracts patient-level events instead of only asking why platinum was used
+- Selects candidate notes with a focused grep scheme for neuroendocrine, small-cell, and histologic-transformation language
+- Writes candidate note text as compact matched snippets instead of sending full notes to the LLM
+- Focuses the LLM label step on whether the patient has neuroendocrine or small cell prostate cancer and when transformation may have occurred
 - Treats `clinical_trial` as context rather than a primary platinum-reason label
 
 ## Files
 
 - `prepare_event_candidates.py`: builds v2 candidate notes and patient context
-- `generate_event_labels.py`: runs the two-stage LLM extraction and synthesis workflow
+- `generate_event_labels.py`: runs the simplified two-stage LLM extraction and synthesis workflow
 - `run_v2_pipeline.py`: convenience wrapper that runs both steps in sequence
 - `prompts.py`: v2 extraction and synthesis prompts
 - `config.py`: default paths, medication groups, and trigger rules
@@ -89,7 +90,9 @@ python COMPASS/PROFILE/v2/prepare_event_candidates.py --text-source raw --mrn-fi
 ```
 
 By default, `generate_event_labels.py` resumes from any existing `LLM_v2_generated_labels.tsv` and `LLM_v2_note_extractions.json` in the output directory. Use `--overwrite-existing` to ignore and replace those files.
+If the output directory contains files from an older v2 label schema, the script will stop and ask you to rerun with `--overwrite-existing` or use a fresh output directory.
 If you want fewer extraction API calls, set `--bundle-max-tokens` and optionally `--bundle-max-notes` so stage 1 extracts multiple notes per call while preserving note-level outputs.
+The candidate-note prep step now keeps only notes with focused grep hits and replaces `CLINICAL_TEXT` with local snippet windows around those hits.
 
 ## Comparison framing
 
@@ -102,5 +105,5 @@ v1 remains the platinum-rationale pipeline:
 v2 is the broader event pipeline:
 
 - patient context built for the broader prostate cohort
-- note selection based on histology, metastasis, platinum, ADT-resistance, biomarker, and trial-context triggers
-- patient-level output focused on metastatic date, platinum date, transformation date, histology, and ADT nonresponse evidence
+- note selection now based on focused grep matches for neuroendocrine, small cell, or transformation language, plus a prostate-context anchor when available
+- patient-level output now focused on neuroendocrine/small-cell prostate cancer status and transformation timing

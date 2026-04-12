@@ -52,10 +52,12 @@ from prompts import (
     PATIENT_SYNTHESIS_SYSTEM_PROMPT,
 )
 
+SCHEMA_VERSION = "v2_ne_scpc_simplified_2026-04-12"
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run the v2 broad prostate event extraction pipeline."
+        description="Run the v2 neuroendocrine/small cell prostate cancer extraction pipeline."
     )
     parser.add_argument("--data-path", type=Path, default=DEFAULT_DATA_PATH)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
@@ -367,13 +369,7 @@ def empty_note_extraction(note_payload):
         "note_date": note_payload.get("note_date"),
         "note_type": note_payload.get("note_type"),
         "histology_mentions": [],
-        "metastatic_mentions": [],
-        "platinum_mentions": [],
         "transformation_mentions": [],
-        "adt_nonresponse_mentions": [],
-        "biomarker_mentions": [],
-        "other_cancer_mentions": [],
-        "trial_context_mentioned": False,
         "overall_relevance": "low",
     }
 
@@ -447,37 +443,36 @@ def extract_note_bundle(
 
 
 def default_patient_result(mrn, structured_context, num_notes_reviewed):
-    first_platinum_date = structured_context.get("FIRST_PLATINUM_DATE")
     return {
+        "schema_version": SCHEMA_VERSION,
         "DFCI_MRN": int(mrn),
-        "metastatic_date": None,
-        "metastatic_date_confidence": "low",
-        "metastatic_sites": "",
-        "first_platinum_date": first_platinum_date,
-        "first_platinum_source": "structured_meds" if first_platinum_date else None,
-        "transformation_suspected_date": None,
-        "transformation_confirmed_date": None,
-        "ever_histologies": "",
-        "current_histology": None,
-        "adt_nonresponse_present": None,
-        "adt_nonresponse_reasons": "",
-        "trial_context_mentioned": None,
-        "other_cancer_present": None,
-        "biomarker_flags": "",
-        "supporting_quotes": "",
-        "supporting_quote_dates": "",
+        "neuroendocrine_small_cell_prostate_cancer": None,
+        "disease_type": None,
+        "transformation_evidence": None,
+        "transformation_date": None,
+        "transformation_date_confidence": None,
+        "supporting_quotes": [],
+        "supporting_quote_dates": [],
         "confidence": "low",
         "num_notes_reviewed": num_notes_reviewed,
         "num_note_extractions": 0,
     }
 
 
+def merge_patient_result(base_row, model_row):
+    if not isinstance(model_row, dict):
+        return base_row
+    merged = base_row.copy()
+    merged.update(model_row)
+    merged["schema_version"] = SCHEMA_VERSION
+    for field in ("supporting_quotes", "supporting_quote_dates"):
+        if merged.get(field) is None:
+            merged[field] = []
+    return merged
+
+
 def serialize_list_fields(result_row):
     list_fields = [
-        "metastatic_sites",
-        "ever_histologies",
-        "adt_nonresponse_reasons",
-        "biomarker_flags",
         "supporting_quotes",
         "supporting_quote_dates",
     ]
@@ -490,6 +485,37 @@ def serialize_list_fields(result_row):
 def remove_existing_result_files(paths):
     for path in paths:
         path.unlink(missing_ok=True)
+
+
+def ensure_resume_compatible(output_path, extractions_path):
+    incompatible_files = []
+
+    if output_path.exists() and output_path.stat().st_size > 0:
+        existing_df = pd.read_csv(output_path, sep="\t")
+        if "schema_version" not in existing_df.columns:
+            incompatible_files.append(output_path.name)
+        else:
+            versions = set(existing_df["schema_version"].dropna().astype(str).unique())
+            if versions and versions != {SCHEMA_VERSION}:
+                incompatible_files.append(output_path.name)
+
+    if extractions_path.exists() and extractions_path.stat().st_size > 0:
+        with open(extractions_path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        if not isinstance(raw, dict):
+            incompatible_files.append(extractions_path.name)
+        else:
+            for value in raw.values():
+                if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION:
+                    incompatible_files.append(extractions_path.name)
+                    break
+
+    if incompatible_files:
+        joined = ", ".join(sorted(set(incompatible_files)))
+        raise ValueError(
+            "Existing v2 outputs were created by an older schema "
+            f"({joined}). Re-run with --overwrite-existing or use a fresh --output-dir."
+        )
 
 
 def main():
@@ -505,6 +531,8 @@ def main():
 
     if args.overwrite_existing:
         remove_existing_result_files([output_path, extractions_path, failures_path])
+    else:
+        ensure_resume_compatible(output_path, extractions_path)
 
     candidate_df = normalize_mrn_column(pd.read_csv(candidate_path)) if candidate_path.exists() else pd.DataFrame()
     context_df = normalize_mrn_column(pd.read_csv(context_path))
@@ -667,6 +695,7 @@ def main():
                 key=lambda item: (item.get("note_date") is None, item.get("note_date")),
             )
             extractions_by_mrn[mrn] = {
+                "schema_version": SCHEMA_VERSION,
                 "structured_context": structured_context,
                 "note_extractions": note_extractions,
             }
@@ -678,7 +707,7 @@ def main():
             "note_extractions": note_extractions,
         }
 
-        if not note_extractions and not structured_context:
+        if not note_extractions:
             result_row = default_patient_result(mrn, structured_context, num_notes_reviewed=0)
         else:
             response_text, error_type = call_with_retry(
@@ -703,7 +732,15 @@ def main():
                     continue
             else:
                 try:
-                    result_row = parse_json_response(response_text)
+                    parsed_row = parse_json_response(response_text)
+                    result_row = merge_patient_result(
+                        default_patient_result(
+                            mrn,
+                            structured_context,
+                            num_notes_reviewed=len(mrn_df),
+                        ),
+                        parsed_row,
+                    )
                 except json.JSONDecodeError as error:
                     print(f"  Synthesis JSON parse failed for {mrn}: {error}")
                     log_failure(

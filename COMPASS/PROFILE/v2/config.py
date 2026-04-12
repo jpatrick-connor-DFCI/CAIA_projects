@@ -70,32 +70,38 @@ PARP_MEDS = {
 
 TOTAL_PSA_LABELS = {"PSA", "PSAR", "PSATOTSCRN", "CPSA", "PSAMON", "PSAULT", "PSAT"}
 
-NOTE_TRIGGER_REGEX = {
-    "histology": (
+FOCUSED_NOTE_GREP_REGEX = {
+    "neuroendocrine": (
         r"\b(?:"
-        r"small cell|small-cell|neuroendocrine|scnc|histology|histologic|"
-        r"transformation|transformed|ductal|adenocarcinoma|anaplastic"
+        r"neuroendocrine|neuro-endocrine|nepc|t-nepc|anaplastic"
         r")\b"
     ),
-    "metastatic": (
+    "small_cell": (
         r"\b(?:"
-        r"metast|metastatic|osseous|bone lesion|bone mets|bone metast|"
-        r"lymph node|lymphadenopathy|nodal disease|liver lesion|hepatic lesion|"
-        r"lung nodule|pulmonary nodule|visceral|brain metast|soft tissue metast"
+        r"small[\s-]?cell|small[\s-]?cell\s+carcinoma|scpc|scnc|oat[\s-]?cell"
         r")\b"
     ),
-    "platinum": r"\b(?:carboplatin|cisplatin|platinum)\b",
-    "adt_nonresponse": (
+    "transformation": (
         r"\b(?:"
-        r"castration resistant|crpc|castrate resistant|androgen deprivation|"
-        r"adt|lupron|eligard|goserelin|degarelix|relugolix|orchiectomy|"
-        r"abiraterone|enzalutamide|apalutamide|darolutamide|"
-        r"progression on|progressed on|rising psa|psa progression"
+        r"histolog(?:ic|ical)\s+transform(?:ation|ed|ing)|"
+        r"transform(?:ation|ed|ing)(?:\s+(?:to|into))?|"
+        r"transdifferentiat(?:e|ed|ion|ing)|"
+        r"dedifferentiat(?:e|ed|ion|ing)|"
+        r"lineage\s+plasticity|"
+        r"treatment[\s-]?emergent\s+neuroendocrine"
         r")\b"
     ),
-    "biomarker": r"\b(?:brca1|brca2|hrd|msi|mismatch repair|cdk12|rb1|tp53|pten)\b",
-    "trial": r"\b(?:trial|protocol|study|clinical trial)\b",
 }
+
+FOCUSED_PROSTATE_CONTEXT_REGEX = (
+    r"\b(?:"
+    r"prostate|prostatic|psa|adenocarcinoma|acinar|ductal|mcrpc|crpc|castration[- ]resistant"
+    r")\b"
+)
+
+FOCUSED_SNIPPET_CONTEXT_CHARS = 240
+FOCUSED_SNIPPET_MAX_CHARS = 2400
+FOCUSED_SNIPPET_MAX_MATCHES = 12
 
 NOTE_TYPE_LIMITS = {
     "Clinician": 24,
