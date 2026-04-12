@@ -14,7 +14,11 @@ from config import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_PLATINUM_WINDOW_DAYS,
     DEFAULT_RAW_TEXT_PATHS,
-    NOTE_TRIGGER_REGEX,
+    FOCUSED_NOTE_GREP_REGEX,
+    FOCUSED_PROSTATE_CONTEXT_REGEX,
+    FOCUSED_SNIPPET_CONTEXT_CHARS,
+    FOCUSED_SNIPPET_MAX_CHARS,
+    FOCUSED_SNIPPET_MAX_MATCHES,
     NOTE_TYPE_LIMITS,
     PARP_MEDS,
     PLATINUM_MEDS,
@@ -24,7 +28,7 @@ from config import (
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Build v2 candidate notes and patient context for broad prostate event extraction."
+        description="Build v2 candidate notes and patient context for focused neuroendocrine/small-cell extraction."
     )
     parser.add_argument("--data-path", type=Path, default=DEFAULT_DATA_PATH)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
@@ -56,7 +60,7 @@ def parse_args():
         "--platinum-window-days",
         type=int,
         default=DEFAULT_PLATINUM_WINDOW_DAYS,
-        help="Include clinician and imaging notes near first platinum exposure when present.",
+        help="Retained for compatibility; focused grep/snippet selection does not use a platinum window.",
     )
     parser.add_argument(
         "--max-clinician-notes",
@@ -172,6 +176,101 @@ def basic_clean_text(text):
     cleaned = re.sub(r"[ \t]+", " ", cleaned)
     cleaned = re.sub(r"\n\s*\n+", "\n\n", cleaned)
     return cleaned.strip()
+
+
+def merge_windows(windows, gap_chars=80):
+    if not windows:
+        return []
+    ordered = sorted(windows)
+    merged = [list(ordered[0])]
+    for start, end in ordered[1:]:
+        if start <= merged[-1][1] + gap_chars:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
+
+
+def build_snippet_text(text, matches):
+    if not matches:
+        return ""
+
+    windows = []
+    for match in matches[:FOCUSED_SNIPPET_MAX_MATCHES]:
+        start = max(0, match["start"] - FOCUSED_SNIPPET_CONTEXT_CHARS)
+        end = min(len(text), match["end"] + FOCUSED_SNIPPET_CONTEXT_CHARS)
+        windows.append((start, end))
+
+    snippets = []
+    for start, end in merge_windows(windows):
+        snippet = text[start:end].strip()
+        if not snippet:
+            continue
+        if start > 0:
+            snippet = "..." + snippet
+        if end < len(text):
+            snippet = snippet + "..."
+        snippets.append(snippet)
+
+    if not snippets:
+        return ""
+
+    snippet_text = "\n\n...\n\n".join(snippets)
+    if len(snippet_text) > FOCUSED_SNIPPET_MAX_CHARS:
+        snippet_text = snippet_text[: FOCUSED_SNIPPET_MAX_CHARS - 3].rstrip() + "..."
+    return snippet_text
+
+
+def extract_focus_grep_metadata(text, note_type):
+    cleaned_text = basic_clean_text(text)
+    if not cleaned_text:
+        return {
+            "HAS_FOCUSED_GREP_TRIGGER": False,
+            "HAS_NEUROENDOCRINE_GREP": False,
+            "HAS_SMALL_CELL_GREP": False,
+            "HAS_TRANSFORMATION_GREP": False,
+            "HAS_PROSTATE_CONTEXT": False,
+            "FOCUS_MATCH_COUNT": 0,
+            "FOCUS_MATCH_LABELS": "",
+            "FOCUS_SNIPPET_TEXT": "",
+            "FOCUS_SNIPPET_CHAR_LEN": 0,
+        }
+
+    matches = []
+    for label, pattern in FOCUSED_NOTE_GREP_REGEX.items():
+        for match in re.finditer(pattern, cleaned_text, flags=re.IGNORECASE):
+            matches.append(
+                {
+                    "label": label,
+                    "start": match.start(),
+                    "end": match.end(),
+                }
+            )
+
+    matches = sorted(matches, key=lambda item: (item["start"], item["end"]))
+    match_labels = []
+    for match in matches:
+        if match["label"] not in match_labels:
+            match_labels.append(match["label"])
+
+    has_prostate_context = bool(
+        re.search(FOCUSED_PROSTATE_CONTEXT_REGEX, cleaned_text, flags=re.IGNORECASE)
+    )
+    has_transformation = "transformation" in match_labels
+    eligible = bool(matches) and (has_prostate_context or has_transformation or note_type == "Pathology")
+    snippet_text = build_snippet_text(cleaned_text, matches) if eligible else ""
+
+    return {
+        "HAS_FOCUSED_GREP_TRIGGER": bool(snippet_text),
+        "HAS_NEUROENDOCRINE_GREP": "neuroendocrine" in match_labels and bool(snippet_text),
+        "HAS_SMALL_CELL_GREP": "small_cell" in match_labels and bool(snippet_text),
+        "HAS_TRANSFORMATION_GREP": has_transformation and bool(snippet_text),
+        "HAS_PROSTATE_CONTEXT": has_prostate_context,
+        "FOCUS_MATCH_COUNT": len(matches) if snippet_text else 0,
+        "FOCUS_MATCH_LABELS": "|".join(match_labels) if snippet_text else "",
+        "FOCUS_SNIPPET_TEXT": snippet_text,
+        "FOCUS_SNIPPET_CHAR_LEN": len(snippet_text),
+    }
 
 
 def infer_note_type_from_filename(path):
@@ -417,20 +516,27 @@ def annotate_text_triggers(text_df):
     work["NOTE_TYPE"] = work["NOTE_TYPE"].fillna("Unknown")
     work["EVENT_DATE"] = parse_datetime_series(work["EVENT_DATE"])
     work["CLINICAL_TEXT"] = work["CLINICAL_TEXT"].fillna("").astype(str)
-    normalized_text = work["CLINICAL_TEXT"].str.lower()
-
-    for name, pattern in NOTE_TRIGGER_REGEX.items():
-        work[f"HAS_{name.upper()}_TRIGGER"] = normalized_text.str.contains(pattern, regex=True, na=False)
-
-    trigger_cols = [col for col in work.columns if col.startswith("HAS_") and col.endswith("_TRIGGER")]
-    work["TRIGGER_CATEGORY_COUNT"] = work[trigger_cols].sum(axis=1)
+    focus_metadata = pd.DataFrame(
+        [
+            extract_focus_grep_metadata(text, note_type)
+            for text, note_type in zip(work["CLINICAL_TEXT"], work["NOTE_TYPE"])
+        ],
+        index=work.index,
+    )
+    work = pd.concat([work, focus_metadata], axis=1)
+    work = work.loc[work["HAS_FOCUSED_GREP_TRIGGER"]].copy()
+    work["CLINICAL_TEXT"] = work["FOCUS_SNIPPET_TEXT"]
+    work["TRIGGER_CATEGORY_COUNT"] = (
+        work["HAS_NEUROENDOCRINE_GREP"].astype(int)
+        + work["HAS_SMALL_CELL_GREP"].astype(int)
+        + work["HAS_TRANSFORMATION_GREP"].astype(int)
+    )
     work["TRIGGER_SCORE"] = (
-        work["HAS_HISTOLOGY_TRIGGER"].astype(int) * 3
-        + work["HAS_METASTATIC_TRIGGER"].astype(int) * 3
-        + work["HAS_PLATINUM_TRIGGER"].astype(int) * 3
-        + work["HAS_ADT_NONRESPONSE_TRIGGER"].astype(int) * 2
-        + work["HAS_BIOMARKER_TRIGGER"].astype(int)
-        + work["HAS_TRIAL_TRIGGER"].astype(int)
+        work["HAS_TRANSFORMATION_GREP"].astype(int) * 4
+        + work["HAS_SMALL_CELL_GREP"].astype(int) * 3
+        + work["HAS_NEUROENDOCRINE_GREP"].astype(int) * 3
+        + work["HAS_PROSTATE_CONTEXT"].astype(int)
+        + work["FOCUS_MATCH_COUNT"].clip(upper=6)
     )
     work["NOTE_TEXT_HASH"] = work["CLINICAL_TEXT"].apply(
         lambda text: hashlib.md5(text.strip().encode("utf-8", errors="ignore")).hexdigest()
@@ -441,22 +547,14 @@ def annotate_text_triggers(text_df):
 
 def selection_reason(row):
     reasons = []
-    if row["NOTE_TYPE"] == "Pathology":
-        reasons.append("pathology_default")
-    if row.get("HAS_HISTOLOGY_TRIGGER", False):
-        reasons.append("histology_trigger")
-    if row.get("HAS_METASTATIC_TRIGGER", False):
-        reasons.append("metastatic_trigger")
-    if row.get("HAS_PLATINUM_TRIGGER", False):
-        reasons.append("platinum_trigger")
-    if row.get("HAS_ADT_NONRESPONSE_TRIGGER", False):
-        reasons.append("adt_trigger")
-    if row.get("HAS_BIOMARKER_TRIGGER", False):
-        reasons.append("biomarker_trigger")
-    if row.get("HAS_TRIAL_TRIGGER", False):
-        reasons.append("trial_context")
-    if row.get("WITHIN_PLATINUM_WINDOW", False):
-        reasons.append("platinum_window")
+    if row.get("HAS_NEUROENDOCRINE_GREP", False):
+        reasons.append("grep_neuroendocrine")
+    if row.get("HAS_SMALL_CELL_GREP", False):
+        reasons.append("grep_small_cell")
+    if row.get("HAS_TRANSFORMATION_GREP", False):
+        reasons.append("grep_transformation")
+    if row.get("HAS_PROSTATE_CONTEXT", False):
+        reasons.append("prostate_context")
     if row.get("FALLBACK_INCLUDED", False):
         reasons.append("fallback_recent_note")
     return "|".join(reasons) if reasons else "unspecified"
@@ -485,15 +583,10 @@ def take_with_coverage(df, limit):
     return df.loc[keep_indices[:limit]].drop(columns=["EVENT_DATE_RANK"], errors="ignore")
 
 
-def select_patient_notes(patient_df, context_row, args):
+def select_patient_notes(patient_df, args):
     patient_df = patient_df.copy()
     patient_df["WITHIN_PLATINUM_WINDOW"] = False
-    platinum_date = context_row.get("FIRST_PLATINUM_DATE")
-    if pd.notna(platinum_date):
-        patient_df["DAYS_TO_PLATINUM"] = (patient_df["EVENT_DATE"] - platinum_date).dt.days
-        patient_df["WITHIN_PLATINUM_WINDOW"] = patient_df["DAYS_TO_PLATINUM"].abs() <= args.platinum_window_days
-    else:
-        patient_df["DAYS_TO_PLATINUM"] = pd.NA
+    patient_df["DAYS_TO_PLATINUM"] = pd.NA
 
     selected_parts = []
 
@@ -502,37 +595,17 @@ def select_patient_notes(patient_df, context_row, args):
     pathology_df["SELECTION_REASON"] = pathology_df.apply(selection_reason, axis=1)
     selected_parts.append(take_with_coverage(pathology_df, args.max_pathology_notes))
 
-    imaging_df = patient_df.loc[
-        (patient_df["NOTE_TYPE"] == "Imaging")
-        & (
-            patient_df["HAS_METASTATIC_TRIGGER"]
-            | patient_df["HAS_HISTOLOGY_TRIGGER"]
-            | patient_df["HAS_PLATINUM_TRIGGER"]
-            | patient_df["WITHIN_PLATINUM_WINDOW"]
-        )
-    ].copy()
+    imaging_df = patient_df.loc[patient_df["NOTE_TYPE"] == "Imaging"].copy()
     imaging_df["FALLBACK_INCLUDED"] = False
     imaging_df["SELECTION_REASON"] = imaging_df.apply(selection_reason, axis=1)
     selected_parts.append(take_with_coverage(imaging_df, args.max_imaging_notes))
 
-    clinician_df = patient_df.loc[
-        (patient_df["NOTE_TYPE"] == "Clinician")
-        & (
-            patient_df["TRIGGER_CATEGORY_COUNT"].gt(0)
-            | patient_df["WITHIN_PLATINUM_WINDOW"]
-        )
-    ].copy()
+    clinician_df = patient_df.loc[patient_df["NOTE_TYPE"] == "Clinician"].copy()
     clinician_df["FALLBACK_INCLUDED"] = False
     clinician_df["SELECTION_REASON"] = clinician_df.apply(selection_reason, axis=1)
     selected_parts.append(take_with_coverage(clinician_df, args.max_clinician_notes))
 
-    selected_df = pd.concat(selected_parts, ignore_index=False)
-
-    if selected_df.empty:
-        fallback_df = patient_df.sort_values("EVENT_DATE", ascending=False).head(2).copy()
-        fallback_df["FALLBACK_INCLUDED"] = True
-        fallback_df["SELECTION_REASON"] = fallback_df.apply(selection_reason, axis=1)
-        selected_df = fallback_df
+    selected_df = pd.concat(selected_parts, ignore_index=False) if selected_parts else patient_df.iloc[0:0].copy()
 
     selected_df = selected_df.drop_duplicates(subset=["DFCI_MRN", "NOTE_TYPE", "EVENT_DATE", "NOTE_TEXT_HASH"])
     return selected_df.sort_values(["DFCI_MRN", "EVENT_DATE", "NOTE_TYPE"], na_position="last")
@@ -574,9 +647,8 @@ def main():
     annotated_text_df = annotate_text_triggers(text_df)
 
     selected_notes = []
-    context_lookup = context_df.set_index("DFCI_MRN").to_dict(orient="index")
     for mrn, patient_df in tqdm(annotated_text_df.groupby("DFCI_MRN"), desc="Selecting v2 notes"):
-        selected_notes.append(select_patient_notes(patient_df, context_lookup.get(mrn, {}), args))
+        selected_notes.append(select_patient_notes(patient_df, args))
 
     candidate_df = pd.concat(selected_notes, ignore_index=True) if selected_notes else pd.DataFrame()
     keep_cols = [
@@ -584,15 +656,17 @@ def main():
         "EVENT_DATE",
         "NOTE_TYPE",
         "CLINICAL_TEXT",
+        "FOCUS_SNIPPET_CHAR_LEN",
+        "FOCUS_MATCH_COUNT",
+        "FOCUS_MATCH_LABELS",
         "TRIGGER_CATEGORY_COUNT",
         "TRIGGER_SCORE",
         "SELECTION_REASON",
-        "HAS_HISTOLOGY_TRIGGER",
-        "HAS_METASTATIC_TRIGGER",
-        "HAS_PLATINUM_TRIGGER",
-        "HAS_ADT_NONRESPONSE_TRIGGER",
-        "HAS_BIOMARKER_TRIGGER",
-        "HAS_TRIAL_TRIGGER",
+        "HAS_FOCUSED_GREP_TRIGGER",
+        "HAS_NEUROENDOCRINE_GREP",
+        "HAS_SMALL_CELL_GREP",
+        "HAS_TRANSFORMATION_GREP",
+        "HAS_PROSTATE_CONTEXT",
         "WITHIN_PLATINUM_WINDOW",
     ]
     if candidate_df.empty:
