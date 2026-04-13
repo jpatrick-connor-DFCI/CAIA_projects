@@ -1,8 +1,8 @@
 """
-Feature-based association and evaluation pipeline using pre-treatment mean labs.
+Feature-based association and evaluation pipeline using pre-treatment lab summaries.
 
 Workflow:
-  1. Build patient-level mean lab features from longitudinal rows observed before first treatment.
+  1. Build patient-level pre-treatment lab summary features from longitudinal rows observed before first treatment.
   2. Split patients into 80% train/validation and 20% held-out test.
   3. Select labs using only the train/validation cohort and a minimum availability threshold.
   4. Run train/validation univariate Cox models with mean-imputed lab values.
@@ -12,7 +12,7 @@ Workflow:
 Endpoints:
   - platinum: time to first platinum exposure or censoring
   - death:    time to death / last contact
-  - either:   composite first of platinum or death
+  - either:   composite first of platinum or death (optional)
 
 Expected input:
   Row-level longitudinal data with at least
@@ -45,6 +45,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.impute import SimpleImputer
+from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 
@@ -74,6 +75,7 @@ DEFAULT_MIN_PATIENT_COVERAGE = 0.20
 DEFAULT_MIN_EVENTS_PER_FEATURE = 10
 DEFAULT_CV_PENALIZERS = [0.01, 0.05, 0.10, 0.20, 0.50, 1.00]
 DEFAULT_CV_L1_RATIOS = [0.0, 0.5]
+DEFAULT_AUC_TIME_QUANTILES = [0.25, 0.50, 0.75]
 PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
 
 JOINT_ENDPOINT_ALIASES = {
@@ -319,6 +321,12 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
     return pat.loc[valid].copy()
 
 
+def _patient_lab_std(values: pd.Series) -> float:
+    if len(values) <= 1:
+        return np.nan
+    return float(np.std(values.to_numpy(dtype=float), ddof=0))
+
+
 def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     working = df.copy()
     required_cols = {"DFCI_MRN", "LAB_NAME", "LAB_VALUE"}
@@ -359,19 +367,38 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
 
     pre_treatment = working.loc[working["t_lab"].lt(working["t_first_treatment"])].copy()
     if pre_treatment.empty:
-        raise ValueError("No pre-treatment lab rows were available to build mean lab features.")
+        raise ValueError("No pre-treatment lab rows were available to build lab summary features.")
+
+    sort_cols = ["DFCI_MRN", "LAB_NAME", "t_lab"]
+    if "LAB_DATE" in pre_treatment.columns:
+        pre_treatment["LAB_DATE"] = _coerce_datetime(pre_treatment["LAB_DATE"])
+        sort_cols.append("LAB_DATE")
+    pre_treatment = pre_treatment.sort_values(sort_cols)
 
     feature_long = (
         pre_treatment.groupby(["DFCI_MRN", "LAB_NAME"])["LAB_VALUE"]
-        .mean()
-        .rename("lab_mean")
+        .agg(
+            mean="mean",
+            last="last",
+            std=_patient_lab_std,
+            min="min",
+            max="max",
+            n_obs="count",
+        )
         .reset_index()
     )
-    feature_df = feature_long.pivot(index="DFCI_MRN", columns="LAB_NAME", values="lab_mean")
-    feature_df.columns = [f"{col}__mean" for col in feature_df.columns]
+    feature_df = (
+        feature_long.set_index(["DFCI_MRN", "LAB_NAME"])
+        .stack()
+        .rename("value")
+        .reset_index()
+        .rename(columns={"level_2": "feature_stat"})
+    )
+    feature_df["feature_name"] = feature_df["LAB_NAME"] + "__" + feature_df["feature_stat"]
+    feature_df = feature_df.pivot(index="DFCI_MRN", columns="feature_name", values="value")
     feature_df = feature_df.sort_index(axis=1)
 
-    print(f"Raw feature matrix: {feature_df.shape[0]} patients x {feature_df.shape[1]} mean-lab features")
+    print(f"Raw feature matrix: {feature_df.shape[0]} patients x {feature_df.shape[1]} summary-lab features")
     return feature_df
 
 
@@ -560,6 +587,99 @@ def build_model_matrices(
     return train_model, eval_model, covariate_cols
 
 
+def format_horizons(horizons: list[float]) -> str:
+    if not horizons:
+        return ""
+    return "|".join(f"{float(horizon):g}" for horizon in horizons)
+
+
+def select_auc_horizons(
+    reference_df: pd.DataFrame,
+    *,
+    duration_col: str,
+    event_col: str,
+    quantiles: list[float],
+) -> list[float]:
+    event_times = pd.to_numeric(
+        reference_df.loc[reference_df[event_col].eq(1), duration_col],
+        errors="coerce",
+    ).dropna()
+    event_times = event_times.loc[np.isfinite(event_times) & event_times.gt(0)]
+    if event_times.empty:
+        return []
+
+    horizons = np.quantile(event_times.to_numpy(dtype=float), quantiles)
+    horizons = np.unique(np.asarray(horizons, dtype=float))
+    return [float(horizon) for horizon in horizons if np.isfinite(horizon) and horizon > 0]
+
+
+def auc_at_horizon(
+    *,
+    duration: np.ndarray,
+    event: np.ndarray,
+    risk_score: np.ndarray,
+    horizon: float,
+) -> tuple[float, int, int, int]:
+    positive = (event == 1) & (duration <= horizon)
+    negative = duration > horizon
+    usable = positive | negative
+
+    n_usable = int(usable.sum())
+    n_positive = int(positive[usable].sum())
+    n_negative = int(negative[usable].sum())
+
+    if n_usable == 0 or n_positive == 0 or n_negative == 0:
+        return np.nan, n_usable, n_positive, n_negative
+
+    auc = float(roc_auc_score(positive[usable].astype(int), risk_score[usable]))
+    return auc, n_usable, n_positive, n_negative
+
+
+def compute_mean_auc_t(
+    eval_df: pd.DataFrame,
+    risk_score: np.ndarray,
+    *,
+    duration_col: str,
+    event_col: str,
+    reference_df: pd.DataFrame,
+    auc_time_quantiles: list[float],
+) -> tuple[float, pd.DataFrame]:
+    horizons = select_auc_horizons(
+        reference_df,
+        duration_col=duration_col,
+        event_col=event_col,
+        quantiles=auc_time_quantiles,
+    )
+    if not horizons:
+        return np.nan, pd.DataFrame(columns=["horizon_days", "auc_t", "n_usable", "n_positive", "n_negative"])
+
+    duration = eval_df[duration_col].to_numpy(dtype=float)
+    event = eval_df[event_col].to_numpy(dtype=int)
+    risk_score = np.asarray(risk_score, dtype=float).reshape(-1)
+
+    rows = []
+    for horizon in horizons:
+        auc_t, n_usable, n_positive, n_negative = auc_at_horizon(
+            duration=duration,
+            event=event,
+            risk_score=risk_score,
+            horizon=horizon,
+        )
+        rows.append(
+            {
+                "horizon_days": horizon,
+                "auc_t": auc_t,
+                "n_usable": n_usable,
+                "n_positive": n_positive,
+                "n_negative": n_negative,
+            }
+        )
+
+    auc_df = pd.DataFrame(rows)
+    mean_auc_t = float(auc_df["auc_t"].mean()) if auc_df["auc_t"].notna().any() else np.nan
+    return mean_auc_t, auc_df
+
+
 def score_cox_model(
     model: CoxPHFitter,
     model_df: pd.DataFrame,
@@ -616,6 +736,9 @@ def run_univariate_associations(
             "ci_upper": np.nan,
             "p_value": np.nan,
             "concordance_index": np.nan,
+            "mean_auc_t": np.nan,
+            "n_valid_auc_horizons": 0,
+            "auc_t_horizons_days": "",
             "fit_penalizer": np.nan,
             "note": "",
         }
@@ -673,6 +796,18 @@ def run_univariate_associations(
         result["ci_upper"] = float(summary_row["exp(coef) upper 95%"])
         result["p_value"] = float(summary_row["p"])
         result["concordance_index"] = float(model.concordance_index_)
+        risk_score = np.asarray(model.predict_partial_hazard(feature_df[model_cols])).reshape(-1)
+        mean_auc_t, auc_df = compute_mean_auc_t(
+            feature_df,
+            risk_score,
+            duration_col=duration_col,
+            event_col=event_col,
+            reference_df=feature_df,
+            auc_time_quantiles=DEFAULT_AUC_TIME_QUANTILES,
+        )
+        result["mean_auc_t"] = mean_auc_t
+        result["n_valid_auc_horizons"] = int(auc_df["auc_t"].notna().sum()) if not auc_df.empty else 0
+        result["auc_t_horizons_days"] = format_horizons(auc_df.loc[auc_df["auc_t"].notna(), "horizon_days"].tolist())
         rows.append(result)
 
     associations = pd.DataFrame(rows)
@@ -726,6 +861,9 @@ def tune_multivariable_model(
                 "n_events_val": int(fold_val[event_col].sum()),
                 "cv_stratification": cv_stratification,
                 "c_index_val": np.nan,
+                "mean_auc_t_val": np.nan,
+                "n_valid_auc_horizons_val": 0,
+                "auc_t_horizons_days_val": "",
                 "n_covariates": np.nan,
                 "note": "",
             }
@@ -749,13 +887,28 @@ def tune_multivariable_model(
                 row["note"] = note
                 row["n_covariates"] = len(covariate_cols)
                 if model is not None:
-                    c_index, _ = score_cox_model(
+                    c_index, val_pred = score_cox_model(
                         model,
                         val_mdf,
                         duration_col=duration_col,
                         event_col=event_col,
                     )
                     row["c_index_val"] = c_index
+                    mean_auc_t_val, auc_df_val = compute_mean_auc_t(
+                        val_mdf,
+                        val_pred,
+                        duration_col=duration_col,
+                        event_col=event_col,
+                        reference_df=train_mdf,
+                        auc_time_quantiles=DEFAULT_AUC_TIME_QUANTILES,
+                    )
+                    row["mean_auc_t_val"] = mean_auc_t_val
+                    row["n_valid_auc_horizons_val"] = (
+                        int(auc_df_val["auc_t"].notna().sum()) if not auc_df_val.empty else 0
+                    )
+                    row["auc_t_horizons_days_val"] = format_horizons(
+                        auc_df_val.loc[auc_df_val["auc_t"].notna(), "horizon_days"].tolist()
+                    )
             except Exception as exc:  # pragma: no cover - defensive for unstable folds
                 row["note"] = f"fold_failed: {exc}"
 
@@ -768,6 +921,11 @@ def tune_multivariable_model(
             cv_mean=("c_index_val", "mean"),
             cv_std=("c_index_val", "std"),
             n_valid_folds=("c_index_val", lambda s: int(s.notna().sum())),
+            mean_auc_t_cv_mean=("mean_auc_t_val", "mean"),
+            mean_auc_t_cv_std=("mean_auc_t_val", "std"),
+            n_valid_auc_t_folds=("mean_auc_t_val", lambda s: int(s.notna().sum())),
+            n_valid_auc_horizons_val_mean=("n_valid_auc_horizons_val", "mean"),
+            auc_t_horizons_days_val=("auc_t_horizons_days_val", "first"),
             n_covariates_mean=("n_covariates", "mean"),
             cv_stratification=("cv_stratification", "first"),
         )
@@ -834,6 +992,22 @@ def fit_final_multivariable_model(
         duration_col=duration_col,
         event_col=event_col,
     )
+    train_mean_auc_t, train_auc_df = compute_mean_auc_t(
+        train_mdf,
+        train_pred,
+        duration_col=duration_col,
+        event_col=event_col,
+        reference_df=train_mdf,
+        auc_time_quantiles=DEFAULT_AUC_TIME_QUANTILES,
+    )
+    test_mean_auc_t, test_auc_df = compute_mean_auc_t(
+        test_mdf,
+        test_pred,
+        duration_col=duration_col,
+        event_col=event_col,
+        reference_df=train_mdf,
+        auc_time_quantiles=DEFAULT_AUC_TIME_QUANTILES,
+    )
 
     metrics_row = {
         "endpoint": endpoint,
@@ -847,6 +1021,13 @@ def fit_final_multivariable_model(
         "n_covariates": len(covariate_cols),
         "train_val_c_index": train_c,
         "test_c_index": test_c,
+        "train_val_mean_auc_t": train_mean_auc_t,
+        "test_mean_auc_t": test_mean_auc_t,
+        "train_val_n_valid_auc_horizons": int(train_auc_df["auc_t"].notna().sum()) if not train_auc_df.empty else 0,
+        "test_n_valid_auc_horizons": int(test_auc_df["auc_t"].notna().sum()) if not test_auc_df.empty else 0,
+        "auc_t_horizons_days": format_horizons(
+            train_auc_df.loc[train_auc_df["auc_t"].notna(), "horizon_days"].tolist()
+        ),
         "adjusted_for_age": adjust_age,
         "split_stratification": split_stratification,
         "cv_stratification": cv_stratification,
@@ -864,6 +1045,9 @@ def fit_final_multivariable_model(
     summary["n_covariates"] = len(covariate_cols)
     summary["train_val_c_index"] = train_c
     summary["test_c_index"] = test_c
+    summary["train_val_mean_auc_t"] = train_mean_auc_t
+    summary["test_mean_auc_t"] = test_mean_auc_t
+    summary["auc_t_horizons_days"] = metrics_row["auc_t_horizons_days"]
     summary["adjusted_for_age"] = adjust_age
     summary["note"] = note
     summary = summary.sort_values("coef", key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
@@ -900,6 +1084,10 @@ def build_univariate_overview(univariate_results: dict[str, pd.DataFrame]) -> pd
                 "ci_upper",
                 "p_value",
                 "q_value",
+                "concordance_index",
+                "mean_auc_t",
+                "n_valid_auc_horizons",
+                "auc_t_horizons_days",
                 "note",
             ]
         ].copy()
@@ -916,7 +1104,7 @@ def build_univariate_overview(univariate_results: dict[str, pd.DataFrame]) -> pd
 
     sort_cols = [
         col
-        for col in ["either_p_value", "platinum_p_value", "death_p_value"]
+        for col in ["platinum_p_value", "death_p_value", "either_p_value"]
         if col in overview.columns
     ]
     if sort_cols:
@@ -946,7 +1134,7 @@ def main(args: argparse.Namespace) -> None:
     outcome_df = make_outcome_df(df)
     print(f"Outcome table: {len(outcome_df)} patients")
 
-    print("Building raw aggregated pre-treatment mean lab feature matrix...")
+    print("Building raw aggregated pre-treatment lab summary feature matrix...")
     feature_df = build_feature_matrix(df)
 
     merged = feature_df.join(outcome_df, how="inner")
@@ -981,7 +1169,7 @@ def main(args: argparse.Namespace) -> None:
 
     print(f"Train/val: {len(train_val)} patients")
     print(f"Test:      {len(test)} patients")
-    print(f"Selected mean-lab features from train/val only: {len(selected_feature_cols)}")
+    print(f"Selected summary-lab features from train/val only: {len(selected_feature_cols)}")
     print(f"Split stratification: {split_stratification}")
 
     feature_df.to_csv(RESULTS / "cox_agg_feature_matrix_raw.csv")
@@ -1036,7 +1224,11 @@ def main(args: argparse.Namespace) -> None:
                     "selected_l1_ratio": best_row["l1_ratio"],
                     "cv_mean": best_row["cv_mean"],
                     "cv_std": best_row["cv_std"],
+                    "mean_auc_t_cv_mean": best_row["mean_auc_t_cv_mean"],
+                    "mean_auc_t_cv_std": best_row["mean_auc_t_cv_std"],
                     "n_valid_folds": best_row["n_valid_folds"],
+                    "n_valid_auc_t_folds": best_row["n_valid_auc_t_folds"],
+                    "auc_t_horizons_days_val": best_row["auc_t_horizons_days_val"],
                     "cv_stratification": best_row["cv_stratification"],
                 }
             )
@@ -1064,7 +1256,12 @@ def main(args: argparse.Namespace) -> None:
             print(
                 f"  penalizer={best_row['penalizer']}  l1_ratio={best_row['l1_ratio']}  cv_mean={best_row['cv_mean']:.4f}"
             )
+            print(f"  CV mean AUC(t)={best_row['mean_auc_t_cv_mean']:.4f}")
+            print(
+                f"  train/val C-index={metrics_row['train_val_c_index']:.4f}  mean AUC(t)={metrics_row['train_val_mean_auc_t']:.4f}"
+            )
             print(f"  held-out test C-index={metrics_row['test_c_index']:.4f}")
+            print(f"  held-out test mean AUC(t)={metrics_row['test_mean_auc_t']:.4f}")
             print("Top multivariable coefficients:")
             print(top.to_string(index=False))
 
@@ -1098,7 +1295,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--endpoints",
         nargs="+",
-        default=["platinum", "death", "either"],
+        default=["platinum", "death"],
         help="Endpoints to analyze. 'joint' is accepted as an alias for 'either'.",
     )
     parser.add_argument(
