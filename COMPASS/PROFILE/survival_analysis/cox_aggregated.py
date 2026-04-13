@@ -1,18 +1,23 @@
 """
-Feature-based association and evaluation pipeline using aggregated pre-treatment labs.
+Feature-based association and evaluation pipeline using pre-treatment mean labs.
 
 Workflow:
-  1. Engineer static pre-treatment lab features per patient.
+  1. Build patient-level mean lab features from longitudinal rows observed before first treatment.
   2. Split patients into 80% train/validation and 20% held-out test.
-  3. Select features using only the train/validation cohort.
-  4. Run train/validation univariate association screens.
+  3. Select labs using only the train/validation cohort and a minimum availability threshold.
+  4. Run train/validation univariate Cox models with mean-imputed lab values.
   5. Tune penalized multivariable Cox models with 5-fold CV on train/validation.
   6. Refit the chosen model on the full 80% block and evaluate on held-out test.
 
 Endpoints:
-  - platinum: time to first platinum exposure
+  - platinum: time to first platinum exposure or censoring
   - death:    time to death / last contact
   - either:   composite first of platinum or death
+
+Expected input:
+  Row-level longitudinal data with at least
+    DFCI_MRN, LAB_NAME, LAB_VALUE, t_lab, t_first_treatment, t_platinum,
+    t_death (or t_last_contact), PLATINUM, DEATH, AGE_AT_TREATMENTSTART
 
 Outputs:
   results/cox_agg_feature_matrix_raw.csv
@@ -39,7 +44,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.stats import linregress
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -67,10 +71,10 @@ DEFAULT_SEED = 42
 DEFAULT_TEST_FRAC = 0.20
 DEFAULT_N_FOLDS = 5
 DEFAULT_MIN_PATIENT_COVERAGE = 0.20
-DEFAULT_MIN_OBS_FOR_SLOPE = 3
 DEFAULT_MIN_EVENTS_PER_FEATURE = 10
 DEFAULT_CV_PENALIZERS = [0.01, 0.05, 0.10, 0.20, 0.50, 1.00]
 DEFAULT_CV_L1_RATIOS = [0.0, 0.5]
+PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
 
 JOINT_ENDPOINT_ALIASES = {
     "joint": "either",
@@ -96,13 +100,20 @@ ENDPOINTS = {
 }
 OUTCOME_COLUMNS = {
     AGE_COL,
+    "FIRST_RECORD_DATE",
+    "DIAGNOSIS_DATE",
+    "DIAGNOSIS",
     "FIRST_TREATMENT_DATE",
+    "FIRST_TREATMENT",
     "LAST_CONTACT_DATE",
     "PLATINUM_DATE",
     "PLATINUM",
     "DEATH",
     "EITHER",
+    "t_diagnosis",
+    "t_first_treatment",
     "t_platinum",
+    "t_last_contact",
     "t_death",
     "t_either",
     "split",
@@ -154,95 +165,139 @@ def normalize_endpoints(raw_endpoints: list[str]) -> list[str]:
     return endpoints
 
 
-def _slope(days: np.ndarray, values: np.ndarray, min_obs_for_slope: int) -> float:
-    mask = np.isfinite(values) & np.isfinite(days)
-    if mask.sum() < min_obs_for_slope:
-        return np.nan
-    slope, *_ = linregress(days[mask], values[mask])
-    return float(slope)
+def _coerce_datetime(series: pd.Series) -> pd.Series:
+    return pd.to_datetime(series, errors="coerce")
 
 
-def aggregate_patient_labs(
-    grp: pd.DataFrame,
-    t0: pd.Timestamp,
-    min_obs_for_slope: int,
-) -> dict[str, float]:
-    pre = grp[grp["LAB_DATE"] < t0].sort_values("LAB_DATE")
-    if pre.empty:
-        return {}
-
-    days = (pre["LAB_DATE"] - t0).dt.days.to_numpy(dtype=float)
-    vals = pre["LAB_VALUE"].to_numpy(dtype=float)
-    if not np.isfinite(vals).any():
-        return {}
-
-    return {
-        "last": float(vals[-1]),
-        "mean": float(np.nanmean(vals)),
-        "std": float(np.nanstd(vals)) if len(vals) > 1 else np.nan,
-        "slope": _slope(days, vals, min_obs_for_slope),
-        "n": float(len(vals)),
-        "days_since": float(-days[-1]),
-    }
+def _coerce_duration(series: pd.Series | None) -> pd.Series | None:
+    if series is None:
+        return None
+    return pd.to_numeric(series, errors="coerce").astype(float)
 
 
-def build_feature_matrix(
-    df: pd.DataFrame,
+def _derive_duration(
+    patient_df: pd.DataFrame,
     *,
-    min_obs_for_slope: int,
-) -> pd.DataFrame:
-    df = df.copy()
-    df["LAB_DATE"] = pd.to_datetime(df["LAB_DATE"])
-    df["FIRST_TREATMENT_DATE"] = pd.to_datetime(df["FIRST_TREATMENT_DATE"])
-    df["LAB_VALUE"] = pd.to_numeric(df["LAB_VALUE"], errors="coerce")
-    df = df.dropna(subset=["DFCI_MRN", "LAB_NAME", "LAB_DATE", "FIRST_TREATMENT_DATE", "LAB_VALUE"])
+    duration_col: str,
+    event_date_col: str,
+    fallback_duration_col: str | None = None,
+) -> pd.Series:
+    if duration_col in patient_df.columns:
+        existing = _coerce_duration(patient_df[duration_col])
+        if existing is not None:
+            return existing
 
-    records = []
-    for (mrn, lab_name), grp in df.groupby(["DFCI_MRN", "LAB_NAME"], sort=True):
-        t0 = grp["FIRST_TREATMENT_DATE"].iloc[0]
-        stats = aggregate_patient_labs(grp, t0, min_obs_for_slope)
-        if not stats:
-            continue
-        row = {"DFCI_MRN": mrn}
-        for stat_name, value in stats.items():
-            row[f"{lab_name}__{stat_name}"] = value
-        records.append(row)
+    derived = pd.Series(np.nan, index=patient_df.index, dtype=float)
+    if event_date_col in patient_df.columns and "FIRST_RECORD_DATE" in patient_df.columns:
+        event_date = _coerce_datetime(patient_df[event_date_col])
+        first_record = _coerce_datetime(patient_df["FIRST_RECORD_DATE"])
+        derived = (event_date - first_record).dt.days.astype(float)
 
-    if not records:
-        raise ValueError("No pre-treatment lab features were generated from the input data.")
+    if fallback_duration_col and fallback_duration_col in patient_df.columns:
+        fallback = _coerce_duration(patient_df[fallback_duration_col])
+        if fallback is not None:
+            derived = derived.fillna(fallback)
 
-    feat = pd.DataFrame(records).groupby("DFCI_MRN").first().sort_index(axis=1)
-    print(f"Raw feature matrix: {feat.shape[0]} patients x {feat.shape[1]} features")
-    return feat
+    return derived
+
+
+def _coerce_platinum(series: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    platinum = series.astype(str).str.upper().isin(PLATINUM_MEDS)
+    return numeric.fillna(platinum.astype(int)).fillna(0).astype(int)
 
 
 def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
-    pat = (
-        df[
-            [
-                "DFCI_MRN",
-                "FIRST_TREATMENT_DATE",
-                "LAST_CONTACT_DATE",
-                "DEATH",
-                "PLATINUM_DATE",
-                "PLATINUM",
-                AGE_COL,
-            ]
-        ]
-        .drop_duplicates("DFCI_MRN")
-        .set_index("DFCI_MRN")
+    patient_level_cols = [
+        "DFCI_MRN",
+        AGE_COL,
+        "FIRST_RECORD_DATE",
+        "DIAGNOSIS_DATE",
+        "DIAGNOSIS",
+        "FIRST_TREATMENT_DATE",
+        "FIRST_TREATMENT",
+        "LAST_CONTACT_DATE",
+        "PLATINUM_DATE",
+        "PLATINUM",
+        "DEATH",
+        "t_diagnosis",
+        "t_first_treatment",
+        "t_platinum",
+        "t_last_contact",
+        "t_death",
+    ]
+    available_cols = [col for col in patient_level_cols if col in df.columns]
+    if "DFCI_MRN" not in available_cols:
+        raise ValueError("Input data must contain DFCI_MRN.")
+
+    pat = df[available_cols].drop_duplicates("DFCI_MRN").set_index("DFCI_MRN")
+
+    if "FIRST_RECORD_DATE" not in pat.columns:
+        if "LAB_DATE" not in df.columns:
+            raise ValueError("Input data must contain FIRST_RECORD_DATE or LAB_DATE.")
+        first_record = _coerce_datetime(df["LAB_DATE"]).groupby(df["DFCI_MRN"]).min()
+        pat["FIRST_RECORD_DATE"] = first_record
+
+    for date_col in [
+        "FIRST_RECORD_DATE",
+        "DIAGNOSIS_DATE",
+        "FIRST_TREATMENT_DATE",
+        "LAST_CONTACT_DATE",
+        "PLATINUM_DATE",
+    ]:
+        if date_col in pat.columns:
+            pat[date_col] = _coerce_datetime(pat[date_col])
+
+    if AGE_COL in pat.columns:
+        pat[AGE_COL] = pd.to_numeric(pat[AGE_COL], errors="coerce")
+    else:
+        pat[AGE_COL] = np.nan
+    pat["DEATH"] = pd.to_numeric(pat.get("DEATH"), errors="coerce").fillna(0).astype(int)
+    pat["PLATINUM"] = _coerce_platinum(pat.get("PLATINUM", pd.Series(0, index=pat.index)))
+    pat["DIAGNOSIS"] = pd.to_numeric(
+        pat.get("DIAGNOSIS", pat.get("DIAGNOSIS_DATE", pd.Series(index=pat.index)).notna()),
+        errors="coerce",
+    ).fillna(0).astype(int)
+    pat["FIRST_TREATMENT"] = pd.to_numeric(
+        pat.get(
+            "FIRST_TREATMENT",
+            pat.get("FIRST_TREATMENT_DATE", pd.Series(index=pat.index)).notna(),
+        ),
+        errors="coerce",
+    ).fillna(0).astype(int)
+
+    if "PLATINUM_DATE" in pat.columns and "LAST_CONTACT_DATE" in pat.columns:
+        pat["PLATINUM_DATE"] = pat["PLATINUM_DATE"].fillna(pat["LAST_CONTACT_DATE"])
+
+    pat["t_last_contact"] = _derive_duration(
+        pat,
+        duration_col="t_last_contact",
+        event_date_col="LAST_CONTACT_DATE",
     )
-
-    for col in ["FIRST_TREATMENT_DATE", "LAST_CONTACT_DATE", "PLATINUM_DATE"]:
-        pat[col] = pd.to_datetime(pat[col])
-
-    pat["PLATINUM"] = pd.to_numeric(pat["PLATINUM"], errors="coerce").fillna(0).astype(int)
-    pat["DEATH"] = pd.to_numeric(pat["DEATH"], errors="coerce").fillna(0).astype(int)
-    pat[AGE_COL] = pd.to_numeric(pat[AGE_COL], errors="coerce")
-    pat["PLATINUM_DATE"] = pat["PLATINUM_DATE"].fillna(pat["LAST_CONTACT_DATE"])
-
-    pat["t_platinum"] = (pat["PLATINUM_DATE"] - pat["FIRST_TREATMENT_DATE"]).dt.days.astype(float)
-    pat["t_death"] = (pat["LAST_CONTACT_DATE"] - pat["FIRST_TREATMENT_DATE"]).dt.days.astype(float)
+    pat["t_death"] = _derive_duration(
+        pat,
+        duration_col="t_death",
+        event_date_col="LAST_CONTACT_DATE",
+        fallback_duration_col="t_last_contact",
+    )
+    pat["t_diagnosis"] = _derive_duration(
+        pat,
+        duration_col="t_diagnosis",
+        event_date_col="DIAGNOSIS_DATE",
+        fallback_duration_col="t_last_contact",
+    )
+    pat["t_first_treatment"] = _derive_duration(
+        pat,
+        duration_col="t_first_treatment",
+        event_date_col="FIRST_TREATMENT_DATE",
+        fallback_duration_col="t_last_contact",
+    )
+    pat["t_platinum"] = _derive_duration(
+        pat,
+        duration_col="t_platinum",
+        event_date_col="PLATINUM_DATE",
+        fallback_duration_col="t_last_contact",
+    )
 
     platinum_event_time = np.where(pat["PLATINUM"].eq(1), pat["t_platinum"], np.inf)
     death_event_time = np.where(pat["DEATH"].eq(1), pat["t_death"], np.inf)
@@ -252,12 +307,72 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
     pat["t_either"] = np.where(pat["EITHER"].eq(1), first_event_time, pat["t_death"])
 
     valid = (
-        pat[AGE_COL].notna()
-        & pat["t_platinum"].gt(0)
-        & pat["t_death"].gt(0)
-        & pat["t_either"].gt(0)
+        pat["FIRST_RECORD_DATE"].notna()
+        & pat["t_platinum"].notna()
+        & pat["t_death"].notna()
+        & pat["t_either"].notna()
+        & pat["t_first_treatment"].notna()
+        & pat["t_platinum"].ge(0)
+        & pat["t_death"].ge(0)
+        & pat["t_either"].ge(0)
     )
     return pat.loc[valid].copy()
+
+
+def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
+    working = df.copy()
+    required_cols = {"DFCI_MRN", "LAB_NAME", "LAB_VALUE"}
+    missing_required = required_cols - set(working.columns)
+    if missing_required:
+        missing_str = ", ".join(sorted(missing_required))
+        raise ValueError(f"Input data is missing required columns for feature engineering: {missing_str}")
+
+    working["LAB_NAME"] = working["LAB_NAME"].astype(str).str.strip()
+    working["LAB_VALUE"] = pd.to_numeric(working["LAB_VALUE"], errors="coerce")
+
+    if "t_lab" not in working.columns:
+        if "LAB_DATE" not in working.columns:
+            raise ValueError("Input data must contain t_lab or LAB_DATE.")
+        if "FIRST_RECORD_DATE" not in working.columns:
+            working["FIRST_RECORD_DATE"] = _coerce_datetime(working["LAB_DATE"]).groupby(working["DFCI_MRN"]).transform("min")
+        working["t_lab"] = (
+            _coerce_datetime(working["LAB_DATE"]) - _coerce_datetime(working["FIRST_RECORD_DATE"])
+        ).dt.days.astype(float)
+    else:
+        working["t_lab"] = _coerce_duration(working["t_lab"])
+
+    if "t_first_treatment" not in working.columns:
+        if not {"FIRST_TREATMENT_DATE", "FIRST_RECORD_DATE"}.issubset(working.columns):
+            raise ValueError(
+                "Input data must contain t_first_treatment or both FIRST_TREATMENT_DATE and FIRST_RECORD_DATE."
+            )
+        working["t_first_treatment"] = (
+            _coerce_datetime(working["FIRST_TREATMENT_DATE"])
+            - _coerce_datetime(working["FIRST_RECORD_DATE"])
+        ).dt.days.astype(float)
+    else:
+        working["t_first_treatment"] = _coerce_duration(working["t_first_treatment"])
+
+    working = working.dropna(
+        subset=["DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab", "t_first_treatment"]
+    )
+
+    pre_treatment = working.loc[working["t_lab"].lt(working["t_first_treatment"])].copy()
+    if pre_treatment.empty:
+        raise ValueError("No pre-treatment lab rows were available to build mean lab features.")
+
+    feature_long = (
+        pre_treatment.groupby(["DFCI_MRN", "LAB_NAME"])["LAB_VALUE"]
+        .mean()
+        .rename("lab_mean")
+        .reset_index()
+    )
+    feature_df = feature_long.pivot(index="DFCI_MRN", columns="LAB_NAME", values="lab_mean")
+    feature_df.columns = [f"{col}__mean" for col in feature_df.columns]
+    feature_df = feature_df.sort_index(axis=1)
+
+    print(f"Raw feature matrix: {feature_df.shape[0]} patients x {feature_df.shape[1]} mean-lab features")
+    return feature_df
 
 
 def combined_event_label(df: pd.DataFrame) -> np.ndarray:
@@ -337,7 +452,10 @@ def select_feature_columns(
         feature_meta["train_val_coverage"].ge(min_patient_coverage)
         & feature_meta["train_val_unique_non_missing"].gt(1)
     )
-    feature_meta = feature_meta.sort_values(["selected", "train_val_coverage", "feature"], ascending=[False, False, True])
+    feature_meta = feature_meta.sort_values(
+        ["selected", "train_val_coverage", "feature"],
+        ascending=[False, False, True],
+    )
 
     selected = feature_meta.loc[feature_meta["selected"], "feature"].tolist()
     if not selected:
@@ -350,7 +468,10 @@ def summarize_endpoints(
     endpoints: list[str],
 ) -> pd.DataFrame:
     rows = []
-    for split_name, split_df in [("train_val", merged.loc[merged["split"].eq("train_val")]), ("test", merged.loc[merged["split"].eq("test")])]:
+    for split_name, split_df in [
+        ("train_val", merged.loc[merged["split"].eq("train_val")]),
+        ("test", merged.loc[merged["split"].eq("test")]),
+    ]:
         for endpoint in endpoints:
             duration_col = ENDPOINTS[endpoint]["duration_col"]
             event_col = ENDPOINTS[endpoint]["event_col"]
@@ -415,14 +536,14 @@ def build_model_matrices(
     eval_model = pd.DataFrame(index=eval_df.index)
 
     if base_feature_cols:
-        imputer = SimpleImputer(strategy="median")
+        imputer = SimpleImputer(strategy="mean")
         scaler = StandardScaler()
-        X_train = imputer.fit_transform(train_df[base_feature_cols].values)
-        X_eval = imputer.transform(eval_df[base_feature_cols].values)
-        X_train = scaler.fit_transform(X_train)
-        X_eval = scaler.transform(X_eval)
-        train_model = pd.DataFrame(X_train, columns=base_feature_cols, index=train_df.index)
-        eval_model = pd.DataFrame(X_eval, columns=base_feature_cols, index=eval_df.index)
+        x_train = imputer.fit_transform(train_df[base_feature_cols].values)
+        x_eval = imputer.transform(eval_df[base_feature_cols].values)
+        x_train = scaler.fit_transform(x_train)
+        x_eval = scaler.transform(x_eval)
+        train_model = pd.DataFrame(x_train, columns=base_feature_cols, index=train_df.index)
+        eval_model = pd.DataFrame(x_eval, columns=base_feature_cols, index=eval_df.index)
 
     if adjust_age:
         train_model["age_10y"] = train_df[AGE_COL].to_numpy(dtype=float) / 10.0
@@ -470,11 +591,13 @@ def run_univariate_associations(
         feature_df = train_val[[feature, duration_col, event_col, AGE_COL]].copy()
         coverage = float(feature_df[feature].notna().mean())
 
-        required_cols = [feature, duration_col, event_col]
+        required_cols = [duration_col, event_col]
         if adjust_age:
             required_cols.append(AGE_COL)
         feature_df = feature_df.dropna(subset=required_cols)
 
+        observed_non_missing = int(feature_df[feature].notna().sum())
+        imputed_count = int(len(feature_df) - observed_non_missing)
         result = {
             "endpoint": endpoint,
             "feature": feature,
@@ -483,6 +606,8 @@ def run_univariate_associations(
             "coverage_train_val": coverage,
             "n_patients_train_val": total_patients,
             "n_patients_used": len(feature_df),
+            "n_patients_observed": observed_non_missing,
+            "n_patients_imputed": imputed_count,
             "n_events_used": int(feature_df[event_col].sum()),
             "adjusted_for_age": adjust_age,
             "coef": np.nan,
@@ -496,6 +621,11 @@ def run_univariate_associations(
         }
 
         if len(feature_df) == 0:
+            result["note"] = "no_rows_with_outcomes"
+            rows.append(result)
+            continue
+
+        if observed_non_missing == 0:
             result["note"] = "no_non_missing_rows"
             rows.append(result)
             continue
@@ -505,14 +635,17 @@ def run_univariate_associations(
             rows.append(result)
             continue
 
-        feature_sd = float(feature_df[feature].std(ddof=0))
+        imputer = SimpleImputer(strategy="mean")
+        feature_values = imputer.fit_transform(feature_df[[feature]]).reshape(-1)
+        feature_sd = float(np.std(feature_values, ddof=0))
         if not np.isfinite(feature_sd) or feature_sd <= 0:
             result["note"] = "feature_has_no_variation"
             rows.append(result)
             continue
 
+        feature_mean = float(np.mean(feature_values))
         feature_df = feature_df.copy()
-        feature_df["feature_z"] = (feature_df[feature] - feature_df[feature].mean()) / feature_sd
+        feature_df["feature_z"] = (feature_values - feature_mean) / feature_sd
         model_cols = ["feature_z"]
 
         if adjust_age:
@@ -758,6 +891,8 @@ def build_univariate_overview(univariate_results: dict[str, pd.DataFrame]) -> pd
                 *key_cols,
                 "coverage_train_val",
                 "n_patients_used",
+                "n_patients_observed",
+                "n_patients_imputed",
                 "n_events_used",
                 "coef",
                 "hazard_ratio_per_sd",
@@ -768,11 +903,7 @@ def build_univariate_overview(univariate_results: dict[str, pd.DataFrame]) -> pd
                 "note",
             ]
         ].copy()
-        rename_map = {
-            col: f"{endpoint}_{col}"
-            for col in keep.columns
-            if col not in key_cols
-        }
+        rename_map = {col: f"{endpoint}_{col}" for col in keep.columns if col not in key_cols}
         keep = keep.rename(columns=rename_map)
 
         if overview is None:
@@ -815,10 +946,12 @@ def main(args: argparse.Namespace) -> None:
     outcome_df = make_outcome_df(df)
     print(f"Outcome table: {len(outcome_df)} patients")
 
-    print("Building raw aggregated pre-treatment feature matrix...")
-    feature_df = build_feature_matrix(df, min_obs_for_slope=args.min_obs_for_slope)
+    print("Building raw aggregated pre-treatment mean lab feature matrix...")
+    feature_df = build_feature_matrix(df)
 
     merged = feature_df.join(outcome_df, how="inner")
+    if args.adjust_age:
+        merged = merged.loc[merged[AGE_COL].notna()].copy()
     if merged.empty:
         raise ValueError("No patients have both engineered features and valid outcomes.")
 
@@ -839,14 +972,16 @@ def main(args: argparse.Namespace) -> None:
     )
 
     keep_cols = selected_feature_cols + [col for col in merged.columns if col in OUTCOME_COLUMNS]
-    train_val = train_val[selected_feature_cols + [col for col in train_val.columns if col in OUTCOME_COLUMNS]].copy()
+    train_val = train_val[
+        selected_feature_cols + [col for col in train_val.columns if col in OUTCOME_COLUMNS]
+    ].copy()
     test = test[selected_feature_cols + [col for col in test.columns if col in OUTCOME_COLUMNS]].copy()
     merged = merged[keep_cols].copy()
     merged["split"] = split_assignments
 
     print(f"Train/val: {len(train_val)} patients")
     print(f"Test:      {len(test)} patients")
-    print(f"Selected features from train/val only: {len(selected_feature_cols)}")
+    print(f"Selected mean-lab features from train/val only: {len(selected_feature_cols)}")
     print(f"Split stratification: {split_stratification}")
 
     feature_df.to_csv(RESULTS / "cox_agg_feature_matrix_raw.csv")
@@ -926,7 +1061,9 @@ def main(args: argparse.Namespace) -> None:
                 ["feature", "coef", "exp(coef)", "p"],
             ].head(10)
             print("\nChosen hyperparameters:")
-            print(f"  penalizer={best_row['penalizer']}  l1_ratio={best_row['l1_ratio']}  cv_mean={best_row['cv_mean']:.4f}")
+            print(
+                f"  penalizer={best_row['penalizer']}  l1_ratio={best_row['l1_ratio']}  cv_mean={best_row['cv_mean']:.4f}"
+            )
             print(f"  held-out test C-index={metrics_row['test_c_index']:.4f}")
             print("Top multivariable coefficients:")
             print(top.to_string(index=False))
@@ -990,21 +1127,17 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--min-patient-coverage",
+        "--min-lab-availability",
+        dest="min_patient_coverage",
         type=float,
         default=DEFAULT_MIN_PATIENT_COVERAGE,
-        help="Minimum train/validation coverage required for a feature to be selected.",
-    )
-    parser.add_argument(
-        "--min-obs-for-slope",
-        type=int,
-        default=DEFAULT_MIN_OBS_FOR_SLOPE,
-        help="Minimum pre-treatment observations needed before fitting a within-patient slope.",
+        help="Minimum train/validation lab availability required for a feature to be selected.",
     )
     parser.add_argument(
         "--min-events-per-feature",
         type=int,
         default=DEFAULT_MIN_EVENTS_PER_FEATURE,
-        help="Skip univariate associations when too few endpoint events remain after dropping missing values.",
+        help="Skip univariate associations when too few endpoint events remain after outcome filtering.",
     )
     parser.add_argument(
         "--univariate-penalizer",
