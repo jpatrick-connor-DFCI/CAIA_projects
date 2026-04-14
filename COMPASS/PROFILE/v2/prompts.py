@@ -31,6 +31,7 @@ Capture only evidence related to:
 - Extract what is documented in this note only.
 - Only capture neuroendocrine or small cell language when it clearly refers to the patient's prostate cancer. Ignore mentions that are clearly about another primary cancer.
 - Prefer explicit statements, but you may capture strongly implied pathology findings when the note itself makes the meaning clear.
+- Do not treat workup alone as disease evidence. If the note only documents testing for neuroendocrine or small cell disease, pending stains or markers, a biopsy ordered to evaluate this, or pathology review requests without a resulting diagnosis or impression, use empty arrays.
 - `event_date` should be the clinically referenced date when stated in the note. If the note only gives the note date, use null.
 - Use empty arrays when the note contains no evidence for an event family.
 - Quotes must be verbatim and 30 words or fewer.
@@ -90,6 +91,7 @@ For EACH note in the bundle, capture evidence related to:
 - Extract only what is documented in that note.
 - Only capture neuroendocrine or small cell language when it clearly refers to the patient's prostate cancer. Ignore mentions that are clearly about another primary cancer.
 - Prefer explicit statements, but you may capture strongly implied pathology findings when the note itself makes the meaning clear.
+- Do not treat workup alone as disease evidence. If a note only documents testing for neuroendocrine or small cell disease, pending stains or markers, a biopsy ordered to evaluate this, or pathology review requests without a resulting diagnosis or impression, use empty arrays.
 - `event_date` should be the clinically referenced date when stated in the note. If the note only gives the note date, use null.
 - Use empty arrays when the note contains no evidence for an event family.
 - Quotes must be verbatim and 30 words or fewer.
@@ -147,6 +149,7 @@ and when transformation from prior adenocarcinoma may have occurred.
 - Pathology is most authoritative for histology and transformation confirmation.
 - Clinician notes are useful for suspected transformation and disease course.
 - Only count neuroendocrine or small cell mentions that are clearly about prostate cancer. Ignore mentions clearly tied to another primary cancer.
+- Do not call the patient neuroendocrine or small cell prostate cancer based only on diagnostic workup. Testing for NEPC or SCPC, pending stains or markers, biopsies ordered to evaluate this, or pathology review requests are not sufficient unless a diagnosis, result, or clinician impression is documented elsewhere in `note_extractions`.
 - Set `neuroendocrine_small_cell_prostate_cancer` to true when the chart supports neuroendocrine or small cell prostate cancer, even if transformation timing is unclear.
 - Use `disease_type = both` when both neuroendocrine and small cell are documented across the chart.
 - Use `transformation_evidence = documented` when transformation is explicit or strongly established by sequential evidence of prior adenocarcinoma followed by neuroendocrine or small cell prostate cancer.

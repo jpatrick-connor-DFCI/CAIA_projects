@@ -45,6 +45,7 @@ from config import (
     DEFAULT_MODEL_NAME,
     DEFAULT_OUTPUT_DIR,
 )
+from evidence_filters import has_substantive_nepc_evidence, sanitize_note_extractions
 from prompts import (
     BUNDLED_EVENT_EXTRACTION_SYSTEM_PROMPT,
     CLINICAL_SAFETY_CONTEXT,
@@ -52,7 +53,7 @@ from prompts import (
     PATIENT_SYNTHESIS_SYSTEM_PROMPT,
 )
 
-SCHEMA_VERSION = "v2_ne_scpc_simplified_2026-04-12"
+SCHEMA_VERSION = "v2_ne_scpc_simplified_2026-04-13"
 
 
 def parse_args():
@@ -617,7 +618,9 @@ def main():
         mrn_df = candidate_groups.get(mrn, pd.DataFrame())
 
         if mrn in extractions_by_mrn:
-            note_extractions = extractions_by_mrn[mrn].get("note_extractions", [])
+            note_extractions = sanitize_note_extractions(
+                extractions_by_mrn[mrn].get("note_extractions", [])
+            )
         else:
             note_extractions = []
             if not mrn_df.empty:
@@ -690,6 +693,7 @@ def main():
                             else:
                                 note_extractions.append(extraction)
 
+            note_extractions = sanitize_note_extractions(note_extractions)
             note_extractions = sorted(
                 note_extractions,
                 key=lambda item: (item.get("note_date") is None, item.get("note_date")),
@@ -707,7 +711,7 @@ def main():
             "note_extractions": note_extractions,
         }
 
-        if not note_extractions:
+        if not note_extractions or not has_substantive_nepc_evidence(note_extractions):
             result_row = default_patient_result(mrn, structured_context, num_notes_reviewed=0)
         else:
             response_text, error_type = call_with_retry(

@@ -10,6 +10,7 @@ This directory contains a parallel v2 arm of the LLM extraction workflow. The or
 - Selects candidate notes with a focused grep scheme for neuroendocrine, small-cell, and histologic-transformation language
 - Writes candidate note text as compact matched snippets instead of sending full notes to the LLM
 - Focuses the LLM label step on whether the patient has neuroendocrine or small cell prostate cancer and when transformation may have occurred
+- Filters out workup-only NEPC or SCPC evidence such as testing plans, pending stains or markers, and biopsies ordered only to evaluate for transformation
 - Treats `clinical_trial` as context rather than a primary platinum-reason label
 
 ## Files
