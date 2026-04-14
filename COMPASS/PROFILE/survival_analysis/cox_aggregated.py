@@ -1,18 +1,19 @@
 """
-Feature-based association and evaluation pipeline using pre-treatment lab summaries.
+Two-arm survival analysis on pre-treatment lab summary features.
 
-Workflow:
-  1. Build patient-level pre-treatment lab summary features from longitudinal rows observed before first treatment.
-  2. Split patients into 80% train/validation and 20% held-out test.
-  3. Select labs using only the train/validation cohort and a minimum availability threshold.
-  4. Run train/validation univariate Cox models with mean-imputed lab values.
-  5. Tune penalized multivariable Cox models with 5-fold CV on train/validation.
-  6. Refit the chosen model on the full 80% block and evaluate on held-out test.
+Features per lab (all pre-first-treatment): mean, min, max, last.
 
-Endpoints:
-  - platinum: time to first platinum exposure or censoring
-  - death:    time to death / last contact
-  - either:   composite first of platinum or death (optional)
+Arm 1 (univariate, full dataset):
+  - For each feature, fit Cox on [AGE + feature] using all patients.
+  - Extract coefficient, HR per SD, 95% CI, and p-value.
+
+Arm 2 (multivariable lasso-Cox):
+  - 80% train/val + 20% held-out test.
+  - 5-fold CV over penalizer grid (L1-only) on the 80%; AGE is unpenalized.
+  - Refit on full 80% with chosen penalizer and evaluate on 20% test:
+    C-index and integrated AUC(t) over the 5-95 percentile of event times.
+
+Endpoints: platinum, death.
 
 Expected input:
   Row-level longitudinal data with at least
@@ -25,8 +26,8 @@ Outputs:
   results/cox_agg_split_assignments.csv
   results/cox_agg_feature_selection.csv
   results/cox_agg_endpoint_summary.csv
-  results/cox_agg_univariate_trainval_<endpoint>.csv
-  results/cox_agg_univariate_trainval_overview.csv
+  results/cox_agg_univariate_<endpoint>.csv
+  results/cox_agg_univariate_overview.csv
   results/cox_agg_cv_metrics.csv
   results/cox_agg_cv_fold_metrics.csv
   results/cox_agg_selected_models.csv
@@ -64,8 +65,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
 
 BASE = Path(__file__).resolve().parent
 DATA_PATH = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/")
-RESULTS = BASE / "results"
-RESULTS.mkdir(exist_ok=True)
+RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis")
+RESULTS.mkdir(parents=True, exist_ok=True)
 
 AGE_COL = "AGE_AT_TREATMENTSTART"
 DEFAULT_SEED = 42
@@ -74,15 +75,10 @@ DEFAULT_N_FOLDS = 5
 DEFAULT_MIN_PATIENT_COVERAGE = 0.20
 DEFAULT_MIN_EVENTS_PER_FEATURE = 10
 DEFAULT_CV_PENALIZERS = [0.01, 0.05, 0.10, 0.20, 0.50, 1.00]
-DEFAULT_CV_L1_RATIOS = [0.0, 0.5]
-DEFAULT_AUC_TIME_QUANTILES = [0.25, 0.50, 0.75]
+DEFAULT_AUC_PERCENTILE_RANGE = (0.05, 0.95)
+DEFAULT_AUC_N_POINTS = 50
 PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
 
-JOINT_ENDPOINT_ALIASES = {
-    "joint": "either",
-    "combined": "either",
-    "composite": "either",
-}
 ENDPOINTS = {
     "platinum": {
         "duration_col": "t_platinum",
@@ -94,10 +90,10 @@ ENDPOINTS = {
         "event_col": "DEATH",
         "description": "Time to death / last contact",
     },
-    "either": {
-        "duration_col": "t_either",
-        "event_col": "EITHER",
-        "description": "Composite: first platinum or death",
+    "nepc": {
+        "duration_col": "t_nepc",
+        "event_col": "NEPC",
+        "description": "Time to NEPC transformation (LLM-labeled)",
     },
 }
 OUTCOME_COLUMNS = {
@@ -112,12 +108,15 @@ OUTCOME_COLUMNS = {
     "PLATINUM",
     "DEATH",
     "EITHER",
+    "NEPC_DATE",
+    "NEPC",
     "t_diagnosis",
     "t_first_treatment",
     "t_platinum",
     "t_last_contact",
     "t_death",
     "t_either",
+    "t_nepc",
     "split",
 }
 
@@ -158,9 +157,9 @@ def benjamini_hochberg(p_values: pd.Series) -> pd.Series:
 def normalize_endpoints(raw_endpoints: list[str]) -> list[str]:
     endpoints: list[str] = []
     for endpoint in raw_endpoints:
-        normalized = JOINT_ENDPOINT_ALIASES.get(endpoint.lower(), endpoint.lower())
+        normalized = endpoint.lower()
         if normalized not in ENDPOINTS:
-            valid = ", ".join(sorted(set(ENDPOINTS) | set(JOINT_ENDPOINT_ALIASES)))
+            valid = ", ".join(sorted(ENDPOINTS))
             raise ValueError(f"Unsupported endpoint '{endpoint}'. Choose from: {valid}")
         if normalized not in endpoints:
             endpoints.append(normalized)
@@ -222,11 +221,14 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
         "PLATINUM_DATE",
         "PLATINUM",
         "DEATH",
+        "NEPC_DATE",
+        "NEPC",
         "t_diagnosis",
         "t_first_treatment",
         "t_platinum",
         "t_last_contact",
         "t_death",
+        "t_nepc",
     ]
     available_cols = [col for col in patient_level_cols if col in df.columns]
     if "DFCI_MRN" not in available_cols:
@@ -246,6 +248,7 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
         "FIRST_TREATMENT_DATE",
         "LAST_CONTACT_DATE",
         "PLATINUM_DATE",
+        "NEPC_DATE",
     ]:
         if date_col in pat.columns:
             pat[date_col] = _coerce_datetime(pat[date_col])
@@ -256,6 +259,7 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
         pat[AGE_COL] = np.nan
     pat["DEATH"] = pd.to_numeric(pat.get("DEATH"), errors="coerce").fillna(0).astype(int)
     pat["PLATINUM"] = _coerce_platinum(pat.get("PLATINUM", pd.Series(0, index=pat.index)))
+    pat["NEPC"] = pd.to_numeric(pat.get("NEPC", pd.Series(0, index=pat.index)), errors="coerce").fillna(0).astype(int)
     pat["DIAGNOSIS"] = pd.to_numeric(
         pat.get("DIAGNOSIS", pat.get("DIAGNOSIS_DATE", pd.Series(index=pat.index)).notna()),
         errors="coerce",
@@ -300,6 +304,12 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
         event_date_col="PLATINUM_DATE",
         fallback_duration_col="t_last_contact",
     )
+    pat["t_nepc"] = _derive_duration(
+        pat,
+        duration_col="t_nepc",
+        event_date_col="NEPC_DATE",
+        fallback_duration_col="t_last_contact",
+    )
 
     platinum_event_time = np.where(pat["PLATINUM"].eq(1), pat["t_platinum"], np.inf)
     death_event_time = np.where(pat["DEATH"].eq(1), pat["t_death"], np.inf)
@@ -313,10 +323,12 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
         & pat["t_platinum"].notna()
         & pat["t_death"].notna()
         & pat["t_either"].notna()
+        & pat["t_nepc"].notna()
         & pat["t_first_treatment"].notna()
         & pat["t_platinum"].ge(0)
         & pat["t_death"].ge(0)
         & pat["t_either"].ge(0)
+        & pat["t_nepc"].ge(0)
     )
     return pat.loc[valid].copy()
 
@@ -379,11 +391,9 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
         pre_treatment.groupby(["DFCI_MRN", "LAB_NAME"])["LAB_VALUE"]
         .agg(
             mean="mean",
-            last="last",
-            std=_patient_lab_std,
             min="min",
             max="max",
-            n_obs="count",
+            last="last",
         )
         .reset_index()
     )
@@ -415,6 +425,8 @@ def choose_stratification_labels(df: pd.DataFrame, *, min_count: int) -> tuple[n
         ("platinum", df["PLATINUM"].astype(int).to_numpy()),
         ("death", df["DEATH"].astype(int).to_numpy()),
     ]
+    if "NEPC" in df.columns:
+        candidates.append(("nepc", df["NEPC"].astype(int).to_numpy()))
     for label_name, labels in candidates:
         counts = pd.Series(labels).value_counts()
         if len(counts) > 1 and counts.min() >= min_count:
@@ -454,39 +466,37 @@ def split_train_test(
 
 
 def select_feature_columns(
-    train_val: pd.DataFrame,
-    test: pd.DataFrame,
+    data: pd.DataFrame,
     raw_feature_cols: list[str],
     *,
     min_patient_coverage: float,
 ) -> tuple[list[str], pd.DataFrame]:
-    train_cov = train_val[raw_feature_cols].notna().mean()
-    test_cov = test[raw_feature_cols].notna().mean()
-    train_unique = train_val[raw_feature_cols].nunique(dropna=True)
+    """Select features on full dataset (used by both Arm 1 and Arm 2)."""
+    coverage = data[raw_feature_cols].notna().mean()
+    unique_non_missing = data[raw_feature_cols].nunique(dropna=True)
 
     feature_meta = pd.DataFrame(
         {
             "feature": raw_feature_cols,
-            "train_val_coverage": train_cov.reindex(raw_feature_cols).values,
-            "test_coverage": test_cov.reindex(raw_feature_cols).values,
-            "train_val_unique_non_missing": train_unique.reindex(raw_feature_cols).values,
+            "coverage": coverage.reindex(raw_feature_cols).values,
+            "unique_non_missing": unique_non_missing.reindex(raw_feature_cols).values,
         }
     )
     parsed = feature_meta["feature"].map(parse_feature_name)
     feature_meta["lab_name"] = parsed.str[0]
     feature_meta["feature_stat"] = parsed.str[1]
     feature_meta["selected"] = (
-        feature_meta["train_val_coverage"].ge(min_patient_coverage)
-        & feature_meta["train_val_unique_non_missing"].gt(1)
+        feature_meta["coverage"].ge(min_patient_coverage)
+        & feature_meta["unique_non_missing"].gt(1)
     )
     feature_meta = feature_meta.sort_values(
-        ["selected", "train_val_coverage", "feature"],
+        ["selected", "coverage", "feature"],
         ascending=[False, False, True],
     )
 
     selected = feature_meta.loc[feature_meta["selected"], "feature"].tolist()
     if not selected:
-        raise ValueError("No features passed train/validation coverage and variability filters.")
+        raise ValueError("No features passed coverage and variability filters.")
     return selected, feature_meta.reset_index(drop=True)
 
 
@@ -525,15 +535,29 @@ def fit_cox_with_fallback(
     event_col: str,
     penalizers: list[float],
     l1_ratio: float,
+    unpenalized_cols: list[str] | None = None,
+    covariate_cols: list[str] | None = None,
 ) -> tuple[CoxPHFitter | None, float, str]:
     require_lifelines()
+
+    if covariate_cols is None:
+        covariate_cols = [c for c in model_df.columns if c not in {duration_col, event_col}]
+    unpenalized = set(unpenalized_cols or [])
 
     last_error = ""
     for penalizer in penalizers:
         try:
+            if unpenalized:
+                penalty_vec = np.array(
+                    [0.0 if c in unpenalized else float(penalizer) for c in covariate_cols],
+                    dtype=float,
+                )
+                pen_arg: float | np.ndarray = penalty_vec
+            else:
+                pen_arg = float(penalizer)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                model = CoxPHFitter(penalizer=penalizer, l1_ratio=l1_ratio)
+                model = CoxPHFitter(penalizer=pen_arg, l1_ratio=l1_ratio)
                 model.fit(model_df, duration_col=duration_col, event_col=event_col)
             note = "fit_ok" if penalizer == 0 else f"fit_ok_penalizer_{penalizer:g}"
             return model, penalizer, note
@@ -550,8 +574,8 @@ def build_model_matrices(
     feature_cols: list[str],
     duration_col: str,
     event_col: str,
-    adjust_age: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """Always includes age as the last covariate; age is the unpenalized column."""
     base_feature_cols = [
         col
         for col in feature_cols
@@ -572,10 +596,9 @@ def build_model_matrices(
         train_model = pd.DataFrame(x_train, columns=base_feature_cols, index=train_df.index)
         eval_model = pd.DataFrame(x_eval, columns=base_feature_cols, index=eval_df.index)
 
-    if adjust_age:
-        train_model["age_10y"] = train_df[AGE_COL].to_numpy(dtype=float) / 10.0
-        eval_model["age_10y"] = eval_df[AGE_COL].to_numpy(dtype=float) / 10.0
-        covariate_cols.append("age_10y")
+    train_model["age"] = train_df[AGE_COL].to_numpy(dtype=float)
+    eval_model["age"] = eval_df[AGE_COL].to_numpy(dtype=float)
+    covariate_cols.append("age")
 
     if not covariate_cols:
         raise ValueError("No usable covariates remained after train-fold filtering.")
@@ -587,18 +610,13 @@ def build_model_matrices(
     return train_model, eval_model, covariate_cols
 
 
-def format_horizons(horizons: list[float]) -> str:
-    if not horizons:
-        return ""
-    return "|".join(f"{float(horizon):g}" for horizon in horizons)
-
-
 def select_auc_horizons(
     reference_df: pd.DataFrame,
     *,
     duration_col: str,
     event_col: str,
-    quantiles: list[float],
+    percentile_range: tuple[float, float],
+    n_points: int,
 ) -> list[float]:
     event_times = pd.to_numeric(
         reference_df.loc[reference_df[event_col].eq(1), duration_col],
@@ -608,9 +626,11 @@ def select_auc_horizons(
     if event_times.empty:
         return []
 
-    horizons = np.quantile(event_times.to_numpy(dtype=float), quantiles)
-    horizons = np.unique(np.asarray(horizons, dtype=float))
-    return [float(horizon) for horizon in horizons if np.isfinite(horizon) and horizon > 0]
+    t_lo, t_hi = np.quantile(event_times.to_numpy(dtype=float), percentile_range)
+    if not (np.isfinite(t_lo) and np.isfinite(t_hi)) or t_hi <= t_lo:
+        return []
+    horizons = np.linspace(float(t_lo), float(t_hi), int(n_points))
+    return [float(h) for h in horizons if np.isfinite(h) and h > 0]
 
 
 def auc_at_horizon(
@@ -635,23 +655,27 @@ def auc_at_horizon(
     return auc, n_usable, n_positive, n_negative
 
 
-def compute_mean_auc_t(
+def compute_integrated_auc_t(
     eval_df: pd.DataFrame,
     risk_score: np.ndarray,
     *,
     duration_col: str,
     event_col: str,
     reference_df: pd.DataFrame,
-    auc_time_quantiles: list[float],
+    percentile_range: tuple[float, float] = DEFAULT_AUC_PERCENTILE_RANGE,
+    n_points: int = DEFAULT_AUC_N_POINTS,
 ) -> tuple[float, pd.DataFrame]:
+    """Time-averaged AUC(t) integrated over the 5-95 percentile of reference event times."""
     horizons = select_auc_horizons(
         reference_df,
         duration_col=duration_col,
         event_col=event_col,
-        quantiles=auc_time_quantiles,
+        percentile_range=percentile_range,
+        n_points=n_points,
     )
+    empty_cols = ["horizon_days", "auc_t", "n_usable", "n_positive", "n_negative"]
     if not horizons:
-        return np.nan, pd.DataFrame(columns=["horizon_days", "auc_t", "n_usable", "n_positive", "n_negative"])
+        return np.nan, pd.DataFrame(columns=empty_cols)
 
     duration = eval_df[duration_col].to_numpy(dtype=float)
     event = eval_df[event_col].to_numpy(dtype=int)
@@ -676,8 +700,16 @@ def compute_mean_auc_t(
         )
 
     auc_df = pd.DataFrame(rows)
-    mean_auc_t = float(auc_df["auc_t"].mean()) if auc_df["auc_t"].notna().any() else np.nan
-    return mean_auc_t, auc_df
+    valid = auc_df["auc_t"].notna()
+    if valid.sum() < 2:
+        return np.nan, auc_df
+    x = auc_df.loc[valid, "horizon_days"].to_numpy(dtype=float)
+    y = auc_df.loc[valid, "auc_t"].to_numpy(dtype=float)
+    span = x[-1] - x[0]
+    if not np.isfinite(span) or span <= 0:
+        return np.nan, auc_df
+    integrated = float(np.trapz(y, x) / span)
+    return integrated, auc_df
 
 
 def score_cox_model(
@@ -693,28 +725,25 @@ def score_cox_model(
 
 
 def run_univariate_associations(
-    train_val: pd.DataFrame,
+    data: pd.DataFrame,
     *,
     feature_cols: list[str],
     endpoint: str,
-    adjust_age: bool,
     min_events_per_feature: int,
     fallback_penalizer: float,
 ) -> pd.DataFrame:
+    """Arm 1: for each feature, fit Cox on [AGE + feature] using the full dataset."""
     duration_col = ENDPOINTS[endpoint]["duration_col"]
     event_col = ENDPOINTS[endpoint]["event_col"]
-    total_patients = len(train_val)
+    total_patients = len(data)
     rows = []
 
     for feature in feature_cols:
         lab_name, feature_stat = parse_feature_name(feature)
-        feature_df = train_val[[feature, duration_col, event_col, AGE_COL]].copy()
+        feature_df = data[[feature, duration_col, event_col, AGE_COL]].copy()
         coverage = float(feature_df[feature].notna().mean())
 
-        required_cols = [duration_col, event_col]
-        if adjust_age:
-            required_cols.append(AGE_COL)
-        feature_df = feature_df.dropna(subset=required_cols)
+        feature_df = feature_df.dropna(subset=[duration_col, event_col, AGE_COL])
 
         observed_non_missing = int(feature_df[feature].notna().sum())
         imputed_count = int(len(feature_df) - observed_non_missing)
@@ -723,22 +752,19 @@ def run_univariate_associations(
             "feature": feature,
             "lab_name": lab_name,
             "feature_stat": feature_stat,
-            "coverage_train_val": coverage,
-            "n_patients_train_val": total_patients,
+            "coverage": coverage,
+            "n_patients_total": total_patients,
             "n_patients_used": len(feature_df),
             "n_patients_observed": observed_non_missing,
             "n_patients_imputed": imputed_count,
             "n_events_used": int(feature_df[event_col].sum()),
-            "adjusted_for_age": adjust_age,
-            "coef": np.nan,
+            "coef_feature": np.nan,
             "hazard_ratio_per_sd": np.nan,
             "ci_lower": np.nan,
             "ci_upper": np.nan,
             "p_value": np.nan,
-            "concordance_index": np.nan,
-            "mean_auc_t": np.nan,
-            "n_valid_auc_horizons": 0,
-            "auc_t_horizons_days": "",
+            "coef_age": np.nan,
+            "p_value_age": np.nan,
             "fit_penalizer": np.nan,
             "note": "",
         }
@@ -769,11 +795,8 @@ def run_univariate_associations(
         feature_mean = float(np.mean(feature_values))
         feature_df = feature_df.copy()
         feature_df["feature_z"] = (feature_values - feature_mean) / feature_sd
-        model_cols = ["feature_z"]
-
-        if adjust_age:
-            feature_df["age_10y"] = feature_df[AGE_COL] / 10.0
-            model_cols.append("age_10y")
+        feature_df["age"] = feature_df[AGE_COL]
+        model_cols = ["feature_z", "age"]
 
         model, used_penalizer, note = fit_cox_with_fallback(
             feature_df[model_cols + [duration_col, event_col]],
@@ -790,24 +813,14 @@ def run_univariate_associations(
             continue
 
         summary_row = model.summary.loc["feature_z"]
-        result["coef"] = float(summary_row["coef"])
+        result["coef_feature"] = float(summary_row["coef"])
         result["hazard_ratio_per_sd"] = float(summary_row["exp(coef)"])
         result["ci_lower"] = float(summary_row["exp(coef) lower 95%"])
         result["ci_upper"] = float(summary_row["exp(coef) upper 95%"])
         result["p_value"] = float(summary_row["p"])
-        result["concordance_index"] = float(model.concordance_index_)
-        risk_score = np.asarray(model.predict_partial_hazard(feature_df[model_cols])).reshape(-1)
-        mean_auc_t, auc_df = compute_mean_auc_t(
-            feature_df,
-            risk_score,
-            duration_col=duration_col,
-            event_col=event_col,
-            reference_df=feature_df,
-            auc_time_quantiles=DEFAULT_AUC_TIME_QUANTILES,
-        )
-        result["mean_auc_t"] = mean_auc_t
-        result["n_valid_auc_horizons"] = int(auc_df["auc_t"].notna().sum()) if not auc_df.empty else 0
-        result["auc_t_horizons_days"] = format_horizons(auc_df.loc[auc_df["auc_t"].notna(), "horizon_days"].tolist())
+        age_row = model.summary.loc["age"]
+        result["coef_age"] = float(age_row["coef"])
+        result["p_value_age"] = float(age_row["p"])
         rows.append(result)
 
     associations = pd.DataFrame(rows)
@@ -832,21 +845,21 @@ def tune_multivariable_model(
     *,
     feature_cols: list[str],
     endpoint: str,
-    adjust_age: bool,
     penalizers: list[float],
-    l1_ratios: list[float],
     n_folds: int,
     seed: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Arm 2: 5-fold CV over penalizer grid, L1-only (lasso), AGE unpenalized."""
     duration_col = ENDPOINTS[endpoint]["duration_col"]
     event_col = ENDPOINTS[endpoint]["event_col"]
+    l1_ratio = 1.0
 
     splitter, strat_labels, cv_stratification = make_cv_splitter(train_val, n_folds=n_folds, seed=seed)
     fold_rows = []
 
     split_args = (np.arange(len(train_val)), strat_labels) if strat_labels is not None else (np.arange(len(train_val)),)
 
-    for penalizer, l1_ratio in product(penalizers, l1_ratios):
+    for penalizer in penalizers:
         for fold, (tr_idx, val_idx) in enumerate(splitter.split(*split_args), 1):
             fold_train = train_val.iloc[tr_idx]
             fold_val = train_val.iloc[val_idx]
@@ -861,9 +874,8 @@ def tune_multivariable_model(
                 "n_events_val": int(fold_val[event_col].sum()),
                 "cv_stratification": cv_stratification,
                 "c_index_val": np.nan,
-                "mean_auc_t_val": np.nan,
+                "integrated_auc_t_val": np.nan,
                 "n_valid_auc_horizons_val": 0,
-                "auc_t_horizons_days_val": "",
                 "n_covariates": np.nan,
                 "note": "",
             }
@@ -875,7 +887,6 @@ def tune_multivariable_model(
                     feature_cols=feature_cols,
                     duration_col=duration_col,
                     event_col=event_col,
-                    adjust_age=adjust_age,
                 )
                 model, _, note = fit_cox_with_fallback(
                     train_mdf,
@@ -883,6 +894,8 @@ def tune_multivariable_model(
                     event_col=event_col,
                     penalizers=[penalizer],
                     l1_ratio=l1_ratio,
+                    unpenalized_cols=["age"],
+                    covariate_cols=covariate_cols,
                 )
                 row["note"] = note
                 row["n_covariates"] = len(covariate_cols)
@@ -894,20 +907,16 @@ def tune_multivariable_model(
                         event_col=event_col,
                     )
                     row["c_index_val"] = c_index
-                    mean_auc_t_val, auc_df_val = compute_mean_auc_t(
+                    integrated_auc_val, auc_df_val = compute_integrated_auc_t(
                         val_mdf,
                         val_pred,
                         duration_col=duration_col,
                         event_col=event_col,
                         reference_df=train_mdf,
-                        auc_time_quantiles=DEFAULT_AUC_TIME_QUANTILES,
                     )
-                    row["mean_auc_t_val"] = mean_auc_t_val
+                    row["integrated_auc_t_val"] = integrated_auc_val
                     row["n_valid_auc_horizons_val"] = (
                         int(auc_df_val["auc_t"].notna().sum()) if not auc_df_val.empty else 0
-                    )
-                    row["auc_t_horizons_days_val"] = format_horizons(
-                        auc_df_val.loc[auc_df_val["auc_t"].notna(), "horizon_days"].tolist()
                     )
             except Exception as exc:  # pragma: no cover - defensive for unstable folds
                 row["note"] = f"fold_failed: {exc}"
@@ -921,11 +930,9 @@ def tune_multivariable_model(
             cv_mean=("c_index_val", "mean"),
             cv_std=("c_index_val", "std"),
             n_valid_folds=("c_index_val", lambda s: int(s.notna().sum())),
-            mean_auc_t_cv_mean=("mean_auc_t_val", "mean"),
-            mean_auc_t_cv_std=("mean_auc_t_val", "std"),
-            n_valid_auc_t_folds=("mean_auc_t_val", lambda s: int(s.notna().sum())),
-            n_valid_auc_horizons_val_mean=("n_valid_auc_horizons_val", "mean"),
-            auc_t_horizons_days_val=("auc_t_horizons_days_val", "first"),
+            integrated_auc_t_cv_mean=("integrated_auc_t_val", "mean"),
+            integrated_auc_t_cv_std=("integrated_auc_t_val", "std"),
+            n_valid_auc_t_folds=("integrated_auc_t_val", lambda s: int(s.notna().sum())),
             n_covariates_mean=("n_covariates", "mean"),
             cv_stratification=("cv_stratification", "first"),
         )
@@ -937,8 +944,8 @@ def tune_multivariable_model(
 
     best_row = (
         cv_df.sort_values(
-            ["cv_mean", "n_valid_folds", "penalizer", "l1_ratio"],
-            ascending=[False, False, True, True],
+            ["cv_mean", "n_valid_folds", "penalizer"],
+            ascending=[False, False, True],
             na_position="last",
         )
         .iloc[0]
@@ -953,14 +960,13 @@ def fit_final_multivariable_model(
     *,
     feature_cols: list[str],
     endpoint: str,
-    adjust_age: bool,
     penalizer: float,
-    l1_ratio: float,
     split_stratification: str,
     cv_stratification: str,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     duration_col = ENDPOINTS[endpoint]["duration_col"]
     event_col = ENDPOINTS[endpoint]["event_col"]
+    l1_ratio = 1.0
 
     train_mdf, test_mdf, covariate_cols = build_model_matrices(
         train_val,
@@ -968,7 +974,6 @@ def fit_final_multivariable_model(
         feature_cols=feature_cols,
         duration_col=duration_col,
         event_col=event_col,
-        adjust_age=adjust_age,
     )
     model, used_penalizer, note = fit_cox_with_fallback(
         train_mdf,
@@ -976,6 +981,8 @@ def fit_final_multivariable_model(
         event_col=event_col,
         penalizers=[penalizer],
         l1_ratio=l1_ratio,
+        unpenalized_cols=["age"],
+        covariate_cols=covariate_cols,
     )
     if model is None:
         raise RuntimeError(f"Final multivariable model failed for endpoint '{endpoint}': {note}")
@@ -992,21 +999,19 @@ def fit_final_multivariable_model(
         duration_col=duration_col,
         event_col=event_col,
     )
-    train_mean_auc_t, train_auc_df = compute_mean_auc_t(
+    train_iauc, train_auc_df = compute_integrated_auc_t(
         train_mdf,
         train_pred,
         duration_col=duration_col,
         event_col=event_col,
         reference_df=train_mdf,
-        auc_time_quantiles=DEFAULT_AUC_TIME_QUANTILES,
     )
-    test_mean_auc_t, test_auc_df = compute_mean_auc_t(
+    test_iauc, test_auc_df = compute_integrated_auc_t(
         test_mdf,
         test_pred,
         duration_col=duration_col,
         event_col=event_col,
         reference_df=train_mdf,
-        auc_time_quantiles=DEFAULT_AUC_TIME_QUANTILES,
     )
 
     metrics_row = {
@@ -1021,14 +1026,12 @@ def fit_final_multivariable_model(
         "n_covariates": len(covariate_cols),
         "train_val_c_index": train_c,
         "test_c_index": test_c,
-        "train_val_mean_auc_t": train_mean_auc_t,
-        "test_mean_auc_t": test_mean_auc_t,
+        "train_val_integrated_auc_t": train_iauc,
+        "test_integrated_auc_t": test_iauc,
+        "auc_percentile_range": f"{DEFAULT_AUC_PERCENTILE_RANGE[0]:g}-{DEFAULT_AUC_PERCENTILE_RANGE[1]:g}",
+        "auc_n_points": DEFAULT_AUC_N_POINTS,
         "train_val_n_valid_auc_horizons": int(train_auc_df["auc_t"].notna().sum()) if not train_auc_df.empty else 0,
         "test_n_valid_auc_horizons": int(test_auc_df["auc_t"].notna().sum()) if not test_auc_df.empty else 0,
-        "auc_t_horizons_days": format_horizons(
-            train_auc_df.loc[train_auc_df["auc_t"].notna(), "horizon_days"].tolist()
-        ),
-        "adjusted_for_age": adjust_age,
         "split_stratification": split_stratification,
         "cv_stratification": cv_stratification,
         "note": note,
@@ -1039,17 +1042,33 @@ def fit_final_multivariable_model(
     summary["endpoint"] = endpoint
     summary["lab_name"] = parsed.str[0]
     summary["feature_stat"] = parsed.str[1]
-    summary["is_age_covariate"] = summary["feature"].eq("age_10y")
+    summary["is_age_covariate"] = summary["feature"].eq("age")
     summary["selected_penalizer"] = used_penalizer
     summary["selected_l1_ratio"] = l1_ratio
     summary["n_covariates"] = len(covariate_cols)
     summary["train_val_c_index"] = train_c
     summary["test_c_index"] = test_c
-    summary["train_val_mean_auc_t"] = train_mean_auc_t
-    summary["test_mean_auc_t"] = test_mean_auc_t
-    summary["auc_t_horizons_days"] = metrics_row["auc_t_horizons_days"]
-    summary["adjusted_for_age"] = adjust_age
+    summary["train_val_integrated_auc_t"] = train_iauc
+    summary["test_integrated_auc_t"] = test_iauc
     summary["note"] = note
+    keep_cols = [
+        "endpoint",
+        "feature",
+        "lab_name",
+        "feature_stat",
+        "is_age_covariate",
+        "coef",
+        "exp(coef)",
+        "selected_penalizer",
+        "selected_l1_ratio",
+        "n_covariates",
+        "train_val_c_index",
+        "test_c_index",
+        "train_val_integrated_auc_t",
+        "test_integrated_auc_t",
+        "note",
+    ]
+    summary = summary[[c for c in keep_cols if c in summary.columns]]
     summary = summary.sort_values("coef", key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
 
     predictions = pd.DataFrame(
@@ -1073,21 +1092,19 @@ def build_univariate_overview(univariate_results: dict[str, pd.DataFrame]) -> pd
         keep = endpoint_df[
             [
                 *key_cols,
-                "coverage_train_val",
+                "coverage",
                 "n_patients_used",
                 "n_patients_observed",
                 "n_patients_imputed",
                 "n_events_used",
-                "coef",
+                "coef_feature",
                 "hazard_ratio_per_sd",
                 "ci_lower",
                 "ci_upper",
                 "p_value",
                 "q_value",
-                "concordance_index",
-                "mean_auc_t",
-                "n_valid_auc_horizons",
-                "auc_t_horizons_days",
+                "coef_age",
+                "p_value_age",
                 "note",
             ]
         ].copy()
@@ -1104,7 +1121,7 @@ def build_univariate_overview(univariate_results: dict[str, pd.DataFrame]) -> pd
 
     sort_cols = [
         col
-        for col in ["platinum_p_value", "death_p_value", "either_p_value"]
+        for col in ["platinum_p_value", "death_p_value"]
         if col in overview.columns
     ]
     if sort_cols:
@@ -1117,7 +1134,7 @@ def print_top_hits(df: pd.DataFrame, *, endpoint: str) -> None:
         df["p_value"].notna(),
         ["feature", "hazard_ratio_per_sd", "p_value", "q_value"],
     ].head(10)
-    print(f"\nTop univariate associations on train/val for {endpoint}:")
+    print(f"\nTop univariate associations for {endpoint}:")
     if hits.empty:
         print("  No estimable feature associations.")
         return
@@ -1138,38 +1155,32 @@ def main(args: argparse.Namespace) -> None:
     feature_df = build_feature_matrix(df)
 
     merged = feature_df.join(outcome_df, how="inner")
-    if args.adjust_age:
-        merged = merged.loc[merged[AGE_COL].notna()].copy()
+    merged = merged.loc[merged[AGE_COL].notna()].copy()
     if merged.empty:
         raise ValueError("No patients have both engineered features and valid outcomes.")
+
+    raw_feature_cols = feature_df.columns.tolist()
+    selected_feature_cols, feature_meta = select_feature_columns(
+        merged,
+        raw_feature_cols,
+        min_patient_coverage=args.min_patient_coverage,
+    )
+
+    merged = merged[
+        selected_feature_cols + [col for col in merged.columns if col in OUTCOME_COLUMNS]
+    ].copy()
 
     train_val, test, split_assignments, split_stratification = split_train_test(
         merged,
         test_frac=args.test_frac,
         seed=args.seed,
     )
-    merged = merged.copy()
     merged["split"] = split_assignments
 
-    raw_feature_cols = feature_df.columns.tolist()
-    selected_feature_cols, feature_meta = select_feature_columns(
-        train_val,
-        test,
-        raw_feature_cols,
-        min_patient_coverage=args.min_patient_coverage,
-    )
-
-    keep_cols = selected_feature_cols + [col for col in merged.columns if col in OUTCOME_COLUMNS]
-    train_val = train_val[
-        selected_feature_cols + [col for col in train_val.columns if col in OUTCOME_COLUMNS]
-    ].copy()
-    test = test[selected_feature_cols + [col for col in test.columns if col in OUTCOME_COLUMNS]].copy()
-    merged = merged[keep_cols].copy()
-    merged["split"] = split_assignments
-
-    print(f"Train/val: {len(train_val)} patients")
-    print(f"Test:      {len(test)} patients")
-    print(f"Selected summary-lab features from train/val only: {len(selected_feature_cols)}")
+    print(f"Full cohort: {len(merged)} patients")
+    print(f"Train/val (Arm 2): {len(train_val)} patients")
+    print(f"Test (Arm 2):      {len(test)} patients")
+    print(f"Selected summary-lab features: {len(selected_feature_cols)}")
     print(f"Split stratification: {split_stratification}")
 
     feature_df.to_csv(RESULTS / "cox_agg_feature_matrix_raw.csv")
@@ -1192,15 +1203,14 @@ def main(args: argparse.Namespace) -> None:
 
         if args.analysis in {"univariate", "both"}:
             univariate_df = run_univariate_associations(
-                train_val,
+                merged,
                 feature_cols=selected_feature_cols,
                 endpoint=endpoint,
-                adjust_age=args.adjust_age,
                 min_events_per_feature=args.min_events_per_feature,
                 fallback_penalizer=args.univariate_penalizer,
             )
             univariate_results[endpoint] = univariate_df
-            univariate_df.to_csv(RESULTS / f"cox_agg_univariate_trainval_{endpoint}.csv", index=False)
+            univariate_df.to_csv(RESULTS / f"cox_agg_univariate_{endpoint}.csv", index=False)
             print_top_hits(univariate_df, endpoint=endpoint)
 
         if args.analysis in {"multivariable", "both"}:
@@ -1208,9 +1218,7 @@ def main(args: argparse.Namespace) -> None:
                 train_val,
                 feature_cols=selected_feature_cols,
                 endpoint=endpoint,
-                adjust_age=args.adjust_age,
                 penalizers=args.cv_penalizers,
-                l1_ratios=args.cv_l1_ratios,
                 n_folds=args.n_folds,
                 seed=args.seed,
             )
@@ -1222,13 +1230,12 @@ def main(args: argparse.Namespace) -> None:
                     "description": ENDPOINTS[endpoint]["description"],
                     "selected_penalizer": best_row["penalizer"],
                     "selected_l1_ratio": best_row["l1_ratio"],
-                    "cv_mean": best_row["cv_mean"],
-                    "cv_std": best_row["cv_std"],
-                    "mean_auc_t_cv_mean": best_row["mean_auc_t_cv_mean"],
-                    "mean_auc_t_cv_std": best_row["mean_auc_t_cv_std"],
+                    "cv_mean_c_index": best_row["cv_mean"],
+                    "cv_std_c_index": best_row["cv_std"],
+                    "cv_mean_integrated_auc_t": best_row["integrated_auc_t_cv_mean"],
+                    "cv_std_integrated_auc_t": best_row["integrated_auc_t_cv_std"],
                     "n_valid_folds": best_row["n_valid_folds"],
                     "n_valid_auc_t_folds": best_row["n_valid_auc_t_folds"],
-                    "auc_t_horizons_days_val": best_row["auc_t_horizons_days_val"],
                     "cv_stratification": best_row["cv_stratification"],
                 }
             )
@@ -1238,9 +1245,7 @@ def main(args: argparse.Namespace) -> None:
                 test,
                 feature_cols=selected_feature_cols,
                 endpoint=endpoint,
-                adjust_age=args.adjust_age,
                 penalizer=float(best_row["penalizer"]),
-                l1_ratio=float(best_row["l1_ratio"]),
                 split_stratification=split_stratification,
                 cv_stratification=str(best_row["cv_stratification"]),
             )
@@ -1248,27 +1253,26 @@ def main(args: argparse.Namespace) -> None:
             summary_df.to_csv(RESULTS / f"cox_agg_multivariable_{endpoint}.csv", index=False)
             pred_df.to_csv(RESULTS / f"cox_agg_test_predictions_{endpoint}.csv", index=False)
 
-            top = summary_df.loc[
-                ~summary_df["is_age_covariate"],
-                ["feature", "coef", "exp(coef)", "p"],
-            ].head(10)
-            print("\nChosen hyperparameters:")
+            top_cols = [c for c in ["feature", "coef", "exp(coef)"] if c in summary_df.columns]
+            top = summary_df.loc[~summary_df["is_age_covariate"], top_cols].head(10)
+            print("\nChosen hyperparameters (L1 lasso, age unpenalized):")
             print(
-                f"  penalizer={best_row['penalizer']}  l1_ratio={best_row['l1_ratio']}  cv_mean={best_row['cv_mean']:.4f}"
+                f"  penalizer={best_row['penalizer']}  cv_mean C-index={best_row['cv_mean']:.4f}"
             )
-            print(f"  CV mean AUC(t)={best_row['mean_auc_t_cv_mean']:.4f}")
+            print(f"  CV integrated AUC(t)={best_row['integrated_auc_t_cv_mean']:.4f}")
             print(
-                f"  train/val C-index={metrics_row['train_val_c_index']:.4f}  mean AUC(t)={metrics_row['train_val_mean_auc_t']:.4f}"
+                f"  train/val C-index={metrics_row['train_val_c_index']:.4f}  "
+                f"integrated AUC(t)={metrics_row['train_val_integrated_auc_t']:.4f}"
             )
             print(f"  held-out test C-index={metrics_row['test_c_index']:.4f}")
-            print(f"  held-out test mean AUC(t)={metrics_row['test_mean_auc_t']:.4f}")
+            print(f"  held-out test integrated AUC(t)={metrics_row['test_integrated_auc_t']:.4f}")
             print("Top multivariable coefficients:")
             print(top.to_string(index=False))
 
     if univariate_results:
         overview = build_univariate_overview(univariate_results)
-        overview.to_csv(RESULTS / "cox_agg_univariate_trainval_overview.csv", index=False)
-        print("\nSaved: results/cox_agg_univariate_trainval_overview.csv")
+        overview.to_csv(RESULTS / "cox_agg_univariate_overview.csv", index=False)
+        print("\nSaved: results/cox_agg_univariate_overview.csv")
 
     if cv_metric_rows:
         pd.concat(cv_metric_rows, ignore_index=True).to_csv(RESULTS / "cox_agg_cv_metrics.csv", index=False)
@@ -1295,8 +1299,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--endpoints",
         nargs="+",
-        default=["platinum", "death"],
-        help="Endpoints to analyze. 'joint' is accepted as an alias for 'either'.",
+        default=["platinum", "death", "nepc"],
+        choices=list(ENDPOINTS),
+        help="Endpoints to analyze.",
     )
     parser.add_argument(
         "--analysis",
@@ -1347,26 +1352,6 @@ if __name__ == "__main__":
         nargs="+",
         type=float,
         default=DEFAULT_CV_PENALIZERS,
-        help="Penalizer values searched during train/validation cross-validation.",
+        help="Lasso penalizer values searched during 5-fold CV on the 80%% train/val block.",
     )
-    parser.add_argument(
-        "--cv-l1-ratios",
-        nargs="+",
-        type=float,
-        default=DEFAULT_CV_L1_RATIOS,
-        help="Elastic-net mixing values searched during train/validation cross-validation.",
-    )
-    parser.add_argument(
-        "--adjust-age",
-        dest="adjust_age",
-        action="store_true",
-        help="Adjust association and multivariable models for age at treatment start.",
-    )
-    parser.add_argument(
-        "--no-adjust-age",
-        dest="adjust_age",
-        action="store_false",
-        help="Run models without the age covariate.",
-    )
-    parser.set_defaults(adjust_age=True)
     main(parser.parse_args())

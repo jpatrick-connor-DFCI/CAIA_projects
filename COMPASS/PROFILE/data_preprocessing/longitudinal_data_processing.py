@@ -127,11 +127,62 @@ def compute_first_prostate_diagnosis(icds: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _earliest_supporting_quote_date(raw: object) -> pd.Timestamp | pd.NaT:
+    if not isinstance(raw, str) or not raw.strip():
+        return pd.NaT
+    dates = [pd.to_datetime(token.strip(), errors="coerce") for token in raw.split("|")]
+    dates = [d for d in dates if pd.notna(d)]
+    if not dates:
+        return pd.NaT
+    return min(dates)
+
+
+def build_nepc_labels(nepc_df: pd.DataFrame) -> pd.DataFrame:
+    """Reduce LLM-generated NEPC labels to per-patient DFCI_MRN / NEPC / NEPC_DATE."""
+    df = nepc_df.copy()
+    if "DFCI_MRN" not in df.columns:
+        raise ValueError("NEPC labels file must contain DFCI_MRN.")
+    flag_col = "neuroendocrine_small_cell_prostate_cancer"
+    if flag_col not in df.columns:
+        raise ValueError(f"NEPC labels file must contain '{flag_col}'.")
+
+    df["NEPC_FLAG"] = (
+        df[flag_col]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .isin({"true", "1", "yes", "t"})
+    )
+
+    transformation_date = (
+        pd.to_datetime(df.get("transformation_date"), errors="coerce")
+        if "transformation_date" in df.columns
+        else pd.Series(pd.NaT, index=df.index)
+    )
+    quote_date = (
+        df.get("supporting_quote_dates", pd.Series(index=df.index, dtype=object))
+        .apply(_earliest_supporting_quote_date)
+    )
+    df["NEPC_DATE"] = transformation_date.fillna(quote_date)
+
+    # Event requires both the flag and a usable date; else treat as censored.
+    df["NEPC"] = (df["NEPC_FLAG"] & df["NEPC_DATE"].notna()).astype(int)
+    df.loc[df["NEPC"].eq(0), "NEPC_DATE"] = pd.NaT
+
+    per_patient = (
+        df.sort_values(["DFCI_MRN", "NEPC", "NEPC_DATE"], ascending=[True, False, True])
+        .groupby("DFCI_MRN", as_index=False)
+        .first()[["DFCI_MRN", "NEPC", "NEPC_DATE"]]
+    )
+    return per_patient
+
+
 def build_longitudinal_prediction_data(
     consolidated_df: pd.DataFrame,
     first_prostate_diagnosis: pd.DataFrame,
     death_df: pd.DataFrame,
     platinum_df: pd.DataFrame,
+    nepc_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     prediction_df = consolidated_df[
         ["DFCI_MRN", "DATE", "collapsed_measurement", "numeric_result_standardized"]
@@ -145,7 +196,16 @@ def build_longitudinal_prediction_data(
             on="DFCI_MRN",
             how="left",
         )
-        .rename(
+    )
+    if nepc_df is not None:
+        pred_df = pred_df.merge(nepc_df, on="DFCI_MRN", how="left")
+        pred_df["NEPC"] = pd.to_numeric(pred_df["NEPC"], errors="coerce").fillna(0).astype(int)
+    else:
+        pred_df["NEPC"] = 0
+        pred_df["NEPC_DATE"] = pd.NaT
+
+    pred_df = (
+        pred_df.rename(
             columns={
                 "collapsed_measurement": "LAB_NAME",
                 "numeric_result_standardized": "LAB_VALUE",
@@ -165,6 +225,7 @@ def build_longitudinal_prediction_data(
         "FIRST_TREATMENT_DATE",
         "LAST_CONTACT_DATE",
         "PLATINUM_DATE",
+        "NEPC_DATE",
     ]
     for col in date_cols:
         pred_df[col] = pd.to_datetime(pred_df[col], errors="coerce").dt.floor("D")
@@ -214,6 +275,13 @@ def build_longitudinal_prediction_data(
         pred_df["t_last_contact"],
     ).astype(float)
 
+    nepc_days = (pred_df["NEPC_DATE"] - pred_df["FIRST_RECORD_DATE"]).dt.days
+    pred_df["t_nepc"] = np.where(
+        pred_df["NEPC"].eq(1),
+        nepc_days,
+        pred_df["t_last_contact"],
+    ).astype(float)
+
     ordered_cols = [
         "DFCI_MRN",
         "AGE_AT_TREATMENTSTART",
@@ -227,11 +295,14 @@ def build_longitudinal_prediction_data(
         "PLATINUM_MEDICATION",
         "PLATINUM_DATE",
         "PLATINUM",
+        "NEPC_DATE",
+        "NEPC",
         "LAB_DATE",
         "t_lab",
         "t_diagnosis",
         "t_first_treatment",
         "t_platinum",
+        "t_nepc",
         "t_last_contact",
         "t_death",
         "LAB_NAME",
@@ -268,6 +339,12 @@ def parse_args() -> argparse.Namespace:
         "--death-csv",
         type=Path,
         default=SURV_PATH / "death_met_surv_df.csv",
+    )
+    parser.add_argument(
+        "--nepc-tsv",
+        type=Path,
+        default=NEPC_PROJ_PATH / "LLM_v2" / "LLM_v2_generated_labels.tsv",
+        help="LLM-generated NEPC labels (TSV) providing the NEPC binary and transformation date.",
     )
     parser.add_argument(
         "--mapping-csv",
@@ -337,11 +414,24 @@ def main() -> None:
     ].copy()
 
     first_prostate_diagnosis = compute_first_prostate_diagnosis(icds)
+
+    nepc_labels = None
+    if args.nepc_tsv is not None and Path(args.nepc_tsv).exists():
+        nepc_raw = pd.read_csv(args.nepc_tsv, sep="\t")
+        nepc_labels = build_nepc_labels(nepc_raw)
+        print(
+            f"Loaded NEPC labels for {len(nepc_labels)} patients "
+            f"({int(nepc_labels['NEPC'].sum())} NEPC events) from {args.nepc_tsv}"
+        )
+    else:
+        print(f"NEPC labels file not found at {args.nepc_tsv}; NEPC endpoint will be all-censored.")
+
     longitudinal_prediction_df = build_longitudinal_prediction_data(
         consolidated_df,
         first_prostate_diagnosis,
         death_df,
         platinum_df,
+        nepc_df=nepc_labels,
     )
     longitudinal_prediction_df.to_csv(args.output_csv, index=False)
 
