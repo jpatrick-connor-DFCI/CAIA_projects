@@ -339,6 +339,33 @@ def _patient_lab_std(values: pd.Series) -> float:
     return float(np.std(values.to_numpy(dtype=float), ddof=0))
 
 
+def _compute_patient_lab_slopes(pre_treatment: pd.DataFrame) -> pd.DataFrame:
+    """Slope of LAB_VALUE vs t_lab (per day) per (DFCI_MRN, LAB_NAME).
+
+    Returns NaN when fewer than 2 observations exist or t_lab has no variation.
+    """
+    def _slope(group: pd.DataFrame) -> float:
+        if len(group) < 2:
+            return np.nan
+        x = group["t_lab"].to_numpy(dtype=float)
+        y = group["LAB_VALUE"].to_numpy(dtype=float)
+        if np.std(x) == 0:
+            return np.nan
+        cov = np.cov(x, y, ddof=0)
+        var_x = cov[0, 0]
+        if var_x == 0:
+            return np.nan
+        return float(cov[0, 1] / var_x)
+
+    slopes = (
+        pre_treatment.groupby(["DFCI_MRN", "LAB_NAME"])[["t_lab", "LAB_VALUE"]]
+        .apply(_slope)
+        .rename("slope")
+        .reset_index()
+    )
+    return slopes
+
+
 def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     working = df.copy()
     required_cols = {"DFCI_MRN", "LAB_NAME", "LAB_VALUE"}
@@ -397,6 +424,8 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
     )
+    slope_long = _compute_patient_lab_slopes(pre_treatment)
+    feature_long = feature_long.merge(slope_long, on=["DFCI_MRN", "LAB_NAME"], how="left")
     feature_df = (
         feature_long.set_index(["DFCI_MRN", "LAB_NAME"])
         .stack()
