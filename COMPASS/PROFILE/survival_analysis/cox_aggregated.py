@@ -7,10 +7,9 @@ Arm 1 (univariate, full dataset):
   - For each feature, fit Cox on [AGE + feature] using all patients.
   - Extract coefficient, HR per SD, 95% CI, and p-value.
 
-Arm 2 (multivariable elastic-net Cox, lifelines CoxPHFitter):
+Arm 2 (multivariable elastic-net Cox):
   - 80% train/val + 20% held-out test.
-  - 5-fold CV over (penalizer x l1_ratio) grid on the 80%; AGE is unpenalized via
-    a per-covariate penalizer vector.
+  - 5-fold CV over (penalizer x l1_ratio) grid on the 80%; AGE is unpenalized.
   - Refit on full 80% with chosen (penalizer, l1_ratio) and evaluate on 20% test:
     C-index and integrated AUC(t) over the 5-95 percentile of event times.
 
@@ -920,7 +919,6 @@ def tune_multivariable_model(
                     duration_col=duration_col,
                     event_col=event_col,
                 )
-                row["n_covariates"] = len(covariate_cols)
                 model, _, note = fit_cox_with_fallback(
                     train_mdf,
                     duration_col=duration_col,
@@ -931,12 +929,8 @@ def tune_multivariable_model(
                     covariate_cols=covariate_cols,
                 )
                 row["note"] = note
-                if model is None:
-                    warnings.warn(
-                        f"Cox elastic-net CV fit failed for endpoint='{endpoint}' fold={fold} "
-                        f"penalizer={penalizer} l1_ratio={l1_ratio}: {note}"
-                    )
-                else:
+                row["n_covariates"] = len(covariate_cols)
+                if model is not None:
                     c_index, val_pred = score_cox_model(
                         model,
                         val_mdf,
@@ -956,10 +950,6 @@ def tune_multivariable_model(
                         int(auc_df_val["auc_t"].notna().sum()) if not auc_df_val.empty else 0
                     )
             except Exception as exc:  # pragma: no cover - defensive for unstable folds
-                warnings.warn(
-                    f"CV fold error for endpoint='{endpoint}' fold={fold} "
-                    f"penalizer={penalizer} l1_ratio={l1_ratio}: {exc}"
-                )
                 row["note"] = f"fold_failed: {exc}"
 
             fold_rows.append(row)
@@ -1003,6 +993,7 @@ def fit_final_multivariable_model(
     endpoint: str,
     penalizer: float,
     l1_ratio: float,
+    penalizer_grid: list[float],
     split_stratification: str,
     cv_stratification: str,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
@@ -1017,42 +1008,38 @@ def fit_final_multivariable_model(
         duration_col=duration_col,
         event_col=event_col,
     )
+    fallback_penalizers = [float(penalizer)] + sorted(
+        {float(p) for p in penalizer_grid if float(p) > float(penalizer)}
+    )
     model, used_penalizer, note = fit_cox_with_fallback(
         train_mdf,
         duration_col=duration_col,
         event_col=event_col,
-        penalizers=[float(penalizer)],
+        penalizers=fallback_penalizers,
         l1_ratio=float(l1_ratio),
         unpenalized_cols=["age"],
         covariate_cols=covariate_cols,
     )
     if model is None:
-        warnings.warn(
-            f"Cox elastic-net final fit did not converge for endpoint='{endpoint}' "
-            f"penalizer={penalizer} l1_ratio={l1_ratio}: {note}. "
-            "Reporting zero-coefficient fallback."
+        raise RuntimeError(f"Final multivariable model failed for endpoint '{endpoint}': {note}")
+    if used_penalizer != penalizer:
+        print(
+            f"  [fallback] CV-chosen penalizer={penalizer:g} failed to converge on full 80% "
+            f"for '{endpoint}'; used penalizer={used_penalizer:g} instead."
         )
 
-    if model is not None:
-        train_c, train_pred = score_cox_model(
-            model,
-            train_mdf,
-            duration_col=duration_col,
-            event_col=event_col,
-        )
-        test_c, test_pred = score_cox_model(
-            model,
-            test_mdf,
-            duration_col=duration_col,
-            event_col=event_col,
-        )
-    else:
-        train_pred = np.zeros(len(train_mdf), dtype=float)
-        test_pred = np.zeros(len(test_mdf), dtype=float)
-        train_c = float("nan")
-        test_c = float("nan")
-        used_penalizer = float(penalizer)
-
+    train_c, train_pred = score_cox_model(
+        model,
+        train_mdf,
+        duration_col=duration_col,
+        event_col=event_col,
+    )
+    test_c, test_pred = score_cox_model(
+        model,
+        test_mdf,
+        duration_col=duration_col,
+        event_col=event_col,
+    )
     train_iauc, train_auc_df = compute_integrated_auc_t(
         train_mdf,
         train_pred,
@@ -1088,18 +1075,10 @@ def fit_final_multivariable_model(
         "test_n_valid_auc_horizons": int(test_auc_df["auc_t"].notna().sum()) if not test_auc_df.empty else 0,
         "split_stratification": split_stratification,
         "cv_stratification": cv_stratification,
-        "backend": "lifelines.CoxPHFitter",
         "note": note,
     }
 
-    if model is not None:
-        summary = model.summary.reset_index().rename(columns={"covariate": "feature"})
-        summary = summary[["feature", "coef", "exp(coef)"]]
-    else:
-        summary = pd.DataFrame(
-            {"feature": covariate_cols, "coef": 0.0, "exp(coef)": 1.0}
-        )
-
+    summary = model.summary.reset_index().rename(columns={"covariate": "feature"})
     parsed = summary["feature"].map(parse_feature_name)
     summary["endpoint"] = endpoint
     summary["lab_name"] = parsed.str[0]
@@ -1310,6 +1289,7 @@ def main(args: argparse.Namespace) -> None:
                 endpoint=endpoint,
                 penalizer=float(best_row["penalizer"]),
                 l1_ratio=float(best_row["l1_ratio"]),
+                penalizer_grid=args.cv_penalizers,
                 split_stratification=split_stratification,
                 cv_stratification=str(best_row["cv_stratification"]),
             )
