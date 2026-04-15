@@ -708,7 +708,8 @@ def compute_integrated_auc_t(
     span = x[-1] - x[0]
     if not np.isfinite(span) or span <= 0:
         return np.nan, auc_df
-    integrated = float(np.trapz(y, x) / span)
+    trapezoid = getattr(np, "trapezoid", np.trapz)
+    integrated = float(trapezoid(y, x) / span)
     return integrated, auc_df
 
 
@@ -961,6 +962,7 @@ def fit_final_multivariable_model(
     feature_cols: list[str],
     endpoint: str,
     penalizer: float,
+    penalizer_grid: list[float],
     split_stratification: str,
     cv_stratification: str,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
@@ -975,17 +977,25 @@ def fit_final_multivariable_model(
         duration_col=duration_col,
         event_col=event_col,
     )
+    fallback_penalizers = [penalizer] + sorted(
+        {float(p) for p in penalizer_grid if float(p) > float(penalizer)}
+    )
     model, used_penalizer, note = fit_cox_with_fallback(
         train_mdf,
         duration_col=duration_col,
         event_col=event_col,
-        penalizers=[penalizer],
+        penalizers=fallback_penalizers,
         l1_ratio=l1_ratio,
         unpenalized_cols=["age"],
         covariate_cols=covariate_cols,
     )
     if model is None:
         raise RuntimeError(f"Final multivariable model failed for endpoint '{endpoint}': {note}")
+    if used_penalizer != penalizer:
+        print(
+            f"  [fallback] CV-chosen penalizer={penalizer:g} failed to converge on full 80% "
+            f"for '{endpoint}'; used penalizer={used_penalizer:g} instead."
+        )
 
     train_c, train_pred = score_cox_model(
         model,
@@ -1246,6 +1256,7 @@ def main(args: argparse.Namespace) -> None:
                 feature_cols=selected_feature_cols,
                 endpoint=endpoint,
                 penalizer=float(best_row["penalizer"]),
+                penalizer_grid=args.cv_penalizers,
                 split_stratification=split_stratification,
                 cv_stratification=str(best_row["cv_stratification"]),
             )
