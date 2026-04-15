@@ -7,11 +7,11 @@ Arm 1 (univariate, full dataset):
   - For each feature, fit Cox on [AGE + feature] using all patients.
   - Extract coefficient, HR per SD, 95% CI, and p-value.
 
-Arm 2 (multivariable elastic-net Cox, sksurv CoxnetSurvivalAnalysis):
+Arm 2 (multivariable elastic-net Cox, lifelines CoxPHFitter):
   - 80% train/val + 20% held-out test.
-  - 5-fold CV over (alpha x l1_ratio) grid on the 80%; AGE is unpenalized via
-    sksurv's penalty_factor.
-  - Refit on full 80% with chosen (alpha, l1_ratio) and evaluate on 20% test:
+  - 5-fold CV over (penalizer x l1_ratio) grid on the 80%; AGE is unpenalized via
+    a per-covariate penalizer vector.
+  - Refit on full 80% with chosen (penalizer, l1_ratio) and evaluate on 20% test:
     C-index and integrated AUC(t) over the 5-95 percentile of event times.
 
 Endpoints: platinum, death.
@@ -63,19 +63,6 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
     concordance_index = None
     LIFELINES_IMPORT_ERROR = exc
 
-try:
-    from sksurv.linear_model import CoxnetSurvivalAnalysis
-    from sksurv.metrics import concordance_index_censored
-    from sksurv.util import Surv
-
-    SKSURV_IMPORT_ERROR: ModuleNotFoundError | None = None
-except ModuleNotFoundError as exc:  # pragma: no cover - depends on local environment
-    CoxnetSurvivalAnalysis = None
-    concordance_index_censored = None
-    Surv = None
-    SKSURV_IMPORT_ERROR = exc
-
-
 BASE = Path(__file__).resolve().parent
 DATA_PATH = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/")
 RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis")
@@ -91,7 +78,6 @@ DEFAULT_CV_PENALIZERS = [0.01, 0.05, 0.10, 0.20, 0.50, 1.00]
 DEFAULT_CV_L1_RATIOS = [0.1, 0.3, 0.5, 0.7, 0.9]
 DEFAULT_AUC_PERCENTILE_RANGE = (0.05, 0.95)
 DEFAULT_AUC_N_POINTS = 50
-COXNET_MAX_ITER = 10_000
 PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
 
 ENDPOINTS = {
@@ -141,25 +127,6 @@ def require_lifelines() -> None:
         raise ModuleNotFoundError(
             "lifelines is required to run the aggregated Cox association pipeline."
         ) from LIFELINES_IMPORT_ERROR
-
-
-def require_sksurv() -> None:
-    if CoxnetSurvivalAnalysis is None or Surv is None or concordance_index_censored is None:
-        raise ModuleNotFoundError(
-            "scikit-survival (sksurv) is required for the multivariable elastic-net Cox fits."
-        ) from SKSURV_IMPORT_ERROR
-
-
-def _to_surv_y(durations: np.ndarray, events: np.ndarray):
-    return Surv.from_arrays(
-        event=np.asarray(events).astype(bool),
-        time=np.asarray(durations).astype(float),
-    )
-
-
-def _penalty_factor(covariate_cols: list[str]) -> np.ndarray:
-    """Return per-feature penalty multipliers (0.0 for unpenalized age, 1.0 elsewhere)."""
-    return np.array([0.0 if c == "age" else 1.0 for c in covariate_cols], dtype=float)
 
 
 def parse_feature_name(feature_name: str) -> tuple[str, str]:
@@ -914,12 +881,8 @@ def tune_multivariable_model(
     n_folds: int,
     seed: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    """Arm 2: 5-fold CV over (alpha x l1_ratio) grid via sksurv CoxnetSurvivalAnalysis.
-
-    For each fold and l1_ratio, fits the full alpha path in one call, then scores
-    every alpha on the held-out fold. AGE is unpenalized via penalty_factor=0.
-    """
-    require_sksurv()
+    """Arm 2: 5-fold CV over (penalizer x l1_ratio) grid (elastic-net), AGE unpenalized."""
+    require_lifelines()
     duration_col = ENDPOINTS[endpoint]["duration_col"]
     event_col = ENDPOINTS[endpoint]["event_col"]
 
@@ -928,25 +891,25 @@ def tune_multivariable_model(
 
     split_args = (np.arange(len(train_val)), strat_labels) if strat_labels is not None else (np.arange(len(train_val)),)
 
-    alphas_desc = sorted({float(p) for p in penalizers if float(p) > 0}, reverse=True)
-    if not alphas_desc:
-        raise ValueError("cv_penalizers must contain at least one positive value.")
-
-    for l1_ratio in l1_ratios:
+    for penalizer, l1_ratio in product(penalizers, l1_ratios):
         for fold, (tr_idx, val_idx) in enumerate(splitter.split(*split_args), 1):
             fold_train = train_val.iloc[tr_idx]
             fold_val = train_val.iloc[val_idx]
-
-            base_row = {
+            row = {
                 "endpoint": endpoint,
                 "fold": fold,
+                "penalizer": float(penalizer),
                 "l1_ratio": float(l1_ratio),
                 "n_train": len(fold_train),
                 "n_val": len(fold_val),
                 "n_events_train": int(fold_train[event_col].sum()),
                 "n_events_val": int(fold_val[event_col].sum()),
                 "cv_stratification": cv_stratification,
+                "c_index_val": np.nan,
+                "integrated_auc_t_val": np.nan,
+                "n_valid_auc_horizons_val": 0,
                 "n_covariates": np.nan,
+                "note": "",
             }
 
             try:
@@ -957,74 +920,33 @@ def tune_multivariable_model(
                     duration_col=duration_col,
                     event_col=event_col,
                 )
-            except Exception as exc:  # pragma: no cover
-                for alpha in alphas_desc:
-                    fold_rows.append({
-                        **base_row,
-                        "penalizer": alpha,
-                        "c_index_val": np.nan,
-                        "integrated_auc_t_val": np.nan,
-                        "n_valid_auc_horizons_val": 0,
-                        "note": f"matrix_failed: {exc}",
-                    })
-                continue
-
-            base_row["n_covariates"] = len(covariate_cols)
-            X_tr = train_mdf[covariate_cols].to_numpy(dtype=float)
-            X_val = val_mdf[covariate_cols].to_numpy(dtype=float)
-            y_tr = _to_surv_y(
-                train_mdf[duration_col].to_numpy(),
-                train_mdf[event_col].to_numpy(),
-            )
-            y_val_event = val_mdf[event_col].to_numpy().astype(bool)
-            y_val_time = val_mdf[duration_col].to_numpy().astype(float)
-            pf = _penalty_factor(covariate_cols)
-
-            fitted_alphas: set[float] = set()
-            fit_note = ""
-            cox: CoxnetSurvivalAnalysis | None = None
-            try:
-                cox = CoxnetSurvivalAnalysis(
+                row["n_covariates"] = len(covariate_cols)
+                model, _, note = fit_cox_with_fallback(
+                    train_mdf,
+                    duration_col=duration_col,
+                    event_col=event_col,
+                    penalizers=[float(penalizer)],
                     l1_ratio=float(l1_ratio),
-                    alphas=alphas_desc,
-                    penalty_factor=pf,
-                    fit_baseline_model=False,
-                    max_iter=COXNET_MAX_ITER,
+                    unpenalized_cols=["age"],
+                    covariate_cols=covariate_cols,
                 )
-                cox.fit(X_tr, y_tr)
-                fitted_alphas = {float(a) for a in cox.alphas_}
-                fit_note = "fit_ok"
-            except (ArithmeticError, ValueError, np.linalg.LinAlgError) as exc:
-                warnings.warn(
-                    f"Coxnet path fit failed for endpoint='{endpoint}' fold={fold} "
-                    f"l1_ratio={l1_ratio}: {exc}"
-                )
-                fit_note = f"path_failed: {exc}"
-                if cox is not None:
-                    fitted_alphas = {float(a) for a in getattr(cox, "alphas_", [])}
-
-            for alpha in alphas_desc:
-                row = {
-                    **base_row,
-                    "penalizer": alpha,
-                    "c_index_val": np.nan,
-                    "integrated_auc_t_val": np.nan,
-                    "n_valid_auc_horizons_val": 0,
-                    "note": fit_note,
-                }
-                if cox is None or alpha not in fitted_alphas:
-                    if cox is not None and alpha not in fitted_alphas:
-                        row["note"] = "alpha_not_in_path"
-                    fold_rows.append(row)
-                    continue
-                try:
-                    risk = np.asarray(cox.predict(X_val, alpha=alpha), dtype=float).reshape(-1)
-                    row["c_index_val"] = float(
-                        concordance_index_censored(y_val_event, y_val_time, risk)[0]
+                row["note"] = note
+                if model is None:
+                    warnings.warn(
+                        f"Cox elastic-net CV fit failed for endpoint='{endpoint}' fold={fold} "
+                        f"penalizer={penalizer} l1_ratio={l1_ratio}: {note}"
                     )
+                else:
+                    c_index, val_pred = score_cox_model(
+                        model,
+                        val_mdf,
+                        duration_col=duration_col,
+                        event_col=event_col,
+                    )
+                    row["c_index_val"] = c_index
                     integrated_auc_val, auc_df_val = compute_integrated_auc_t(
                         val_mdf,
-                        risk,
+                        val_pred,
                         duration_col=duration_col,
                         event_col=event_col,
                         reference_df=train_mdf,
@@ -1033,9 +955,14 @@ def tune_multivariable_model(
                     row["n_valid_auc_horizons_val"] = (
                         int(auc_df_val["auc_t"].notna().sum()) if not auc_df_val.empty else 0
                     )
-                except Exception as exc:  # pragma: no cover
-                    row["note"] = f"score_failed: {exc}"
-                fold_rows.append(row)
+            except Exception as exc:  # pragma: no cover - defensive for unstable folds
+                warnings.warn(
+                    f"CV fold error for endpoint='{endpoint}' fold={fold} "
+                    f"penalizer={penalizer} l1_ratio={l1_ratio}: {exc}"
+                )
+                row["note"] = f"fold_failed: {exc}"
+
+            fold_rows.append(row)
 
     fold_df = pd.DataFrame(fold_rows)
     cv_df = (
@@ -1079,7 +1006,7 @@ def fit_final_multivariable_model(
     split_stratification: str,
     cv_stratification: str,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
-    require_sksurv()
+    require_lifelines()
     duration_col = ENDPOINTS[endpoint]["duration_col"]
     event_col = ENDPOINTS[endpoint]["event_col"]
 
@@ -1090,53 +1017,41 @@ def fit_final_multivariable_model(
         duration_col=duration_col,
         event_col=event_col,
     )
-    X_tr = train_mdf[covariate_cols].to_numpy(dtype=float)
-    X_te = test_mdf[covariate_cols].to_numpy(dtype=float)
-    y_tr = _to_surv_y(
-        train_mdf[duration_col].to_numpy(),
-        train_mdf[event_col].to_numpy(),
-    )
-    y_tr_event = train_mdf[event_col].to_numpy().astype(bool)
-    y_tr_time = train_mdf[duration_col].to_numpy().astype(float)
-    y_te_event = test_mdf[event_col].to_numpy().astype(bool)
-    y_te_time = test_mdf[duration_col].to_numpy().astype(float)
-    pf = _penalty_factor(covariate_cols)
-
-    model = CoxnetSurvivalAnalysis(
+    model, used_penalizer, note = fit_cox_with_fallback(
+        train_mdf,
+        duration_col=duration_col,
+        event_col=event_col,
+        penalizers=[float(penalizer)],
         l1_ratio=float(l1_ratio),
-        alphas=[float(penalizer)],
-        penalty_factor=pf,
-        fit_baseline_model=False,
-        max_iter=COXNET_MAX_ITER,
+        unpenalized_cols=["age"],
+        covariate_cols=covariate_cols,
     )
-    try:
-        model.fit(X_tr, y_tr)
-        note = "fit_ok"
-    except (ArithmeticError, ValueError, np.linalg.LinAlgError) as exc:
+    if model is None:
         warnings.warn(
-            f"Coxnet final fit did not converge for endpoint='{endpoint}' "
-            f"alpha={penalizer} l1_ratio={l1_ratio}: {exc}. "
-            "Proceeding with the current (possibly partial) estimate."
+            f"Cox elastic-net final fit did not converge for endpoint='{endpoint}' "
+            f"penalizer={penalizer} l1_ratio={l1_ratio}: {note}. "
+            "Reporting zero-coefficient fallback."
         )
-        note = f"fit_not_converged: {exc}"
-    used_alpha = float(penalizer)
 
-    if hasattr(model, "coef_"):
-        train_pred = np.asarray(model.predict(X_tr), dtype=float).reshape(-1)
-        test_pred = np.asarray(model.predict(X_te), dtype=float).reshape(-1)
-        try:
-            train_c = float(concordance_index_censored(y_tr_event, y_tr_time, train_pred)[0])
-        except (ValueError, ZeroDivisionError):
-            train_c = float("nan")
-        try:
-            test_c = float(concordance_index_censored(y_te_event, y_te_time, test_pred)[0])
-        except (ValueError, ZeroDivisionError):
-            test_c = float("nan")
+    if model is not None:
+        train_c, train_pred = score_cox_model(
+            model,
+            train_mdf,
+            duration_col=duration_col,
+            event_col=event_col,
+        )
+        test_c, test_pred = score_cox_model(
+            model,
+            test_mdf,
+            duration_col=duration_col,
+            event_col=event_col,
+        )
     else:
-        train_pred = np.zeros(len(X_tr), dtype=float)
-        test_pred = np.zeros(len(X_te), dtype=float)
+        train_pred = np.zeros(len(train_mdf), dtype=float)
+        test_pred = np.zeros(len(test_mdf), dtype=float)
         train_c = float("nan")
         test_c = float("nan")
+        used_penalizer = float(penalizer)
 
     train_iauc, train_auc_df = compute_integrated_auc_t(
         train_mdf,
@@ -1160,7 +1075,7 @@ def fit_final_multivariable_model(
         "n_test": len(test),
         "n_events_train_val": int(train_val[event_col].sum()),
         "n_events_test": int(test[event_col].sum()),
-        "selected_penalizer": used_alpha,
+        "selected_penalizer": used_penalizer,
         "selected_l1_ratio": float(l1_ratio),
         "n_covariates": len(covariate_cols),
         "train_val_c_index": train_c,
@@ -1173,41 +1088,50 @@ def fit_final_multivariable_model(
         "test_n_valid_auc_horizons": int(test_auc_df["auc_t"].notna().sum()) if not test_auc_df.empty else 0,
         "split_stratification": split_stratification,
         "cv_stratification": cv_stratification,
-        "backend": "sksurv.CoxnetSurvivalAnalysis",
+        "backend": "lifelines.CoxPHFitter",
         "note": note,
     }
 
-    if hasattr(model, "coef_"):
-        coefs = np.asarray(model.coef_, dtype=float).reshape(-1)
+    if model is not None:
+        summary = model.summary.reset_index().rename(columns={"covariate": "feature"})
+        summary = summary[["feature", "coef", "exp(coef)"]]
     else:
-        coefs = np.zeros(len(covariate_cols), dtype=float)
-    summary_rows = []
-    for col, coef in zip(covariate_cols, coefs):
-        lab_name, feature_stat = parse_feature_name(col)
-        summary_rows.append(
-            {
-                "endpoint": endpoint,
-                "feature": col,
-                "lab_name": lab_name,
-                "feature_stat": feature_stat,
-                "is_age_covariate": col == "age",
-                "coef": float(coef),
-                "exp(coef)": float(np.exp(coef)),
-                "selected_penalizer": used_alpha,
-                "selected_l1_ratio": float(l1_ratio),
-                "n_covariates": len(covariate_cols),
-                "train_val_c_index": train_c,
-                "test_c_index": test_c,
-                "train_val_integrated_auc_t": train_iauc,
-                "test_integrated_auc_t": test_iauc,
-                "note": note,
-            }
+        summary = pd.DataFrame(
+            {"feature": covariate_cols, "coef": 0.0, "exp(coef)": 1.0}
         )
-    summary = (
-        pd.DataFrame(summary_rows)
-        .sort_values("coef", key=lambda s: s.abs(), ascending=False)
-        .reset_index(drop=True)
-    )
+
+    parsed = summary["feature"].map(parse_feature_name)
+    summary["endpoint"] = endpoint
+    summary["lab_name"] = parsed.str[0]
+    summary["feature_stat"] = parsed.str[1]
+    summary["is_age_covariate"] = summary["feature"].eq("age")
+    summary["selected_penalizer"] = used_penalizer
+    summary["selected_l1_ratio"] = float(l1_ratio)
+    summary["n_covariates"] = len(covariate_cols)
+    summary["train_val_c_index"] = train_c
+    summary["test_c_index"] = test_c
+    summary["train_val_integrated_auc_t"] = train_iauc
+    summary["test_integrated_auc_t"] = test_iauc
+    summary["note"] = note
+    keep_cols = [
+        "endpoint",
+        "feature",
+        "lab_name",
+        "feature_stat",
+        "is_age_covariate",
+        "coef",
+        "exp(coef)",
+        "selected_penalizer",
+        "selected_l1_ratio",
+        "n_covariates",
+        "train_val_c_index",
+        "test_c_index",
+        "train_val_integrated_auc_t",
+        "test_integrated_auc_t",
+        "note",
+    ]
+    summary = summary[[c for c in keep_cols if c in summary.columns]]
+    summary = summary.sort_values("coef", key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
 
     predictions = pd.DataFrame(
         {
@@ -1216,7 +1140,7 @@ def fit_final_multivariable_model(
             "dataset": "test",
             "duration_days": test[duration_col].to_numpy(dtype=float),
             "event": test[event_col].to_numpy(dtype=int),
-            "risk_score": test_pred,
+            "risk_score": np.asarray(test_pred).reshape(-1),
         }
     )
     return metrics_row, summary, predictions
