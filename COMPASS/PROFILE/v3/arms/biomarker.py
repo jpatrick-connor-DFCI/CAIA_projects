@@ -132,6 +132,14 @@ def is_test_only_quote(quote):
     return any(pattern.search(normalized_quote) for pattern in TEST_ONLY_PATTERNS)
 
 
+def normalize_mentions(value):
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return [value]
+    return []
+
+
 def empty_note_extraction(note_payload):
     return {
         "note_date": note_payload.get("note_date"),
@@ -149,7 +157,7 @@ def sanitize_note_extractions(note_extractions):
         cleaned = deepcopy(extraction)
         cleaned["biomarker_mentions"] = [
             mention
-            for mention in cleaned.get("biomarker_mentions", [])
+            for mention in normalize_mentions(cleaned.get("biomarker_mentions"))
             if isinstance(mention, dict) and not is_test_only_quote(mention.get("quote"))
         ]
         if not cleaned["biomarker_mentions"]:
