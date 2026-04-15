@@ -90,14 +90,13 @@ def main():
         raise ValueError("Use at most one of --prepare-only, --extract-only, or --label-only.")
 
     context_cmd = [sys.executable, str(CURRENT_DIR / "prepare_patient_context.py")]
-    derive_cmd = [sys.executable, str(CURRENT_DIR / "derive_structured_features.py")]
     candidate_cmd = [sys.executable, str(CURRENT_DIR / "prepare_candidate_notes.py")]
     extraction_cmd = [sys.executable, str(CURRENT_DIR / "generate_note_extractions.py")]
     label_cmd = [sys.executable, str(CURRENT_DIR / "generate_patient_labels.py")]
 
-    for command in (context_cmd, derive_cmd, candidate_cmd):
+    for command in (context_cmd, candidate_cmd):
         append_optional_arg(command, "--data-path", args.data_path)
-    for command in (context_cmd, derive_cmd, candidate_cmd, extraction_cmd, label_cmd):
+    for command in (context_cmd, candidate_cmd, extraction_cmd, label_cmd):
         append_optional_arg(command, "--output-dir", args.output_dir)
         append_optional_arg(command, "--mrns", args.mrns)
         append_optional_arg(command, "--mrn-file", args.mrn_file)
@@ -139,7 +138,6 @@ def main():
 
     if args.prepare_only:
         run_command(context_cmd)
-        run_command(derive_cmd)
         run_command(candidate_cmd)
         return
     if args.extract_only:
@@ -150,7 +148,6 @@ def main():
         return
 
     run_command(context_cmd)
-    run_command(derive_cmd)
     run_command(candidate_cmd)
     run_command(extraction_cmd)
     run_command(label_cmd)

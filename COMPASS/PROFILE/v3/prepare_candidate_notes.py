@@ -248,26 +248,10 @@ def take_with_coverage(df, limit):
 
 
 def compute_platinum_window_flags(work, context_df, before_days, after_days):
-    if context_df.empty or "FIRST_PLATINUM_DATE" not in context_df.columns:
-        work["FIRST_PLATINUM_DATE"] = pd.NaT
-        work["WITHIN_PLATINUM_WINDOW"] = False
-        work["DAYS_TO_PLATINUM"] = pd.NA
-        return work
-
-    merged = work.merge(
-        context_df[["DFCI_MRN", "FIRST_PLATINUM_DATE"]],
-        on="DFCI_MRN",
-        how="left",
-    )
-    merged["FIRST_PLATINUM_DATE"] = parse_datetime_series(merged["FIRST_PLATINUM_DATE"])
-    merged["DAYS_TO_PLATINUM"] = (
-        merged["EVENT_DATE"] - merged["FIRST_PLATINUM_DATE"]
-    ).dt.days
-    merged["WITHIN_PLATINUM_WINDOW"] = (
-        merged["DAYS_TO_PLATINUM"].notna()
-        & merged["DAYS_TO_PLATINUM"].between(-before_days, after_days)
-    )
-    return merged
+    work = work.copy()
+    work["WITHIN_PLATINUM_WINDOW"] = False
+    work["DAYS_TO_PLATINUM"] = pd.NA
+    return work
 
 
 def build_selected_note_text(df):

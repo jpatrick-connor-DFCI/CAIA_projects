@@ -195,13 +195,13 @@ def ensure_resume_compatible(output_path, extractions_path):
         )
 
 
-def default_patient_result(mrn, structured_context, num_notes_reviewed):
-    platinum_exposed = bool(structured_context.get("EVER_PLATINUM", False))
+def default_patient_result(mrn, note_extractions, num_notes_reviewed):
+    platinum_exposed = infer_platinum_exposure_from_text(note_extractions)
     return {
         "schema_version": SCHEMA_VERSION,
         "DFCI_MRN": int(mrn),
         "platinum_exposed": platinum_exposed,
-        "first_platinum_date": structured_context.get("FIRST_PLATINUM_DATE"),
+        "first_platinum_date": infer_first_platinum_date_from_text(note_extractions),
         "nepc_scpc_status": "absent",
         "nepc_scpc_subtype": None,
         "nepc_scpc_evidence_level": "none",
@@ -248,16 +248,12 @@ def merge_patient_result(base_row, model_row):
     return merged
 
 
-def should_run_synthesis(note_extractions, structured_context):
+def should_run_synthesis(note_extractions):
     if has_substantive_v3_evidence(note_extractions):
         return True
-    if structured_context.get("EVER_PLATINUM"):
+    if infer_platinum_exposure_from_text(note_extractions):
         return True
-    if structured_context.get("c6_supportive_lab_pattern_present"):
-        return True
-    if structured_context.get("has_any_dna_repair_alteration"):
-        return True
-    if structured_context.get("EVER_PARP"):
+    if any(extraction.get("overall_relevance") in {"high", "medium"} for extraction in note_extractions or []):
         return True
     return False
 
@@ -269,7 +265,6 @@ def main():
 
     context_path = args.context_path or args.output_dir / "LLM_v3_patient_context.csv"
     candidate_path = args.candidate_path or args.output_dir / "LLM_v3_candidate_text_data.csv"
-    derived_path = args.derived_features_path or args.output_dir / "LLM_v3_derived_features.tsv"
     extractions_path = args.note_extractions_path or args.output_dir / "LLM_v3_note_extractions.json"
     output_path = args.output_dir / "LLM_v3_generated_labels.tsv"
     failures_path = args.output_dir / "LLM_v3_failed_patients.tsv"
@@ -281,7 +276,6 @@ def main():
 
     context_df = normalize_mrn_column(pd.read_csv(context_path, low_memory=False))
     candidate_df = normalize_mrn_column(pd.read_csv(candidate_path, low_memory=False)) if candidate_path.exists() else pd.DataFrame()
-    derived_df = normalize_mrn_column(pd.read_csv(derived_path, sep="\t", low_memory=False)) if derived_path.exists() else pd.DataFrame()
     if "DFCI_MRN" not in context_df.columns:
         raise ValueError(f"Context file is missing DFCI_MRN: {context_path}")
 
@@ -289,8 +283,6 @@ def main():
         context_df = context_df.loc[context_df["DFCI_MRN"].isin(selected_mrns)].copy()
         if not candidate_df.empty:
             candidate_df = candidate_df.loc[candidate_df["DFCI_MRN"].isin(selected_mrns)].copy()
-        if not derived_df.empty:
-            derived_df = derived_df.loc[derived_df["DFCI_MRN"].isin(selected_mrns)].copy()
         if context_df.empty:
             raise ValueError("No patients remained after applying the requested MRN filter.")
 
@@ -328,7 +320,6 @@ def main():
         print(f"Processing {len(remaining_mrns)} v3 synthesis patients ({len(completed_mrns)} done)\n")
 
     context_lookup = context_df.set_index("DFCI_MRN").to_dict(orient="index")
-    derived_lookup = derived_df.set_index("DFCI_MRN").to_dict(orient="index") if not derived_df.empty else {}
     candidate_groups = (
         {int(mrn): group.sort_values("EVENT_DATE") for mrn, group in candidate_df.groupby("DFCI_MRN")}
         if not candidate_df.empty
@@ -340,17 +331,13 @@ def main():
 
     for mrn in remaining_mrns:
         context_row = context_lookup.get(mrn, {})
-        derived_row = derived_lookup.get(mrn, {})
-        structured_context = {
-            **build_structured_context(context_row),
-            **build_structured_context(derived_row),
-        }
+        structured_context = build_structured_context(context_row)
         mrn_df = candidate_groups.get(mrn, pd.DataFrame())
         extraction_entry = extractions_by_mrn.get(mrn, {})
         note_extractions = sanitize_note_extractions(extraction_entry.get("note_extractions", []))
 
-        if not should_run_synthesis(note_extractions, structured_context):
-            result_row = default_patient_result(mrn, structured_context, num_notes_reviewed=len(mrn_df))
+        if not should_run_synthesis(note_extractions):
+            result_row = default_patient_result(mrn, note_extractions, num_notes_reviewed=len(mrn_df))
         else:
             synthesis_payload = {
                 "structured_context": structured_context,
@@ -372,7 +359,7 @@ def main():
             try:
                 parsed_row = parse_json_response(response_text)
                 result_row = merge_patient_result(
-                    default_patient_result(mrn, structured_context, num_notes_reviewed=len(mrn_df)),
+                    default_patient_result(mrn, note_extractions, num_notes_reviewed=len(mrn_df)),
                     parsed_row,
                 )
             except json.JSONDecodeError as error:
@@ -387,8 +374,8 @@ def main():
                 continue
 
         result_row["DFCI_MRN"] = int(mrn)
-        result_row["platinum_exposed"] = bool(structured_context.get("EVER_PLATINUM", False))
-        result_row["first_platinum_date"] = structured_context.get("FIRST_PLATINUM_DATE")
+        result_row["platinum_exposed"] = infer_platinum_exposure_from_text(note_extractions)
+        result_row["first_platinum_date"] = infer_first_platinum_date_from_text(note_extractions)
         result_row["num_notes_reviewed"] = int(len(mrn_df))
         result_row["num_note_extractions"] = int(len(note_extractions))
         result_row = serialize_list_fields(result_row, LIST_FIELDS)
