@@ -1171,11 +1171,20 @@ def build_univariate_overview(univariate_results: dict[str, pd.DataFrame]) -> pd
 
 
 def print_top_hits(df: pd.DataFrame, *, endpoint: str) -> None:
-    hits = df.loc[
-        df["p_value"].notna(),
-        ["feature", "hazard_ratio_per_sd", "p_value", "q_value"],
-    ].head(10)
+    estimable = df.loc[df["p_value"].notna()]
+    n_tested = len(estimable)
+    n_sig_p = int((estimable["p_value"] < 0.05).sum()) if n_tested else 0
+    n_sig_q = (
+        int((estimable["q_value"] < 0.05).sum())
+        if n_tested and "q_value" in estimable.columns
+        else 0
+    )
     print(f"\nTop univariate associations for {endpoint}:")
+    print(
+        f"  Significant hits: {n_sig_p}/{n_tested} at p<0.05, "
+        f"{n_sig_q}/{n_tested} at q<0.05 (BH)"
+    )
+    hits = estimable[["feature", "hazard_ratio_per_sd", "p_value", "q_value"]].head(10)
     if hits.empty:
         print("  No estimable feature associations.")
         return
@@ -1238,11 +1247,11 @@ def main(args: argparse.Namespace) -> None:
     selected_model_rows = []
     test_metric_rows = []
 
-    for endpoint in endpoints:
-        print(f"\n=== {endpoint.upper()} ===")
-        print(ENDPOINTS[endpoint]["description"])
-
-        if args.analysis in {"univariate", "both"}:
+    if args.analysis in {"univariate", "both"}:
+        print("\n##### ARM 1: UNIVARIATE (all endpoints) #####")
+        for endpoint in endpoints:
+            print(f"\n=== {endpoint.upper()} ===")
+            print(ENDPOINTS[endpoint]["description"])
             univariate_df = run_univariate_associations(
                 merged,
                 feature_cols=selected_feature_cols,
@@ -1254,7 +1263,11 @@ def main(args: argparse.Namespace) -> None:
             univariate_df.to_csv(RESULTS / f"cox_agg_univariate_{endpoint}.csv", index=False)
             print_top_hits(univariate_df, endpoint=endpoint)
 
-        if args.analysis in {"multivariable", "both"}:
+    if args.analysis in {"multivariable", "both"}:
+        print("\n##### ARM 2: MULTIVARIABLE ELASTIC-NET (all endpoints) #####")
+        for endpoint in endpoints:
+            print(f"\n=== {endpoint.upper()} ===")
+            print(ENDPOINTS[endpoint]["description"])
             fold_df, cv_df, best_row = tune_multivariable_model(
                 train_val,
                 feature_cols=selected_feature_cols,
