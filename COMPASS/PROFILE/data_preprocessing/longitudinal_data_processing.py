@@ -338,7 +338,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--death-csv",
         type=Path,
-        default=SURV_PATH / "death_met_surv_df.csv",
+        default=SURV_PATH / "death_met_surv_df.csv.gz",
     )
     parser.add_argument(
         "--nepc-tsv",

@@ -46,7 +46,7 @@ complete_df = pd.concat(all_notes, ignore_index=True)
 complete_df.to_csv(os.path.join(NEPC_PROJ_PATH, 'prostate_text_data.csv'), index=False)
 
 # Filter related datasets by prostate patients
-icds = filter_and_save(os.path.join(EMBED_PROJ_PATH, 'time-to-event_analysis/timestamped_icd_info.csv'), os.path.join(NEPC_PROJ_PATH, 'prostate_icd_data.csv'))
+icds = filter_and_save(os.path.join(EMBED_PROJ_PATH, 'time-to-event_analysis/timestamped_icd_info.csv.gz'), os.path.join(NEPC_PROJ_PATH, 'prostate_icd_data.csv'))
 health = filter_and_save(os.path.join(ONCDRS_PATH, 'HEALTH_HISTORY.csv'), os.path.join(NEPC_PROJ_PATH, 'prostate_health_history_data.csv'))
 meds = filter_and_save(os.path.join(ONCDRS_PATH, 'MEDICATIONS.csv'), os.path.join(NEPC_PROJ_PATH, 'prostate_medications_data.csv'))
 labs = filter_and_save(os.path.join(ONCDRS_PATH, 'OUTPT_LAB_RESULTS_LABS.csv'), os.path.join(NEPC_PROJ_PATH, 'prostate_labs_data.csv'), 
