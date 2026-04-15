@@ -11,34 +11,36 @@ The guiding idea is to preserve the focused behavior that made `v2` work well fo
 
 ## Architecture
 
-1. `prepare_note_inventory.py`
-   - loads the shared raw note inventory for the requested MRNs
-   - writes note-count metadata to `LLM_v3_patient_context.csv`
-2. `run_arm_pipeline.py --arm nepc`
-   - builds trigger-centered snippets for the NEPC arm
-   - extracts note-level NEPC evidence
-   - synthesizes one NEPC label row per MRN
-3. `run_arm_pipeline.py --arm avpc`
-   - builds trigger-centered snippets for the AVPC arm
-   - extracts note-level AVPC-feature evidence
-   - synthesizes one AVPC label row per MRN
-4. `run_arm_pipeline.py --arm biomarker`
-   - builds trigger-centered snippets for the biomarker arm
-   - extracts note-level biomarker evidence
-   - synthesizes one biomarker label row per MRN
-5. `merge_labels.py`
-   - merges the three arm outputs on `DFCI_MRN`
-   - assigns the final `v3` bucket
+1. `compile_prostate_note_bundle.py`
+   - loads all raw OncDRS notes for the supplied prostate MRN list
+   - writes `LLM_v3_prostate_note_bundle.json.gz`
+2. `run_v3_pipeline.py`
+   - prepares the shared note inventory
+   - runs one or more arm pipelines in-process
+   - merges the arm outputs into the final `v3` bucket
+
+`prepare_note_inventory.py`, `prepare_arm_candidates.py`, `generate_arm_labels.py`,
+and `merge_labels.py` still exist as stage-level entrypoints for debugging or backwards
+compatibility, but `run_v3_pipeline.py` is the primary entrypoint.
 
 The task-specific arm definitions live under `COMPASS/PROFILE/v3/arms/`.
 
-## One-Command Run
+## Recommended Two-Step Run
+
+```bash
+python COMPASS/PROFILE/v3/compile_prostate_note_bundle.py --mrn-file path/to/prostate_mrns.txt
+python COMPASS/PROFILE/v3/run_v3_pipeline.py --text-source bundle --max-workers 4
+```
+
+If the bundle lives somewhere else, pass `--note-bundle-path path/to/LLM_v3_prostate_note_bundle.json.gz`.
+
+`v3` still defaults to raw OncDRS note loading for backwards compatibility. Use `--text-source compiled` only if you intentionally want the precompiled `prostate_text_data.csv` path.
+
+## One-Command Raw Run
 
 ```bash
 python COMPASS/PROFILE/v3/run_v3_pipeline.py --mrn-file path/to/mrns.txt --max-workers 4
 ```
-
-`v3` defaults to raw OncDRS note loading. Use `--text-source compiled` only if you intentionally want the precompiled `prostate_text_data.csv` path.
 
 ## Stage Modes
 
@@ -46,6 +48,7 @@ python COMPASS/PROFILE/v3/run_v3_pipeline.py --mrn-file path/to/mrns.txt --max-w
 python COMPASS/PROFILE/v3/run_v3_pipeline.py --prepare-only --mrn-file path/to/mrns.txt
 python COMPASS/PROFILE/v3/run_v3_pipeline.py --arms-only --mrn-file path/to/mrns.txt --max-workers 4
 python COMPASS/PROFILE/v3/run_v3_pipeline.py --merge-only
+python COMPASS/PROFILE/v3/run_v3_pipeline.py --arm nepc --arms-only --mrn-file path/to/mrns.txt
 ```
 
 ## Outputs
@@ -54,6 +57,7 @@ By default, `v3` writes to `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/v3_outp
 
 Shared files:
 
+- `LLM_v3_prostate_note_bundle.json.gz`
 - `LLM_v3_note_inventory.csv`
 - `LLM_v3_patient_context.csv`
 - `LLM_v3_merged_labels.tsv`
@@ -76,5 +80,6 @@ Per-arm files:
 ## Notes
 
 - All three arms follow the same retrieval pattern as the NEPC approach: any trigger hit makes the note eligible, and the note text is replaced by large merged snippet windows around the trigger hits.
+- The shared snippet window is intentionally much larger in the current implementation so the LLM sees more complete surrounding context for trial, workup, and suspicion language.
 - No structured labs, genomics tables, medication tables, or PSA tables are used in this `v3` design.
 - `cisplatin` and `carboplatin` are still the platinum terms recognized in note text.

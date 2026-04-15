@@ -1,11 +1,17 @@
 import re
 from copy import deepcopy
 
-from settings import PROSTATE_CONTEXT_REGEX
+from .evidence_utils import (
+    TRIAL_ONLY_PATTERNS,
+    collect_partitioned_mentions,
+    normalize_label,
+    sanitize_mentions,
+)
+from helpers import PROSTATE_CONTEXT_REGEX
 
 
 ARM_NAME = "nepc"
-SCHEMA_VERSION = "v3_nepc_2026-04-14"
+SCHEMA_VERSION = "v3_nepc_2026-04-15"
 LIST_FIELDS = ["supporting_quotes", "supporting_quote_dates"]
 
 TRIGGER_REGEX = {
@@ -54,6 +60,7 @@ Capture only evidence related to:
 - Extract what is documented in this note only.
 - Only capture neuroendocrine or small-cell language when it clearly refers to the patient's prostate cancer.
 - Do not treat workup alone as disease evidence. Testing plans, pending stains, planned biopsies, and pathology review requests without resulting diagnosis should not populate disease arrays.
+- Clinical trial screening, eligibility, enrollment, or protocol language does not establish NEPC or transformation by itself.
 - Pathology is most authoritative for histology.
 - Quotes must be verbatim and 30 words or fewer.
 - Return empty arrays when the note contains no evidence for an event family.
@@ -116,6 +123,7 @@ and whether transformation is documented or suspected.
 - Use `note_extractions` as the only clinical evidence source.
 - Pathology is most authoritative for histology.
 - Do not call NEPC/SCPC present from workup alone.
+- Do not call NEPC/SCPC present from suspicion, clinical trial screening, or eligibility language alone.
 - Use `has_nepc_signal = true` when the chart supports neuroendocrine or small-cell prostate cancer.
 - Use `has_nepc_signal = false` when reviewed evidence does not support NEPC/SCPC.
 - Use `has_nepc_signal = null` only when the chart is too ambiguous to classify confidently.
@@ -146,27 +154,7 @@ TEST_ONLY_PATTERNS = [
         r".{0,70}\b(?:test(?:ing)?|work[\s-]?up|stain(?:s|ing)?|ihc|immunostain(?:s|ing)?|marker(?:s)?|biopsy|pathology\s+review)\b"
     ),
 ]
-
-
-def normalize_evidence_text(text):
-    if text is None:
-        return ""
-    return re.sub(r"\s+", " ", str(text).strip().lower())
-
-
-def is_test_only_quote(quote):
-    normalized_quote = normalize_evidence_text(quote)
-    if not normalized_quote:
-        return False
-    return any(pattern.search(normalized_quote) for pattern in TEST_ONLY_PATTERNS)
-
-
-def normalize_mentions(value):
-    if isinstance(value, list):
-        return value
-    if isinstance(value, dict):
-        return [value]
-    return []
+EXCLUSION_PATTERNS = TEST_ONLY_PATTERNS + TRIAL_ONLY_PATTERNS
 
 
 def empty_note_extraction(note_payload):
@@ -185,16 +173,11 @@ def sanitize_note_extractions(note_extractions):
         if not isinstance(extraction, dict):
             continue
         cleaned = deepcopy(extraction)
-        cleaned["histology_mentions"] = [
-            mention
-            for mention in normalize_mentions(cleaned.get("histology_mentions"))
-            if isinstance(mention, dict) and not is_test_only_quote(mention.get("quote"))
-        ]
-        cleaned["transformation_mentions"] = [
-            mention
-            for mention in normalize_mentions(cleaned.get("transformation_mentions"))
-            if isinstance(mention, dict) and not is_test_only_quote(mention.get("quote"))
-        ]
+        cleaned["histology_mentions"] = sanitize_mentions(cleaned.get("histology_mentions"), EXCLUSION_PATTERNS)
+        cleaned["transformation_mentions"] = sanitize_mentions(
+            cleaned.get("transformation_mentions"),
+            EXCLUSION_PATTERNS,
+        )
         if not cleaned["histology_mentions"] and not cleaned["transformation_mentions"]:
             cleaned["overall_relevance"] = "low"
         sanitized.append(cleaned)
@@ -202,10 +185,22 @@ def sanitize_note_extractions(note_extractions):
 
 
 def has_substantive_evidence(note_extractions):
-    for extraction in note_extractions or []:
-        if extraction.get("histology_mentions") or extraction.get("transformation_mentions"):
-            return True
-    return False
+    histology_affirmative, histology_equivocal = collect_partitioned_mentions(
+        note_extractions,
+        field_names=["histology_mentions"],
+        affirmative_assertions={"present", "historical"},
+    )
+    transformation_affirmative, transformation_equivocal = collect_partitioned_mentions(
+        note_extractions,
+        field_names=["transformation_mentions"],
+        affirmative_assertions={"documented", "historical"},
+    )
+    return bool(
+        histology_affirmative
+        or histology_equivocal
+        or transformation_affirmative
+        or transformation_equivocal
+    )
 
 
 def default_patient_result(mrn, num_notes_reviewed):
@@ -225,13 +220,75 @@ def default_patient_result(mrn, num_notes_reviewed):
     }
 
 
-def merge_patient_result(base_row, model_row):
+def infer_nepc_subtype(histology_mentions, transformation_mentions):
+    subtype_labels = set()
+    for mention in histology_mentions or []:
+        label = normalize_label(mention.get("label"))
+        if label in {"neuroendocrine", "small_cell", "both"}:
+            subtype_labels.add(label)
+    for mention in transformation_mentions or []:
+        label = normalize_label(mention.get("to_histology"))
+        if label in {"neuroendocrine", "small_cell", "both"}:
+            subtype_labels.add(label)
+
+    if "both" in subtype_labels or {"neuroendocrine", "small_cell"}.issubset(subtype_labels):
+        return "both"
+    if "small_cell" in subtype_labels:
+        return "small_cell"
+    if "neuroendocrine" in subtype_labels:
+        return "neuroendocrine"
+    return None
+
+
+def merge_patient_result(base_row, model_row, note_extractions=None):
     if not isinstance(model_row, dict):
-        return base_row
+        model_row = {}
     merged = base_row.copy()
     merged.update(model_row)
     merged["schema_version"] = SCHEMA_VERSION
     for field in LIST_FIELDS:
         if merged.get(field) is None:
             merged[field] = []
+
+    if note_extractions is None:
+        return merged
+
+    histology_affirmative, histology_equivocal = collect_partitioned_mentions(
+        note_extractions,
+        field_names=["histology_mentions"],
+        affirmative_assertions={"present", "historical"},
+    )
+    transformation_affirmative, transformation_equivocal = collect_partitioned_mentions(
+        note_extractions,
+        field_names=["transformation_mentions"],
+        affirmative_assertions={"documented", "historical"},
+    )
+
+    has_affirmative_signal = bool(histology_affirmative or transformation_affirmative)
+    has_equivocal_signal = bool(histology_equivocal or transformation_equivocal)
+    inferred_subtype = infer_nepc_subtype(histology_affirmative, transformation_affirmative)
+
+    if has_affirmative_signal:
+        merged["has_nepc_signal"] = True
+        merged["nepc_subtype"] = inferred_subtype or merged.get("nepc_subtype")
+    elif has_equivocal_signal:
+        merged["has_nepc_signal"] = None
+        merged["nepc_subtype"] = None
+        merged["confidence"] = "low"
+    else:
+        merged["has_nepc_signal"] = False
+        merged["nepc_subtype"] = None
+
+    if transformation_affirmative:
+        merged["has_transformation_signal"] = True
+        merged["transformation_status"] = "documented"
+    elif transformation_equivocal:
+        merged["has_transformation_signal"] = None
+        merged["transformation_status"] = "suspected"
+        merged["confidence"] = "low"
+    else:
+        merged["has_transformation_signal"] = False
+        merged["transformation_status"] = "not_documented"
+        merged["transformation_date"] = None
+
     return merged

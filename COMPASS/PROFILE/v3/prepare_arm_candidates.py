@@ -3,10 +3,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from arm_registry import load_arm_module
-from candidate_utils import annotate_inventory_notes
-from common import load_selected_mrns, normalize_mrn_column
-from settings import DEFAULT_OUTPUT_DIR
+from helpers import (
+    DEFAULT_OUTPUT_DIR,
+    annotate_inventory_notes,
+    load_arm_module,
+    load_selected_mrns,
+    normalize_mrn_column,
+)
 
 
 def parse_args():
@@ -24,8 +27,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
+def run(args):
     arm_module = load_arm_module(args.arm)
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
     inventory_path = args.inventory_path or args.output_dir / "LLM_v3_note_inventory.csv"
@@ -41,6 +43,10 @@ def main():
     print(f"Wrote {arm_module.ARM_NAME} candidate notes: {output_path}")
     print(f"Patients with selected notes: {candidate_df['DFCI_MRN'].nunique() if not candidate_df.empty else 0}")
     print(f"Selected notes: {len(candidate_df)}")
+
+
+def main():
+    run(parse_args())
 
 
 if __name__ == "__main__":

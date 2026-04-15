@@ -1,11 +1,12 @@
 import re
 from copy import deepcopy
 
-from settings import PROSTATE_CONTEXT_REGEX
+from .evidence_utils import TRIAL_ONLY_PATTERNS, collect_partitioned_mentions, normalize_label, sanitize_mentions
+from helpers import PROSTATE_CONTEXT_REGEX
 
 
 ARM_NAME = "avpc"
-SCHEMA_VERSION = "v3_avpc_2026-04-14"
+SCHEMA_VERSION = "v3_avpc_2026-04-15"
 LIST_FIELDS = ["present_criteria", "supporting_quotes", "supporting_quote_dates"]
 
 TRIGGER_REGEX = {
@@ -93,6 +94,7 @@ Capture only evidence related to:
 - Extract what is documented in this note only.
 - Only capture AVPC evidence when it clearly refers to the patient's prostate cancer.
 - Do not populate disease arrays from workup or testing plans alone.
+- Clinical trial screening, eligibility, enrollment, or protocol language does not establish AVPC by itself.
 - Imaging is most authoritative for metastatic-pattern features such as visceral disease, lytic lesions, or bulky disease.
 - Pathology is most authoritative for C1.
 - Quotes must be verbatim and 30 words or fewer.
@@ -154,6 +156,7 @@ Your task is to determine whether the chart supports aggressive variant prostate
 - `has_avpc_features = true` when the chart documents explicit AVPC/anaplastic language or one or more substantive AVPC features.
 - `has_avpc_features = false` when reviewed evidence does not support AVPC features.
 - `has_avpc_features = null` only when the chart is too ambiguous to classify confidently.
+- Do not call AVPC present from suspicion, clinical trial screening, or eligibility language alone.
 - Explicit AVPC mention is stronger than isolated supportive features.
 - Use `present`, `absent`, or `indeterminate` for each criterion field.
 
@@ -188,27 +191,7 @@ TEST_ONLY_PATTERNS = [
         r".{0,70}\b(?:test(?:ing)?|work[\s-]?up|stain(?:s|ing)?|ihc|immunostain(?:s|ing)?|marker(?:s)?|biopsy|pathology\s+review)\b"
     ),
 ]
-
-
-def normalize_evidence_text(text):
-    if text is None:
-        return ""
-    return re.sub(r"\s+", " ", str(text).strip().lower())
-
-
-def is_test_only_quote(quote):
-    normalized_quote = normalize_evidence_text(quote)
-    if not normalized_quote:
-        return False
-    return any(pattern.search(normalized_quote) for pattern in TEST_ONLY_PATTERNS)
-
-
-def normalize_mentions(value):
-    if isinstance(value, list):
-        return value
-    if isinstance(value, dict):
-        return [value]
-    return []
+EXCLUSION_PATTERNS = TEST_ONLY_PATTERNS + TRIAL_ONLY_PATTERNS
 
 
 def empty_note_extraction(note_payload):
@@ -227,16 +210,11 @@ def sanitize_note_extractions(note_extractions):
         if not isinstance(extraction, dict):
             continue
         cleaned = deepcopy(extraction)
-        cleaned["explicit_avpc_mentions"] = [
-            mention
-            for mention in normalize_mentions(cleaned.get("explicit_avpc_mentions"))
-            if isinstance(mention, dict) and not is_test_only_quote(mention.get("quote"))
-        ]
-        cleaned["criteria_mentions"] = [
-            mention
-            for mention in normalize_mentions(cleaned.get("criteria_mentions"))
-            if isinstance(mention, dict) and not is_test_only_quote(mention.get("quote"))
-        ]
+        cleaned["explicit_avpc_mentions"] = sanitize_mentions(
+            cleaned.get("explicit_avpc_mentions"),
+            EXCLUSION_PATTERNS,
+        )
+        cleaned["criteria_mentions"] = sanitize_mentions(cleaned.get("criteria_mentions"), EXCLUSION_PATTERNS)
         if not cleaned["explicit_avpc_mentions"] and not cleaned["criteria_mentions"]:
             cleaned["overall_relevance"] = "low"
         sanitized.append(cleaned)
@@ -244,10 +222,17 @@ def sanitize_note_extractions(note_extractions):
 
 
 def has_substantive_evidence(note_extractions):
-    for extraction in note_extractions or []:
-        if extraction.get("explicit_avpc_mentions") or extraction.get("criteria_mentions"):
-            return True
-    return False
+    explicit_affirmative, explicit_equivocal = collect_partitioned_mentions(
+        note_extractions,
+        field_names=["explicit_avpc_mentions"],
+        affirmative_assertions={"present", "historical"},
+    )
+    criteria_affirmative, criteria_equivocal = collect_partitioned_mentions(
+        note_extractions,
+        field_names=["criteria_mentions"],
+        affirmative_assertions={"present", "historical"},
+    )
+    return bool(explicit_affirmative or explicit_equivocal or criteria_affirmative or criteria_equivocal)
 
 
 def default_patient_result(mrn, num_notes_reviewed):
@@ -272,13 +257,62 @@ def default_patient_result(mrn, num_notes_reviewed):
     }
 
 
-def merge_patient_result(base_row, model_row):
+def merge_patient_result(base_row, model_row, note_extractions=None):
     if not isinstance(model_row, dict):
-        return base_row
+        model_row = {}
     merged = base_row.copy()
     merged.update(model_row)
     merged["schema_version"] = SCHEMA_VERSION
     for field in LIST_FIELDS:
         if merged.get(field) is None:
             merged[field] = []
+
+    if note_extractions is None:
+        return merged
+
+    explicit_affirmative, explicit_equivocal = collect_partitioned_mentions(
+        note_extractions,
+        field_names=["explicit_avpc_mentions"],
+        affirmative_assertions={"present", "historical"},
+    )
+    criteria_affirmative, criteria_equivocal = collect_partitioned_mentions(
+        note_extractions,
+        field_names=["criteria_mentions"],
+        affirmative_assertions={"present", "historical"},
+    )
+
+    has_affirmative_signal = bool(explicit_affirmative or criteria_affirmative)
+    has_equivocal_signal = bool(explicit_equivocal or criteria_equivocal)
+    merged["explicit_avpc_mention"] = bool(explicit_affirmative)
+
+    if has_affirmative_signal:
+        merged["has_avpc_features"] = True
+    elif has_equivocal_signal:
+        merged["has_avpc_features"] = None
+        merged["confidence"] = "low"
+    else:
+        merged["has_avpc_features"] = False
+
+    affirmative_criteria = {
+        normalize_label(mention.get("criterion")).upper()
+        for mention in criteria_affirmative
+        if normalize_label(mention.get("criterion")) in {f"c{idx}" for idx in range(1, 8)}
+    }
+    equivocal_criteria = {
+        normalize_label(mention.get("criterion")).upper()
+        for mention in criteria_equivocal
+        if normalize_label(mention.get("criterion")) in {f"c{idx}" for idx in range(1, 8)}
+    }
+
+    merged["present_criteria"] = sorted(affirmative_criteria)
+    for idx in range(1, 8):
+        criterion = f"C{idx}"
+        field_name = f"avpc_c{idx}"
+        if criterion in affirmative_criteria:
+            merged[field_name] = "present"
+        elif criterion in equivocal_criteria:
+            merged[field_name] = "indeterminate"
+        else:
+            merged[field_name] = "absent"
+
     return merged

@@ -1,9 +1,11 @@
 import re
 from copy import deepcopy
 
+from .evidence_utils import TRIAL_ONLY_PATTERNS, collect_partitioned_mentions, normalize_label, sanitize_mentions
+
 
 ARM_NAME = "biomarker"
-SCHEMA_VERSION = "v3_biomarker_2026-04-14"
+SCHEMA_VERSION = "v3_biomarker_2026-04-15"
 LIST_FIELDS = ["biomarker_types", "supporting_quotes", "supporting_quote_dates"]
 
 TRIGGER_REGEX = {
@@ -43,6 +45,7 @@ Capture only evidence related to platinum-relevant biomarkers or molecular findi
 ## RULES
 - Extract what is documented in this note only.
 - Do not count planned testing, pending results, or orders for sequencing as a biomarker finding.
+- Clinical trial screening, eligibility, enrollment, or protocol language does not establish a biomarker finding by itself.
 - A biomarker can be captured even if the note does not explicitly mention platinum.
 - Quotes must be verbatim and 30 words or fewer.
 
@@ -95,6 +98,7 @@ Your task is to determine whether the chart supports a biomarker signal potentia
 - `has_biomarker_signal = true` when the chart documents one or more substantive biomarker findings.
 - `has_biomarker_signal = false` when reviewed evidence does not support a biomarker finding.
 - `has_biomarker_signal = null` only when the chart is too ambiguous to classify confidently.
+- Do not call a biomarker present from suspicion, send-for-testing language, or clinical trial screening alone.
 - Set `platinum_linked_biomarker = true` only when the chart ties the biomarker to platinum choice, platinum sensitivity, or platinum rationale.
 
 ## OUTPUT FORMAT
@@ -117,27 +121,7 @@ TEST_ONLY_PATTERNS = [
         r"recommend(?:ed)?)\b.{0,70}\b(?:oncopanel|sequencing|genetic\s+testing|testing|assay|panel)\b"
     ),
 ]
-
-
-def normalize_evidence_text(text):
-    if text is None:
-        return ""
-    return re.sub(r"\s+", " ", str(text).strip().lower())
-
-
-def is_test_only_quote(quote):
-    normalized_quote = normalize_evidence_text(quote)
-    if not normalized_quote:
-        return False
-    return any(pattern.search(normalized_quote) for pattern in TEST_ONLY_PATTERNS)
-
-
-def normalize_mentions(value):
-    if isinstance(value, list):
-        return value
-    if isinstance(value, dict):
-        return [value]
-    return []
+EXCLUSION_PATTERNS = TEST_ONLY_PATTERNS + TRIAL_ONLY_PATTERNS
 
 
 def empty_note_extraction(note_payload):
@@ -155,11 +139,7 @@ def sanitize_note_extractions(note_extractions):
         if not isinstance(extraction, dict):
             continue
         cleaned = deepcopy(extraction)
-        cleaned["biomarker_mentions"] = [
-            mention
-            for mention in normalize_mentions(cleaned.get("biomarker_mentions"))
-            if isinstance(mention, dict) and not is_test_only_quote(mention.get("quote"))
-        ]
+        cleaned["biomarker_mentions"] = sanitize_mentions(cleaned.get("biomarker_mentions"), EXCLUSION_PATTERNS)
         if not cleaned["biomarker_mentions"]:
             cleaned["overall_relevance"] = "low"
         sanitized.append(cleaned)
@@ -167,10 +147,12 @@ def sanitize_note_extractions(note_extractions):
 
 
 def has_substantive_evidence(note_extractions):
-    for extraction in note_extractions or []:
-        if extraction.get("biomarker_mentions"):
-            return True
-    return False
+    affirmative_mentions, equivocal_mentions = collect_partitioned_mentions(
+        note_extractions,
+        field_names=["biomarker_mentions"],
+        affirmative_assertions={"present", "historical"},
+    )
+    return bool(affirmative_mentions or equivocal_mentions)
 
 
 def default_patient_result(mrn, num_notes_reviewed):
@@ -188,13 +170,54 @@ def default_patient_result(mrn, num_notes_reviewed):
     }
 
 
-def merge_patient_result(base_row, model_row):
+def merge_patient_result(base_row, model_row, note_extractions=None):
     if not isinstance(model_row, dict):
-        return base_row
+        model_row = {}
     merged = base_row.copy()
     merged.update(model_row)
     merged["schema_version"] = SCHEMA_VERSION
     for field in LIST_FIELDS:
         if merged.get(field) is None:
             merged[field] = []
+
+    if note_extractions is None:
+        return merged
+
+    affirmative_mentions, equivocal_mentions = collect_partitioned_mentions(
+        note_extractions,
+        field_names=["biomarker_mentions"],
+        affirmative_assertions={"present", "historical"},
+    )
+    has_affirmative_signal = bool(affirmative_mentions)
+    has_equivocal_signal = bool(equivocal_mentions)
+
+    if has_affirmative_signal:
+        merged["has_biomarker_signal"] = True
+    elif has_equivocal_signal:
+        merged["has_biomarker_signal"] = None
+        merged["confidence"] = "low"
+    else:
+        merged["has_biomarker_signal"] = False
+
+    merged["biomarker_types"] = sorted(
+        {
+            str(mention.get("marker")).strip()
+            for mention in affirmative_mentions
+            if str(mention.get("marker")).strip()
+        }
+    )
+
+    platinum_link_values = {
+        normalize_label(mention.get("platinum_linked"))
+        for mention in affirmative_mentions + equivocal_mentions
+    }
+    if has_affirmative_signal and "true" in platinum_link_values:
+        merged["platinum_linked_biomarker"] = True
+    elif has_affirmative_signal and "possible" in platinum_link_values:
+        merged["platinum_linked_biomarker"] = None
+    elif has_equivocal_signal:
+        merged["platinum_linked_biomarker"] = None
+    else:
+        merged["platinum_linked_biomarker"] = False
+
     return merged

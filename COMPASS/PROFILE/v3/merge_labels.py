@@ -3,8 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from common import normalize_mrn_column
-from settings import ARM_NAMES, DEFAULT_OUTPUT_DIR
+from helpers import ARM_NAMES, DEFAULT_OUTPUT_DIR, normalize_mrn_column
 
 
 def parse_args():
@@ -14,11 +13,22 @@ def parse_args():
     return parser.parse_args()
 
 
+def ensure_unique_mrns(df, source_name):
+    if df.empty or "DFCI_MRN" not in df.columns:
+        return df
+    duplicated = sorted(df.loc[df["DFCI_MRN"].duplicated(keep=False), "DFCI_MRN"].unique().tolist())
+    if duplicated:
+        preview = ", ".join(str(mrn) for mrn in duplicated[:5])
+        raise ValueError(f"{source_name} contains duplicate DFCI_MRN values: {preview}")
+    return df
+
+
 def load_arm_labels(output_dir, arm_name):
     path = output_dir / f"LLM_v3_{arm_name}_labels.tsv"
     if not path.exists() or path.stat().st_size == 0:
         return pd.DataFrame(columns=["DFCI_MRN"])
     df = normalize_mrn_column(pd.read_csv(path, sep="\t", low_memory=False))
+    df = ensure_unique_mrns(df, path.name)
     rename_map = {column: f"{arm_name}_{column}" for column in df.columns if column != "DFCI_MRN"}
     return df.rename(columns=rename_map)
 
@@ -60,12 +70,12 @@ def needs_manual_review(row):
     )
 
 
-def main():
-    args = parse_args()
+def run(args):
     context_path = args.context_path or args.output_dir / "LLM_v3_patient_context.csv"
     context_df = normalize_mrn_column(pd.read_csv(context_path, low_memory=False))
     if "DFCI_MRN" not in context_df.columns:
         raise ValueError(f"Context file is missing DFCI_MRN: {context_path}")
+    context_df = ensure_unique_mrns(context_df, context_path.name)
 
     merged_df = context_df.copy()
     for arm_name in ARM_NAMES:
@@ -80,6 +90,10 @@ def main():
 
     print(f"Wrote merged labels: {output_path}")
     print(f"Patients in merged labels: {merged_df['DFCI_MRN'].nunique()}")
+
+
+def main():
+    run(parse_args())
 
 
 if __name__ == "__main__":

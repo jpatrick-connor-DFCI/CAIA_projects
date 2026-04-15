@@ -3,8 +3,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from common import load_note_text_dataframe, load_selected_mrns
-from settings import DEFAULT_DATA_PATH, DEFAULT_OUTPUT_DIR, DEFAULT_RAW_TEXT_PATHS
+from helpers import (
+    DEFAULT_DATA_PATH,
+    DEFAULT_OUTPUT_DIR,
+    NOTE_BUNDLE_FILENAME,
+    load_note_text_dataframe,
+    load_selected_mrns,
+    resolve_raw_text_paths,
+    standardize_note_text_dataframe,
+)
 
 
 def parse_args():
@@ -15,9 +22,9 @@ def parse_args():
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument(
         "--text-source",
-        choices=["compiled", "raw"],
+        choices=["compiled", "raw", "bundle"],
         default="raw",
-        help="Use compiled prostate_text_data.csv or raw OncDRS JSON notes.",
+        help="Use compiled prostate_text_data.csv, raw OncDRS JSON notes, or a compiled gzip note bundle.",
     )
     parser.add_argument(
         "--raw-text-path",
@@ -25,6 +32,12 @@ def parse_args():
         action="append",
         default=None,
         help="Raw OncDRS note directory. Repeat to search multiple directories.",
+    )
+    parser.add_argument(
+        "--note-bundle-path",
+        type=Path,
+        default=None,
+        help="Optional gzip note bundle produced by compile_prostate_note_bundle.py.",
     )
     parser.add_argument("--mrns", default=None, help="Comma-separated DFCI_MRN values to include.")
     parser.add_argument(
@@ -34,21 +47,6 @@ def parse_args():
         help="Optional text/CSV/TSV file containing DFCI_MRN values.",
     )
     return parser.parse_args()
-
-
-def resolve_raw_text_paths(raw_text_paths_arg=None):
-    if raw_text_paths_arg:
-        ordered_paths = []
-        seen = set()
-        for path in raw_text_paths_arg:
-            normalized = Path(path)
-            key = str(normalized)
-            if key not in seen:
-                seen.add(key)
-                ordered_paths.append(normalized)
-        return ordered_paths
-    return list(DEFAULT_RAW_TEXT_PATHS)
-
 
 def build_note_counts(text_df):
     if text_df.empty:
@@ -89,34 +87,21 @@ def build_patient_context(text_df):
     return context_df.sort_values("DFCI_MRN").reset_index(drop=True)
 
 
-def main():
-    args = parse_args()
+def run(args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
     raw_text_paths = resolve_raw_text_paths(args.raw_text_path)
+    note_bundle_path = args.note_bundle_path or args.output_dir / NOTE_BUNDLE_FILENAME
 
-    text_df = load_note_text_dataframe(args.text_source, args.data_path, raw_text_paths, selected_mrns)
-    keep_cols = [
-        column
-        for column in (
-            "DFCI_MRN",
-            "EVENT_DATE",
-            "NOTE_TYPE",
-            "CLINICAL_TEXT",
-            "RAW_SOURCE_FILE",
-            "RAW_NOTE_ID",
-            "RPT_DATE",
-            "RPT_TYPE",
-            "SOURCE_STR",
-            "PROC_DESC_STR",
-            "ENCOUNTER_TYPE_DESC_STR",
-        )
-        if column in text_df.columns
-    ]
-    inventory_df = text_df[keep_cols].copy()
-    inventory_df["EVENT_DATE"] = pd.to_datetime(inventory_df["EVENT_DATE"], errors="coerce").dt.strftime("%Y-%m-%d")
-    inventory_df = inventory_df.sort_values(["DFCI_MRN", "EVENT_DATE", "NOTE_TYPE"], na_position="last")
+    text_df = load_note_text_dataframe(
+        args.text_source,
+        args.data_path,
+        raw_text_paths,
+        selected_mrns,
+        note_bundle_path=note_bundle_path,
+    )
+    inventory_df = standardize_note_text_dataframe(text_df)
     context_df = build_patient_context(text_df)
 
     inventory_path = args.output_dir / "LLM_v3_note_inventory.csv"
@@ -131,8 +116,14 @@ def main():
     print(f"Text source: {args.text_source}")
     if args.text_source == "raw":
         print(f"Raw text directories searched: {', '.join(str(path) for path in raw_text_paths)}")
+    if args.text_source == "bundle":
+        print(f"Compiled note bundle: {note_bundle_path}")
     if selected_mrns is not None:
         print(f"Requested MRNs: {len(selected_mrns)}")
+
+
+def main():
+    run(parse_args())
 
 
 if __name__ == "__main__":
