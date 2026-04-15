@@ -91,6 +91,7 @@ DEFAULT_CV_PENALIZERS = [0.01, 0.05, 0.10, 0.20, 0.50, 1.00]
 DEFAULT_CV_L1_RATIOS = [0.1, 0.3, 0.5, 0.7, 0.9]
 DEFAULT_AUC_PERCENTILE_RANGE = (0.05, 0.95)
 DEFAULT_AUC_N_POINTS = 50
+COXNET_MAX_ITER = 10_000
 PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
 
 ENDPOINTS = {
@@ -983,19 +984,24 @@ def tune_multivariable_model(
             fit_note = ""
             cox: CoxnetSurvivalAnalysis | None = None
             try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    cox = CoxnetSurvivalAnalysis(
-                        l1_ratio=float(l1_ratio),
-                        alphas=alphas_desc,
-                        penalty_factor=pf,
-                        fit_baseline_model=False,
-                    )
-                    cox.fit(X_tr, y_tr)
+                cox = CoxnetSurvivalAnalysis(
+                    l1_ratio=float(l1_ratio),
+                    alphas=alphas_desc,
+                    penalty_factor=pf,
+                    fit_baseline_model=False,
+                    max_iter=COXNET_MAX_ITER,
+                )
+                cox.fit(X_tr, y_tr)
                 fitted_alphas = {float(a) for a in cox.alphas_}
                 fit_note = "fit_ok"
             except (ArithmeticError, ValueError, np.linalg.LinAlgError) as exc:
+                warnings.warn(
+                    f"Coxnet path fit failed for endpoint='{endpoint}' fold={fold} "
+                    f"l1_ratio={l1_ratio}: {exc}"
+                )
                 fit_note = f"path_failed: {exc}"
+                if cox is not None:
+                    fitted_alphas = {float(a) for a in getattr(cox, "alphas_", [])}
 
             for alpha in alphas_desc:
                 row = {
@@ -1070,7 +1076,6 @@ def fit_final_multivariable_model(
     endpoint: str,
     penalizer: float,
     l1_ratio: float,
-    penalizer_grid: list[float],
     split_stratification: str,
     cv_stratification: str,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
@@ -1097,43 +1102,41 @@ def fit_final_multivariable_model(
     y_te_time = test_mdf[duration_col].to_numpy().astype(float)
     pf = _penalty_factor(covariate_cols)
 
-    fallback_alphas = [float(penalizer)] + sorted(
-        {float(p) for p in penalizer_grid if float(p) > float(penalizer)}
+    model = CoxnetSurvivalAnalysis(
+        l1_ratio=float(l1_ratio),
+        alphas=[float(penalizer)],
+        penalty_factor=pf,
+        fit_baseline_model=False,
+        max_iter=COXNET_MAX_ITER,
     )
-
-    model: CoxnetSurvivalAnalysis | None = None
-    used_alpha = float("nan")
-    note = ""
-    for alpha in fallback_alphas:
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                cox = CoxnetSurvivalAnalysis(
-                    l1_ratio=float(l1_ratio),
-                    alphas=[float(alpha)],
-                    penalty_factor=pf,
-                    fit_baseline_model=False,
-                )
-                cox.fit(X_tr, y_tr)
-            model = cox
-            used_alpha = float(alpha)
-            note = "fit_ok" if alpha == penalizer else f"fit_ok_fallback_alpha_{alpha:g}"
-            break
-        except (ArithmeticError, ValueError, np.linalg.LinAlgError) as exc:
-            note = f"fit_failed: {exc}"
-
-    if model is None:
-        raise RuntimeError(f"Final multivariable model failed for endpoint '{endpoint}': {note}")
-    if used_alpha != penalizer:
-        print(
-            f"  [fallback] CV-chosen alpha={penalizer:g} failed to converge on full 80% "
-            f"for '{endpoint}'; used alpha={used_alpha:g} instead."
+    try:
+        model.fit(X_tr, y_tr)
+        note = "fit_ok"
+    except (ArithmeticError, ValueError, np.linalg.LinAlgError) as exc:
+        warnings.warn(
+            f"Coxnet final fit did not converge for endpoint='{endpoint}' "
+            f"alpha={penalizer} l1_ratio={l1_ratio}: {exc}. "
+            "Proceeding with the current (possibly partial) estimate."
         )
+        note = f"fit_not_converged: {exc}"
+    used_alpha = float(penalizer)
 
-    train_pred = np.asarray(model.predict(X_tr), dtype=float).reshape(-1)
-    test_pred = np.asarray(model.predict(X_te), dtype=float).reshape(-1)
-    train_c = float(concordance_index_censored(y_tr_event, y_tr_time, train_pred)[0])
-    test_c = float(concordance_index_censored(y_te_event, y_te_time, test_pred)[0])
+    if hasattr(model, "coef_"):
+        train_pred = np.asarray(model.predict(X_tr), dtype=float).reshape(-1)
+        test_pred = np.asarray(model.predict(X_te), dtype=float).reshape(-1)
+        try:
+            train_c = float(concordance_index_censored(y_tr_event, y_tr_time, train_pred)[0])
+        except (ValueError, ZeroDivisionError):
+            train_c = float("nan")
+        try:
+            test_c = float(concordance_index_censored(y_te_event, y_te_time, test_pred)[0])
+        except (ValueError, ZeroDivisionError):
+            test_c = float("nan")
+    else:
+        train_pred = np.zeros(len(X_tr), dtype=float)
+        test_pred = np.zeros(len(X_te), dtype=float)
+        train_c = float("nan")
+        test_c = float("nan")
 
     train_iauc, train_auc_df = compute_integrated_auc_t(
         train_mdf,
@@ -1174,7 +1177,10 @@ def fit_final_multivariable_model(
         "note": note,
     }
 
-    coefs = np.asarray(model.coef_, dtype=float).reshape(-1)  # (n_features,) for single-alpha fit
+    if hasattr(model, "coef_"):
+        coefs = np.asarray(model.coef_, dtype=float).reshape(-1)
+    else:
+        coefs = np.zeros(len(covariate_cols), dtype=float)
     summary_rows = []
     for col, coef in zip(covariate_cols, coefs):
         lab_name, feature_stat = parse_feature_name(col)
@@ -1380,7 +1386,6 @@ def main(args: argparse.Namespace) -> None:
                 endpoint=endpoint,
                 penalizer=float(best_row["penalizer"]),
                 l1_ratio=float(best_row["l1_ratio"]),
-                penalizer_grid=args.cv_penalizers,
                 split_stratification=split_stratification,
                 cv_stratification=str(best_row["cv_stratification"]),
             )
