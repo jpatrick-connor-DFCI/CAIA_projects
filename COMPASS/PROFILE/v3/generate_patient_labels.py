@@ -54,12 +54,25 @@ LIST_FIELDS = [
 ]
 
 
+def infer_platinum_exposure_from_text(note_extractions):
+    return any((extraction.get("platinum_mentions") or []) for extraction in note_extractions or [])
+
+
+def infer_first_platinum_date_from_text(note_extractions):
+    candidate_dates = []
+    for extraction in note_extractions or []:
+        for mention in extraction.get("platinum_mentions") or []:
+            event_date = mention.get("event_date") or extraction.get("note_date")
+            if event_date:
+                candidate_dates.append(str(event_date))
+    return sorted(candidate_dates)[0] if candidate_dates else None
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Run v3 patient-level synthesis.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--context-path", type=Path, default=None)
     parser.add_argument("--candidate-path", type=Path, default=None)
-    parser.add_argument("--derived-features-path", type=Path, default=None)
     parser.add_argument("--note-extractions-path", type=Path, default=None)
     parser.add_argument("--mrns", default=None, help="Comma-separated DFCI_MRN values to include.")
     parser.add_argument(

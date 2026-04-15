@@ -163,7 +163,7 @@ Return ONLY valid JSON. No markdown fencing, no commentary.
 PATIENT_SYNTHESIS_SYSTEM_PROMPT = """
 You are a clinical data synthesis system for an IRB-approved prostate cancer research study.
 You will receive:
-1. `structured_context` derived from medications, labs, and other structured data
+1. `structured_context` containing only note-level metadata such as note counts
 2. `note_extractions` generated from selected notes
 
 Your task is to synthesize the patient's disease phenotype and, when applicable, the main
@@ -178,13 +178,12 @@ indication for platinum chemotherapy.
 - For non-platinum patients, whether they have a platinum-suggestive phenotype
 
 ## CLINICAL RULES
-- Use `note_extractions` as the primary disease evidence source.
-- Use `structured_context` to support timing, lab-pattern interpretation, biomarker context, and treatment history.
-- Do not diagnose NEPC/SCPC from lab patterns alone.
+- Use `note_extractions` as the only clinical evidence source.
+- `structured_context` is metadata only and must not be used to infer disease phenotype, platinum exposure, biomarkers, or treatment history.
 - AVPC can be supported by explicit AVPC/anaplastic language or by Aparicio criteria. Use the specific criteria documented in the chart.
 - Pathology is most authoritative for C1 and for neuroendocrine/small-cell histology.
 - Imaging is most authoritative for C2-C5.
-- Structured labs are authoritative for LDH, CEA, calcium, and PSA-derived supportive context.
+- Only use LDH, CEA, calcium, PSA, or neuroendocrine marker evidence when it is explicitly documented in the note text.
 - `primary_platinum_indication` must be one of:
   - `nepc_scpc`
   - `aggressive_variant`
@@ -193,12 +192,13 @@ indication for platinum chemotherapy.
   - `other`
   - `unclear`
   - `not_applicable`
-- Use `not_applicable` when `PLATINUM_EXPOSED` is false.
+- Use `not_applicable` when platinum exposure is not supported anywhere in `note_extractions`.
 - `platinum_suggestive_phenotype` must be one of:
   - `nepc_scpc`
   - `aggressive_variant`
   - `none`
   - `indeterminate`
+- Determine whether the patient is platinum-exposed only from explicit platinum mentions in the note text.
 - Use `dominant_disease_phenotype = mixed_transition` when the chart supports both conventional adenocarcinoma history and later NEPC/SCPC or AVPC evolution without a single clean dominant state.
 - Use `indeterminate` instead of guessing when evidence is too thin.
 - Use empty arrays for list fields when no evidence is present.

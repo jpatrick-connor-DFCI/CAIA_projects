@@ -7,10 +7,10 @@ Arm 1 (univariate, full dataset):
   - For each feature, fit Cox on [AGE + feature] using all patients.
   - Extract coefficient, HR per SD, 95% CI, and p-value.
 
-Arm 2 (multivariable lasso-Cox):
+Arm 2 (multivariable elastic-net Cox):
   - 80% train/val + 20% held-out test.
-  - 5-fold CV over penalizer grid (L1-only) on the 80%; AGE is unpenalized.
-  - Refit on full 80% with chosen penalizer and evaluate on 20% test:
+  - 5-fold CV over (penalizer x l1_ratio) grid on the 80%; AGE is unpenalized.
+  - Refit on full 80% with chosen (penalizer, l1_ratio) and evaluate on 20% test:
     C-index and integrated AUC(t) over the 5-95 percentile of event times.
 
 Endpoints: platinum, death.
@@ -75,6 +75,7 @@ DEFAULT_N_FOLDS = 5
 DEFAULT_MIN_PATIENT_COVERAGE = 0.20
 DEFAULT_MIN_EVENTS_PER_FEATURE = 10
 DEFAULT_CV_PENALIZERS = [0.01, 0.05, 0.10, 0.20, 0.50, 1.00]
+DEFAULT_CV_L1_RATIOS = [0.1, 0.3, 0.5, 0.7, 0.9]
 DEFAULT_AUC_PERCENTILE_RANGE = (0.05, 0.95)
 DEFAULT_AUC_N_POINTS = 50
 PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
@@ -876,20 +877,20 @@ def tune_multivariable_model(
     feature_cols: list[str],
     endpoint: str,
     penalizers: list[float],
+    l1_ratios: list[float],
     n_folds: int,
     seed: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    """Arm 2: 5-fold CV over penalizer grid, L1-only (lasso), AGE unpenalized."""
+    """Arm 2: 5-fold CV over (penalizer x l1_ratio) grid (elastic-net), AGE unpenalized."""
     duration_col = ENDPOINTS[endpoint]["duration_col"]
     event_col = ENDPOINTS[endpoint]["event_col"]
-    l1_ratio = 1.0
 
     splitter, strat_labels, cv_stratification = make_cv_splitter(train_val, n_folds=n_folds, seed=seed)
     fold_rows = []
 
     split_args = (np.arange(len(train_val)), strat_labels) if strat_labels is not None else (np.arange(len(train_val)),)
 
-    for penalizer in penalizers:
+    for penalizer, l1_ratio in product(penalizers, l1_ratios):
         for fold, (tr_idx, val_idx) in enumerate(splitter.split(*split_args), 1):
             fold_train = train_val.iloc[tr_idx]
             fold_val = train_val.iloc[val_idx]
@@ -974,8 +975,8 @@ def tune_multivariable_model(
 
     best_row = (
         cv_df.sort_values(
-            ["cv_mean", "n_valid_folds", "penalizer"],
-            ascending=[False, False, True],
+            ["cv_mean", "n_valid_folds", "penalizer", "l1_ratio"],
+            ascending=[False, False, True, True],
             na_position="last",
         )
         .iloc[0]
@@ -991,13 +992,13 @@ def fit_final_multivariable_model(
     feature_cols: list[str],
     endpoint: str,
     penalizer: float,
+    l1_ratio: float,
     penalizer_grid: list[float],
     split_stratification: str,
     cv_stratification: str,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     duration_col = ENDPOINTS[endpoint]["duration_col"]
     event_col = ENDPOINTS[endpoint]["event_col"]
-    l1_ratio = 1.0
 
     train_mdf, test_mdf, covariate_cols = build_model_matrices(
         train_val,
@@ -1258,6 +1259,7 @@ def main(args: argparse.Namespace) -> None:
                 feature_cols=selected_feature_cols,
                 endpoint=endpoint,
                 penalizers=args.cv_penalizers,
+                l1_ratios=args.cv_l1_ratios,
                 n_folds=args.n_folds,
                 seed=args.seed,
             )
@@ -1285,6 +1287,7 @@ def main(args: argparse.Namespace) -> None:
                 feature_cols=selected_feature_cols,
                 endpoint=endpoint,
                 penalizer=float(best_row["penalizer"]),
+                l1_ratio=float(best_row["l1_ratio"]),
                 penalizer_grid=args.cv_penalizers,
                 split_stratification=split_stratification,
                 cv_stratification=str(best_row["cv_stratification"]),
@@ -1295,9 +1298,10 @@ def main(args: argparse.Namespace) -> None:
 
             top_cols = [c for c in ["feature", "coef", "exp(coef)"] if c in summary_df.columns]
             top = summary_df.loc[~summary_df["is_age_covariate"], top_cols].head(10)
-            print("\nChosen hyperparameters (L1 lasso, age unpenalized):")
+            print("\nChosen hyperparameters (elastic-net, age unpenalized):")
             print(
-                f"  penalizer={best_row['penalizer']}  cv_mean C-index={best_row['cv_mean']:.4f}"
+                f"  penalizer={best_row['penalizer']}  l1_ratio={best_row['l1_ratio']}  "
+                f"cv_mean C-index={best_row['cv_mean']:.4f}"
             )
             print(f"  CV integrated AUC(t)={best_row['integrated_auc_t_cv_mean']:.4f}")
             print(
@@ -1392,6 +1396,13 @@ if __name__ == "__main__":
         nargs="+",
         type=float,
         default=DEFAULT_CV_PENALIZERS,
-        help="Lasso penalizer values searched during 5-fold CV on the 80%% train/val block.",
+        help="Penalizer values searched during 5-fold CV on the 80%% train/val block.",
+    )
+    parser.add_argument(
+        "--cv-l1-ratios",
+        nargs="+",
+        type=float,
+        default=DEFAULT_CV_L1_RATIOS,
+        help="Elastic-net L1 mixing values (0=ridge, 1=lasso) searched during 5-fold CV.",
     )
     main(parser.parse_args())

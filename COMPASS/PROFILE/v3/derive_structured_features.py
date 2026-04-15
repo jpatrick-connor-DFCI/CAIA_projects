@@ -51,12 +51,14 @@ def parse_args():
 
 def standardize_labs_input(labs_df):
     work = labs_df.copy()
-    rename_map = {}
-    if "TEST_NAME" not in work.columns and "TEST_TYPE_DESCR" in work.columns:
-        rename_map["TEST_TYPE_DESCR"] = "TEST_NAME"
-    if "TEST_NAME" not in work.columns and "TEST_TYPE_CD" in work.columns:
-        rename_map["TEST_TYPE_CD"] = "TEST_NAME"
-    work = work.rename(columns=rename_map)
+    if "TEST_NAME" not in work.columns:
+        if "TEST_TYPE_DESCR" in work.columns:
+            work["TEST_NAME"] = work["TEST_TYPE_DESCR"]
+            if "TEST_TYPE_CD" in work.columns:
+                missing_name = work["TEST_NAME"].isna() | work["TEST_NAME"].astype(str).str.strip().eq("")
+                work.loc[missing_name, "TEST_NAME"] = work.loc[missing_name, "TEST_TYPE_CD"]
+        elif "TEST_TYPE_CD" in work.columns:
+            work["TEST_NAME"] = work["TEST_TYPE_CD"]
     return work
 
 

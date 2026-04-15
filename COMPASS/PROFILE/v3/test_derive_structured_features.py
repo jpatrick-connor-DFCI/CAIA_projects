@@ -12,6 +12,7 @@ if str(CURRENT_DIR) not in sys.path:
 from derive_structured_features import (  # noqa: E402
     build_lab_feature_table,
     build_somatic_feature_table,
+    standardize_labs_input,
     value_is_positive,
 )
 
@@ -22,6 +23,24 @@ class StructuredFeaturesTest(unittest.TestCase):
         self.assertTrue(value_is_positive("Pathogenic mutation"))
         self.assertFalse(value_is_positive(0))
         self.assertFalse(value_is_positive("wild-type"))
+
+    def test_standardize_labs_input_creates_single_test_name_column(self):
+        labs_df = pd.DataFrame(
+            [
+                {
+                    "DFCI_MRN": 1,
+                    "TEST_TYPE_CD": "LDH",
+                    "TEST_TYPE_DESCR": "LDH (LACTATE DEHYDROGENASE)",
+                    "NUMERIC_RESULT": 100,
+                    "RESULT_UOM_NM": "U/L",
+                }
+            ]
+        )
+
+        standardized = standardize_labs_input(labs_df)
+
+        self.assertEqual(1, standardized.columns.tolist().count("TEST_NAME"))
+        self.assertEqual("LDH (LACTATE DEHYDROGENASE)", standardized.loc[0, "TEST_NAME"])
 
     def test_build_lab_feature_table_derives_peak_markers(self):
         labs_df = pd.DataFrame(
