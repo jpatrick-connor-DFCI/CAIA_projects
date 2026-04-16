@@ -13,6 +13,11 @@ from helpers import PROSTATE_CONTEXT_REGEX
 ARM_NAME = "nepc"
 SCHEMA_VERSION = "v3_nepc_2026-04-15"
 LIST_FIELDS = ["supporting_quotes", "supporting_quote_dates"]
+REQUIRED_SYNTHESIS_FIELDS = [
+    "has_nepc_signal",
+    "has_transformation_signal",
+    "transformation_status",
+]
 
 TRIGGER_REGEX = {
     "nepc_core": (

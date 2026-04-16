@@ -30,6 +30,10 @@ try:
     import tiktoken
 except ImportError:
     tiktoken = None
+    print(
+        "WARNING: tiktoken not installed — token estimates will use a rough word-count "
+        "heuristic (1.35x multiplier). Bundle token limits may be exceeded."
+    )
 
 
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -754,22 +758,39 @@ def normalize_bundle_extractions(bundle_response, note_bundle, arm_module):
     }
     note_order = [note["note_index"] for note in note_bundle]
     normalized = {idx: value.copy() for idx, value in note_defaults.items()}
+    returned_indices = set()
+    unknown_indices = []
+    non_dict_items = 0
+    missing_index_items = 0
 
     if isinstance(bundle_response, list):
         for item in bundle_response:
             if not isinstance(item, dict):
+                non_dict_items += 1
                 continue
             note_index = pd.to_numeric(item.get("note_index"), errors="coerce")
             if pd.isna(note_index):
+                missing_index_items += 1
                 continue
             note_index = int(note_index)
             if note_index not in normalized:
+                unknown_indices.append(note_index)
                 continue
+            returned_indices.add(note_index)
             merged = normalized[note_index].copy()
             merged.update(item)
             merged["note_date"] = merged.get("note_date") or note_defaults[note_index]["note_date"]
             merged["note_type"] = merged.get("note_type") or note_defaults[note_index]["note_type"]
             normalized[note_index] = merged
+
+    missing_indices = [idx for idx in note_order if idx not in returned_indices]
+    if unknown_indices or missing_indices or non_dict_items or missing_index_items:
+        print(
+            f"    [{getattr(arm_module, 'ARM_NAME', 'arm')}] bundle coverage warning: "
+            f"bundle_size={len(note_bundle)} returned={len(returned_indices)} "
+            f"missing={missing_indices} unknown={unknown_indices} "
+            f"non_dict={non_dict_items} no_index={missing_index_items}"
+        )
 
     ordered = []
     for note_index in note_order:

@@ -25,7 +25,11 @@ def ensure_unique_mrns(df, source_name):
 
 def load_arm_labels(output_dir, arm_name):
     path = output_dir / f"LLM_v3_{arm_name}_labels.tsv"
-    if not path.exists() or path.stat().st_size == 0:
+    if not path.exists():
+        print(f"WARNING: {arm_name} labels file not found: {path} — arm columns will be NaN")
+        return pd.DataFrame(columns=["DFCI_MRN"])
+    if path.stat().st_size == 0:
+        print(f"WARNING: {arm_name} labels file is empty: {path} — arm columns will be NaN")
         return pd.DataFrame(columns=["DFCI_MRN"])
     df = normalize_mrn_column(pd.read_csv(path, sep="\t", low_memory=False))
     df = ensure_unique_mrns(df, path.name)
@@ -78,8 +82,13 @@ def run(args):
     context_df = ensure_unique_mrns(context_df, context_path.name)
 
     merged_df = context_df.copy()
+    context_mrns = set(context_df["DFCI_MRN"].unique())
     for arm_name in ARM_NAMES:
         arm_df = load_arm_labels(args.output_dir, arm_name)
+        arm_mrns = set(arm_df["DFCI_MRN"].unique()) if not arm_df.empty else set()
+        missing_count = len(context_mrns - arm_mrns)
+        if missing_count:
+            print(f"WARNING: {missing_count} patients in context have no {arm_name} labels")
         merged_df = merged_df.merge(arm_df, on="DFCI_MRN", how="left")
 
     merged_df["final_bucket"] = merged_df.apply(assign_final_bucket, axis=1)

@@ -148,7 +148,8 @@ def extract_patient_note_extractions(
         return [], None
 
     note_extractions = []
-    bundle_errors = []
+    hard_errors = []
+    filtered_note_count = 0
     worker_count = max(1, min(max_workers, len(note_bundles)))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {
@@ -168,27 +169,36 @@ def extract_patient_note_extractions(
             try:
                 extraction, error_type = future.result()
             except json.JSONDecodeError as error:
+                extraction = None
                 error_type = f"json_parse: {str(error)[:200]}"
             except Exception as error:  # noqa: BLE001
+                extraction = None
                 error_type = f"unexpected: {type(error).__name__}: {str(error)[:200]}"
 
             if error_type:
                 if "content_filter" in error_type:
+                    filtered_note_count += len(submitted_bundle)
                     print(
                         f"    Bundle filtered for {arm_module.ARM_NAME} {mrn} "
-                        f"({len(submitted_bundle)} notes)"
+                        f"({len(submitted_bundle)} notes) - skipping bundle, continuing patient"
                     )
-                else:
-                    print(f"    Extraction failed for {arm_module.ARM_NAME} {mrn}: {error_type}")
-                bundle_errors.append(error_type)
+                    continue
+                print(f"    Extraction failed for {arm_module.ARM_NAME} {mrn}: {error_type}")
+                hard_errors.append(error_type)
                 continue
 
             if extraction:
                 note_extractions.extend(extraction if isinstance(extraction, list) else [extraction])
 
-    if bundle_errors:
-        return None, summarize_error_types(bundle_errors)
-    return normalize_note_extractions(arm_module, note_extractions), None
+    if hard_errors:
+        return None, summarize_error_types(hard_errors)
+    if filtered_note_count and not note_extractions:
+        return None, f"content_filter_all_bundles: {filtered_note_count} notes filtered"
+    return normalize_note_extractions(arm_module, note_extractions), (
+        f"content_filter_partial: {filtered_note_count} notes filtered"
+        if filtered_note_count
+        else None
+    )
 
 
 def synthesize_patient_result(
@@ -224,6 +234,14 @@ def synthesize_patient_result(
         parsed_row = parse_json_response(response_text)
     except json.JSONDecodeError as error:
         return None, f"json_parse: {str(error)[:200]}"
+
+    if not isinstance(parsed_row, dict):
+        return None, f"synthesis_schema_not_object: {type(parsed_row).__name__}"
+
+    required_fields = getattr(arm_module, "REQUIRED_SYNTHESIS_FIELDS", [])
+    missing_fields = [field for field in required_fields if field not in parsed_row]
+    if missing_fields:
+        return None, f"synthesis_schema_incomplete: missing {missing_fields}"
 
     return (
         arm_module.merge_patient_result(
@@ -336,10 +354,11 @@ def run(args):
         structured_context = build_structured_context(context_row)
         mrn_df = candidate_groups.get(mrn, pd.DataFrame())
 
-        if mrn in extractions_by_mrn:
+        cached_entry = extractions_by_mrn.get(mrn)
+        if cached_entry and not cached_entry.get("partial", False):
             note_extractions = normalize_note_extractions(
                 arm_module,
-                extractions_by_mrn[mrn].get("note_extractions", []),
+                cached_entry.get("note_extractions", []),
             )
         else:
             note_extractions, extraction_error = extract_patient_note_extractions(
@@ -355,13 +374,18 @@ def run(args):
                 bundle_max_notes=args.bundle_max_notes,
                 extraction_system_message=extraction_system_message,
             )
-            if extraction_error:
+            if extraction_error and note_extractions is None:
                 log_failure(paths["failures"], mrn, extraction_error, len(mrn_df), "extraction")
                 continue
+            if extraction_error:
+                log_failure(
+                    paths["failures"], mrn, extraction_error, len(mrn_df), "extraction_partial"
+                )
 
             extractions_by_mrn[mrn] = {
                 "schema_version": arm_module.SCHEMA_VERSION,
                 "note_extractions": note_extractions,
+                "partial": bool(extraction_error),
             }
             save_extractions_by_mrn(paths["extractions"], extractions_by_mrn)
 

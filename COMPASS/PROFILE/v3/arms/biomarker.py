@@ -2,11 +2,13 @@ import re
 from copy import deepcopy
 
 from .evidence_utils import TRIAL_ONLY_PATTERNS, collect_partitioned_mentions, normalize_label, sanitize_mentions
+from helpers import PROSTATE_CONTEXT_REGEX as _PROSTATE_CONTEXT_REGEX
 
 
 ARM_NAME = "biomarker"
 SCHEMA_VERSION = "v3_biomarker_2026-04-15"
 LIST_FIELDS = ["biomarker_types", "supporting_quotes", "supporting_quote_dates"]
+REQUIRED_SYNTHESIS_FIELDS = ["has_biomarker_signal", "platinum_linked_biomarker"]
 
 TRIGGER_REGEX = {
     "biomarker_core": (
@@ -25,9 +27,9 @@ TRIGGER_REGEX = {
         r")\b"
     ),
 }
-PROSTATE_CONTEXT_REGEX = None
-REQUIRE_PROSTATE_CONTEXT = False
-ALLOW_WITHOUT_CONTEXT_NOTE_TYPES = set()
+PROSTATE_CONTEXT_REGEX = _PROSTATE_CONTEXT_REGEX
+REQUIRE_PROSTATE_CONTEXT = True
+ALLOW_WITHOUT_CONTEXT_NOTE_TYPES = {"Pathology"}
 ALLOW_WITHOUT_CONTEXT_LABELS = set()
 REQUIRED_TRIGGER_LABELS = {"biomarker_core"}
 

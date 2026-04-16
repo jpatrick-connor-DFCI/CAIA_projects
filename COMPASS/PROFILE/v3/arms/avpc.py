@@ -8,6 +8,17 @@ from helpers import PROSTATE_CONTEXT_REGEX
 ARM_NAME = "avpc"
 SCHEMA_VERSION = "v3_avpc_2026-04-15"
 LIST_FIELDS = ["present_criteria", "supporting_quotes", "supporting_quote_dates"]
+REQUIRED_SYNTHESIS_FIELDS = [
+    "has_avpc_features",
+    "explicit_avpc_mention",
+    "avpc_c1",
+    "avpc_c2",
+    "avpc_c3",
+    "avpc_c4",
+    "avpc_c5",
+    "avpc_c6",
+    "avpc_c7",
+]
 
 TRIGGER_REGEX = {
     "explicit_avpc": (
