@@ -23,6 +23,8 @@ DEFAULT_MAPPING_CSV = PROFILE_DIR / "OMOP_to_DFCI_lab_ids.csv"
 DEFAULT_UNIQUE_LABS_CSV = PROFILE_DIR / "unique_lab_ids_w_units.csv"
 
 PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
+PARPI_MEDS = {"OLAPARIB", "RUCAPARIB", "NIRAPARIB", "TALAZOPARIB", "VELIPARIB"}
+MIN_PSA_COUNT = 5
 
 
 def generate_new_test_name(code: object, descr: object) -> str:
@@ -235,7 +237,6 @@ def build_longitudinal_prediction_data(
         pred_df["AGE_AT_TREATMENTSTART"],
         errors="coerce",
     )
-    pred_df["DIAGNOSIS"] = pred_df["DIAGNOSIS_DATE"].notna().astype(int)
     pred_df["FIRST_TREATMENT"] = pred_df["FIRST_TREATMENT_DATE"].notna().astype(int)
     pred_df["PLATINUM"] = (
         pred_df["PLATINUM_MEDICATION"]
@@ -246,24 +247,25 @@ def build_longitudinal_prediction_data(
     )
     pred_df["PLATINUM_DATE"] = pred_df["PLATINUM_DATE"].fillna(pred_df["LAST_CONTACT_DATE"])
 
-    pred_df["FIRST_RECORD_DATE"] = pred_df.groupby("DFCI_MRN")["LAB_DATE"].transform("min")
+    first_lab_date = pred_df.groupby("DFCI_MRN")["LAB_DATE"].transform("min")
+    pred_df["FIRST_RECORD_DATE"] = pd.concat(
+        [first_lab_date, pred_df["DIAGNOSIS_DATE"], pred_df["FIRST_TREATMENT_DATE"]],
+        axis=1,
+    ).min(axis=1)
     pred_df["t_lab"] = (pred_df["LAB_DATE"] - pred_df["FIRST_RECORD_DATE"]).dt.days.astype(float)
     pred_df["t_last_contact"] = (
         pred_df["LAST_CONTACT_DATE"] - pred_df["FIRST_RECORD_DATE"]
     ).dt.days.astype(float)
     pred_df["t_death"] = pred_df["t_last_contact"]
 
-    diagnosis_days = (pred_df["DIAGNOSIS_DATE"] - pred_df["FIRST_RECORD_DATE"]).dt.days
+    pred_df["t_diagnosis"] = (
+        (pred_df["DIAGNOSIS_DATE"] - pred_df["FIRST_RECORD_DATE"]).dt.days.astype(float)
+    )
     first_treatment_days = (
         pred_df["FIRST_TREATMENT_DATE"] - pred_df["FIRST_RECORD_DATE"]
     ).dt.days
     platinum_days = (pred_df["PLATINUM_DATE"] - pred_df["FIRST_RECORD_DATE"]).dt.days
 
-    pred_df["t_diagnosis"] = np.where(
-        pred_df["DIAGNOSIS"].eq(1),
-        diagnosis_days,
-        pred_df["t_last_contact"],
-    ).astype(float)
     pred_df["t_first_treatment"] = np.where(
         pred_df["FIRST_TREATMENT"].eq(1),
         first_treatment_days,
@@ -287,7 +289,6 @@ def build_longitudinal_prediction_data(
         "AGE_AT_TREATMENTSTART",
         "FIRST_RECORD_DATE",
         "DIAGNOSIS_DATE",
-        "DIAGNOSIS",
         "FIRST_TREATMENT_DATE",
         "FIRST_TREATMENT",
         "LAST_CONTACT_DATE",
@@ -309,6 +310,63 @@ def build_longitudinal_prediction_data(
         "LAB_VALUE",
     ]
     return pred_df[ordered_cols].copy()
+
+
+def apply_cohort_filters(
+    pred_df: pd.DataFrame,
+    *,
+    medications_df: pd.DataFrame,
+    min_psa_count: int = MIN_PSA_COUNT,
+) -> pd.DataFrame:
+    """Patient-level inclusion/exclusion on the row-level prediction frame.
+
+    Inclusion:
+      - recorded first treatment (FIRST_TREATMENT == 1); never-treated
+        patients are excluded so that the "pre-treatment" window used by
+        downstream feature engineering is well-defined.
+      - >= ``min_psa_count`` PSA rows in the longitudinal prediction frame
+        (LAB_NAME == "PSA", after lab consolidation)
+    Exclusion:
+      - any PARPi exposure, identified from the pre-existing prostate
+        medications table via NCI_PREFERRED_MED_NM membership in PARPI_MEDS
+
+    Prostate-diagnosis inclusion and non-prostate-primary exclusion are
+    already enforced upstream (ICD-based, via compute_first_prostate_diagnosis).
+    """
+    n_before = pred_df["DFCI_MRN"].nunique()
+    print(f"Cohort before treatment/PSA/PARPi filters: {n_before} patients")
+
+    pred_df = pred_df.loc[pred_df["FIRST_TREATMENT"].eq(1)].copy()
+    n_after_treated = pred_df["DFCI_MRN"].nunique()
+    print(f"  First-treatment inclusion: kept {n_after_treated}/{n_before}")
+
+    psa_counts = (
+        pred_df.loc[pred_df["LAB_NAME"].eq("PSA")]
+        .groupby("DFCI_MRN")
+        .size()
+    )
+    keep_psa = psa_counts.loc[psa_counts >= min_psa_count].index
+    pred_df = pred_df.loc[pred_df["DFCI_MRN"].isin(keep_psa)].copy()
+    n_after_psa = pred_df["DFCI_MRN"].nunique()
+    print(
+        f"  PSA count filter (>= {min_psa_count}): "
+        f"kept {n_after_psa}/{n_after_treated}"
+    )
+
+    parpi_mrns = set(
+        medications_df.loc[
+            medications_df["NCI_PREFERRED_MED_NM"].astype(str).str.upper().isin(PARPI_MEDS),
+            "DFCI_MRN",
+        ].unique()
+    )
+    pred_df = pred_df.loc[~pred_df["DFCI_MRN"].isin(parpi_mrns)].copy()
+    n_after_parpi = pred_df["DFCI_MRN"].nunique()
+    print(
+        f"  PARPi exclusion: dropped {n_after_psa - n_after_parpi} "
+        f"(remaining: {n_after_parpi})"
+    )
+
+    return pred_df
 
 
 def parse_args() -> argparse.Namespace:
@@ -334,6 +392,12 @@ def parse_args() -> argparse.Namespace:
         "--platinum-csv",
         type=Path,
         default=NEPC_PROJ_PATH / "platinum_chemo_records.csv",
+    )
+    parser.add_argument(
+        "--medications-csv",
+        type=Path,
+        default=NEPC_PROJ_PATH / "prostate_medications_data.csv",
+        help="Pre-compiled prostate-cohort medications table (used for PARPi exclusion).",
     )
     parser.add_argument(
         "--death-csv",
@@ -433,6 +497,13 @@ def main() -> None:
         platinum_df,
         nepc_df=nepc_labels,
     )
+
+    medications_df = pd.read_csv(args.medications_csv, usecols=["DFCI_MRN", "NCI_PREFERRED_MED_NM"])
+    longitudinal_prediction_df = apply_cohort_filters(
+        longitudinal_prediction_df,
+        medications_df=medications_df,
+    )
+
     longitudinal_prediction_df.to_csv(args.output_csv, index=False)
 
     print(f"Wrote unique lab inventory to {args.unique_labs_csv}")

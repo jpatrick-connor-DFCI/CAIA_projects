@@ -13,7 +13,7 @@ Arm 2 (multivariable elastic-net Cox):
   - Refit on full 80% with chosen (penalizer, l1_ratio) and evaluate on 20% test:
     C-index and integrated AUC(t) over the 5-95 percentile of event times.
 
-Endpoints: platinum, death.
+Endpoints: platinum, death, nepc.
 
 Expected input:
   Row-level longitudinal data with at least
@@ -21,19 +21,9 @@ Expected input:
     t_death (or t_last_contact), PLATINUM, DEATH, AGE_AT_TREATMENTSTART
 
 Outputs:
-  results/cox_agg_feature_matrix_raw.csv
-  results/cox_agg_outcome_table.csv
-  results/cox_agg_split_assignments.csv
-  results/cox_agg_feature_selection.csv
-  results/cox_agg_endpoint_summary.csv
-  results/cox_agg_univariate_<endpoint>.csv
-  results/cox_agg_univariate_overview.csv
-  results/cox_agg_cv_metrics.csv
-  results/cox_agg_cv_fold_metrics.csv
-  results/cox_agg_selected_models.csv
-  results/cox_agg_test_metrics.csv
-  results/cox_agg_multivariable_<endpoint>.csv
-  results/cox_agg_test_predictions_<endpoint>.csv
+  results/cox_agg_feature_selection.csv   (selected lab features + coverage)
+  results/cox_agg_univariate.csv          (log HRs, p-values, FDR per endpoint)
+  results/cox_agg_multivariable.csv       (coefs + C-indices + integrated AUC(t))
 """
 
 from __future__ import annotations
@@ -100,7 +90,6 @@ OUTCOME_COLUMNS = {
     AGE_COL,
     "FIRST_RECORD_DATE",
     "DIAGNOSIS_DATE",
-    "DIAGNOSIS",
     "FIRST_TREATMENT_DATE",
     "FIRST_TREATMENT",
     "LAST_CONTACT_DATE",
@@ -214,7 +203,6 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
         AGE_COL,
         "FIRST_RECORD_DATE",
         "DIAGNOSIS_DATE",
-        "DIAGNOSIS",
         "FIRST_TREATMENT_DATE",
         "FIRST_TREATMENT",
         "LAST_CONTACT_DATE",
@@ -260,10 +248,6 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
     pat["DEATH"] = pd.to_numeric(pat.get("DEATH"), errors="coerce").fillna(0).astype(int)
     pat["PLATINUM"] = _coerce_platinum(pat.get("PLATINUM", pd.Series(0, index=pat.index)))
     pat["NEPC"] = pd.to_numeric(pat.get("NEPC", pd.Series(0, index=pat.index)), errors="coerce").fillna(0).astype(int)
-    pat["DIAGNOSIS"] = pd.to_numeric(
-        pat.get("DIAGNOSIS", pat.get("DIAGNOSIS_DATE", pd.Series(index=pat.index)).notna()),
-        errors="coerce",
-    ).fillna(0).astype(int)
     pat["FIRST_TREATMENT"] = pd.to_numeric(
         pat.get(
             "FIRST_TREATMENT",
@@ -527,34 +511,6 @@ def select_feature_columns(
     if not selected:
         raise ValueError("No features passed coverage and variability filters.")
     return selected, feature_meta.reset_index(drop=True)
-
-
-def summarize_endpoints(
-    merged: pd.DataFrame,
-    endpoints: list[str],
-) -> pd.DataFrame:
-    rows = []
-    for split_name, split_df in [
-        ("train_val", merged.loc[merged["split"].eq("train_val")]),
-        ("test", merged.loc[merged["split"].eq("test")]),
-    ]:
-        for endpoint in endpoints:
-            duration_col = ENDPOINTS[endpoint]["duration_col"]
-            event_col = ENDPOINTS[endpoint]["event_col"]
-            event_times = split_df.loc[split_df[event_col].eq(1), duration_col]
-            rows.append(
-                {
-                    "split": split_name,
-                    "endpoint": endpoint,
-                    "description": ENDPOINTS[endpoint]["description"],
-                    "n_patients": len(split_df),
-                    "n_events": int(split_df[event_col].sum()),
-                    "event_rate": float(split_df[event_col].mean()) if len(split_df) else np.nan,
-                    "median_time_days_all": float(split_df[duration_col].median()) if len(split_df) else np.nan,
-                    "median_time_days_events": float(event_times.median()) if not event_times.empty else np.nan,
-                }
-            )
-    return pd.DataFrame(rows)
 
 
 def fit_cox_with_fallback(
@@ -1125,51 +1081,6 @@ def fit_final_multivariable_model(
     return metrics_row, summary, predictions
 
 
-def build_univariate_overview(univariate_results: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    overview: pd.DataFrame | None = None
-    key_cols = ["feature", "lab_name", "feature_stat"]
-
-    for endpoint, endpoint_df in univariate_results.items():
-        keep = endpoint_df[
-            [
-                *key_cols,
-                "coverage",
-                "n_patients_used",
-                "n_patients_observed",
-                "n_patients_imputed",
-                "n_events_used",
-                "coef_feature",
-                "hazard_ratio_per_sd",
-                "ci_lower",
-                "ci_upper",
-                "p_value",
-                "q_value",
-                "coef_age",
-                "p_value_age",
-                "note",
-            ]
-        ].copy()
-        rename_map = {col: f"{endpoint}_{col}" for col in keep.columns if col not in key_cols}
-        keep = keep.rename(columns=rename_map)
-
-        if overview is None:
-            overview = keep
-        else:
-            overview = overview.merge(keep, on=key_cols, how="outer")
-
-    if overview is None:
-        return pd.DataFrame(columns=key_cols)
-
-    sort_cols = [
-        col
-        for col in ["platinum_p_value", "death_p_value"]
-        if col in overview.columns
-    ]
-    if sort_cols:
-        overview = overview.sort_values(sort_cols, na_position="last").reset_index(drop=True)
-    return overview
-
-
 def print_top_hits(df: pd.DataFrame, *, endpoint: str) -> None:
     estimable = df.loc[df["p_value"].notna()]
     n_tested = len(estimable)
@@ -1220,12 +1131,11 @@ def main(args: argparse.Namespace) -> None:
         selected_feature_cols + [col for col in merged.columns if col in OUTCOME_COLUMNS]
     ].copy()
 
-    train_val, test, split_assignments, split_stratification = split_train_test(
+    train_val, test, _, split_stratification = split_train_test(
         merged,
         test_frac=args.test_frac,
         seed=args.seed,
     )
-    merged["split"] = split_assignments
 
     print(f"Full cohort: {len(merged)} patients")
     print(f"Train/val (Arm 2): {len(train_val)} patients")
@@ -1233,19 +1143,29 @@ def main(args: argparse.Namespace) -> None:
     print(f"Selected summary-lab features: {len(selected_feature_cols)}")
     print(f"Split stratification: {split_stratification}")
 
-    feature_df.to_csv(RESULTS / "cox_agg_feature_matrix_raw.csv")
-    outcome_df.to_csv(RESULTS / "cox_agg_outcome_table.csv")
-    split_assignments.to_frame().to_csv(RESULTS / "cox_agg_split_assignments.csv")
-    feature_meta.to_csv(RESULTS / "cox_agg_feature_selection.csv", index=False)
+    feature_meta.loc[
+        feature_meta["selected"],
+        ["feature", "lab_name", "feature_stat", "coverage", "unique_non_missing"],
+    ].to_csv(RESULTS / "cox_agg_feature_selection.csv", index=False)
 
-    endpoint_summary = summarize_endpoints(merged, endpoints)
-    endpoint_summary.to_csv(RESULTS / "cox_agg_endpoint_summary.csv", index=False)
+    univariate_frames: list[pd.DataFrame] = []
+    multivariable_frames: list[pd.DataFrame] = []
 
-    univariate_results: dict[str, pd.DataFrame] = {}
-    cv_metric_rows = []
-    cv_fold_rows = []
-    selected_model_rows = []
-    test_metric_rows = []
+    univariate_keep_cols = [
+        "endpoint",
+        "feature",
+        "lab_name",
+        "feature_stat",
+        "coverage",
+        "n_patients_used",
+        "n_events_used",
+        "coef_feature",
+        "hazard_ratio_per_sd",
+        "ci_lower",
+        "ci_upper",
+        "p_value",
+        "q_value",
+    ]
 
     if args.analysis in {"univariate", "both"}:
         print("\n##### ARM 1: UNIVARIATE (all endpoints) #####")
@@ -1259,8 +1179,7 @@ def main(args: argparse.Namespace) -> None:
                 min_events_per_feature=args.min_events_per_feature,
                 fallback_penalizer=args.univariate_penalizer,
             )
-            univariate_results[endpoint] = univariate_df
-            univariate_df.to_csv(RESULTS / f"cox_agg_univariate_{endpoint}.csv", index=False)
+            univariate_frames.append(univariate_df[univariate_keep_cols].copy())
             print_top_hits(univariate_df, endpoint=endpoint)
 
     if args.analysis in {"multivariable", "both"}:
@@ -1268,7 +1187,7 @@ def main(args: argparse.Namespace) -> None:
         for endpoint in endpoints:
             print(f"\n=== {endpoint.upper()} ===")
             print(ENDPOINTS[endpoint]["description"])
-            fold_df, cv_df, best_row = tune_multivariable_model(
+            _, _, best_row = tune_multivariable_model(
                 train_val,
                 feature_cols=selected_feature_cols,
                 endpoint=endpoint,
@@ -1277,25 +1196,8 @@ def main(args: argparse.Namespace) -> None:
                 n_folds=args.n_folds,
                 seed=args.seed,
             )
-            cv_fold_rows.append(fold_df)
-            cv_metric_rows.append(cv_df)
-            selected_model_rows.append(
-                {
-                    "endpoint": endpoint,
-                    "description": ENDPOINTS[endpoint]["description"],
-                    "selected_penalizer": best_row["penalizer"],
-                    "selected_l1_ratio": best_row["l1_ratio"],
-                    "cv_mean_c_index": best_row["cv_mean"],
-                    "cv_std_c_index": best_row["cv_std"],
-                    "cv_mean_integrated_auc_t": best_row["integrated_auc_t_cv_mean"],
-                    "cv_std_integrated_auc_t": best_row["integrated_auc_t_cv_std"],
-                    "n_valid_folds": best_row["n_valid_folds"],
-                    "n_valid_auc_t_folds": best_row["n_valid_auc_t_folds"],
-                    "cv_stratification": best_row["cv_stratification"],
-                }
-            )
 
-            metrics_row, summary_df, pred_df = fit_final_multivariable_model(
+            metrics_row, summary_df, _ = fit_final_multivariable_model(
                 train_val,
                 test,
                 feature_cols=selected_feature_cols,
@@ -1306,9 +1208,7 @@ def main(args: argparse.Namespace) -> None:
                 split_stratification=split_stratification,
                 cv_stratification=str(best_row["cv_stratification"]),
             )
-            test_metric_rows.append(metrics_row)
-            summary_df.to_csv(RESULTS / f"cox_agg_multivariable_{endpoint}.csv", index=False)
-            pred_df.to_csv(RESULTS / f"cox_agg_test_predictions_{endpoint}.csv", index=False)
+            multivariable_frames.append(summary_df)
 
             top_cols = [c for c in ["feature", "coef", "exp(coef)"] if c in summary_df.columns]
             top = summary_df.loc[~summary_df["is_age_covariate"], top_cols].head(10)
@@ -1327,28 +1227,21 @@ def main(args: argparse.Namespace) -> None:
             print("Top multivariable coefficients:")
             print(top.to_string(index=False))
 
-    if univariate_results:
-        overview = build_univariate_overview(univariate_results)
-        overview.to_csv(RESULTS / "cox_agg_univariate_overview.csv", index=False)
-        print("\nSaved: results/cox_agg_univariate_overview.csv")
+    if univariate_frames:
+        pd.concat(univariate_frames, ignore_index=True).to_csv(
+            RESULTS / "cox_agg_univariate.csv", index=False
+        )
+    if multivariable_frames:
+        pd.concat(multivariable_frames, ignore_index=True).to_csv(
+            RESULTS / "cox_agg_multivariable.csv", index=False
+        )
 
-    if cv_metric_rows:
-        pd.concat(cv_metric_rows, ignore_index=True).to_csv(RESULTS / "cox_agg_cv_metrics.csv", index=False)
-        pd.concat(cv_fold_rows, ignore_index=True).to_csv(RESULTS / "cox_agg_cv_fold_metrics.csv", index=False)
-        pd.DataFrame(selected_model_rows).to_csv(RESULTS / "cox_agg_selected_models.csv", index=False)
-        pd.DataFrame(test_metric_rows).to_csv(RESULTS / "cox_agg_test_metrics.csv", index=False)
-        print("Saved:")
-        print("  results/cox_agg_cv_metrics.csv")
-        print("  results/cox_agg_cv_fold_metrics.csv")
-        print("  results/cox_agg_selected_models.csv")
-        print("  results/cox_agg_test_metrics.csv")
-
-    print("Saved:")
-    print("  results/cox_agg_feature_matrix_raw.csv")
-    print("  results/cox_agg_outcome_table.csv")
-    print("  results/cox_agg_split_assignments.csv")
+    print("\nSaved:")
     print("  results/cox_agg_feature_selection.csv")
-    print("  results/cox_agg_endpoint_summary.csv")
+    if univariate_frames:
+        print("  results/cox_agg_univariate.csv")
+    if multivariable_frames:
+        print("  results/cox_agg_multivariable.csv")
 
 
 if __name__ == "__main__":

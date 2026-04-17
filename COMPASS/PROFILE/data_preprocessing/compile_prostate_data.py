@@ -66,6 +66,6 @@ total_psa.to_csv(os.path.join(NEPC_PROJ_PATH, 'total_psa_records.csv'), index=Fa
 platinum_df = (meds.loc[(meds['NCI_PREFERRED_MED_NM'] == 'CISPLATIN') |
                         (meds['NCI_PREFERRED_MED_NM'] == 'CARBOPLATIN')]
                .sort_values(by='MED_START_DT').drop_duplicates(subset='DFCI_MRN')
-               .rename(columns={'NCI_PREFERRED_MED_NM' : 'medication', 
+               .rename(columns={'NCI_PREFERRED_MED_NM' : 'medication',
                                 'MED_START_DT' : 'medication_start_time'}))
 platinum_df.to_csv(os.path.join(NEPC_PROJ_PATH, 'platinum_chemo_records.csv'), index=False)
