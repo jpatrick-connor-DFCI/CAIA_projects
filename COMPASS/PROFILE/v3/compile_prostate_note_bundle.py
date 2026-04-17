@@ -48,7 +48,6 @@ def main():
     write_note_bundle(
         args.output_path,
         note_df,
-        source_type="raw",
         raw_text_paths=raw_text_paths,
         selected_mrns=selected_mrns,
     )

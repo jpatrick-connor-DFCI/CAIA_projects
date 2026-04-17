@@ -1,119 +1,216 @@
 import argparse
-from argparse import Namespace
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from helpers import ARM_NAMES, DEFAULT_DATA_PATH, DEFAULT_MODEL_NAME, DEFAULT_OUTPUT_DIR
-from generate_arm_labels import run as run_generate_arm_labels
-from merge_labels import run as run_merge_labels
-from prepare_arm_candidates import run as run_prepare_arm_candidates
-from prepare_note_inventory import run as run_prepare_note_inventory
+import pandas as pd
+
+from helpers import (
+    CLASSIFY_SYSTEM_PROMPT,
+    CLINICAL_SAFETY_CONTEXT,
+    DEFAULT_MODEL_NAME,
+    DEFAULT_OUTPUT_DIR,
+    NOTE_BUNDLE_FILENAME,
+    build_client,
+    build_patient_snippets,
+    call_with_retry,
+    load_notes,
+    load_selected_mrns,
+    parse_json_response,
+)
+
+
+OUTPUT_COLUMNS = [
+    "DFCI_MRN",
+    "primary_label",
+    "has_nepc",
+    "has_avpc",
+    "has_biomarker",
+    "biomarker_genes",
+    "avpc_criteria",
+    "supporting_quotes",
+    "supporting_quote_dates",
+    "confidence",
+    "rationale",
+    "num_snippets",
+]
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run the fresh multi-arm PROFILE v3 pipeline.")
-    parser.add_argument("--data-path", type=Path, default=None)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--text-source", choices=["compiled", "raw", "bundle"], default="raw")
-    parser.add_argument("--raw-text-path", type=Path, action="append", default=None)
-    parser.add_argument("--note-bundle-path", type=Path, default=None)
-    parser.add_argument("--mrns", default=None)
+    parser = argparse.ArgumentParser(
+        description="Classify each prostate patient as NEPC / AVPC / biomarker / conventional with one LLM call."
+    )
     parser.add_argument("--mrn-file", type=Path, default=None)
-    parser.add_argument("--arm", choices=ARM_NAMES, default=None)
-    parser.add_argument("--model", default=None)
-    parser.add_argument("--max-workers", type=int, default=None)
+    parser.add_argument("--mrns", default=None)
+    parser.add_argument(
+        "--note-bundle-path",
+        type=Path,
+        default=None,
+        help="Optional gzipped note bundle. If absent, loads raw OncDRS JSONs.",
+    )
+    parser.add_argument("--raw-text-path", type=Path, action="append", default=None)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--model", default=DEFAULT_MODEL_NAME)
+    parser.add_argument("--max-workers", type=int, default=4)
+    parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--limit-mrns", type=int, default=None)
-    parser.add_argument("--bundle-max-tokens", type=int, default=None)
-    parser.add_argument("--bundle-max-notes", type=int, default=None)
-    parser.add_argument("--retry-failures", action="store_true")
-    parser.add_argument("--overwrite-existing", action="store_true")
-    parser.add_argument("--prepare-only", action="store_true")
-    parser.add_argument("--arms-only", action="store_true")
-    parser.add_argument("--merge-only", action="store_true")
+    parser.add_argument("--max-notes-per-patient", type=int, default=25)
+    parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
 
-def build_arm_args(args, arm_name):
-    return Namespace(
-        arm=arm_name,
-        output_dir=args.output_dir,
-        mrns=args.mrns,
-        mrn_file=args.mrn_file,
-        model=args.model,
-        max_workers=args.max_workers,
-        limit_mrns=args.limit_mrns,
-        bundle_max_tokens=args.bundle_max_tokens,
-        bundle_max_notes=args.bundle_max_notes,
-        retry_failures=args.retry_failures,
-        overwrite_existing=args.overwrite_existing,
+def append_row(path, row):
+    pd.DataFrame([row], columns=OUTPUT_COLUMNS).to_csv(
+        path,
+        mode="a",
+        sep="\t",
+        index=False,
+        header=not path.exists() or path.stat().st_size == 0,
     )
 
 
-def run_arm(arm_args):
-    run_prepare_arm_candidates(
-        Namespace(
-            arm=arm_args.arm,
-            output_dir=arm_args.output_dir,
-            inventory_path=None,
-            mrns=arm_args.mrns,
-            mrn_file=arm_args.mrn_file,
-        )
+def append_failure(path, mrn, error, num_snippets):
+    pd.DataFrame(
+        [{"DFCI_MRN": int(mrn), "error": error, "num_snippets": int(num_snippets)}]
+    ).to_csv(
+        path,
+        mode="a",
+        sep="\t",
+        index=False,
+        header=not path.exists() or path.stat().st_size == 0,
     )
-    run_generate_arm_labels(
-        Namespace(
-            arm=arm_args.arm,
-            output_dir=arm_args.output_dir,
-            candidate_path=None,
-            context_path=None,
-            mrns=arm_args.mrns,
-            mrn_file=arm_args.mrn_file,
-            model=arm_args.model or DEFAULT_MODEL_NAME,
-            max_retries=3,
-            max_workers=arm_args.max_workers or 4,
-            limit_mrns=arm_args.limit_mrns,
-            bundle_max_tokens=arm_args.bundle_max_tokens or 7000,
-            bundle_max_notes=arm_args.bundle_max_notes or 6,
-            retry_failures=arm_args.retry_failures,
-            overwrite_existing=arm_args.overwrite_existing,
-        )
-    )
+
+
+def classify_patient(client, model, max_retries, mrn, snippets):
+    payload = {
+        "patient_mrn": int(mrn),
+        "notes": [
+            {
+                "note_date": s["note_date"],
+                "note_type": s["note_type"],
+                "trigger_categories": s["trigger_categories"],
+                "note_text": s["snippet"],
+            }
+            for s in snippets
+        ],
+    }
+    messages = [
+        {"role": "system", "content": CLASSIFY_SYSTEM_PROMPT + CLINICAL_SAFETY_CONTEXT},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    response_text, error = call_with_retry(client, model, messages, max_retries)
+    if error:
+        return None, error
+    try:
+        result = parse_json_response(response_text)
+    except json.JSONDecodeError as exc:
+        return None, f"json_parse: {exc}"
+    if not isinstance(result, dict):
+        return None, f"non_dict_response: {type(result).__name__}"
+    return result, None
+
+
+def make_row(mrn, num_snippets, result):
+    return {
+        "DFCI_MRN": int(mrn),
+        "primary_label": result.get("primary_label"),
+        "has_nepc": result.get("has_nepc"),
+        "has_avpc": result.get("has_avpc"),
+        "has_biomarker": result.get("has_biomarker"),
+        "biomarker_genes": " | ".join(str(g) for g in (result.get("biomarker_genes") or [])),
+        "avpc_criteria": " | ".join(str(c) for c in (result.get("avpc_criteria") or [])),
+        "supporting_quotes": " | ".join(str(q) for q in (result.get("supporting_quotes") or [])),
+        "supporting_quote_dates": " | ".join(str(d) for d in (result.get("supporting_quote_dates") or [])),
+        "confidence": result.get("confidence"),
+        "rationale": result.get("rationale"),
+        "num_snippets": int(num_snippets),
+    }
+
+
+def conventional_row(mrn):
+    return {
+        "DFCI_MRN": int(mrn),
+        "primary_label": "conventional",
+        "has_nepc": False,
+        "has_avpc": False,
+        "has_biomarker": False,
+        "biomarker_genes": "",
+        "avpc_criteria": "",
+        "supporting_quotes": "",
+        "supporting_quote_dates": "",
+        "confidence": "high",
+        "rationale": "No NEPC / AVPC / biomarker triggers found in any reviewed note.",
+        "num_snippets": 0,
+    }
 
 
 def run(args):
-    chosen_modes = sum([args.prepare_only, args.arms_only, args.merge_only])
-    if chosen_modes > 1:
-        raise ValueError("Use at most one of --prepare-only, --arms-only, or --merge-only.")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = args.output_dir / "LLM_v3_labels.tsv"
+    failures_path = args.output_dir / "LLM_v3_failed_patients.tsv"
 
-    selected_arms = [args.arm] if args.arm else list(ARM_NAMES)
+    if args.overwrite:
+        output_path.unlink(missing_ok=True)
+        failures_path.unlink(missing_ok=True)
 
-    if args.prepare_only or (not args.arms_only and not args.merge_only):
-        run_prepare_note_inventory(
-            Namespace(
-                data_path=args.data_path or DEFAULT_DATA_PATH,
-                output_dir=args.output_dir,
-                text_source=args.text_source,
-                raw_text_path=args.raw_text_path,
-                note_bundle_path=args.note_bundle_path,
-                mrns=args.mrns,
-                mrn_file=args.mrn_file,
-            )
-        )
-        if args.prepare_only:
-            return
+    selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
+    bundle_path = args.note_bundle_path or args.output_dir / NOTE_BUNDLE_FILENAME
 
-    if not args.merge_only:
-        with ThreadPoolExecutor(max_workers=len(selected_arms)) as executor:
-            futures = {
-                executor.submit(run_arm, build_arm_args(args, arm_name)): arm_name
-                for arm_name in selected_arms
-            }
-            for future in as_completed(futures):
-                arm_name = futures[future]
-                future.result()
-                print(f"Finished arm: {arm_name}")
+    notes_df = load_notes(
+        bundle_path=bundle_path,
+        raw_text_paths=args.raw_text_path,
+        selected_mrns=selected_mrns,
+    )
+    print(
+        f"Loaded notes: {len(notes_df)} rows for "
+        f"{notes_df['DFCI_MRN'].nunique()} patients"
+    )
 
-    if not args.arms_only:
-        run_merge_labels(Namespace(output_dir=args.output_dir, context_path=None))
+    patient_snippets = build_patient_snippets(
+        notes_df, max_notes_per_patient=args.max_notes_per_patient
+    )
+    all_mrns = set(notes_df["DFCI_MRN"].astype(int).unique())
+    triggered_mrns = set(patient_snippets.keys())
+    no_signal_mrns = all_mrns - triggered_mrns
+
+    print(f"Patients with triggered snippets: {len(triggered_mrns)}")
+    print(f"Patients with no signal (auto-conventional): {len(no_signal_mrns)}")
+
+    completed = set()
+    if output_path.exists() and output_path.stat().st_size > 0:
+        completed = set(pd.read_csv(output_path, sep="\t")["DFCI_MRN"].astype(int))
+    print(f"Already completed: {len(completed)}")
+
+    for mrn in sorted(no_signal_mrns - completed):
+        append_row(output_path, conventional_row(mrn))
+
+    mrns_to_run = sorted(triggered_mrns - completed)
+    if args.limit_mrns is not None:
+        mrns_to_run = mrns_to_run[: args.limit_mrns]
+    print(f"Patients to classify with LLM: {len(mrns_to_run)}")
+
+    if not mrns_to_run:
+        print(f"Wrote labels: {output_path}")
+        return
+
+    client = build_client()
+
+    def worker(mrn):
+        snippets = patient_snippets[mrn]
+        result, error = classify_patient(client, args.model, args.max_retries, mrn, snippets)
+        return mrn, snippets, result, error
+
+    with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
+        futures = {executor.submit(worker, mrn): mrn for mrn in mrns_to_run}
+        for future in as_completed(futures):
+            mrn, snippets, result, error = future.result()
+            if error or result is None:
+                print(f"  Classification failed for {mrn}: {error}")
+                append_failure(failures_path, mrn, error or "no_result", len(snippets))
+                continue
+            append_row(output_path, make_row(mrn, len(snippets), result))
+
+    print(f"Wrote labels: {output_path}")
 
 
 def main():
