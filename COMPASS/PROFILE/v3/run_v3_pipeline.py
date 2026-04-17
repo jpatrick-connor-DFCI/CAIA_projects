@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
+from tqdm.auto import tqdm
 
 from helpers import (
     CLASSIFY_SYSTEM_PROMPT,
@@ -56,7 +57,7 @@ def parse_args():
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--limit-mrns", type=int, default=None)
-    parser.add_argument("--max-notes-per-patient", type=int, default=25)
+    parser.add_argument("--max-notes-per-patient", type=int, default=40)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -210,10 +211,12 @@ def run(args):
 
     with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
         futures = {executor.submit(worker, mrn): mrn for mrn in mrns_to_run}
-        for future in as_completed(futures):
+        for future in tqdm(
+            as_completed(futures), total=len(futures), desc="Patients", unit="pt"
+        ):
             mrn, snippets, result, error = future.result()
             if error or result is None:
-                print(f"  Classification failed for {mrn}: {error}")
+                tqdm.write(f"  Classification failed for {mrn}: {error}")
                 append_failure(failures_path, mrn, error or "no_result", len(snippets))
                 continue
             append_row(output_path, make_row(mrn, len(snippets), result))

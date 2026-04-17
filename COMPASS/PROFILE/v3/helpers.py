@@ -164,8 +164,16 @@ Each snippet was selected because it contains language relevant to one of:
 1. Classify the patient into ONE primary bucket and report supporting evidence,
    applying this precedence (return the highest-precedence bucket documented):
 
-   a. nepc — chart documents neuroendocrine or small-cell prostate cancer, OR a documented
-      histologic transformation from prostate adenocarcinoma to neuroendocrine/small-cell.
+   a. nepc — chart documents ANY of the following on a prostate-derived specimen or in
+      a prostate-cancer patient's oncologic documentation:
+        - neuroendocrine or small-cell prostate carcinoma diagnosis
+        - histologic transformation from adenocarcinoma to neuroendocrine / small-cell
+        - neuroendocrine features or neuroendocrine differentiation (focal, partial, or
+          "with NE features" / "component of" all qualify)
+        - positive neuroendocrine IHC markers (synaptophysin, chromogranin, CD56, NSE,
+          INSM1) on a prostate-derived specimen
+      Any documented neuroendocrine feature is sufficient for `nepc` — do NOT downgrade
+      to `avpc` because the wording is hedged.
    b. avpc — chart documents aggressive-variant or anaplastic prostate cancer language, OR
       satisfies one or more Aparicio aggressive-variant criteria:
         C1 small-cell histology
@@ -179,6 +187,9 @@ Each snippet was selected because it contains language relevant to one of:
         BRCA1, BRCA2, ATM, CDK12, PALB2, HRD/HRR, DDR pathway, MSI-H, MMR-deficient, TMB-high.
    d. conventional — none of the above.
 
+   PRECEDENCE IS STRICT: if NEPC criteria are met, the primary bucket is `nepc` even when
+   AVPC criteria (C1–C7) are ALSO met. `avpc` is only chosen when NEPC criteria are absent.
+
 2. SEPARATELY, flag whether the chart documents a NON-PROSTATE PRIMARY cancer
    (synchronous or metachronous, e.g., NSCLC/SCLC, colorectal, urothelial/bladder,
    renal cell, pancreatic, gastric, hepatocellular, lymphoma, melanoma, head and neck,
@@ -191,7 +202,15 @@ Each snippet was selected because it contains language relevant to one of:
   language do NOT establish a diagnosis or biomarker finding by themselves.
 - Pathology is most authoritative for histology. Imaging is most authoritative for
   metastatic pattern.
-- Quotes must be verbatim, <=30 words.
+- Read every pathology snippet end-to-end. Neuroendocrine findings, IHC panels, and
+  small-cell histology routinely live in the microscopic / addendum sections and must
+  not be missed — missing a pathology NEPC finding is the most common failure mode.
+- If a pathology report documents NE features, set `has_nepc = true` and
+  `primary_label = "nepc"` even if clinician notes still describe the disease as AVPC
+  or adenocarcinoma.
+- Quotes must be verbatim. Prefer substantive quotes that preserve surrounding clinical
+  context (roughly 40–120 words each). Include the sentence(s) on either side of the
+  key finding when they clarify specimen source, timing, or diagnostic certainty.
 - For `has_non_prostate_primary`: only set true when the chart documents the patient
   currently has or previously had a non-prostate primary cancer. Do NOT count family
   history, differential-diagnosis mentions, ruled-out workup, or "no history of other
@@ -457,8 +476,8 @@ def load_notes(*, bundle_path=None, raw_text_paths=None, selected_mrns=None):
 
 
 # Snippet building
-SNIPPET_CONTEXT_CHARS = 1500
-SNIPPET_MAX_CHARS = 8000
+SNIPPET_CONTEXT_CHARS = 2500
+SNIPPET_MAX_CHARS = 15000
 
 
 def merge_windows(windows, gap_chars=80):
@@ -502,7 +521,7 @@ def build_snippet(text, matches, *, context_chars=SNIPPET_CONTEXT_CHARS, max_cha
     return out
 
 
-def build_patient_snippets(notes_df, *, max_notes_per_patient=25, snippet_max_chars=SNIPPET_MAX_CHARS):
+def build_patient_snippets(notes_df, *, max_notes_per_patient=40, snippet_max_chars=SNIPPET_MAX_CHARS):
     """Return {mrn: [{note_date, note_type, trigger_categories, snippet}, ...]}.
 
     Notes without any trigger hit are dropped. Per patient, notes are ranked by
