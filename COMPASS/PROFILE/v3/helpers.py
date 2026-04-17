@@ -476,8 +476,12 @@ def load_notes(*, bundle_path=None, raw_text_paths=None, selected_mrns=None):
 
 
 # Snippet building
-SNIPPET_CONTEXT_CHARS = 2500
-SNIPPET_MAX_CHARS = 15000
+SNIPPET_CONTEXT_CHARS = 2000
+SNIPPET_MAX_CHARS = 10000
+# Hard cap on total snippet chars per patient payload. 128k-token models at ~4 chars/token
+# give ~500k input chars; we budget ~300k for snippets to leave room for the system prompt,
+# JSON scaffolding, and output.
+PATIENT_PAYLOAD_MAX_CHARS = 300000
 
 
 def merge_windows(windows, gap_chars=80):
@@ -521,11 +525,19 @@ def build_snippet(text, matches, *, context_chars=SNIPPET_CONTEXT_CHARS, max_cha
     return out
 
 
-def build_patient_snippets(notes_df, *, max_notes_per_patient=40, snippet_max_chars=SNIPPET_MAX_CHARS):
+def build_patient_snippets(
+    notes_df,
+    *,
+    max_notes_per_patient=30,
+    snippet_max_chars=SNIPPET_MAX_CHARS,
+    payload_max_chars=PATIENT_PAYLOAD_MAX_CHARS,
+):
     """Return {mrn: [{note_date, note_type, trigger_categories, snippet}, ...]}.
 
     Notes without any trigger hit are dropped. Per patient, notes are ranked by
-    (number of trigger categories, raw trigger count, recency) and capped.
+    (number of trigger categories, raw trigger count, recency) and kept until either
+    `max_notes_per_patient` or the cumulative `payload_max_chars` budget is hit
+    (whichever comes first), so outlier patients can't exceed the model's context window.
     """
     if notes_df.empty:
         return {}
@@ -563,15 +575,20 @@ def build_patient_snippets(notes_df, *, max_notes_per_patient=40, snippet_max_ch
             ),
             reverse=True,
         )
-        ranked[mrn] = [
-            {
+        kept = []
+        used_chars = 0
+        for c in items[:max_notes_per_patient]:
+            snippet_len = len(c["snippet"])
+            if kept and used_chars + snippet_len > payload_max_chars:
+                break
+            kept.append({
                 "note_date": c["note_date"],
                 "note_type": c["note_type"],
                 "trigger_categories": c["trigger_categories"],
                 "snippet": c["snippet"],
-            }
-            for c in items[:max_notes_per_patient]
-        ]
+            })
+            used_chars += snippet_len
+        ranked[mrn] = kept
     return ranked
 
 

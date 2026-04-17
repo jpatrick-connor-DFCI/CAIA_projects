@@ -57,7 +57,7 @@ def parse_args():
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--limit-mrns", type=int, default=None)
-    parser.add_argument("--max-notes-per-patient", type=int, default=40)
+    parser.add_argument("--max-notes-per-patient", type=int, default=30)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
