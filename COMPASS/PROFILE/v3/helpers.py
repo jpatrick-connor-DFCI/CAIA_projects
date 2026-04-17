@@ -112,6 +112,27 @@ TRIGGER_REGEX = {
         r"tumor\s+mutational\s+burden|tmb"
         r")\b"
     ),
+    "non_prostate_primary": (
+        r"\b(?:"
+        # Lung
+        r"nsclc|sclc|non[- ]small[- ]cell\s+lung|lung\s+adenocarcinoma|lung\s+(?:cancer|carcinoma)|"
+        # GI
+        r"colorectal|colon\s+(?:cancer|carcinoma)|rectal\s+(?:cancer|carcinoma)|"
+        r"pancreatic\s+(?:cancer|carcinoma|adenocarcinoma)|gastric\s+(?:cancer|carcinoma)|"
+        r"esophageal\s+(?:cancer|carcinoma)|hepatocellular\s+carcinoma|hcc|"
+        # GU (non-prostate)
+        r"urothelial\s+(?:cancer|carcinoma)|bladder\s+(?:cancer|carcinoma)|"
+        r"renal\s+cell\s+carcinoma|rcc|kidney\s+(?:cancer|carcinoma)|"
+        # Heme
+        r"lymphoma|leukemia|multiple\s+myeloma|"
+        # Other solid
+        r"melanoma|glioblastoma|head\s+and\s+neck\s+(?:cancer|carcinoma|squamous)|"
+        r"breast\s+(?:cancer|carcinoma)|"
+        # Multi-primary phrases
+        r"second\s+primary|synchronous\s+primary|metachronous\s+primary|"
+        r"history\s+of\s+(?:lung|colon|colorectal|breast|bladder|kidney|renal|pancreatic|gastric|esophageal|melanoma|lymphoma|leukemia)"
+        r")\b"
+    ),
 }
 
 
@@ -137,25 +158,32 @@ Each snippet was selected because it contains language relevant to one of:
 - neuroendocrine prostate cancer (NEPC)
 - aggressive-variant prostate cancer (AVPC)
 - platinum-relevant molecular biomarkers
+- a non-prostate primary cancer (separate annotation)
 
 ## YOUR TASK
-Classify the patient into ONE primary bucket and report supporting evidence.
-Apply this precedence (return the highest-precedence bucket that is documented):
+1. Classify the patient into ONE primary bucket and report supporting evidence,
+   applying this precedence (return the highest-precedence bucket documented):
 
-1. nepc — chart documents neuroendocrine or small-cell prostate cancer, OR a documented
-   histologic transformation from prostate adenocarcinoma to neuroendocrine/small-cell.
-2. avpc — chart documents aggressive-variant or anaplastic prostate cancer language, OR
-   satisfies one or more Aparicio aggressive-variant criteria:
-     C1 small-cell histology
-     C2 visceral metastatic pattern
-     C3 predominantly lytic bone metastases
-     C4 bulky pelvic/prostate or bulky nodal disease
-     C5 low PSA with high-volume disease
-     C6 neuroendocrine markers / elevated CEA or LDH / hypercalcemia (when explicit)
-     C7 rapid progression to castration-resistant or androgen-independent disease
-3. biomarker — chart documents a platinum-relevant biomarker:
-     BRCA1, BRCA2, ATM, CDK12, PALB2, HRD/HRR, DDR pathway, MSI-H, MMR-deficient, TMB-high.
-4. conventional — none of the above.
+   a. nepc — chart documents neuroendocrine or small-cell prostate cancer, OR a documented
+      histologic transformation from prostate adenocarcinoma to neuroendocrine/small-cell.
+   b. avpc — chart documents aggressive-variant or anaplastic prostate cancer language, OR
+      satisfies one or more Aparicio aggressive-variant criteria:
+        C1 small-cell histology
+        C2 visceral metastatic pattern
+        C3 predominantly lytic bone metastases
+        C4 bulky pelvic/prostate or bulky nodal disease
+        C5 low PSA with high-volume disease
+        C6 neuroendocrine markers / elevated CEA or LDH / hypercalcemia (when explicit)
+        C7 rapid progression to castration-resistant or androgen-independent disease
+   c. biomarker — chart documents a platinum-relevant biomarker:
+        BRCA1, BRCA2, ATM, CDK12, PALB2, HRD/HRR, DDR pathway, MSI-H, MMR-deficient, TMB-high.
+   d. conventional — none of the above.
+
+2. SEPARATELY, flag whether the chart documents a NON-PROSTATE PRIMARY cancer
+   (synchronous or metachronous, e.g., NSCLC/SCLC, colorectal, urothelial/bladder,
+   renal cell, pancreatic, gastric, hepatocellular, lymphoma, melanoma, head and neck,
+   breast). This annotation is INDEPENDENT of the primary bucket — a patient classified
+   as `nepc` can still have `has_non_prostate_primary = true` if both are documented.
 
 ## RULES
 - Use only the snippets provided. Do not infer beyond documented evidence.
@@ -164,6 +192,10 @@ Apply this precedence (return the highest-precedence bucket that is documented):
 - Pathology is most authoritative for histology. Imaging is most authoritative for
   metastatic pattern.
 - Quotes must be verbatim, <=30 words.
+- For `has_non_prostate_primary`: only set true when the chart documents the patient
+  currently has or previously had a non-prostate primary cancer. Do NOT count family
+  history, differential-diagnosis mentions, ruled-out workup, or "no history of other
+  malignancies" statements. List specific cancer types in `non_prostate_primary_types`.
 
 ## OUTPUT FORMAT
 Return ONLY valid JSON.
@@ -175,6 +207,8 @@ Return ONLY valid JSON.
   "has_biomarker": true | false,
   "biomarker_genes": ["BRCA2"],
   "avpc_criteria": ["C1", "C2"],
+  "has_non_prostate_primary": true | false,
+  "non_prostate_primary_types": ["NSCLC", "colorectal"],
   "supporting_quotes": ["<verbatim quote>"],
   "supporting_quote_dates": ["YYYY-MM-DD"],
   "confidence": "high | medium | low",

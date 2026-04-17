@@ -705,9 +705,13 @@ def score_cox_model(
     duration_col: str,
     event_col: str,
 ) -> tuple[float, np.ndarray]:
-    pred = np.asarray(model.predict_partial_hazard(model_df)).reshape(-1)
-    c_index = float(concordance_index(model_df[duration_col], -pred, model_df[event_col]))
-    return c_index, pred
+    # Use the linear predictor (log partial hazard) rather than exp(linear predictor):
+    # ranking is identical, and it avoids exp() overflow when the linear predictor
+    # is large for a handful of outlier rows — which would otherwise produce inf and
+    # crash roc_auc_score.
+    log_pred = np.asarray(model.predict_log_partial_hazard(model_df)).reshape(-1)
+    c_index = float(concordance_index(model_df[duration_col], -log_pred, model_df[event_col]))
+    return c_index, log_pred
 
 
 def run_univariate_associations(

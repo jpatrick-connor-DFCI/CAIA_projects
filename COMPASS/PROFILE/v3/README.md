@@ -9,6 +9,8 @@ Classifies each prostate cancer patient into one of four buckets with a single L
 
 Precedence: `nepc > avpc > biomarker > conventional` (the LLM applies it in the same call).
 
+Independently, every patient is also flagged for `has_non_prostate_primary` (e.g., NSCLC, colorectal, urothelial, RCC, lymphoma) — this annotation can co-occur with any primary label.
+
 ## Files
 
 ```text
@@ -58,8 +60,8 @@ By default, `v3` writes to `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/v3_outp
 
 ```text
 DFCI_MRN, primary_label,
-has_nepc, has_avpc, has_biomarker,
-biomarker_genes, avpc_criteria,
+has_nepc, has_avpc, has_biomarker, has_non_prostate_primary,
+biomarker_genes, avpc_criteria, non_prostate_primary_types,
 supporting_quotes, supporting_quote_dates,
 confidence, rationale, num_snippets
 ```
