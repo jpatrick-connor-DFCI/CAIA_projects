@@ -183,8 +183,18 @@ Each snippet was selected because it contains language relevant to one of:
         C5 low PSA with high-volume disease
         C6 neuroendocrine markers / elevated CEA or LDH / hypercalcemia (when explicit)
         C7 rapid progression to castration-resistant or androgen-independent disease
-   c. biomarker — chart documents a platinum-relevant biomarker:
-        BRCA1, BRCA2, ATM, CDK12, PALB2, HRD/HRR, DDR pathway, MSI-H, MMR-deficient, TMB-high.
+   c. biomarker — chart documents a QUALIFYING SOMATIC (tumor) biomarker. The qualifying
+      set is restricted to: BRCA2, TP53, RB1, PTEN. Only these four genes cause the
+      primary bucket to be `biomarker` and `has_biomarker` to be true.
+      Only count findings from tumor/somatic testing (e.g., tumor NGS, OncoPanel, FoundationOne,
+      Tempus, MSK-IMPACT, ctDNA/liquid biopsy of tumor). Do NOT count germline findings — exclude
+      results from germline panels, hereditary / familial testing, blood/saliva germline assays,
+      or variants explicitly labeled "germline". If a variant is ambiguous between germline and
+      somatic, do not set `has_biomarker = true`.
+      Other somatic biomarkers (BRCA1, ATM, CDK12, PALB2, HRD/HRR, DDR pathway, MSI-H,
+      MMR-deficient, TMB-high, AR variants, SPOP, etc.) must still be RECORDED in
+      `biomarker_genes` when documented, but they do NOT by themselves set
+      `has_biomarker = true` or change the primary bucket.
    d. conventional — none of the above.
 
    PRECEDENCE IS STRICT: if NEPC criteria are met, the primary bucket is `nepc` even when
@@ -215,6 +225,10 @@ Each snippet was selected because it contains language relevant to one of:
   currently has or previously had a non-prostate primary cancer. Do NOT count family
   history, differential-diagnosis mentions, ruled-out workup, or "no history of other
   malignancies" statements. List specific cancer types in `non_prostate_primary_types`.
+- For `biomarker_genes`: list EVERY somatic biomarker / gene alteration documented in
+  the chart (e.g., ["BRCA2", "ATM", "TMB-high"]), regardless of whether it qualifies for
+  the `biomarker` bucket. `has_biomarker` and `primary_label = "biomarker"` are gated on
+  the qualifying set (BRCA2, TP53, RB1, PTEN) only.
 
 ## OUTPUT FORMAT
 Return ONLY valid JSON.
