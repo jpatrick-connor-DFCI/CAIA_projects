@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -54,6 +55,76 @@ def load_split(
     return sub.sort_values([id_col, time_col], ascending=(True, True)).drop(columns=["split"])
 
 
+def add_post_landmark_horizon_columns(
+    df: pd.DataFrame,
+    *,
+    id_col: str,
+    time_col: str,
+    event_col: str | list[str],
+    time_to_event_col: str | list[str],
+    horizon: int,
+) -> tuple[pd.DataFrame, str | list[str], str | list[str]]:
+    """Censor each endpoint at first-treatment-start + horizon.
+
+    SurvLatent's max_pred_window is absolute from TIME=0, but this application
+    evaluates a post-treatment horizon from each patient's landmark. We therefore
+    add per-patient horizon-censored event/time columns and reserve the larger
+    absolute model window only for making room for pre-landmark history.
+    """
+    if horizon <= 0:
+        raise ValueError("--max-pred-window must be positive.")
+
+    event_cols = event_col if isinstance(event_col, list) else [event_col]
+    time_cols = time_to_event_col if isinstance(time_to_event_col, list) else [time_to_event_col]
+    if len(event_cols) != len(time_cols):
+        raise ValueError("event_col and time_to_event_col must have matching lengths.")
+
+    adjusted = df.copy()
+    landmark_time = adjusted.groupby(id_col)[time_col].transform("max").astype(float)
+    if landmark_time.isna().any():
+        raise ValueError("Unable to infer landmark time from patient TIME maxima.")
+
+    adjusted_event_cols: list[str] = []
+    adjusted_time_cols: list[str] = []
+    for raw_event_col, raw_time_col in zip(event_cols, time_cols):
+        if raw_event_col not in adjusted.columns or raw_time_col not in adjusted.columns:
+            raise ValueError(f"Missing event/time columns: {raw_event_col}, {raw_time_col}")
+
+        adj_event_col = f"{raw_event_col}__post_landmark_h{horizon}"
+        adj_time_col = f"{raw_time_col}__post_landmark_h{horizon}"
+        raw_event = pd.to_numeric(adjusted[raw_event_col], errors="coerce").fillna(0).astype(int)
+        raw_time = pd.to_numeric(adjusted[raw_time_col], errors="coerce").astype(float)
+        post_landmark_time = raw_time - landmark_time
+        censor_time = landmark_time + float(horizon)
+        if post_landmark_time.isna().any() or post_landmark_time.le(0).any():
+            raise ValueError(
+                f"Input contains non-positive post-landmark time for {raw_time_col}."
+            )
+
+        observed_before_horizon = post_landmark_time.gt(0) & post_landmark_time.lt(horizon)
+        adjusted_time = np.where(observed_before_horizon, raw_time, censor_time)
+        # Events exactly at the administrative horizon are censored so every
+        # patient follows the same strictly-within-horizon convention.
+        within_horizon = raw_event.eq(1) & post_landmark_time.gt(0) & post_landmark_time.lt(horizon)
+        adjusted[adj_event_col] = within_horizon.astype(int)
+        adjusted[adj_time_col] = adjusted_time
+        adjusted_post_time = adjusted[adj_time_col] - landmark_time
+        if adjusted_post_time.isna().any() or adjusted_post_time.le(0).any():
+            raise ValueError(
+                f"Non-positive post-landmark time found after horizon censoring for {raw_time_col}."
+            )
+        if adjusted_post_time.gt(horizon).any():
+            raise ValueError(
+                f"Post-landmark time exceeds requested horizon after censoring for {raw_time_col}."
+            )
+        adjusted_event_cols.append(adj_event_col)
+        adjusted_time_cols.append(adj_time_col)
+
+    if isinstance(event_col, list):
+        return adjusted, adjusted_event_cols, adjusted_time_cols
+    return adjusted, adjusted_event_cols[0], adjusted_time_cols[0]
+
+
 def import_survlatent(repo_path: Path):
     if not repo_path.exists():
         raise FileNotFoundError(f"SurvLatent ODE repo not found at {repo_path}")
@@ -64,6 +135,126 @@ def import_survlatent(repo_path: Path):
     from lib.neural_ode_surv import SurvLatentODE  # noqa: F401
     from lib.utils import get_ckpt_model  # noqa: F401
     return torch, SurvLatentODE, get_ckpt_model
+
+
+def prepare_run_artifacts(run_id: str, *, overwrite: bool, resume: bool) -> None:
+    performance_dir = Path("model_performance") / run_id
+    experiment_paths = [
+        Path("experiments") / f"experiment_{run_id}.ckpt",
+        Path("experiments") / f"run_{run_id}.ckpt",
+    ]
+    existing = [p for p in [performance_dir, *experiment_paths] if p.exists()]
+    if not existing:
+        return
+    if overwrite:
+        for path in existing:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        print(f"Removed existing artifacts for run_id={run_id}.")
+        return
+    if resume:
+        print(f"Resuming with existing artifacts for run_id={run_id}.")
+        return
+    existing_str = "\n  ".join(str(p) for p in existing)
+    raise RuntimeError(
+        f"Existing SurvLatent artifacts found for run_id={run_id}:\n  {existing_str}\n"
+        "Reusing a run_id can silently load an old best_model.pt and produce misleading AUCs. "
+        "Pass --overwrite-run for a fresh fit or --resume-run if this is intentional."
+    )
+
+
+def _to_numpy(value) -> np.ndarray:
+    if hasattr(value, "detach"):
+        value = value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _value_at_horizon(series, horizon: int) -> float:
+    values = _to_numpy(series).reshape(-1)
+    if horizon < 0 or horizon >= len(values):
+        return np.nan
+    return float(values[horizon])
+
+
+def _quantile_horizons(remaining_time: np.ndarray, event_mask: np.ndarray) -> dict[str, int]:
+    event_times = remaining_time[event_mask & np.isfinite(remaining_time) & (remaining_time > 0)]
+    if len(event_times) == 0:
+        event_times = remaining_time[np.isfinite(remaining_time) & (remaining_time > 0)]
+    if len(event_times) == 0:
+        return {}
+    return {
+        "25": int(np.quantile(event_times, 0.25)),
+        "50": int(np.quantile(event_times, 0.50)),
+        "75": int(np.quantile(event_times, 0.75)),
+    }
+
+
+def write_prediction_diagnostics(
+    *,
+    output_dir: Path,
+    run_id: str,
+    config: str,
+    batch_dict: dict,
+    metric_input,
+    cs_cif_total,
+    n_events: int,
+    event_cols: list[str],
+    requested_window: int,
+    model_window: int,
+) -> Path:
+    sample_ids = list(batch_dict["sample_ids"])
+    labels = _to_numpy(batch_dict["labels"]).reshape(-1).astype(int)
+    remaining_time = _to_numpy(batch_dict["remaining_time_to_event"]).reshape(-1).astype(float)
+    end_of_obs = np.asarray([float(_to_numpy(v).reshape(-1)[0]) for v in batch_dict["end_of_obs_idx"]])
+
+    rows = pd.DataFrame(
+        {
+            "DFCI_MRN": sample_ids,
+            "config": config,
+            "label": labels,
+            "remaining_time_to_event": remaining_time,
+            "end_of_obs_idx": end_of_obs,
+            "requested_max_pred_window": requested_window,
+            "model_max_pred_window": model_window,
+        }
+    )
+
+    if n_events == 1:
+        event_name = event_cols[0]
+        horizons = _quantile_horizons(remaining_time, labels == 1)
+        rows[f"{event_name}_event"] = labels == 1
+        for quantile_label, horizon in horizons.items():
+            risks = [1.0 - _value_at_horizon(seq, horizon) for seq in metric_input]
+            rows[f"{event_name}_risk_q{quantile_label}"] = risks
+            rows[f"{event_name}_horizon_q{quantile_label}"] = horizon
+    else:
+        for event_idx, event_name in enumerate(event_cols):
+            event_label = event_idx + 1
+            horizons = _quantile_horizons(remaining_time, labels == event_label)
+            rows[f"{event_name}_event"] = labels == event_label
+            event_cif = cs_cif_total[event_idx]
+            for quantile_label, horizon in horizons.items():
+                risks = [_value_at_horizon(seq, horizon) for seq in event_cif]
+                rows[f"{event_name}_risk_q{quantile_label}"] = risks
+                rows[f"{event_name}_horizon_q{quantile_label}"] = horizon
+
+    path = output_dir / f"survlatent_ode_prediction_diagnostics_{run_id}.csv"
+    rows.to_csv(path, index=False)
+
+    print("\nPrediction diagnostics:")
+    for col in rows.columns:
+        if "_risk_q" not in col:
+            continue
+        values = pd.to_numeric(rows[col], errors="coerce")
+        print(
+            f"  {col}: n={int(values.notna().sum())} "
+            f"mean={values.mean():.4f} sd={values.std(ddof=0):.6f} "
+            f"min={values.min():.4f} max={values.max():.4f}"
+        )
+    print(f"  saved: {path}")
+    return path
 
 
 def main(args: argparse.Namespace) -> None:
@@ -85,17 +276,17 @@ def main(args: argparse.Namespace) -> None:
     model_max_pred_window = int(args.max_pred_window) + max_landmark_time
 
     event_cfg = EVENT_CONFIGS[args.config]
-    event_col = event_cfg["event_col"]
-    time_to_event_col = event_cfg["time_to_event_col"]
-    n_events = len(event_col) if isinstance(event_col, list) else 1
+    raw_event_col = event_cfg["event_col"]
+    raw_time_to_event_col = event_cfg["time_to_event_col"]
+    n_events = len(raw_event_col) if isinstance(raw_event_col, list) else 1
 
     # For saving artifacts and printing, always use list form.
-    event_cols_list = event_col if isinstance(event_col, list) else [event_col]
+    event_cols_list = raw_event_col if isinstance(raw_event_col, list) else [raw_event_col]
 
     data_info_dic = {
         "id_col": id_col,
-        "event_col": event_col,
-        "time_to_event_col": time_to_event_col,
+        "event_col": raw_event_col,
+        "time_to_event_col": raw_time_to_event_col,
         "time_col": time_col,
         "feat_cat": feat_cat,
         "feat_cont": feat_cont,
@@ -110,6 +301,18 @@ def main(args: argparse.Namespace) -> None:
     )
 
     df = pd.read_csv(input_csv)
+    df, event_col, time_to_event_col = add_post_landmark_horizon_columns(
+        df,
+        id_col=id_col,
+        time_col=time_col,
+        event_col=raw_event_col,
+        time_to_event_col=raw_time_to_event_col,
+        horizon=args.max_pred_window,
+    )
+    data_info_dic["event_col"] = event_col
+    data_info_dic["time_to_event_col"] = time_to_event_col
+    adjusted_event_cols_list = event_col if isinstance(event_col, list) else [event_col]
+    print(f"Horizon-censored event columns for modeling: {adjusted_event_cols_list}")
 
     data_train = load_split(df, "train", id_col=id_col, time_col=time_col)
     data_valid = load_split(df, "valid", id_col=id_col, time_col=time_col)
@@ -144,6 +347,7 @@ def main(args: argparse.Namespace) -> None:
     run_id = args.run_id or f"prostate_{args.config}_v1"
 
     if not args.skip_train:
+        prepare_run_artifacts(run_id, overwrite=args.overwrite_run, resume=args.resume_run)
         print(f"\nTraining run_id={run_id} for up to {args.n_epochs} epochs ...")
         model.fit(
             data_train,
@@ -180,7 +384,10 @@ def main(args: argparse.Namespace) -> None:
     )
 
     print("Sampling survival probabilities and cause-specific CIFs ...")
-    from lib.neural_ode_surv import eval_model  # imported here to keep top-light
+    try:
+        from lib.neural_ode_surv import eval_model  # imported here to keep top-light
+    except ImportError:
+        from lib.utils import eval_model
 
     if n_events == 1:
         surv_prob = model.get_surv_prob(
@@ -221,12 +428,25 @@ def main(args: argparse.Namespace) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / f"survlatent_ode_test_metrics_{run_id}.csv"
     cif_path = output_dir / f"survlatent_ode_cif_{run_id}.npz"
+    diagnostics_path = write_prediction_diagnostics(
+        output_dir=output_dir,
+        run_id=run_id,
+        config=args.config,
+        batch_dict=batch_dict_test,
+        metric_input=metric_input,
+        cs_cif_total=cs_cif_total,
+        n_events=n_events,
+        event_cols=event_cols_list,
+        requested_window=args.max_pred_window,
+        model_window=model_max_pred_window,
+    )
     df_test_result.to_csv(metrics_path, index=False)
     if n_events == 1:
         np.savez_compressed(
             cif_path,
             surv_prob=np.asarray(surv_prob),
             event_cols=np.array(event_cols_list),
+            model_event_cols=np.array(adjusted_event_cols_list),
             post_treatment_max_pred_window=np.asarray(args.max_pred_window),
             model_max_pred_window=np.asarray(model_max_pred_window),
         )
@@ -236,10 +456,11 @@ def main(args: argparse.Namespace) -> None:
             ef_surv_prob=np.asarray(metric_input),
             cs_cif_total=np.asarray(cs_cif_total),
             event_cols=np.array(event_cols_list),
+            model_event_cols=np.array(adjusted_event_cols_list),
             post_treatment_max_pred_window=np.asarray(args.max_pred_window),
             model_max_pred_window=np.asarray(model_max_pred_window),
         )
-    print(f"\nSaved:\n  {metrics_path}\n  {cif_path}")
+    print(f"\nSaved:\n  {metrics_path}\n  {cif_path}\n  {diagnostics_path}")
     print("\nTest metrics:")
     print(df_test_result.to_string(index=False))
 
@@ -278,6 +499,16 @@ if __name__ == "__main__":
         help="Training identifier. Defaults to prostate_<config>_v1 so checkpoints do not collide across configs.",
     )
     parser.add_argument("--skip-train", action="store_true", help="Reuse an existing checkpoint.")
+    parser.add_argument(
+        "--overwrite-run",
+        action="store_true",
+        help="Delete existing SurvLatent artifacts for this run_id before training.",
+    )
+    parser.add_argument(
+        "--resume-run",
+        action="store_true",
+        help="Allow training to reuse/append existing SurvLatent artifacts for this run_id.",
+    )
 
     parser.add_argument("--seed", type=int, default=1991)
     parser.add_argument("--n-epochs", type=int, default=30)

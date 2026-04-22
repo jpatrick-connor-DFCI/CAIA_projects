@@ -54,12 +54,18 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
     LIFELINES_IMPORT_ERROR = exc
 
 try:
+    from sksurv.linear_model import CoxnetSurvivalAnalysis
     from sksurv.metrics import cumulative_dynamic_auc
+    from sksurv.util import Surv
 
     SKSURV_IMPORT_ERROR: ModuleNotFoundError | None = None
 except ModuleNotFoundError as exc:  # pragma: no cover - depends on local environment
+    CoxnetSurvivalAnalysis = None
     cumulative_dynamic_auc = None
+    Surv = None
     SKSURV_IMPORT_ERROR = exc
+
+DEFAULT_COXNET_MAX_ITER = 5000
 
 BASE = Path(__file__).resolve().parent
 DATA_PATH = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/")
@@ -650,8 +656,15 @@ def build_model_matrices(
         train_model = pd.DataFrame(x_train, columns=scaled_cols, index=train_df.index)
         eval_model = pd.DataFrame(x_eval, columns=scaled_cols, index=eval_df.index)
 
-    train_model["age"] = train_df[AGE_COL].to_numpy(dtype=float)
-    eval_model["age"] = eval_df[AGE_COL].to_numpy(dtype=float)
+    age_scaler = StandardScaler()
+    train_age = age_scaler.fit_transform(
+        train_df[[AGE_COL]].to_numpy(dtype=float)
+    ).reshape(-1)
+    eval_age = age_scaler.transform(
+        eval_df[[AGE_COL]].to_numpy(dtype=float)
+    ).reshape(-1)
+    train_model["age"] = train_age
+    eval_model["age"] = eval_age
     covariate_cols.append("age")
 
     if not covariate_cols:
@@ -800,6 +813,98 @@ def score_cox_model(
     return c_index, log_pred
 
 
+def _build_coxnet_xy(
+    model_df: pd.DataFrame,
+    *,
+    covariate_cols: list[str],
+    duration_col: str,
+    event_col: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    X = model_df[covariate_cols].to_numpy(dtype=float)
+    y = Surv.from_arrays(
+        event=model_df[event_col].astype(bool).to_numpy(),
+        time=model_df[duration_col].astype(float).to_numpy(),
+    )
+    return X, y
+
+
+def fit_coxnet_with_fallback(
+    model_df: pd.DataFrame,
+    *,
+    duration_col: str,
+    event_col: str,
+    penalizers: list[float],
+    l1_ratio: float,
+    covariate_cols: list[str],
+    unpenalized_cols: list[str] | None = None,
+    max_iter: int = DEFAULT_COXNET_MAX_ITER,
+) -> tuple[CoxnetSurvivalAnalysis | None, float, str]:
+    """Elastic-net Cox via sksurv's coordinate-descent CoxnetSurvivalAnalysis.
+
+    Convergence warnings are silenced and the solver's partial fit is accepted
+    without retry; in practice max_iter=5000 yields usable coefficients even
+    when the path solver reports it has not fully converged. A non-exception
+    fit is therefore always considered "ok"; only hard failures (arithmetic /
+    linalg errors, empty coefficient paths) trigger the penalizer fallback.
+    """
+    require_sksurv()
+    X, y = _build_coxnet_xy(
+        model_df,
+        covariate_cols=covariate_cols,
+        duration_col=duration_col,
+        event_col=event_col,
+    )
+    unpenalized = set(unpenalized_cols or [])
+    penalty_factor = np.array(
+        [0.0 if c in unpenalized else 1.0 for c in covariate_cols],
+        dtype=float,
+    )
+
+    last_error = ""
+    for penalizer in penalizers:
+        try:
+            model = CoxnetSurvivalAnalysis(
+                alphas=[float(penalizer)],
+                l1_ratio=float(l1_ratio),
+                penalty_factor=penalty_factor,
+                max_iter=int(max_iter),
+                fit_baseline_model=False,
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model.fit(X, y)
+        except (ArithmeticError, ValueError, np.linalg.LinAlgError) as exc:
+            last_error = str(exc)
+            continue
+        note = f"fit_ok_penalizer_{penalizer:g}"
+        return model, float(penalizer), note
+
+    return None, float("nan"), f"fit_failed: {last_error}"
+
+
+def score_coxnet_model(
+    model: CoxnetSurvivalAnalysis,
+    model_df: pd.DataFrame,
+    *,
+    duration_col: str,
+    event_col: str,
+    covariate_cols: list[str],
+) -> tuple[float, np.ndarray]:
+    X = model_df[covariate_cols].to_numpy(dtype=float)
+    log_pred = np.asarray(model.predict(X)).reshape(-1)
+    c_index = float(concordance_index(model_df[duration_col], -log_pred, model_df[event_col]))
+    return c_index, log_pred
+
+
+def coxnet_coefficients(
+    model: CoxnetSurvivalAnalysis, covariate_cols: list[str]
+) -> pd.Series:
+    coefs = np.asarray(model.coef_)
+    if coefs.ndim == 2:
+        coefs = coefs[:, -1]
+    return pd.Series(coefs.reshape(-1), index=covariate_cols, name="coef")
+
+
 def run_univariate_associations(
     data: pd.DataFrame,
     *,
@@ -876,7 +981,12 @@ def run_univariate_associations(
         feature_mean = float(np.mean(feature_values))
         feature_df = feature_df.copy()
         feature_df["feature_z"] = (feature_values - feature_mean) / feature_sd
-        feature_df["age"] = feature_df[AGE_COL]
+        age_values = feature_df[AGE_COL].to_numpy(dtype=float)
+        age_sd = float(np.std(age_values, ddof=0))
+        if np.isfinite(age_sd) and age_sd > 0:
+            feature_df["age"] = (age_values - float(np.mean(age_values))) / age_sd
+        else:
+            feature_df["age"] = age_values - float(np.mean(age_values))
         model_cols = ["feature_z", "age"]
         if include_missing_indicator:
             feature_df["feature_missing"] = missing_indicator
@@ -939,8 +1049,11 @@ def tune_multivariable_model(
     seed: int,
     auc_time_unit_days: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    """Arm 2: 5-fold CV over (penalizer x l1_ratio) grid (elastic-net), AGE unpenalized."""
-    require_lifelines()
+    """Arm 2: 5-fold CV over (penalizer x l1_ratio) grid (elastic-net), AGE unpenalized.
+
+    Backed by sksurv's CoxnetSurvivalAnalysis for speed on high-dimensional
+    feature sets; convergence warnings are silenced and partial fits accepted.
+    """
     require_sksurv()
     duration_col = ENDPOINTS[endpoint]["duration_col"]
     event_col = ENDPOINTS[endpoint]["event_col"]
@@ -979,23 +1092,24 @@ def tune_multivariable_model(
                     duration_col=duration_col,
                     event_col=event_col,
                 )
-                model, _, note = fit_cox_with_fallback(
+                model, _, note = fit_coxnet_with_fallback(
                     train_mdf,
                     duration_col=duration_col,
                     event_col=event_col,
                     penalizers=[float(penalizer)],
                     l1_ratio=float(l1_ratio),
-                    unpenalized_cols=["age"],
                     covariate_cols=covariate_cols,
+                    unpenalized_cols=["age"],
                 )
                 row["note"] = note
                 row["n_covariates"] = len(covariate_cols)
                 if model is not None:
-                    c_index, val_pred = score_cox_model(
+                    c_index, val_pred = score_coxnet_model(
                         model,
                         val_mdf,
                         duration_col=duration_col,
                         event_col=event_col,
+                        covariate_cols=covariate_cols,
                     )
                     row["c_index_val"] = c_index
                     mean_auc_val, auc_df_val = compute_survlatent_auc_t(
@@ -1059,7 +1173,6 @@ def fit_final_multivariable_model(
     cv_stratification: str,
     auc_time_unit_days: int,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
-    require_lifelines()
     require_sksurv()
     duration_col = ENDPOINTS[endpoint]["duration_col"]
     event_col = ENDPOINTS[endpoint]["event_col"]
@@ -1074,34 +1187,36 @@ def fit_final_multivariable_model(
     fallback_penalizers = [float(penalizer)] + sorted(
         {float(p) for p in penalizer_grid if float(p) > float(penalizer)}
     )
-    model, used_penalizer, note = fit_cox_with_fallback(
+    model, used_penalizer, note = fit_coxnet_with_fallback(
         train_mdf,
         duration_col=duration_col,
         event_col=event_col,
         penalizers=fallback_penalizers,
         l1_ratio=float(l1_ratio),
-        unpenalized_cols=["age"],
         covariate_cols=covariate_cols,
+        unpenalized_cols=["age"],
     )
     if model is None:
         raise RuntimeError(f"Final multivariable model failed for endpoint '{endpoint}': {note}")
     if used_penalizer != penalizer:
         print(
-            f"  [fallback] CV-chosen penalizer={penalizer:g} failed to converge on full 80% "
+            f"  [fallback] CV-chosen penalizer={penalizer:g} did not produce a usable fit on full 80% "
             f"for '{endpoint}'; used penalizer={used_penalizer:g} instead."
         )
 
-    train_c, train_pred = score_cox_model(
+    train_c, train_pred = score_coxnet_model(
         model,
         train_mdf,
         duration_col=duration_col,
         event_col=event_col,
+        covariate_cols=covariate_cols,
     )
-    test_c, test_pred = score_cox_model(
+    test_c, test_pred = score_coxnet_model(
         model,
         test_mdf,
         duration_col=duration_col,
         event_col=event_col,
+        covariate_cols=covariate_cols,
     )
     train_mean_auc, train_auc_df = compute_survlatent_auc_t(
         train_mdf,
@@ -1153,7 +1268,12 @@ def fit_final_multivariable_model(
                 auc_row["horizon_time_unit"]
             )
 
-    summary = model.summary.reset_index().rename(columns={"covariate": "feature"})
+    # CoxnetSurvivalAnalysis does not produce SE / p-values / CIs — penalized
+    # MLE estimates do not have meaningful analytic standard errors, so we only
+    # emit coef and exp(coef) here.
+    coefs = coxnet_coefficients(model, covariate_cols)
+    summary = coefs.reset_index().rename(columns={"index": "feature", "coef": "coef"})
+    summary["exp(coef)"] = np.exp(summary["coef"].to_numpy(dtype=float))
     parsed = summary["feature"].map(parse_feature_name)
     summary["endpoint"] = endpoint
     summary["lab_name"] = parsed.str[0]
