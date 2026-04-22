@@ -274,6 +274,15 @@ def main(args: argparse.Namespace) -> None:
     if dropped:
         print(f"Dropped {dropped} patients with no usable pre-event observations.")
 
+    # Rebase each patient's TIME so their earliest surviving observation sits at
+    # TIME=0, matching the Framingham convention. The collate compares
+    # dur[0] (= event - first_obs_time) against the shared TIME grid, which only
+    # works when time[first_obs] == 0 for every patient.
+    first_time = wide.groupby("DFCI_MRN")["TIME"].transform("min").to_numpy(dtype=float)
+    wide["TIME"] = (wide["TIME"].to_numpy(dtype=float) - first_time).astype(int)
+    wide["t_platinum"] = wide["t_platinum"].to_numpy(dtype=float) - first_time
+    wide["t_death"] = wide["t_death"].to_numpy(dtype=float) - first_time
+
     column_order = (
         ["DFCI_MRN", "TIME"]
         + selected_labs
