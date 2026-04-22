@@ -375,7 +375,30 @@ def main(args: argparse.Namespace) -> None:
     dropped = len(static) - wide["DFCI_MRN"].nunique()
     if dropped:
         print(f"Dropped {dropped} patients with no usable pre-event observations.")
-    max_landmark_time = int(wide["landmark_time"].max()) if not wide.empty else 0
+
+    # The SurvLatent ODE collate sizes its shared time grid from the training
+    # max(TIME). Any valid/test patient whose max TIME exceeds that grid will
+    # trigger an out-of-bounds write in variable_time_collate_fn_survival; drop
+    # those outliers here. Also compute max_landmark_time from training only so
+    # run.py's model_max_pred_window matches the grid the model actually sees.
+    train_rows = wide.loc[wide["split"] == "train"]
+    train_max_time = int(train_rows["TIME"].max()) if not train_rows.empty else 0
+    patient_split = wide.groupby("DFCI_MRN")["split"].first()
+    patient_max_time = wide.groupby("DFCI_MRN")["TIME"].max()
+    over_grid = patient_max_time.index[
+        (patient_max_time > train_max_time) & patient_split.ne("train")
+    ]
+    if len(over_grid):
+        print(
+            f"Dropped {len(over_grid)} valid/test patients whose max TIME exceeded "
+            f"the training grid ({train_max_time})."
+        )
+        wide = wide.loc[~wide["DFCI_MRN"].isin(over_grid)].copy()
+    max_landmark_time = (
+        int(wide.loc[wide["split"] == "train", "landmark_time"].max())
+        if not wide.empty
+        else 0
+    )
 
     column_order = (
         ["DFCI_MRN", "TIME"]
