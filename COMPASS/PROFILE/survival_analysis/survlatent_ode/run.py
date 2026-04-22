@@ -25,6 +25,25 @@ import pandas as pd
 
 DEFAULT_RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis")
 
+# Event configuration.
+# For single-event configs, event_col / time_to_event_col are strings (not lists
+# of length 1) because pre_process_data dispatches on isinstance(..., list) and
+# a list-of-one would land in the competing-risks branch with n_events==1.
+EVENT_CONFIGS = {
+    "death": {
+        "event_col": "DEATH",
+        "time_to_event_col": "t_death",
+    },
+    "platinum": {
+        "event_col": "PLATINUM",
+        "time_to_event_col": "t_platinum",
+    },
+    "competing": {
+        "event_col": ["PLATINUM", "DEATH"],
+        "time_to_event_col": ["t_platinum", "t_death"],
+    },
+}
+
 
 def load_split(
     df: pd.DataFrame, split: str, *, id_col: str, time_col: str
@@ -59,23 +78,36 @@ def main(args: argparse.Namespace) -> None:
 
     id_col = manifest["id_col"]
     time_col = manifest["time_col"]
-    event_cols = manifest["event_cols"]
-    time_to_event_cols = manifest["time_to_event_cols"]
     feat_cont = manifest["feat_cont"]
     feat_cat = manifest["feat_cat"]
     feat_reconstr = manifest["feat_reconstr"]
+    max_landmark_time = int(manifest.get("max_landmark_time", 0))
+    model_max_pred_window = int(args.max_pred_window) + max_landmark_time
+
+    event_cfg = EVENT_CONFIGS[args.config]
+    event_col = event_cfg["event_col"]
+    time_to_event_col = event_cfg["time_to_event_col"]
+    n_events = len(event_col) if isinstance(event_col, list) else 1
+
+    # For saving artifacts and printing, always use list form.
+    event_cols_list = event_col if isinstance(event_col, list) else [event_col]
 
     data_info_dic = {
         "id_col": id_col,
-        "event_col": event_cols,
-        "time_to_event_col": time_to_event_cols,
+        "event_col": event_col,
+        "time_to_event_col": time_to_event_col,
         "time_col": time_col,
         "feat_cat": feat_cat,
         "feat_cont": feat_cont,
     }
     feats_dim = len(feat_cat) + len(feat_cont)
     reconstr_dim = len(feat_reconstr)
-    n_events = len(event_cols)
+    print(f"Config: {args.config}  events={event_cols_list}  n_events={n_events}")
+    print(
+        f"Post-treatment prediction window={args.max_pred_window}; "
+        f"model absolute window={model_max_pred_window} "
+        f"(max landmark offset={max_landmark_time})"
+    )
 
     df = pd.read_csv(input_csv)
 
@@ -109,7 +141,7 @@ def main(args: argparse.Namespace) -> None:
         haz_dec_layers=args.haz_dec_layers,
     )
 
-    run_id = args.run_id
+    run_id = args.run_id or f"prostate_{args.config}_v1"
 
     if not args.skip_train:
         print(f"\nTraining run_id={run_id} for up to {args.n_epochs} epochs ...")
@@ -117,10 +149,11 @@ def main(args: argparse.Namespace) -> None:
             data_train,
             data_valid,
             data_info_dic,
-            max_pred_window=args.max_pred_window,
+            max_pred_window=model_max_pred_window,
             run_id=run_id,
             n_epochs=args.n_epochs,
             batch_size=args.batch_size,
+            lr=args.lr,
             surv_loss_scale=args.surv_loss_scale,
             early_stopping=args.early_stopping,
             feat_reconstr=feat_reconstr,
@@ -140,7 +173,7 @@ def main(args: argparse.Namespace) -> None:
     batch_dict_test = model.process_eval_data(
         data_test,
         data_info_dic,
-        max_pred_window=args.max_pred_window,
+        max_pred_window=model_max_pred_window,
         run_id=run_id,
         feat_reconstr=feat_reconstr,
         model_info=model_info,
@@ -149,20 +182,37 @@ def main(args: argparse.Namespace) -> None:
     print("Sampling survival probabilities and cause-specific CIFs ...")
     from lib.neural_ode_surv import eval_model  # imported here to keep top-light
 
-    ef_surv_prob, cs_cif_total = model.get_surv_prob(
-        batch_dict_test,
-        model_info=model_info,
-        max_pred_window=args.max_pred_window,
-        filename_suffix=run_id,
-        device=device,
-        n_events=n_events,
-    )
+    if n_events == 1:
+        surv_prob = model.get_surv_prob(
+            batch_dict_test,
+            model_info=model_info,
+            max_pred_window=model_max_pred_window,
+            filename_suffix=run_id,
+            device=device,
+            n_events=n_events,
+        )
+        metric_input = surv_prob
+        cs_cif_total = None
+    else:
+        ef_surv_prob, cs_cif_total = model.get_surv_prob(
+            batch_dict_test,
+            model_info=model_info,
+            max_pred_window=model_max_pred_window,
+            filename_suffix=run_id,
+            device=device,
+            n_events=n_events,
+        )
+        surv_prob = None
+        metric_input = ef_surv_prob
+
     df_test_result = eval_model(
         model_info,
         batch_dict_test,
-        ef_surv_prob,
+        metric_input,
         run_id=run_id,
         cs_cif_total=cs_cif_total,
+        # Metrics are reported on the requested post-treatment horizon; the
+        # larger model horizon only compensates for pre-landmark history.
         max_pred_window=args.max_pred_window,
         n_events=n_events,
     )
@@ -172,12 +222,23 @@ def main(args: argparse.Namespace) -> None:
     metrics_path = output_dir / f"survlatent_ode_test_metrics_{run_id}.csv"
     cif_path = output_dir / f"survlatent_ode_cif_{run_id}.npz"
     df_test_result.to_csv(metrics_path, index=False)
-    np.savez_compressed(
-        cif_path,
-        ef_surv_prob=np.asarray(ef_surv_prob),
-        cs_cif_total=np.asarray(cs_cif_total),
-        event_cols=np.array(event_cols),
-    )
+    if n_events == 1:
+        np.savez_compressed(
+            cif_path,
+            surv_prob=np.asarray(surv_prob),
+            event_cols=np.array(event_cols_list),
+            post_treatment_max_pred_window=np.asarray(args.max_pred_window),
+            model_max_pred_window=np.asarray(model_max_pred_window),
+        )
+    else:
+        np.savez_compressed(
+            cif_path,
+            ef_surv_prob=np.asarray(metric_input),
+            cs_cif_total=np.asarray(cs_cif_total),
+            event_cols=np.array(event_cols_list),
+            post_treatment_max_pred_window=np.asarray(args.max_pred_window),
+            model_max_pred_window=np.asarray(model_max_pred_window),
+        )
     print(f"\nSaved:\n  {metrics_path}\n  {cif_path}")
     print("\nTest metrics:")
     print(df_test_result.to_string(index=False))
@@ -205,7 +266,17 @@ if __name__ == "__main__":
         default=str(DEFAULT_RESULTS),
         help="Directory to write metrics/CIF artifacts into.",
     )
-    parser.add_argument("--run-id", default="prostate_platinum_death_v1")
+    parser.add_argument(
+        "--config",
+        choices=list(EVENT_CONFIGS),
+        required=True,
+        help="Event configuration: 'death' / 'platinum' (single-event) or 'competing' (platinum vs death).",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Training identifier. Defaults to prostate_<config>_v1 so checkpoints do not collide across configs.",
+    )
     parser.add_argument("--skip-train", action="store_true", help="Reuse an existing checkpoint.")
 
     parser.add_argument("--seed", type=int, default=1991)

@@ -12,7 +12,7 @@ Arm 2 (multivariable elastic-net Cox):
   - 80% train/val + 20% held-out test.
   - 5-fold CV over (penalizer x l1_ratio) grid on the 80%; AGE is unpenalized.
   - Refit on full 80% with chosen (penalizer, l1_ratio) and evaluate on 20% test:
-    C-index and integrated AUC(t) over the 5-95 percentile of event times.
+    C-index and SurvLatent-style IPCW cumulative/dynamic AUC(t).
 
 Endpoints: platinum, death.
 
@@ -24,7 +24,8 @@ Expected input:
 Outputs:
   results/cox_agg_feature_selection.csv   (selected lab features + coverage)
   results/cox_agg_univariate.csv          (log HRs, p-values, FDR per endpoint)
-  results/cox_agg_multivariable.csv       (coefs + C-indices + integrated AUC(t))
+  results/cox_agg_multivariable.csv       (coefs + C-indices + AUC(t))
+  results/cox_agg_multivariable_metrics.csv
 """
 
 from __future__ import annotations
@@ -37,7 +38,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 
@@ -53,10 +53,17 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
     concordance_index = None
     LIFELINES_IMPORT_ERROR = exc
 
+try:
+    from sksurv.metrics import cumulative_dynamic_auc
+
+    SKSURV_IMPORT_ERROR: ModuleNotFoundError | None = None
+except ModuleNotFoundError as exc:  # pragma: no cover - depends on local environment
+    cumulative_dynamic_auc = None
+    SKSURV_IMPORT_ERROR = exc
+
 BASE = Path(__file__).resolve().parent
 DATA_PATH = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/")
 RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis")
-RESULTS.mkdir(parents=True, exist_ok=True)
 
 AGE_COL = "AGE_AT_TREATMENTSTART"
 DEFAULT_SEED = 42
@@ -66,23 +73,24 @@ DEFAULT_MIN_PATIENT_COVERAGE = 0.20
 DEFAULT_MIN_EVENTS_PER_FEATURE = 10
 DEFAULT_CV_PENALIZERS = [0.01, 0.05, 0.10, 0.20, 0.50, 1.00]
 DEFAULT_CV_L1_RATIOS = [0.5, 1.0]
-DEFAULT_AUC_PERCENTILE_RANGE = (0.05, 0.95)
-DEFAULT_AUC_N_POINTS = 10
+DEFAULT_AUC_QUANTILES = (0.25, 0.375, 0.50, 0.625, 0.75)
+DEFAULT_AUC_TIME_UNIT_DAYS = 7
 PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
 MIN_SLOPE_OBS = 3
 MIN_SLOPE_SPAN_DAYS = 7.0
 MIN_DELTA_OBS = 2
+SPLIT_ASSIGNMENTS_FILENAME = "cox_agg_split_assignments.csv"
 
 ENDPOINTS = {
     "platinum": {
         "duration_col": "t_platinum",
         "event_col": "PLATINUM",
-        "description": "Time to first platinum exposure",
+        "description": "Time from first treatment start to first platinum exposure",
     },
     "death": {
         "duration_col": "t_death",
         "event_col": "DEATH",
-        "description": "Time to death / last contact",
+        "description": "Time from first treatment start to death / last contact",
     },
 }
 OUTCOME_COLUMNS = {
@@ -99,8 +107,11 @@ OUTCOME_COLUMNS = {
     "t_diagnosis",
     "t_first_treatment",
     "t_platinum",
+    "t_platinum_from_first_record",
     "t_last_contact",
+    "t_last_contact_from_first_record",
     "t_death",
+    "t_death_from_first_record",
     "t_either",
     "split",
 }
@@ -111,6 +122,13 @@ def require_lifelines() -> None:
         raise ModuleNotFoundError(
             "lifelines is required to run the aggregated Cox association pipeline."
         ) from LIFELINES_IMPORT_ERROR
+
+
+def require_sksurv() -> None:
+    if cumulative_dynamic_auc is None:
+        raise ModuleNotFoundError(
+            "scikit-survival is required for the SurvLatent-style Cox AUC(t) evaluation."
+        ) from SKSURV_IMPORT_ERROR
 
 
 def parse_feature_name(feature_name: str) -> tuple[str, str]:
@@ -280,6 +298,11 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
         fallback_duration_col="t_last_contact",
     )
 
+    landmark_time = pat["t_first_treatment"].astype(float)
+    for duration_col in ["t_last_contact", "t_death", "t_platinum"]:
+        pat[f"{duration_col}_from_first_record"] = pat[duration_col]
+        pat[duration_col] = pat[duration_col].astype(float) - landmark_time
+
     platinum_event_time = np.where(pat["PLATINUM"].eq(1), pat["t_platinum"], np.inf)
     death_event_time = np.where(pat["DEATH"].eq(1), pat["t_death"], np.inf)
     first_event_time = np.minimum(platinum_event_time, death_event_time)
@@ -289,13 +312,17 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
 
     valid = (
         pat["FIRST_RECORD_DATE"].notna()
+        & pat["FIRST_TREATMENT"].eq(1)
+        & pat["t_first_treatment"].notna()
+        & pat["t_first_treatment"].ge(0)
         & pat["t_platinum"].notna()
         & pat["t_death"].notna()
+        & pat["t_last_contact"].notna()
         & pat["t_either"].notna()
-        & pat["t_first_treatment"].notna()
-        & pat["t_platinum"].ge(0)
-        & pat["t_death"].ge(0)
-        & pat["t_either"].ge(0)
+        & pat["t_platinum"].gt(0)
+        & pat["t_death"].gt(0)
+        & pat["t_last_contact"].gt(0)
+        & pat["t_either"].gt(0)
     )
     return pat.loc[valid].copy()
 
@@ -468,13 +495,45 @@ def split_train_test(
     return train_val, test, split_assignments, label_name
 
 
+def build_aligned_cohort(
+    df: pd.DataFrame,
+    *,
+    test_frac: float,
+    seed: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, str]:
+    """Build the shared landmarked patient cohort and held-out test split."""
+    outcome_df = make_outcome_df(df)
+    print(f"Outcome table: {len(outcome_df)} patients")
+
+    print("Building raw aggregated pre-treatment lab summary feature matrix...")
+    feature_df = build_feature_matrix(df)
+
+    merged = feature_df.join(outcome_df, how="inner")
+    merged = merged.loc[merged[AGE_COL].notna()].copy()
+    if merged.empty:
+        raise ValueError("No patients have both engineered features and valid outcomes.")
+
+    train_val, test, split_assignments, split_stratification = split_train_test(
+        merged,
+        test_frac=test_frac,
+        seed=seed,
+    )
+    merged = merged.copy()
+    merged["split"] = split_assignments
+    train_val = train_val.copy()
+    train_val["split"] = "train_val"
+    test = test.copy()
+    test["split"] = "test"
+    return outcome_df, feature_df, merged, train_val, test, split_assignments, split_stratification
+
+
 def select_feature_columns(
     data: pd.DataFrame,
     raw_feature_cols: list[str],
     *,
     min_patient_coverage: float,
 ) -> tuple[list[str], pd.DataFrame]:
-    """Select features on full dataset (used by both Arm 1 and Arm 2)."""
+    """Select features on the training/validation block to avoid test leakage."""
     coverage = data[raw_feature_cols].notna().mean()
     unique_non_missing = data[raw_feature_cols].nunique(dropna=True)
 
@@ -556,7 +615,12 @@ def build_model_matrices(
         for col in feature_cols
         if train_df[col].notna().any() and train_df[col].nunique(dropna=True) > 1
     ]
-    covariate_cols = list(base_feature_cols)
+    missing_indicator_cols = [
+        f"{col}__missing"
+        for col in base_feature_cols
+        if train_df[col].isna().nunique(dropna=False) > 1
+    ]
+    covariate_cols = list(base_feature_cols) + missing_indicator_cols
 
     train_model = pd.DataFrame(index=train_df.index)
     eval_model = pd.DataFrame(index=eval_df.index)
@@ -564,12 +628,27 @@ def build_model_matrices(
     if base_feature_cols:
         imputer = SimpleImputer(strategy="mean")
         scaler = StandardScaler()
-        x_train = imputer.fit_transform(train_df[base_feature_cols].values)
-        x_eval = imputer.transform(eval_df[base_feature_cols].values)
+        x_train_values = imputer.fit_transform(train_df[base_feature_cols].values)
+        x_eval_values = imputer.transform(eval_df[base_feature_cols].values)
+
+        if missing_indicator_cols:
+            indicator_source_cols = [
+                col.removesuffix("__missing") for col in missing_indicator_cols
+            ]
+            x_train_missing = train_df[indicator_source_cols].isna().astype(float).to_numpy()
+            x_eval_missing = eval_df[indicator_source_cols].isna().astype(float).to_numpy()
+            x_train = np.hstack([x_train_values, x_train_missing])
+            x_eval = np.hstack([x_eval_values, x_eval_missing])
+            scaled_cols = base_feature_cols + missing_indicator_cols
+        else:
+            x_train = x_train_values
+            x_eval = x_eval_values
+            scaled_cols = base_feature_cols
+
         x_train = scaler.fit_transform(x_train)
         x_eval = scaler.transform(x_eval)
-        train_model = pd.DataFrame(x_train, columns=base_feature_cols, index=train_df.index)
-        eval_model = pd.DataFrame(x_eval, columns=base_feature_cols, index=eval_df.index)
+        train_model = pd.DataFrame(x_train, columns=scaled_cols, index=train_df.index)
+        eval_model = pd.DataFrame(x_eval, columns=scaled_cols, index=eval_df.index)
 
     train_model["age"] = train_df[AGE_COL].to_numpy(dtype=float)
     eval_model["age"] = eval_df[AGE_COL].to_numpy(dtype=float)
@@ -585,107 +664,124 @@ def build_model_matrices(
     return train_model, eval_model, covariate_cols
 
 
-def select_auc_horizons(
-    reference_df: pd.DataFrame,
-    *,
-    duration_col: str,
-    event_col: str,
-    percentile_range: tuple[float, float],
-    n_points: int,
-) -> list[float]:
-    event_times = pd.to_numeric(
-        reference_df.loc[reference_df[event_col].eq(1), duration_col],
-        errors="coerce",
-    ).dropna()
-    event_times = event_times.loc[np.isfinite(event_times) & event_times.gt(0)]
-    if event_times.empty:
-        return []
-
-    t_lo, t_hi = np.quantile(event_times.to_numpy(dtype=float), percentile_range)
-    if not (np.isfinite(t_lo) and np.isfinite(t_hi)) or t_hi <= t_lo:
-        return []
-    horizons = np.linspace(float(t_lo), float(t_hi), int(n_points))
-    return [float(h) for h in horizons if np.isfinite(h) and h > 0]
+def _duration_to_auc_units(duration: pd.Series, *, time_unit_days: int) -> np.ndarray:
+    if time_unit_days <= 0:
+        raise ValueError("time_unit_days must be positive.")
+    duration_days = pd.to_numeric(duration, errors="coerce").to_numpy(dtype=float)
+    return np.ceil(duration_days / float(time_unit_days))
 
 
-def auc_at_horizon(
-    *,
-    duration: np.ndarray,
-    event: np.ndarray,
-    risk_score: np.ndarray,
-    horizon: float,
-) -> tuple[float, int, int, int]:
-    positive = (event == 1) & (duration <= horizon)
-    negative = duration > horizon
-    usable = positive | negative
-
-    n_usable = int(usable.sum())
-    n_positive = int(positive[usable].sum())
-    n_negative = int(negative[usable].sum())
-
-    if n_usable == 0 or n_positive == 0 or n_negative == 0:
-        return np.nan, n_usable, n_positive, n_negative
-
-    auc = float(roc_auc_score(positive[usable].astype(int), risk_score[usable]))
-    return auc, n_usable, n_positive, n_negative
+def _make_survival_array(event: np.ndarray, duration: np.ndarray) -> np.ndarray:
+    survival = np.empty(
+        dtype=[("event", bool), ("time", np.float64)],
+        shape=len(duration),
+    )
+    survival["event"] = event.astype(bool)
+    survival["time"] = duration.astype(float)
+    return survival
 
 
-def compute_integrated_auc_t(
+def compute_survlatent_auc_t(
     eval_df: pd.DataFrame,
     risk_score: np.ndarray,
     *,
     duration_col: str,
     event_col: str,
     reference_df: pd.DataFrame,
-    percentile_range: tuple[float, float] = DEFAULT_AUC_PERCENTILE_RANGE,
-    n_points: int = DEFAULT_AUC_N_POINTS,
+    time_unit_days: int = DEFAULT_AUC_TIME_UNIT_DAYS,
+    quantiles: tuple[float, ...] = DEFAULT_AUC_QUANTILES,
 ) -> tuple[float, pd.DataFrame]:
-    """Time-averaged AUC(t) integrated over the 5-95 percentile of reference event times."""
-    horizons = select_auc_horizons(
-        reference_df,
-        duration_col=duration_col,
-        event_col=event_col,
-        percentile_range=percentile_range,
-        n_points=n_points,
-    )
-    empty_cols = ["horizon_days", "auc_t", "n_usable", "n_positive", "n_negative"]
-    if not horizons:
-        return np.nan, pd.DataFrame(columns=empty_cols)
+    """Match SurvLatent ODE's IPCW cumulative/dynamic AUC(t) evaluation."""
+    require_sksurv()
 
-    duration = eval_df[duration_col].to_numpy(dtype=float)
-    event = eval_df[event_col].to_numpy(dtype=int)
+    empty_cols = [
+        "horizon_quantile",
+        "horizon_time_unit",
+        "horizon_days",
+        "auc_t",
+        "n_eval",
+        "n_eval_events",
+        "note",
+    ]
+
+    train_duration = _duration_to_auc_units(
+        reference_df[duration_col],
+        time_unit_days=time_unit_days,
+    )
+    train_event = reference_df[event_col].to_numpy(dtype=int)
+    eval_duration = _duration_to_auc_units(
+        eval_df[duration_col],
+        time_unit_days=time_unit_days,
+    )
+    eval_event = eval_df[event_col].to_numpy(dtype=int)
     risk_score = np.asarray(risk_score, dtype=float).reshape(-1)
 
+    train_valid = np.isfinite(train_duration) & (train_duration > 0)
+    eval_valid = np.isfinite(eval_duration) & (eval_duration > 0) & np.isfinite(risk_score)
+    if train_valid.sum() == 0 or eval_valid.sum() == 0:
+        return np.nan, pd.DataFrame(columns=empty_cols)
+
+    train_surv = _make_survival_array(train_event[train_valid], train_duration[train_valid])
+    eval_surv = _make_survival_array(eval_event[eval_valid], eval_duration[eval_valid])
+    eval_risk = risk_score[eval_valid]
+
+    event_times = eval_duration[eval_valid & (eval_event == 1)]
+    event_times = event_times[np.isfinite(event_times) & (event_times > 0)]
+    if len(event_times) == 0:
+        return np.nan, pd.DataFrame(columns=empty_cols)
+
+    horizon_times = np.asarray(
+        [int(val) for val in np.quantile(event_times, quantiles)],
+        dtype=float,
+    )
     rows = []
-    for horizon in horizons:
-        auc_t, n_usable, n_positive, n_negative = auc_at_horizon(
-            duration=duration,
-            event=event,
-            risk_score=risk_score,
-            horizon=horizon,
-        )
+    for quantile, horizon in zip(quantiles, horizon_times):
+        auc_t = np.nan
+        note = ""
+        if horizon <= 0:
+            note = "non_positive_horizon"
+        else:
+            try:
+                auc_values, _ = cumulative_dynamic_auc(
+                    train_surv,
+                    eval_surv,
+                    eval_risk,
+                    np.asarray([horizon], dtype=float),
+                )
+                auc_t = float(auc_values[0])
+            except ValueError as exc:
+                note = f"auc_failed: {exc}"
         rows.append(
             {
-                "horizon_days": horizon,
+                "horizon_quantile": quantile,
+                "horizon_time_unit": horizon,
+                "horizon_days": horizon * float(time_unit_days),
                 "auc_t": auc_t,
-                "n_usable": n_usable,
-                "n_positive": n_positive,
-                "n_negative": n_negative,
+                "n_eval": int(eval_valid.sum()),
+                "n_eval_events": int((eval_event[eval_valid] == 1).sum()),
+                "note": note,
             }
         )
 
     auc_df = pd.DataFrame(rows)
-    valid = auc_df["auc_t"].notna()
-    if valid.sum() < 2:
+    if len(horizon_times) < 2 or horizon_times[-1] <= horizon_times[0]:
         return np.nan, auc_df
-    x = auc_df.loc[valid, "horizon_days"].to_numpy(dtype=float)
-    y = auc_df.loc[valid, "auc_t"].to_numpy(dtype=float)
-    span = x[-1] - x[0]
-    if not np.isfinite(span) or span <= 0:
+
+    mean_auc_times = np.arange(horizon_times[0], horizon_times[-1], dtype=float)
+    mean_auc_times = mean_auc_times[mean_auc_times > 0]
+    if len(mean_auc_times) == 0:
         return np.nan, auc_df
-    trapezoid = getattr(np, "trapezoid", np.trapz)
-    integrated = float(trapezoid(y, x) / span)
-    return integrated, auc_df
+
+    try:
+        _, mean_auc = cumulative_dynamic_auc(
+            train_surv,
+            eval_surv,
+            eval_risk,
+            mean_auc_times,
+        )
+    except ValueError:
+        mean_auc = np.nan
+    return float(mean_auc) if np.isfinite(mean_auc) else np.nan, auc_df
 
 
 def score_cox_model(
@@ -698,7 +794,7 @@ def score_cox_model(
     # Use the linear predictor (log partial hazard) rather than exp(linear predictor):
     # ranking is identical, and it avoids exp() overflow when the linear predictor
     # is large for a handful of outlier rows — which would otherwise produce inf and
-    # crash roc_auc_score.
+    # crash downstream AUC routines.
     log_pred = np.asarray(model.predict_log_partial_hazard(model_df)).reshape(-1)
     c_index = float(concordance_index(model_df[duration_col], -log_pred, model_df[event_col]))
     return c_index, log_pred
@@ -743,6 +839,8 @@ def run_univariate_associations(
             "ci_lower": np.nan,
             "ci_upper": np.nan,
             "p_value": np.nan,
+            "coef_missing": np.nan,
+            "p_value_missing": np.nan,
             "coef_age": np.nan,
             "p_value_age": np.nan,
             "fit_penalizer": np.nan,
@@ -764,6 +862,9 @@ def run_univariate_associations(
             rows.append(result)
             continue
 
+        missing_indicator = feature_df[feature].isna().astype(float).to_numpy()
+        include_missing_indicator = bool(np.unique(missing_indicator).size > 1)
+
         imputer = SimpleImputer(strategy="mean")
         feature_values = imputer.fit_transform(feature_df[[feature]]).reshape(-1)
         feature_sd = float(np.std(feature_values, ddof=0))
@@ -777,6 +878,9 @@ def run_univariate_associations(
         feature_df["feature_z"] = (feature_values - feature_mean) / feature_sd
         feature_df["age"] = feature_df[AGE_COL]
         model_cols = ["feature_z", "age"]
+        if include_missing_indicator:
+            feature_df["feature_missing"] = missing_indicator
+            model_cols.insert(1, "feature_missing")
 
         model, used_penalizer, note = fit_cox_with_fallback(
             feature_df[model_cols + [duration_col, event_col]],
@@ -798,6 +902,10 @@ def run_univariate_associations(
         result["ci_lower"] = float(summary_row["exp(coef) lower 95%"])
         result["ci_upper"] = float(summary_row["exp(coef) upper 95%"])
         result["p_value"] = float(summary_row["p"])
+        if include_missing_indicator and "feature_missing" in model.summary.index:
+            missing_row = model.summary.loc["feature_missing"]
+            result["coef_missing"] = float(missing_row["coef"])
+            result["p_value_missing"] = float(missing_row["p"])
         age_row = model.summary.loc["age"]
         result["coef_age"] = float(age_row["coef"])
         result["p_value_age"] = float(age_row["p"])
@@ -829,9 +937,11 @@ def tune_multivariable_model(
     l1_ratios: list[float],
     n_folds: int,
     seed: int,
+    auc_time_unit_days: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """Arm 2: 5-fold CV over (penalizer x l1_ratio) grid (elastic-net), AGE unpenalized."""
     require_lifelines()
+    require_sksurv()
     duration_col = ENDPOINTS[endpoint]["duration_col"]
     event_col = ENDPOINTS[endpoint]["event_col"]
 
@@ -855,7 +965,7 @@ def tune_multivariable_model(
                 "n_events_val": int(fold_val[event_col].sum()),
                 "cv_stratification": cv_stratification,
                 "c_index_val": np.nan,
-                "integrated_auc_t_val": np.nan,
+                "mean_auc_t_val": np.nan,
                 "n_valid_auc_horizons_val": 0,
                 "n_covariates": np.nan,
                 "note": "",
@@ -888,14 +998,15 @@ def tune_multivariable_model(
                         event_col=event_col,
                     )
                     row["c_index_val"] = c_index
-                    integrated_auc_val, auc_df_val = compute_integrated_auc_t(
+                    mean_auc_val, auc_df_val = compute_survlatent_auc_t(
                         val_mdf,
                         val_pred,
                         duration_col=duration_col,
                         event_col=event_col,
                         reference_df=train_mdf,
+                        time_unit_days=auc_time_unit_days,
                     )
-                    row["integrated_auc_t_val"] = integrated_auc_val
+                    row["mean_auc_t_val"] = mean_auc_val
                     row["n_valid_auc_horizons_val"] = (
                         int(auc_df_val["auc_t"].notna().sum()) if not auc_df_val.empty else 0
                     )
@@ -911,9 +1022,9 @@ def tune_multivariable_model(
             cv_mean=("c_index_val", "mean"),
             cv_std=("c_index_val", "std"),
             n_valid_folds=("c_index_val", lambda s: int(s.notna().sum())),
-            integrated_auc_t_cv_mean=("integrated_auc_t_val", "mean"),
-            integrated_auc_t_cv_std=("integrated_auc_t_val", "std"),
-            n_valid_auc_t_folds=("integrated_auc_t_val", lambda s: int(s.notna().sum())),
+            mean_auc_t_cv_mean=("mean_auc_t_val", "mean"),
+            mean_auc_t_cv_std=("mean_auc_t_val", "std"),
+            n_valid_auc_t_folds=("mean_auc_t_val", lambda s: int(s.notna().sum())),
             n_covariates_mean=("n_covariates", "mean"),
             cv_stratification=("cv_stratification", "first"),
         )
@@ -946,8 +1057,10 @@ def fit_final_multivariable_model(
     penalizer_grid: list[float],
     split_stratification: str,
     cv_stratification: str,
+    auc_time_unit_days: int,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     require_lifelines()
+    require_sksurv()
     duration_col = ENDPOINTS[endpoint]["duration_col"]
     event_col = ENDPOINTS[endpoint]["event_col"]
 
@@ -990,19 +1103,21 @@ def fit_final_multivariable_model(
         duration_col=duration_col,
         event_col=event_col,
     )
-    train_iauc, train_auc_df = compute_integrated_auc_t(
+    train_mean_auc, train_auc_df = compute_survlatent_auc_t(
         train_mdf,
         train_pred,
         duration_col=duration_col,
         event_col=event_col,
         reference_df=train_mdf,
+        time_unit_days=auc_time_unit_days,
     )
-    test_iauc, test_auc_df = compute_integrated_auc_t(
+    test_mean_auc, test_auc_df = compute_survlatent_auc_t(
         test_mdf,
         test_pred,
         duration_col=duration_col,
         event_col=event_col,
         reference_df=train_mdf,
+        time_unit_days=auc_time_unit_days,
     )
 
     metrics_row = {
@@ -1017,16 +1132,26 @@ def fit_final_multivariable_model(
         "n_covariates": len(covariate_cols),
         "train_val_c_index": train_c,
         "test_c_index": test_c,
-        "train_val_integrated_auc_t": train_iauc,
-        "test_integrated_auc_t": test_iauc,
-        "auc_percentile_range": f"{DEFAULT_AUC_PERCENTILE_RANGE[0]:g}-{DEFAULT_AUC_PERCENTILE_RANGE[1]:g}",
-        "auc_n_points": DEFAULT_AUC_N_POINTS,
+        "train_val_mean_auc_t": train_mean_auc,
+        "test_mean_auc_t": test_mean_auc,
+        "auc_quantiles": ",".join(f"{q:g}" for q in DEFAULT_AUC_QUANTILES),
+        "auc_time_unit_days": auc_time_unit_days,
         "train_val_n_valid_auc_horizons": int(train_auc_df["auc_t"].notna().sum()) if not train_auc_df.empty else 0,
         "test_n_valid_auc_horizons": int(test_auc_df["auc_t"].notna().sum()) if not test_auc_df.empty else 0,
         "split_stratification": split_stratification,
         "cv_stratification": cv_stratification,
         "note": note,
     }
+    for label, auc_df in [("train_val", train_auc_df), ("test", test_auc_df)]:
+        if auc_df.empty:
+            continue
+        for _, auc_row in auc_df.iterrows():
+            quantile = float(auc_row["horizon_quantile"])
+            quantile_label = f"{quantile * 100:g}".replace(".", "_")
+            metrics_row[f"{label}_auc_{quantile_label}_percentile"] = float(auc_row["auc_t"])
+            metrics_row[f"{label}_auc_{quantile_label}_time_unit"] = float(
+                auc_row["horizon_time_unit"]
+            )
 
     summary = model.summary.reset_index().rename(columns={"covariate": "feature"})
     parsed = summary["feature"].map(parse_feature_name)
@@ -1039,8 +1164,8 @@ def fit_final_multivariable_model(
     summary["n_covariates"] = len(covariate_cols)
     summary["train_val_c_index"] = train_c
     summary["test_c_index"] = test_c
-    summary["train_val_integrated_auc_t"] = train_iauc
-    summary["test_integrated_auc_t"] = test_iauc
+    summary["train_val_mean_auc_t"] = train_mean_auc
+    summary["test_mean_auc_t"] = test_mean_auc
     summary["note"] = note
     keep_cols = [
         "endpoint",
@@ -1055,8 +1180,8 @@ def fit_final_multivariable_model(
         "n_covariates",
         "train_val_c_index",
         "test_c_index",
-        "train_val_integrated_auc_t",
-        "test_integrated_auc_t",
+        "train_val_mean_auc_t",
+        "test_mean_auc_t",
         "note",
     ]
     summary = summary[[c for c in keep_cols if c in summary.columns]]
@@ -1097,30 +1222,20 @@ def print_top_hits(df: pd.DataFrame, *, endpoint: str) -> None:
 
 
 def main(args: argparse.Namespace) -> None:
+    RESULTS.mkdir(parents=True, exist_ok=True)
     endpoints = normalize_endpoints(args.endpoints)
 
     print("Loading data...")
     df = pd.read_csv(args.data, low_memory=False)
 
-    print("Building outcome table...")
-    outcome_df = make_outcome_df(df)
-    print(f"Outcome table: {len(outcome_df)} patients")
-
-    print("Building raw aggregated pre-treatment lab summary feature matrix...")
-    feature_df = build_feature_matrix(df)
-
-    merged = feature_df.join(outcome_df, how="inner")
-    merged = merged.loc[merged[AGE_COL].notna()].copy()
-    if merged.empty:
-        raise ValueError("No patients have both engineered features and valid outcomes.")
-
-    raw_feature_cols = feature_df.columns.tolist()
-
-    train_val, test, _, split_stratification = split_train_test(
-        merged,
+    print("Building landmarked outcome table and aligned patient split...")
+    _, feature_df, merged, train_val, test, split_assignments, split_stratification = build_aligned_cohort(
+        df,
         test_frac=args.test_frac,
         seed=args.seed,
     )
+
+    raw_feature_cols = feature_df.columns.tolist()
 
     # Feature selection on train_val only to avoid leaking test-set coverage.
     selected_feature_cols, feature_meta = select_feature_columns(
@@ -1140,6 +1255,11 @@ def main(args: argparse.Namespace) -> None:
     print(f"Selected summary-lab features: {len(selected_feature_cols)}")
     print(f"Split stratification: {split_stratification}")
 
+    split_assignments.rename_axis("DFCI_MRN").reset_index().to_csv(
+        RESULTS / SPLIT_ASSIGNMENTS_FILENAME,
+        index=False,
+    )
+
     feature_meta.loc[
         feature_meta["selected"],
         ["feature", "lab_name", "feature_stat", "coverage", "unique_non_missing"],
@@ -1147,6 +1267,7 @@ def main(args: argparse.Namespace) -> None:
 
     univariate_frames: list[pd.DataFrame] = []
     multivariable_frames: list[pd.DataFrame] = []
+    multivariable_metric_rows: list[dict] = []
 
     univariate_keep_cols = [
         "endpoint",
@@ -1155,6 +1276,8 @@ def main(args: argparse.Namespace) -> None:
         "feature_stat",
         "coverage",
         "n_patients_used",
+        "n_patients_observed",
+        "n_patients_imputed",
         "n_events_used",
         "coef_feature",
         "hazard_ratio_per_sd",
@@ -1162,6 +1285,8 @@ def main(args: argparse.Namespace) -> None:
         "ci_upper",
         "p_value",
         "q_value",
+        "coef_missing",
+        "p_value_missing",
     ]
 
     if args.analysis in {"univariate", "both"}:
@@ -1192,6 +1317,7 @@ def main(args: argparse.Namespace) -> None:
                 l1_ratios=args.cv_l1_ratios,
                 n_folds=args.n_folds,
                 seed=args.seed,
+                auc_time_unit_days=args.auc_time_unit_days,
             )
 
             metrics_row, summary_df, _ = fit_final_multivariable_model(
@@ -1204,7 +1330,9 @@ def main(args: argparse.Namespace) -> None:
                 penalizer_grid=args.cv_penalizers,
                 split_stratification=split_stratification,
                 cv_stratification=str(best_row["cv_stratification"]),
+                auc_time_unit_days=args.auc_time_unit_days,
             )
+            multivariable_metric_rows.append(metrics_row)
             multivariable_frames.append(summary_df)
 
             top_cols = [c for c in ["feature", "coef", "exp(coef)"] if c in summary_df.columns]
@@ -1214,13 +1342,13 @@ def main(args: argparse.Namespace) -> None:
                 f"  penalizer={best_row['penalizer']}  l1_ratio={best_row['l1_ratio']}  "
                 f"cv_mean C-index={best_row['cv_mean']:.4f}"
             )
-            print(f"  CV integrated AUC(t)={best_row['integrated_auc_t_cv_mean']:.4f}")
+            print(f"  CV mean AUC(t)={best_row['mean_auc_t_cv_mean']:.4f}")
             print(
                 f"  train/val C-index={metrics_row['train_val_c_index']:.4f}  "
-                f"integrated AUC(t)={metrics_row['train_val_integrated_auc_t']:.4f}"
+                f"mean AUC(t)={metrics_row['train_val_mean_auc_t']:.4f}"
             )
             print(f"  held-out test C-index={metrics_row['test_c_index']:.4f}")
-            print(f"  held-out test integrated AUC(t)={metrics_row['test_integrated_auc_t']:.4f}")
+            print(f"  held-out test mean AUC(t)={metrics_row['test_mean_auc_t']:.4f}")
             print("Top multivariable coefficients:")
             print(top.to_string(index=False))
 
@@ -1232,13 +1360,20 @@ def main(args: argparse.Namespace) -> None:
         pd.concat(multivariable_frames, ignore_index=True).to_csv(
             RESULTS / "cox_agg_multivariable.csv", index=False
         )
+    if multivariable_metric_rows:
+        pd.DataFrame(multivariable_metric_rows).to_csv(
+            RESULTS / "cox_agg_multivariable_metrics.csv", index=False
+        )
 
     print("\nSaved:")
+    print(f"  results/{SPLIT_ASSIGNMENTS_FILENAME}")
     print("  results/cox_agg_feature_selection.csv")
     if univariate_frames:
         print("  results/cox_agg_univariate.csv")
     if multivariable_frames:
         print("  results/cox_agg_multivariable.csv")
+    if multivariable_metric_rows:
+        print("  results/cox_agg_multivariable_metrics.csv")
 
 
 if __name__ == "__main__":
@@ -1308,5 +1443,11 @@ if __name__ == "__main__":
         type=float,
         default=DEFAULT_CV_L1_RATIOS,
         help="Elastic-net L1 mixing values (0=ridge, 1=lasso) searched during 5-fold CV.",
+    )
+    parser.add_argument(
+        "--auc-time-unit-days",
+        type=int,
+        default=DEFAULT_AUC_TIME_UNIT_DAYS,
+        help="Time unit used for Cox AUC(t), matching SurvLatent ODE input bins by default.",
     )
     main(parser.parse_args())
