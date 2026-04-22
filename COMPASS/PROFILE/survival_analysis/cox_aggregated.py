@@ -1,7 +1,8 @@
 """
 Two-arm survival analysis on pre-treatment lab summary features.
 
-Features per lab (all pre-first-treatment): mean, min, max, last.
+Features per lab (all pre-first-treatment): mean, min, max, last, slope,
+delta (last - first), n_observations.
 
 Arm 1 (univariate, full dataset):
   - For each feature, fit Cox on [AGE + feature] using all patients.
@@ -13,7 +14,7 @@ Arm 2 (multivariable elastic-net Cox):
   - Refit on full 80% with chosen (penalizer, l1_ratio) and evaluate on 20% test:
     C-index and integrated AUC(t) over the 5-95 percentile of event times.
 
-Endpoints: platinum, death, nepc.
+Endpoints: platinum, death.
 
 Expected input:
   Row-level longitudinal data with at least
@@ -68,6 +69,9 @@ DEFAULT_CV_L1_RATIOS = [0.5, 1.0]
 DEFAULT_AUC_PERCENTILE_RANGE = (0.05, 0.95)
 DEFAULT_AUC_N_POINTS = 10
 PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
+MIN_SLOPE_OBS = 3
+MIN_SLOPE_SPAN_DAYS = 7.0
+MIN_DELTA_OBS = 2
 
 ENDPOINTS = {
     "platinum": {
@@ -79,11 +83,6 @@ ENDPOINTS = {
         "duration_col": "t_death",
         "event_col": "DEATH",
         "description": "Time to death / last contact",
-    },
-    "nepc": {
-        "duration_col": "t_nepc",
-        "event_col": "NEPC",
-        "description": "Time to NEPC transformation (LLM-labeled)",
     },
 }
 OUTCOME_COLUMNS = {
@@ -97,15 +96,12 @@ OUTCOME_COLUMNS = {
     "PLATINUM",
     "DEATH",
     "EITHER",
-    "NEPC_DATE",
-    "NEPC",
     "t_diagnosis",
     "t_first_treatment",
     "t_platinum",
     "t_last_contact",
     "t_death",
     "t_either",
-    "t_nepc",
     "split",
 }
 
@@ -209,14 +205,11 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
         "PLATINUM_DATE",
         "PLATINUM",
         "DEATH",
-        "NEPC_DATE",
-        "NEPC",
         "t_diagnosis",
         "t_first_treatment",
         "t_platinum",
         "t_last_contact",
         "t_death",
-        "t_nepc",
     ]
     available_cols = [col for col in patient_level_cols if col in df.columns]
     if "DFCI_MRN" not in available_cols:
@@ -236,7 +229,6 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
         "FIRST_TREATMENT_DATE",
         "LAST_CONTACT_DATE",
         "PLATINUM_DATE",
-        "NEPC_DATE",
     ]:
         if date_col in pat.columns:
             pat[date_col] = _coerce_datetime(pat[date_col])
@@ -247,7 +239,6 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
         pat[AGE_COL] = np.nan
     pat["DEATH"] = pd.to_numeric(pat.get("DEATH"), errors="coerce").fillna(0).astype(int)
     pat["PLATINUM"] = _coerce_platinum(pat.get("PLATINUM", pd.Series(0, index=pat.index)))
-    pat["NEPC"] = pd.to_numeric(pat.get("NEPC", pd.Series(0, index=pat.index)), errors="coerce").fillna(0).astype(int)
     pat["FIRST_TREATMENT"] = pd.to_numeric(
         pat.get(
             "FIRST_TREATMENT",
@@ -288,12 +279,6 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
         event_date_col="PLATINUM_DATE",
         fallback_duration_col="t_last_contact",
     )
-    pat["t_nepc"] = _derive_duration(
-        pat,
-        duration_col="t_nepc",
-        event_date_col="NEPC_DATE",
-        fallback_duration_col="t_last_contact",
-    )
 
     platinum_event_time = np.where(pat["PLATINUM"].eq(1), pat["t_platinum"], np.inf)
     death_event_time = np.where(pat["DEATH"].eq(1), pat["t_death"], np.inf)
@@ -307,12 +292,10 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
         & pat["t_platinum"].notna()
         & pat["t_death"].notna()
         & pat["t_either"].notna()
-        & pat["t_nepc"].notna()
         & pat["t_first_treatment"].notna()
         & pat["t_platinum"].ge(0)
         & pat["t_death"].ge(0)
         & pat["t_either"].ge(0)
-        & pat["t_nepc"].ge(0)
     )
     return pat.loc[valid].copy()
 
@@ -326,14 +309,15 @@ def _patient_lab_std(values: pd.Series) -> float:
 def _compute_patient_lab_slopes(pre_treatment: pd.DataFrame) -> pd.DataFrame:
     """Slope of LAB_VALUE vs t_lab (per day) per (DFCI_MRN, LAB_NAME).
 
-    Returns NaN when fewer than 2 observations exist or t_lab has no variation.
+    Returns NaN unless a patient has >= MIN_SLOPE_OBS observations spanning at
+    least MIN_SLOPE_SPAN_DAYS; short-span fits produce unstable, extreme slopes.
     """
     def _slope(group: pd.DataFrame) -> float:
-        if len(group) < 2:
+        if len(group) < MIN_SLOPE_OBS:
             return np.nan
         x = group["t_lab"].to_numpy(dtype=float)
         y = group["LAB_VALUE"].to_numpy(dtype=float)
-        if np.std(x) == 0:
+        if (x.max() - x.min()) < MIN_SLOPE_SPAN_DAYS:
             return np.nan
         cov = np.cov(x, y, ddof=0)
         var_x = cov[0, 0]
@@ -404,10 +388,18 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
             mean="mean",
             min="min",
             max="max",
+            first="first",
             last="last",
+            n_observations="count",
         )
         .reset_index()
     )
+    feature_long["delta"] = np.where(
+        feature_long["n_observations"] >= MIN_DELTA_OBS,
+        feature_long["last"] - feature_long["first"],
+        np.nan,
+    )
+    feature_long = feature_long.drop(columns=["first"])
     slope_long = _compute_patient_lab_slopes(pre_treatment)
     feature_long = feature_long.merge(slope_long, on=["DFCI_MRN", "LAB_NAME"], how="left")
     feature_df = (
@@ -438,8 +430,6 @@ def choose_stratification_labels(df: pd.DataFrame, *, min_count: int) -> tuple[n
         ("platinum", df["PLATINUM"].astype(int).to_numpy()),
         ("death", df["DEATH"].astype(int).to_numpy()),
     ]
-    if "NEPC" in df.columns:
-        candidates.append(("nepc", df["NEPC"].astype(int).to_numpy()))
     for label_name, labels in candidates:
         counts = pd.Series(labels).value_counts()
         if len(counts) > 1 and counts.min() >= min_count:
@@ -1125,21 +1115,24 @@ def main(args: argparse.Namespace) -> None:
         raise ValueError("No patients have both engineered features and valid outcomes.")
 
     raw_feature_cols = feature_df.columns.tolist()
-    selected_feature_cols, feature_meta = select_feature_columns(
-        merged,
-        raw_feature_cols,
-        min_patient_coverage=args.min_patient_coverage,
-    )
-
-    merged = merged[
-        selected_feature_cols + [col for col in merged.columns if col in OUTCOME_COLUMNS]
-    ].copy()
 
     train_val, test, _, split_stratification = split_train_test(
         merged,
         test_frac=args.test_frac,
         seed=args.seed,
     )
+
+    # Feature selection on train_val only to avoid leaking test-set coverage.
+    selected_feature_cols, feature_meta = select_feature_columns(
+        train_val,
+        raw_feature_cols,
+        min_patient_coverage=args.min_patient_coverage,
+    )
+
+    keep_cols = selected_feature_cols + [c for c in merged.columns if c in OUTCOME_COLUMNS]
+    merged = merged[keep_cols].copy()
+    train_val = train_val[keep_cols].copy()
+    test = test[keep_cols].copy()
 
     print(f"Full cohort: {len(merged)} patients")
     print(f"Train/val (Arm 2): {len(train_val)} patients")
@@ -1254,7 +1247,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--endpoints",
         nargs="+",
-        default=["platinum", "death", "nepc"],
+        default=["platinum", "death"],
         choices=list(ENDPOINTS),
         help="Endpoints to analyze.",
     )
