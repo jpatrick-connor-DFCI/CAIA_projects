@@ -4,12 +4,20 @@ Classifies each prostate cancer patient into one of four buckets with a single L
 
 - **nepc** — neuroendocrine / small-cell prostate cancer or documented histologic transformation
 - **avpc** — aggressive-variant / anaplastic language or one or more Aparicio C1–C7 features
-- **biomarker** — platinum-relevant biomarker (BRCA1/2, ATM, CDK12, PALB2, HRD/HRR/DDR, MSI-H, MMR, TMB)
+- **biomarker** — platinum-triggering somatic biomarker: BRCA1, BRCA2, or PALB2
 - **conventional** — none of the above
 
 Precedence: `nepc > avpc > biomarker > conventional` (the LLM applies it in the same call).
 
-Independently, every patient is also flagged for `has_non_prostate_primary` (e.g., NSCLC, colorectal, urothelial, RCC, lymphoma) — this annotation can co-occur with any primary label.
+Independently, each patient is also flagged for two separate annotations that can co-occur with any primary label:
+
+- `has_non_prostate_primary` — synchronous/metachronous non-prostate primary (e.g., NSCLC, colorectal, urothelial, RCC, lymphoma).
+- `has_molecular_avpc` — ≥ 2 somatic alterations among {PTEN, TP53, RB1}. Fully independent of `has_avpc` — does not change `primary_label` or `avpc_criteria`.
+
+AVPC C-criteria refinements (v3 current):
+
+- **C2** (visceral pattern) requires lung / adrenal / brain / pleural / peritoneal metastasis; liver-only involvement does NOT qualify. When C2 is set, `visceral_met_pattern` records either `visceral_only` or `visceral_and_bone`.
+- **C4** (bulky disease) is restricted to bulky lymphadenopathy / nodal disease OR a prostate / pelvic mass with a documented measurement ≥ 5 cm.
 
 ## Files
 
@@ -60,8 +68,8 @@ By default, `v3` writes to `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/v3_outp
 
 ```text
 DFCI_MRN, primary_label,
-has_nepc, has_avpc, has_biomarker, has_non_prostate_primary,
-biomarker_genes, avpc_criteria, non_prostate_primary_types,
+has_nepc, has_avpc, has_biomarker, has_molecular_avpc, has_non_prostate_primary,
+biomarker_genes, avpc_criteria, visceral_met_pattern, non_prostate_primary_types,
 supporting_quotes, supporting_quote_dates,
 confidence, rationale, num_snippets
 ```

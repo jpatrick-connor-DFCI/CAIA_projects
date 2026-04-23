@@ -1,12 +1,17 @@
 """
-Two-arm survival analysis on pre-treatment lab summary features.
+Two-arm survival analysis on landmarked lab summary features.
 
-Features per lab (all pre-first-treatment): mean, min, max, last, slope,
-delta (last - first), n_observations.
+Features per lab (all pre-landmark): mean, min, max, last, slope, delta
+(last - first), n_observations.
 
 Arm 1 (univariate, full dataset):
   - For each feature, fit Cox on [AGE + feature] using all patients.
   - Extract coefficient, HR per SD, 95% CI, and p-value.
+
+Arm 1b (univariate, full dataset, n_obs-adjusted):
+  - For each non-count feature, fit Cox on
+    [AGE + matching LAB__n_observations + feature] using all patients.
+  - Extract coefficients, HRs per SD, 95% CIs, and p-values.
 
 Arm 2 (multivariable elastic-net Cox):
   - 80% train/val + 20% held-out test.
@@ -16,14 +21,21 @@ Arm 2 (multivariable elastic-net Cox):
 
 Endpoints: platinum, death.
 
+Supports landmark offsets relative to first treatment via --landmark-days. When
+multiple landmark offsets are requested, analyses are restricted to the
+intersection MRN set eligible at every requested landmark so comparisons are
+made on a fixed cohort.
+
 Expected input:
   Row-level longitudinal data with at least
     DFCI_MRN, LAB_NAME, LAB_VALUE, t_lab, t_first_treatment, t_platinum,
     t_death (or t_last_contact), PLATINUM, DEATH, AGE_AT_TREATMENTSTART
 
 Outputs:
+  results/cox_agg_landmark_mrn_availability.csv
   results/cox_agg_feature_selection.csv   (selected lab features + coverage)
   results/cox_agg_univariate.csv          (log HRs, p-values, FDR per endpoint)
+  results/cox_agg_univariate_nobs_adjusted.csv
   results/cox_agg_multivariable.csv       (coefs + C-indices + AUC(t))
   results/cox_agg_multivariable_metrics.csv
 """
@@ -75,6 +87,7 @@ AGE_COL = "AGE_AT_TREATMENTSTART"
 DEFAULT_SEED = 42
 DEFAULT_TEST_FRAC = 0.20
 DEFAULT_N_FOLDS = 5
+DEFAULT_LANDMARK_DAYS = [0]
 DEFAULT_MIN_PATIENT_COVERAGE = 0.20
 DEFAULT_MIN_EVENTS_PER_FEATURE = 10
 DEFAULT_CV_PENALIZERS = [0.01, 0.05, 0.10, 0.20, 0.50, 1.00]
@@ -86,6 +99,7 @@ MIN_SLOPE_OBS = 3
 MIN_SLOPE_SPAN_DAYS = 7.0
 MIN_DELTA_OBS = 2
 SPLIT_ASSIGNMENTS_FILENAME = "cox_agg_split_assignments.csv"
+LANDMARK_AVAILABILITY_FILENAME = "cox_agg_landmark_mrn_availability.csv"
 
 ENDPOINTS = {
     "platinum": {
@@ -143,6 +157,11 @@ def parse_feature_name(feature_name: str) -> tuple[str, str]:
     return feature_name.rsplit("__", 1)
 
 
+def matching_n_obs_feature(feature_name: str) -> str:
+    lab_name, _ = parse_feature_name(feature_name)
+    return f"{lab_name}__n_observations"
+
+
 def benjamini_hochberg(p_values: pd.Series) -> pd.Series:
     q_values = pd.Series(np.nan, index=p_values.index, dtype=float)
     valid = p_values.notna()
@@ -173,6 +192,17 @@ def normalize_endpoints(raw_endpoints: list[str]) -> list[str]:
         if normalized not in endpoints:
             endpoints.append(normalized)
     return endpoints
+
+
+def normalize_landmark_days(raw_landmark_days: list[int]) -> list[int]:
+    landmark_days: list[int] = []
+    for raw_day in raw_landmark_days:
+        day = int(raw_day)
+        if day < 0:
+            raise ValueError(f"Landmark days must be non-negative, got {day}.")
+        if day not in landmark_days:
+            landmark_days.append(day)
+    return sorted(landmark_days)
 
 
 def _coerce_datetime(series: pd.Series) -> pd.Series:
@@ -217,7 +247,7 @@ def _coerce_platinum(series: pd.Series) -> pd.Series:
     return numeric.fillna(platinum.astype(int)).fillna(0).astype(int)
 
 
-def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
+def make_outcome_df(df: pd.DataFrame, *, landmark_offset_days: int = 0) -> pd.DataFrame:
     patient_level_cols = [
         "DFCI_MRN",
         AGE_COL,
@@ -304,7 +334,7 @@ def make_outcome_df(df: pd.DataFrame) -> pd.DataFrame:
         fallback_duration_col="t_last_contact",
     )
 
-    landmark_time = pat["t_first_treatment"].astype(float)
+    landmark_time = pat["t_first_treatment"].astype(float) + float(landmark_offset_days)
     for duration_col in ["t_last_contact", "t_death", "t_platinum"]:
         pat[f"{duration_col}_from_first_record"] = pat[duration_col]
         pat[duration_col] = pat[duration_col].astype(float) - landmark_time
@@ -367,7 +397,7 @@ def _compute_patient_lab_slopes(pre_treatment: pd.DataFrame) -> pd.DataFrame:
     return slopes
 
 
-def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
+def build_feature_matrix(df: pd.DataFrame, *, landmark_offset_days: int = 0) -> pd.DataFrame:
     working = df.copy()
     required_cols = {"DFCI_MRN", "LAB_NAME", "LAB_VALUE"}
     missing_required = required_cols - set(working.columns)
@@ -405,9 +435,10 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
         subset=["DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab", "t_first_treatment"]
     )
 
-    pre_treatment = working.loc[working["t_lab"].lt(working["t_first_treatment"])].copy()
+    landmark_time = working["t_first_treatment"].astype(float) + float(landmark_offset_days)
+    pre_treatment = working.loc[working["t_lab"].lt(landmark_time)].copy()
     if pre_treatment.empty:
-        raise ValueError("No pre-treatment lab rows were available to build lab summary features.")
+        raise ValueError("No pre-landmark lab rows were available to build lab summary features.")
 
     sort_cols = ["DFCI_MRN", "LAB_NAME", "t_lab"]
     if "LAB_DATE" in pre_treatment.columns:
@@ -448,6 +479,72 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
 
     print(f"Raw feature matrix: {feature_df.shape[0]} patients x {feature_df.shape[1]} summary-lab features")
     return feature_df
+
+
+def build_landmark_merged(
+    df: pd.DataFrame,
+    *,
+    landmark_offset_days: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    outcome_df = make_outcome_df(df, landmark_offset_days=landmark_offset_days)
+    print(f"Outcome table @ landmark +{landmark_offset_days}d: {len(outcome_df)} patients")
+
+    print(f"Building raw aggregated lab summary feature matrix through landmark +{landmark_offset_days}d...")
+    feature_df = build_feature_matrix(df, landmark_offset_days=landmark_offset_days)
+
+    merged = feature_df.join(outcome_df, how="inner")
+    merged = merged.loc[merged[AGE_COL].notna()].copy()
+    if merged.empty:
+        raise ValueError("No patients have both engineered features and valid outcomes.")
+    return outcome_df, feature_df, merged
+
+
+def apply_split_assignments(
+    merged: pd.DataFrame,
+    *,
+    split_assignments: pd.Series,
+    split_stratification: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, str]:
+    aligned_splits = split_assignments.reindex(merged.index)
+    if aligned_splits.isna().any():
+        missing = aligned_splits.index[aligned_splits.isna()].tolist()
+        missing_preview = ", ".join(str(mrn) for mrn in missing[:5])
+        raise ValueError(
+            "Provided split assignments do not cover the merged cohort"
+            + (f" (e.g. {missing_preview})" if missing_preview else "")
+            + "."
+        )
+
+    merged = merged.copy()
+    merged["split"] = aligned_splits
+    train_val = merged.loc[aligned_splits.eq("train_val")].copy()
+    test = merged.loc[aligned_splits.eq("test")].copy()
+    train_val["split"] = "train_val"
+    test["split"] = "test"
+    return merged, train_val, test, aligned_splits, split_stratification
+
+
+def build_landmark_availability_table(
+    merged_by_landmark: dict[int, pd.DataFrame],
+) -> tuple[pd.DataFrame, pd.Index]:
+    if not merged_by_landmark:
+        raise ValueError("No landmark cohorts were provided.")
+
+    all_mrns = pd.Index([])
+    common_mrns: pd.Index | None = None
+    for merged in merged_by_landmark.values():
+        all_mrns = all_mrns.union(merged.index)
+        common_mrns = merged.index if common_mrns is None else common_mrns.intersection(merged.index)
+
+    availability = pd.DataFrame(index=all_mrns)
+    landmark_cols: list[str] = []
+    for landmark_day in sorted(merged_by_landmark):
+        col = f"eligible_landmark_{landmark_day}"
+        landmark_cols.append(col)
+        availability[col] = availability.index.isin(merged_by_landmark[landmark_day].index)
+    availability["eligible_all_landmarks"] = availability[landmark_cols].all(axis=1)
+    availability = availability.rename_axis("DFCI_MRN").reset_index()
+    return availability, (common_mrns if common_mrns is not None else pd.Index([]))
 
 
 def combined_event_label(df: pd.DataFrame) -> np.ndarray:
@@ -506,30 +603,46 @@ def build_aligned_cohort(
     *,
     test_frac: float,
     seed: int,
+    landmark_offset_days: int = 0,
+    required_mrns: pd.Index | None = None,
+    split_assignments: pd.Series | None = None,
+    split_stratification: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, str]:
     """Build the shared landmarked patient cohort and held-out test split."""
-    outcome_df = make_outcome_df(df)
-    print(f"Outcome table: {len(outcome_df)} patients")
-
-    print("Building raw aggregated pre-treatment lab summary feature matrix...")
-    feature_df = build_feature_matrix(df)
-
-    merged = feature_df.join(outcome_df, how="inner")
-    merged = merged.loc[merged[AGE_COL].notna()].copy()
-    if merged.empty:
-        raise ValueError("No patients have both engineered features and valid outcomes.")
-
-    train_val, test, split_assignments, split_stratification = split_train_test(
-        merged,
-        test_frac=test_frac,
-        seed=seed,
+    outcome_df, feature_df, merged = build_landmark_merged(
+        df,
+        landmark_offset_days=landmark_offset_days,
     )
-    merged = merged.copy()
-    merged["split"] = split_assignments
-    train_val = train_val.copy()
-    train_val["split"] = "train_val"
-    test = test.copy()
-    test["split"] = "test"
+    if required_mrns is not None:
+        merged = merged.loc[merged.index.intersection(required_mrns)].copy()
+        if merged.empty:
+            raise ValueError(
+                f"No patients remained after restricting to the requested landmark cohort at +{landmark_offset_days}d."
+            )
+
+    if split_assignments is None:
+        train_val, test, split_assignments, split_stratification = split_train_test(
+            merged,
+            test_frac=test_frac,
+            seed=seed,
+        )
+        merged = merged.copy()
+        merged["split"] = split_assignments
+        train_val = train_val.copy()
+        train_val["split"] = "train_val"
+        test = test.copy()
+        test["split"] = "test"
+    else:
+        if split_stratification is None:
+            raise ValueError("split_stratification must be provided when reusing split_assignments.")
+        merged, train_val, test, split_assignments, split_stratification = apply_split_assignments(
+            merged,
+            split_assignments=split_assignments,
+            split_stratification=split_stratification,
+        )
+
+    outcome_df = outcome_df.loc[outcome_df.index.intersection(merged.index)].copy()
+    feature_df = feature_df.loc[feature_df.index.intersection(merged.index)].copy()
     return outcome_df, feature_df, merged, train_val, test, split_assignments, split_stratification
 
 
@@ -1026,6 +1139,180 @@ def run_univariate_associations(
     return associations.sort_values(["p_value", "q_value", "feature"], na_position="last").reset_index(drop=True)
 
 
+def run_univariate_nobs_adjusted_associations(
+    data: pd.DataFrame,
+    *,
+    feature_cols: list[str],
+    endpoint: str,
+    min_events_per_feature: int,
+    fallback_penalizer: float,
+) -> pd.DataFrame:
+    """Arm 1b: fit Cox on [AGE + matching LAB__n_observations + feature]."""
+    duration_col = ENDPOINTS[endpoint]["duration_col"]
+    event_col = ENDPOINTS[endpoint]["event_col"]
+    total_patients = len(data)
+    rows = []
+
+    for feature in feature_cols:
+        lab_name, feature_stat = parse_feature_name(feature)
+        n_obs_feature = matching_n_obs_feature(feature)
+        result = {
+            "endpoint": endpoint,
+            "feature": feature,
+            "lab_name": lab_name,
+            "feature_stat": feature_stat,
+            "n_obs_feature": n_obs_feature,
+            "coverage": np.nan,
+            "n_obs_coverage": np.nan,
+            "n_patients_total": total_patients,
+            "n_patients_used": 0,
+            "n_patients_observed": 0,
+            "n_patients_imputed": 0,
+            "n_patients_n_obs_observed": 0,
+            "n_patients_n_obs_imputed": 0,
+            "n_events_used": 0,
+            "coef_feature": np.nan,
+            "hazard_ratio_per_sd": np.nan,
+            "ci_lower": np.nan,
+            "ci_upper": np.nan,
+            "p_value": np.nan,
+            "coef_n_obs": np.nan,
+            "hazard_ratio_n_obs_per_sd": np.nan,
+            "ci_lower_n_obs": np.nan,
+            "ci_upper_n_obs": np.nan,
+            "p_value_n_obs": np.nan,
+            "coef_missing": np.nan,
+            "p_value_missing": np.nan,
+            "coef_age": np.nan,
+            "p_value_age": np.nan,
+            "fit_penalizer": np.nan,
+            "note": "",
+        }
+
+        if feature_stat == "n_observations":
+            result["note"] = "target_is_n_observations"
+            rows.append(result)
+            continue
+
+        if n_obs_feature not in data.columns:
+            result["note"] = "missing_matching_n_obs_feature"
+            rows.append(result)
+            continue
+
+        feature_df = data[[feature, n_obs_feature, duration_col, event_col, AGE_COL]].copy()
+        result["coverage"] = float(feature_df[feature].notna().mean())
+        result["n_obs_coverage"] = float(feature_df[n_obs_feature].notna().mean())
+
+        feature_df = feature_df.dropna(subset=[duration_col, event_col, AGE_COL])
+        observed_non_missing = int(feature_df[feature].notna().sum())
+        observed_n_obs = int(feature_df[n_obs_feature].notna().sum())
+        result["n_patients_used"] = len(feature_df)
+        result["n_patients_observed"] = observed_non_missing
+        result["n_patients_imputed"] = int(len(feature_df) - observed_non_missing)
+        result["n_patients_n_obs_observed"] = observed_n_obs
+        result["n_patients_n_obs_imputed"] = int(len(feature_df) - observed_n_obs)
+        result["n_events_used"] = int(feature_df[event_col].sum())
+
+        if len(feature_df) == 0:
+            result["note"] = "no_rows_with_outcomes"
+            rows.append(result)
+            continue
+
+        if observed_non_missing == 0:
+            result["note"] = "no_non_missing_rows"
+            rows.append(result)
+            continue
+
+        if observed_n_obs == 0:
+            result["note"] = "no_non_missing_n_obs_rows"
+            rows.append(result)
+            continue
+
+        if result["n_events_used"] < min_events_per_feature:
+            result["note"] = f"too_few_events_lt_{min_events_per_feature}"
+            rows.append(result)
+            continue
+
+        missing_indicator = feature_df[feature].isna().astype(float).to_numpy()
+        include_missing_indicator = bool(np.unique(missing_indicator).size > 1)
+
+        feature_values = SimpleImputer(strategy="mean").fit_transform(feature_df[[feature]]).reshape(-1)
+        feature_sd = float(np.std(feature_values, ddof=0))
+        if not np.isfinite(feature_sd) or feature_sd <= 0:
+            result["note"] = "feature_has_no_variation"
+            rows.append(result)
+            continue
+
+        n_obs_values = (
+            SimpleImputer(strategy="mean")
+            .fit_transform(feature_df[[n_obs_feature]])
+            .reshape(-1)
+        )
+        n_obs_sd = float(np.std(n_obs_values, ddof=0))
+        if not np.isfinite(n_obs_sd) or n_obs_sd <= 0:
+            result["note"] = "n_obs_has_no_variation"
+            rows.append(result)
+            continue
+
+        feature_df = feature_df.copy()
+        feature_df["feature_z"] = (feature_values - float(np.mean(feature_values))) / feature_sd
+        feature_df["n_obs_z"] = (n_obs_values - float(np.mean(n_obs_values))) / n_obs_sd
+
+        age_values = feature_df[AGE_COL].to_numpy(dtype=float)
+        age_sd = float(np.std(age_values, ddof=0))
+        if np.isfinite(age_sd) and age_sd > 0:
+            feature_df["age"] = (age_values - float(np.mean(age_values))) / age_sd
+        else:
+            feature_df["age"] = age_values - float(np.mean(age_values))
+
+        model_cols = ["feature_z", "n_obs_z", "age"]
+        if include_missing_indicator:
+            feature_df["feature_missing"] = missing_indicator
+            model_cols.insert(1, "feature_missing")
+
+        model, used_penalizer, note = fit_cox_with_fallback(
+            feature_df[model_cols + [duration_col, event_col]],
+            duration_col=duration_col,
+            event_col=event_col,
+            penalizers=[0.0, fallback_penalizer],
+            l1_ratio=0.0,
+        )
+        result["fit_penalizer"] = used_penalizer
+        result["note"] = note
+
+        if model is None:
+            rows.append(result)
+            continue
+
+        summary_row = model.summary.loc["feature_z"]
+        result["coef_feature"] = float(summary_row["coef"])
+        result["hazard_ratio_per_sd"] = float(summary_row["exp(coef)"])
+        result["ci_lower"] = float(summary_row["exp(coef) lower 95%"])
+        result["ci_upper"] = float(summary_row["exp(coef) upper 95%"])
+        result["p_value"] = float(summary_row["p"])
+
+        n_obs_row = model.summary.loc["n_obs_z"]
+        result["coef_n_obs"] = float(n_obs_row["coef"])
+        result["hazard_ratio_n_obs_per_sd"] = float(n_obs_row["exp(coef)"])
+        result["ci_lower_n_obs"] = float(n_obs_row["exp(coef) lower 95%"])
+        result["ci_upper_n_obs"] = float(n_obs_row["exp(coef) upper 95%"])
+        result["p_value_n_obs"] = float(n_obs_row["p"])
+
+        if include_missing_indicator and "feature_missing" in model.summary.index:
+            missing_row = model.summary.loc["feature_missing"]
+            result["coef_missing"] = float(missing_row["coef"])
+            result["p_value_missing"] = float(missing_row["p"])
+
+        age_row = model.summary.loc["age"]
+        result["coef_age"] = float(age_row["coef"])
+        result["p_value_age"] = float(age_row["p"])
+        rows.append(result)
+
+    associations = pd.DataFrame(rows)
+    associations["q_value"] = benjamini_hochberg(associations["p_value"])
+    return associations.sort_values(["p_value", "q_value", "feature"], na_position="last").reset_index(drop=True)
+
+
 def make_cv_splitter(
     train_val: pd.DataFrame,
     *,
@@ -1320,7 +1607,7 @@ def fit_final_multivariable_model(
     return metrics_row, summary, predictions
 
 
-def print_top_hits(df: pd.DataFrame, *, endpoint: str) -> None:
+def print_top_hits(df: pd.DataFrame, *, endpoint: str, label: str = "univariate") -> None:
     estimable = df.loc[df["p_value"].notna()]
     n_tested = len(estimable)
     n_sig_p = int((estimable["p_value"] < 0.05).sum()) if n_tested else 0
@@ -1329,7 +1616,7 @@ def print_top_hits(df: pd.DataFrame, *, endpoint: str) -> None:
         if n_tested and "q_value" in estimable.columns
         else 0
     )
-    print(f"\nTop univariate associations for {endpoint}:")
+    print(f"\nTop {label} associations for {endpoint}:")
     print(
         f"  Significant hits: {n_sig_p}/{n_tested} at p<0.05, "
         f"{n_sig_q}/{n_tested} at q<0.05 (BH)"
@@ -1344,48 +1631,57 @@ def print_top_hits(df: pd.DataFrame, *, endpoint: str) -> None:
 def main(args: argparse.Namespace) -> None:
     RESULTS.mkdir(parents=True, exist_ok=True)
     endpoints = normalize_endpoints(args.endpoints)
+    landmark_days = normalize_landmark_days(args.landmark_days)
 
     print("Loading data...")
     df = pd.read_csv(args.data, low_memory=False)
 
-    print("Building landmarked outcome table and aligned patient split...")
-    _, feature_df, merged, train_val, test, split_assignments, split_stratification = build_aligned_cohort(
+    print(
+        "Building landmark-specific cohorts and intersecting MRNs across "
+        f"requested landmarks: {landmark_days}"
+    )
+    landmark_payloads: dict[int, dict[str, pd.DataFrame]] = {}
+    merged_by_landmark: dict[int, pd.DataFrame] = {}
+    for landmark_day in landmark_days:
+        print(f"\n##### COHORT BUILD: LANDMARK +{landmark_day} DAYS #####")
+        outcome_df, feature_df, merged = build_landmark_merged(
+            df,
+            landmark_offset_days=landmark_day,
+        )
+        landmark_payloads[landmark_day] = {
+            "outcome_df": outcome_df,
+            "feature_df": feature_df,
+            "merged": merged,
+        }
+        merged_by_landmark[landmark_day] = merged
+
+    landmark_availability, common_mrns = build_landmark_availability_table(merged_by_landmark)
+    common_mrns = landmark_payloads[landmark_days[0]]["merged"].index.intersection(common_mrns)
+    if len(common_mrns) == 0:
+        raise ValueError("No MRNs were eligible at every requested landmark.")
+
+    print(f"\nCommon MRN cohort across landmarks {landmark_days}: {len(common_mrns)} patients")
+    base_landmark_day = landmark_days[0]
+    _, _, base_merged, _, _, split_assignments, split_stratification = build_aligned_cohort(
         df,
         test_frac=args.test_frac,
         seed=args.seed,
+        landmark_offset_days=base_landmark_day,
+        required_mrns=common_mrns,
     )
-
-    raw_feature_cols = feature_df.columns.tolist()
-
-    # Feature selection on train_val only to avoid leaking test-set coverage.
-    selected_feature_cols, feature_meta = select_feature_columns(
-        train_val,
-        raw_feature_cols,
-        min_patient_coverage=args.min_patient_coverage,
-    )
-
-    keep_cols = selected_feature_cols + [c for c in merged.columns if c in OUTCOME_COLUMNS]
-    merged = merged[keep_cols].copy()
-    train_val = train_val[keep_cols].copy()
-    test = test[keep_cols].copy()
-
-    print(f"Full cohort: {len(merged)} patients")
-    print(f"Train/val (Arm 2): {len(train_val)} patients")
-    print(f"Test (Arm 2):      {len(test)} patients")
-    print(f"Selected summary-lab features: {len(selected_feature_cols)}")
-    print(f"Split stratification: {split_stratification}")
+    print(f"Split stratification (derived once on landmark +{base_landmark_day}d): {split_stratification}")
 
     split_assignments.rename_axis("DFCI_MRN").reset_index().to_csv(
         RESULTS / SPLIT_ASSIGNMENTS_FILENAME,
         index=False,
     )
+    landmark_availability["included_all_landmarks"] = landmark_availability["DFCI_MRN"].isin(common_mrns)
+    landmark_availability["split"] = landmark_availability["DFCI_MRN"].map(split_assignments)
+    landmark_availability.to_csv(RESULTS / LANDMARK_AVAILABILITY_FILENAME, index=False)
 
-    feature_meta.loc[
-        feature_meta["selected"],
-        ["feature", "lab_name", "feature_stat", "coverage", "unique_non_missing"],
-    ].to_csv(RESULTS / "cox_agg_feature_selection.csv", index=False)
-
+    feature_selection_frames: list[pd.DataFrame] = []
     univariate_frames: list[pd.DataFrame] = []
+    univariate_nobs_adjusted_frames: list[pd.DataFrame] = []
     multivariable_frames: list[pd.DataFrame] = []
     multivariable_metric_rows: list[dict] = []
 
@@ -1408,73 +1704,171 @@ def main(args: argparse.Namespace) -> None:
         "coef_missing",
         "p_value_missing",
     ]
+    univariate_nobs_adjusted_keep_cols = [
+        "landmark_days",
+        "endpoint",
+        "feature",
+        "lab_name",
+        "feature_stat",
+        "n_obs_feature",
+        "coverage",
+        "n_obs_coverage",
+        "n_patients_used",
+        "n_patients_observed",
+        "n_patients_imputed",
+        "n_patients_n_obs_observed",
+        "n_patients_n_obs_imputed",
+        "n_events_used",
+        "coef_feature",
+        "hazard_ratio_per_sd",
+        "ci_lower",
+        "ci_upper",
+        "p_value",
+        "q_value",
+        "coef_n_obs",
+        "hazard_ratio_n_obs_per_sd",
+        "ci_lower_n_obs",
+        "ci_upper_n_obs",
+        "p_value_n_obs",
+        "coef_missing",
+        "p_value_missing",
+        "note",
+    ]
+    univariate_keep_cols = ["landmark_days"] + univariate_keep_cols
 
-    if args.analysis in {"univariate", "both"}:
-        print("\n##### ARM 1: UNIVARIATE (all endpoints) #####")
-        for endpoint in endpoints:
-            print(f"\n=== {endpoint.upper()} ===")
-            print(ENDPOINTS[endpoint]["description"])
-            univariate_df = run_univariate_associations(
-                merged,
-                feature_cols=selected_feature_cols,
-                endpoint=endpoint,
-                min_events_per_feature=args.min_events_per_feature,
-                fallback_penalizer=args.univariate_penalizer,
-            )
-            univariate_frames.append(univariate_df[univariate_keep_cols].copy())
-            print_top_hits(univariate_df, endpoint=endpoint)
+    for landmark_day in landmark_days:
+        print(f"\n##### LANDMARK ANALYSES: +{landmark_day} DAYS #####")
+        feature_df = landmark_payloads[landmark_day]["feature_df"]
+        merged = (
+            landmark_payloads[landmark_day]["merged"]
+            .loc[common_mrns]
+            .copy()
+        )
+        merged, train_val, test, _, _ = apply_split_assignments(
+            merged,
+            split_assignments=split_assignments,
+            split_stratification=split_stratification,
+        )
+        raw_feature_cols = feature_df.columns.tolist()
+        univariate_data = merged.copy()
 
-    if args.analysis in {"multivariable", "both"}:
-        print("\n##### ARM 2: MULTIVARIABLE ELASTIC-NET (all endpoints) #####")
-        for endpoint in endpoints:
-            print(f"\n=== {endpoint.upper()} ===")
-            print(ENDPOINTS[endpoint]["description"])
-            _, _, best_row = tune_multivariable_model(
-                train_val,
-                feature_cols=selected_feature_cols,
-                endpoint=endpoint,
-                penalizers=args.cv_penalizers,
-                l1_ratios=args.cv_l1_ratios,
-                n_folds=args.n_folds,
-                seed=args.seed,
-                auc_time_unit_days=args.auc_time_unit_days,
-            )
+        # Feature selection on train_val only to avoid leaking test-set coverage.
+        selected_feature_cols, feature_meta = select_feature_columns(
+            train_val,
+            raw_feature_cols,
+            min_patient_coverage=args.min_patient_coverage,
+        )
+        feature_meta_selected = feature_meta.loc[
+            feature_meta["selected"],
+            ["feature", "lab_name", "feature_stat", "coverage", "unique_non_missing"],
+        ].copy()
+        feature_meta_selected.insert(0, "landmark_days", landmark_day)
+        feature_selection_frames.append(feature_meta_selected)
 
-            metrics_row, summary_df, _ = fit_final_multivariable_model(
-                train_val,
-                test,
-                feature_cols=selected_feature_cols,
-                endpoint=endpoint,
-                penalizer=float(best_row["penalizer"]),
-                l1_ratio=float(best_row["l1_ratio"]),
-                penalizer_grid=args.cv_penalizers,
-                split_stratification=split_stratification,
-                cv_stratification=str(best_row["cv_stratification"]),
-                auc_time_unit_days=args.auc_time_unit_days,
-            )
-            multivariable_metric_rows.append(metrics_row)
-            multivariable_frames.append(summary_df)
+        keep_cols = selected_feature_cols + [c for c in merged.columns if c in OUTCOME_COLUMNS]
+        merged = merged[keep_cols].copy()
+        train_val = train_val[keep_cols].copy()
+        test = test[keep_cols].copy()
 
-            top_cols = [c for c in ["feature", "coef", "exp(coef)"] if c in summary_df.columns]
-            top = summary_df.loc[~summary_df["is_age_covariate"], top_cols].head(10)
-            print("\nChosen hyperparameters (elastic-net, age unpenalized):")
-            print(
-                f"  penalizer={best_row['penalizer']}  l1_ratio={best_row['l1_ratio']}  "
-                f"cv_mean C-index={best_row['cv_mean']:.4f}"
-            )
-            print(f"  CV mean AUC(t)={best_row['mean_auc_t_cv_mean']:.4f}")
-            print(
-                f"  train/val C-index={metrics_row['train_val_c_index']:.4f}  "
-                f"mean AUC(t)={metrics_row['train_val_mean_auc_t']:.4f}"
-            )
-            print(f"  held-out test C-index={metrics_row['test_c_index']:.4f}")
-            print(f"  held-out test mean AUC(t)={metrics_row['test_mean_auc_t']:.4f}")
-            print("Top multivariable coefficients:")
-            print(top.to_string(index=False))
+        print(f"Full cohort: {len(merged)} patients")
+        print(f"Train/val (Arm 2): {len(train_val)} patients")
+        print(f"Test (Arm 2):      {len(test)} patients")
+        print(f"Selected summary-lab features: {len(selected_feature_cols)}")
 
+        if args.analysis in {"univariate", "both"}:
+            print("\n##### ARM 1: UNIVARIATE (all endpoints) #####")
+            for endpoint in endpoints:
+                print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
+                print(ENDPOINTS[endpoint]["description"])
+                univariate_df = run_univariate_associations(
+                    univariate_data,
+                    feature_cols=selected_feature_cols,
+                    endpoint=endpoint,
+                    min_events_per_feature=args.min_events_per_feature,
+                    fallback_penalizer=args.univariate_penalizer,
+                )
+                univariate_df.insert(0, "landmark_days", landmark_day)
+                univariate_frames.append(univariate_df[univariate_keep_cols].copy())
+                print_top_hits(univariate_df, endpoint=endpoint)
+
+                adjusted_df = run_univariate_nobs_adjusted_associations(
+                    univariate_data,
+                    feature_cols=selected_feature_cols,
+                    endpoint=endpoint,
+                    min_events_per_feature=args.min_events_per_feature,
+                    fallback_penalizer=args.univariate_penalizer,
+                )
+                adjusted_df.insert(0, "landmark_days", landmark_day)
+                univariate_nobs_adjusted_frames.append(
+                    adjusted_df[univariate_nobs_adjusted_keep_cols].copy()
+                )
+                print_top_hits(
+                    adjusted_df,
+                    endpoint=endpoint,
+                    label="n_obs-adjusted univariate",
+                )
+
+        if args.analysis in {"multivariable", "both"}:
+            print("\n##### ARM 2: MULTIVARIABLE ELASTIC-NET (all endpoints) #####")
+            for endpoint in endpoints:
+                print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
+                print(ENDPOINTS[endpoint]["description"])
+                _, _, best_row = tune_multivariable_model(
+                    train_val,
+                    feature_cols=selected_feature_cols,
+                    endpoint=endpoint,
+                    penalizers=args.cv_penalizers,
+                    l1_ratios=args.cv_l1_ratios,
+                    n_folds=args.n_folds,
+                    seed=args.seed,
+                    auc_time_unit_days=args.auc_time_unit_days,
+                )
+
+                metrics_row, summary_df, _ = fit_final_multivariable_model(
+                    train_val,
+                    test,
+                    feature_cols=selected_feature_cols,
+                    endpoint=endpoint,
+                    penalizer=float(best_row["penalizer"]),
+                    l1_ratio=float(best_row["l1_ratio"]),
+                    penalizer_grid=args.cv_penalizers,
+                    split_stratification=split_stratification,
+                    cv_stratification=str(best_row["cv_stratification"]),
+                    auc_time_unit_days=args.auc_time_unit_days,
+                )
+                metrics_row["landmark_days"] = landmark_day
+                summary_df.insert(0, "landmark_days", landmark_day)
+                multivariable_metric_rows.append(metrics_row)
+                multivariable_frames.append(summary_df)
+
+                top_cols = [c for c in ["feature", "coef", "exp(coef)"] if c in summary_df.columns]
+                top = summary_df.loc[~summary_df["is_age_covariate"], top_cols].head(10)
+                print("\nChosen hyperparameters (elastic-net, age unpenalized):")
+                print(
+                    f"  penalizer={best_row['penalizer']}  l1_ratio={best_row['l1_ratio']}  "
+                    f"cv_mean C-index={best_row['cv_mean']:.4f}"
+                )
+                print(f"  CV mean AUC(t)={best_row['mean_auc_t_cv_mean']:.4f}")
+                print(
+                    f"  train/val C-index={metrics_row['train_val_c_index']:.4f}  "
+                    f"mean AUC(t)={metrics_row['train_val_mean_auc_t']:.4f}"
+                )
+                print(f"  held-out test C-index={metrics_row['test_c_index']:.4f}")
+                print(f"  held-out test mean AUC(t)={metrics_row['test_mean_auc_t']:.4f}")
+                print("Top multivariable coefficients:")
+                print(top.to_string(index=False))
+
+    if feature_selection_frames:
+        pd.concat(feature_selection_frames, ignore_index=True).to_csv(
+            RESULTS / "cox_agg_feature_selection.csv", index=False
+        )
     if univariate_frames:
         pd.concat(univariate_frames, ignore_index=True).to_csv(
             RESULTS / "cox_agg_univariate.csv", index=False
+        )
+    if univariate_nobs_adjusted_frames:
+        pd.concat(univariate_nobs_adjusted_frames, ignore_index=True).to_csv(
+            RESULTS / "cox_agg_univariate_nobs_adjusted.csv", index=False
         )
     if multivariable_frames:
         pd.concat(multivariable_frames, ignore_index=True).to_csv(
@@ -1487,9 +1881,12 @@ def main(args: argparse.Namespace) -> None:
 
     print("\nSaved:")
     print(f"  results/{SPLIT_ASSIGNMENTS_FILENAME}")
+    print(f"  results/{LANDMARK_AVAILABILITY_FILENAME}")
     print("  results/cox_agg_feature_selection.csv")
     if univariate_frames:
         print("  results/cox_agg_univariate.csv")
+    if univariate_nobs_adjusted_frames:
+        print("  results/cox_agg_univariate_nobs_adjusted.csv")
     if multivariable_frames:
         print("  results/cox_agg_multivariable.csv")
     if multivariable_metric_rows:
@@ -1505,6 +1902,17 @@ if __name__ == "__main__":
         default=["platinum", "death"],
         choices=list(ENDPOINTS),
         help="Endpoints to analyze.",
+    )
+    parser.add_argument(
+        "--landmark-days",
+        nargs="+",
+        type=int,
+        default=DEFAULT_LANDMARK_DAYS,
+        help=(
+            "Landmark offsets in days relative to first treatment. When multiple "
+            "values are provided, analyses use the MRN intersection across all "
+            "requested landmarks."
+        ),
     )
     parser.add_argument(
         "--analysis",
