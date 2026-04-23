@@ -25,6 +25,9 @@ import numpy as np
 import pandas as pd
 
 DEFAULT_RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis")
+DEFAULT_LR = 0.01
+DEFAULT_SURV_LOSS_SCALE = 10.0
+DEFAULT_WAIT_UNTIL_FULL_SURV_LOSS = 15
 
 # Event configuration.
 # For single-event configs, event_col / time_to_event_col are strings (not lists
@@ -178,6 +181,36 @@ def _value_at_horizon(series, horizon: int) -> float:
     return float(values[horizon])
 
 
+def pad_patient_curves(curves) -> tuple[np.ndarray, np.ndarray]:
+    arrays = [_to_numpy(curve).reshape(-1).astype(float) for curve in curves]
+    lengths = np.asarray([len(curve) for curve in arrays], dtype=int)
+    max_len = int(lengths.max()) if len(lengths) else 0
+    padded = np.full((len(arrays), max_len), np.nan, dtype=float)
+    for idx, curve in enumerate(arrays):
+        padded[idx, : len(curve)] = curve
+    return padded, lengths
+
+
+def pad_event_patient_curves(curves_by_event) -> tuple[np.ndarray, np.ndarray]:
+    event_arrays = [
+        [_to_numpy(curve).reshape(-1).astype(float) for curve in event_curves]
+        for event_curves in curves_by_event
+    ]
+    n_events = len(event_arrays)
+    n_patients = max((len(event_curves) for event_curves in event_arrays), default=0)
+    max_len = max(
+        (len(curve) for event_curves in event_arrays for curve in event_curves),
+        default=0,
+    )
+    padded = np.full((n_events, n_patients, max_len), np.nan, dtype=float)
+    lengths = np.zeros((n_events, n_patients), dtype=int)
+    for event_idx, event_curves in enumerate(event_arrays):
+        for patient_idx, curve in enumerate(event_curves):
+            lengths[event_idx, patient_idx] = len(curve)
+            padded[event_idx, patient_idx, : len(curve)] = curve
+    return padded, lengths
+
+
 def _quantile_horizons(remaining_time: np.ndarray, event_mask: np.ndarray) -> dict[str, int]:
     event_times = remaining_time[event_mask & np.isfinite(remaining_time) & (remaining_time > 0)]
     if len(event_times) == 0:
@@ -208,6 +241,11 @@ def write_prediction_diagnostics(
     labels = _to_numpy(batch_dict["labels"]).reshape(-1).astype(int)
     remaining_time = _to_numpy(batch_dict["remaining_time_to_event"]).reshape(-1).astype(float)
     end_of_obs = np.asarray([float(_to_numpy(v).reshape(-1)[0]) for v in batch_dict["end_of_obs_idx"]])
+    observed = _to_numpy(batch_dict["observed_data"]).astype(float)
+    observed_mask = _to_numpy(batch_dict["observed_mask"]).astype(float)
+    observed_abs_sum = np.abs(observed * observed_mask).sum(axis=(1, 2))
+    observed_value_count = observed_mask.sum(axis=(1, 2))
+    observed_time_count = (observed_mask.sum(axis=2) > 0).sum(axis=1)
 
     rows = pd.DataFrame(
         {
@@ -216,6 +254,9 @@ def write_prediction_diagnostics(
             "label": labels,
             "remaining_time_to_event": remaining_time,
             "end_of_obs_idx": end_of_obs,
+            "observed_value_count": observed_value_count,
+            "observed_time_count": observed_time_count,
+            "observed_abs_sum": observed_abs_sum,
             "requested_max_pred_window": requested_window,
             "model_max_pred_window": model_window,
         }
@@ -244,15 +285,90 @@ def write_prediction_diagnostics(
     rows.to_csv(path, index=False)
 
     print("\nPrediction diagnostics:")
+    print(
+        "  processed input variation: "
+        f"observed_value_count_sd={rows['observed_value_count'].std(ddof=0):.6f} "
+        f"observed_time_count_sd={rows['observed_time_count'].std(ddof=0):.6f} "
+        f"observed_abs_sum_sd={rows['observed_abs_sum'].std(ddof=0):.6f} "
+        f"end_of_obs_sd={rows['end_of_obs_idx'].std(ddof=0):.6f}"
+    )
+    risk_sds = []
     for col in rows.columns:
         if "_risk_q" not in col:
             continue
         values = pd.to_numeric(rows[col], errors="coerce")
+        risk_sds.append(float(values.std(ddof=0)))
         print(
             f"  {col}: n={int(values.notna().sum())} "
             f"mean={values.mean():.4f} sd={values.std(ddof=0):.6f} "
             f"min={values.min():.4f} max={values.max():.4f}"
         )
+    if risk_sds and max(risk_sds) < 1e-5:
+        print(
+            "  WARNING: risk variation is essentially zero; AUC(t) will be near 0.5 "
+            "because every patient is receiving the same risk curve."
+        )
+    print(f"  saved: {path}")
+    return path
+
+
+def summarize_training_curve(*, output_dir: Path, run_id: str, n_events: int) -> Path | None:
+    curve_rows = []
+    performance_dir = Path("model_performance") / run_id
+    metric_names = ["c_idx", "ibs", "mean_auc", "reconstr_loss", "survival_loss"]
+    for event_idx in range(n_events):
+        perf_path = performance_dir / f"model_performance_{event_idx}_{run_id}.npy"
+        if not perf_path.exists():
+            continue
+        performance = np.load(perf_path, allow_pickle=True)
+        if len(performance) < len(metric_names):
+            continue
+        n_epochs = max(len(values) for values in performance[: len(metric_names)])
+        for epoch_idx in range(n_epochs):
+            row = {"event_idx": event_idx + 1, "epoch": epoch_idx + 1}
+            for metric_name, values in zip(metric_names, performance[: len(metric_names)]):
+                if epoch_idx < len(values):
+                    row[metric_name] = values[epoch_idx]
+                else:
+                    row[metric_name] = np.nan
+            curve_rows.append(row)
+
+    if not curve_rows:
+        return None
+
+    curve = pd.DataFrame(curve_rows)
+    path = output_dir / f"survlatent_ode_training_curve_{run_id}.csv"
+    curve.to_csv(path, index=False)
+
+    print("\nTraining curve diagnostics:")
+    for event_idx, event_curve in curve.groupby("event_idx", sort=True):
+        auc = pd.to_numeric(event_curve["mean_auc"], errors="coerce")
+        valid_auc = auc.dropna()
+        if valid_auc.empty:
+            continue
+        best_pos = int(valid_auc.to_numpy().argmax())
+        best_epoch = int(valid_auc.index[best_pos])
+        best_row = event_curve.loc[best_epoch]
+        first_auc = float(valid_auc.iloc[0])
+        best_auc = float(best_row["mean_auc"])
+        last_auc = float(valid_auc.iloc[-1])
+        print(
+            f"  event_{int(event_idx)}: first_auc={first_auc:.4f} "
+            f"best_auc={best_auc:.4f} at epoch={int(best_row['epoch'])} "
+            f"last_auc={last_auc:.4f}"
+        )
+        if int(best_row["epoch"]) < 3:
+            print(
+                "    WARNING: peak validation AUC occurred before epoch 3; "
+                "the upstream SurvLatent trainer does not save best_model.pt "
+                "for epochs 1-2."
+            )
+        if best_auc - last_auc > 0.05:
+            print(
+                "    WARNING: validation AUC fell substantially after its peak; "
+                "reduce --surv-loss-scale, lengthen --wait-until-full-surv-loss, "
+                "or evaluate --checkpoint best instead of latest."
+            )
     print(f"  saved: {path}")
     return path
 
@@ -362,16 +478,24 @@ def main(args: argparse.Namespace) -> None:
             early_stopping=args.early_stopping,
             feat_reconstr=feat_reconstr,
             wait_until_full_surv_loss=args.wait_until_full_surv_loss,
+            survival_loss_exp=args.survival_loss_exp,
             random_seed=args.seed,
         )
 
-    ckpt = Path("model_performance") / run_id / "best_model.pt"
+    ckpt = Path("model_performance") / run_id / f"{args.checkpoint}_model.pt"
     if not ckpt.exists():
         raise FileNotFoundError(
             f"Checkpoint not found at {ckpt.resolve()}; training may have failed."
         )
-    print(f"\nLoading best checkpoint: {ckpt.resolve()}")
+    print(f"\nLoading {args.checkpoint} checkpoint: {ckpt.resolve()}")
     model_info = get_ckpt_model(str(ckpt), model, device)
+    print(
+        "Checkpoint info: "
+        f"selected={args.checkpoint} "
+        f"best_epoch={model_info.get('best_epoch', 'NA')} "
+        f"itr={model_info.get('itr', 'NA')} "
+        f"max_obs_time={model_info.get('max_obs_time', 'NA')}"
+    )
 
     print("Processing held-out test set ...")
     batch_dict_test = model.process_eval_data(
@@ -428,6 +552,11 @@ def main(args: argparse.Namespace) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / f"survlatent_ode_test_metrics_{run_id}.csv"
     cif_path = output_dir / f"survlatent_ode_cif_{run_id}.npz"
+    training_curve_path = summarize_training_curve(
+        output_dir=output_dir,
+        run_id=run_id,
+        n_events=n_events,
+    )
     diagnostics_path = write_prediction_diagnostics(
         output_dir=output_dir,
         run_id=run_id,
@@ -442,25 +571,36 @@ def main(args: argparse.Namespace) -> None:
     )
     df_test_result.to_csv(metrics_path, index=False)
     if n_events == 1:
+        surv_prob_padded, surv_prob_lengths = pad_patient_curves(surv_prob)
         np.savez_compressed(
             cif_path,
-            surv_prob=np.asarray(surv_prob),
+            surv_prob=surv_prob_padded,
+            surv_prob_lengths=surv_prob_lengths,
             event_cols=np.array(event_cols_list),
             model_event_cols=np.array(adjusted_event_cols_list),
             post_treatment_max_pred_window=np.asarray(args.max_pred_window),
             model_max_pred_window=np.asarray(model_max_pred_window),
         )
     else:
+        ef_surv_prob_padded, ef_surv_prob_lengths = pad_patient_curves(metric_input)
+        cs_cif_total_padded, cs_cif_total_lengths = pad_event_patient_curves(cs_cif_total)
         np.savez_compressed(
             cif_path,
-            ef_surv_prob=np.asarray(metric_input),
-            cs_cif_total=np.asarray(cs_cif_total),
+            ef_surv_prob=ef_surv_prob_padded,
+            ef_surv_prob_lengths=ef_surv_prob_lengths,
+            cs_cif_total=cs_cif_total_padded,
+            cs_cif_total_lengths=cs_cif_total_lengths,
             event_cols=np.array(event_cols_list),
             model_event_cols=np.array(adjusted_event_cols_list),
             post_treatment_max_pred_window=np.asarray(args.max_pred_window),
             model_max_pred_window=np.asarray(model_max_pred_window),
         )
-    print(f"\nSaved:\n  {metrics_path}\n  {cif_path}\n  {diagnostics_path}")
+    saved_paths = [metrics_path, cif_path, diagnostics_path]
+    if training_curve_path is not None:
+        saved_paths.append(training_curve_path)
+    print("\nSaved:")
+    for path in saved_paths:
+        print(f"  {path}")
     print("\nTest metrics:")
     print(df_test_result.to_string(index=False))
 
@@ -509,14 +649,50 @@ if __name__ == "__main__":
         action="store_true",
         help="Allow training to reuse/append existing SurvLatent artifacts for this run_id.",
     )
+    parser.add_argument(
+        "--checkpoint",
+        choices=["best", "latest"],
+        default="best",
+        help="Checkpoint to evaluate after training or with --skip-train.",
+    )
 
     parser.add_argument("--seed", type=int, default=1991)
     parser.add_argument("--n-epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=100)
-    parser.add_argument("--lr", type=float, default=0.01)
-    parser.add_argument("--surv-loss-scale", type=float, default=100.0)
-    parser.add_argument("--wait-until-full-surv-loss", type=int, default=3)
-    parser.add_argument("--early-stopping", action="store_true", default=True)
+    parser.add_argument("--lr", type=float, default=DEFAULT_LR)
+    parser.add_argument("--surv-loss-scale", type=float, default=DEFAULT_SURV_LOSS_SCALE)
+    parser.add_argument(
+        "--wait-until-full-surv-loss",
+        type=int,
+        default=DEFAULT_WAIT_UNTIL_FULL_SURV_LOSS,
+        help="Epochs used to ramp survival loss from 0.01 to --surv-loss-scale.",
+    )
+    parser.add_argument(
+        "--early-stopping",
+        dest="early_stopping",
+        action="store_true",
+        default=True,
+        help="Enable SurvLatent's validation-AUC early stopping.",
+    )
+    parser.add_argument(
+        "--no-early-stopping",
+        dest="early_stopping",
+        action="store_false",
+        help="Disable SurvLatent's validation-AUC early stopping.",
+    )
+    parser.add_argument(
+        "--survival-loss-exp",
+        dest="survival_loss_exp",
+        action="store_true",
+        default=True,
+        help="Use SurvLatent's exponential survival-loss warmup.",
+    )
+    parser.add_argument(
+        "--no-survival-loss-exp",
+        dest="survival_loss_exp",
+        action="store_false",
+        help="Disable SurvLatent's exponential survival-loss warmup.",
+    )
     parser.add_argument(
         "--max-pred-window",
         type=int,
