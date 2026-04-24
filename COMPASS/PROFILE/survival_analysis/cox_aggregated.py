@@ -109,8 +109,9 @@ DEFAULT_CV_L1_RATIOS = [0.1, 0.3, 0.5, 0.7, 0.9, 1.0]
 DEFAULT_AUC_QUANTILES = (0.25, 0.375, 0.50, 0.625, 0.75)
 DEFAULT_AUC_TIME_UNIT_DAYS = 7
 PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
-MIN_SLOPE_OBS = 3
-MIN_SLOPE_SPAN_DAYS = 7.0
+MIN_SLOPE_OBS = 4
+MIN_SLOPE_UNIQUE_TIMES = 3
+MIN_SLOPE_SPAN_DAYS = 14.0
 MIN_DELTA_OBS = 2
 SPLIT_ASSIGNMENTS_FILENAME = "cox_agg_split_assignments.csv"
 LANDMARK_AVAILABILITY_FILENAME = "cox_agg_landmark_mrn_availability.csv"
@@ -384,23 +385,29 @@ def _patient_lab_std(values: pd.Series) -> float:
 
 
 def _compute_patient_lab_slopes(pre_treatment: pd.DataFrame) -> pd.DataFrame:
-    """Slope of LAB_VALUE vs t_lab (per day) per (DFCI_MRN, LAB_NAME).
+    """OLS slope of LAB_VALUE vs t_lab (per day) per (DFCI_MRN, LAB_NAME).
 
-    Returns NaN unless a patient has >= MIN_SLOPE_OBS observations spanning at
-    least MIN_SLOPE_SPAN_DAYS; short-span fits produce unstable, extreme slopes.
+    Returns NaN unless a patient has enough observations, enough unique
+    timepoints, and a sufficient time span; these stricter requirements keep
+    the original OLS-style slope definition while reducing unstable estimates
+    from sparse, short-span trajectories.
     """
     def _slope(group: pd.DataFrame) -> float:
         if len(group) < MIN_SLOPE_OBS:
             return np.nan
+        if group["t_lab"].nunique(dropna=True) < MIN_SLOPE_UNIQUE_TIMES:
+            return np.nan
+
         x = group["t_lab"].to_numpy(dtype=float)
         y = group["LAB_VALUE"].to_numpy(dtype=float)
         if (x.max() - x.min()) < MIN_SLOPE_SPAN_DAYS:
             return np.nan
         cov = np.cov(x, y, ddof=0)
         var_x = cov[0, 0]
-        if var_x == 0:
+        if not np.isfinite(var_x) or var_x <= 0:
             return np.nan
-        return float(cov[0, 1] / var_x)
+        slope = float(cov[0, 1] / var_x)
+        return slope if np.isfinite(slope) else np.nan
 
     slopes = (
         pre_treatment.groupby(["DFCI_MRN", "LAB_NAME"])[["t_lab", "LAB_VALUE"]]
