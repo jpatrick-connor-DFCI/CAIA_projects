@@ -77,7 +77,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
     Surv = None
     SKSURV_IMPORT_ERROR = exc
 
-DEFAULT_COXNET_MAX_ITER = 5000
+DEFAULT_COXNET_MAX_ITER = 20000
+DEFAULT_MAX_ABS_COXNET_COEF = 25.0
 
 BASE = Path(__file__).resolve().parent
 DATA_PATH = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/")
@@ -954,6 +955,17 @@ def _build_coxnet_xy(
     return X, y
 
 
+def _summarize_warning_messages(caught_warnings: list[warnings.WarningMessage]) -> str:
+    if not caught_warnings:
+        return ""
+    messages = []
+    for warning_msg in caught_warnings:
+        message = str(warning_msg.message).strip().replace("\n", " ")
+        if message and message not in messages:
+            messages.append(message)
+    return " | ".join(messages[:3])
+
+
 def fit_coxnet_with_fallback(
     model_df: pd.DataFrame,
     *,
@@ -967,11 +979,11 @@ def fit_coxnet_with_fallback(
 ) -> tuple[CoxnetSurvivalAnalysis | None, float, str]:
     """Elastic-net Cox via sksurv's coordinate-descent CoxnetSurvivalAnalysis.
 
-    Convergence warnings are silenced and the solver's partial fit is accepted
-    without retry; in practice max_iter=5000 yields usable coefficients even
-    when the path solver reports it has not fully converged. A non-exception
-    fit is therefore always considered "ok"; only hard failures (arithmetic /
-    linalg errors, empty coefficient paths) trigger the penalizer fallback.
+    Stability-first wrapper around sksurv's coordinate-descent Coxnet.
+
+    Fits that emit warnings, produce non-finite coefficients, or blow up to
+    implausibly large absolute coefficients on z-scored inputs are rejected and
+    treated as unusable, triggering the penalizer fallback.
     """
     require_sksurv()
     X, y = _build_coxnet_xy(
@@ -996,12 +1008,37 @@ def fit_coxnet_with_fallback(
                 max_iter=int(max_iter),
                 fit_baseline_model=False,
             )
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
+            with warnings.catch_warnings(record=True) as caught_warnings:
+                warnings.simplefilter("always")
                 model.fit(X, y)
         except (ArithmeticError, ValueError, np.linalg.LinAlgError) as exc:
             last_error = str(exc)
             continue
+
+        warning_summary = _summarize_warning_messages(caught_warnings)
+        if warning_summary:
+            last_error = f"warning_emitted: {warning_summary}"
+            continue
+
+        coefs = np.asarray(model.coef_, dtype=float)
+        if coefs.ndim == 2:
+            coefs = coefs[:, -1]
+        coefs = coefs.reshape(-1)
+        if coefs.size != len(covariate_cols):
+            last_error = (
+                f"coef_size_mismatch: expected {len(covariate_cols)} got {coefs.size}"
+            )
+            continue
+        if not np.all(np.isfinite(coefs)):
+            last_error = "non_finite_coefficients"
+            continue
+        max_abs_coef = float(np.max(np.abs(coefs))) if coefs.size else 0.0
+        if max_abs_coef > DEFAULT_MAX_ABS_COXNET_COEF:
+            last_error = (
+                f"coef_blowup_max_abs_{max_abs_coef:.3f}_gt_{DEFAULT_MAX_ABS_COXNET_COEF:g}"
+            )
+            continue
+
         note = f"fit_ok_penalizer_{penalizer:g}"
         return model, float(penalizer), note
 
@@ -1352,7 +1389,8 @@ def tune_multivariable_model(
     """Arm 2: 5-fold CV over (penalizer x l1_ratio) grid (elastic-net), AGE unpenalized.
 
     Backed by sksurv's CoxnetSurvivalAnalysis for speed on high-dimensional
-    feature sets; convergence warnings are silenced and partial fits accepted.
+    feature sets. Hyperparameter selection is restricted to combinations with
+    valid fits in every CV fold.
     """
     require_sksurv()
     duration_col = ENDPOINTS[endpoint]["duration_col"]
@@ -1444,12 +1482,20 @@ def tune_multivariable_model(
         )
         .reset_index()
     )
+    cv_df["all_folds_valid"] = cv_df["n_valid_folds"].eq(int(n_folds))
 
     if cv_df["n_valid_folds"].eq(0).all():
         raise RuntimeError(f"All CV fits failed for endpoint '{endpoint}'.")
+    if not cv_df["all_folds_valid"].any():
+        best_valid = int(cv_df["n_valid_folds"].max())
+        raise RuntimeError(
+            f"No hyperparameter setting produced valid fits in all {n_folds} folds for endpoint "
+            f"'{endpoint}'. Best observed validity was {best_valid}/{n_folds} folds."
+        )
 
     best_row = (
-        cv_df.sort_values(
+        cv_df.loc[cv_df["all_folds_valid"]]
+        .sort_values(
             ["cv_mean", "n_valid_folds", "penalizer", "l1_ratio"],
             ascending=[False, False, True, True],
             na_position="last",
