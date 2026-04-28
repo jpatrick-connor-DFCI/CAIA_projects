@@ -80,6 +80,12 @@ def require_lifelines() -> None:
         ) from LIFELINES_IMPORT_ERROR
 
 
+def strip_suffix(value: str, suffix: str) -> str:
+    if value.endswith(suffix):
+        return value[: -len(suffix)]
+    return value
+
+
 def fit_preprocessor(train_df: pd.DataFrame, *, feature_cols: list[str]) -> dict:
     base_feature_cols = [
         col
@@ -100,7 +106,7 @@ def fit_preprocessor(train_df: pd.DataFrame, *, feature_cols: list[str]) -> dict
     x_train_values = imputer.fit_transform(train_df[base_feature_cols])
 
     if missing_cols:
-        missing_source = [col.removesuffix("__missing") for col in missing_cols]
+        missing_source = [strip_suffix(col, "__missing") for col in missing_cols]
         x_train_values = np.hstack(
             [x_train_values, train_df[missing_source].isna().astype(float).to_numpy()]
         )
@@ -124,7 +130,7 @@ def transform_xgb_matrix(df: pd.DataFrame, preprocessor: dict) -> np.ndarray:
     missing_cols = preprocessor["missing_cols"]
     x_values = preprocessor["imputer"].transform(df[base_feature_cols])
     if missing_cols:
-        missing_source = [col.removesuffix("__missing") for col in missing_cols]
+        missing_source = [strip_suffix(col, "__missing") for col in missing_cols]
         x_values = np.hstack(
             [x_values, df[missing_source].isna().astype(float).to_numpy()]
         )
