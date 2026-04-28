@@ -18,6 +18,8 @@ Arm 2 (multivariable elastic-net Cox):
   - 5-fold CV over (penalizer x l1_ratio) grid on the 80%; AGE is unpenalized.
   - Refit on full 80% with chosen (penalizer, l1_ratio) and evaluate on 20% test:
     C-index and SurvLatent-style IPCW cumulative/dynamic AUC(t).
+  - Optionally administratively censor Cox AUC(t) at the SurvLatent prediction
+    horizon via --auc-max-time-units for an apples-to-apples horizon check.
 
 Endpoints: platinum, death.
 
@@ -828,6 +830,25 @@ def _make_survival_array(event: np.ndarray, duration: np.ndarray) -> np.ndarray:
     return survival
 
 
+def _apply_auc_admin_censoring(
+    event: np.ndarray,
+    duration: np.ndarray,
+    *,
+    max_time_unit: int | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Censor durations at a fixed AUC horizon, matching SurvLatent's convention."""
+    event = np.asarray(event, dtype=int).copy()
+    duration = np.asarray(duration, dtype=float).copy()
+    if max_time_unit is None:
+        return event, duration
+    if max_time_unit <= 0:
+        raise ValueError("max_time_unit must be positive when provided.")
+
+    within_horizon = event.astype(bool) & (duration > 0) & (duration < float(max_time_unit))
+    duration = np.where(duration < float(max_time_unit), duration, float(max_time_unit))
+    return within_horizon.astype(int), duration
+
+
 def compute_survlatent_auc_t(
     eval_df: pd.DataFrame,
     risk_score: np.ndarray,
@@ -837,6 +858,7 @@ def compute_survlatent_auc_t(
     reference_df: pd.DataFrame,
     time_unit_days: int = DEFAULT_AUC_TIME_UNIT_DAYS,
     quantiles: tuple[float, ...] = DEFAULT_AUC_QUANTILES,
+    max_time_unit: int | None = None,
 ) -> tuple[float, pd.DataFrame]:
     """Match SurvLatent ODE's IPCW cumulative/dynamic AUC(t) evaluation."""
     require_sksurv()
@@ -848,6 +870,7 @@ def compute_survlatent_auc_t(
         "auc_t",
         "n_eval",
         "n_eval_events",
+        "admin_censor_time_unit",
         "note",
     ]
 
@@ -862,6 +885,17 @@ def compute_survlatent_auc_t(
     )
     eval_event = eval_df[event_col].to_numpy(dtype=int)
     risk_score = np.asarray(risk_score, dtype=float).reshape(-1)
+
+    train_event, train_duration = _apply_auc_admin_censoring(
+        train_event,
+        train_duration,
+        max_time_unit=max_time_unit,
+    )
+    eval_event, eval_duration = _apply_auc_admin_censoring(
+        eval_event,
+        eval_duration,
+        max_time_unit=max_time_unit,
+    )
 
     train_valid = np.isfinite(train_duration) & (train_duration > 0)
     eval_valid = np.isfinite(eval_duration) & (eval_duration > 0) & np.isfinite(risk_score)
@@ -906,6 +940,7 @@ def compute_survlatent_auc_t(
                 "auc_t": auc_t,
                 "n_eval": int(eval_valid.sum()),
                 "n_eval_events": int((eval_event[eval_valid] == 1).sum()),
+                "admin_censor_time_unit": max_time_unit,
                 "note": note,
             }
         )
@@ -1392,6 +1427,7 @@ def tune_multivariable_model(
     n_folds: int,
     seed: int,
     auc_time_unit_days: int,
+    auc_max_time_units: int | None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """Arm 2: 5-fold CV over (penalizer x l1_ratio) grid (elastic-net), AGE unpenalized.
 
@@ -1464,6 +1500,7 @@ def tune_multivariable_model(
                         event_col=event_col,
                         reference_df=train_mdf,
                         time_unit_days=auc_time_unit_days,
+                        max_time_unit=auc_max_time_units,
                     )
                     row["mean_auc_t_val"] = mean_auc_val
                     row["n_valid_auc_horizons_val"] = (
@@ -1525,6 +1562,7 @@ def fit_final_multivariable_model(
     split_stratification: str,
     cv_stratification: str,
     auc_time_unit_days: int,
+    auc_max_time_units: int | None,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     require_sksurv()
     duration_col = ENDPOINTS[endpoint]["duration_col"]
@@ -1578,6 +1616,7 @@ def fit_final_multivariable_model(
         event_col=event_col,
         reference_df=train_mdf,
         time_unit_days=auc_time_unit_days,
+        max_time_unit=auc_max_time_units,
     )
     test_mean_auc, test_auc_df = compute_survlatent_auc_t(
         test_mdf,
@@ -1586,6 +1625,7 @@ def fit_final_multivariable_model(
         event_col=event_col,
         reference_df=train_mdf,
         time_unit_days=auc_time_unit_days,
+        max_time_unit=auc_max_time_units,
     )
 
     metrics_row = {
@@ -1604,6 +1644,7 @@ def fit_final_multivariable_model(
         "test_mean_auc_t": test_mean_auc,
         "auc_quantiles": ",".join(f"{q:g}" for q in DEFAULT_AUC_QUANTILES),
         "auc_time_unit_days": auc_time_unit_days,
+        "auc_admin_censor_time_unit": auc_max_time_units,
         "train_val_n_valid_auc_horizons": int(train_auc_df["auc_t"].notna().sum()) if not train_auc_df.empty else 0,
         "test_n_valid_auc_horizons": int(test_auc_df["auc_t"].notna().sum()) if not test_auc_df.empty else 0,
         "split_stratification": split_stratification,
@@ -1639,6 +1680,7 @@ def fit_final_multivariable_model(
     summary["test_c_index"] = test_c
     summary["train_val_mean_auc_t"] = train_mean_auc
     summary["test_mean_auc_t"] = test_mean_auc
+    summary["auc_admin_censor_time_unit"] = auc_max_time_units
     summary["note"] = note
     keep_cols = [
         "endpoint",
@@ -1655,6 +1697,7 @@ def fit_final_multivariable_model(
         "test_c_index",
         "train_val_mean_auc_t",
         "test_mean_auc_t",
+        "auc_admin_censor_time_unit",
         "note",
     ]
     summary = summary[[c for c in keep_cols if c in summary.columns]]
@@ -1888,6 +1931,7 @@ def main(args: argparse.Namespace) -> None:
                     n_folds=args.n_folds,
                     seed=args.seed,
                     auc_time_unit_days=args.auc_time_unit_days,
+                    auc_max_time_units=args.auc_max_time_units,
                 )
 
                 metrics_row, summary_df, _ = fit_final_multivariable_model(
@@ -1901,6 +1945,7 @@ def main(args: argparse.Namespace) -> None:
                     split_stratification=split_stratification,
                     cv_stratification=str(best_row["cv_stratification"]),
                     auc_time_unit_days=args.auc_time_unit_days,
+                    auc_max_time_units=args.auc_max_time_units,
                 )
                 metrics_row["landmark_days"] = landmark_day
                 summary_df.insert(0, "landmark_days", landmark_day)
@@ -2043,5 +2088,15 @@ if __name__ == "__main__":
         type=int,
         default=DEFAULT_AUC_TIME_UNIT_DAYS,
         help="Time unit used for Cox AUC(t), matching SurvLatent ODE input bins by default.",
+    )
+    parser.add_argument(
+        "--auc-max-time-units",
+        type=int,
+        default=None,
+        help=(
+            "Optional administrative censoring horizon for Cox AUC(t), in "
+            "--auc-time-unit-days units. Use 260 to match the default "
+            "SurvLatent --max-pred-window."
+        ),
     )
     main(parser.parse_args())

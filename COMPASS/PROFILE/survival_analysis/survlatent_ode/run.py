@@ -28,6 +28,7 @@ DEFAULT_RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_an
 DEFAULT_LR = 0.01
 DEFAULT_SURV_LOSS_SCALE = 10.0
 DEFAULT_WAIT_UNTIL_FULL_SURV_LOSS = 15
+DEFAULT_AUC_QUANTILES = (0.25, 0.375, 0.50, 0.625, 0.75)
 
 # Event configuration.
 # For single-event configs, event_col / time_to_event_col are strings (not lists
@@ -222,6 +223,235 @@ def _quantile_horizons(remaining_time: np.ndarray, event_mask: np.ndarray) -> di
         "50": int(np.quantile(event_times, 0.50)),
         "75": int(np.quantile(event_times, 0.75)),
     }
+
+
+def _make_survival_array(event: np.ndarray, duration: np.ndarray) -> np.ndarray:
+    survival = np.empty(
+        dtype=[("event", bool), ("time", np.float64)],
+        shape=len(duration),
+    )
+    survival["event"] = event.astype(bool)
+    survival["time"] = duration.astype(float)
+    return survival
+
+
+def _patient_level_event_frame(
+    df: pd.DataFrame,
+    *,
+    id_col: str,
+    time_col: str,
+    event_col: str,
+    time_to_event_col: str,
+) -> pd.DataFrame:
+    patient = (
+        df.groupby(id_col, sort=False)
+        .agg(
+            event=(event_col, "first"),
+            event_time=(time_to_event_col, "first"),
+            landmark_time=(time_col, "max"),
+        )
+        .copy()
+    )
+    patient["event"] = pd.to_numeric(patient["event"], errors="coerce").fillna(0).astype(int)
+    patient["duration"] = (
+        pd.to_numeric(patient["event_time"], errors="coerce")
+        - pd.to_numeric(patient["landmark_time"], errors="coerce")
+    )
+    patient.index = patient.index.map(str)
+    return patient
+
+
+def _curve_values_at_times(curve, times: np.ndarray, *, survival_curve: bool) -> np.ndarray:
+    values = _to_numpy(curve).reshape(-1).astype(float)
+    idx = times.astype(int)
+    if len(idx) == 0:
+        return np.full(len(idx), np.nan, dtype=float)
+    if idx.min() < 0 or idx.max() >= len(values):
+        return np.full(len(idx), np.nan, dtype=float)
+    selected = values[idx]
+    return 1.0 - selected if survival_curve else selected
+
+
+def compute_cox_comparable_auc_t(
+    *,
+    df: pd.DataFrame,
+    id_col: str,
+    time_col: str,
+    event_cols: list[str],
+    time_to_event_cols: list[str],
+    event_names: list[str],
+    sample_ids: list,
+    risk_curves_by_event: list,
+    survival_curve: bool,
+    quantiles: tuple[float, ...] = DEFAULT_AUC_QUANTILES,
+) -> tuple[dict[str, float], pd.DataFrame]:
+    """Compute a Cox-style IPCW dynamic AUC(t) directly from SurvLatent curves."""
+    try:
+        from sksurv.metrics import cumulative_dynamic_auc
+    except ModuleNotFoundError as exc:
+        print(
+            "\nCox-comparable AUC(t) audit skipped: scikit-survival is not available "
+            f"({exc})."
+        )
+        return {}, pd.DataFrame()
+
+    ref_df = df.loc[df["split"].isin(["train", "valid"])].copy()
+    eval_df = df.loc[df["split"].eq("test")].copy()
+    sample_ids_str = [str(sample_id) for sample_id in sample_ids]
+    rows: list[dict] = []
+    summary: dict[str, float] = {}
+
+    for event_idx, (event_col, time_col_event, event_name, curves) in enumerate(
+        zip(event_cols, time_to_event_cols, event_names, risk_curves_by_event)
+    ):
+        ref_patient = _patient_level_event_frame(
+            ref_df,
+            id_col=id_col,
+            time_col=time_col,
+            event_col=event_col,
+            time_to_event_col=time_col_event,
+        )
+        eval_patient = _patient_level_event_frame(
+            eval_df,
+            id_col=id_col,
+            time_col=time_col,
+            event_col=event_col,
+            time_to_event_col=time_col_event,
+        ).reindex(sample_ids_str)
+
+        ref_event = ref_patient["event"].to_numpy(dtype=int)
+        ref_duration = ref_patient["duration"].to_numpy(dtype=float)
+        eval_event = eval_patient["event"].fillna(0).to_numpy(dtype=int)
+        eval_duration = eval_patient["duration"].to_numpy(dtype=float)
+
+        ref_valid = np.isfinite(ref_duration) & (ref_duration > 0)
+        eval_valid_base = np.isfinite(eval_duration) & (eval_duration > 0)
+        event_times = eval_duration[eval_valid_base & (eval_event == 1)]
+        event_times = event_times[np.isfinite(event_times) & (event_times > 0)]
+        if ref_valid.sum() == 0 or eval_valid_base.sum() == 0 or len(event_times) == 0:
+            rows.append(
+                {
+                    "event": event_name,
+                    "event_idx": event_idx + 1,
+                    "horizon_quantile": "mean_25_75",
+                    "horizon_time_unit": np.nan,
+                    "auc_t": np.nan,
+                    "n_eval": int(eval_valid_base.sum()),
+                    "n_eval_events": int((eval_event[eval_valid_base] == 1).sum()),
+                    "note": "no_valid_reference_eval_or_events",
+                }
+            )
+            summary[f"cox_comparable_mean_auc_t_{event_name}"] = np.nan
+            continue
+
+        ref_surv = _make_survival_array(ref_event[ref_valid], ref_duration[ref_valid])
+        horizon_times = np.asarray(
+            [int(val) for val in np.quantile(event_times, quantiles)],
+            dtype=float,
+        )
+
+        for quantile, horizon in zip(quantiles, horizon_times):
+            risk_at_horizon = np.asarray(
+                [
+                    _curve_values_at_times(
+                        curve,
+                        np.asarray([horizon], dtype=int),
+                        survival_curve=survival_curve,
+                    )[0]
+                    for curve in curves
+                ],
+                dtype=float,
+            )
+            eval_valid = eval_valid_base & np.isfinite(risk_at_horizon)
+            auc_t = np.nan
+            note = ""
+            if horizon <= 0:
+                note = "non_positive_horizon"
+            elif eval_valid.sum() == 0:
+                note = "no_eval_curves_cover_horizon"
+            else:
+                try:
+                    eval_surv = _make_survival_array(
+                        eval_event[eval_valid],
+                        eval_duration[eval_valid],
+                    )
+                    auc_values, _ = cumulative_dynamic_auc(
+                        ref_surv,
+                        eval_surv,
+                        risk_at_horizon[eval_valid],
+                        np.asarray([horizon], dtype=float),
+                    )
+                    auc_t = float(auc_values[0])
+                except ValueError as exc:
+                    note = f"auc_failed: {exc}"
+            rows.append(
+                {
+                    "event": event_name,
+                    "event_idx": event_idx + 1,
+                    "horizon_quantile": quantile,
+                    "horizon_time_unit": horizon,
+                    "auc_t": auc_t,
+                    "n_eval": int(eval_valid.sum()),
+                    "n_eval_events": int((eval_event[eval_valid] == 1).sum()),
+                    "note": note,
+                }
+            )
+
+        mean_auc = np.nan
+        mean_note = ""
+        if len(horizon_times) < 2 or horizon_times[-1] <= horizon_times[0]:
+            mean_note = "non_increasing_auc_horizons"
+        else:
+            mean_auc_times = np.arange(horizon_times[0], horizon_times[-1], dtype=int)
+            mean_auc_times = mean_auc_times[mean_auc_times > 0]
+            if len(mean_auc_times) == 0:
+                mean_note = "no_positive_mean_auc_times"
+            else:
+                risk_matrix = np.asarray(
+                    [
+                        _curve_values_at_times(
+                            curve,
+                            mean_auc_times,
+                            survival_curve=survival_curve,
+                        )
+                        for curve in curves
+                    ],
+                    dtype=float,
+                )
+                eval_valid = eval_valid_base & np.isfinite(risk_matrix).all(axis=1)
+                if eval_valid.sum() == 0:
+                    mean_note = "no_eval_curves_cover_mean_auc_range"
+                else:
+                    try:
+                        eval_surv = _make_survival_array(
+                            eval_event[eval_valid],
+                            eval_duration[eval_valid],
+                        )
+                        _, mean_auc = cumulative_dynamic_auc(
+                            ref_surv,
+                            eval_surv,
+                            risk_matrix[eval_valid],
+                            mean_auc_times.astype(float),
+                        )
+                        mean_auc = float(mean_auc)
+                    except ValueError as exc:
+                        mean_note = f"mean_auc_failed: {exc}"
+
+        rows.append(
+            {
+                "event": event_name,
+                "event_idx": event_idx + 1,
+                "horizon_quantile": "mean_25_75",
+                "horizon_time_unit": np.nan,
+                "auc_t": mean_auc,
+                "n_eval": int(eval_valid_base.sum()),
+                "n_eval_events": int((eval_event[eval_valid_base] == 1).sum()),
+                "note": mean_note,
+            }
+        )
+        summary[f"cox_comparable_mean_auc_t_{event_name}"] = mean_auc
+
+    return summary, pd.DataFrame(rows)
 
 
 def write_prediction_diagnostics(
@@ -428,6 +658,9 @@ def main(args: argparse.Namespace) -> None:
     data_info_dic["event_col"] = event_col
     data_info_dic["time_to_event_col"] = time_to_event_col
     adjusted_event_cols_list = event_col if isinstance(event_col, list) else [event_col]
+    adjusted_time_cols_list = (
+        time_to_event_col if isinstance(time_to_event_col, list) else [time_to_event_col]
+    )
     print(f"Horizon-censored event columns for modeling: {adjusted_event_cols_list}")
 
     data_train = load_split(df, "train", id_col=id_col, time_col=time_col)
@@ -569,6 +802,36 @@ def main(args: argparse.Namespace) -> None:
         requested_window=args.max_pred_window,
         model_window=model_max_pred_window,
     )
+
+    if n_events == 1:
+        risk_curves_by_event = [metric_input]
+        risk_curves_are_survival = True
+    else:
+        risk_curves_by_event = cs_cif_total
+        risk_curves_are_survival = False
+    auc_summary, auc_df = compute_cox_comparable_auc_t(
+        df=df,
+        id_col=id_col,
+        time_col=time_col,
+        event_cols=adjusted_event_cols_list,
+        time_to_event_cols=adjusted_time_cols_list,
+        event_names=event_cols_list,
+        sample_ids=list(batch_dict_test["sample_ids"]),
+        risk_curves_by_event=risk_curves_by_event,
+        survival_curve=risk_curves_are_survival,
+    )
+    auc_path = None
+    if auc_summary:
+        for col, value in auc_summary.items():
+            df_test_result[col] = value
+        print("\nCox-comparable AUC(t) audit:")
+        for col, value in auc_summary.items():
+            value_str = f"{value:.4f}" if np.isfinite(value) else "nan"
+            print(f"  {col}={value_str}")
+    if not auc_df.empty:
+        auc_path = output_dir / f"survlatent_ode_auc_t_audit_{run_id}.csv"
+        auc_df.to_csv(auc_path, index=False)
+
     df_test_result.to_csv(metrics_path, index=False)
     if n_events == 1:
         surv_prob_padded, surv_prob_lengths = pad_patient_curves(surv_prob)
@@ -596,6 +859,8 @@ def main(args: argparse.Namespace) -> None:
             model_max_pred_window=np.asarray(model_max_pred_window),
         )
     saved_paths = [metrics_path, cif_path, diagnostics_path]
+    if auc_path is not None:
+        saved_paths.append(auc_path)
     if training_curve_path is not None:
         saved_paths.append(training_curve_path)
     print("\nSaved:")
