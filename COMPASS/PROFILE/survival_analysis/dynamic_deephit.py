@@ -6,11 +6,20 @@ survlatent_ode/build_input.py and trains a compact GRU model with a discrete
 competing-risks likelihood. It is intentionally self-contained so it does not
 depend on the original TensorFlow 1.x Dynamic-DeepHit reference code.
 
-Outputs:
-  dynamic_deephit_metrics.csv
-  dynamic_deephit_auc_t.csv
-  dynamic_deephit_patient_risks.csv
-  dynamic_deephit_manifest.json
+Runs 5-fold stratified CV on train_val (combined PLATINUM+DEATH stratification)
+over a (hidden_dim x dropout x lr) grid, then refits the chosen hyperparameter
+combo on full train_val and evaluates on the held-out test fold. --no-cv
+falls back to the legacy single-fit path. Per-config outputs are suffixed by
+args.config so the platinum / death / competing runs do not collide.
+
+Outputs (per --config):
+  dynamic_deephit_metrics_{config}.csv
+  dynamic_deephit_auc_t_{config}.csv
+  dynamic_deephit_brier_{config}.csv
+  dynamic_deephit_cv_folds_{config}.csv
+  dynamic_deephit_cv_summary_{config}.csv
+  dynamic_deephit_patient_risks_{config}.csv
+  dynamic_deephit_manifest_{config}.json
 """
 
 from __future__ import annotations
@@ -18,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from itertools import product
 from pathlib import Path
 
 import numpy as np
@@ -59,11 +69,21 @@ if str(SURVIVAL_DIR) not in sys.path:
     sys.path.insert(0, str(SURVIVAL_DIR))
 
 from cox_aggregated import _make_survival_array  # noqa: E402
+from helper import (  # noqa: E402
+    assert_disjoint_folds,
+    assert_no_test_leakage,
+    compute_brier,
+    iter_stratified_folds,
+)
 
 DEFAULT_RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis")
 DEFAULT_SEED = 42
 DEFAULT_MAX_PRED_WINDOW = 52
 DEFAULT_AUC_QUANTILES = (0.25, 0.375, 0.50, 0.625, 0.75)
+DEFAULT_N_FOLDS = 5
+DEFAULT_CV_HIDDEN_DIMS = [32, 64, 128]
+DEFAULT_CV_DROPOUTS = [0.10, 0.20, 0.30]
+DEFAULT_CV_LRS = [5e-4, 1e-3, 2e-3]
 
 
 def require_torch() -> None:
@@ -338,12 +358,348 @@ def predict(model, loader, device: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def train_evaluate(
+    *,
+    df: pd.DataFrame,
+    id_col: str,
+    time_col: str,
+    feature_cols: list[str],
+    targets: pd.DataFrame,
+    train_ids: set,
+    valid_ids: set,
+    eval_ids: set,
+    args: argparse.Namespace,
+    n_events: int,
+    horizon: int,
+    hidden_dim: int,
+    dropout: float,
+    lr: float,
+    seed: int,
+) -> tuple[pd.DataFrame, dict, float]:
+    """Train DeepHit on `train_ids` watching `valid_ids` for early stopping,
+    predict on `eval_ids`. Normalization is fit on train_ids only — never on
+    valid or eval. Returns (pred_df, history, best_valid_loss).
+    """
+    set_seed(seed)
+    mean, std = fit_normalization(df, feature_cols=feature_cols, train_ids=train_ids)
+    train_rows = df.loc[df[id_col].astype(str).isin(train_ids), time_col]
+    if train_rows.empty:
+        raise ValueError("Empty fold_train when fitting DeepHit normalization.")
+    max_observed_time = float(train_rows.max())
+    sequences = build_sequences(
+        df,
+        id_col=id_col,
+        time_col=time_col,
+        feature_cols=feature_cols,
+        targets=targets,
+        mean=mean,
+        std=std,
+        max_observed_time=max_observed_time,
+    )
+
+    train_ds = SequenceDataset(sequences, sorted(train_ids))
+    valid_ds = SequenceDataset(sequences, sorted(valid_ids))
+    eval_ds = SequenceDataset(sequences, sorted(eval_ids))
+    if len(train_ds) == 0 or len(valid_ds) == 0 or len(eval_ds) == 0:
+        raise ValueError(
+            f"Empty split: train={len(train_ds)} valid={len(valid_ds)} eval={len(eval_ds)}"
+        )
+    train_loader = DataLoader(
+        train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_batch
+    )
+    valid_loader = DataLoader(
+        valid_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_batch
+    )
+    eval_loader = DataLoader(
+        eval_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_batch
+    )
+
+    device = "cuda" if args.cuda and torch.cuda.is_available() else "cpu"
+    input_dim = next(iter(train_loader))["x"].shape[-1]
+    model = DynamicDeepHitGRU(
+        input_dim=input_dim,
+        hidden_dim=int(hidden_dim),
+        n_events=n_events,
+        horizon=horizon,
+        dropout=float(dropout),
+    ).to(device)
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=float(lr), weight_decay=args.weight_decay
+    )
+
+    best_state = None
+    best_valid = float("inf")
+    epochs_without_improvement = 0
+    history = []
+    for epoch in range(1, args.epochs + 1):
+        train_loss = run_epoch(model, train_loader, optimizer, device)
+        valid_loss = run_epoch(model, valid_loader, None, device)
+        history.append(
+            {"epoch": epoch, "train_loss": train_loss, "valid_loss": valid_loss}
+        )
+        if valid_loss < best_valid - args.min_delta:
+            best_valid = valid_loss
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+        if epochs_without_improvement >= args.patience:
+            break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    pred = predict(model, eval_loader, device)
+    return pred, history, best_valid
+
+
+def cv_run(
+    *,
+    df: pd.DataFrame,
+    id_col: str,
+    time_col: str,
+    feature_cols: list[str],
+    targets: pd.DataFrame,
+    train_val_static: pd.DataFrame,
+    args: argparse.Namespace,
+    n_events: int,
+    event_names: list[str],
+    fixed_horizons_by_event: dict[str, np.ndarray],
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """5-fold stratified CV over (hidden_dim x dropout x lr).
+
+    `train_val_static` is patient-indexed with PLATINUM/DEATH for stratification
+    (combined 4-cell label). For each fold and each combo, the model is trained
+    on fold_train MRNs with fold_val watched for early stopping (and used as
+    the metric set). Returns (fold_df, cv_summary_df, best_row).
+    """
+    fold_partitions = list(
+        iter_stratified_folds(train_val_static, n_folds=args.n_folds, seed=args.seed)
+    )
+    if not fold_partitions:
+        raise RuntimeError("No CV folds produced for DeepHit.")
+    cv_stratification = fold_partitions[0][3]
+
+    grid = list(
+        product(args.cv_hidden_dims, args.cv_dropouts, args.cv_lrs)
+    )
+    fold_rows: list[dict] = []
+    for hidden_dim, dropout, lr in grid:
+        for fold, tr_idx, val_idx, _ in fold_partitions:
+            fold_train_ids = set(train_val_static.index[tr_idx].astype(str))
+            fold_val_ids = set(train_val_static.index[val_idx].astype(str))
+            assert_disjoint_folds(
+                fold_train_mrns=fold_train_ids,
+                fold_val_mrns=fold_val_ids,
+                fold=fold,
+            )
+            row = {
+                "fold": fold,
+                "hidden_dim": int(hidden_dim),
+                "dropout": float(dropout),
+                "lr": float(lr),
+                "n_train": len(fold_train_ids),
+                "n_val": len(fold_val_ids),
+                "cv_stratification": cv_stratification,
+                "best_valid_loss": np.nan,
+                "n_epochs": 0,
+                "note": "",
+            }
+            for event_name in event_names:
+                row[f"c_index_val__{event_name}"] = np.nan
+                row[f"mean_auc_t_val__{event_name}"] = np.nan
+                row[f"integrated_brier_val__{event_name}"] = np.nan
+            try:
+                pred, history, best_valid = train_evaluate(
+                    df=df,
+                    id_col=id_col,
+                    time_col=time_col,
+                    feature_cols=feature_cols,
+                    targets=targets,
+                    train_ids=fold_train_ids,
+                    valid_ids=fold_val_ids,
+                    eval_ids=fold_val_ids,
+                    args=args,
+                    n_events=n_events,
+                    horizon=args.max_pred_window,
+                    hidden_dim=hidden_dim,
+                    dropout=dropout,
+                    lr=lr,
+                    seed=args.seed + fold,
+                )
+                row["best_valid_loss"] = float(best_valid)
+                row["n_epochs"] = int(len(history))
+                fold_train_targets = targets.loc[
+                    targets.index.map(str).isin(fold_train_ids)
+                ].copy()
+                metrics_df, _ = compute_metrics(
+                    pred,
+                    event_names=event_names,
+                    train_val_targets=fold_train_targets,
+                    quantiles=tuple(args.auc_quantiles),
+                    fixed_horizons_by_event=fixed_horizons_by_event,
+                )
+                _, ibs_by_event = compute_brier_for_pred(
+                    pred,
+                    event_names=event_names,
+                    train_val_targets=fold_train_targets,
+                    horizons_by_event=fixed_horizons_by_event,
+                )
+                for _, mrow in metrics_df.iterrows():
+                    event_name = mrow["event"]
+                    row[f"c_index_val__{event_name}"] = float(mrow.get("c_index", np.nan))
+                    row[f"mean_auc_t_val__{event_name}"] = float(
+                        mrow.get("mean_auc_t", np.nan)
+                    )
+                    row[f"integrated_brier_val__{event_name}"] = float(
+                        ibs_by_event.get(event_name, np.nan)
+                    )
+            except Exception as exc:  # pragma: no cover - defensive
+                row["note"] = f"fold_failed: {exc}"
+            fold_rows.append(row)
+
+    fold_df = pd.DataFrame(fold_rows)
+    agg_cols = {
+        "best_valid_loss_mean": ("best_valid_loss", "mean"),
+        "n_epochs_mean": ("n_epochs", "mean"),
+        "n_valid_folds": ("best_valid_loss", lambda s: int(s.notna().sum())),
+        "cv_stratification": ("cv_stratification", "first"),
+    }
+    for event_name in event_names:
+        agg_cols[f"cv_mean_c_index__{event_name}"] = (
+            f"c_index_val__{event_name}",
+            "mean",
+        )
+        agg_cols[f"cv_std_c_index__{event_name}"] = (
+            f"c_index_val__{event_name}",
+            "std",
+        )
+        agg_cols[f"cv_mean_auc_t__{event_name}"] = (
+            f"mean_auc_t_val__{event_name}",
+            "mean",
+        )
+        agg_cols[f"cv_mean_integrated_brier__{event_name}"] = (
+            f"integrated_brier_val__{event_name}",
+            "mean",
+        )
+    cv_df = (
+        fold_df.groupby(["hidden_dim", "dropout", "lr"], dropna=False)
+        .agg(**agg_cols)
+        .reset_index()
+    )
+    cv_df["all_folds_valid"] = cv_df["n_valid_folds"].eq(int(args.n_folds))
+
+    if cv_df["n_valid_folds"].eq(0).all():
+        raise RuntimeError("All DeepHit CV fits failed.")
+    candidate = cv_df.loc[cv_df["all_folds_valid"]]
+    if candidate.empty:
+        candidate = cv_df.sort_values("n_valid_folds", ascending=False)
+
+    # Score by mean C-index averaged across causes (ignores NaNs).
+    cindex_cols = [
+        f"cv_mean_c_index__{name}" for name in event_names
+    ]
+    candidate = candidate.copy()
+    candidate["__rank_score"] = candidate[cindex_cols].mean(axis=1, skipna=True)
+    best_row = (
+        candidate.sort_values(
+            ["__rank_score", "n_valid_folds", "hidden_dim", "dropout", "lr"],
+            ascending=[False, False, True, True, True],
+            na_position="last",
+        )
+        .drop(columns="__rank_score")
+        .iloc[0]
+        .to_dict()
+    )
+    return fold_df, cv_df, best_row
+
+
+def compute_brier_for_pred(
+    pred: pd.DataFrame,
+    *,
+    event_names: list[str],
+    train_val_targets: pd.DataFrame,
+    horizons_by_event: dict[str, np.ndarray],
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    """Per-cause IPCW Brier on DeepHit's PMF predictions.
+
+    For each cause k, treats the event as binary (1 iff cause==k, 0 otherwise
+    including censored AND competing) and feeds 1 - CIF_k(h) as the survival
+    estimate at horizon h. For competing-risk configs this is the binary
+    "cause-of-interest" Brier — not the cumulative-incidence Brier — but it's
+    the convention consistent with how the existing per-cause AUC(t) is
+    computed. Train arrays come from `train_val_targets` so the IPCW weights
+    are train-only.
+    """
+    rows: list[dict] = []
+    integrated_by_event: dict[str, float] = {}
+    ref_event_any = train_val_targets["label"].to_numpy(dtype=int)
+    ref_duration = train_val_targets["duration"].to_numpy(dtype=float)
+    ref_valid = np.isfinite(ref_duration) & (ref_duration > 0)
+
+    for event_idx, event_name in enumerate(event_names, start=1):
+        horizons = np.asarray(
+            horizons_by_event.get(event_name, np.asarray([], dtype=float)),
+            dtype=float,
+        )
+        horizons = np.unique(horizons[horizons > 0])
+        if len(horizons) == 0:
+            integrated_by_event[event_name] = float("nan")
+            continue
+
+        event = pred["label"].eq(event_idx).astype(int).to_numpy()
+        duration = pred["duration"].to_numpy(dtype=float)
+        valid = np.isfinite(duration) & (duration > 0)
+        if not valid.any():
+            integrated_by_event[event_name] = float("nan")
+            continue
+
+        surv_cols = []
+        for h in horizons:
+            risk_col = f"event_{event_idx}_risk_h{int(h)}"
+            if risk_col not in pred.columns:
+                surv_cols = []
+                break
+            cif = pred.loc[valid, risk_col].to_numpy(dtype=float)
+            surv_cols.append(1.0 - cif)
+        if not surv_cols:
+            # Fall back to the cumulative total risk if per-horizon columns
+            # aren't materialized (legacy paths).
+            total = pred.loc[valid, f"event_{event_idx}_risk_total"].to_numpy(
+                dtype=float
+            )
+            surv_cols = [1.0 - total for _ in horizons]
+        surv_at_horizons = np.column_stack(surv_cols)
+
+        train_event = (ref_event_any[ref_valid] == event_idx).astype(int)
+        train_duration = ref_duration[ref_valid]
+        eval_event = event[valid]
+        eval_duration = duration[valid]
+
+        brier_df, ibs = compute_brier(
+            train_event=train_event,
+            train_duration=train_duration,
+            eval_event=eval_event,
+            eval_duration=eval_duration,
+            surv_at_horizons=surv_at_horizons,
+            horizons=horizons,
+            time_unit_days=1,  # DeepHit horizons are already in time-unit bins.
+        )
+        if not brier_df.empty:
+            brier_df = brier_df.copy()
+            brier_df.insert(0, "event", event_name)
+            rows.extend(brier_df.to_dict("records"))
+        integrated_by_event[event_name] = ibs
+
+    return pd.DataFrame(rows), integrated_by_event
+
+
 def compute_metrics(
     pred: pd.DataFrame,
     *,
     event_names: list[str],
     train_val_targets: pd.DataFrame,
     quantiles: tuple[float, ...],
+    fixed_horizons_by_event: dict[str, np.ndarray] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     require_lifelines()
     metric_rows = []
@@ -370,8 +726,17 @@ def compute_metrics(
                 ref_duration[ref_valid],
             )
             eval_surv = _make_survival_array(event[valid], duration[valid])
-            horizons = np.asarray([int(v) for v in np.quantile(event_times, quantiles)], dtype=float)
-            for quantile, horizon in zip(quantiles, horizons):
+            if fixed_horizons_by_event is None:
+                horizons = np.asarray([int(v) for v in np.quantile(event_times, quantiles)], dtype=float)
+                horizon_quantiles = tuple(quantiles)
+            else:
+                horizons = np.asarray(
+                    fixed_horizons_by_event.get(event_name, np.asarray([], dtype=float)),
+                    dtype=float,
+                )
+                horizons = np.unique(horizons[horizons > 0])
+                horizon_quantiles = tuple([np.nan] * len(horizons))
+            for quantile, horizon in zip(horizon_quantiles, horizons):
                 auc_t = np.nan
                 note = ""
                 if horizon <= 0:
@@ -404,7 +769,15 @@ def compute_metrics(
             if len(horizons) >= 2 and horizons[-1] > horizons[0]:
                 times = np.arange(horizons[0], horizons[-1], dtype=float)
                 try:
-                    _, mean_auc = cumulative_dynamic_auc(ref_surv, eval_surv, risk[valid], times)
+                    risk_cols = []
+                    for t in times:
+                        risk_col = f"event_{event_idx}_risk_h{int(t)}"
+                        if risk_col in pred.columns:
+                            risk_cols.append(pred.loc[valid, risk_col].to_numpy(dtype=float))
+                        else:
+                            risk_cols.append(risk[valid])
+                    time_risk = np.column_stack(risk_cols)
+                    _, mean_auc = cumulative_dynamic_auc(ref_surv, eval_surv, time_risk, times)
                     mean_auc = float(mean_auc)
                 except ValueError:
                     mean_auc = np.nan
@@ -446,83 +819,158 @@ def main(args: argparse.Namespace) -> None:
     train_ids = set(patient_split.index[patient_split.eq("train")].map(str))
     valid_ids = set(patient_split.index[patient_split.eq("valid")].map(str))
     test_ids = set(patient_split.index[patient_split.eq("test")].map(str))
-    mean, std = fit_normalization(df, feature_cols=feature_cols, train_ids=train_ids)
-    max_observed_time = float(df.loc[df[id_col].astype(str).isin(train_ids), time_col].max())
-    sequences = build_sequences(
-        df,
+    train_val_ids = train_ids.union(valid_ids)
+    assert_no_test_leakage(
+        test_mrns=test_ids,
+        train_mrns=train_val_ids,
+        context=f"dynamic_deephit.main[{args.config}]",
+    )
+
+    # Patient-level static frame for stratification (combined PLATINUM+DEATH).
+    patient_static = (
+        df.groupby(id_col)[["PLATINUM", "DEATH"]]
+        .first()
+        .astype(int)
+    )
+    patient_static.index = patient_static.index.astype(str)
+    train_val_static = patient_static.loc[
+        patient_static.index.intersection(sorted(train_val_ids))
+    ].copy()
+
+    # Fixed AUC / Brier horizon grid per cause, derived once from train_val
+    # event durations only. Shared by every CV fold and by the test eval.
+    train_val_targets = targets.loc[
+        targets.index.map(str).isin(train_val_ids)
+    ].copy()
+    fixed_horizons_by_event: dict[str, np.ndarray] = {}
+    for event_idx, event_name in enumerate(event_names, start=1):
+        event_durations = train_val_targets.loc[
+            train_val_targets["label"].eq(event_idx),
+            "duration",
+        ].to_numpy(dtype=float)
+        event_durations = event_durations[
+            np.isfinite(event_durations) & (event_durations > 0)
+        ]
+        if len(event_durations):
+            horizons = np.asarray(
+                [int(v) for v in np.quantile(event_durations, tuple(args.auc_quantiles))],
+                dtype=float,
+            )
+            horizons = np.unique(
+                horizons[(horizons > 0) & (horizons <= args.max_pred_window)]
+            )
+            fixed_horizons_by_event[event_name] = horizons
+
+    fold_df = pd.DataFrame()
+    cv_summary_df = pd.DataFrame()
+    chosen: dict | None = None
+    if not args.no_cv:
+        print(
+            f"Running 5-fold CV on {len(train_val_ids)} train_val patients "
+            f"({len(args.cv_hidden_dims)*len(args.cv_dropouts)*len(args.cv_lrs)} combos) "
+            f"for config={args.config} ..."
+        )
+        fold_df, cv_summary_df, best_row = cv_run(
+            df=df,
+            id_col=id_col,
+            time_col=time_col,
+            feature_cols=feature_cols,
+            targets=targets,
+            train_val_static=train_val_static,
+            args=args,
+            n_events=len(event_names),
+            event_names=event_names,
+            fixed_horizons_by_event=fixed_horizons_by_event,
+        )
+        chosen = {
+            "hidden_dim": int(best_row["hidden_dim"]),
+            "dropout": float(best_row["dropout"]),
+            "lr": float(best_row["lr"]),
+            "cv_stratification": str(best_row.get("cv_stratification", "")),
+        }
+        for event_name in event_names:
+            chosen[f"cv_mean_c_index__{event_name}"] = float(
+                best_row.get(f"cv_mean_c_index__{event_name}", np.nan)
+            )
+            chosen[f"cv_mean_auc_t__{event_name}"] = float(
+                best_row.get(f"cv_mean_auc_t__{event_name}", np.nan)
+            )
+            chosen[f"cv_mean_integrated_brier__{event_name}"] = float(
+                best_row.get(f"cv_mean_integrated_brier__{event_name}", np.nan)
+            )
+        print(
+            f"CV chose hidden_dim={chosen['hidden_dim']} "
+            f"dropout={chosen['dropout']:g} lr={chosen['lr']:g}"
+        )
+
+    # Final fit on full train_val using chosen (or default) hyperparameters.
+    final_hidden_dim = chosen["hidden_dim"] if chosen is not None else args.hidden_dim
+    final_dropout = chosen["dropout"] if chosen is not None else args.dropout
+    final_lr = chosen["lr"] if chosen is not None else args.lr
+
+    pred, history, best_valid = train_evaluate(
+        df=df,
         id_col=id_col,
         time_col=time_col,
         feature_cols=feature_cols,
         targets=targets,
-        mean=mean,
-        std=std,
-        max_observed_time=max_observed_time,
-    )
-
-    train_ds = SequenceDataset(sequences, sorted(train_ids))
-    valid_ds = SequenceDataset(sequences, sorted(valid_ids))
-    test_ds = SequenceDataset(sequences, sorted(test_ids))
-    if len(train_ds) == 0 or len(valid_ds) == 0 or len(test_ds) == 0:
-        raise ValueError(
-            f"Empty split after sequence assembly: train={len(train_ds)} valid={len(valid_ds)} test={len(test_ds)}"
-        )
-
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_batch)
-    valid_loader = DataLoader(valid_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_batch)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_batch)
-
-    device = "cuda" if args.cuda and torch.cuda.is_available() else "cpu"
-    input_dim = next(iter(train_loader))["x"].shape[-1]
-    model = DynamicDeepHitGRU(
-        input_dim=input_dim,
-        hidden_dim=args.hidden_dim,
+        train_ids=train_ids,
+        valid_ids=valid_ids,
+        eval_ids=test_ids,
+        args=args,
         n_events=len(event_names),
         horizon=args.max_pred_window,
-        dropout=args.dropout,
-    ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        hidden_dim=final_hidden_dim,
+        dropout=final_dropout,
+        lr=final_lr,
+        seed=args.seed,
+    )
 
-    best_state = None
-    best_valid = np.inf
-    epochs_without_improvement = 0
-    history = []
-    for epoch in range(1, args.epochs + 1):
-        train_loss = run_epoch(model, train_loader, optimizer, device)
-        valid_loss = run_epoch(model, valid_loader, None, device)
-        history.append({"epoch": epoch, "train_loss": train_loss, "valid_loss": valid_loss})
-        if valid_loss < best_valid - args.min_delta:
-            best_valid = valid_loss
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
-        print(f"epoch={epoch:03d} train_loss={train_loss:.4f} valid_loss={valid_loss:.4f}")
-        if epochs_without_improvement >= args.patience:
-            break
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
-
-    pred = predict(model, test_loader, device)
-    train_val_targets = targets.loc[
-        targets.index.map(str).isin(train_ids.union(valid_ids))
-    ].copy()
     metrics, auc_t = compute_metrics(
         pred,
         event_names=event_names,
         train_val_targets=train_val_targets,
         quantiles=tuple(args.auc_quantiles),
+        fixed_horizons_by_event=fixed_horizons_by_event,
     )
+    brier_t, integrated_brier_by_event = compute_brier_for_pred(
+        pred,
+        event_names=event_names,
+        train_val_targets=train_val_targets,
+        horizons_by_event=fixed_horizons_by_event,
+    )
+    metrics = metrics.copy()
+    metrics["integrated_brier"] = metrics["event"].map(
+        lambda name: integrated_brier_by_event.get(name, float("nan"))
+    )
+    metrics["selected_hidden_dim"] = final_hidden_dim
+    metrics["selected_dropout"] = final_dropout
+    metrics["selected_lr"] = final_lr
+    metrics["config"] = args.config
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    pred_path = output_dir / f"dynamic_deephit_patient_risks_{args.config}.csv"
-    metrics_path = output_dir / f"dynamic_deephit_metrics_{args.config}.csv"
-    auc_path = output_dir / f"dynamic_deephit_auc_t_{args.config}.csv"
-    manifest_out = output_dir / f"dynamic_deephit_manifest_{args.config}.json"
+    config_tag = args.config
+    pred_path = output_dir / f"dynamic_deephit_patient_risks_{config_tag}.csv"
+    metrics_path = output_dir / f"dynamic_deephit_metrics_{config_tag}.csv"
+    auc_path = output_dir / f"dynamic_deephit_auc_t_{config_tag}.csv"
+    brier_path = output_dir / f"dynamic_deephit_brier_{config_tag}.csv"
+    cv_folds_path = output_dir / f"dynamic_deephit_cv_folds_{config_tag}.csv"
+    cv_summary_path = output_dir / f"dynamic_deephit_cv_summary_{config_tag}.csv"
+    manifest_out = output_dir / f"dynamic_deephit_manifest_{config_tag}.json"
     pred.to_csv(pred_path, index=False)
     metrics.to_csv(metrics_path, index=False)
     auc_t.to_csv(auc_path, index=False)
+    saved = [metrics_path, auc_path, pred_path]
+    if not brier_t.empty:
+        brier_t.to_csv(brier_path, index=False)
+        saved.append(brier_path)
+    if not fold_df.empty:
+        fold_df.to_csv(cv_folds_path, index=False)
+        saved.append(cv_folds_path)
+    if not cv_summary_df.empty:
+        cv_summary_df.to_csv(cv_summary_path, index=False)
+        saved.append(cv_summary_path)
     manifest_out.write_text(
         json.dumps(
             {
@@ -531,20 +979,35 @@ def main(args: argparse.Namespace) -> None:
                 "config": args.config,
                 "event_names": event_names,
                 "feature_cols": feature_cols,
+                "auc_horizons_by_event": {
+                    event_name: [float(v) for v in horizons]
+                    for event_name, horizons in fixed_horizons_by_event.items()
+                },
                 "max_pred_window": args.max_pred_window,
                 "seed": args.seed,
                 "split_counts": {
-                    "train": len(train_ds),
-                    "valid": len(valid_ds),
-                    "test": len(test_ds),
+                    "train": len(train_ids),
+                    "valid": len(valid_ids),
+                    "test": len(test_ids),
                 },
                 "best_valid_loss": best_valid,
+                "selected_hyperparameters": {
+                    "hidden_dim": final_hidden_dim,
+                    "dropout": final_dropout,
+                    "lr": final_lr,
+                    "selected_via_cv": chosen is not None,
+                    "cv_summary": chosen,
+                },
+                "integrated_brier_by_event": integrated_brier_by_event,
                 "history": history,
             },
             indent=2,
         )
     )
-    print(f"\nSaved:\n  {metrics_path}\n  {auc_path}\n  {pred_path}\n  {manifest_out}")
+    saved.append(manifest_out)
+    print("\nSaved:")
+    for path in saved:
+        print(f"  {path}")
 
 
 if __name__ == "__main__":
@@ -565,4 +1028,28 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--cuda", action="store_true")
     parser.add_argument("--auc-quantiles", nargs="+", type=float, default=list(DEFAULT_AUC_QUANTILES))
+    parser.add_argument("--n-folds", type=int, default=DEFAULT_N_FOLDS)
+    parser.add_argument(
+        "--cv-hidden-dims",
+        nargs="+",
+        type=int,
+        default=list(DEFAULT_CV_HIDDEN_DIMS),
+    )
+    parser.add_argument(
+        "--cv-dropouts",
+        nargs="+",
+        type=float,
+        default=list(DEFAULT_CV_DROPOUTS),
+    )
+    parser.add_argument(
+        "--cv-lrs",
+        nargs="+",
+        type=float,
+        default=list(DEFAULT_CV_LRS),
+    )
+    parser.add_argument(
+        "--no-cv",
+        action="store_true",
+        help="Skip 5-fold CV; fit a single model with --hidden-dim/--dropout/--lr.",
+    )
     main(parser.parse_args())

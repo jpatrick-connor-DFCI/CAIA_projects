@@ -55,6 +55,16 @@ from sklearn.impute import SimpleImputer
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 
+from helper import (
+    assert_disjoint_folds,
+    assert_no_test_leakage,
+    breslow_survival_at_horizons,
+    compute_brier,
+    compute_horizon_grid,
+    horizon_grid_frame,
+    select_canonical_labs,
+)
+
 try:
     from lifelines import CoxPHFitter
     from lifelines.exceptions import ConvergenceError
@@ -117,6 +127,9 @@ MIN_SLOPE_SPAN_DAYS = 14.0
 MIN_DELTA_OBS = 2
 SPLIT_ASSIGNMENTS_FILENAME = "cox_agg_split_assignments.csv"
 LANDMARK_AVAILABILITY_FILENAME = "cox_agg_landmark_mrn_availability.csv"
+HORIZON_GRID_FILENAME = "cox_agg_horizon_grid.csv"
+CANONICAL_LABS_TRAIN_VAL_FILENAME = "cox_agg_canonical_labs_train_val.csv"
+CANONICAL_LABS_FOLDS_FILENAME = "cox_agg_canonical_labs_folds.csv"
 
 ENDPOINTS = {
     "platinum": {
@@ -378,6 +391,38 @@ def make_outcome_df(df: pd.DataFrame, *, landmark_offset_days: int = 0) -> pd.Da
         & pat["t_either"].gt(0)
     )
     return pat.loc[valid].copy()
+
+
+def build_pre_treatment_lab_long(
+    df: pd.DataFrame,
+    *,
+    cohort_index: pd.Index | None = None,
+    landmark_offset_days: int = 0,
+) -> pd.DataFrame:
+    """Long-format pre-landmark lab observations used for canonical-lab selection.
+
+    Returns columns DFCI_MRN, LAB_NAME, LAB_VALUE, t_lab, t_first_treatment.
+    Restricts to observations with t_lab < t_first_treatment + landmark_offset_days
+    so the lab presence used for coverage is the same window the aggregated
+    feature engineering and the SurvLatent person-period builder consume.
+    """
+    required = {"DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab", "t_first_treatment"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"build_pre_treatment_lab_long missing columns: {sorted(missing)}"
+        )
+    out = df[list(required)].copy()
+    out["LAB_NAME"] = out["LAB_NAME"].astype(str).str.strip()
+    out["LAB_VALUE"] = pd.to_numeric(out["LAB_VALUE"], errors="coerce")
+    out["t_lab"] = pd.to_numeric(out["t_lab"], errors="coerce")
+    out["t_first_treatment"] = pd.to_numeric(out["t_first_treatment"], errors="coerce")
+    out = out.dropna(subset=["DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab", "t_first_treatment"])
+    landmark_t = out["t_first_treatment"] + float(landmark_offset_days)
+    out = out.loc[out["t_lab"] < landmark_t].copy()
+    if cohort_index is not None:
+        out = out.loc[out["DFCI_MRN"].isin(cohort_index)].copy()
+    return out
 
 
 def _patient_lab_std(values: pd.Series) -> float:
@@ -674,8 +719,14 @@ def select_feature_columns(
     raw_feature_cols: list[str],
     *,
     min_patient_coverage: float,
+    restrict_to_labs: list[str] | None = None,
 ) -> tuple[list[str], pd.DataFrame]:
-    """Select features on the training/validation block to avoid test leakage."""
+    """Select features on the training/validation block to avoid test leakage.
+
+    `restrict_to_labs`, when provided, intersects the per-stat survivors with
+    the canonical lab list (computed upstream on the same MRN block). This is
+    the gate that enforces an identical lab set across pipelines.
+    """
     coverage = data[raw_feature_cols].notna().mean()
     unique_non_missing = data[raw_feature_cols].nunique(dropna=True)
 
@@ -693,6 +744,10 @@ def select_feature_columns(
         feature_meta["coverage"].ge(min_patient_coverage)
         & feature_meta["unique_non_missing"].gt(1)
     )
+    if restrict_to_labs is not None:
+        canonical = set(str(lab) for lab in restrict_to_labs)
+        feature_meta["in_canonical_labs"] = feature_meta["lab_name"].astype(str).isin(canonical)
+        feature_meta["selected"] = feature_meta["selected"] & feature_meta["in_canonical_labs"]
     feature_meta = feature_meta.sort_values(
         ["selected", "coverage", "feature"],
         ascending=[False, False, True],
@@ -859,8 +914,15 @@ def compute_survlatent_auc_t(
     time_unit_days: int = DEFAULT_AUC_TIME_UNIT_DAYS,
     quantiles: tuple[float, ...] = DEFAULT_AUC_QUANTILES,
     max_time_unit: int | None = None,
+    fixed_horizons: np.ndarray | None = None,
 ) -> tuple[float, pd.DataFrame]:
-    """Match SurvLatent ODE's IPCW cumulative/dynamic AUC(t) evaluation."""
+    """Match SurvLatent ODE's IPCW cumulative/dynamic AUC(t) evaluation.
+
+    When `fixed_horizons` is provided, the horizon grid is taken from those
+    values (in time-units) and `quantiles` is ignored. This lets every CV fold
+    and the held-out test eval use one shared grid derived once from train_val
+    event times — no test-driven horizon selection.
+    """
     require_sksurv()
 
     empty_cols = [
@@ -906,17 +968,28 @@ def compute_survlatent_auc_t(
     eval_surv = _make_survival_array(eval_event[eval_valid], eval_duration[eval_valid])
     eval_risk = risk_score[eval_valid]
 
-    event_times = eval_duration[eval_valid & (eval_event == 1)]
-    event_times = event_times[np.isfinite(event_times) & (event_times > 0)]
-    if len(event_times) == 0:
-        return np.nan, pd.DataFrame(columns=empty_cols)
+    if fixed_horizons is not None:
+        horizon_times = np.asarray(fixed_horizons, dtype=float).reshape(-1)
+        horizon_times = np.unique(horizon_times[horizon_times > 0])
+        if max_time_unit is not None:
+            horizon_times = horizon_times[horizon_times <= float(max_time_unit)]
+        if len(horizon_times) == 0:
+            return np.nan, pd.DataFrame(columns=empty_cols)
+        # Pad quantile column with NaN since we no longer derive horizons from quantiles.
+        horizon_quantiles: tuple[float, ...] = tuple([np.nan] * len(horizon_times))
+    else:
+        event_times = eval_duration[eval_valid & (eval_event == 1)]
+        event_times = event_times[np.isfinite(event_times) & (event_times > 0)]
+        if len(event_times) == 0:
+            return np.nan, pd.DataFrame(columns=empty_cols)
+        horizon_times = np.asarray(
+            [int(val) for val in np.quantile(event_times, quantiles)],
+            dtype=float,
+        )
+        horizon_quantiles = tuple(quantiles)
 
-    horizon_times = np.asarray(
-        [int(val) for val in np.quantile(event_times, quantiles)],
-        dtype=float,
-    )
     rows = []
-    for quantile, horizon in zip(quantiles, horizon_times):
+    for quantile, horizon in zip(horizon_quantiles, horizon_times):
         auc_t = np.nan
         note = ""
         if horizon <= 0:
@@ -1099,6 +1172,40 @@ def score_coxnet_model(
     log_pred = np.asarray(model.predict(X)).reshape(-1)
     c_index = float(concordance_index(model_df[duration_col], -log_pred, model_df[event_col]))
     return c_index, log_pred
+
+
+def coxnet_survival_at_horizons(
+    model: CoxnetSurvivalAnalysis,
+    train_mdf: pd.DataFrame,
+    eval_mdf: pd.DataFrame,
+    *,
+    duration_col: str,
+    event_col: str,
+    covariate_cols: list[str],
+    horizons: np.ndarray,
+    time_unit_days: int = DEFAULT_AUC_TIME_UNIT_DAYS,
+) -> np.ndarray:
+    """Survival probabilities for each eval row at each horizon (in time-units).
+
+    Coxnet is fit with fit_baseline_model=False, so we recover S(t|x) via a
+    Breslow estimator on the training linear predictor. Train durations are
+    converted into the same time unit as `horizons` so the baseline cumulative
+    hazard and the horizons share a clock.
+    """
+    X_train = train_mdf[covariate_cols].to_numpy(dtype=float)
+    X_eval = eval_mdf[covariate_cols].to_numpy(dtype=float)
+    train_lp = np.asarray(model.predict(X_train)).reshape(-1)
+    eval_lp = np.asarray(model.predict(X_eval)).reshape(-1)
+    train_event = train_mdf[event_col].astype(int).to_numpy()
+    train_duration = pd.to_numeric(train_mdf[duration_col], errors="coerce").to_numpy(dtype=float)
+    train_duration_units = np.ceil(train_duration / float(time_unit_days))
+    return breslow_survival_at_horizons(
+        train_event=train_event,
+        train_duration=train_duration_units,
+        train_lp=train_lp,
+        eval_lp=eval_lp,
+        horizons=horizons,
+    )
 
 
 def coxnet_coefficients(
@@ -1420,7 +1527,7 @@ def make_cv_splitter(
 def tune_multivariable_model(
     train_val: pd.DataFrame,
     *,
-    feature_cols: list[str],
+    raw_feature_cols: list[str],
     endpoint: str,
     penalizers: list[float],
     l1_ratios: list[float],
@@ -1428,12 +1535,21 @@ def tune_multivariable_model(
     seed: int,
     auc_time_unit_days: int,
     auc_max_time_units: int | None,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    pre_treatment_lab_df: pd.DataFrame,
+    horizon_grid: np.ndarray,
+    min_patient_coverage: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict, pd.DataFrame]:
     """Arm 2: 5-fold CV over (penalizer x l1_ratio) grid (elastic-net), AGE unpenalized.
 
     Backed by sksurv's CoxnetSurvivalAnalysis for speed on high-dimensional
     feature sets. Hyperparameter selection is restricted to combinations with
     valid fits in every CV fold.
+
+    Strict no-leakage: canonical labs are recomputed inside each fold from
+    fold_train MRNs only, and AUC(t)/Brier use the fixed horizon_grid passed
+    in (derived once on full train_val). Test never participates.
+
+    Returns (fold_df, cv_df, best_row, fold_canonical_labs_df).
     """
     require_sksurv()
     duration_col = ENDPOINTS[endpoint]["duration_col"]
@@ -1441,13 +1557,47 @@ def tune_multivariable_model(
 
     splitter, strat_labels, cv_stratification = make_cv_splitter(train_val, n_folds=n_folds, seed=seed)
     fold_rows = []
+    fold_canonical_labs_rows: list[dict] = []
 
     split_args = (np.arange(len(train_val)), strat_labels) if strat_labels is not None else (np.arange(len(train_val)),)
 
+    # Materialize splits once so canonical-lab selection and the (penalizer, l1_ratio)
+    # grid traverse the same fold partition deterministically.
+    fold_partitions = list(enumerate(splitter.split(*split_args), 1))
+    fold_canonical_labs: dict[int, list[str]] = {}
+    fold_selected_features: dict[int, list[str]] = {}
+    for fold, (tr_idx, val_idx) in fold_partitions:
+        fold_train_idx = train_val.index[tr_idx]
+        fold_val_idx = train_val.index[val_idx]
+        assert_disjoint_folds(
+            fold_train_mrns=fold_train_idx,
+            fold_val_mrns=fold_val_idx,
+            fold=fold,
+        )
+        canonical = select_canonical_labs(
+            pre_treatment_lab_df,
+            mrns=fold_train_idx,
+            min_coverage=min_patient_coverage,
+        )
+        fold_canonical_labs[fold] = canonical
+        fold_train = train_val.iloc[tr_idx]
+        selected, _ = select_feature_columns(
+            fold_train,
+            raw_feature_cols,
+            min_patient_coverage=min_patient_coverage,
+            restrict_to_labs=canonical,
+        )
+        fold_selected_features[fold] = selected
+        for lab in canonical:
+            fold_canonical_labs_rows.append(
+                {"endpoint": endpoint, "fold": fold, "lab_name": lab}
+            )
+
     for penalizer, l1_ratio in product(penalizers, l1_ratios):
-        for fold, (tr_idx, val_idx) in enumerate(splitter.split(*split_args), 1):
+        for fold, (tr_idx, val_idx) in fold_partitions:
             fold_train = train_val.iloc[tr_idx]
             fold_val = train_val.iloc[val_idx]
+            fold_features = fold_selected_features[fold]
             row = {
                 "endpoint": endpoint,
                 "fold": fold,
@@ -1457,10 +1607,14 @@ def tune_multivariable_model(
                 "n_val": len(fold_val),
                 "n_events_train": int(fold_train[event_col].sum()),
                 "n_events_val": int(fold_val[event_col].sum()),
+                "n_canonical_labs": len(fold_canonical_labs[fold]),
+                "n_selected_features": len(fold_features),
                 "cv_stratification": cv_stratification,
                 "c_index_val": np.nan,
                 "mean_auc_t_val": np.nan,
                 "n_valid_auc_horizons_val": 0,
+                "integrated_brier_val": np.nan,
+                "n_valid_brier_horizons_val": 0,
                 "n_covariates": np.nan,
                 "note": "",
             }
@@ -1469,7 +1623,7 @@ def tune_multivariable_model(
                 train_mdf, val_mdf, covariate_cols = build_model_matrices(
                     fold_train,
                     fold_val,
-                    feature_cols=feature_cols,
+                    feature_cols=fold_features,
                     duration_col=duration_col,
                     event_col=event_col,
                 )
@@ -1501,10 +1655,43 @@ def tune_multivariable_model(
                         reference_df=train_mdf,
                         time_unit_days=auc_time_unit_days,
                         max_time_unit=auc_max_time_units,
+                        fixed_horizons=horizon_grid,
                     )
                     row["mean_auc_t_val"] = mean_auc_val
                     row["n_valid_auc_horizons_val"] = (
                         int(auc_df_val["auc_t"].notna().sum()) if not auc_df_val.empty else 0
+                    )
+
+                    val_surv = coxnet_survival_at_horizons(
+                        model,
+                        train_mdf,
+                        val_mdf,
+                        duration_col=duration_col,
+                        event_col=event_col,
+                        covariate_cols=covariate_cols,
+                        horizons=horizon_grid,
+                        time_unit_days=auc_time_unit_days,
+                    )
+                    train_dur_units = np.ceil(
+                        pd.to_numeric(train_mdf[duration_col], errors="coerce").to_numpy(dtype=float)
+                        / float(auc_time_unit_days)
+                    )
+                    val_dur_units = np.ceil(
+                        pd.to_numeric(val_mdf[duration_col], errors="coerce").to_numpy(dtype=float)
+                        / float(auc_time_unit_days)
+                    )
+                    brier_df, ibs = compute_brier(
+                        train_event=train_mdf[event_col].to_numpy(dtype=int),
+                        train_duration=train_dur_units,
+                        eval_event=val_mdf[event_col].to_numpy(dtype=int),
+                        eval_duration=val_dur_units,
+                        surv_at_horizons=val_surv,
+                        horizons=horizon_grid,
+                        time_unit_days=auc_time_unit_days,
+                    )
+                    row["integrated_brier_val"] = ibs
+                    row["n_valid_brier_horizons_val"] = (
+                        int(brier_df["brier"].notna().sum()) if not brier_df.empty else 0
                     )
             except Exception as exc:  # pragma: no cover - defensive for unstable folds
                 row["note"] = f"fold_failed: {exc}"
@@ -1521,6 +1708,9 @@ def tune_multivariable_model(
             mean_auc_t_cv_mean=("mean_auc_t_val", "mean"),
             mean_auc_t_cv_std=("mean_auc_t_val", "std"),
             n_valid_auc_t_folds=("mean_auc_t_val", lambda s: int(s.notna().sum())),
+            integrated_brier_cv_mean=("integrated_brier_val", "mean"),
+            integrated_brier_cv_std=("integrated_brier_val", "std"),
+            n_valid_brier_folds=("integrated_brier_val", lambda s: int(s.notna().sum())),
             n_covariates_mean=("n_covariates", "mean"),
             cv_stratification=("cv_stratification", "first"),
         )
@@ -1547,7 +1737,8 @@ def tune_multivariable_model(
         .iloc[0]
         .to_dict()
     )
-    return fold_df, cv_df, best_row
+    fold_canonical_labs_df = pd.DataFrame(fold_canonical_labs_rows)
+    return fold_df, cv_df, best_row, fold_canonical_labs_df
 
 
 def fit_final_multivariable_model(
@@ -1563,11 +1754,25 @@ def fit_final_multivariable_model(
     cv_stratification: str,
     auc_time_unit_days: int,
     auc_max_time_units: int | None,
-) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
+    horizon_grid: np.ndarray,
+    canonical_labs: list[str],
+) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Refit on full train_val using the train_val canonical labs and evaluate on test.
+
+    No-leak: canonical_labs and horizon_grid must be derived upstream from
+    train_val only. The returned tuple is
+        (metrics_row, summary_df, predictions, test_auc_df, test_brier_df)
+    where test_brier_df contains per-horizon Brier on the test fold.
+    """
     require_sksurv()
     duration_col = ENDPOINTS[endpoint]["duration_col"]
     event_col = ENDPOINTS[endpoint]["event_col"]
 
+    assert_no_test_leakage(
+        test_mrns=test.index,
+        train_mrns=train_val.index,
+        context=f"fit_final_multivariable_model[{endpoint}]",
+    )
     train_mdf, test_mdf, covariate_cols = build_model_matrices(
         train_val,
         test,
@@ -1617,6 +1822,7 @@ def fit_final_multivariable_model(
         reference_df=train_mdf,
         time_unit_days=auc_time_unit_days,
         max_time_unit=auc_max_time_units,
+        fixed_horizons=horizon_grid,
     )
     test_mean_auc, test_auc_df = compute_survlatent_auc_t(
         test_mdf,
@@ -1626,7 +1832,39 @@ def fit_final_multivariable_model(
         reference_df=train_mdf,
         time_unit_days=auc_time_unit_days,
         max_time_unit=auc_max_time_units,
+        fixed_horizons=horizon_grid,
     )
+
+    test_surv = coxnet_survival_at_horizons(
+        model,
+        train_mdf,
+        test_mdf,
+        duration_col=duration_col,
+        event_col=event_col,
+        covariate_cols=covariate_cols,
+        horizons=horizon_grid,
+        time_unit_days=auc_time_unit_days,
+    )
+    train_dur_units = np.ceil(
+        pd.to_numeric(train_mdf[duration_col], errors="coerce").to_numpy(dtype=float)
+        / float(auc_time_unit_days)
+    )
+    test_dur_units = np.ceil(
+        pd.to_numeric(test_mdf[duration_col], errors="coerce").to_numpy(dtype=float)
+        / float(auc_time_unit_days)
+    )
+    test_brier_df, test_ibs = compute_brier(
+        train_event=train_mdf[event_col].to_numpy(dtype=int),
+        train_duration=train_dur_units,
+        eval_event=test_mdf[event_col].to_numpy(dtype=int),
+        eval_duration=test_dur_units,
+        surv_at_horizons=test_surv,
+        horizons=horizon_grid,
+        time_unit_days=auc_time_unit_days,
+    )
+    test_brier_df = test_brier_df.copy()
+    if not test_brier_df.empty:
+        test_brier_df.insert(0, "endpoint", endpoint)
 
     metrics_row = {
         "endpoint": endpoint,
@@ -1638,15 +1876,19 @@ def fit_final_multivariable_model(
         "selected_penalizer": used_penalizer,
         "selected_l1_ratio": float(l1_ratio),
         "n_covariates": len(covariate_cols),
+        "n_canonical_labs": len(canonical_labs),
         "train_val_c_index": train_c,
         "test_c_index": test_c,
         "train_val_mean_auc_t": train_mean_auc,
         "test_mean_auc_t": test_mean_auc,
+        "test_integrated_brier": test_ibs,
         "auc_quantiles": ",".join(f"{q:g}" for q in DEFAULT_AUC_QUANTILES),
         "auc_time_unit_days": auc_time_unit_days,
         "auc_admin_censor_time_unit": auc_max_time_units,
+        "horizon_grid": ",".join(f"{float(h):g}" for h in np.asarray(horizon_grid, dtype=float).reshape(-1)),
         "train_val_n_valid_auc_horizons": int(train_auc_df["auc_t"].notna().sum()) if not train_auc_df.empty else 0,
         "test_n_valid_auc_horizons": int(test_auc_df["auc_t"].notna().sum()) if not test_auc_df.empty else 0,
+        "test_n_valid_brier_horizons": int(test_brier_df["brier"].notna().sum()) if not test_brier_df.empty else 0,
         "split_stratification": split_stratification,
         "cv_stratification": cv_stratification,
         "note": note,
@@ -1655,12 +1897,14 @@ def fit_final_multivariable_model(
         if auc_df.empty:
             continue
         for _, auc_row in auc_df.iterrows():
-            quantile = float(auc_row["horizon_quantile"])
-            quantile_label = f"{quantile * 100:g}".replace(".", "_")
-            metrics_row[f"{label}_auc_{quantile_label}_percentile"] = float(auc_row["auc_t"])
-            metrics_row[f"{label}_auc_{quantile_label}_time_unit"] = float(
-                auc_row["horizon_time_unit"]
-            )
+            horizon = float(auc_row["horizon_time_unit"])
+            horizon_label = f"h{int(horizon)}"
+            metrics_row[f"{label}_auc_{horizon_label}"] = float(auc_row["auc_t"])
+    if not test_brier_df.empty:
+        for _, brier_row in test_brier_df.iterrows():
+            horizon = float(brier_row["horizon_time_unit"])
+            horizon_label = f"h{int(horizon)}"
+            metrics_row[f"test_brier_{horizon_label}"] = float(brier_row["brier"])
 
     # CoxnetSurvivalAnalysis does not produce SE / p-values / CIs — penalized
     # MLE estimates do not have meaningful analytic standard errors, so we only
@@ -1713,7 +1957,10 @@ def fit_final_multivariable_model(
             "risk_score": np.asarray(test_pred).reshape(-1),
         }
     )
-    return metrics_row, summary, predictions
+    test_auc_df = test_auc_df.copy()
+    if not test_auc_df.empty:
+        test_auc_df.insert(0, "endpoint", endpoint)
+    return metrics_row, summary, predictions, test_auc_df, test_brier_df
 
 
 def print_top_hits(df: pd.DataFrame, *, endpoint: str, label: str = "univariate") -> None:
@@ -1793,6 +2040,11 @@ def main(args: argparse.Namespace) -> None:
     univariate_nobs_adjusted_frames: list[pd.DataFrame] = []
     multivariable_frames: list[pd.DataFrame] = []
     multivariable_metric_rows: list[dict] = []
+    multivariable_test_auc_frames: list[pd.DataFrame] = []
+    multivariable_test_brier_frames: list[pd.DataFrame] = []
+    horizon_grid_rows: list[pd.DataFrame] = []
+    canonical_labs_train_val_rows: list[dict] = []
+    canonical_labs_fold_rows: list[pd.DataFrame] = []
 
     univariate_keep_cols = [
         "endpoint",
@@ -1861,11 +2113,39 @@ def main(args: argparse.Namespace) -> None:
         raw_feature_cols = feature_df.columns.tolist()
         univariate_data = merged.copy()
 
-        # Feature selection on train_val only to avoid leaking test-set coverage.
+        assert_no_test_leakage(
+            test_mrns=test.index,
+            train_mrns=train_val.index,
+            context=f"main[landmark+{landmark_day}d]",
+        )
+
+        # Canonical lab list: derived from pre-treatment lab observations of
+        # train_val MRNs only, then shared across the per-stat feature filter
+        # below and downstream pipelines (XGBoost, DeepHit) via the persisted
+        # cox_agg_canonical_labs_train_val.csv artifact.
+        pre_treatment_lab_df = build_pre_treatment_lab_long(
+            df,
+            cohort_index=merged.index,
+            landmark_offset_days=landmark_day,
+        )
+        canonical_labs = select_canonical_labs(
+            pre_treatment_lab_df,
+            mrns=train_val.index,
+            min_coverage=args.min_patient_coverage,
+        )
+        for lab in canonical_labs:
+            canonical_labs_train_val_rows.append(
+                {"landmark_days": landmark_day, "lab_name": lab}
+            )
+
+        # Feature selection on train_val only to avoid leaking test-set coverage,
+        # restricted to the canonical lab set so Cox / XGBoost / DeepHit operate
+        # on the same labs (different feature representations only).
         selected_feature_cols, feature_meta = select_feature_columns(
             train_val,
             raw_feature_cols,
             min_patient_coverage=args.min_patient_coverage,
+            restrict_to_labs=canonical_labs,
         )
         feature_meta_selected = feature_meta.loc[
             feature_meta["selected"],
@@ -1882,7 +2162,37 @@ def main(args: argparse.Namespace) -> None:
         print(f"Full cohort: {len(merged)} patients")
         print(f"Train/val (Arm 2): {len(train_val)} patients")
         print(f"Test (Arm 2):      {len(test)} patients")
+        print(f"Canonical labs (train_val): {len(canonical_labs)}")
         print(f"Selected summary-lab features: {len(selected_feature_cols)}")
+
+        # Fixed AUC(t) / Brier horizon grid per endpoint, derived ONCE from
+        # train_val event times. Reused by every CV fold and by the test eval
+        # so no test event time can drive horizon selection.
+        endpoint_horizon_grids: dict[str, np.ndarray] = {}
+        for endpoint in endpoints:
+            duration_col = ENDPOINTS[endpoint]["duration_col"]
+            event_col = ENDPOINTS[endpoint]["event_col"]
+            grid = compute_horizon_grid(
+                train_val,
+                duration_col=duration_col,
+                event_col=event_col,
+                quantiles=DEFAULT_AUC_QUANTILES,
+                time_unit_days=args.auc_time_unit_days,
+            )
+            endpoint_horizon_grids[endpoint] = grid
+            grid_df = horizon_grid_frame(
+                grid,
+                quantiles=DEFAULT_AUC_QUANTILES,
+                time_unit_days=args.auc_time_unit_days,
+                endpoint=endpoint,
+            )
+            grid_df.insert(0, "landmark_days", landmark_day)
+            horizon_grid_rows.append(grid_df)
+            print(
+                f"Horizon grid ({endpoint}): "
+                + ", ".join(f"{int(h)}" for h in grid)
+                + f" {args.auc_time_unit_days}-day units"
+            )
 
         if args.analysis in {"univariate", "both"}:
             print("\n##### ARM 1: UNIVARIATE (all endpoints) #####")
@@ -1922,9 +2232,10 @@ def main(args: argparse.Namespace) -> None:
             for endpoint in endpoints:
                 print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
                 print(ENDPOINTS[endpoint]["description"])
-                _, _, best_row = tune_multivariable_model(
+                horizon_grid = endpoint_horizon_grids[endpoint]
+                _, _, best_row, fold_canonical_labs_df = tune_multivariable_model(
                     train_val,
-                    feature_cols=selected_feature_cols,
+                    raw_feature_cols=raw_feature_cols,
                     endpoint=endpoint,
                     penalizers=args.cv_penalizers,
                     l1_ratios=args.cv_l1_ratios,
@@ -1932,9 +2243,21 @@ def main(args: argparse.Namespace) -> None:
                     seed=args.seed,
                     auc_time_unit_days=args.auc_time_unit_days,
                     auc_max_time_units=args.auc_max_time_units,
+                    pre_treatment_lab_df=pre_treatment_lab_df,
+                    horizon_grid=horizon_grid,
+                    min_patient_coverage=args.min_patient_coverage,
                 )
+                if not fold_canonical_labs_df.empty:
+                    fold_canonical_labs_df.insert(0, "landmark_days", landmark_day)
+                    canonical_labs_fold_rows.append(fold_canonical_labs_df)
 
-                metrics_row, summary_df, _ = fit_final_multivariable_model(
+                (
+                    metrics_row,
+                    summary_df,
+                    _,
+                    test_auc_df,
+                    test_brier_df,
+                ) = fit_final_multivariable_model(
                     train_val,
                     test,
                     feature_cols=selected_feature_cols,
@@ -1946,11 +2269,21 @@ def main(args: argparse.Namespace) -> None:
                     cv_stratification=str(best_row["cv_stratification"]),
                     auc_time_unit_days=args.auc_time_unit_days,
                     auc_max_time_units=args.auc_max_time_units,
+                    horizon_grid=horizon_grid,
+                    canonical_labs=canonical_labs,
                 )
                 metrics_row["landmark_days"] = landmark_day
                 summary_df.insert(0, "landmark_days", landmark_day)
                 multivariable_metric_rows.append(metrics_row)
                 multivariable_frames.append(summary_df)
+                if not test_auc_df.empty:
+                    test_auc_df = test_auc_df.copy()
+                    test_auc_df.insert(0, "landmark_days", landmark_day)
+                    multivariable_test_auc_frames.append(test_auc_df)
+                if not test_brier_df.empty:
+                    test_brier_df = test_brier_df.copy()
+                    test_brier_df.insert(0, "landmark_days", landmark_day)
+                    multivariable_test_brier_frames.append(test_brier_df)
 
                 top_cols = [c for c in ["feature", "coef", "exp(coef)"] if c in summary_df.columns]
                 top = summary_df.loc[~summary_df["is_age_covariate"], top_cols].head(10)
@@ -1960,18 +2293,32 @@ def main(args: argparse.Namespace) -> None:
                     f"cv_mean C-index={best_row['cv_mean']:.4f}"
                 )
                 print(f"  CV mean AUC(t)={best_row['mean_auc_t_cv_mean']:.4f}")
+                print(f"  CV mean integrated Brier={best_row['integrated_brier_cv_mean']:.4f}")
                 print(
                     f"  train/val C-index={metrics_row['train_val_c_index']:.4f}  "
                     f"mean AUC(t)={metrics_row['train_val_mean_auc_t']:.4f}"
                 )
                 print(f"  held-out test C-index={metrics_row['test_c_index']:.4f}")
                 print(f"  held-out test mean AUC(t)={metrics_row['test_mean_auc_t']:.4f}")
+                print(f"  held-out test integrated Brier={metrics_row['test_integrated_brier']:.4f}")
                 print("Top multivariable coefficients:")
                 print(top.to_string(index=False))
 
     if feature_selection_frames:
         pd.concat(feature_selection_frames, ignore_index=True).to_csv(
             RESULTS / "cox_agg_feature_selection.csv", index=False
+        )
+    if horizon_grid_rows:
+        pd.concat(horizon_grid_rows, ignore_index=True).to_csv(
+            RESULTS / HORIZON_GRID_FILENAME, index=False
+        )
+    if canonical_labs_train_val_rows:
+        pd.DataFrame(canonical_labs_train_val_rows).to_csv(
+            RESULTS / CANONICAL_LABS_TRAIN_VAL_FILENAME, index=False
+        )
+    if canonical_labs_fold_rows:
+        pd.concat(canonical_labs_fold_rows, ignore_index=True).to_csv(
+            RESULTS / CANONICAL_LABS_FOLDS_FILENAME, index=False
         )
     if univariate_frames:
         pd.concat(univariate_frames, ignore_index=True).to_csv(
@@ -1985,6 +2332,14 @@ def main(args: argparse.Namespace) -> None:
         pd.concat(multivariable_frames, ignore_index=True).to_csv(
             RESULTS / "cox_agg_multivariable.csv", index=False
         )
+    if multivariable_test_auc_frames:
+        pd.concat(multivariable_test_auc_frames, ignore_index=True).to_csv(
+            RESULTS / "cox_agg_multivariable_test_auc_t.csv", index=False
+        )
+    if multivariable_test_brier_frames:
+        pd.concat(multivariable_test_brier_frames, ignore_index=True).to_csv(
+            RESULTS / "cox_agg_multivariable_test_brier.csv", index=False
+        )
     if multivariable_metric_rows:
         pd.DataFrame(multivariable_metric_rows).to_csv(
             RESULTS / "cox_agg_multivariable_metrics.csv", index=False
@@ -1994,12 +2349,22 @@ def main(args: argparse.Namespace) -> None:
     print(f"  results/{SPLIT_ASSIGNMENTS_FILENAME}")
     print(f"  results/{LANDMARK_AVAILABILITY_FILENAME}")
     print("  results/cox_agg_feature_selection.csv")
+    if horizon_grid_rows:
+        print(f"  results/{HORIZON_GRID_FILENAME}")
+    if canonical_labs_train_val_rows:
+        print(f"  results/{CANONICAL_LABS_TRAIN_VAL_FILENAME}")
+    if canonical_labs_fold_rows:
+        print(f"  results/{CANONICAL_LABS_FOLDS_FILENAME}")
     if univariate_frames:
         print("  results/cox_agg_univariate.csv")
     if univariate_nobs_adjusted_frames:
         print("  results/cox_agg_univariate_nobs_adjusted.csv")
     if multivariable_frames:
         print("  results/cox_agg_multivariable.csv")
+    if multivariable_test_auc_frames:
+        print("  results/cox_agg_multivariable_test_auc_t.csv")
+    if multivariable_test_brier_frames:
+        print("  results/cox_agg_multivariable_test_brier.csv")
     if multivariable_metric_rows:
         print("  results/cox_agg_multivariable_metrics.csv")
 

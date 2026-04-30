@@ -36,6 +36,7 @@ if str(SURVIVAL_DIR) not in sys.path:
 
 from cox_aggregated import (  # noqa: E402
     AGE_COL,
+    CANONICAL_LABS_TRAIN_VAL_FILENAME,
     SPLIT_ASSIGNMENTS_FILENAME,
     build_aligned_cohort,
     choose_stratification_labels,
@@ -162,7 +163,16 @@ def select_labs(
     train_mrns: set,
     min_coverage: float,
     max_labs: int | None,
+    canonical_labs: list[str] | None = None,
 ) -> list[str]:
+    if canonical_labs is not None:
+        selected = [lab for lab in canonical_labs if lab in set(labs["LAB_NAME"].astype(str))]
+        if max_labs is not None:
+            selected = selected[:max_labs]
+        if not selected:
+            raise ValueError("No canonical labs are present in the SurvLatent lab table.")
+        return selected
+
     train_labs = labs.loc[labs["DFCI_MRN"].isin(train_mrns)]
     n_train = len(train_mrns)
     if n_train == 0:
@@ -180,6 +190,21 @@ def select_labs(
     if max_labs is not None and len(ranked) > max_labs:
         ranked = ranked.head(max_labs)
     return ranked.index.tolist()
+
+
+def load_canonical_labs(path: Path, *, landmark_days: int) -> list[str] | None:
+    if not path.exists():
+        return None
+    canonical = pd.read_csv(path)
+    required = {"landmark_days", "lab_name"}
+    missing = required - set(canonical.columns)
+    if missing:
+        raise ValueError(f"Canonical lab file {path} is missing columns: {sorted(missing)}")
+    rows = canonical.loc[canonical["landmark_days"].astype(int).eq(int(landmark_days))]
+    labs = rows["lab_name"].dropna().astype(str).drop_duplicates().tolist()
+    if not labs:
+        raise ValueError(f"No canonical labs found for landmark_days={landmark_days} in {path}.")
+    return labs
 
 
 def clip_bounds(
@@ -251,11 +276,20 @@ def main(args: argparse.Namespace) -> None:
     labs = build_lab_long(df, static)
     print(f"Pre-treatment lab rows: {len(labs)}")
 
+    canonical_labs_path = Path(args.canonical_labs_csv)
+    canonical_labs = None if args.no_canonical_labs else load_canonical_labs(
+        canonical_labs_path,
+        landmark_days=args.landmark_days,
+    )
+    if canonical_labs is not None:
+        print(f"Using canonical Cox lab set from {canonical_labs_path} ({len(canonical_labs)} labs)")
+
     selected_labs = select_labs(
         labs,
         train_mrns=train_mrns,
         min_coverage=args.min_coverage,
         max_labs=args.max_labs,
+        canonical_labs=canonical_labs,
     )
     print(f"Selected labs ({len(selected_labs)}): {selected_labs}")
     selected_lab_rows = labs.loc[labs["LAB_NAME"].isin(selected_labs)].copy()
@@ -435,6 +469,7 @@ def main(args: argparse.Namespace) -> None:
         "cox_split_stratification": cox_split_stratification,
         "survlatent_validation_stratification": val_stratification,
         "min_coverage": args.min_coverage,
+        "canonical_labs_csv": str(canonical_labs_path) if canonical_labs is not None else None,
         "outlier_quantiles": [args.outlier_lo, args.outlier_hi],
         "clip_bounds": {k: list(v) for k, v in bounds.items()},
         "cox_split_assignments": str(split_path),
@@ -472,6 +507,25 @@ if __name__ == "__main__":
     )
     parser.add_argument("--min-coverage", type=float, default=DEFAULT_MIN_COVERAGE)
     parser.add_argument(
+        "--canonical-labs-csv",
+        default=None,
+        help=(
+            "CSV containing Cox canonical labs. Defaults to "
+            "<output-dir>/cox_agg_canonical_labs_train_val.csv when present."
+        ),
+    )
+    parser.add_argument(
+        "--landmark-days",
+        type=int,
+        default=0,
+        help="Landmark offset used to select rows from --canonical-labs-csv.",
+    )
+    parser.add_argument(
+        "--no-canonical-labs",
+        action="store_true",
+        help="Use the legacy SurvLatent train-only lab selection instead of Cox canonical labs.",
+    )
+    parser.add_argument(
         "--max-labs",
         type=int,
         default=None,
@@ -479,4 +533,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--outlier-lo", type=float, default=DEFAULT_OUTLIER_LO)
     parser.add_argument("--outlier-hi", type=float, default=DEFAULT_OUTLIER_HI)
-    main(parser.parse_args())
+    parsed = parser.parse_args()
+    if parsed.canonical_labs_csv is None:
+        parsed.canonical_labs_csv = str(Path(parsed.output_dir) / CANONICAL_LABS_TRAIN_VAL_FILENAME)
+    main(parsed)
