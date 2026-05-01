@@ -57,6 +57,26 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
     LIFELINES_IMPORT_ERROR = exc
 
 try:
+    from tqdm.auto import tqdm
+
+    TQDM_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover - tqdm is optional
+    TQDM_AVAILABLE = False
+
+    def tqdm(iterable=None, **kwargs):  # type: ignore[no-redef]
+        """No-op tqdm fallback — yields the iterable unchanged."""
+        if iterable is None:
+            class _Null:
+                def update(self, *_a, **_kw): pass
+                def set_postfix(self, *_a, **_kw): pass
+                def set_description(self, *_a, **_kw): pass
+                def close(self): pass
+                def __enter__(self): return self
+                def __exit__(self, *_): return False
+            return _Null()
+        return iterable
+
+try:
     from sksurv.metrics import cumulative_dynamic_auc
 
     SKSURV_IMPORT_ERROR: ModuleNotFoundError | None = None
@@ -431,7 +451,15 @@ def train_evaluate(
     best_valid = float("inf")
     epochs_without_improvement = 0
     history = []
-    for epoch in range(1, args.epochs + 1):
+    bar_desc = getattr(args, "_progress_desc", "training")
+    progress = tqdm(
+        range(1, args.epochs + 1),
+        total=args.epochs,
+        desc=bar_desc,
+        leave=False,
+        dynamic_ncols=True,
+    )
+    for epoch in progress:
         train_loss = run_epoch(model, train_loader, optimizer, device)
         valid_loss = run_epoch(model, valid_loader, None, device)
         history.append(
@@ -443,8 +471,19 @@ def train_evaluate(
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
+        if hasattr(progress, "set_postfix"):
+            progress.set_postfix(
+                {
+                    "train": f"{train_loss:.4f}",
+                    "valid": f"{valid_loss:.4f}",
+                    "best": f"{best_valid:.4f}",
+                    "stale": epochs_without_improvement,
+                }
+            )
         if epochs_without_improvement >= args.patience:
             break
+    if hasattr(progress, "close"):
+        progress.close()
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -483,6 +522,12 @@ def cv_run(
         product(args.cv_hidden_dims, args.cv_dropouts, args.cv_lrs)
     )
     fold_rows: list[dict] = []
+    total_runs = len(grid) * len(fold_partitions)
+    cv_bar = tqdm(
+        total=total_runs,
+        desc=f"DeepHit CV[{args.config}]",
+        dynamic_ncols=True,
+    )
     for hidden_dim, dropout, lr in grid:
         for fold, tr_idx, val_idx, _ in fold_partitions:
             fold_train_ids = set(train_val_static.index[tr_idx].astype(str))
@@ -508,6 +553,10 @@ def cv_run(
                 row[f"c_index_val__{event_name}"] = np.nan
                 row[f"mean_auc_t_val__{event_name}"] = np.nan
                 row[f"integrated_brier_val__{event_name}"] = np.nan
+            args._progress_desc = (
+                f"hd={int(hidden_dim)} dr={float(dropout):.2f} "
+                f"lr={float(lr):g} fold={fold}"
+            )
             try:
                 pred, history, best_valid = train_evaluate(
                     df=df,
@@ -556,6 +605,20 @@ def cv_run(
             except Exception as exc:  # pragma: no cover - defensive
                 row["note"] = f"fold_failed: {exc}"
             fold_rows.append(row)
+            if hasattr(cv_bar, "set_postfix"):
+                cv_bar.set_postfix(
+                    {
+                        "best_valid": (
+                            f"{row['best_valid_loss']:.4f}"
+                            if np.isfinite(row.get("best_valid_loss", np.nan))
+                            else "nan"
+                        )
+                    }
+                )
+            cv_bar.update(1)
+    cv_bar.close()
+    if hasattr(args, "_progress_desc"):
+        delattr(args, "_progress_desc")
 
     fold_df = pd.DataFrame(fold_rows)
     agg_cols = {
@@ -908,6 +971,9 @@ def main(args: argparse.Namespace) -> None:
     final_dropout = chosen["dropout"] if chosen is not None else args.dropout
     final_lr = chosen["lr"] if chosen is not None else args.lr
 
+    args._progress_desc = (
+        f"final fit hd={final_hidden_dim} dr={final_dropout:.2f} lr={final_lr:g}"
+    )
     pred, history, best_valid = train_evaluate(
         df=df,
         id_col=id_col,

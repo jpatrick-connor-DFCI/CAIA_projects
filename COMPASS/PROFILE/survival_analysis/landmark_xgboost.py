@@ -49,6 +49,25 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
     concordance_index = None
     LIFELINES_IMPORT_ERROR = exc
 
+try:
+    from tqdm.auto import tqdm
+
+    TQDM_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover - tqdm is optional
+    TQDM_AVAILABLE = False
+
+    def tqdm(iterable=None, **kwargs):  # type: ignore[no-redef]
+        if iterable is None:
+            class _Null:
+                def update(self, *_a, **_kw): pass
+                def set_postfix(self, *_a, **_kw): pass
+                def set_description(self, *_a, **_kw): pass
+                def close(self): pass
+                def __enter__(self): return self
+                def __exit__(self, *_): return False
+            return _Null()
+        return iterable
+
 SURVIVAL_DIR = Path(__file__).resolve().parent
 if str(SURVIVAL_DIR) not in sys.path:
     sys.path.insert(0, str(SURVIVAL_DIR))
@@ -101,6 +120,60 @@ def require_lifelines() -> None:
         raise ModuleNotFoundError(
             "lifelines is required to compute concordance indices."
         ) from LIFELINES_IMPORT_ERROR
+
+
+class TqdmXGBCallback:
+    """Per-boosting-round tqdm progress for xgb.train.
+
+    Implemented as a duck-typed `xgb.callback.TrainingCallback` subclass when
+    XGBoost is available; this avoids touching xgb at module import time so the
+    rest of the file still loads if XGBoost is missing.
+    """
+
+    def __init__(self, total_rounds: int, desc: str = "xgb"):
+        self.bar = tqdm(
+            total=int(total_rounds),
+            desc=desc,
+            leave=False,
+            dynamic_ncols=True,
+        )
+
+    def before_training(self, model):
+        return model
+
+    def after_iteration(self, model, epoch, evals_log):
+        latest = {}
+        for split, metrics in evals_log.items():
+            for metric, vals in metrics.items():
+                if vals:
+                    latest[f"{split[:5]}_{metric[:6]}"] = f"{float(vals[-1]):.4f}"
+        if hasattr(self.bar, "set_postfix"):
+            self.bar.set_postfix(latest)
+        self.bar.update(1)
+        return False  # don't stop training
+
+    def after_training(self, model):
+        if hasattr(self.bar, "close"):
+            self.bar.close()
+        return model
+
+
+def _make_xgb_callback(total_rounds: int, desc: str):
+    """Return a real xgb TrainingCallback subclass instance, or None."""
+    if xgb is None or not TQDM_AVAILABLE:
+        return None
+    base = xgb.callback.TrainingCallback
+    cls = type(
+        "_TqdmXGBCallbackImpl",
+        (base,),
+        {
+            "__init__": TqdmXGBCallback.__init__,
+            "before_training": TqdmXGBCallback.before_training,
+            "after_iteration": TqdmXGBCallback.after_iteration,
+            "after_training": TqdmXGBCallback.after_training,
+        },
+    )
+    return cls(total_rounds=total_rounds, desc=desc)
 
 
 def strip_suffix(value: str, suffix: str) -> str:
@@ -250,13 +323,19 @@ def fit_xgb_cox(
         "seed": args.seed,
         "tree_method": args.tree_method,
     }
+    bar_desc = getattr(args, "_xgb_progress_desc", "xgb-train")
+    cb = _make_xgb_callback(total_rounds=args.num_boost_round, desc=bar_desc)
     train_kwargs = {
         "params": params,
         "dtrain": dtrain,
         "num_boost_round": args.num_boost_round,
         "evals": evals,
-        "verbose_eval": args.verbose_eval,
+        # tqdm replaces per-round prints; only fall back to xgboost's own
+        # logger when tqdm isn't installed.
+        "verbose_eval": False if cb is not None else args.verbose_eval,
     }
+    if cb is not None:
+        train_kwargs["callbacks"] = [cb]
     if len(valid_df) and args.early_stopping_rounds:
         train_kwargs["early_stopping_rounds"] = args.early_stopping_rounds
     model = xgb.train(**train_kwargs)
@@ -437,6 +516,12 @@ def cv_one_endpoint(
         product(args.cv_max_depths, args.cv_etas, args.cv_min_child_weights)
     )
     fold_rows: list[dict] = []
+    total_runs = len(grid) * len(fold_partitions)
+    cv_bar = tqdm(
+        total=total_runs,
+        desc=f"xgb CV[{endpoint}@+{landmark_day}d]",
+        dynamic_ncols=True,
+    )
     for max_depth, eta, min_child_weight in grid:
         for fold, tr_idx, val_idx, _ in fold_partitions:
             fold_train = train_val.iloc[tr_idx]
@@ -464,6 +549,10 @@ def cv_one_endpoint(
                 "n_valid_brier_horizons_val": 0,
                 "note": "",
             }
+            args._xgb_progress_desc = (
+                f"d={int(max_depth)} eta={float(eta):g} "
+                f"mcw={float(min_child_weight):g} fold={fold}"
+            )
             try:
                 if not fold_features:
                     raise ValueError("no usable features after fold-level selection")
@@ -545,6 +634,23 @@ def cv_one_endpoint(
             except Exception as exc:  # pragma: no cover - defensive
                 row["note"] = f"fold_failed: {exc}"
             fold_rows.append(row)
+            if hasattr(cv_bar, "set_postfix"):
+                cv_bar.set_postfix(
+                    {
+                        "C": (
+                            f"{row['c_index_val']:.4f}"
+                            if np.isfinite(row.get("c_index_val", np.nan))
+                            else "nan"
+                        ),
+                        "iter": int(row["best_iteration"])
+                        if np.isfinite(row.get("best_iteration", np.nan))
+                        else "-",
+                    }
+                )
+            cv_bar.update(1)
+    cv_bar.close()
+    if hasattr(args, "_xgb_progress_desc"):
+        delattr(args, "_xgb_progress_desc")
 
     fold_df = pd.DataFrame(fold_rows)
     cv_df = (
