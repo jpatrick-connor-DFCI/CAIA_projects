@@ -451,15 +451,7 @@ def train_evaluate(
     best_valid = float("inf")
     epochs_without_improvement = 0
     history = []
-    bar_desc = getattr(args, "_progress_desc", "training")
-    progress = tqdm(
-        range(1, args.epochs + 1),
-        total=args.epochs,
-        desc=bar_desc,
-        leave=False,
-        dynamic_ncols=True,
-    )
-    for epoch in progress:
+    for epoch in range(1, args.epochs + 1):
         train_loss = run_epoch(model, train_loader, optimizer, device)
         valid_loss = run_epoch(model, valid_loader, None, device)
         history.append(
@@ -471,19 +463,8 @@ def train_evaluate(
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
-        if hasattr(progress, "set_postfix"):
-            progress.set_postfix(
-                {
-                    "train": f"{train_loss:.4f}",
-                    "valid": f"{valid_loss:.4f}",
-                    "best": f"{best_valid:.4f}",
-                    "stale": epochs_without_improvement,
-                }
-            )
         if epochs_without_improvement >= args.patience:
             break
-    if hasattr(progress, "close"):
-        progress.close()
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -553,10 +534,6 @@ def cv_run(
                 row[f"c_index_val__{event_name}"] = np.nan
                 row[f"mean_auc_t_val__{event_name}"] = np.nan
                 row[f"integrated_brier_val__{event_name}"] = np.nan
-            args._progress_desc = (
-                f"hd={int(hidden_dim)} dr={float(dropout):.2f} "
-                f"lr={float(lr):g} fold={fold}"
-            )
             try:
                 pred, history, best_valid = train_evaluate(
                     df=df,
@@ -608,17 +585,19 @@ def cv_run(
             if hasattr(cv_bar, "set_postfix"):
                 cv_bar.set_postfix(
                     {
+                        "hd": int(hidden_dim),
+                        "dr": f"{float(dropout):.2f}",
+                        "lr": f"{float(lr):g}",
+                        "fold": fold,
                         "best_valid": (
                             f"{row['best_valid_loss']:.4f}"
                             if np.isfinite(row.get("best_valid_loss", np.nan))
                             else "nan"
-                        )
+                        ),
                     }
                 )
             cv_bar.update(1)
     cv_bar.close()
-    if hasattr(args, "_progress_desc"):
-        delattr(args, "_progress_desc")
 
     fold_df = pd.DataFrame(fold_rows)
     agg_cols = {
@@ -971,9 +950,6 @@ def main(args: argparse.Namespace) -> None:
     final_dropout = chosen["dropout"] if chosen is not None else args.dropout
     final_lr = chosen["lr"] if chosen is not None else args.lr
 
-    args._progress_desc = (
-        f"final fit hd={final_hidden_dim} dr={final_dropout:.2f} lr={final_lr:g}"
-    )
     pred, history, best_valid = train_evaluate(
         df=df,
         id_col=id_col,

@@ -122,60 +122,6 @@ def require_lifelines() -> None:
         ) from LIFELINES_IMPORT_ERROR
 
 
-class TqdmXGBCallback:
-    """Per-boosting-round tqdm progress for xgb.train.
-
-    Implemented as a duck-typed `xgb.callback.TrainingCallback` subclass when
-    XGBoost is available; this avoids touching xgb at module import time so the
-    rest of the file still loads if XGBoost is missing.
-    """
-
-    def __init__(self, total_rounds: int, desc: str = "xgb"):
-        self.bar = tqdm(
-            total=int(total_rounds),
-            desc=desc,
-            leave=False,
-            dynamic_ncols=True,
-        )
-
-    def before_training(self, model):
-        return model
-
-    def after_iteration(self, model, epoch, evals_log):
-        latest = {}
-        for split, metrics in evals_log.items():
-            for metric, vals in metrics.items():
-                if vals:
-                    latest[f"{split[:5]}_{metric[:6]}"] = f"{float(vals[-1]):.4f}"
-        if hasattr(self.bar, "set_postfix"):
-            self.bar.set_postfix(latest)
-        self.bar.update(1)
-        return False  # don't stop training
-
-    def after_training(self, model):
-        if hasattr(self.bar, "close"):
-            self.bar.close()
-        return model
-
-
-def _make_xgb_callback(total_rounds: int, desc: str):
-    """Return a real xgb TrainingCallback subclass instance, or None."""
-    if xgb is None or not TQDM_AVAILABLE:
-        return None
-    base = xgb.callback.TrainingCallback
-    cls = type(
-        "_TqdmXGBCallbackImpl",
-        (base,),
-        {
-            "__init__": TqdmXGBCallback.__init__,
-            "before_training": TqdmXGBCallback.before_training,
-            "after_iteration": TqdmXGBCallback.after_iteration,
-            "after_training": TqdmXGBCallback.after_training,
-        },
-    )
-    return cls(total_rounds=total_rounds, desc=desc)
-
-
 def strip_suffix(value: str, suffix: str) -> str:
     if value.endswith(suffix):
         return value[: -len(suffix)]
@@ -323,19 +269,16 @@ def fit_xgb_cox(
         "seed": args.seed,
         "tree_method": args.tree_method,
     }
-    bar_desc = getattr(args, "_xgb_progress_desc", "xgb-train")
-    cb = _make_xgb_callback(total_rounds=args.num_boost_round, desc=bar_desc)
     train_kwargs = {
         "params": params,
         "dtrain": dtrain,
         "num_boost_round": args.num_boost_round,
         "evals": evals,
-        # tqdm replaces per-round prints; only fall back to xgboost's own
-        # logger when tqdm isn't installed.
-        "verbose_eval": False if cb is not None else args.verbose_eval,
+        # Per-round prints are silenced — the outer CV bar tracks progress per
+        # parameter combo. Set --verbose-eval explicitly if you want xgboost's
+        # own logger back.
+        "verbose_eval": False,
     }
-    if cb is not None:
-        train_kwargs["callbacks"] = [cb]
     if len(valid_df) and args.early_stopping_rounds:
         train_kwargs["early_stopping_rounds"] = args.early_stopping_rounds
     model = xgb.train(**train_kwargs)
@@ -549,10 +492,6 @@ def cv_one_endpoint(
                 "n_valid_brier_horizons_val": 0,
                 "note": "",
             }
-            args._xgb_progress_desc = (
-                f"d={int(max_depth)} eta={float(eta):g} "
-                f"mcw={float(min_child_weight):g} fold={fold}"
-            )
             try:
                 if not fold_features:
                     raise ValueError("no usable features after fold-level selection")
@@ -637,6 +576,10 @@ def cv_one_endpoint(
             if hasattr(cv_bar, "set_postfix"):
                 cv_bar.set_postfix(
                     {
+                        "d": int(max_depth),
+                        "eta": f"{float(eta):g}",
+                        "mcw": f"{float(min_child_weight):g}",
+                        "fold": fold,
                         "C": (
                             f"{row['c_index_val']:.4f}"
                             if np.isfinite(row.get("c_index_val", np.nan))
@@ -649,8 +592,6 @@ def cv_one_endpoint(
                 )
             cv_bar.update(1)
     cv_bar.close()
-    if hasattr(args, "_xgb_progress_desc"):
-        delattr(args, "_xgb_progress_desc")
 
     fold_df = pd.DataFrame(fold_rows)
     cv_df = (
