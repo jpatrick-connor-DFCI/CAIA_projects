@@ -7,10 +7,11 @@ competing-risks likelihood. It is intentionally self-contained so it does not
 depend on the original TensorFlow 1.x Dynamic-DeepHit reference code.
 
 Runs 5-fold stratified CV on train_val (combined PLATINUM+DEATH stratification)
-over a (hidden_dim x dropout x lr) grid, then refits the chosen hyperparameter
-combo on full train_val and evaluates on the held-out test fold. --no-cv
-falls back to the legacy single-fit path. Per-config outputs are suffixed by
-args.config so the platinum / death / competing runs do not collide.
+over a (hidden_dim x dropout x lr) grid, then fits the chosen hyperparameter
+combo with the train/valid split from the input manifest for early stopping and
+evaluates on the held-out test fold. --no-cv falls back to the legacy single-fit
+path. Per-config outputs are suffixed by args.config so the platinum / death /
+competing runs do not collide.
 
 Outputs (per --config):
   dynamic_deephit_metrics_{config}.csv
@@ -945,7 +946,7 @@ def main(args: argparse.Namespace) -> None:
             f"dropout={chosen['dropout']:g} lr={chosen['lr']:g}"
         )
 
-    # Final fit on full train_val using chosen (or default) hyperparameters.
+    # Final fit uses the manifest's train split and watches valid for early stopping.
     final_hidden_dim = chosen["hidden_dim"] if chosen is not None else args.hidden_dim
     final_dropout = chosen["dropout"] if chosen is not None else args.dropout
     final_lr = chosen["lr"] if chosen is not None else args.lr

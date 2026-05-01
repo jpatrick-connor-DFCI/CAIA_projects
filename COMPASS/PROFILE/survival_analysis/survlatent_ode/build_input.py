@@ -1,12 +1,12 @@
 """
-Build person-period input for SurvLatent ODE from the pre-treatment longitudinal
+Build person-period input for SurvLatent ODE from the pre-landmark longitudinal
 lab data used by cox_aggregated.py.
 
 Output is a wide CSV with one row per (DFCI_MRN, binned time) carrying lab values
 as columns (NaN where not measured in that bin), plus patient-level static and
-event columns repeated on every row. Pre-treatment history is binned into
-fixed-width windows (default 7 days), a synthetic first-treatment-start landmark
-row is appended, and event/censoring times are encoded after that landmark.
+event columns repeated on every row. Pre-landmark history is binned into
+fixed-width windows (default 7 days), a synthetic landmark row is appended, and
+event/censoring times are encoded after that landmark.
 
 Splits match cox_aggregated.py (seed=42, test_frac=0.20) plus an internal
 train/validation split carved out of the 80% train_val block for early stopping.
@@ -37,6 +37,7 @@ if str(SURVIVAL_DIR) not in sys.path:
 from cox_aggregated import (  # noqa: E402
     AGE_COL,
     CANONICAL_LABS_TRAIN_VAL_FILENAME,
+    DEFAULT_LANDMARK_DAYS,
     SPLIT_ASSIGNMENTS_FILENAME,
     build_aligned_cohort,
     choose_stratification_labels,
@@ -133,7 +134,12 @@ def assign_survlatent_splits(
     return split, label_name
 
 
-def build_lab_long(df: pd.DataFrame, static: pd.DataFrame) -> pd.DataFrame:
+def build_lab_long(
+    df: pd.DataFrame,
+    static: pd.DataFrame,
+    *,
+    landmark_offset_days: int,
+) -> pd.DataFrame:
     required = {"DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab"}
     missing = required - set(df.columns)
     if missing:
@@ -146,14 +152,15 @@ def build_lab_long(df: pd.DataFrame, static: pd.DataFrame) -> pd.DataFrame:
     labs = labs.dropna(subset=["DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab"])
     labs = labs.loc[labs["DFCI_MRN"].isin(static.index)]
 
-    # Restrict to pre-treatment observations so the endpoint is predicted from
-    # information available before the treatment-start landmark.
+    # Restrict to pre-landmark observations so the endpoint is predicted from
+    # information available before treatment start + landmark_offset_days.
     labs = labs.merge(
         static[["t_first_treatment"]].reset_index(),
         on="DFCI_MRN",
         how="inner",
     )
-    labs = labs.loc[labs["t_lab"] < labs["t_first_treatment"]].copy()
+    landmark_t = labs["t_first_treatment"] + float(landmark_offset_days)
+    labs = labs.loc[labs["t_lab"] < landmark_t].copy()
     return labs
 
 
@@ -248,11 +255,15 @@ def main(args: argparse.Namespace) -> None:
     print(f"Loading longitudinal data from {args.data} ...")
     df = pd.read_csv(args.data, low_memory=False)
 
-    print("Rebuilding Cox landmark cohort so the held-out test split is identical ...")
+    print(
+        "Rebuilding Cox landmark cohort so the held-out test split is identical "
+        f"at landmark +{args.landmark_days}d ..."
+    )
     outcome_df, _, merged, _, _, cox_split_assignments, cox_split_stratification = build_aligned_cohort(
         df,
         seed=args.seed,
         test_frac=args.test_frac,
+        landmark_offset_days=args.landmark_days,
     )
 
     static = assemble_static(outcome_df, merged.index)
@@ -273,8 +284,12 @@ def main(args: argparse.Namespace) -> None:
     print(f"Cox test split stratification: {cox_split_stratification}")
     print(f"SurvLatent internal validation stratification: {val_stratification}")
 
-    labs = build_lab_long(df, static)
-    print(f"Pre-treatment lab rows: {len(labs)}")
+    labs = build_lab_long(
+        df,
+        static,
+        landmark_offset_days=args.landmark_days,
+    )
+    print(f"Pre-landmark lab rows: {len(labs)}")
 
     canonical_labs_path = Path(args.canonical_labs_csv)
     canonical_labs = None if args.no_canonical_labs else load_canonical_labs(
@@ -294,13 +309,16 @@ def main(args: argparse.Namespace) -> None:
     print(f"Selected labs ({len(selected_labs)}): {selected_labs}")
     selected_lab_rows = labs.loc[labs["LAB_NAME"].isin(selected_labs)].copy()
 
-    # Bin pre-treatment history relative to first treatment start. The treatment
-    # landmark itself is added below as the final observed row for each patient,
-    # so SurvLatent's survival horizon starts at treatment start.
+    # Bin pre-landmark history relative to the requested landmark. The landmark
+    # itself is added below as the final observed row for each patient, so the
+    # survival horizon starts at treatment start + landmark_days.
     selected_lab_rows["REL_BIN"] = np.floor(
         (
             selected_lab_rows["t_lab"].to_numpy(dtype=float)
-            - selected_lab_rows["t_first_treatment"].to_numpy(dtype=float)
+            - (
+                selected_lab_rows["t_first_treatment"].to_numpy(dtype=float)
+                + float(args.landmark_days)
+            )
         )
         / float(args.time_unit_days)
     ).astype(int)
@@ -324,7 +342,7 @@ def main(args: argparse.Namespace) -> None:
     selected_lab_rows["TIME"] = selected_lab_rows["REL_BIN"] + selected_lab_rows["landmark_time"]
 
     if selected_lab_rows.empty:
-        raise ValueError("No selected pre-treatment lab rows remain after filtering.")
+        raise ValueError("No selected pre-landmark lab rows remain after filtering.")
 
     landmark_time = (
         selected_lab_rows.groupby("DFCI_MRN")["landmark_time"].first()
@@ -385,9 +403,9 @@ def main(args: argparse.Namespace) -> None:
     ]
     wide = wide.merge(static[static_cols], left_on="DFCI_MRN", right_index=True, how="inner")
 
-    # Convert post-treatment event/censoring durations into the same integer time
+    # Convert post-landmark event/censoring durations into the same integer time
     # unit as TIME. Ceil keeps any positive post-landmark duration strictly after
-    # the synthetic treatment-start row.
+    # the synthetic landmark row.
     t_platinum_after_landmark = np.ceil(
         wide["t_platinum"].to_numpy(dtype=float) / float(args.time_unit_days)
     )
@@ -458,8 +476,9 @@ def main(args: argparse.Namespace) -> None:
         "feat_cat": [],
         "feat_reconstr": selected_labs,
         "time_unit_days": args.time_unit_days,
-        "time_origin": "first_selected_pre_treatment_lab_bin",
-        "prediction_landmark": "first_treatment_start",
+        "time_origin": "first_selected_pre_landmark_lab_bin",
+        "prediction_landmark": f"first_treatment_start_plus_{int(args.landmark_days)}d",
+        "landmark_days": int(args.landmark_days),
         "event_times": "absolute_bins_from_time_origin",
         "max_landmark_time": max_landmark_time,
         "n_patients_without_selected_labs": n_without_selected_labs,
@@ -517,8 +536,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--landmark-days",
         type=int,
-        default=0,
-        help="Landmark offset used to select rows from --canonical-labs-csv.",
+        default=None,
+        help=(
+            "Landmark offset relative to first treatment. Defaults to the first "
+            "cox_aggregated.py default landmark."
+        ),
     )
     parser.add_argument(
         "--no-canonical-labs",
@@ -534,6 +556,8 @@ if __name__ == "__main__":
     parser.add_argument("--outlier-lo", type=float, default=DEFAULT_OUTLIER_LO)
     parser.add_argument("--outlier-hi", type=float, default=DEFAULT_OUTLIER_HI)
     parsed = parser.parse_args()
+    if parsed.landmark_days is None:
+        parsed.landmark_days = int(DEFAULT_LANDMARK_DAYS[0])
     if parsed.canonical_labs_csv is None:
         parsed.canonical_labs_csv = str(Path(parsed.output_dir) / CANONICAL_LABS_TRAIN_VAL_FILENAME)
     main(parsed)

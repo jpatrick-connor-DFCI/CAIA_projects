@@ -36,8 +36,7 @@ Expected input:
 Outputs:
   results/cox_agg_landmark_mrn_availability.csv
   results/cox_agg_feature_selection.csv   (selected lab features + coverage)
-  results/cox_agg_univariate.csv          (log HRs, p-values, FDR per endpoint)
-  results/cox_agg_univariate_nobs_adjusted.csv
+  results/cox_agg_univariate_nobs_adjusted.csv  (n_obs-adjusted log HRs, p, q)
   results/cox_agg_multivariable.csv       (coefs + C-indices + AUC(t))
   results/cox_agg_multivariable_metrics.csv
 """
@@ -100,7 +99,7 @@ AGE_COL = "AGE_AT_TREATMENTSTART"
 DEFAULT_SEED = 42
 DEFAULT_TEST_FRAC = 0.20
 DEFAULT_N_FOLDS = 5
-DEFAULT_LANDMARK_DAYS = [0]
+DEFAULT_LANDMARK_DAYS = [180, 365]  # 6 months and 1 year post first treatment
 DEFAULT_MIN_PATIENT_COVERAGE = 0.20
 DEFAULT_MIN_EVENTS_PER_FEATURE = 10
 DEFAULT_CV_PENALIZERS = [
@@ -2036,7 +2035,6 @@ def main(args: argparse.Namespace) -> None:
     landmark_availability.to_csv(RESULTS / LANDMARK_AVAILABILITY_FILENAME, index=False)
 
     feature_selection_frames: list[pd.DataFrame] = []
-    univariate_frames: list[pd.DataFrame] = []
     univariate_nobs_adjusted_frames: list[pd.DataFrame] = []
     multivariable_frames: list[pd.DataFrame] = []
     multivariable_metric_rows: list[dict] = []
@@ -2046,25 +2044,6 @@ def main(args: argparse.Namespace) -> None:
     canonical_labs_train_val_rows: list[dict] = []
     canonical_labs_fold_rows: list[pd.DataFrame] = []
 
-    univariate_keep_cols = [
-        "endpoint",
-        "feature",
-        "lab_name",
-        "feature_stat",
-        "coverage",
-        "n_patients_used",
-        "n_patients_observed",
-        "n_patients_imputed",
-        "n_events_used",
-        "coef_feature",
-        "hazard_ratio_per_sd",
-        "ci_lower",
-        "ci_upper",
-        "p_value",
-        "q_value",
-        "coef_missing",
-        "p_value_missing",
-    ]
     univariate_nobs_adjusted_keep_cols = [
         "landmark_days",
         "endpoint",
@@ -2095,7 +2074,6 @@ def main(args: argparse.Namespace) -> None:
         "p_value_missing",
         "note",
     ]
-    univariate_keep_cols = ["landmark_days"] + univariate_keep_cols
 
     for landmark_day in landmark_days:
         print(f"\n##### LANDMARK ANALYSES: +{landmark_day} DAYS #####")
@@ -2154,16 +2132,20 @@ def main(args: argparse.Namespace) -> None:
         feature_meta_selected.insert(0, "landmark_days", landmark_day)
         feature_selection_frames.append(feature_meta_selected)
 
-        keep_cols = selected_feature_cols + [c for c in merged.columns if c in OUTCOME_COLUMNS]
-        merged = merged[keep_cols].copy()
-        train_val = train_val[keep_cols].copy()
-        test = test[keep_cols].copy()
+        # NOTE: do NOT subset train_val / merged / test to selected_feature_cols.
+        # The multivariable arm's per-fold selection rebuilds the canonical lab
+        # set and per-stat filter against the *raw* feature universe inside each
+        # CV fold (see tune_multivariable_model), so it needs access to all
+        # raw_feature_cols on train_val. Downstream call sites already specify
+        # the column subset they consume via select_feature_columns and
+        # build_model_matrices, so leaving the full feature universe in place
+        # is harmless for univariate / final-fit paths.
 
         print(f"Full cohort: {len(merged)} patients")
         print(f"Train/val (Arm 2): {len(train_val)} patients")
         print(f"Test (Arm 2):      {len(test)} patients")
         print(f"Canonical labs (train_val): {len(canonical_labs)}")
-        print(f"Selected summary-lab features: {len(selected_feature_cols)}")
+        print(f"Selected summary-lab features (train_val pre-filter): {len(selected_feature_cols)}")
 
         # Fixed AUC(t) / Brier horizon grid per endpoint, derived ONCE from
         # train_val event times. Reused by every CV fold and by the test eval
@@ -2195,21 +2177,10 @@ def main(args: argparse.Namespace) -> None:
             )
 
         if args.analysis in {"univariate", "both"}:
-            print("\n##### ARM 1: UNIVARIATE (all endpoints) #####")
+            print("\n##### ARM 1: UNIVARIATE (n_obs-adjusted, all endpoints) #####")
             for endpoint in endpoints:
                 print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
                 print(ENDPOINTS[endpoint]["description"])
-                univariate_df = run_univariate_associations(
-                    univariate_data,
-                    feature_cols=selected_feature_cols,
-                    endpoint=endpoint,
-                    min_events_per_feature=args.min_events_per_feature,
-                    fallback_penalizer=args.univariate_penalizer,
-                )
-                univariate_df.insert(0, "landmark_days", landmark_day)
-                univariate_frames.append(univariate_df[univariate_keep_cols].copy())
-                print_top_hits(univariate_df, endpoint=endpoint)
-
                 adjusted_df = run_univariate_nobs_adjusted_associations(
                     univariate_data,
                     feature_cols=selected_feature_cols,
@@ -2320,10 +2291,6 @@ def main(args: argparse.Namespace) -> None:
         pd.concat(canonical_labs_fold_rows, ignore_index=True).to_csv(
             RESULTS / CANONICAL_LABS_FOLDS_FILENAME, index=False
         )
-    if univariate_frames:
-        pd.concat(univariate_frames, ignore_index=True).to_csv(
-            RESULTS / "cox_agg_univariate.csv", index=False
-        )
     if univariate_nobs_adjusted_frames:
         pd.concat(univariate_nobs_adjusted_frames, ignore_index=True).to_csv(
             RESULTS / "cox_agg_univariate_nobs_adjusted.csv", index=False
@@ -2355,8 +2322,6 @@ def main(args: argparse.Namespace) -> None:
         print(f"  results/{CANONICAL_LABS_TRAIN_VAL_FILENAME}")
     if canonical_labs_fold_rows:
         print(f"  results/{CANONICAL_LABS_FOLDS_FILENAME}")
-    if univariate_frames:
-        print("  results/cox_agg_univariate.csv")
     if univariate_nobs_adjusted_frames:
         print("  results/cox_agg_univariate_nobs_adjusted.csv")
     if multivariable_frames:

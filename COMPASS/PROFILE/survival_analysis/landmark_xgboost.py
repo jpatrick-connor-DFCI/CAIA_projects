@@ -4,9 +4,10 @@ Landmarking + XGBoost survival baseline for longitudinal lab summaries.
 For each requested landmark, this script reuses cox_aggregated.py's landmarked
 feature engineering and held-out split, then runs 5-fold stratified CV on
 train_val over a (max_depth x eta x min_child_weight) grid to pick
-hyperparameters before refitting on full train_val and evaluating on the
-held-out test fold. Per-fold canonical labs and the fixed horizon grid keep
-test data fully isolated from selection.
+hyperparameters before fitting the chosen configuration with an internal
+early-stopping split and evaluating on the held-out test fold. Per-fold
+canonical labs and the fixed horizon grid keep test data fully isolated from
+selection.
 
 Outputs:
   landmark_xgboost_metrics.csv
