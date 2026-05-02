@@ -1,0 +1,10 @@
+cox	0	both
+cox	90	both
+xgboost	0	both
+xgboost	90	both
+deephit	0	competing
+deephit	90	competing
+deephit	0	PLATINUM
+deephit	90	PLATINUM
+deephit	0	DEATH
+deephit	90	DEATH

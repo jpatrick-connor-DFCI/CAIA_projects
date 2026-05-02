@@ -75,20 +75,14 @@ if str(SURVIVAL_DIR) not in sys.path:
 
 from cox_aggregated import (  # noqa: E402
     AGE_COL,
-    DATA_PATH,
-    DEFAULT_AUC_QUANTILES,
-    DEFAULT_AUC_TIME_UNIT_DAYS,
     DEFAULT_LANDMARK_DAYS,
-    DEFAULT_MIN_PATIENT_COVERAGE,
     DEFAULT_SEED,
-    DEFAULT_TEST_FRAC,
     ENDPOINTS,
     OUTCOME_COLUMNS,
     RESULTS,
-    build_aligned_cohort,
-    build_landmark_availability_table,
-    build_pre_treatment_lab_long,
-    compute_survlatent_auc_t,
+    _load_build_manifest,
+    _load_prebuilt_landmark,
+    compute_ipcw_auc_t,
     normalize_endpoints,
     normalize_landmark_days,
     select_feature_columns,
@@ -98,7 +92,6 @@ from helper import (  # noqa: E402
     assert_no_test_leakage,
     breslow_survival_at_horizons,
     compute_brier,
-    compute_horizon_grid,
     iter_stratified_folds,
     select_canonical_labs,
 )
@@ -518,7 +511,7 @@ def cv_one_endpoint(
                             duration[valid], -risk[valid], event[valid]
                         )
                     )
-                mean_auc_val, auc_df_val = compute_survlatent_auc_t(
+                mean_auc_val, auc_df_val = compute_ipcw_auc_t(
                     fold_val,
                     risk,
                     duration_col=duration_col,
@@ -757,7 +750,7 @@ def run_one_endpoint(
     if valid.sum() and event[valid].sum():
         c_index = float(concordance_index(duration[valid], -risk[valid], event[valid]))
 
-    mean_auc, auc_t = compute_survlatent_auc_t(
+    mean_auc, auc_t = compute_ipcw_auc_t(
         test,
         risk,
         duration_col=duration_col,
@@ -874,21 +867,23 @@ def main(args: argparse.Namespace) -> None:
     require_lifelines()
     endpoints = normalize_endpoints(args.endpoints)
     landmark_days = normalize_landmark_days(args.landmark_days)
-    df = pd.read_csv(args.data, low_memory=False)
-
-    merged_by_landmark = {}
-    initial_split = None
-    split_stratification = None
-    for landmark_day in landmark_days:
-        _, _, merged, _, _, _, _ = build_aligned_cohort(
-            df,
-            seed=args.seed,
-            test_frac=args.test_frac,
-            landmark_offset_days=landmark_day,
+    inputs_dir = Path(args.inputs_dir)
+    if not inputs_dir.exists():
+        raise FileNotFoundError(
+            f"Inputs dir {inputs_dir} not found. Run build_prediction_inputs.py first."
         )
-        merged_by_landmark[landmark_day] = merged
+    build_manifest = _load_build_manifest(inputs_dir)
+    args.min_patient_coverage = float(build_manifest["min_patient_coverage"])
+    args.auc_time_unit_days = int(build_manifest["auc_time_unit_days"])
+    args.auc_quantiles = tuple(build_manifest["auc_quantiles"])
+    args.auc_max_time_units = None
+    auc_horizons_by_landmark = build_manifest["auc_horizons_by_landmark"]
+    print(
+        f"Loading prebuilt prediction inputs from {inputs_dir} "
+        f"(min_patient_coverage={args.min_patient_coverage}, "
+        f"auc_time_unit_days={args.auc_time_unit_days} per build manifest)"
+    )
 
-    availability, common_mrns = build_landmark_availability_table(merged_by_landmark)
     all_metrics = []
     all_auc = []
     all_brier = []
@@ -900,17 +895,9 @@ def main(args: argparse.Namespace) -> None:
     all_fold_canonical_labs = []
 
     for landmark_day in landmark_days:
-        _, _, merged, train_val, test, split_assignments, split_stratification = build_aligned_cohort(
-            df,
-            seed=args.seed,
-            test_frac=args.test_frac,
-            landmark_offset_days=landmark_day,
-            required_mrns=common_mrns,
-            split_assignments=initial_split,
-            split_stratification=split_stratification,
+        merged, train_val, test, pre_treatment_lab_df = _load_prebuilt_landmark(
+            inputs_dir, landmark_day
         )
-        if initial_split is None:
-            initial_split = split_assignments
 
         assert_no_test_leakage(
             test_mrns=test.index,
@@ -919,18 +906,11 @@ def main(args: argparse.Namespace) -> None:
         )
 
         raw_feature_cols = [
-            col
-            for col in merged.columns
-            if col not in OUTCOME_COLUMNS and col != "split"
+            col for col in merged.columns if col not in OUTCOME_COLUMNS
         ]
         print(
             f"\nLandmark +{landmark_day}d: train_val={len(train_val)} test={len(test)} "
             f"raw_features={len(raw_feature_cols)}"
-        )
-        pre_treatment_lab_df = build_pre_treatment_lab_long(
-            df,
-            cohort_index=merged.index,
-            landmark_offset_days=landmark_day,
         )
         canonical_labs = select_canonical_labs(
             pre_treatment_lab_df,
@@ -938,15 +918,18 @@ def main(args: argparse.Namespace) -> None:
             min_coverage=args.min_patient_coverage,
         )
         print(f"Canonical labs (train_val): {len(canonical_labs)}")
+        landmark_horizons = auc_horizons_by_landmark.get(str(int(landmark_day)))
+        if landmark_horizons is None:
+            raise KeyError(
+                f"build_manifest.json has no auc_horizons_by_landmark entry for landmark +{landmark_day}d."
+            )
         for endpoint in endpoints:
             print(f"Fitting XGBoost Cox endpoint={endpoint} ...")
-            horizon_grid = compute_horizon_grid(
-                train_val,
-                duration_col=ENDPOINTS[endpoint]["duration_col"],
-                event_col=ENDPOINTS[endpoint]["event_col"],
-                quantiles=tuple(args.auc_quantiles),
-                time_unit_days=args.auc_time_unit_days,
-            )
+            if endpoint not in landmark_horizons:
+                raise KeyError(
+                    f"build_manifest.json missing horizons for endpoint {endpoint!r} at landmark +{landmark_day}d."
+                )
+            horizon_grid = np.asarray(landmark_horizons[endpoint], dtype=float)
             (
                 metrics,
                 auc_t,
@@ -994,7 +977,6 @@ def main(args: argparse.Namespace) -> None:
     cv_folds_path = output_dir / "landmark_xgboost_cv_folds.csv"
     cv_summary_path = output_dir / "landmark_xgboost_cv_summary.csv"
     fold_labs_path = output_dir / "landmark_xgboost_canonical_labs_folds.csv"
-    availability_path = output_dir / "landmark_xgboost_landmark_mrn_availability.csv"
 
     pd.concat(all_metrics, ignore_index=True).to_csv(metrics_path, index=False)
     pd.concat(all_auc, ignore_index=True).to_csv(auc_path, index=False)
@@ -1016,8 +998,6 @@ def main(args: argparse.Namespace) -> None:
             fold_labs_path, index=False
         )
         saved.append(fold_labs_path)
-    availability.to_csv(availability_path, index=False)
-    saved.append(availability_path)
     print("\nSaved:")
     for path in saved:
         print(f"  {path}")
@@ -1025,14 +1005,16 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", default=str(DATA_PATH / "longitudinal_prediction_data.csv"))
+    parser.add_argument(
+        "--inputs-dir",
+        default=str(RESULTS / "prediction_inputs"),
+        help="Directory containing prebuilt inputs from build_prediction_inputs.py.",
+    )
     parser.add_argument("--output-dir", default=str(RESULTS))
     parser.add_argument("--endpoints", nargs="+", default=list(ENDPOINTS))
     parser.add_argument("--landmark-days", nargs="+", type=int, default=DEFAULT_LANDMARK_DAYS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    parser.add_argument("--test-frac", type=float, default=DEFAULT_TEST_FRAC)
     parser.add_argument("--val-frac", type=float, default=0.20)
-    parser.add_argument("--min-patient-coverage", type=float, default=DEFAULT_MIN_PATIENT_COVERAGE)
     parser.add_argument("--max-features", type=int, default=None)
     parser.add_argument("--num-boost-round", type=int, default=1000)
     parser.add_argument("--early-stopping-rounds", type=int, default=50)
@@ -1045,9 +1027,6 @@ if __name__ == "__main__":
     parser.add_argument("--reg-alpha", type=float, default=0.0)
     parser.add_argument("--tree-method", default="hist")
     parser.add_argument("--verbose-eval", type=int, default=50)
-    parser.add_argument("--auc-time-unit-days", type=int, default=DEFAULT_AUC_TIME_UNIT_DAYS)
-    parser.add_argument("--auc-quantiles", nargs="+", type=float, default=list(DEFAULT_AUC_QUANTILES))
-    parser.add_argument("--auc-max-time-units", type=int, default=None)
     parser.add_argument("--n-folds", type=int, default=DEFAULT_N_FOLDS)
     parser.add_argument(
         "--cv-max-depths",

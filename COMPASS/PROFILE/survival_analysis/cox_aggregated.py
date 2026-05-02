@@ -17,9 +17,9 @@ Arm 2 (multivariable elastic-net Cox):
   - 80% train/val + 20% held-out test.
   - 5-fold CV over (penalizer x l1_ratio) grid on the 80%; AGE is unpenalized.
   - Refit on full 80% with chosen (penalizer, l1_ratio) and evaluate on 20% test:
-    C-index and SurvLatent-style IPCW cumulative/dynamic AUC(t).
-  - Optionally administratively censor Cox AUC(t) at the SurvLatent prediction
-    horizon via --auc-max-time-units for an apples-to-apples horizon check.
+    C-index and IPCW cumulative/dynamic AUC(t).
+  - AUC(t) horizons are read from build_manifest.json so Cox, XGBoost, and
+    Dynamic DeepHit use the same per-landmark quantile grid.
 
 Endpoints: platinum, death.
 
@@ -94,12 +94,13 @@ DEFAULT_MAX_ABS_COXNET_COEF = 25.0
 BASE = Path(__file__).resolve().parent
 DATA_PATH = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/")
 RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis")
+DEFAULT_V3_LABELS_PATH = DATA_PATH / "v3_outputs" / "LLM_v3_labels.tsv"
 
 AGE_COL = "AGE_AT_TREATMENTSTART"
 DEFAULT_SEED = 42
 DEFAULT_TEST_FRAC = 0.20
 DEFAULT_N_FOLDS = 5
-DEFAULT_LANDMARK_DAYS = [180, 365]  # 6 months and 1 year post first treatment
+DEFAULT_LANDMARK_DAYS = [0, 90]  # treatment start and 90 days post first treatment
 DEFAULT_MIN_PATIENT_COVERAGE = 0.20
 DEFAULT_MIN_EVENTS_PER_FEATURE = 10
 DEFAULT_CV_PENALIZERS = [
@@ -176,7 +177,7 @@ def require_lifelines() -> None:
 def require_sksurv() -> None:
     if cumulative_dynamic_auc is None:
         raise ModuleNotFoundError(
-            "scikit-survival is required for the SurvLatent-style Cox AUC(t) evaluation."
+            "scikit-survival is required for the Cox IPCW AUC(t) evaluation."
         ) from SKSURV_IMPORT_ERROR
 
 
@@ -221,6 +222,11 @@ def normalize_endpoints(raw_endpoints: list[str]) -> list[str]:
         if normalized not in endpoints:
             endpoints.append(normalized)
     return endpoints
+
+
+def load_v3_label_mrns(path: Path) -> set[int]:
+    labels = pd.read_csv(path, sep="\t", usecols=["DFCI_MRN"])
+    return set(labels["DFCI_MRN"].dropna().astype(int).unique())
 
 
 def normalize_landmark_days(raw_landmark_days: list[int]) -> list[int]:
@@ -330,9 +336,6 @@ def make_outcome_df(df: pd.DataFrame, *, landmark_offset_days: int = 0) -> pd.Da
         errors="coerce",
     ).fillna(0).astype(int)
 
-    if "PLATINUM_DATE" in pat.columns and "LAST_CONTACT_DATE" in pat.columns:
-        pat["PLATINUM_DATE"] = pat["PLATINUM_DATE"].fillna(pat["LAST_CONTACT_DATE"])
-
     pat["t_last_contact"] = _derive_duration(
         pat,
         duration_col="t_last_contact",
@@ -360,7 +363,10 @@ def make_outcome_df(df: pd.DataFrame, *, landmark_offset_days: int = 0) -> pd.Da
         pat,
         duration_col="t_platinum",
         event_date_col="PLATINUM_DATE",
-        fallback_duration_col="t_last_contact",
+    )
+    pat["t_platinum"] = pat["t_platinum"].where(
+        pat["PLATINUM"].eq(1),
+        pat["t_platinum"].fillna(pat["t_last_contact"]),
     )
 
     landmark_time = pat["t_first_treatment"].astype(float) + float(landmark_offset_days)
@@ -403,7 +409,7 @@ def build_pre_treatment_lab_long(
     Returns columns DFCI_MRN, LAB_NAME, LAB_VALUE, t_lab, t_first_treatment.
     Restricts to observations with t_lab < t_first_treatment + landmark_offset_days
     so the lab presence used for coverage is the same window the aggregated
-    feature engineering and the SurvLatent person-period builder consume.
+    feature engineering and Dynamic DeepHit person-period builder consume.
     """
     required = {"DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab", "t_first_treatment"}
     missing = required - set(df.columns)
@@ -890,7 +896,7 @@ def _apply_auc_admin_censoring(
     *,
     max_time_unit: int | None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Censor durations at a fixed AUC horizon, matching SurvLatent's convention."""
+    """Censor durations at a fixed AUC horizon for comparable finite-horizon metrics."""
     event = np.asarray(event, dtype=int).copy()
     duration = np.asarray(duration, dtype=float).copy()
     if max_time_unit is None:
@@ -903,7 +909,7 @@ def _apply_auc_admin_censoring(
     return within_horizon.astype(int), duration
 
 
-def compute_survlatent_auc_t(
+def compute_ipcw_auc_t(
     eval_df: pd.DataFrame,
     risk_score: np.ndarray,
     *,
@@ -915,7 +921,7 @@ def compute_survlatent_auc_t(
     max_time_unit: int | None = None,
     fixed_horizons: np.ndarray | None = None,
 ) -> tuple[float, pd.DataFrame]:
-    """Match SurvLatent ODE's IPCW cumulative/dynamic AUC(t) evaluation.
+    """Compute IPCW cumulative/dynamic AUC(t).
 
     When `fixed_horizons` is provided, the horizon grid is taken from those
     values (in time-units) and `quantiles` is ignored. This lets every CV fold
@@ -1646,7 +1652,7 @@ def tune_multivariable_model(
                         covariate_cols=covariate_cols,
                     )
                     row["c_index_val"] = c_index
-                    mean_auc_val, auc_df_val = compute_survlatent_auc_t(
+                    mean_auc_val, auc_df_val = compute_ipcw_auc_t(
                         val_mdf,
                         val_pred,
                         duration_col=duration_col,
@@ -1813,7 +1819,7 @@ def fit_final_multivariable_model(
         event_col=event_col,
         covariate_cols=covariate_cols,
     )
-    train_mean_auc, train_auc_df = compute_survlatent_auc_t(
+    train_mean_auc, train_auc_df = compute_ipcw_auc_t(
         train_mdf,
         train_pred,
         duration_col=duration_col,
@@ -1823,7 +1829,7 @@ def fit_final_multivariable_model(
         max_time_unit=auc_max_time_units,
         fixed_horizons=horizon_grid,
     )
-    test_mean_auc, test_auc_df = compute_survlatent_auc_t(
+    test_mean_auc, test_auc_df = compute_ipcw_auc_t(
         test_mdf,
         test_pred,
         duration_col=duration_col,
@@ -1983,56 +1989,83 @@ def print_top_hits(df: pd.DataFrame, *, endpoint: str, label: str = "univariate"
     print(hits.to_string(index=False))
 
 
+def _load_build_manifest(inputs_dir: Path) -> dict:
+    from build_prediction_inputs import BUILD_MANIFEST_FILENAME
+
+    manifest_path = inputs_dir / BUILD_MANIFEST_FILENAME
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"Missing build manifest at {manifest_path}. Run build_prediction_inputs.py first."
+        )
+    import json as _json
+
+    return _json.loads(manifest_path.read_text())
+
+
+def _load_prebuilt_landmark(
+    inputs_dir: Path,
+    landmark_day: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load aggregated + pre-treatment lab data written by build_prediction_inputs.py.
+
+    Returns (merged, train_val, test, pre_treatment_lab_df).
+    `merged` carries the original 3-way split column; `train_val` is the row
+    subset where split is in {train, valid} and `test` is split == "test".
+    """
+    from build_prediction_inputs import (
+        aggregated_filename,
+        pre_treatment_lab_filename,
+    )
+
+    agg_path = inputs_dir / aggregated_filename(landmark_day)
+    if not agg_path.exists():
+        raise FileNotFoundError(
+            f"Missing aggregated input for landmark +{landmark_day}d at {agg_path}. "
+            "Run build_prediction_inputs.py first."
+        )
+    aggregated = pd.read_csv(agg_path).set_index("DFCI_MRN")
+    if "split" not in aggregated.columns:
+        raise ValueError(f"{agg_path} is missing the 'split' column.")
+    train_val = aggregated.loc[aggregated["split"].isin(["train", "valid"])].copy()
+    test = aggregated.loc[aggregated["split"].eq("test")].copy()
+    if train_val.empty or test.empty:
+        raise ValueError(
+            f"Landmark +{landmark_day}d aggregated input has empty train_val or test "
+            f"({len(train_val)} / {len(test)})."
+        )
+
+    pre_path = inputs_dir / pre_treatment_lab_filename(landmark_day)
+    if not pre_path.exists():
+        raise FileNotFoundError(
+            f"Missing pre-landmark lab data for landmark +{landmark_day}d at {pre_path}. "
+            "Run build_prediction_inputs.py first."
+        )
+    pre_treatment_lab_df = pd.read_csv(pre_path)
+    return aggregated, train_val, test, pre_treatment_lab_df
+
+
 def main(args: argparse.Namespace) -> None:
+    global RESULTS
+    RESULTS = Path(args.output_dir)
     RESULTS.mkdir(parents=True, exist_ok=True)
     endpoints = normalize_endpoints(args.endpoints)
     landmark_days = normalize_landmark_days(args.landmark_days)
-
-    print("Loading data...")
-    df = pd.read_csv(args.data, low_memory=False)
-
-    print(
-        "Building landmark-specific cohorts and intersecting MRNs across "
-        f"requested landmarks: {landmark_days}"
-    )
-    landmark_payloads: dict[int, dict[str, pd.DataFrame]] = {}
-    merged_by_landmark: dict[int, pd.DataFrame] = {}
-    for landmark_day in landmark_days:
-        print(f"\n##### COHORT BUILD: LANDMARK +{landmark_day} DAYS #####")
-        outcome_df, feature_df, merged = build_landmark_merged(
-            df,
-            landmark_offset_days=landmark_day,
+    inputs_dir = Path(args.inputs_dir)
+    if not inputs_dir.exists():
+        raise FileNotFoundError(
+            f"Inputs dir {inputs_dir} not found. Run build_prediction_inputs.py first."
         )
-        landmark_payloads[landmark_day] = {
-            "outcome_df": outcome_df,
-            "feature_df": feature_df,
-            "merged": merged,
-        }
-        merged_by_landmark[landmark_day] = merged
-
-    landmark_availability, common_mrns = build_landmark_availability_table(merged_by_landmark)
-    common_mrns = landmark_payloads[landmark_days[0]]["merged"].index.intersection(common_mrns)
-    if len(common_mrns) == 0:
-        raise ValueError("No MRNs were eligible at every requested landmark.")
-
-    print(f"\nCommon MRN cohort across landmarks {landmark_days}: {len(common_mrns)} patients")
-    base_landmark_day = landmark_days[0]
-    _, _, base_merged, _, _, split_assignments, split_stratification = build_aligned_cohort(
-        df,
-        test_frac=args.test_frac,
-        seed=args.seed,
-        landmark_offset_days=base_landmark_day,
-        required_mrns=common_mrns,
+    build_manifest = _load_build_manifest(inputs_dir)
+    min_patient_coverage = float(build_manifest["min_patient_coverage"])
+    args.auc_time_unit_days = int(build_manifest["auc_time_unit_days"])
+    args.auc_quantiles = tuple(build_manifest["auc_quantiles"])
+    args.auc_max_time_units = None
+    auc_horizons_by_landmark = build_manifest["auc_horizons_by_landmark"]
+    print(
+        f"Loading prebuilt prediction inputs from {inputs_dir} "
+        f"(min_patient_coverage={min_patient_coverage}, "
+        f"auc_time_unit_days={args.auc_time_unit_days} per build manifest)"
     )
-    print(f"Split stratification (derived once on landmark +{base_landmark_day}d): {split_stratification}")
-
-    split_assignments.rename_axis("DFCI_MRN").reset_index().to_csv(
-        RESULTS / SPLIT_ASSIGNMENTS_FILENAME,
-        index=False,
-    )
-    landmark_availability["included_all_landmarks"] = landmark_availability["DFCI_MRN"].isin(common_mrns)
-    landmark_availability["split"] = landmark_availability["DFCI_MRN"].map(split_assignments)
-    landmark_availability.to_csv(RESULTS / LANDMARK_AVAILABILITY_FILENAME, index=False)
 
     feature_selection_frames: list[pd.DataFrame] = []
     univariate_nobs_adjusted_frames: list[pd.DataFrame] = []
@@ -2077,19 +2110,13 @@ def main(args: argparse.Namespace) -> None:
 
     for landmark_day in landmark_days:
         print(f"\n##### LANDMARK ANALYSES: +{landmark_day} DAYS #####")
-        feature_df = landmark_payloads[landmark_day]["feature_df"]
-        merged = (
-            landmark_payloads[landmark_day]["merged"]
-            .loc[common_mrns]
-            .copy()
+        merged, train_val, test, pre_treatment_lab_df = _load_prebuilt_landmark(
+            inputs_dir, landmark_day
         )
-        merged, train_val, test, _, _ = apply_split_assignments(
-            merged,
-            split_assignments=split_assignments,
-            split_stratification=split_stratification,
-        )
-        raw_feature_cols = feature_df.columns.tolist()
+        raw_feature_cols = [c for c in merged.columns if c not in OUTCOME_COLUMNS]
         univariate_data = merged.copy()
+
+        split_stratification = "prebuilt"
 
         assert_no_test_leakage(
             test_mrns=test.index,
@@ -2098,18 +2125,12 @@ def main(args: argparse.Namespace) -> None:
         )
 
         # Canonical lab list: derived from pre-treatment lab observations of
-        # train_val MRNs only, then shared across the per-stat feature filter
-        # below and downstream pipelines (XGBoost, DeepHit) via the persisted
-        # cox_agg_canonical_labs_train_val.csv artifact.
-        pre_treatment_lab_df = build_pre_treatment_lab_long(
-            df,
-            cohort_index=merged.index,
-            landmark_offset_days=landmark_day,
-        )
+        # train_val MRNs only, mirroring build_prediction_inputs.py so the
+        # per-stat feature filter agrees with the upstream canonical set.
         canonical_labs = select_canonical_labs(
             pre_treatment_lab_df,
             mrns=train_val.index,
-            min_coverage=args.min_patient_coverage,
+            min_coverage=min_patient_coverage,
         )
         for lab in canonical_labs:
             canonical_labs_train_val_rows.append(
@@ -2122,7 +2143,7 @@ def main(args: argparse.Namespace) -> None:
         selected_feature_cols, feature_meta = select_feature_columns(
             train_val,
             raw_feature_cols,
-            min_patient_coverage=args.min_patient_coverage,
+            min_patient_coverage=min_patient_coverage,
             restrict_to_labs=canonical_labs,
         )
         feature_meta_selected = feature_meta.loc[
@@ -2147,31 +2168,32 @@ def main(args: argparse.Namespace) -> None:
         print(f"Canonical labs (train_val): {len(canonical_labs)}")
         print(f"Selected summary-lab features (train_val pre-filter): {len(selected_feature_cols)}")
 
-        # Fixed AUC(t) / Brier horizon grid per endpoint, derived ONCE from
-        # train_val event times. Reused by every CV fold and by the test eval
-        # so no test event time can drive horizon selection.
+        # AUC(t) horizon grid is loaded from build_manifest.json so Cox / XGBoost /
+        # DeepHit all evaluate on the identical horizon set per (landmark, endpoint).
+        landmark_horizons = auc_horizons_by_landmark.get(str(int(landmark_day)))
+        if landmark_horizons is None:
+            raise KeyError(
+                f"build_manifest.json has no auc_horizons_by_landmark entry for landmark +{landmark_day}d. "
+                "Re-run build_prediction_inputs.py for this landmark."
+            )
         endpoint_horizon_grids: dict[str, np.ndarray] = {}
         for endpoint in endpoints:
-            duration_col = ENDPOINTS[endpoint]["duration_col"]
-            event_col = ENDPOINTS[endpoint]["event_col"]
-            grid = compute_horizon_grid(
-                train_val,
-                duration_col=duration_col,
-                event_col=event_col,
-                quantiles=DEFAULT_AUC_QUANTILES,
-                time_unit_days=args.auc_time_unit_days,
-            )
+            if endpoint not in landmark_horizons:
+                raise KeyError(
+                    f"build_manifest.json missing horizons for endpoint {endpoint!r} at landmark +{landmark_day}d."
+                )
+            grid = np.asarray(landmark_horizons[endpoint], dtype=float)
             endpoint_horizon_grids[endpoint] = grid
             grid_df = horizon_grid_frame(
                 grid,
-                quantiles=DEFAULT_AUC_QUANTILES,
+                quantiles=args.auc_quantiles,
                 time_unit_days=args.auc_time_unit_days,
                 endpoint=endpoint,
             )
             grid_df.insert(0, "landmark_days", landmark_day)
             horizon_grid_rows.append(grid_df)
             print(
-                f"Horizon grid ({endpoint}): "
+                f"Horizon grid ({endpoint}, from manifest): "
                 + ", ".join(f"{int(h)}" for h in grid)
                 + f" {args.auc_time_unit_days}-day units"
             )
@@ -2216,7 +2238,7 @@ def main(args: argparse.Namespace) -> None:
                     auc_max_time_units=args.auc_max_time_units,
                     pre_treatment_lab_df=pre_treatment_lab_df,
                     horizon_grid=horizon_grid,
-                    min_patient_coverage=args.min_patient_coverage,
+                    min_patient_coverage=min_patient_coverage,
                 )
                 if not fold_canonical_labs_df.empty:
                     fold_canonical_labs_df.insert(0, "landmark_days", landmark_day)
@@ -2283,10 +2305,9 @@ def main(args: argparse.Namespace) -> None:
         pd.concat(horizon_grid_rows, ignore_index=True).to_csv(
             RESULTS / HORIZON_GRID_FILENAME, index=False
         )
-    if canonical_labs_train_val_rows:
-        pd.DataFrame(canonical_labs_train_val_rows).to_csv(
-            RESULTS / CANONICAL_LABS_TRAIN_VAL_FILENAME, index=False
-        )
+    # canonical_labs_train_val is owned by build_prediction_inputs.py; we keep
+    # canonical_labs_train_val_rows in memory only for cross-checking.
+    _ = canonical_labs_train_val_rows
     if canonical_labs_fold_rows:
         pd.concat(canonical_labs_fold_rows, ignore_index=True).to_csv(
             RESULTS / CANONICAL_LABS_FOLDS_FILENAME, index=False
@@ -2313,13 +2334,9 @@ def main(args: argparse.Namespace) -> None:
         )
 
     print("\nSaved:")
-    print(f"  results/{SPLIT_ASSIGNMENTS_FILENAME}")
-    print(f"  results/{LANDMARK_AVAILABILITY_FILENAME}")
     print("  results/cox_agg_feature_selection.csv")
     if horizon_grid_rows:
         print(f"  results/{HORIZON_GRID_FILENAME}")
-    if canonical_labs_train_val_rows:
-        print(f"  results/{CANONICAL_LABS_TRAIN_VAL_FILENAME}")
     if canonical_labs_fold_rows:
         print(f"  results/{CANONICAL_LABS_FOLDS_FILENAME}")
     if univariate_nobs_adjusted_frames:
@@ -2336,7 +2353,16 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", default=str(DATA_PATH / "longitudinal_prediction_data.csv"))
+    parser.add_argument(
+        "--inputs-dir",
+        default=str(RESULTS / "prediction_inputs"),
+        help="Directory containing prebuilt inputs from build_prediction_inputs.py.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=str(RESULTS),
+        help="Directory for Cox result CSVs.",
+    )
     parser.add_argument(
         "--endpoints",
         nargs="+",
@@ -2349,11 +2375,7 @@ if __name__ == "__main__":
         nargs="+",
         type=int,
         default=DEFAULT_LANDMARK_DAYS,
-        help=(
-            "Landmark offsets in days relative to first treatment. When multiple "
-            "values are provided, analyses use the MRN intersection across all "
-            "requested landmarks."
-        ),
+        help="Landmark offsets to analyze. Each must have prebuilt inputs in --inputs-dir.",
     )
     parser.add_argument(
         "--analysis",
@@ -2365,27 +2387,13 @@ if __name__ == "__main__":
         "--seed",
         type=int,
         default=DEFAULT_SEED,
-        help="Random seed for the patient split and cross-validation.",
-    )
-    parser.add_argument(
-        "--test-frac",
-        type=float,
-        default=DEFAULT_TEST_FRAC,
-        help="Fraction of patients reserved for the held-out test set.",
+        help="Random seed for cross-validation. The patient split is fixed by build_prediction_inputs.py.",
     )
     parser.add_argument(
         "--n-folds",
         type=int,
         default=DEFAULT_N_FOLDS,
         help="Number of cross-validation folds within the train/validation cohort.",
-    )
-    parser.add_argument(
-        "--min-patient-coverage",
-        "--min-lab-availability",
-        dest="min_patient_coverage",
-        type=float,
-        default=DEFAULT_MIN_PATIENT_COVERAGE,
-        help="Minimum train/validation lab availability required for a feature to be selected.",
     )
     parser.add_argument(
         "--min-events-per-feature",
@@ -2413,20 +2421,6 @@ if __name__ == "__main__":
         default=DEFAULT_CV_L1_RATIOS,
         help="Elastic-net L1 mixing values (0=ridge, 1=lasso) searched during 5-fold CV.",
     )
-    parser.add_argument(
-        "--auc-time-unit-days",
-        type=int,
-        default=DEFAULT_AUC_TIME_UNIT_DAYS,
-        help="Time unit used for Cox AUC(t), matching SurvLatent ODE input bins by default.",
-    )
-    parser.add_argument(
-        "--auc-max-time-units",
-        type=int,
-        default=None,
-        help=(
-            "Optional administrative censoring horizon for Cox AUC(t), in "
-            "--auc-time-unit-days units. Use 260 to match the default "
-            "SurvLatent --max-pred-window."
-        ),
-    )
+    # AUC(t) time unit, quantiles, horizons all come from build_manifest.json
+    # so Cox/XGB/DeepHit evaluate on the identical horizon set.
     main(parser.parse_args())

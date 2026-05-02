@@ -1,8 +1,8 @@
 """
 Dynamic-DeepHit-style recurrent survival model for longitudinal lab histories.
 
-This script consumes the person-period CSV produced by
-survlatent_ode/build_input.py and trains a compact GRU model with a discrete
+This script consumes the per-landmark person-period CSV produced by
+build_prediction_inputs.py and trains a compact GRU model with a discrete
 competing-risks likelihood. It is intentionally self-contained so it does not
 depend on the original TensorFlow 1.x Dynamic-DeepHit reference code.
 
@@ -99,7 +99,7 @@ from helper import (  # noqa: E402
 
 DEFAULT_RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis")
 DEFAULT_SEED = 42
-DEFAULT_MAX_PRED_WINDOW = 52
+DEFAULT_MAX_PRED_WINDOW = 260
 DEFAULT_AUC_QUANTILES = (0.25, 0.375, 0.50, 0.625, 0.75)
 DEFAULT_N_FOLDS = 5
 DEFAULT_CV_HIDDEN_DIMS = [32, 64, 128]
@@ -178,6 +178,9 @@ def patient_targets(
             duration = float(np.nanmin(durations_arr[valid_times]))
             label = 0
 
+        uncensored_duration = duration
+        uncensored_label = label
+
         if duration > max_pred_window:
             duration = float(max_pred_window)
             label = 0
@@ -190,9 +193,49 @@ def patient_targets(
                 "duration": duration,
                 "duration_bin": duration_bin,
                 "label": label,
+                "uncensored_duration": uncensored_duration,
+                "uncensored_label": uncensored_label,
             }
         )
     return pd.DataFrame(rows).set_index(id_col)
+
+
+def fixed_horizon_grid_from_targets(
+    train_val_targets: pd.DataFrame,
+    *,
+    event_idx: int,
+    event_name: str,
+    quantiles: tuple[float, ...],
+    max_pred_window: int,
+) -> np.ndarray:
+    """Match Cox/XGBoost horizon selection: train/valid event-time quantiles.
+
+    DeepHit durations are already in the same integer time unit as the
+    longitudinal input. We use uncensored event durations for quantile selection
+    and require the model prediction window to cover the selected grid.
+    """
+    if {"uncensored_label", "uncensored_duration"}.issubset(train_val_targets.columns):
+        event_mask = train_val_targets["uncensored_label"].eq(event_idx)
+        event_durations = train_val_targets.loc[event_mask, "uncensored_duration"]
+    else:
+        event_mask = train_val_targets["label"].eq(event_idx)
+        event_durations = train_val_targets.loc[event_mask, "duration"]
+    event_durations = pd.to_numeric(event_durations, errors="coerce").to_numpy(dtype=float)
+    event_durations = event_durations[np.isfinite(event_durations) & (event_durations > 0)]
+    if len(event_durations) == 0:
+        return np.asarray([], dtype=float)
+    horizons = np.asarray(
+        [int(v) for v in np.quantile(event_durations, list(quantiles))],
+        dtype=float,
+    )
+    horizons = np.unique(horizons[horizons > 0])
+    if len(horizons) and horizons.max() > float(max_pred_window):
+        raise ValueError(
+            f"DeepHit --max-pred-window={max_pred_window} is shorter than the "
+            f"largest train/valid quantile horizon for {event_name} ({int(horizons.max())}). "
+            "Increase --max-pred-window so DeepHit and Cox/XGBoost AUC horizons are comparable."
+        )
+    return horizons
 
 
 def fit_normalization(df: pd.DataFrame, *, feature_cols: list[str], train_ids: set) -> tuple[pd.Series, pd.Series]:
@@ -845,6 +888,34 @@ def main(args: argparse.Namespace) -> None:
     manifest = json.loads(manifest_path.read_text())
     df = pd.read_csv(input_csv, low_memory=False)
 
+    # Per-(landmark, endpoint) horizons live in build_manifest.json (sibling of
+    # the longitudinal CSV). Loading them here so DeepHit, Cox, and XGBoost
+    # evaluate mean AUC(t) on the identical horizon set.
+    build_manifest_path = input_csv.parent / "build_manifest.json"
+    if not build_manifest_path.exists():
+        raise FileNotFoundError(
+            f"Missing {build_manifest_path}. Run build_prediction_inputs.py first."
+        )
+    build_manifest = json.loads(build_manifest_path.read_text())
+    args.auc_quantiles = list(build_manifest["auc_quantiles"])
+    landmark_horizons = build_manifest["auc_horizons_by_landmark"].get(
+        str(int(manifest["landmark_days"]))
+    )
+    if landmark_horizons is None:
+        raise KeyError(
+            f"build_manifest.json has no auc_horizons_by_landmark entry for landmark "
+            f"+{manifest['landmark_days']}d."
+        )
+    max_manifest_horizon = max(
+        (h for hs in landmark_horizons.values() for h in hs), default=0
+    )
+    if args.max_pred_window < max_manifest_horizon:
+        raise ValueError(
+            f"--max-pred-window={args.max_pred_window} is shorter than the largest "
+            f"manifest horizon ({max_manifest_horizon}). Increase it so DeepHit's "
+            "AUC grid is comparable to Cox/XGBoost."
+        )
+
     id_col = manifest["id_col"]
     time_col = manifest["time_col"]
     event_cols, time_cols, event_names = event_config(args.config, manifest)
@@ -880,28 +951,23 @@ def main(args: argparse.Namespace) -> None:
         patient_static.index.intersection(sorted(train_val_ids))
     ].copy()
 
-    # Fixed AUC / Brier horizon grid per cause, derived once from train_val
-    # event durations only. Shared by every CV fold and by the test eval.
+    # AUC horizons sourced from build_manifest.json so Cox / XGBoost / DeepHit
+    # evaluate mean AUC(t) on the identical (landmark, endpoint) horizon set.
     train_val_targets = targets.loc[
         targets.index.map(str).isin(train_val_ids)
     ].copy()
     fixed_horizons_by_event: dict[str, np.ndarray] = {}
-    for event_idx, event_name in enumerate(event_names, start=1):
-        event_durations = train_val_targets.loc[
-            train_val_targets["label"].eq(event_idx),
-            "duration",
-        ].to_numpy(dtype=float)
-        event_durations = event_durations[
-            np.isfinite(event_durations) & (event_durations > 0)
-        ]
-        if len(event_durations):
-            horizons = np.asarray(
-                [int(v) for v in np.quantile(event_durations, tuple(args.auc_quantiles))],
-                dtype=float,
+    for event_name in event_names:
+        manifest_lookup_key = event_name.lower()
+        manifest_horizons = landmark_horizons.get(manifest_lookup_key)
+        if manifest_horizons is None:
+            raise KeyError(
+                f"build_manifest.json has no horizons for event {event_name!r} "
+                f"at landmark +{manifest['landmark_days']}d."
             )
-            horizons = np.unique(
-                horizons[(horizons > 0) & (horizons <= args.max_pred_window)]
-            )
+        horizons = np.asarray(manifest_horizons, dtype=float)
+        horizons = horizons[(horizons > 0) & (horizons <= float(args.max_pred_window))]
+        if len(horizons):
             fixed_horizons_by_event[event_name] = horizons
 
     fold_df = pd.DataFrame()
@@ -1055,11 +1121,38 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input-csv", default=str(DEFAULT_RESULTS / "survlatent_ode_input.csv"))
-    parser.add_argument("--manifest", default=str(DEFAULT_RESULTS / "survlatent_ode_manifest.json"))
+    parser.add_argument(
+        "--inputs-dir",
+        default=str(DEFAULT_RESULTS / "prediction_inputs"),
+        help="Directory containing prebuilt inputs from build_prediction_inputs.py.",
+    )
+    parser.add_argument(
+        "--landmark-day",
+        type=int,
+        default=0,
+        help="Landmark to load. Resolves to longitudinal_landmark{D}.csv in --inputs-dir unless overridden.",
+    )
+    parser.add_argument(
+        "--input-csv",
+        default=None,
+        help="Override longitudinal CSV path (defaults to longitudinal_landmark{landmark_days}.csv).",
+    )
+    parser.add_argument(
+        "--manifest",
+        default=None,
+        help="Override manifest path (defaults to longitudinal_landmark{landmark_days}_manifest.json).",
+    )
     parser.add_argument("--output-dir", default=str(DEFAULT_RESULTS))
     parser.add_argument("--config", default="competing", help="competing, PLATINUM, or DEATH")
-    parser.add_argument("--max-pred-window", type=int, default=DEFAULT_MAX_PRED_WINDOW)
+    parser.add_argument(
+        "--max-pred-window",
+        type=int,
+        default=DEFAULT_MAX_PRED_WINDOW,
+        help=(
+            "Discrete prediction window in input time bins. Must cover the "
+            "train/valid event-time quantile horizons used for Cox/XGBoost-comparable AUC."
+        ),
+    )
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.20)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -1070,7 +1163,7 @@ if __name__ == "__main__":
     parser.add_argument("--min-delta", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--cuda", action="store_true")
-    parser.add_argument("--auc-quantiles", nargs="+", type=float, default=list(DEFAULT_AUC_QUANTILES))
+    # auc_quantiles loaded from build_manifest.json so all three models share one grid.
     parser.add_argument("--n-folds", type=int, default=DEFAULT_N_FOLDS)
     parser.add_argument(
         "--cv-hidden-dims",
@@ -1095,4 +1188,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip 5-fold CV; fit a single model with --hidden-dim/--dropout/--lr.",
     )
-    main(parser.parse_args())
+    parsed = parser.parse_args()
+    inputs_dir = Path(parsed.inputs_dir)
+    if parsed.input_csv is None:
+        parsed.input_csv = str(inputs_dir / f"longitudinal_landmark{int(parsed.landmark_day)}.csv")
+    if parsed.manifest is None:
+        parsed.manifest = str(
+            inputs_dir / f"longitudinal_landmark{int(parsed.landmark_day)}_manifest.json"
+        )
+    main(parsed)
