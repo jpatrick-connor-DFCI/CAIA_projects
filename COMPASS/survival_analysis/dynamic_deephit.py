@@ -26,6 +26,7 @@ Outputs (per --config):
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import sys
 from itertools import product
@@ -33,6 +34,20 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+try:
+    import psutil
+
+    _PROC = psutil.Process()
+except ModuleNotFoundError:  # pragma: no cover - psutil is optional
+    _PROC = None
+
+
+def _rss_gb() -> float:
+    """Resident set size in GB. Returns nan if psutil isn't installed."""
+    if _PROC is None:
+        return float("nan")
+    return _PROC.memory_info().rss / 1e9
 
 try:
     import torch
@@ -99,7 +114,7 @@ from helper import (  # noqa: E402
 
 DEFAULT_RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis")
 DEFAULT_SEED = 42
-DEFAULT_MAX_PRED_WINDOW = 260
+DEFAULT_MAX_PRED_WINDOW = 100
 DEFAULT_AUC_QUANTILES = (0.25, 0.375, 0.50, 0.625, 0.75)
 DEFAULT_N_FOLDS = 5
 DEFAULT_CV_HIDDEN_DIMS = [32, 64, 128]
@@ -513,6 +528,16 @@ def train_evaluate(
     if best_state is not None:
         model.load_state_dict(best_state)
     pred = predict(model, eval_loader, device)
+
+    # Drop heavy refs before returning so PyTorch's allocator can recycle the
+    # memory before the next CV iteration runs. Without this, RSS climbs
+    # monotonically across the 27 x 5 CV grid and the kernel OOM-kills mid-run.
+    del model, optimizer, train_loader, valid_loader, eval_loader
+    del train_ds, valid_ds, eval_ds, sequences, best_state
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    gc.collect()
+
     return pred, history, best_valid
 
 
@@ -578,6 +603,12 @@ def cv_run(
                 row[f"c_index_val__{event_name}"] = np.nan
                 row[f"mean_auc_t_val__{event_name}"] = np.nan
                 row[f"integrated_brier_val__{event_name}"] = np.nan
+            # Pre-bind so the `del` after the try always finds these locals.
+            pred = None
+            history = None
+            fold_train_targets = None
+            metrics_df = None
+            ibs_by_event = None
             try:
                 pred, history, best_valid = train_evaluate(
                     df=df,
@@ -626,6 +657,14 @@ def cv_run(
             except Exception as exc:  # pragma: no cover - defensive
                 row["note"] = f"fold_failed: {exc}"
             fold_rows.append(row)
+
+            # Per-fold cleanup so RSS doesn't accumulate across the CV grid.
+            del pred, history, fold_train_targets, metrics_df, ibs_by_event
+            if torch is not None and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+            row["rss_gb_after_fold"] = round(_rss_gb(), 2)
+
             if hasattr(cv_bar, "set_postfix"):
                 cv_bar.set_postfix(
                     {
@@ -638,6 +677,7 @@ def cv_run(
                             if np.isfinite(row.get("best_valid_loss", np.nan))
                             else "nan"
                         ),
+                        "rss_gb": row["rss_gb_after_fold"],
                     }
                 )
             cv_bar.update(1)
