@@ -1514,6 +1514,37 @@ def make_cv_splitter(
     return KFold(n_splits=n_folds, shuffle=True, random_state=seed), None, "unstratified"
 
 
+def _summarize_fold_failures(fold_df: pd.DataFrame) -> str:
+    """Render a per-(penalizer, l1_ratio, fold) note table for CV diagnostics."""
+    if fold_df is None or fold_df.empty:
+        return "  (no fold rows recorded)"
+    cols = [
+        "fold",
+        "penalizer",
+        "l1_ratio",
+        "n_events_train",
+        "n_events_val",
+        "n_canonical_labs",
+        "n_selected_features",
+        "c_index_val",
+        "note",
+    ]
+    available = [c for c in cols if c in fold_df.columns]
+    notes = (
+        fold_df["note"].fillna("").astype(str).value_counts().head(5).to_dict()
+        if "note" in fold_df.columns
+        else {}
+    )
+    note_summary = "\n".join(f"    {n:>4}x  {note!r}" for note, n in notes.items())
+    table = fold_df[available].head(20).to_string(index=False)
+    return (
+        "  Most common per-fold notes:\n"
+        f"{note_summary}\n"
+        "  First 20 fold rows:\n"
+        f"{table}"
+    )
+
+
 def tune_multivariable_model(
     train_val: pd.DataFrame,
     *,
@@ -1709,12 +1740,16 @@ def tune_multivariable_model(
     cv_df["all_folds_valid"] = cv_df["n_valid_folds"].eq(int(n_folds))
 
     if cv_df["n_valid_folds"].eq(0).all():
-        raise RuntimeError(f"All CV fits failed for endpoint '{endpoint}'.")
+        diagnostic = _summarize_fold_failures(fold_df)
+        raise RuntimeError(
+            f"All CV fits failed for endpoint '{endpoint}'.\n{diagnostic}"
+        )
     if not cv_df["all_folds_valid"].any():
         best_valid = int(cv_df["n_valid_folds"].max())
+        diagnostic = _summarize_fold_failures(fold_df)
         raise RuntimeError(
             f"No hyperparameter setting produced valid fits in all {n_folds} folds for endpoint "
-            f"'{endpoint}'. Best observed validity was {best_valid}/{n_folds} folds."
+            f"'{endpoint}'. Best observed validity was {best_valid}/{n_folds} folds.\n{diagnostic}"
         )
 
     best_row = (
