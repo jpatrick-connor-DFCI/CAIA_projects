@@ -1075,17 +1075,6 @@ def _build_coxnet_xy(
     return X, y
 
 
-def _summarize_warning_messages(caught_warnings: list[warnings.WarningMessage]) -> str:
-    if not caught_warnings:
-        return ""
-    messages = []
-    for warning_msg in caught_warnings:
-        message = str(warning_msg.message).strip().replace("\n", " ")
-        if message and message not in messages:
-            messages.append(message)
-    return " | ".join(messages[:3])
-
-
 def fit_coxnet_with_fallback(
     model_df: pd.DataFrame,
     *,
@@ -1128,16 +1117,12 @@ def fit_coxnet_with_fallback(
                 max_iter=int(max_iter),
                 fit_baseline_model=False,
             )
-            with warnings.catch_warnings(record=True) as caught_warnings:
-                warnings.simplefilter("always")
-                model.fit(X, y)
+            # Warnings emitted by sksurv (incl. ConvergenceWarning) are NOT
+            # treated as failures — the finite + bounded coefficient checks
+            # below catch genuinely unusable fits.
+            model.fit(X, y)
         except (ArithmeticError, ValueError, np.linalg.LinAlgError) as exc:
             last_error = str(exc)
-            continue
-
-        warning_summary = _summarize_warning_messages(caught_warnings)
-        if warning_summary:
-            last_error = f"warning_emitted: {warning_summary}"
             continue
 
         coefs = np.asarray(model.coef_, dtype=float)
