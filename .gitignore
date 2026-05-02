@@ -2,6 +2,18 @@
 __pycache__/
 *.py[cod]
 
+# OS / editor / tool caches
+.DS_Store
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+*.swp
+*~
+
 # Only track COMPASS and IPIO folders
 /*
 !COMPASS/
