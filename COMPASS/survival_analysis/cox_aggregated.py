@@ -835,7 +835,8 @@ def build_model_matrices(
 
         if missing_indicator_cols:
             indicator_source_cols = [
-                col.removesuffix("__missing") for col in missing_indicator_cols
+                col[: -len("__missing")] if col.endswith("__missing") else col
+                for col in missing_indicator_cols
             ]
             x_train_missing = train_df[indicator_source_cols].isna().astype(float).to_numpy()
             x_eval_missing = eval_df[indicator_source_cols].isna().astype(float).to_numpy()
