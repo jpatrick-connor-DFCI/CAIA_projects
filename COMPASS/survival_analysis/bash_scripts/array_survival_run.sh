@@ -7,11 +7,11 @@
 #SBATCH --mem=32G
 #SBATCH --time=48:00:00
 #SBATCH --array=0-0%1
-#SBATCH --output=COMPASS/PROFILE/survival_analysis/bash_scripts/array_survival_run/output/%A_%a.out
-#SBATCH --error=COMPASS/PROFILE/survival_analysis/bash_scripts/array_survival_run/error/%A_%a.err
+#SBATCH --output=COMPASS/survival_analysis/bash_scripts/array_survival_run/output/%A_%a.out
+#SBATCH --error=COMPASS/survival_analysis/bash_scripts/array_survival_run/error/%A_%a.err
 
 PROJECT_ROOT=${PROJECT_ROOT:-/data/gusev/USERS/jpconnor/code/CAIA}
-SURVIVAL_DIR="$PROJECT_ROOT/COMPASS/PROFILE/survival_analysis"
+SURVIVAL_DIR="$PROJECT_ROOT/COMPASS/survival_analysis"
 MANIFEST=${MANIFEST:-$SURVIVAL_DIR/bash_scripts/slurm_manifests/survival_tasks.tsv}
 ROWS_PER_TASK=${ROWS_PER_TASK:-1}
 INPUTS_DIR=${INPUTS_DIR:-/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis/prediction_inputs}
@@ -28,8 +28,8 @@ fi
 
 cd "$PROJECT_ROOT"
 mkdir -p \
-  COMPASS/PROFILE/survival_analysis/bash_scripts/array_survival_run/output \
-  COMPASS/PROFILE/survival_analysis/bash_scripts/array_survival_run/error \
+  COMPASS/survival_analysis/bash_scripts/array_survival_run/output \
+  COMPASS/survival_analysis/bash_scripts/array_survival_run/error \
   "$OUTPUT_DIR"
 
 module load miniforge3

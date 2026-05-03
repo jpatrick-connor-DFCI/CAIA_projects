@@ -2,13 +2,13 @@
 # Launch wrapper for build_prediction_inputs.sh.
 #
 # Usage:
-#   bash COMPASS/PROFILE/survival_analysis/bash_scripts/launch_build_prediction_inputs.sh
-#   LANDMARK_DAYS="0 90" bash COMPASS/PROFILE/survival_analysis/bash_scripts/launch_build_prediction_inputs.sh
+#   bash COMPASS/survival_analysis/bash_scripts/launch_build_prediction_inputs.sh
+#   LANDMARK_DAYS="0 90" bash COMPASS/survival_analysis/bash_scripts/launch_build_prediction_inputs.sh
 
 set -euo pipefail
 
 PROJECT_ROOT="${PROJECT_ROOT:-/data/gusev/USERS/jpconnor/code/CAIA}"
-SURVIVAL_DIR="$PROJECT_ROOT/COMPASS/PROFILE/survival_analysis"
+SURVIVAL_DIR="$PROJECT_ROOT/COMPASS/survival_analysis"
 INPUTS_DIR="${INPUTS_DIR:-/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis/prediction_inputs}"
 
 mkdir -p \

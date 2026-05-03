@@ -6,11 +6,11 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=08:00:00
-#SBATCH --output=COMPASS/PROFILE/survival_analysis/bash_scripts/build_prediction_inputs/output/%j.out
-#SBATCH --error=COMPASS/PROFILE/survival_analysis/bash_scripts/build_prediction_inputs/error/%j.err
+#SBATCH --output=COMPASS/survival_analysis/bash_scripts/build_prediction_inputs/output/%j.out
+#SBATCH --error=COMPASS/survival_analysis/bash_scripts/build_prediction_inputs/error/%j.err
 
 PROJECT_ROOT=${PROJECT_ROOT:-/data/gusev/USERS/jpconnor/code/CAIA}
-SURVIVAL_DIR="$PROJECT_ROOT/COMPASS/PROFILE/survival_analysis"
+SURVIVAL_DIR="$PROJECT_ROOT/COMPASS/survival_analysis"
 DATA=${DATA:-/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/longitudinal_prediction_data.csv}
 V3_LABELS_PATH=${V3_LABELS_PATH:-/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/v3_outputs/LLM_v3_labels.tsv}
 INPUTS_DIR=${INPUTS_DIR:-/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis/prediction_inputs}
@@ -27,8 +27,8 @@ fi
 
 cd "$PROJECT_ROOT"
 mkdir -p \
-  COMPASS/PROFILE/survival_analysis/bash_scripts/build_prediction_inputs/output \
-  COMPASS/PROFILE/survival_analysis/bash_scripts/build_prediction_inputs/error \
+  COMPASS/survival_analysis/bash_scripts/build_prediction_inputs/output \
+  COMPASS/survival_analysis/bash_scripts/build_prediction_inputs/error \
   "$INPUTS_DIR"
 
 module load miniforge3

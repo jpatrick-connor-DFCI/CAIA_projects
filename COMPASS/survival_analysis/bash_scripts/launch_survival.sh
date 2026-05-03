@@ -5,14 +5,14 @@
 # Environment variables accepted here are forwarded to the array script.
 #
 # Usage:
-#   bash COMPASS/PROFILE/survival_analysis/bash_scripts/launch_survival.sh
-#   ROWS_PER_TASK=2 bash COMPASS/PROFILE/survival_analysis/bash_scripts/launch_survival.sh
-#   MANIFEST=/path/to/tasks.tsv bash COMPASS/PROFILE/survival_analysis/bash_scripts/launch_survival.sh
+#   bash COMPASS/survival_analysis/bash_scripts/launch_survival.sh
+#   ROWS_PER_TASK=2 bash COMPASS/survival_analysis/bash_scripts/launch_survival.sh
+#   MANIFEST=/path/to/tasks.tsv bash COMPASS/survival_analysis/bash_scripts/launch_survival.sh
 
 set -euo pipefail
 
 PROJECT_ROOT="${PROJECT_ROOT:-/data/gusev/USERS/jpconnor/code/CAIA}"
-SURVIVAL_DIR="$PROJECT_ROOT/COMPASS/PROFILE/survival_analysis"
+SURVIVAL_DIR="$PROJECT_ROOT/COMPASS/survival_analysis"
 MANIFEST="${MANIFEST:-$SURVIVAL_DIR/bash_scripts/slurm_manifests/survival_tasks.tsv}"
 ROWS_PER_TASK="${ROWS_PER_TASK:-1}"
 INPUTS_DIR="${INPUTS_DIR:-/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis/prediction_inputs}"
