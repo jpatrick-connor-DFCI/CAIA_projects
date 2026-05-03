@@ -282,7 +282,28 @@ def _coerce_platinum(series: pd.Series) -> pd.Series:
     return numeric.fillna(platinum.astype(int)).fillna(0).astype(int)
 
 
-def make_outcome_df(df: pd.DataFrame, *, landmark_offset_days: int = 0) -> pd.DataFrame:
+def make_outcome_df(
+    df: pd.DataFrame,
+    *,
+    landmark_offset_days: int = 0,
+    anchor_col: str = "t_first_treatment",
+    extra_anchor_cols: tuple[str, ...] = (),
+    require_first_treatment: bool = True,
+) -> pd.DataFrame:
+    """Build the per-patient outcome table rebased to a landmark.
+
+    Args:
+        landmark_offset_days: days added to ``anchor_col`` to define the landmark.
+        anchor_col: column whose value (in days from first record) anchors the
+            landmark. Defaults to ``t_first_treatment``; the genomic arm passes
+            ``t_sample``.
+        extra_anchor_cols: additional patient-level columns to preserve through
+            the dedup (e.g. ``("t_sample", "SAMPLE_COLLECTION_DT")`` for the
+            genomic arm). These are kept in the returned frame.
+        require_first_treatment: whether the cohort filter requires
+            ``FIRST_TREATMENT == 1``. Off for the genomic arm where treatment
+            timing is irrelevant to the outcome window.
+    """
     patient_level_cols = [
         "DFCI_MRN",
         AGE_COL,
@@ -299,6 +320,7 @@ def make_outcome_df(df: pd.DataFrame, *, landmark_offset_days: int = 0) -> pd.Da
         "t_platinum",
         "t_last_contact",
         "t_death",
+        *extra_anchor_cols,
     ]
     available_cols = [col for col in patient_level_cols if col in df.columns]
     if "DFCI_MRN" not in available_cols:
@@ -369,7 +391,9 @@ def make_outcome_df(df: pd.DataFrame, *, landmark_offset_days: int = 0) -> pd.Da
         pat["t_platinum"].fillna(pat["t_last_contact"]),
     )
 
-    landmark_time = pat["t_first_treatment"].astype(float) + float(landmark_offset_days)
+    if anchor_col not in pat.columns:
+        raise ValueError(f"make_outcome_df: anchor_col {anchor_col!r} missing from input.")
+    landmark_time = pat[anchor_col].astype(float) + float(landmark_offset_days)
     for duration_col in ["t_last_contact", "t_death", "t_platinum"]:
         pat[f"{duration_col}_from_first_record"] = pat[duration_col]
         pat[duration_col] = pat[duration_col].astype(float) - landmark_time
@@ -383,9 +407,8 @@ def make_outcome_df(df: pd.DataFrame, *, landmark_offset_days: int = 0) -> pd.Da
 
     valid = (
         pat["FIRST_RECORD_DATE"].notna()
-        & pat["FIRST_TREATMENT"].eq(1)
-        & pat["t_first_treatment"].notna()
-        & pat["t_first_treatment"].ge(0)
+        & pat[anchor_col].notna()
+        & pat[anchor_col].ge(0)
         & pat["t_platinum"].notna()
         & pat["t_death"].notna()
         & pat["t_last_contact"].notna()
@@ -395,6 +418,8 @@ def make_outcome_df(df: pd.DataFrame, *, landmark_offset_days: int = 0) -> pd.Da
         & pat["t_last_contact"].gt(0)
         & pat["t_either"].gt(0)
     )
+    if require_first_treatment:
+        valid = valid & pat["FIRST_TREATMENT"].eq(1)
     return pat.loc[valid].copy()
 
 
@@ -403,27 +428,43 @@ def build_pre_treatment_lab_long(
     *,
     cohort_index: pd.Index | None = None,
     landmark_offset_days: int = 0,
+    anchor_col: str = "t_first_treatment",
+    anchor_series: pd.Series | None = None,
 ) -> pd.DataFrame:
     """Long-format pre-landmark lab observations used for canonical-lab selection.
 
-    Returns columns DFCI_MRN, LAB_NAME, LAB_VALUE, t_lab, t_first_treatment.
-    Restricts to observations with t_lab < t_first_treatment + landmark_offset_days
-    so the lab presence used for coverage is the same window the aggregated
-    feature engineering and Dynamic DeepHit person-period builder consume.
+    Returns columns DFCI_MRN, LAB_NAME, LAB_VALUE, t_lab, <anchor_col>.
+    Restricts to observations with t_lab < <anchor_col> + landmark_offset_days
+    so the lab presence used for coverage matches the aggregated feature
+    engineering and Dynamic DeepHit person-period builder windows.
+
+    ``anchor_series`` (MRN-indexed) overrides the column lookup, supporting the
+    genomic arm where ``t_sample`` is per-patient and not carried on every row.
     """
-    required = {"DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab", "t_first_treatment"}
-    missing = required - set(df.columns)
+    base_required = {"DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab"}
+    missing = base_required - set(df.columns)
     if missing:
         raise ValueError(
             f"build_pre_treatment_lab_long missing columns: {sorted(missing)}"
         )
-    out = df[list(required)].copy()
+
+    cols = list(base_required)
+    if anchor_series is None:
+        if anchor_col not in df.columns:
+            raise ValueError(
+                f"build_pre_treatment_lab_long needs anchor column {anchor_col!r} on df or via anchor_series."
+            )
+        cols.append(anchor_col)
+    out = df[cols].copy()
     out["LAB_NAME"] = out["LAB_NAME"].astype(str).str.strip()
     out["LAB_VALUE"] = pd.to_numeric(out["LAB_VALUE"], errors="coerce")
     out["t_lab"] = pd.to_numeric(out["t_lab"], errors="coerce")
-    out["t_first_treatment"] = pd.to_numeric(out["t_first_treatment"], errors="coerce")
-    out = out.dropna(subset=["DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab", "t_first_treatment"])
-    landmark_t = out["t_first_treatment"] + float(landmark_offset_days)
+    if anchor_series is not None:
+        out[anchor_col] = out["DFCI_MRN"].map(anchor_series.astype(float)).astype(float)
+    else:
+        out[anchor_col] = pd.to_numeric(out[anchor_col], errors="coerce")
+    out = out.dropna(subset=["DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab", anchor_col])
+    landmark_t = out[anchor_col] + float(landmark_offset_days)
     out = out.loc[out["t_lab"] < landmark_t].copy()
     if cohort_index is not None:
         out = out.loc[out["DFCI_MRN"].isin(cohort_index)].copy()
@@ -470,7 +511,24 @@ def _compute_patient_lab_slopes(pre_treatment: pd.DataFrame) -> pd.DataFrame:
     return slopes
 
 
-def build_feature_matrix(df: pd.DataFrame, *, landmark_offset_days: int = 0) -> pd.DataFrame:
+def build_feature_matrix(
+    df: pd.DataFrame,
+    *,
+    landmark_offset_days: int = 0,
+    anchor_col: str = "t_first_treatment",
+    anchor_series: pd.Series | None = None,
+) -> pd.DataFrame:
+    """Per-patient lab summary features for the pre-landmark window.
+
+    Args:
+        landmark_offset_days: days added to ``anchor_col`` to define the landmark.
+        anchor_col: column on ``df`` whose value (in days from first record) is
+            the anchor. Default ``t_first_treatment``; the genomic arm uses
+            ``t_sample``.
+        anchor_series: optional MRN-indexed Series providing per-patient anchor
+            values when the column isn't carried on every lab row (e.g.
+            ``t_sample`` joined externally). Takes precedence over ``anchor_col``.
+    """
     working = df.copy()
     required_cols = {"DFCI_MRN", "LAB_NAME", "LAB_VALUE"}
     missing_required = required_cols - set(working.columns)
@@ -492,23 +550,27 @@ def build_feature_matrix(df: pd.DataFrame, *, landmark_offset_days: int = 0) -> 
     else:
         working["t_lab"] = _coerce_duration(working["t_lab"])
 
-    if "t_first_treatment" not in working.columns:
-        if not {"FIRST_TREATMENT_DATE", "FIRST_RECORD_DATE"}.issubset(working.columns):
+    if anchor_series is not None:
+        anchor_map = anchor_series.astype(float)
+        working[anchor_col] = working["DFCI_MRN"].map(anchor_map).astype(float)
+    elif anchor_col not in working.columns:
+        if anchor_col == "t_first_treatment" and {"FIRST_TREATMENT_DATE", "FIRST_RECORD_DATE"}.issubset(working.columns):
+            working["t_first_treatment"] = (
+                _coerce_datetime(working["FIRST_TREATMENT_DATE"])
+                - _coerce_datetime(working["FIRST_RECORD_DATE"])
+            ).dt.days.astype(float)
+        else:
             raise ValueError(
-                "Input data must contain t_first_treatment or both FIRST_TREATMENT_DATE and FIRST_RECORD_DATE."
+                f"build_feature_matrix needs anchor column {anchor_col!r} on the df or via anchor_series."
             )
-        working["t_first_treatment"] = (
-            _coerce_datetime(working["FIRST_TREATMENT_DATE"])
-            - _coerce_datetime(working["FIRST_RECORD_DATE"])
-        ).dt.days.astype(float)
     else:
-        working["t_first_treatment"] = _coerce_duration(working["t_first_treatment"])
+        working[anchor_col] = _coerce_duration(working[anchor_col])
 
     working = working.dropna(
-        subset=["DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab", "t_first_treatment"]
+        subset=["DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab", anchor_col]
     )
 
-    landmark_time = working["t_first_treatment"].astype(float) + float(landmark_offset_days)
+    landmark_time = working[anchor_col].astype(float) + float(landmark_offset_days)
     pre_treatment = working.loc[working["t_lab"].lt(landmark_time)].copy()
     if pre_treatment.empty:
         raise ValueError("No pre-landmark lab rows were available to build lab summary features.")

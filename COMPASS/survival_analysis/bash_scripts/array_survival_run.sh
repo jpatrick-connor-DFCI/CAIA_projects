@@ -119,6 +119,17 @@ for LINE_NUM in $(seq "$START_LINE" "$END_LINE"); do
         FAILED=1
       fi
       ;;
+    cox_genomic)
+      # Anchor is t_sample, not a numeric landmark; LANDMARK field is ignored ("-").
+      if ! python "$SURVIVAL_DIR/cox_genomic_univariate.py" \
+        --inputs-dir "$INPUTS_DIR" \
+        --output-dir "$ROW_OUTPUT_DIR" \
+        --endpoints platinum death
+      then
+        echo "[error] row ${LINE_NUM} failed: model=${MODEL}, config=${CONFIG}"
+        FAILED=1
+      fi
+      ;;
     *)
       echo "Unsupported model in manifest row ${LINE_NUM}: $MODEL"
       exit 1
