@@ -143,6 +143,36 @@ ENDPOINTS = {
         "description": "Time from first treatment start to death / last contact",
     },
 }
+
+# Admin-censor everyone beyond this many days post-landmark so Cox / XGBoost /
+# DeepHit train and evaluate on identical event populations. Matches DeepHit's
+# DEFAULT_MAX_PRED_WINDOW (260) * build_manifest.auc_time_unit_days (7) = 1820.
+ADMIN_CENSOR_DAYS = 1820
+
+
+def _apply_admin_censor(
+    df: pd.DataFrame,
+    *,
+    landmark_day: int,
+    horizon_days: int = ADMIN_CENSOR_DAYS,
+) -> pd.DataFrame:
+    """Cap durations at `landmark_day + horizon_days` and zero out late events.
+
+    Mutates and returns `df`. Applied per (event_col, duration_col) pair in
+    ENDPOINTS so PLATINUM and DEATH are censored independently.
+    """
+    cap = float(landmark_day) + float(horizon_days)
+    for spec in ENDPOINTS.values():
+        dcol = spec["duration_col"]
+        ecol = spec["event_col"]
+        if dcol not in df.columns or ecol not in df.columns:
+            continue
+        duration = pd.to_numeric(df[dcol], errors="coerce")
+        beyond = duration > cap
+        if beyond.any():
+            df.loc[beyond, ecol] = 0
+            df.loc[beyond, dcol] = cap
+    return df
 OUTCOME_COLUMNS = {
     AGE_COL,
     "FIRST_RECORD_DATE",
@@ -1180,10 +1210,11 @@ def fit_coxnet_with_fallback(
                 max_iter=int(max_iter),
                 fit_baseline_model=False,
             )
-            # Warnings emitted by sksurv (incl. ConvergenceWarning) are NOT
-            # treated as failures — the finite + bounded coefficient checks
-            # below catch genuinely unusable fits.
-            model.fit(X, y)
+            # sksurv ConvergenceWarning suppressed; the finite + bounded
+            # coefficient checks below catch genuinely unusable fits.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model.fit(X, y)
         except (ArithmeticError, ValueError, np.linalg.LinAlgError) as exc:
             last_error = str(exc)
             continue
@@ -2109,6 +2140,23 @@ def _load_prebuilt_landmark(
     aggregated = pd.read_csv(agg_path).set_index("DFCI_MRN")
     if "split" not in aggregated.columns:
         raise ValueError(f"{agg_path} is missing the 'split' column.")
+    pre_censor_events = {
+        ecol: int(pd.to_numeric(aggregated[ecol], errors="coerce").fillna(0).sum())
+        for ecol in (spec["event_col"] for spec in ENDPOINTS.values())
+        if ecol in aggregated.columns
+    }
+    aggregated = _apply_admin_censor(aggregated, landmark_day=landmark_day)
+    post_censor_events = {
+        ecol: int(pd.to_numeric(aggregated[ecol], errors="coerce").fillna(0).sum())
+        for ecol in pre_censor_events
+    }
+    for ecol, pre in pre_censor_events.items():
+        post = post_censor_events[ecol]
+        if post != pre:
+            print(
+                f"  admin-censor (landmark +{landmark_day}d, horizon "
+                f"{ADMIN_CENSOR_DAYS}d): {ecol} events {pre} -> {post}"
+            )
     train_val = aggregated.loc[aggregated["split"].isin(["train", "valid"])].copy()
     test = aggregated.loc[aggregated["split"].eq("test")].copy()
     if train_val.empty or test.empty:
