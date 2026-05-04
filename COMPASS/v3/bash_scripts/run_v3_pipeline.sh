@@ -12,7 +12,7 @@
 PROJECT_ROOT=${PROJECT_ROOT:-/data/gusev/USERS/jpconnor/code/CAIA}
 V3_DIR="$PROJECT_ROOT/COMPASS/v3"
 OUTPUT_DIR=${OUTPUT_DIR:-/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/v3_outputs}
-MRN_FILE=${MRN_FILE:-/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/prostate_mrns.txt}
+MRN_FILE=${MRN_FILE:-/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/mrn_lists/longitudinal_mrns.csv}
 NOTE_BUNDLE_PATH=${NOTE_BUNDLE_PATH:-$OUTPUT_DIR/LLM_v3_prostate_note_bundle.json.gz}
 MODEL=${MODEL:-gpt-4o}
 MAX_WORKERS=${MAX_WORKERS:-8}
