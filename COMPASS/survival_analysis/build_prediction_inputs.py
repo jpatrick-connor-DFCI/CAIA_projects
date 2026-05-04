@@ -406,10 +406,10 @@ def build_longitudinal_wide(
     wide = wide.merge(static[static_cols], left_on="DFCI_MRN", right_index=True, how="inner")
 
     t_platinum_after_landmark = np.ceil(
-        wide["t_platinum"].to_numpy(dtype=float) / float(time_unit_days)
+        (wide["t_platinum"].to_numpy(dtype=float) - float(landmark_day)) / float(time_unit_days)
     )
     t_death_after_landmark = np.ceil(
-        wide["t_death"].to_numpy(dtype=float) / float(time_unit_days)
+        (wide["t_death"].to_numpy(dtype=float) - float(landmark_day)) / float(time_unit_days)
     )
     wide["t_platinum"] = wide["landmark_time"].to_numpy(dtype=float) + t_platinum_after_landmark
     wide["t_death"] = wide["landmark_time"].to_numpy(dtype=float) + t_death_after_landmark

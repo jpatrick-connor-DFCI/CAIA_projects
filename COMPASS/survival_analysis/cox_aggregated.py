@@ -2142,7 +2142,7 @@ def main(args: argparse.Namespace) -> None:
     min_patient_coverage = float(build_manifest["min_patient_coverage"])
     args.auc_time_unit_days = int(build_manifest["auc_time_unit_days"])
     args.auc_quantiles = tuple(build_manifest["auc_quantiles"])
-    args.auc_max_time_units = None
+    args.auc_max_time_units = 260
     auc_horizons_by_landmark = build_manifest["auc_horizons_by_landmark"]
     print(
         f"Loading prebuilt prediction inputs from {inputs_dir} "
