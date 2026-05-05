@@ -104,6 +104,111 @@ def _zscore(values: np.ndarray) -> tuple[np.ndarray, float]:
     return (values - float(np.mean(values))) / sd, sd
 
 
+def fit_baseline_lab(
+    data: pd.DataFrame,
+    *,
+    feature: str,
+    endpoint: str,
+    fallback_penalizer: float,
+    min_events_per_feature: int,
+) -> dict:
+    """Cox on [z(AGE) + z(n_obs) + z(lab)] — same cohort, no PGS term.
+
+    Provides the reference effect size for the lab feature so callers can compute
+    PGS-induced attenuation. Mirrors fit_one's missing-indicator and z-scoring
+    conventions so the two are directly comparable.
+    """
+    duration_col = ENDPOINTS[endpoint]["duration_col"]
+    event_col = ENDPOINTS[endpoint]["event_col"]
+    n_obs_feature = matching_n_obs_feature(feature)
+
+    out = {
+        "coef_feature_baseline": np.nan,
+        "hazard_ratio_baseline_per_sd": np.nan,
+        "ci_lower_baseline": np.nan,
+        "ci_upper_baseline": np.nan,
+        "p_value_baseline": np.nan,
+        "n_patients_baseline": 0,
+        "n_events_baseline": 0,
+        "fit_penalizer_baseline": np.nan,
+        "note_baseline": "",
+    }
+    for required in (feature, n_obs_feature, duration_col, event_col, AGE_COL):
+        if required not in data.columns:
+            out["note_baseline"] = f"missing_column:{required}"
+            return out
+
+    sub = data[[feature, n_obs_feature, duration_col, event_col, AGE_COL]].copy()
+    sub = sub.dropna(subset=[duration_col, event_col, AGE_COL])
+    out["n_patients_baseline"] = int(len(sub))
+    out["n_events_baseline"] = int(sub[event_col].sum()) if len(sub) else 0
+    if sub.empty:
+        out["note_baseline"] = "no_rows_with_outcomes"
+        return out
+    if int(sub[feature].notna().sum()) == 0:
+        out["note_baseline"] = "no_non_missing_feature_rows"
+        return out
+    if int(sub[n_obs_feature].notna().sum()) == 0:
+        out["note_baseline"] = "no_non_missing_n_obs_rows"
+        return out
+    if out["n_events_baseline"] < min_events_per_feature:
+        out["note_baseline"] = f"too_few_events_lt_{min_events_per_feature}"
+        return out
+
+    feature_missing = sub[feature].isna().astype(float).to_numpy()
+    include_feature_missing = bool(np.unique(feature_missing).size > 1)
+
+    feature_vals = SimpleImputer(strategy="mean").fit_transform(sub[[feature]]).reshape(-1)
+    n_obs_vals = SimpleImputer(strategy="mean").fit_transform(sub[[n_obs_feature]]).reshape(-1)
+    feature_z, feature_sd = _zscore(feature_vals)
+    if feature_sd <= 0 or not np.isfinite(feature_sd):
+        out["note_baseline"] = "feature_has_no_variation"
+        return out
+    n_obs_z, n_obs_sd = _zscore(n_obs_vals)
+    if n_obs_sd <= 0 or not np.isfinite(n_obs_sd):
+        out["note_baseline"] = "n_obs_has_no_variation"
+        return out
+    age_vals = sub[AGE_COL].to_numpy(dtype=float)
+    age_z, age_sd = _zscore(age_vals)
+    if age_sd <= 0 or not np.isfinite(age_sd):
+        age_z = age_vals - float(np.mean(age_vals))
+
+    model_df = pd.DataFrame(
+        {
+            "feature_z": feature_z,
+            "n_obs_z": n_obs_z,
+            "age": age_z,
+            duration_col: sub[duration_col].to_numpy(dtype=float),
+            event_col: sub[event_col].astype(int).to_numpy(),
+        },
+        index=sub.index,
+    )
+    if include_feature_missing:
+        model_df["feature_missing"] = feature_missing
+
+    model, used_penalizer, note = fit_cox_with_fallback(
+        model_df,
+        duration_col=duration_col,
+        event_col=event_col,
+        penalizers=[0.0, fallback_penalizer],
+        l1_ratio=0.0,
+    )
+    out["fit_penalizer_baseline"] = used_penalizer
+    out["note_baseline"] = note
+    if model is None:
+        return out
+
+    s = model.summary
+    if "feature_z" in s.index:
+        row = s.loc["feature_z"]
+        out["coef_feature_baseline"] = float(row["coef"])
+        out["hazard_ratio_baseline_per_sd"] = float(row["exp(coef)"])
+        out["ci_lower_baseline"] = float(row["exp(coef) lower 95%"])
+        out["ci_upper_baseline"] = float(row["exp(coef) upper 95%"])
+        out["p_value_baseline"] = float(row["p"])
+    return out
+
+
 def fit_one(
     data: pd.DataFrame,
     *,
@@ -315,6 +420,21 @@ def run_for_landmark(
     rows: list[dict] = []
     for endpoint in endpoints:
         for feature in target_features:
+            baseline = fit_baseline_lab(
+                merged,
+                feature=feature,
+                endpoint=endpoint,
+                fallback_penalizer=fallback_penalizer,
+                min_events_per_feature=min_events_per_feature,
+            )
+            print(
+                f"  baseline {endpoint}/{feature}: "
+                f"HR={baseline['hazard_ratio_baseline_per_sd']:.3f} "
+                f"p={baseline['p_value_baseline']:.2e} "
+                f"n={baseline['n_patients_baseline']} "
+                f"events={baseline['n_events_baseline']} "
+                f"({baseline['note_baseline']})"
+            )
             for pgs in pgs_cols:
                 row = fit_one(
                     merged,
@@ -325,6 +445,13 @@ def run_for_landmark(
                     min_events_per_feature=min_events_per_feature,
                 )
                 row["landmark_days"] = landmark
+                row.update(baseline)
+                row["coef_feature_delta"] = (
+                    row["coef_feature"] - baseline["coef_feature_baseline"]
+                    if np.isfinite(row["coef_feature"])
+                    and np.isfinite(baseline["coef_feature_baseline"])
+                    else np.nan
+                )
                 rows.append(row)
 
     out = pd.DataFrame(rows)
@@ -332,11 +459,14 @@ def run_for_landmark(
         print("No rows produced.")
         return
 
-    # BH-adjust PGS p-values within each (endpoint, lab_name) sweep.
+    # BH-adjust PGS and lab-feature p-values within each (endpoint, lab_name) sweep.
+    # The lab-feature p-value varies across PGS rows because each fit adjusts for
+    # a different PGS, so its q reflects sensitivity to PGS choice.
     out["q_value_pgs"] = np.nan
+    out["q_value"] = np.nan
     for (endpoint, lab_name), idx in out.groupby(["endpoint", "lab_name"]).groups.items():
-        block = out.loc[idx, "p_value_pgs"]
-        out.loc[idx, "q_value_pgs"] = benjamini_hochberg(block).values
+        out.loc[idx, "q_value_pgs"] = benjamini_hochberg(out.loc[idx, "p_value_pgs"]).values
+        out.loc[idx, "q_value"] = benjamini_hochberg(out.loc[idx, "p_value"]).values
 
     out = out.sort_values(["endpoint", "lab_name", "p_value_pgs"], na_position="last")
 
@@ -362,8 +492,11 @@ def run_for_landmark(
                 "hazard_ratio_pgs_per_sd",
                 "p_value_pgs",
                 "q_value_pgs",
+                "hazard_ratio_baseline_per_sd",
                 "hazard_ratio_per_sd",
                 "p_value",
+                "q_value",
+                "coef_feature_delta",
             ]
             print(top[cols].to_string(index=False))
 
