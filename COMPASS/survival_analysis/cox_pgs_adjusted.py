@@ -1,10 +1,19 @@
 """
 PGS-adjusted univariate Cox for the lab-feature arm.
 
-For each (endpoint, landmark, target lab feature, PGS), fits:
+For each (endpoint, landmark, target lab feature, PGS), fits three Cox models
+on the same cohort (rows with valid outcomes + age):
 
-    Surv(t) ~ z(AGE) + z(PGS) + z(LAB__n_observations) + z(LAB__feature)
-              [+ feature_missing if any] [+ pgs_missing if any]
+    baseline:  Surv(t) ~ z(AGE) + z(LAB__n_observations) + z(LAB__feature)
+    joint:     Surv(t) ~ z(AGE) + z(PGS) + z(LAB__n_observations) + z(LAB__feature)
+    pgs-alone: Surv(t) ~ z(AGE) + z(PGS)
+
+    [+ feature_missing if any] [+ pgs_missing if any]
+
+The pgs-alone fit doesn't depend on which target_lab is being compared, so it
+is computed once per (endpoint, pgs) and broadcast across the target-lab rows.
+Together these implement the nested-model comparison: pgs-alone vs baseline-lab
+(head-to-head), and joint vs baseline-lab (does PGS add on top of clinical?).
 
 Compared to cox_aggregated's run_univariate_nobs_adjusted_associations, this
 module sweeps over PGS columns instead of over all lab features: target labs
@@ -206,6 +215,120 @@ def fit_baseline_lab(
         out["ci_lower_baseline"] = float(row["exp(coef) lower 95%"])
         out["ci_upper_baseline"] = float(row["exp(coef) upper 95%"])
         out["p_value_baseline"] = float(row["p"])
+    return out
+
+
+def fit_pgs_only(
+    data: pd.DataFrame,
+    *,
+    pgs: str,
+    endpoint: str,
+    fallback_penalizer: float,
+    min_events_per_feature: int,
+) -> dict:
+    """Cox on [z(AGE) + z(PGS)] — no lab term, no n_obs term.
+
+    Cohort matches fit_baseline_lab / fit_one (rows with valid outcomes + age).
+    PGS missingness is mean-imputed with a missing indicator, mirroring fit_one.
+    Run once per (endpoint, pgs); the result is broadcast across the target-lab
+    rows in run_for_landmark since the fit doesn't depend on which lab is being
+    evaluated against PGS.
+    """
+    duration_col = ENDPOINTS[endpoint]["duration_col"]
+    event_col = ENDPOINTS[endpoint]["event_col"]
+
+    out = {
+        "coef_pgs_alone": np.nan,
+        "hazard_ratio_pgs_alone_per_sd": np.nan,
+        "ci_lower_pgs_alone": np.nan,
+        "ci_upper_pgs_alone": np.nan,
+        "p_value_pgs_alone": np.nan,
+        "coef_age_pgs_alone": np.nan,
+        "p_value_age_pgs_alone": np.nan,
+        "coef_pgs_missing_alone": np.nan,
+        "p_value_pgs_missing_alone": np.nan,
+        "n_patients_pgs_alone": 0,
+        "n_patients_pgs_observed_alone": 0,
+        "n_patients_pgs_imputed_alone": 0,
+        "n_events_pgs_alone": 0,
+        "fit_penalizer_pgs_alone": np.nan,
+        "note_pgs_alone": "",
+    }
+    for required in (pgs, duration_col, event_col, AGE_COL):
+        if required not in data.columns:
+            out["note_pgs_alone"] = f"missing_column:{required}"
+            return out
+
+    sub = data[[pgs, duration_col, event_col, AGE_COL]].copy()
+    sub = sub.dropna(subset=[duration_col, event_col, AGE_COL])
+    out["n_patients_pgs_alone"] = int(len(sub))
+    out["n_events_pgs_alone"] = int(sub[event_col].sum()) if len(sub) else 0
+    out["n_patients_pgs_observed_alone"] = int(sub[pgs].notna().sum()) if len(sub) else 0
+    out["n_patients_pgs_imputed_alone"] = int(len(sub) - out["n_patients_pgs_observed_alone"])
+    if sub.empty:
+        out["note_pgs_alone"] = "no_rows_with_outcomes"
+        return out
+    if out["n_patients_pgs_observed_alone"] == 0:
+        out["note_pgs_alone"] = "no_non_missing_pgs_rows"
+        return out
+    if out["n_events_pgs_alone"] < min_events_per_feature:
+        out["note_pgs_alone"] = f"too_few_events_lt_{min_events_per_feature}"
+        return out
+
+    pgs_missing = sub[pgs].isna().astype(float).to_numpy()
+    include_pgs_missing = bool(np.unique(pgs_missing).size > 1)
+
+    pgs_vals = SimpleImputer(strategy="mean").fit_transform(sub[[pgs]]).reshape(-1)
+    pgs_z, pgs_sd = _zscore(pgs_vals)
+    if pgs_sd <= 0 or not np.isfinite(pgs_sd):
+        out["note_pgs_alone"] = "pgs_has_no_variation"
+        return out
+
+    age_vals = sub[AGE_COL].to_numpy(dtype=float)
+    age_z, age_sd = _zscore(age_vals)
+    if age_sd <= 0 or not np.isfinite(age_sd):
+        age_z = age_vals - float(np.mean(age_vals))
+
+    model_df = pd.DataFrame(
+        {
+            "pgs_z": pgs_z,
+            "age": age_z,
+            duration_col: sub[duration_col].to_numpy(dtype=float),
+            event_col: sub[event_col].astype(int).to_numpy(),
+        },
+        index=sub.index,
+    )
+    if include_pgs_missing:
+        model_df["pgs_missing"] = pgs_missing
+
+    model, used_penalizer, note = fit_cox_with_fallback(
+        model_df,
+        duration_col=duration_col,
+        event_col=event_col,
+        penalizers=[0.0, fallback_penalizer],
+        l1_ratio=0.0,
+    )
+    out["fit_penalizer_pgs_alone"] = used_penalizer
+    out["note_pgs_alone"] = note
+    if model is None:
+        return out
+
+    s = model.summary
+    if "pgs_z" in s.index:
+        row = s.loc["pgs_z"]
+        out["coef_pgs_alone"] = float(row["coef"])
+        out["hazard_ratio_pgs_alone_per_sd"] = float(row["exp(coef)"])
+        out["ci_lower_pgs_alone"] = float(row["exp(coef) lower 95%"])
+        out["ci_upper_pgs_alone"] = float(row["exp(coef) upper 95%"])
+        out["p_value_pgs_alone"] = float(row["p"])
+    if "age" in s.index:
+        row = s.loc["age"]
+        out["coef_age_pgs_alone"] = float(row["coef"])
+        out["p_value_age_pgs_alone"] = float(row["p"])
+    if include_pgs_missing and "pgs_missing" in s.index:
+        row = s.loc["pgs_missing"]
+        out["coef_pgs_missing_alone"] = float(row["coef"])
+        out["p_value_pgs_missing_alone"] = float(row["p"])
     return out
 
 
@@ -417,6 +540,19 @@ def run_for_landmark(
     if missing_target:
         raise ValueError(f"Aggregated CSV missing target features: {missing_target}")
 
+    # PGS-alone fits don't depend on which target_lab we're comparing against, so
+    # compute once per (endpoint, pgs) and broadcast across the target-lab rows.
+    pgs_only_cache: dict[tuple[str, str], dict] = {}
+    for endpoint in endpoints:
+        for pgs in pgs_cols:
+            pgs_only_cache[(endpoint, pgs)] = fit_pgs_only(
+                merged,
+                pgs=pgs,
+                endpoint=endpoint,
+                fallback_penalizer=fallback_penalizer,
+                min_events_per_feature=min_events_per_feature,
+            )
+
     rows: list[dict] = []
     for endpoint in endpoints:
         for feature in target_features:
@@ -446,6 +582,7 @@ def run_for_landmark(
                 )
                 row["landmark_days"] = landmark
                 row.update(baseline)
+                row.update(pgs_only_cache[(endpoint, pgs)])
                 row["coef_feature_delta"] = (
                     row["coef_feature"] - baseline["coef_feature_baseline"]
                     if np.isfinite(row["coef_feature"])
@@ -461,12 +598,18 @@ def run_for_landmark(
 
     # BH-adjust PGS and lab-feature p-values within each (endpoint, lab_name) sweep.
     # The lab-feature p-value varies across PGS rows because each fit adjusts for
-    # a different PGS, so its q reflects sensitivity to PGS choice.
+    # a different PGS, so its q reflects sensitivity to PGS choice. The PGS-alone
+    # p-value is constant across the two target_lab rows but BH is still applied
+    # within the per-lab group so each output slice carries a self-consistent q.
     out["q_value_pgs"] = np.nan
     out["q_value"] = np.nan
+    out["q_value_pgs_alone"] = np.nan
     for (endpoint, lab_name), idx in out.groupby(["endpoint", "lab_name"]).groups.items():
         out.loc[idx, "q_value_pgs"] = benjamini_hochberg(out.loc[idx, "p_value_pgs"]).values
         out.loc[idx, "q_value"] = benjamini_hochberg(out.loc[idx, "p_value"]).values
+        out.loc[idx, "q_value_pgs_alone"] = benjamini_hochberg(
+            out.loc[idx, "p_value_pgs_alone"]
+        ).values
 
     out = out.sort_values(["endpoint", "lab_name", "p_value_pgs"], na_position="last")
 
@@ -492,6 +635,9 @@ def run_for_landmark(
                 "hazard_ratio_pgs_per_sd",
                 "p_value_pgs",
                 "q_value_pgs",
+                "hazard_ratio_pgs_alone_per_sd",
+                "p_value_pgs_alone",
+                "q_value_pgs_alone",
                 "hazard_ratio_baseline_per_sd",
                 "hazard_ratio_per_sd",
                 "p_value",
