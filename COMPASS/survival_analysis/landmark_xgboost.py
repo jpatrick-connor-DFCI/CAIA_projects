@@ -80,6 +80,7 @@ from cox_aggregated import (  # noqa: E402
     ENDPOINTS,
     OUTCOME_COLUMNS,
     RESULTS,
+    _copy_with_admin_censor,
     _load_build_manifest,
     _load_prebuilt_landmark,
     compute_ipcw_auc_t,
@@ -898,6 +899,9 @@ def main(args: argparse.Namespace) -> None:
         merged, train_val, test, pre_treatment_lab_df = _load_prebuilt_landmark(
             inputs_dir, landmark_day
         )
+        merged = _copy_with_admin_censor(merged, landmark_day=landmark_day)
+        train_val = merged.loc[merged["split"].isin(["train", "valid"])].copy()
+        test = merged.loc[merged["split"].eq("test")].copy()
 
         assert_no_test_leakage(
             test_mrns=test.index,

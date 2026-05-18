@@ -2140,23 +2140,6 @@ def _load_prebuilt_landmark(
     aggregated = pd.read_csv(agg_path).set_index("DFCI_MRN")
     if "split" not in aggregated.columns:
         raise ValueError(f"{agg_path} is missing the 'split' column.")
-    pre_censor_events = {
-        ecol: int(pd.to_numeric(aggregated[ecol], errors="coerce").fillna(0).sum())
-        for ecol in (spec["event_col"] for spec in ENDPOINTS.values())
-        if ecol in aggregated.columns
-    }
-    aggregated = _apply_admin_censor(aggregated, landmark_day=landmark_day)
-    post_censor_events = {
-        ecol: int(pd.to_numeric(aggregated[ecol], errors="coerce").fillna(0).sum())
-        for ecol in pre_censor_events
-    }
-    for ecol, pre in pre_censor_events.items():
-        post = post_censor_events[ecol]
-        if post != pre:
-            print(
-                f"  admin-censor (landmark +{landmark_day}d, horizon "
-                f"{ADMIN_CENSOR_DAYS}d): {ecol} events {pre} -> {post}"
-            )
     train_val = aggregated.loc[aggregated["split"].isin(["train", "valid"])].copy()
     test = aggregated.loc[aggregated["split"].eq("test")].copy()
     if train_val.empty or test.empty:
@@ -2173,6 +2156,32 @@ def _load_prebuilt_landmark(
         )
     pre_treatment_lab_df = pd.read_csv(pre_path)
     return aggregated, train_val, test, pre_treatment_lab_df
+
+
+def _copy_with_admin_censor(
+    aggregated: pd.DataFrame,
+    *,
+    landmark_day: int,
+) -> pd.DataFrame:
+    """Return a finite-horizon model copy capped to the DeepHit window."""
+    pre_censor_events = {
+        ecol: int(pd.to_numeric(aggregated[ecol], errors="coerce").fillna(0).sum())
+        for ecol in (spec["event_col"] for spec in ENDPOINTS.values())
+        if ecol in aggregated.columns
+    }
+    censored = _apply_admin_censor(aggregated.copy(), landmark_day=landmark_day)
+    post_censor_events = {
+        ecol: int(pd.to_numeric(censored[ecol], errors="coerce").fillna(0).sum())
+        for ecol in pre_censor_events
+    }
+    for ecol, pre in pre_censor_events.items():
+        post = post_censor_events[ecol]
+        if post != pre:
+            print(
+                f"  admin-censor (landmark +{landmark_day}d, horizon "
+                f"{ADMIN_CENSOR_DAYS}d): {ecol} events {pre} -> {post}"
+            )
+    return censored
 
 
 def main(args: argparse.Namespace) -> None:
@@ -2330,7 +2339,7 @@ def main(args: argparse.Namespace) -> None:
             )
 
         if args.analysis in {"univariate", "both"}:
-            print("\n##### ARM 1: UNIVARIATE (n_obs-adjusted, all endpoints) #####")
+            print("\n##### ARM 1: UNIVARIATE (n_obs-adjusted, full follow-up, all endpoints) #####")
             for endpoint in endpoints:
                 print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
                 print(ENDPOINTS[endpoint]["description"])
@@ -2352,13 +2361,20 @@ def main(args: argparse.Namespace) -> None:
                 )
 
         if args.analysis in {"multivariable", "both"}:
+            multivariable_data = _copy_with_admin_censor(merged, landmark_day=landmark_day)
+            multivariable_train_val = multivariable_data.loc[
+                multivariable_data["split"].isin(["train", "valid"])
+            ].copy()
+            multivariable_test = multivariable_data.loc[
+                multivariable_data["split"].eq("test")
+            ].copy()
             print("\n##### ARM 2: MULTIVARIABLE ELASTIC-NET (all endpoints) #####")
             for endpoint in endpoints:
                 print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
                 print(ENDPOINTS[endpoint]["description"])
                 horizon_grid = endpoint_horizon_grids[endpoint]
                 _, _, best_row, fold_canonical_labs_df = tune_multivariable_model(
-                    train_val,
+                    multivariable_train_val,
                     raw_feature_cols=raw_feature_cols,
                     endpoint=endpoint,
                     penalizers=args.cv_penalizers,
@@ -2382,8 +2398,8 @@ def main(args: argparse.Namespace) -> None:
                     test_auc_df,
                     test_brier_df,
                 ) = fit_final_multivariable_model(
-                    train_val,
-                    test,
+                    multivariable_train_val,
+                    multivariable_test,
                     feature_cols=selected_feature_cols,
                     endpoint=endpoint,
                     penalizer=float(best_row["penalizer"]),

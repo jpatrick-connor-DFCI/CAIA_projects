@@ -193,6 +193,10 @@ def main(args: argparse.Namespace) -> None:
         f"Loaded genomic inputs from {inputs_dir / GENOMIC_OUTPUT_SUBDIR} "
         f"(min_patient_coverage={min_patient_coverage} per build manifest)"
     )
+    print(
+        "Using full post-sample follow-up for univariate Cox; no DeepHit-style "
+        "admin censor is applied."
+    )
 
     train_val = aggregated.loc[aggregated["split"].isin(["train", "valid"])].copy()
     test = aggregated.loc[aggregated["split"].eq("test")].copy()

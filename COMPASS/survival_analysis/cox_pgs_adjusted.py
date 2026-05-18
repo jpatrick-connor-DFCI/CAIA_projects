@@ -400,6 +400,10 @@ def run_for_landmark(
     print(f"\n=== landmark={landmark} ===")
     print(f"Reading aggregated: {aggregated_path}")
     agg = load_aggregated(aggregated_path)
+    # Intentionally use the full post-landmark follow-up window. The main
+    # multivariable Cox path admin-censors to match Dynamic DeepHit's finite
+    # horizon, but this univariate sensitivity arm is not subject to that
+    # model-class constraint.
     n_agg = len(agg)
 
     overlap = agg.index.intersection(germline.index)
