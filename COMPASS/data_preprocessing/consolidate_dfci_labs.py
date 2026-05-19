@@ -431,6 +431,125 @@ RULES_BY_MEASUREMENT = {
 }
 
 
+# Per-measurement physiologic value-range filter, applied AFTER unit
+# standardization. Mirrors caia-project-compass/compass_preprocessing.py
+# (physiologic_ranges, ~L904-985). Ranges are deliberately generous — meant to
+# reject data-entry errors and sentinel values (e.g. testosterone = 9999999),
+# not enforce reference ranges. Keys are `collapsed_measurement` values from
+# RULES_BY_MEASUREMENT; bounds are in each measurement's canonical_unit.
+PHYSIOLOGIC_RANGES: dict[str, tuple[float, float]] = {
+    # Enzymes (U/L)
+    "ALT": (0.0, 50000.0),
+    "AST": (0.0, 50000.0),
+    "Alkaline phosphatase": (0.0, 50000.0),
+    "Creatine kinase": (0.0, 50000.0),
+    "LDH": (0.0, 50000.0),
+    # Proteins & ratios
+    "Albumin": (0.5, 7.0),                 # g/dL
+    "Albumin/globulin ratio": (0.1, 5.0),  # ratio
+    "Globulin": (0.5, 10.0),               # g/dL
+    "Total protein": (2.0, 15.0),          # g/dL
+    "Hemoglobin": (1.0, 25.0),             # g/dL
+    # Bilirubin (mg/dL)
+    "Direct bilirubin": (0.0, 50.0),
+    "Total bilirubin": (0.0, 50.0),
+    # Electrolytes (mEq/L; equivalent to mmol/L for monovalent ions)
+    "Chloride": (50.0, 150.0),
+    "CO2": (5.0, 60.0),
+    "Potassium": (1.0, 10.0),
+    "Sodium": (100.0, 200.0),
+    # Tumor markers
+    "CA125": (0.0, 100000.0),              # U/mL
+    "CA19-9": (0.0, 100000.0),             # U/mL
+    "AFP": (0.0, 100000.0),                # ng/mL
+    "CEA": (0.0, 100000.0),                # ng/mL
+    "PSA": (0.0, 10000.0),                 # ng/mL
+    # Other chemistry (mg/dL)
+    "CRP": (0.0, 100.0),
+    "Calcium": (2.0, 20.0),
+    "Creatinine": (0.0, 30.0),
+    "Glucose": (5.0, 1500.0),
+    "BUN": (1.0, 200.0),
+    # CBC – absolute counts (canonical k/uL or M/uL)
+    "RBC": (0.5, 10.0),                    # million/uL
+    "WBC": (0.0, 500.0),                   # 10^3/uL
+    "Lymphocytes absolute": (0.0, 50.0),   # 10^3/uL
+    "Monocytes absolute": (0.0, 30.0),     # 10^3/uL
+    "Neutrophils absolute": (0.0, 100.0),  # 10^3/uL
+    "Basophils absolute": (0.0, 10.0),     # 10^3/uL
+    "Eosinophils absolute": (0.0, 30.0),   # 10^3/uL
+    "Platelets": (5.0, 1500.0),            # 10^3/uL
+    # CBC – indices
+    "MCH": (10.0, 60.0),                   # pg
+    "MCHC": (20.0, 45.0),                  # g/dL
+    "MCV": (40.0, 150.0),                  # fL
+    "RDW": (5.0, 30.0),                    # %
+    "Hematocrit": (5.0, 75.0),             # %
+    # Coagulation
+    "INR": (0.1, 20.0),                    # ratio
+    "PT": (0.0, 200.0),                    # seconds
+    "aPTT": (0.0, 200.0),                  # seconds
+    "Fibrinogen": (0.0, 2000.0),           # mg/dL
+    # Vitals
+    "Body height": (50.0, 275.0),          # cm
+    "Body temperature": (25.0, 45.0),      # °C — note: PROFILE's unit_factors
+                                           # list fahrenheit at factor 1.0,
+                                           # so unconverted Fahrenheit values
+                                           # (e.g. 98.6) fall outside this range
+                                           # and are dropped, which is fine.
+    "Body weight": (1.0, 500.0),           # kg
+    "Diastolic blood pressure": (10.0, 200.0),  # mmHg
+    "Systolic blood pressure": (30.0, 300.0),   # mmHg
+    "Heart rate": (20.0, 250.0),           # bpm
+    "Respiratory rate": (2.0, 60.0),       # breaths/min
+    # Endocrinology / inflammation
+    "Testosterone": (0.0, 2000.0),         # ng/dL  — catches 9999999 sentinel
+    "TSH": (0.0, 500.0),                   # mIU/L
+    "Free T4": (0.0, 15.0),                # ng/dL
+    "ESR": (0.0, 200.0),                   # mm/hr
+}
+
+# Numeric sentinel values used by DFCI source systems to encode "missing /
+# error / not reported". Filtered at numeric coercion (before unit conversion)
+# so they never reach a per-measurement physiologic check.
+SENTINEL_NUMERIC_VALUES: frozenset[float] = frozenset({
+    9999999.0,
+    -9999999.0,
+    999999.0,
+    -999999.0,
+})
+
+
+def is_sentinel_value(value: object) -> bool:
+    """True iff `value` is a known DFCI missing/error sentinel."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(v):
+        return False
+    return v in SENTINEL_NUMERIC_VALUES
+
+
+def is_within_physiologic_range(
+    collapsed_measurement: object, standardized_value: object
+) -> bool:
+    """True iff there's no range for this measurement OR the value is in-range."""
+    if not isinstance(collapsed_measurement, str):
+        return True
+    bounds = PHYSIOLOGIC_RANGES.get(collapsed_measurement)
+    if bounds is None:
+        return True
+    try:
+        v = float(standardized_value)
+    except (TypeError, ValueError):
+        return True
+    if not math.isfinite(v):
+        return True
+    lo, hi = bounds
+    return lo <= v <= hi
+
+
 def extract_prefix(test_name: object) -> str:
     if pd.isna(test_name):
         return ""
@@ -829,6 +948,18 @@ def consolidate_dfci_labs(
     output_df["TEST_NAME_PREFIX"] = output_df["TEST_NAME"].map(extract_prefix)
     output_df["normalized_result_uom_nm"] = output_df["RESULT_UOM_NM"].map(normalize_unit)
     output_df["numeric_result_as_float"] = pd.to_numeric(output_df["NUMERIC_RESULT"], errors="coerce")
+    # Drop known DFCI sentinel values (e.g. 9999999.0) before any unit math so
+    # they never reach a per-measurement physiologic check. Mirrors the existing
+    # PSA-specific filter in compile_prostate_data.py but applied across every
+    # lab, fixing testosterone (and any other) sentinel leakage.
+    sentinel_mask = output_df["numeric_result_as_float"].map(is_sentinel_value)
+    n_sentinels = int(sentinel_mask.sum())
+    if n_sentinels:
+        print(
+            f"[consolidate_dfci_labs] dropped {n_sentinels} rows whose NUMERIC_RESULT "
+            f"matched a known sentinel value (e.g. 9999999.0)."
+        )
+        output_df.loc[sentinel_mask, "numeric_result_as_float"] = float("nan")
     output_rows: list[dict] = []
 
     for _, row in output_df.iterrows():
@@ -935,6 +1066,18 @@ def consolidate_dfci_labs(
         base_row["conversion_factor"] = factor if factor is not None else pd.NA
         base_row["numeric_result_standardized"] = standardized_value
         base_row["conversion_status"] = status
+
+        # Per-measurement physiologic range filter (mirrors CAIA's
+        # compass_preprocessing physiologic_ranges; bounds are in canonical
+        # units). Out-of-range values get their standardized value nulled with
+        # a status code so the row stays in the audit trail. Sentinel values
+        # were already removed at numeric coercion; this catches plausible-
+        # looking but physiologically impossible entries.
+        if not is_within_physiologic_range(
+            metadata["collapsed_measurement"], standardized_value
+        ):
+            base_row["numeric_result_standardized"] = pd.NA
+            base_row["conversion_status"] = "out_of_physiologic_range"
 
         output_rows.append(base_row)
 
