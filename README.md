@@ -28,7 +28,8 @@ CAIA/
 │   │   ├── landmark_xgboost.py
 │   │   ├── dynamic_deephit.py
 │   │   ├── helper.py
-│   │   └── run_locally.ipynb
+│   │   ├── run_locally.ipynb
+│   │   └── generate_figures.ipynb
 │   ├── utils.py                   # shared note-cleaning rules + clean_note()
 │   ├── OMOP_to_DFCI_lab_ids.csv
 │   └── unique_lab_ids_w_units.csv
@@ -85,7 +86,7 @@ A four-stage chain. All stages are driven from `run_locally.ipynb`, which invoke
    - `cox_pgs_adjusted.py` — PGS-adjusted Cox sweep for selected labs (e.g. Testosterone, PSA)
    - `cox_genomic_univariate.py` — genomic-feature univariate Cox on the t_sample-anchored cohort
 
-4. **Inspection** — `run_locally.ipynb` (sections 4–6) collects headline metrics and runs cohort/feature diagnostics. The analysis notebooks (`paired_volcano_platinum.ipynb`, `model_auc_barplot_platinum.ipynb`, `model_importance_platinum.ipynb`) consume the same outputs.
+4. **Inspection** — `run_locally.ipynb` (sections 4–6) collects headline metrics and runs cohort/feature diagnostics. `generate_figures.ipynb` builds the three platinum-arm figures (paired univariate volcano, grouped AUC barplot, 2×2 importance grid) from the same outputs and writes them to `figures/`.
 
 ## `utils.py`
 
