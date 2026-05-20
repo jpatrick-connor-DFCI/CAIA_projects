@@ -2,19 +2,13 @@
 NOTE_TYPE-aware text cleaning for clinical notes.
 
 Usage:
-    from note_cleaning import clean_note, extract_structured_elements
+    from utils import clean_note
 
     cleaned = clean_note(text, note_type='Clinician')
-    extractions = extract_structured_elements(text, note_type='Pathology')
 
 Rules are organized into:
   - UNIVERSAL_RULES: applied to all notes regardless of type
   - TYPE_SPECIFIC_RULES: keyed by NOTE_TYPE, applied only to matching notes
-  - EXTRACTION_PATTERNS: regex patterns for pre-extracting structured clinical info
-
-To populate rules: run sample_notes_for_regex_generation.py, send the output
-with regex_generation_prompt.txt to the enterprise GPT, then paste the generated
-rules into the dictionaries below.
 """
 
 import re
@@ -169,38 +163,6 @@ TYPE_SPECIFIC_RULES = {
     'Pathology': PATHOLOGY_RULES,
 }
 
-# Extraction patterns: Deduplicated and merged across note types.
-EXTRACTION_PATTERNS = [
-    {
-        'name': 'histology_type',
-        'pattern': r'\b(small cell carcinoma|neuroendocrine differentiation|prostatic adenocarcinoma|ductal type|acinar carcinoma)\b',
-        'note_types': ['clinician', 'imaging', 'pathology'],
-        'flags': re.IGNORECASE,
-        'description': 'Extracts histology type mentions.'
-    },
-    {
-        'name': 'platinum_drug_mentions',
-        'pattern': r'\b(carboplatin|cisplatin|oxaliplatin)(?:-based)?\b.*?(?:started|initiated|administered|used)',
-        'note_types': ['clinician', 'imaging', 'pathology'],
-        'flags': re.IGNORECASE,
-        'description': 'Extracts mentions of platinum drugs with context.'
-    },
-    {
-        'name': 'psa_values',
-        'pattern': r'\bPSA[:\s]*(?:>|<)?\d+(\.\d+)?\b',
-        'note_types': ['clinician', 'imaging', 'pathology'],
-        'flags': re.IGNORECASE,
-        'description': 'Extracts PSA values.'
-    },
-    {
-        'name': 'dates',
-        'pattern': r'\b(?:\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2})\b',
-        'note_types': ['clinician', 'imaging', 'pathology'],
-        'flags': re.IGNORECASE,
-        'description': 'Extracts dates associated with diagnoses or treatment changes.'
-    }
-]
-
 def clean_note(text, note_type=None):
     """Clean a clinical note by applying universal and type-specific regex rules.
 
@@ -226,122 +188,3 @@ def clean_note(text, note_type=None):
     # Final whitespace cleanup
     text = re.sub(r'\n\s*\n+', '\n\n', text)
     return text.strip()
-
-"""
-Per-Note and Synthesis Prompts for DFCI-enterprise GPT-4o instance.
-
-For each patient, apply the prompt_note_extraction prompt for each cleaned note to generate a json file for that note.
-Then, collate the per-note json files into a json array to pass into a synthesis API call using prompt_platinum_classification.
-
-"""
-
-### Per-Note Extraction Prompt
-prompt_note_extraction = """
-You are a clinical data extraction system for an IRB-approved research study on prostate cancer patients who received platinum-based chemotherapy. Your job is to extract ALL clinically relevant evidence from a single note that could help explain why platinum was used.
-
-## INPUT
-- **Note Type** — Clinician, Imaging, or Pathology.
-- **Note Date** — YYYY-MM-DD.
-- **Note Text** — full text of one clinical note.
-
-## WHAT TO EXTRACT
-Surface any evidence related to:
-- Histology (adenocarcinoma, neuroendocrine, small cell, mixed, ductal, etc.)
-- Histologic transformation (e.g., adenocarcinoma transforming to neuroendocrine/small cell)
-- Metastatic disease (bone lesions, visceral metastases, lymph node involvement, pathology stating "metastatic")
-- Castration resistance (rising PSA on ADT, progression on hormonal therapy)
-- Platinum chemotherapy rationale (why it was chosen, what it was combined with)
-- Clinical trial enrollment (protocol names, study references)
-- Biomarker/genomic findings (BRCA2, HRD, MSI-H, etc.)
-- Disease status (progression, response, stable)
-- Other cancer diagnoses (non-prostate primaries that might explain platinum use)
-
-## RULES
-- Extract what is documented. When something is implied but not explicitly stated (e.g., a pathology report saying "consistent with metastatic prostate adenocarcinoma"), extract it and note the source.
-- Use null when the note does not contain relevant information for a field.
-- Quotes must be verbatim, ≤30 words each.
-
-## OUTPUT FORMAT
-Return ONLY valid JSON. No markdown fencing, no commentary.
-
-{
-  "note_date": "<YYYY-MM-DD>",
-  "note_type": "<Clinician | Imaging | Pathology>",
-  "histology": "<'adenocarcinoma' | 'neuroendocrine' | 'small_cell' | 'mixed' | 'other' | null>",
-  "metastatic_disease": <true | false | null>,
-  "transformation_mentioned": <true | false>,
-  "transformation_detail": "<e.g. 'adenocarcinoma to neuroendocrine' or null>",
-  "castration_resistant": <true | false | null>,
-  "platinum_mentioned": <true | false>,
-  "platinum_context": "<brief description of how platinum is discussed, or null>",
-  "clinical_trial_mentioned": <true | false>,
-  "biomarkers": "<any genomic/molecular findings mentioned, or null>",
-  "other_cancer": "<non-prostate cancer mentioned, or null>",
-  "key_quotes": ["<verbatim quote, ≤30 words>"]
-}
-
-Now extract from the following note:
-"""
-
-### Patient-Level Synthesis Prompt
-prompt_platinum_classification = """
-You are a clinical data synthesis system for an IRB-approved research study. You receive per-note extractions for a prostate cancer patient who received platinum-based chemotherapy (carboplatin or cisplatin). Your task is to synthesize the evidence across all notes and determine WHY platinum was used.
-
-## CLINICAL CONTEXT
-Platinum chemotherapy is NOT standard treatment for prostate cancer. When a prostate cancer patient receives platinum, there is always a specific clinical reason. We are studying whether platinum initiation can serve as a proxy for aggressive disease phenotypes. Common reasons include:
-- **Neuroendocrine or small cell transformation** — the tumor changed from adenocarcinoma to a neuroendocrine or small cell phenotype, treated with platinum-based regimens.
-- **De novo small cell / neuroendocrine prostate cancer** — rare cases where the initial diagnosis is small cell or neuroendocrine, not a transformation from adenocarcinoma.
-- **Clinical trial enrollment** — platinum given as part of a trial protocol.
-- **Castration-resistant prostate cancer (CRPC)** — platinum used in the setting of documented castration resistance (rising PSA or progression despite ADT/hormonal therapy), without histologic transformation.
-- **Disease progression on standard therapies** — platinum used empirically after exhausting standard options, without documented castration resistance or histologic transformation.
-- **Non-prostate primary** — the platinum is for a different cancer in a patient who also has prostate cancer.
-- **Biomarker-driven** — platinum selected based on genomic findings (e.g., BRCA2, HRD, MSI-H).
-
-## INPUT
-A JSON array of per-note extractions in chronological order by `note_date`.
-
-## RULES
-- Base your answer on the evidence across all notes. When the clinical reasoning for platinum is not expressly stated, draw conclusions from the available evidence. For example:
-  - A pathology extraction showing histology "small cell" or "neuroendocrine" supports transformation even if no note explicitly says "transformation occurred."
-  - Extractions showing `metastatic_disease: true` document metastatic disease even if no clinician note explicitly says "metastatic."
-  - Extractions showing `castration_resistant: true` support CRPC.
-  - Extractions showing `clinical_trial_mentioned: true` with platinum context support clinical trial.
-- When drawing conclusions from indirect evidence, set `confidence` to "medium" rather than "high."
-- Weigh evidence by note type: Pathology extractions are most authoritative for histology; Clinician extractions for treatment rationale; Imaging extractions for disease burden and metastatic status.
-- If extractions contradict on histology, prefer the most recent Pathology note. If none, use the most recent Clinician note.
-- If multiple reasons apply, report the PRIMARY reason that drove the platinum decision.
-- Use null only when the extractions genuinely do not contain enough information to determine the answer.
-
-## OUTPUT FORMAT
-Return ONLY valid JSON. No markdown fencing, no commentary.
-
-{
-  "platinum_reason": "<enum or null>",
-  "platinum_reason_detail": "<one-sentence explanation grounded in the note extractions, or null>",
-  "histology_at_platinum_start": "<'adenocarcinoma' | 'neuroendocrine' | 'small_cell' | 'mixed' | 'other' | null>",
-  "metastatic_disease": <true | false | null>,
-  "transformation_documented": <true | false | null>,
-  "transformation_detail": "<e.g. 'adenocarcinoma to small cell carcinoma' or null>",
-  "supporting_quotes": ["<verbatim quote from extractions, ≤30 words>"],
-  "supporting_quote_dates": ["<YYYY-MM-DD of note containing each quote>"],
-  "confidence": "<'high' | 'medium' | 'low'>"
-}
-
-Field `platinum_reason` must be one of:
-  - "neuroendocrine_transformation" — documented transformation to neuroendocrine or small cell
-  - "de_novo_neuroendocrine" — initial diagnosis was neuroendocrine or small cell, no prior adenocarcinoma
-  - "clinical_trial" — platinum given as part of a clinical trial
-  - "crpc" — platinum in the setting of castration-resistant prostate cancer, no histologic transformation documented
-  - "disease_progression" — empiric platinum after progression on standard therapies, without documented castration resistance or histologic transformation
-  - "non_prostate_primary" — platinum is for a different cancer, not the prostate cancer
-  - "biomarker_driven" — platinum selected based on genomic/molecular findings
-  - "other" — documented reason that does not fit the above categories
-  - null — notes do not contain enough information to determine the reason
-
-Field `confidence`:
-  - "high" — the reason is explicitly stated or clearly documented
-  - "medium" — the reason is strongly implied by the clinical context but not explicitly stated
-  - "low" — ambiguous or insufficient documentation; best guess from available evidence
-
-Now synthesize the following per-note extractions:
-"""

@@ -40,10 +40,10 @@ v3/
 
 ```bash
 # (one-time) compile a gzip note bundle so re-runs don't re-scan raw OncDRS JSON
-python COMPASS/PROFILE/v3/compile_prostate_note_bundle.py --mrn-file path/to/prostate_mrns.txt
+python COMPASS/v3/compile_prostate_note_bundle.py --mrn-file path/to/prostate_mrns.txt
 
 # classify
-python COMPASS/PROFILE/v3/run_v3_pipeline.py --mrn-file path/to/prostate_mrns.txt --max-workers 4
+python COMPASS/v3/run_v3_pipeline.py --mrn-file path/to/prostate_mrns.txt --max-workers 4
 ```
 
 If the bundle lives elsewhere: `--note-bundle-path path/to/LLM_v3_prostate_note_bundle.json.gz`.
@@ -51,7 +51,7 @@ If the bundle lives elsewhere: `--note-bundle-path path/to/LLM_v3_prostate_note_
 ## One-command raw run
 
 ```bash
-python COMPASS/PROFILE/v3/run_v3_pipeline.py --mrn-file path/to/mrns.txt --max-workers 4
+python COMPASS/v3/run_v3_pipeline.py --mrn-file path/to/mrns.txt --max-workers 4
 ```
 
 When no bundle exists at the expected path, the pipeline falls back to scanning raw OncDRS JSONs directly.

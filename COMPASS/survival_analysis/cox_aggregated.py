@@ -94,7 +94,6 @@ DEFAULT_MAX_ABS_COXNET_COEF = 25.0
 BASE = Path(__file__).resolve().parent
 DATA_PATH = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/")
 RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis")
-DEFAULT_V3_LABELS_PATH = DATA_PATH / "v3_outputs" / "LLM_v3_labels.tsv"
 
 AGE_COL = "AGE_AT_TREATMENTSTART"
 DEFAULT_SEED = 42
@@ -252,11 +251,6 @@ def normalize_endpoints(raw_endpoints: list[str]) -> list[str]:
         if normalized not in endpoints:
             endpoints.append(normalized)
     return endpoints
-
-
-def load_v3_label_mrns(path: Path) -> set[int]:
-    labels = pd.read_csv(path, sep="\t", usecols=["DFCI_MRN"])
-    return set(labels["DFCI_MRN"].dropna().astype(int).unique())
 
 
 def normalize_landmark_days(raw_landmark_days: list[int]) -> list[int]:

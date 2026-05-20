@@ -1,162 +1,114 @@
 # CAIA
 
-Current repository for the CAIA prostate profiling workflow. The active code in this repo is focused on assembling a prostate cancer cohort from local DFCI/Profile exports, preparing note text for manual or LLM review, and generating patient-level labels about why platinum chemotherapy was used.
+Research workflow for assembling a prostate cancer cohort from local DFCI / Profile / OncDRS exports, labeling each patient via a v3 single-call LLM classifier, and running landmark survival analysis (Cox / XGBoost / Dynamic-DeepHit) on the resulting cohort.
 
-This is no longer the older OMOP/PySpark preprocessing repository described in prior versions of the README. The current checked-in code is mostly pandas-based and lives under `COMPASS/PROFILE/`.
+The code is pandas-based and the entry points are command-line scripts plus a local-runs notebook.
 
-## Current Repository Structure
+## Repository Structure
 
 ```text
 CAIA/
 ├── COMPASS/
-│   ├── COMPASS_Cohort_Report.docx
-│   ├── COMPASS_Exclusion_and_Threshold_Analysis.docx
-│   └── PROFILE/
-│       ├── data_preprocessing/
-│       │   ├── compile_prostate_data.py
-│       │   ├── compile_MRNs_for_manual_review.py
-│       │   └── compile_text_for_LLM_review.py
-│       ├── regex_generation/
-│       │   ├── generate_regex_rules.py
-│       │   └── regex_prompts.py
-│       ├── generate_LLM_labels.py
-│       └── utils.py
-├── IPIO/
-│   └── IPIO_Cohort_Report.docx
+│   ├── data_preprocessing/        # prostate cohort + source-data compilation
+│   │   ├── compile_prostate_data.py
+│   │   ├── compile_MRNs_for_manual_review.py
+│   │   └── compile_text_for_LLM_review.py
+│   ├── v3/                        # current LLM labeling pipeline
+│   │   ├── compile_prostate_note_bundle.py
+│   │   ├── helpers.py
+│   │   └── run_v3_pipeline.py
+│   ├── survival_analysis/         # cohort consolidation + survival models
+│   │   ├── consolidate_dfci_labs.py
+│   │   ├── longitudinal_data_processing.py
+│   │   ├── build_prediction_inputs.py
+│   │   ├── build_genomic_inputs.py
+│   │   ├── cox_aggregated.py
+│   │   ├── cox_genomic_univariate.py
+│   │   ├── cox_pgs_adjusted.py
+│   │   ├── landmark_xgboost.py
+│   │   ├── dynamic_deephit.py
+│   │   ├── helper.py
+│   │   └── run_locally.ipynb
+│   ├── utils.py                   # shared note-cleaning rules + clean_note()
+│   ├── OMOP_to_DFCI_lab_ids.csv
+│   └── unique_lab_ids_w_units.csv
+├── common_OMOP/
 └── README.md
 ```
 
-## What Is In Scope Right Now
+## Pipeline
 
-The active workflow supports retrospective review of prostate cancer patients who received platinum chemotherapy, with an emphasis on identifying likely neuroendocrine or small-cell transformation and other clinical reasons for platinum use.
+### 1. Compile the prostate cohort source data
 
-The main pieces are:
+`COMPASS/data_preprocessing/compile_prostate_data.py`
 
-- Cohort and source-data compilation from local Profile / OncDRS / embedding-project exports
-- Heuristic filtering for prostate patients, PSA records, and platinum exposures
-- Candidate-patient selection for manual review
-- Note-window extraction for LLM review around platinum start
-- Regex-based note cleaning for clinician, imaging, and pathology notes
-- Two-stage LLM labeling: per-note extraction followed by patient-level synthesis
+Pulls prostate MRNs from the DFCI first-treatments table and filters the related raw exports (ICDs, health history, medications, labs, somatic, total PSA, platinum-chemo records) down to the prostate cohort. Outputs:
 
-## Active Workflow
+- `prostate_text_data.csv`, `prostate_icd_data.csv`, `prostate_health_history_data.csv`, `prostate_medications_data.csv`, `prostate_labs_data.csv`, `prostate_somatic_data.csv`
+- `total_psa_records.csv`, `platinum_chemo_records.csv`
 
-### 1. Build the prostate cohort data bundle
+These CSVs are the upstream inputs for both the v3 LLM pipeline and the survival pipeline.
 
-`COMPASS/PROFILE/data_preprocessing/compile_prostate_data.py`
+### 2. v3 LLM patient labeling
 
-This script:
+`COMPASS/v3/run_v3_pipeline.py`
 
-- pulls prostate MRNs from `first_treatments_dfci_w_inferred_cancers.csv`
-- loads note metadata and batch JSON note files from the clinical text embedding project
-- writes a prostate-only note table to `prostate_text_data.csv`
-- filters related ICD, health history, medication, lab, and somatic datasets to the same MRNs
-- creates convenience outputs for total PSA records and first platinum exposure records
+One LLM call per patient against an Azure OpenAI `gpt-4o` deployment. Each patient is classified as **NEPC**, **AVPC**, **biomarker-driven**, or **conventional**, with structured fields covering NE features, AVPC criteria, biomarker genes, visceral metastasis patterns, supporting quotes, and confidence.
 
-Key implementation detail: paths are hard-coded to shared filesystem locations under `/data/gusev/...`.
+Two steps:
 
-### 2. Prepare manual review candidates
+1. `compile_prostate_note_bundle.py` — gather all OncDRS notes for a list of DFCI MRNs into a gzipped JSON bundle.
+2. `run_v3_pipeline.py` — read the bundle, build per-patient snippets, call the LLM with `CLASSIFY_SYSTEM_PROMPT`, parse the JSON response, and write `LLM_v3_labels.tsv`.
 
-`COMPASS/PROFILE/data_preprocessing/compile_MRNs_for_manual_review.py`
+Helpers (`compile_prostate_note_bundle.py`, `helpers.py`) import `clean_note` from `COMPASS/utils.py`.
 
-This script combines the derived prostate datasets to create a review table for platinum-treated patients. It adds:
+### 3. Survival analysis
 
-- note counts by note type
-- whether platinum drug names appear in notes
-- non-prostate primary malignancy flags from ICD-10 codes
-- PARP inhibitor exposure
-- BRCA2-related somatic columns from the somatic data table
+`COMPASS/survival_analysis/`
 
-Primary output:
+A four-stage chain. All stages are driven from `run_locally.ipynb`, which invokes each script with `!{PYTHON} ...` so a single notebook kernel runs the whole pipeline end-to-end.
 
-- `prostate_pxs_for_review_v2.csv`
+1. **Lab consolidation** — `longitudinal_data_processing.py` (which internally calls `consolidate_dfci_labs.consolidate_dfci_labs`) folds the raw `prostate_labs_data.csv` and health-history rows into a per-patient longitudinal prediction frame. Applies the sentinel-value filter and per-measurement physiologic-range filter. Output: `longitudinal_prediction_data.csv`.
 
-### 3. Prepare note text for LLM review
+   Cohort filters at this stage (in `apply_cohort_filters`):
+   - C61 prostate ICD required; non-prostate primary excluded
+   - Must have a recorded first treatment (`FIRST_TREATMENT == 1`)
+   - ≥ 5 PSA rows
+   - PARPi-exposed patients excluded
 
-`COMPASS/PROFILE/data_preprocessing/compile_text_for_LLM_review.py`
+2. **Prediction inputs** — `build_prediction_inputs.py` (plus `build_genomic_inputs.py` for the genomic-anchored arm). Derives landmark cohorts (default landmarks: 0 and 90 days post first-treatment), 3-way train/valid/test split, canonical lab feature sets, AUC horizon grids, and writes per-landmark aggregated + longitudinal CSVs into `prediction_inputs/`.
 
-This script:
+3. **Models** — fit and evaluate at each landmark on the **PLATINUM** (time-to-first-platinum) and **DEATH** endpoints:
+   - `cox_aggregated.py` — Cox univariate + multivariable (elastic net) on aggregated features
+   - `landmark_xgboost.py` — XGBoost survival on the same aggregated features
+   - `dynamic_deephit.py` — Dynamic-DeepHit on the longitudinal feature CSVs (PLATINUM and competing-risk configs)
+   - `cox_pgs_adjusted.py` — PGS-adjusted Cox sweep for selected labs (e.g. Testosterone, PSA)
+   - `cox_genomic_univariate.py` — genomic-feature univariate Cox on the t_sample-anchored cohort
 
-- reads existing annotation data from `baca_lab_patient_annotations.tsv`
-- keeps patients whose platinum indication is still unlabeled
-- joins those patients to the full prostate note table
-- keeps notes within +/-90 days of platinum start
-- writes the result to `LLM_candidate_text_data.csv`
-
-### 4. Generate regex cleaning rules
-
-`COMPASS/PROFILE/regex_generation/generate_regex_rules.py`
-
-This script samples notes by `NOTE_TYPE`, sends the samples to an Azure OpenAI deployment, and asks the model to propose:
-
-- boilerplate-removal regexes
-- regex patterns for extracting structured note elements
-
-Outputs are written under the data directory configured in the script, including:
-
-- per-note-type GPT responses
-- a synthesized `generated_rules.py`
-
-The prompt templates for this step live in `COMPASS/PROFILE/regex_generation/regex_prompts.py`.
-
-### 5. Clean notes and run LLM labeling
-
-`COMPASS/PROFILE/generate_LLM_labels.py`
-
-This is the main labeling script. It:
-
-- reads `LLM_candidate_text_data.csv`
-- cleans note text with `clean_note(...)` from `COMPASS/PROFILE/utils.py`
-- runs per-note extraction prompts against an Azure OpenAI `gpt-4o` deployment
-- checkpoints note-level JSON extractions
-- runs a second synthesis prompt per patient to infer the primary reason platinum was used
-- appends patient-level results to a TSV output
-- tracks failures separately and supports `--retry-failures`
-
-Configured outputs:
-
-- `LLM_generated_labels.tsv`
-- `LLM_note_extractions.json`
-- `LLM_failed_patients.tsv`
+4. **Inspection** — `run_locally.ipynb` (sections 4–6) collects headline metrics and runs cohort/feature diagnostics. The analysis notebooks (`paired_volcano_platinum.ipynb`, `model_auc_barplot_platinum.ipynb`, `model_importance_platinum.ipynb`) consume the same outputs.
 
 ## `utils.py`
 
-`COMPASS/PROFILE/utils.py` contains:
-
-- regex cleaning rules shared across note types plus note-type-specific rules
-- helper function `clean_note(text, note_type=None)`
-- the per-note extraction prompt
-- the patient-level platinum-classification synthesis prompt
-
-The current prompts are designed for de-identified oncology notes and classify platinum rationale into categories such as:
-
-- neuroendocrine transformation
-- de novo neuroendocrine disease
-- clinical trial
-- CRPC
-- disease progression
-- non-prostate primary
-- biomarker-driven use
+`COMPASS/utils.py` contains note-cleaning regex rules (universal, clinician, imaging, pathology) and the `clean_note(text, note_type=None)` helper used by `COMPASS/v3/helpers.py`.
 
 ## Dependencies and Runtime Assumptions
 
-There is no packaged environment definition in this repo at the moment. The checked-in scripts assume access to:
+No packaged environment definition is checked in. The scripts assume:
 
-- Python with `pandas`, `numpy`, and `tqdm`
-- `openai`
-- `azure-identity`
-- local/shared CSV and JSON data files under `/data/gusev/...`
+- Python with `pandas`, `numpy`, `tqdm`, `scikit-learn`, `scikit-survival`, `xgboost`, `lifelines`, `pycox`/`torch` (DeepHit)
+- `openai`, `azure-identity` (LLM labeling)
 - valid Azure credentials for `DefaultAzureCredential`
-- access to the Azure OpenAI endpoint hard-coded in the LLM scripts
+- access to the Azure OpenAI endpoint hard-coded in v3 / configured via env vars
+- CSV and JSON data files under `/data/gusev/...` (raw exports and outputs)
 
-Because paths and endpoints are currently embedded directly in the scripts, this repo is best understood as a research workflow snapshot rather than a portable package.
+Paths are mostly hard-coded to the cluster filesystem; the survival notebook exposes them as variables for local overrides.
 
-## Current State of `IPIO`
+## `IPIO`
 
-`IPIO/` currently contains only `IPIO_Cohort_Report.docx`. The older IPIO preprocessing code referenced by earlier README versions is not present in this checkout.
+`IPIO/` currently contains only `IPIO_Cohort_Report.docx`. The older IPIO preprocessing code referenced by prior README versions is not in this checkout.
 
 ## Notes
 
-- Hidden `.ipynb_checkpoints` and `.DS_Store` files exist in the tree but are not part of the intended workflow.
+- `.ipynb_checkpoints/` and `__pycache__/` artifacts exist in the tree but are not part of the workflow.
 - Several scripts read and write data outside the repository root.
-- If this repo is going to be used by others, the next cleanup step would be to externalize paths, add an environment file, and document the expected input tables explicitly.
+- Earlier LLM-labeling code (`COMPASS/v2/`, `COMPASS/generate_LLM_labels.py`, `COMPASS/regex_generation/`) has been removed; v3 is the only supported labeling pipeline.

@@ -46,14 +46,12 @@ from cox_aggregated import (  # noqa: E402
     DEFAULT_SEED,
     DEFAULT_TEST_FRAC,
     DEFAULT_MIN_PATIENT_COVERAGE,
-    DEFAULT_V3_LABELS_PATH,
     ENDPOINTS,
     RESULTS,
     build_landmark_availability_table,
     build_landmark_merged,
     build_pre_treatment_lab_long,
     choose_stratification_labels,
-    load_v3_label_mrns,
     normalize_landmark_days,
 )
 from helper import (  # noqa: E402
@@ -483,19 +481,10 @@ def main(args: argparse.Namespace) -> None:
     print(f"Loading data from {args.data} ...")
     df = pd.read_csv(args.data, low_memory=False)
 
-    v3_mrns = load_v3_label_mrns(Path(args.v3_labels_path))
-    n_before = df["DFCI_MRN"].nunique()
     df["DFCI_MRN"] = pd.to_numeric(df["DFCI_MRN"], errors="coerce")
     df = df.loc[df["DFCI_MRN"].notna()].copy()
     df["DFCI_MRN"] = df["DFCI_MRN"].astype(int)
-    df = df.loc[df["DFCI_MRN"].isin(v3_mrns)].copy()
-    n_after = df["DFCI_MRN"].nunique()
-    print(
-        f"Restricted to MRNs with v3 LLM labels ({args.v3_labels_path}): "
-        f"{n_after}/{n_before} patients retained"
-    )
-    if n_after == 0:
-        raise ValueError("No MRNs remain after intersecting with v3 LLM label cohort.")
+    print(f"Loaded cohort: {df['DFCI_MRN'].nunique()} unique MRNs")
 
     merged_by_landmark: dict[int, pd.DataFrame] = {}
     for landmark_day in landmark_days:
@@ -665,7 +654,6 @@ def main(args: argparse.Namespace) -> None:
     )
     build_manifest = {
         "data": str(args.data),
-        "v3_labels_path": str(args.v3_labels_path),
         "landmark_days": [int(d) for d in landmark_days],
         "seed": int(args.seed),
         "test_frac": float(args.test_frac),
@@ -694,12 +682,6 @@ def main(args: argparse.Namespace) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", default=str(DATA_PATH / "longitudinal_prediction_data.csv"))
-    parser.add_argument(
-        "--v3-labels-path",
-        type=str,
-        default=str(DEFAULT_V3_LABELS_PATH),
-        help="TSV of v3 LLM labels (DFCI_MRN column). Cohort is restricted to its MRN set.",
-    )
     parser.add_argument(
         "--landmark-days",
         nargs="+",

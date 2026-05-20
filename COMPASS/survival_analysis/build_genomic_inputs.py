@@ -6,8 +6,8 @@ Predicts platinum / death from sample collection forward, with
 features derived from labs measured strictly before t_sample plus 12 binary
 genomic indicators ({TP53, RB1, PTEN} x {SV, DEL, AMP, SNV}).
 
-Cohort = v3-filtered longitudinal cohort INTERSECTED with patients that have
-a genomic sample AND have a split label in the existing
+Cohort = longitudinal cohort INTERSECTED with patients that have a genomic
+sample AND have a split label in the existing
 prediction_inputs/split_assignments.csv (so test stays test across arms).
 
 Outputs (under <inputs-dir>/genomic):
@@ -38,12 +38,10 @@ from cox_aggregated import (  # noqa: E402
     AGE_COL,
     DATA_PATH,
     DEFAULT_MIN_PATIENT_COVERAGE,
-    DEFAULT_V3_LABELS_PATH,
     ENDPOINTS,
     RESULTS,
     build_feature_matrix,
     build_pre_treatment_lab_long,
-    load_v3_label_mrns,
     make_outcome_df,
 )
 from helper import (  # noqa: E402
@@ -127,12 +125,7 @@ def main(args: argparse.Namespace) -> None:
     df["DFCI_MRN"] = pd.to_numeric(df["DFCI_MRN"], errors="coerce")
     df = df.loc[df["DFCI_MRN"].notna()].copy()
     df["DFCI_MRN"] = df["DFCI_MRN"].astype(int)
-
-    v3_mrns = load_v3_label_mrns(Path(args.v3_labels_path))
-    n_before = df["DFCI_MRN"].nunique()
-    df = df.loc[df["DFCI_MRN"].isin(v3_mrns)].copy()
-    n_after = df["DFCI_MRN"].nunique()
-    print(f"v3-filtered cohort: {n_after}/{n_before} patients")
+    print(f"Loaded cohort: {df['DFCI_MRN'].nunique()} unique MRNs")
 
     somatic = load_somatic(Path(args.somatic_path))
     print(f"Somatic patients: {len(somatic)}")
@@ -241,7 +234,6 @@ def main(args: argparse.Namespace) -> None:
 
     manifest = {
         "data": str(args.data),
-        "v3_labels_path": str(args.v3_labels_path),
         "somatic_path": str(args.somatic_path),
         "anchor": "t_sample",
         "sample_pick_rule": "input csv assumed deduplicated by DFCI_MRN",
@@ -267,7 +259,6 @@ def main(args: argparse.Namespace) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", default=str(DATA_PATH / "longitudinal_prediction_data.csv"))
-    parser.add_argument("--v3-labels-path", type=str, default=str(DEFAULT_V3_LABELS_PATH))
     parser.add_argument("--somatic-path", type=str, default=str(DEFAULT_SOMATIC_PATH))
     parser.add_argument(
         "--inputs-dir",
