@@ -2,7 +2,7 @@
 Single source of truth for survival-analysis prediction inputs.
 
 For each requested landmark, this script:
-  1. Loads + v3-filters the raw longitudinal lab CSV.
+  1. Loads + current cohort-filters the raw longitudinal lab CSV.
   2. Builds the landmarked patient cohort and intersects MRNs across all
      requested landmarks so every downstream model sees the same patients.
   3. Derives a 3-way train/valid/test split ONCE on the intersection cohort

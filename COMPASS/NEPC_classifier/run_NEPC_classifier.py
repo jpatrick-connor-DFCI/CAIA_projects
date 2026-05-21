@@ -161,8 +161,8 @@ def conventional_row(mrn):
 
 def run(args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = args.output_dir / "LLM_v3_labels.tsv"
-    failures_path = args.output_dir / "LLM_v3_failed_patients.tsv"
+    output_path = args.output_dir / "LLM_NEPC_classifier_labels.tsv"
+    failures_path = args.output_dir / "LLM_NEPC_classifier_failed_patients.tsv"
 
     if args.overwrite:
         output_path.unlink(missing_ok=True)

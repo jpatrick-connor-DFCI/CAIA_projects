@@ -1,6 +1,6 @@
 # CAIA
 
-Research workflow for assembling a prostate cancer cohort from local DFCI / Profile / OncDRS exports, labeling each patient via a v3 single-call LLM classifier, and running landmark survival analysis (Cox / XGBoost / Dynamic-DeepHit) on the resulting cohort.
+Research workflow for assembling a prostate cancer cohort from local DFCI / Profile / OncDRS exports, labeling each patient via the NEPC_classifier single-call LLM classifier, and running landmark survival analysis (Cox / XGBoost / Dynamic-DeepHit) on the resulting cohort.
 
 The code is pandas-based and the entry points are command-line scripts plus a local-runs notebook.
 
@@ -13,10 +13,10 @@ CAIA/
 │   │   ├── compile_prostate_data.py
 │   │   ├── compile_MRNs_for_manual_review.py
 │   │   └── compile_text_for_LLM_review.py
-│   ├── v3/                        # current LLM labeling pipeline
+│   ├── NEPC_classifier/           # current LLM labeling pipeline
 │   │   ├── compile_prostate_note_bundle.py
 │   │   ├── helpers.py
-│   │   └── run_v3_pipeline.py
+│   │   └── run_NEPC_classifier.py
 │   ├── survival_analysis/         # cohort consolidation + survival models
 │   │   ├── consolidate_dfci_labs.py
 │   │   ├── longitudinal_data_processing.py
@@ -48,18 +48,18 @@ Pulls prostate MRNs from the DFCI first-treatments table and filters the related
 - `prostate_text_data.csv`, `prostate_icd_data.csv`, `prostate_health_history_data.csv`, `prostate_medications_data.csv`, `prostate_labs_data.csv`, `prostate_somatic_data.csv`
 - `total_psa_records.csv`, `platinum_chemo_records.csv`
 
-These CSVs are the upstream inputs for both the v3 LLM pipeline and the survival pipeline.
+These CSVs are the upstream inputs for both the NEPC_classifier LLM pipeline and the survival pipeline.
 
-### 2. v3 LLM patient labeling
+### 2. NEPC Classifier LLM Patient Labeling
 
-`COMPASS/v3/run_v3_pipeline.py`
+`COMPASS/NEPC_classifier/run_NEPC_classifier.py`
 
 One LLM call per patient against an Azure OpenAI `gpt-4o` deployment. Each patient is classified as **NEPC**, **AVPC**, **biomarker-driven**, or **conventional**, with structured fields covering NE features, AVPC criteria, biomarker genes, visceral metastasis patterns, supporting quotes, and confidence.
 
 Two steps:
 
 1. `compile_prostate_note_bundle.py` — gather all OncDRS notes for a list of DFCI MRNs into a gzipped JSON bundle.
-2. `run_v3_pipeline.py` — read the bundle, build per-patient snippets, call the LLM with `CLASSIFY_SYSTEM_PROMPT`, parse the JSON response, and write `LLM_v3_labels.tsv`.
+2. `run_NEPC_classifier.py` — read the bundle, build per-patient snippets, call the LLM with `CLASSIFY_SYSTEM_PROMPT`, parse the JSON response, and write `LLM_NEPC_classifier_labels.tsv`.
 
 Helpers (`compile_prostate_note_bundle.py`, `helpers.py`) import `clean_note` from `COMPASS/utils.py`.
 
@@ -90,7 +90,7 @@ A four-stage chain. All stages are driven from `run_locally.ipynb`, which invoke
 
 ## `utils.py`
 
-`COMPASS/utils.py` contains note-cleaning regex rules (universal, clinician, imaging, pathology) and the `clean_note(text, note_type=None)` helper used by `COMPASS/v3/helpers.py`.
+`COMPASS/utils.py` contains note-cleaning regex rules (universal, clinician, imaging, pathology) and the `clean_note(text, note_type=None)` helper used by `COMPASS/NEPC_classifier/helpers.py`.
 
 ## Dependencies and Runtime Assumptions
 
@@ -99,7 +99,7 @@ No packaged environment definition is checked in. The scripts assume:
 - Python with `pandas`, `numpy`, `tqdm`, `scikit-learn`, `scikit-survival`, `xgboost`, `lifelines`, `pycox`/`torch` (DeepHit)
 - `openai`, `azure-identity` (LLM labeling)
 - valid Azure credentials for `DefaultAzureCredential`
-- access to the Azure OpenAI endpoint hard-coded in v3 / configured via env vars
+- access to the Azure OpenAI endpoint hard-coded in NEPC_classifier / configured via env vars
 - CSV and JSON data files under `/data/gusev/...` (raw exports and outputs)
 
 Paths are mostly hard-coded to the cluster filesystem; the survival notebook exposes them as variables for local overrides.
@@ -112,4 +112,4 @@ Paths are mostly hard-coded to the cluster filesystem; the survival notebook exp
 
 - `.ipynb_checkpoints/` and `__pycache__/` artifacts exist in the tree but are not part of the workflow.
 - Several scripts read and write data outside the repository root.
-- Earlier LLM-labeling code (`COMPASS/v2/`, `COMPASS/generate_LLM_labels.py`, `COMPASS/regex_generation/`) has been removed; v3 is the only supported labeling pipeline.
+- Earlier LLM-labeling code (`COMPASS/v2/`, `COMPASS/generate_LLM_labels.py`, `COMPASS/regex_generation/`) has been removed; NEPC_classifier is the only supported labeling pipeline.

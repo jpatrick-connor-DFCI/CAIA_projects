@@ -13,7 +13,7 @@ from helpers import (
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Compile all raw notes for a prostate MRN list into a gzip JSON bundle for v3."
+        description="Compile all raw notes for a prostate MRN list into a gzip JSON bundle for NEPC_classifier."
     )
     parser.add_argument(
         "--output-path",

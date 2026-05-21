@@ -37,14 +37,14 @@ DEFAULT_DATA_PATH = Path(
     os.environ.get("CAIA_COMPASS_DATA_PATH", "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/")
 )
 DEFAULT_OUTPUT_DIR = Path(
-    os.environ.get("CAIA_COMPASS_V3_OUTPUT_DIR", str(DEFAULT_DATA_PATH / "v3_outputs"))
+    os.environ.get("CAIA_COMPASS_NEPC_CLASSIFIER_OUTPUT_DIR", str(DEFAULT_DATA_PATH / "LLM_NEPC_labels"))
 )
 DEFAULT_RAW_TEXT_PATHS = (
     Path("/data/gusev/PROFILE/CLINICAL/OncDRS/CLINICAL_TEXTS_2024_03/"),
     Path("/data/gusev/PROFILE/CLINICAL/OncDRS/CLINICAL_TEXTS_2025_03/"),
     Path("/data/gusev/PROFILE/CLINICAL/OncDRS/CLINICAL_TEXTS_2025_11/"),
 )
-NOTE_BUNDLE_FILENAME = "LLM_v3_prostate_note_bundle.json.gz"
+NOTE_BUNDLE_FILENAME = "LLM_NEPC_classifier_note_bundle.json.gz"
 
 NOTE_BUNDLE_COLUMNS = (
     "DFCI_MRN",

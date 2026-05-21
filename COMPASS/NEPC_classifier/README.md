@@ -1,4 +1,4 @@
-# PROFILE LLM Extraction v3
+# NEPC Classifier
 
 Classifies each prostate cancer patient into one of four buckets with a single LLM call:
 
@@ -14,7 +14,7 @@ Independently, each patient is also flagged for two separate annotations that ca
 - `has_non_prostate_primary` — synchronous/metachronous non-prostate primary (e.g., NSCLC, colorectal, urothelial, RCC, lymphoma).
 - `has_molecular_avpc` — ≥ 2 somatic alterations among {PTEN, TP53, RB1}. Fully independent of `has_avpc` — does not change `primary_label` or `avpc_criteria`.
 
-AVPC C-criteria refinements (v3 current):
+AVPC C-criteria refinements:
 
 - **C2** (visceral pattern) requires lung / adrenal / brain / pleural / peritoneal metastasis; liver-only involvement does NOT qualify. When C2 is set, `visceral_met_pattern` records either `visceral_only` or `visceral_and_bone`.
 - **C4** (bulky disease) is restricted to bulky lymphadenopathy / nodal disease OR a prostate / pelvic mass with a documented measurement ≥ 5 cm.
@@ -22,9 +22,9 @@ AVPC C-criteria refinements (v3 current):
 ## Files
 
 ```text
-v3/
+NEPC_classifier/
   helpers.py                       # config, triggers, prompt, snippet builder, LLM client
-  run_v3_pipeline.py               # main entrypoint
+  run_NEPC_classifier.py           # main entrypoint
   compile_prostate_note_bundle.py  # optional: pre-compile raw OncDRS notes into a gzip bundle
 ```
 
@@ -40,31 +40,31 @@ v3/
 
 ```bash
 # (one-time) compile a gzip note bundle so re-runs don't re-scan raw OncDRS JSON
-python COMPASS/v3/compile_prostate_note_bundle.py --mrn-file path/to/prostate_mrns.txt
+python COMPASS/NEPC_classifier/compile_prostate_note_bundle.py --mrn-file path/to/prostate_mrns.txt
 
 # classify
-python COMPASS/v3/run_v3_pipeline.py --mrn-file path/to/prostate_mrns.txt --max-workers 4
+python COMPASS/NEPC_classifier/run_NEPC_classifier.py --mrn-file path/to/prostate_mrns.txt --max-workers 4
 ```
 
-If the bundle lives elsewhere: `--note-bundle-path path/to/LLM_v3_prostate_note_bundle.json.gz`.
+If the bundle lives elsewhere: `--note-bundle-path path/to/LLM_NEPC_classifier_note_bundle.json.gz`.
 
 ## One-command raw run
 
 ```bash
-python COMPASS/v3/run_v3_pipeline.py --mrn-file path/to/mrns.txt --max-workers 4
+python COMPASS/NEPC_classifier/run_NEPC_classifier.py --mrn-file path/to/mrns.txt --max-workers 4
 ```
 
 When no bundle exists at the expected path, the pipeline falls back to scanning raw OncDRS JSONs directly.
 
 ## Outputs
 
-By default, `v3` writes to `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/v3_outputs/`.
+By default, `NEPC_classifier` writes to `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/LLM_NEPC_labels/`.
 
-- `LLM_v3_prostate_note_bundle.json.gz` — optional pre-compiled note bundle
-- `LLM_v3_labels.tsv` — one row per patient with the final classification, supporting quotes, confidence, and rationale
-- `LLM_v3_failed_patients.tsv` — appended for any patient whose LLM call errored
+- `LLM_NEPC_classifier_note_bundle.json.gz` — optional pre-compiled note bundle
+- `LLM_NEPC_classifier_labels.tsv` — one row per patient with the final classification, supporting quotes, confidence, and rationale
+- `LLM_NEPC_classifier_failed_patients.tsv` — appended for any patient whose LLM call errored
 
-`LLM_v3_labels.tsv` columns:
+`LLM_NEPC_classifier_labels.tsv` columns:
 
 ```text
 DFCI_MRN, primary_label,
@@ -74,7 +74,7 @@ supporting_quotes, supporting_quote_dates,
 confidence, rationale, num_snippets
 ```
 
-The pipeline is resumable: re-running skips MRNs already present in `LLM_v3_labels.tsv`. Use `--overwrite` to start fresh.
+The pipeline is resumable: re-running skips MRNs already present in `LLM_NEPC_classifier_labels.tsv`. Use `--overwrite` to start fresh.
 
 ## Useful flags
 
@@ -89,5 +89,5 @@ The pipeline is resumable: re-running skips MRNs already present in `LLM_v3_labe
 ## Notes
 
 - All triggers are matched on `clean_note`-cleaned text. Each note's snippet is capped at ~8000 chars; per-patient snippet counts are capped (default 25), so a single LLM call typically sees ~50k tokens of focused context (~40% of gpt-4o's 128k window).
-- No structured labs, genomics tables, medication tables, or PSA tables are used in this `v3` design — all signal comes from note text.
+- No structured labs, genomics tables, medication tables, or PSA tables are used in this classifier — all signal comes from note text.
 - `cisplatin` and `carboplatin` are no longer used as triggers; biomarker selection is driven by the molecular terms above.
