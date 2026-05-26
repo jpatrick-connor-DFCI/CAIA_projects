@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-try:
-    from .consolidate_dfci_labs import consolidate_dfci_labs
-except ImportError:  # pragma: no cover - supports direct script execution
-    from consolidate_dfci_labs import consolidate_dfci_labs
+SURVIVAL_DIR = Path(__file__).resolve().parent           # .../survival_analysis/PROFILE
+SURVIVAL_PARENT = SURVIVAL_DIR.parent                    # .../survival_analysis
+for _p in (str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from helpers.consolidate_dfci_labs import consolidate_dfci_labs  # noqa: E402
+
+ID_COL = "DFCI_MRN"
+AGE_COL = "AGE_AT_TREATMENTSTART"
 
 
 DATA_ROOT = Path("/data/gusev/USERS/jpconnor/data")
@@ -41,12 +48,12 @@ def build_raw_longitudinal_data(
 ) -> pd.DataFrame:
     vital_signs_df = health_df.loc[
         health_df["CODE_TYPE"] == "Vital Signs",
-        ["DFCI_MRN", "START_DT", "HEALTH_HISTORY_TYPE", "RESULTS", "UNITS_CD"],
+        [ID_COL, "START_DT", "HEALTH_HISTORY_TYPE", "RESULTS", "UNITS_CD"],
     ].copy()
 
     labs_df_col_sub = labs_df[
         [
-            "DFCI_MRN",
+            ID_COL,
             "SPECIMEN_COLLECT_DT",
             "TEST_TYPE_CD",
             "TEST_TYPE_DESCR",
@@ -68,7 +75,7 @@ def build_raw_longitudinal_data(
                 "HEALTH_HISTORY_TYPE": "LAB_NAME",
                 "UNITS_CD": "LAB_UNIT",
             }
-        )[["DFCI_MRN", "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE"]]
+        )[[ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE"]]
     )
 
     labs_df_col_sub = (
@@ -79,7 +86,7 @@ def build_raw_longitudinal_data(
                 "RESULT_UOM_NM": "LAB_UNIT",
                 "TEST_NAME": "LAB_NAME",
             }
-        )[["DFCI_MRN", "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE"]]
+        )[[ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE"]]
     )
 
     return pd.concat([vital_signs_df, labs_df_col_sub], ignore_index=True)
@@ -116,14 +123,14 @@ def mark_non_prostate_primary_icd(icds: pd.DataFrame) -> pd.DataFrame:
 
 def compute_first_prostate_diagnosis(icds: pd.DataFrame) -> pd.DataFrame:
     icds = mark_non_prostate_primary_icd(icds)
-    mrns_to_include = icds.loc[~icds["NON_PROSTATE_PRIMARY_ICD10"], "DFCI_MRN"].unique()
+    mrns_to_include = icds.loc[~icds["NON_PROSTATE_PRIMARY_ICD10"], ID_COL].unique()
 
     return (
         icds.loc[
-            (icds["DIAGNOSIS_ICD10_CD"] == "C61") & icds["DFCI_MRN"].isin(mrns_to_include),
-            ["DFCI_MRN", "START_DT"],
+            (icds["DIAGNOSIS_ICD10_CD"] == "C61") & icds[ID_COL].isin(mrns_to_include),
+            [ID_COL, "START_DT"],
         ]
-        .groupby("DFCI_MRN", as_index=False)["START_DT"]
+        .groupby(ID_COL, as_index=False)["START_DT"]
         .min()
         .rename(columns={"START_DT": "DIAGNOSIS_DATE"})
     )
@@ -136,15 +143,15 @@ def build_longitudinal_prediction_data(
     platinum_df: pd.DataFrame,
 ) -> pd.DataFrame:
     prediction_df = consolidated_df[
-        ["DFCI_MRN", "DATE", "collapsed_measurement", "numeric_result_standardized"]
+        [ID_COL, "DATE", "collapsed_measurement", "numeric_result_standardized"]
     ].dropna().copy()
 
     pred_df = (
-        prediction_df.merge(first_prostate_diagnosis, on="DFCI_MRN", how="inner")
-        .merge(death_df, on="DFCI_MRN", how="inner")
+        prediction_df.merge(first_prostate_diagnosis, on=ID_COL, how="inner")
+        .merge(death_df, on=ID_COL, how="inner")
         .merge(
-            platinum_df[["DFCI_MRN", "medication", "medication_start_time"]],
-            on="DFCI_MRN",
+            platinum_df[[ID_COL, "medication", "medication_start_time"]],
+            on=ID_COL,
             how="left",
         )
     )
@@ -189,7 +196,7 @@ def build_longitudinal_prediction_data(
     )
     pred_df["PLATINUM_DATE"] = pred_df["PLATINUM_DATE"].fillna(pred_df["LAST_CONTACT_DATE"])
 
-    first_lab_date = pred_df.groupby("DFCI_MRN")["LAB_DATE"].transform("min")
+    first_lab_date = pred_df.groupby(ID_COL)["LAB_DATE"].transform("min")
     pred_df["FIRST_RECORD_DATE"] = pd.concat(
         [first_lab_date, pred_df["DIAGNOSIS_DATE"], pred_df["FIRST_TREATMENT_DATE"]],
         axis=1,
@@ -220,7 +227,7 @@ def build_longitudinal_prediction_data(
     ).astype(float)
 
     ordered_cols = [
-        "DFCI_MRN",
+        ID_COL,
         "AGE_AT_TREATMENTSTART",
         "FIRST_RECORD_DATE",
         "DIAGNOSIS_DATE",
@@ -265,21 +272,21 @@ def apply_cohort_filters(
     Prostate-diagnosis inclusion and non-prostate-primary exclusion are
     already enforced upstream (ICD-based, via compute_first_prostate_diagnosis).
     """
-    n_before = pred_df["DFCI_MRN"].nunique()
+    n_before = pred_df[ID_COL].nunique()
     print(f"Cohort before treatment/PSA/PARPi filters: {n_before} patients")
 
     pred_df = pred_df.loc[pred_df["FIRST_TREATMENT"].eq(1)].copy()
-    n_after_treated = pred_df["DFCI_MRN"].nunique()
+    n_after_treated = pred_df[ID_COL].nunique()
     print(f"  First-treatment inclusion: kept {n_after_treated}/{n_before}")
 
     psa_counts = (
         pred_df.loc[pred_df["LAB_NAME"].eq("PSA")]
-        .groupby("DFCI_MRN")
+        .groupby(ID_COL)
         .size()
     )
     keep_psa = psa_counts.loc[psa_counts >= min_psa_count].index
-    pred_df = pred_df.loc[pred_df["DFCI_MRN"].isin(keep_psa)].copy()
-    n_after_psa = pred_df["DFCI_MRN"].nunique()
+    pred_df = pred_df.loc[pred_df[ID_COL].isin(keep_psa)].copy()
+    n_after_psa = pred_df[ID_COL].nunique()
     print(
         f"  PSA count filter (>= {min_psa_count}): "
         f"kept {n_after_psa}/{n_after_treated}"
@@ -288,11 +295,11 @@ def apply_cohort_filters(
     parpi_mrns = set(
         medications_df.loc[
             medications_df["NCI_PREFERRED_MED_NM"].astype(str).str.upper().isin(PARPI_MEDS),
-            "DFCI_MRN",
+            ID_COL,
         ].unique()
     )
-    pred_df = pred_df.loc[~pred_df["DFCI_MRN"].isin(parpi_mrns)].copy()
-    n_after_parpi = pred_df["DFCI_MRN"].nunique()
+    pred_df = pred_df.loc[~pred_df[ID_COL].isin(parpi_mrns)].copy()
+    n_after_parpi = pred_df[ID_COL].nunique()
     print(
         f"  PARPi exclusion: dropped {n_after_psa - n_after_parpi} "
         f"(remaining: {n_after_parpi})"
@@ -395,7 +402,7 @@ def main() -> None:
     platinum_df = pd.read_csv(args.platinum_csv)
     death_df = pd.read_csv(args.death_csv)[
         [
-            "DFCI_MRN",
+            ID_COL,
             "first_treatment_date",
             "last_contact_date",
             "death",
@@ -412,7 +419,7 @@ def main() -> None:
         platinum_df,
     )
 
-    medications_df = pd.read_csv(args.medications_csv, usecols=["DFCI_MRN", "NCI_PREFERRED_MED_NM"])
+    medications_df = pd.read_csv(args.medications_csv, usecols=[ID_COL, "NCI_PREFERRED_MED_NM"])
     longitudinal_prediction_df = apply_cohort_filters(
         longitudinal_prediction_df,
         medications_df=medications_df,

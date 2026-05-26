@@ -107,6 +107,7 @@ def select_canonical_labs(
     *,
     mrns: Iterable,
     min_coverage: float,
+    id_col: str = "DFCI_MRN",
     min_distinct_values: int = DEFAULT_MIN_DISTINCT_LAB_VALUES,
 ) -> list[str]:
     """Coverage-based lab selection on a fixed MRN set.
@@ -122,7 +123,7 @@ def select_canonical_labs(
     here defines the leakage boundary: callers must pass train_val MRNs at the
     pipeline level, fold_train MRNs inside CV, and never test MRNs.
     """
-    required = {"DFCI_MRN", "LAB_NAME", "LAB_VALUE"}
+    required = {id_col, "LAB_NAME", "LAB_VALUE"}
     missing = required - set(long_df.columns)
     if missing:
         raise ValueError(f"select_canonical_labs missing columns: {sorted(missing)}")
@@ -131,12 +132,12 @@ def select_canonical_labs(
     if not mrn_set:
         raise ValueError("select_canonical_labs received an empty MRN set.")
 
-    sub = long_df.loc[long_df["DFCI_MRN"].isin(mrn_set)]
+    sub = long_df.loc[long_df[id_col].isin(mrn_set)]
     if sub.empty:
         raise ValueError("select_canonical_labs: no observations for the given MRNs.")
 
     n = len(mrn_set)
-    coverage = sub.groupby("LAB_NAME")["DFCI_MRN"].nunique() / float(n)
+    coverage = sub.groupby("LAB_NAME")[id_col].nunique() / float(n)
     distinct = sub.groupby("LAB_NAME")["LAB_VALUE"].nunique()
     eligible_mask = (
         coverage.ge(float(min_coverage))
@@ -157,16 +158,25 @@ def compute_horizon_grid(
     event_col: str,
     quantiles: tuple[float, ...] = DEFAULT_AUC_QUANTILES,
     time_unit_days: int = DEFAULT_AUC_TIME_UNIT_DAYS,
+    admin_censor_days: int | float | None = None,
 ) -> np.ndarray:
     """AUC(t) / Brier horizon grid in time-units, derived from train_val ONLY.
 
     Quantiles are taken over observed event durations (event==1) on the
-    train_val block. The grid is fixed once and reused across all CV folds and
-    the held-out test evaluation, eliminating any test-driven horizon choice.
+    train_val block, after applying optional finite-window administrative
+    censoring. The grid is fixed once and reused across all CV folds and the
+    held-out test evaluation, eliminating any test-driven horizon choice.
     Returns a strictly-positive, sorted, deduplicated array of horizons.
     """
     duration = pd.to_numeric(train_val_df[duration_col], errors="coerce").to_numpy(dtype=float)
     event = pd.to_numeric(train_val_df[event_col], errors="coerce").fillna(0).astype(int).to_numpy()
+    if admin_censor_days is not None:
+        cap = float(admin_censor_days)
+        if cap <= 0:
+            raise ValueError("admin_censor_days must be positive when provided.")
+        late = duration > cap
+        event = np.where(late, 0, event)
+        duration = np.where(late, cap, duration)
     valid = (event == 1) & np.isfinite(duration) & (duration > 0)
     event_times = duration[valid]
     if len(event_times) == 0:

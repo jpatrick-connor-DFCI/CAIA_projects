@@ -69,15 +69,18 @@ except ModuleNotFoundError:  # pragma: no cover - tqdm is optional
             return _Null()
         return iterable
 
-SURVIVAL_DIR = Path(__file__).resolve().parent
-if str(SURVIVAL_DIR) not in sys.path:
-    sys.path.insert(0, str(SURVIVAL_DIR))
+SURVIVAL_DIR = Path(__file__).resolve().parent           # .../survival_analysis/PROFILE
+SURVIVAL_PARENT = SURVIVAL_DIR.parent                    # .../survival_analysis
+for _p in (str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from cox_aggregated import (  # noqa: E402
     AGE_COL,
     DEFAULT_LANDMARK_DAYS,
     DEFAULT_SEED,
     ENDPOINTS,
+    ID_COL,
     OUTCOME_COLUMNS,
     RESULTS,
     _copy_with_admin_censor,
@@ -88,7 +91,7 @@ from cox_aggregated import (  # noqa: E402
     normalize_landmark_days,
     select_feature_columns,
 )
-from helper import (  # noqa: E402
+from helpers.helper import (  # noqa: E402
     assert_disjoint_folds,
     assert_no_test_leakage,
     breslow_survival_at_horizons,
@@ -428,6 +431,7 @@ def cv_one_endpoint(
             pre_treatment_lab_df,
             mrns=fold_train_idx,
             min_coverage=args.min_patient_coverage,
+            id_col=ID_COL,
         )
         fold_canonical_labs[fold] = canonical
         fold_train = train_val.iloc[tr_idx]
@@ -835,7 +839,7 @@ def run_one_endpoint(
         {
             "landmark_day": landmark_day,
             "endpoint": endpoint,
-            "DFCI_MRN": test.index,
+            ID_COL: test.index,
             "duration": duration,
             "event": event,
             "risk_score": risk,
@@ -864,6 +868,12 @@ def run_one_endpoint(
 
 
 def main(args: argparse.Namespace) -> None:
+    global ID_COL, AGE_COL
+    ID_COL = args.id_col
+    AGE_COL = args.age_col
+    import cox_aggregated as _ca
+    _ca.ID_COL = ID_COL
+    _ca.AGE_COL = AGE_COL
     require_xgboost()
     require_lifelines()
     endpoints = normalize_endpoints(args.endpoints)
@@ -920,6 +930,7 @@ def main(args: argparse.Namespace) -> None:
             pre_treatment_lab_df,
             mrns=train_val.index,
             min_coverage=args.min_patient_coverage,
+            id_col=ID_COL,
         )
         print(f"Canonical labs (train_val): {len(canonical_labs)}")
         landmark_horizons = auc_horizons_by_landmark.get(str(int(landmark_day)))
@@ -1009,6 +1020,10 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--id-col", default=ID_COL,
+                        help="Patient identifier column name (default DFCI_MRN; e.g. person_id for CAIA).")
+    parser.add_argument("--age-col", default=AGE_COL,
+                        help="Age covariate column name (default AGE_AT_TREATMENTSTART; e.g. AGE_AT_DIAGNOSIS for CAIA).")
     parser.add_argument(
         "--inputs-dir",
         default=str(RESULTS / "prediction_inputs"),

@@ -35,18 +35,22 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-SURVIVAL_DIR = Path(__file__).resolve().parent
-if str(SURVIVAL_DIR) not in sys.path:
-    sys.path.insert(0, str(SURVIVAL_DIR))
+SURVIVAL_DIR = Path(__file__).resolve().parent           # .../survival_analysis/PROFILE
+SURVIVAL_PARENT = SURVIVAL_DIR.parent                    # .../survival_analysis
+for _p in (str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from cox_aggregated import (  # noqa: E402
     AGE_COL,
+    ADMIN_CENSOR_DAYS,
     DATA_PATH,
     DEFAULT_LANDMARK_DAYS,
     DEFAULT_SEED,
     DEFAULT_TEST_FRAC,
     DEFAULT_MIN_PATIENT_COVERAGE,
     ENDPOINTS,
+    ID_COL,
     RESULTS,
     build_landmark_availability_table,
     build_landmark_merged,
@@ -54,7 +58,7 @@ from cox_aggregated import (  # noqa: E402
     choose_stratification_labels,
     normalize_landmark_days,
 )
-from helper import (  # noqa: E402
+from helpers.helper import (  # noqa: E402
     DEFAULT_AUC_QUANTILES,
     compute_horizon_grid,
     select_canonical_labs,
@@ -221,19 +225,19 @@ def build_longitudinal_lab_long(
     *,
     landmark_offset_days: int,
 ) -> pd.DataFrame:
-    required = {"DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab"}
+    required = {ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Input data is missing lab columns: {sorted(missing)}")
-    labs = df[["DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab"]].copy()
+    labs = df[[ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab"]].copy()
     labs["LAB_NAME"] = labs["LAB_NAME"].astype(str).str.strip()
     labs["LAB_VALUE"] = pd.to_numeric(labs["LAB_VALUE"], errors="coerce")
     labs["t_lab"] = pd.to_numeric(labs["t_lab"], errors="coerce").astype(float)
-    labs = labs.dropna(subset=["DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab"])
-    labs = labs.loc[labs["DFCI_MRN"].isin(static.index)]
+    labs = labs.dropna(subset=[ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab"])
+    labs = labs.loc[labs[ID_COL].isin(static.index)]
     labs = labs.merge(
         static[["t_first_treatment"]].reset_index(),
-        on="DFCI_MRN",
+        on=ID_COL,
         how="inner",
     )
     landmark_t = labs["t_first_treatment"] + float(landmark_offset_days)
@@ -258,8 +262,8 @@ def select_longitudinal_labs(
         return selected
     if not train_mrns:
         raise ValueError("Training set is empty; cannot select labs.")
-    train_labs = labs.loc[labs["DFCI_MRN"].isin(train_mrns)]
-    coverage = train_labs.groupby("LAB_NAME")["DFCI_MRN"].nunique() / len(train_mrns)
+    train_labs = labs.loc[labs[ID_COL].isin(train_mrns)]
+    coverage = train_labs.groupby("LAB_NAME")[ID_COL].nunique() / len(train_mrns)
     variability = train_labs.groupby("LAB_NAME")["LAB_VALUE"].nunique()
     eligible = coverage.index[(coverage >= min_coverage) & (variability.reindex(coverage.index) > 1)]
     if not len(eligible):
@@ -278,7 +282,7 @@ def fit_clip_bounds(
     q_lo: float,
     q_hi: float,
 ) -> dict[str, tuple[float, float]]:
-    train_agg = agg.loc[agg["DFCI_MRN"].isin(train_mrns)]
+    train_agg = agg.loc[agg[ID_COL].isin(train_mrns)]
     bounds: dict[str, tuple[float, float]] = {}
     for lab in labs:
         vals = train_agg.loc[train_agg["LAB_NAME"] == lab, "LAB_VALUE"].to_numpy(dtype=float)
@@ -343,20 +347,20 @@ def build_longitudinal_wide(
 
     landmark_time = pd.Series(0, index=static.index, dtype=int, name="landmark_time")
     selected_lab_landmarks = (
-        -selected_lab_rows.groupby("DFCI_MRN")["REL_BIN"].min()
+        -selected_lab_rows.groupby(ID_COL)["REL_BIN"].min()
     ).astype(int)
     landmark_time.loc[selected_lab_landmarks.index] = selected_lab_landmarks
     n_without_selected_labs = int((landmark_time == 0).sum())
 
     selected_lab_rows = selected_lab_rows.merge(
         landmark_time.reset_index(),
-        on="DFCI_MRN",
+        on=ID_COL,
         how="inner",
     )
     selected_lab_rows["TIME"] = selected_lab_rows["REL_BIN"] + selected_lab_rows["landmark_time"]
 
     landmark_time = (
-        selected_lab_rows.groupby("DFCI_MRN")["landmark_time"].first()
+        selected_lab_rows.groupby(ID_COL)["landmark_time"].first()
         .reindex(static.index)
         .fillna(0)
         .astype(int)
@@ -364,7 +368,7 @@ def build_longitudinal_wide(
     )
 
     agg = (
-        selected_lab_rows.groupby(["DFCI_MRN", "TIME", "LAB_NAME"], sort=False)["LAB_VALUE"]
+        selected_lab_rows.groupby([ID_COL, "TIME", "LAB_NAME"], sort=False)["LAB_VALUE"]
         .mean()
         .reset_index()
     )
@@ -378,7 +382,7 @@ def build_longitudinal_wide(
     agg = apply_clip_bounds(agg, bounds)
 
     wide = agg.pivot_table(
-        index=["DFCI_MRN", "TIME"],
+        index=[ID_COL, "TIME"],
         columns="LAB_NAME",
         values="LAB_VALUE",
         aggfunc="mean",
@@ -387,11 +391,11 @@ def build_longitudinal_wide(
     for lab in selected_labs:
         if lab not in wide.columns:
             wide[lab] = np.nan
-    wide = wide.merge(landmark_time.reset_index(), on="DFCI_MRN", how="inner")
+    wide = wide.merge(landmark_time.reset_index(), on=ID_COL, how="inner")
 
     landmark_rows = pd.DataFrame(
         {
-            "DFCI_MRN": landmark_time.index,
+            ID_COL: landmark_time.index,
             "TIME": landmark_time.to_numpy(dtype=int),
             "landmark_time": landmark_time.to_numpy(dtype=int),
         }
@@ -401,7 +405,7 @@ def build_longitudinal_wide(
     wide = pd.concat([wide, landmark_rows], ignore_index=True, sort=False)
 
     static_cols = [AGE_COL, "t_platinum", "t_death", "PLATINUM", "DEATH", "split"]
-    wide = wide.merge(static[static_cols], left_on="DFCI_MRN", right_index=True, how="inner")
+    wide = wide.merge(static[static_cols], left_on=ID_COL, right_index=True, how="inner")
 
     t_platinum_after_landmark = np.ceil(
         (wide["t_platinum"].to_numpy(dtype=float) - float(landmark_day)) / float(time_unit_days)
@@ -415,9 +419,9 @@ def build_longitudinal_wide(
     event_time = wide[["t_platinum", "t_death"]].min(axis=1).to_numpy(dtype=float)
     wide = wide.loc[wide["TIME"].to_numpy(dtype=float) < event_time].copy()
 
-    counts = wide.groupby("DFCI_MRN").size()
+    counts = wide.groupby(ID_COL).size()
     surviving = counts[counts > 0].index
-    wide = wide.loc[wide["DFCI_MRN"].isin(surviving)].copy()
+    wide = wide.loc[wide[ID_COL].isin(surviving)].copy()
 
     max_landmark_time = (
         int(wide.loc[wide["split"] == "train", "landmark_time"].max())
@@ -425,11 +429,11 @@ def build_longitudinal_wide(
         else 0
     )
     column_order = (
-        ["DFCI_MRN", "TIME"]
+        [ID_COL, "TIME"]
         + selected_labs
         + [AGE_COL, "PLATINUM", "DEATH", "t_platinum", "t_death", "split"]
     )
-    wide = wide.sort_values(["DFCI_MRN", "TIME"])[column_order]
+    wide = wide.sort_values([ID_COL, "TIME"])[column_order]
 
     manifest_extras = {
         "max_landmark_time": max_landmark_time,
@@ -445,11 +449,11 @@ def assert_split_agreement(
     landmark_day: int,
 ) -> None:
     long_split = (
-        longitudinal.groupby("DFCI_MRN")["split"]
+        longitudinal.groupby(ID_COL)["split"]
         .agg(lambda s: s.iloc[0])
         .rename("split_long")
     )
-    nunique = longitudinal.groupby("DFCI_MRN")["split"].nunique()
+    nunique = longitudinal.groupby(ID_COL)["split"].nunique()
     inconsistent = nunique[nunique > 1]
     if not inconsistent.empty:
         raise AssertionError(
@@ -474,17 +478,33 @@ def assert_split_agreement(
 
 
 def main(args: argparse.Namespace) -> None:
+    global ID_COL, AGE_COL
+    ID_COL = args.id_col
+    AGE_COL = args.age_col
+    import cox_aggregated as _ca
+    _ca.ID_COL = ID_COL
+    _ca.AGE_COL = AGE_COL
     landmark_days = normalize_landmark_days(args.landmark_days)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading data from {args.data} ...")
-    df = pd.read_csv(args.data, low_memory=False)
+    data_path = Path(args.data)
+    if data_path.suffix.lower() == ".parquet":
+        print(f"Loading parquet from {data_path} ...")
+        from helpers.loaders import load_caia_parquet
+        patient_df, labs_df = load_caia_parquet(data_path, id_col=ID_COL, verbose=True)
+        df = labs_df.merge(patient_df, on=ID_COL, how="left")
+        # CAIA cohort is pre-filtered for first-treatment eligibility upstream;
+        # set FIRST_TREATMENT=1 so make_outcome_df's first-treatment filter passes.
+        df["FIRST_TREATMENT"] = 1
+    else:
+        print(f"Loading data from {data_path} ...")
+        df = pd.read_csv(data_path, low_memory=False)
 
-    df["DFCI_MRN"] = pd.to_numeric(df["DFCI_MRN"], errors="coerce")
-    df = df.loc[df["DFCI_MRN"].notna()].copy()
-    df["DFCI_MRN"] = df["DFCI_MRN"].astype(int)
-    print(f"Loaded cohort: {df['DFCI_MRN'].nunique()} unique MRNs")
+    df[ID_COL] = pd.to_numeric(df[ID_COL], errors="coerce")
+    df = df.loc[df[ID_COL].notna()].copy()
+    df[ID_COL] = df[ID_COL].astype(int)
+    print(f"Loaded cohort: {df[ID_COL].nunique()} unique MRNs")
 
     merged_by_landmark: dict[int, pd.DataFrame] = {}
     for landmark_day in landmark_days:
@@ -514,11 +534,11 @@ def main(args: argparse.Namespace) -> None:
     print(f"Split sizes: train={counts.get('train', 0)} valid={counts.get('valid', 0)} test={counts.get('test', 0)}")
 
     split_path = output_dir / SPLIT_ASSIGNMENTS_FILENAME
-    split.rename_axis("DFCI_MRN").reset_index().to_csv(split_path, index=False)
+    split.rename_axis(ID_COL).reset_index().to_csv(split_path, index=False)
     print(f"Wrote {split_path}")
 
-    availability["included_all_landmarks"] = availability["DFCI_MRN"].isin(common_mrns)
-    availability["split"] = availability["DFCI_MRN"].map(split)
+    availability["included_all_landmarks"] = availability[ID_COL].isin(common_mrns)
+    availability["split"] = availability[ID_COL].map(split)
     availability_path = output_dir / LANDMARK_AVAILABILITY_FILENAME
     availability.to_csv(availability_path, index=False)
     print(f"Wrote {availability_path}")
@@ -536,7 +556,7 @@ def main(args: argparse.Namespace) -> None:
         aggregated = build_aggregated_table(merged, split=split)
 
         agg_path = output_dir / aggregated_filename(landmark_day)
-        aggregated.rename_axis("DFCI_MRN").reset_index().to_csv(agg_path, index=False)
+        aggregated.rename_axis(ID_COL).reset_index().to_csv(agg_path, index=False)
         print(f"  aggregated:        {len(aggregated)} patients -> {agg_path}")
 
         pre_treatment_lab_df = build_pre_treatment_lab_long(
@@ -552,14 +572,15 @@ def main(args: argparse.Namespace) -> None:
             pre_treatment_lab_df,
             mrns=pd.Index(sorted(train_val_mrns)),
             min_coverage=args.min_patient_coverage,
+            id_col=ID_COL,
         )
         for lab in canonical_labs:
             canonical_labs_rows.append({"landmark_days": landmark_day, "lab_name": lab})
         print(f"  canonical labs (train+valid): {len(canonical_labs)}")
 
         # Per-endpoint AUC horizon grid, derived ONCE from train+valid event
-        # times. All three downstream models read these from the manifest so
-        # mean AUC(t) is on the same horizon set for the same test cohort.
+        # times after finite-window censoring. All three downstream models read
+        # these from the manifest so mean AUC(t) is on the same horizon set.
         train_val_block = aggregated.loc[aggregated["split"].isin(["train", "valid"])]
         landmark_horizons: dict[str, list[int]] = {}
         for endpoint, cfg in ENDPOINTS.items():
@@ -569,6 +590,7 @@ def main(args: argparse.Namespace) -> None:
                 event_col=cfg["event_col"],
                 quantiles=auc_quantiles,
                 time_unit_days=args.time_unit_days,
+                admin_censor_days=ADMIN_CENSOR_DAYS,
             )
             landmark_horizons[endpoint] = [int(h) for h in grid]
             print(
@@ -598,7 +620,7 @@ def main(args: argparse.Namespace) -> None:
         wide.to_csv(long_csv, index=False)
         long_manifest = output_dir / longitudinal_manifest_filename(landmark_day)
         manifest = {
-            "id_col": "DFCI_MRN",
+            "id_col": ID_COL,
             "time_col": "TIME",
             "event_cols": ["PLATINUM", "DEATH"],
             "time_to_event_cols": ["t_platinum", "t_death"],
@@ -621,21 +643,21 @@ def main(args: argparse.Namespace) -> None:
             "canonical_labs_used": not args.no_canonical_labs,
             "split_assignments": str(split_path.name),
             "split_counts": {
-                "train": int(wide.loc[wide["split"] == "train", "DFCI_MRN"].nunique()),
-                "valid": int(wide.loc[wide["split"] == "valid", "DFCI_MRN"].nunique()),
-                "test": int(wide.loc[wide["split"] == "test", "DFCI_MRN"].nunique()),
+                "train": int(wide.loc[wide["split"] == "train", ID_COL].nunique()),
+                "valid": int(wide.loc[wide["split"] == "valid", ID_COL].nunique()),
+                "test": int(wide.loc[wide["split"] == "test", ID_COL].nunique()),
             },
             "n_rows": int(len(wide)),
             **manifest_extras,
         }
         long_manifest.write_text(json.dumps(manifest, indent=2))
         print(
-            f"  longitudinal:      rows={len(wide)} patients={wide['DFCI_MRN'].nunique()} "
+            f"  longitudinal:      rows={len(wide)} patients={wide[ID_COL].nunique()} "
             f"-> {long_csv}"
         )
 
         assert_split_agreement(aggregated, wide, landmark_day=landmark_day)
-        long_mrns = wide["DFCI_MRN"].nunique()
+        long_mrns = wide[ID_COL].nunique()
         agg_mrns = len(aggregated)
         if long_mrns < agg_mrns:
             print(
@@ -669,6 +691,7 @@ def main(args: argparse.Namespace) -> None:
         "n_patients_common_cohort": int(len(common_mrns)),
         "auc_quantiles": list(auc_quantiles),
         "auc_time_unit_days": int(args.time_unit_days),
+        "auc_admin_censor_days": int(ADMIN_CENSOR_DAYS),
         "auc_horizons_by_landmark": auc_horizons_by_landmark,
         "auc_max_horizon": int(max_horizon),
     }
@@ -681,6 +704,10 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--id-col", default=ID_COL,
+                        help="Patient identifier column name (default DFCI_MRN; e.g. person_id for CAIA).")
+    parser.add_argument("--age-col", default=AGE_COL,
+                        help="Age covariate column name (default AGE_AT_TREATMENTSTART; e.g. AGE_AT_DIAGNOSIS for CAIA).")
     parser.add_argument("--data", default=str(DATA_PATH / "longitudinal_prediction_data.csv"))
     parser.add_argument(
         "--landmark-days",

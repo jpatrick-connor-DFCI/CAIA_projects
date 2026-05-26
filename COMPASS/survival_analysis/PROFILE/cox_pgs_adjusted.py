@@ -39,13 +39,16 @@ import numpy as np
 import pandas as pd
 from sklearn.impute import SimpleImputer
 
-SURVIVAL_DIR = Path(__file__).resolve().parent
-if str(SURVIVAL_DIR) not in sys.path:
-    sys.path.insert(0, str(SURVIVAL_DIR))
+SURVIVAL_DIR = Path(__file__).resolve().parent           # .../survival_analysis/PROFILE
+SURVIVAL_PARENT = SURVIVAL_DIR.parent                    # .../survival_analysis
+for _p in (str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from cox_aggregated import (  # noqa: E402
     AGE_COL,
     ENDPOINTS,
+    ID_COL,
     RESULTS,
     benjamini_hochberg,
     fit_cox_with_fallback,
@@ -56,7 +59,7 @@ from cox_aggregated import (  # noqa: E402
 )
 
 DEFAULT_AGGREGATED_PATTERN = (
-    "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis/"
+    "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis/PROFILE/"
     "prediction_inputs/aggregated_landmark{landmark}.csv"
 )
 DEFAULT_GERMLINE_PATH = (
@@ -86,25 +89,25 @@ def select_pgs_columns(germline: pd.DataFrame, tokens: tuple[str, ...]) -> list[
 
 def load_germline(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
-    if "DFCI_MRN" not in df.columns:
+    if ID_COL not in df.columns:
         raise ValueError(f"{path} missing DFCI_MRN column.")
-    df["DFCI_MRN"] = pd.to_numeric(df["DFCI_MRN"], errors="coerce")
-    df = df.loc[df["DFCI_MRN"].notna()].copy()
-    df["DFCI_MRN"] = df["DFCI_MRN"].astype(int)
-    if df["DFCI_MRN"].duplicated().any():
-        n_dup = int(df["DFCI_MRN"].duplicated().sum())
+    df[ID_COL] = pd.to_numeric(df[ID_COL], errors="coerce")
+    df = df.loc[df[ID_COL].notna()].copy()
+    df[ID_COL] = df[ID_COL].astype(int)
+    if df[ID_COL].duplicated().any():
+        n_dup = int(df[ID_COL].duplicated().sum())
         raise ValueError(f"{path} has {n_dup} duplicate DFCI_MRN rows; expected deduplicated.")
-    return df.set_index("DFCI_MRN")
+    return df.set_index(ID_COL)
 
 
 def load_aggregated(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
-    if "DFCI_MRN" not in df.columns:
+    if ID_COL not in df.columns:
         raise ValueError(f"{path} missing DFCI_MRN column.")
-    df["DFCI_MRN"] = pd.to_numeric(df["DFCI_MRN"], errors="coerce")
-    df = df.loc[df["DFCI_MRN"].notna()].copy()
-    df["DFCI_MRN"] = df["DFCI_MRN"].astype(int)
-    return df.set_index("DFCI_MRN")
+    df[ID_COL] = pd.to_numeric(df[ID_COL], errors="coerce")
+    df = df.loc[df[ID_COL].notna()].copy()
+    df[ID_COL] = df[ID_COL].astype(int)
+    return df.set_index(ID_COL)
 
 
 def _zscore(values: np.ndarray) -> tuple[np.ndarray, float]:

@@ -26,13 +26,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-SURVIVAL_DIR = Path(__file__).resolve().parent
-if str(SURVIVAL_DIR) not in sys.path:
-    sys.path.insert(0, str(SURVIVAL_DIR))
+SURVIVAL_DIR = Path(__file__).resolve().parent           # .../survival_analysis/PROFILE
+SURVIVAL_PARENT = SURVIVAL_DIR.parent                    # .../survival_analysis
+for _p in (str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from cox_aggregated import (  # noqa: E402
     AGE_COL,
     ENDPOINTS,
+    ID_COL,
     OUTCOME_COLUMNS,
     RESULTS,
     benjamini_hochberg,
@@ -77,7 +80,7 @@ def _load_genomic_inputs(inputs_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, 
     agg_path = genomic_dir / GENOMIC_AGGREGATED_FILENAME
     if not agg_path.exists():
         raise FileNotFoundError(f"Missing {agg_path}.")
-    aggregated = pd.read_csv(agg_path).set_index("DFCI_MRN")
+    aggregated = pd.read_csv(agg_path).set_index(ID_COL)
     if "split" not in aggregated.columns:
         raise ValueError(f"{agg_path} missing 'split' column.")
 
@@ -213,6 +216,7 @@ def main(args: argparse.Namespace) -> None:
         pre_sample_lab_df,
         mrns=train_val.index,
         min_coverage=min_patient_coverage,
+        id_col=ID_COL,
     )
     print(f"Canonical labs (train+valid pre-sample): {len(canonical_labs)}")
 

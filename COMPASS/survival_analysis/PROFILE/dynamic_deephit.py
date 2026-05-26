@@ -85,19 +85,21 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
     cumulative_dynamic_auc = None
     SKSURV_IMPORT_ERROR = exc
 
-SURVIVAL_DIR = Path(__file__).resolve().parent
-if str(SURVIVAL_DIR) not in sys.path:
-    sys.path.insert(0, str(SURVIVAL_DIR))
+SURVIVAL_DIR = Path(__file__).resolve().parent           # .../survival_analysis/PROFILE
+SURVIVAL_PARENT = SURVIVAL_DIR.parent                    # .../survival_analysis
+for _p in (str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-from cox_aggregated import _make_survival_array  # noqa: E402
-from helper import (  # noqa: E402
+from cox_aggregated import _make_survival_array, AGE_COL, ID_COL  # noqa: E402
+from helpers.helper import (  # noqa: E402
     assert_disjoint_folds,
     assert_no_test_leakage,
     compute_brier,
     iter_stratified_folds,
 )
 
-DEFAULT_RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis")
+DEFAULT_RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis/PROFILE")
 DEFAULT_SEED = 42
 DEFAULT_MAX_PRED_WINDOW = 260
 DEFAULT_AUC_QUANTILES = (0.25, 0.375, 0.50, 0.625, 0.75)
@@ -239,7 +241,7 @@ def fixed_horizon_grid_from_targets(
 
 
 def fit_normalization(df: pd.DataFrame, *, feature_cols: list[str], train_ids: set) -> tuple[pd.Series, pd.Series]:
-    train = df.loc[df["DFCI_MRN"].astype(str).isin(train_ids), feature_cols]
+    train = df.loc[df[ID_COL].astype(str).isin(train_ids), feature_cols]
     mean = train.mean(skipna=True).fillna(0.0)
     std = train.std(skipna=True, ddof=0).replace(0, np.nan).fillna(1.0)
     return mean, std
@@ -406,7 +408,7 @@ def predict(model, loader, device: str) -> pd.DataFrame:
             no_event_np = no_event.cpu().numpy()
             for row_idx, sample_id in enumerate(batch["ids"]):
                 row = {
-                    "DFCI_MRN": sample_id,
+                    ID_COL: sample_id,
                     "duration": float(batch["duration"][row_idx]),
                     "duration_bin": int(batch["duration_bin"][row_idx]),
                     "label": int(batch["label"][row_idx]),
@@ -881,6 +883,12 @@ def compute_metrics(
 
 
 def main(args: argparse.Namespace) -> None:
+    global ID_COL, AGE_COL
+    ID_COL = args.id_col
+    AGE_COL = args.age_col
+    import cox_aggregated as _ca
+    _ca.ID_COL = ID_COL
+    _ca.AGE_COL = AGE_COL
     require_torch()
     set_seed(args.seed)
     input_csv = Path(args.input_csv)
@@ -1121,6 +1129,10 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--id-col", default=ID_COL,
+                        help="Patient identifier column name (default DFCI_MRN; e.g. person_id for CAIA).")
+    parser.add_argument("--age-col", default=AGE_COL,
+                        help="Age covariate column name (default AGE_AT_TREATMENTSTART; e.g. AGE_AT_DIAGNOSIS for CAIA).")
     parser.add_argument(
         "--inputs-dir",
         default=str(DEFAULT_RESULTS / "prediction_inputs"),

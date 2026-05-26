@@ -44,6 +44,7 @@ Outputs:
 from __future__ import annotations
 
 import argparse
+import sys
 import warnings
 from itertools import product
 from pathlib import Path
@@ -54,7 +55,13 @@ from sklearn.impute import SimpleImputer
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 
-from helper import (
+SURVIVAL_DIR = Path(__file__).resolve().parent           # .../survival_analysis/PROFILE
+SURVIVAL_PARENT = SURVIVAL_DIR.parent                    # .../survival_analysis
+for _p in (str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from helpers.helper import (  # noqa: E402
     assert_disjoint_folds,
     assert_no_test_leakage,
     breslow_survival_at_horizons,
@@ -93,9 +100,10 @@ DEFAULT_MAX_ABS_COXNET_COEF = 25.0
 
 BASE = Path(__file__).resolve().parent
 DATA_PATH = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/")
-RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis")
+RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis/PROFILE")
 
 AGE_COL = "AGE_AT_TREATMENTSTART"
+ID_COL = "DFCI_MRN"
 DEFAULT_SEED = 42
 DEFAULT_TEST_FRAC = 0.20
 DEFAULT_N_FOLDS = 5
@@ -155,12 +163,13 @@ def _apply_admin_censor(
     landmark_day: int,
     horizon_days: int = ADMIN_CENSOR_DAYS,
 ) -> pd.DataFrame:
-    """Cap durations at `landmark_day + horizon_days` and zero out late events.
+    """Cap landmark-rebased durations at `horizon_days` and zero out late events.
 
     Mutates and returns `df`. Applied per (event_col, duration_col) pair in
     ENDPOINTS so PLATINUM and DEATH are censored independently.
     """
-    cap = float(landmark_day) + float(horizon_days)
+    _ = landmark_day
+    cap = float(horizon_days)
     for spec in ENDPOINTS.values():
         dcol = spec["duration_col"]
         ecol = spec["event_col"]
@@ -329,7 +338,7 @@ def make_outcome_df(
             timing is irrelevant to the outcome window.
     """
     patient_level_cols = [
-        "DFCI_MRN",
+        ID_COL,
         AGE_COL,
         "FIRST_RECORD_DATE",
         "DIAGNOSIS_DATE",
@@ -347,15 +356,15 @@ def make_outcome_df(
         *extra_anchor_cols,
     ]
     available_cols = [col for col in patient_level_cols if col in df.columns]
-    if "DFCI_MRN" not in available_cols:
+    if ID_COL not in available_cols:
         raise ValueError("Input data must contain DFCI_MRN.")
 
-    pat = df[available_cols].drop_duplicates("DFCI_MRN").set_index("DFCI_MRN")
+    pat = df[available_cols].drop_duplicates(ID_COL).set_index(ID_COL)
 
     if "FIRST_RECORD_DATE" not in pat.columns:
         if "LAB_DATE" not in df.columns:
             raise ValueError("Input data must contain FIRST_RECORD_DATE or LAB_DATE.")
-        first_record = _coerce_datetime(df["LAB_DATE"]).groupby(df["DFCI_MRN"]).min()
+        first_record = _coerce_datetime(df["LAB_DATE"]).groupby(df[ID_COL]).min()
         pat["FIRST_RECORD_DATE"] = first_record
 
     for date_col in [
@@ -465,7 +474,7 @@ def build_pre_treatment_lab_long(
     ``anchor_series`` (MRN-indexed) overrides the column lookup, supporting the
     genomic arm where ``t_sample`` is per-patient and not carried on every row.
     """
-    base_required = {"DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab"}
+    base_required = {ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab"}
     missing = base_required - set(df.columns)
     if missing:
         raise ValueError(
@@ -484,14 +493,14 @@ def build_pre_treatment_lab_long(
     out["LAB_VALUE"] = pd.to_numeric(out["LAB_VALUE"], errors="coerce")
     out["t_lab"] = pd.to_numeric(out["t_lab"], errors="coerce")
     if anchor_series is not None:
-        out[anchor_col] = out["DFCI_MRN"].map(anchor_series.astype(float)).astype(float)
+        out[anchor_col] = out[ID_COL].map(anchor_series.astype(float)).astype(float)
     else:
         out[anchor_col] = pd.to_numeric(out[anchor_col], errors="coerce")
-    out = out.dropna(subset=["DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab", anchor_col])
+    out = out.dropna(subset=[ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab", anchor_col])
     landmark_t = out[anchor_col] + float(landmark_offset_days)
     out = out.loc[out["t_lab"] < landmark_t].copy()
     if cohort_index is not None:
-        out = out.loc[out["DFCI_MRN"].isin(cohort_index)].copy()
+        out = out.loc[out[ID_COL].isin(cohort_index)].copy()
     return out
 
 
@@ -527,7 +536,7 @@ def _compute_patient_lab_slopes(pre_treatment: pd.DataFrame) -> pd.DataFrame:
         return slope if np.isfinite(slope) else np.nan
 
     slopes = (
-        pre_treatment.groupby(["DFCI_MRN", "LAB_NAME"])[["t_lab", "LAB_VALUE"]]
+        pre_treatment.groupby([ID_COL, "LAB_NAME"])[["t_lab", "LAB_VALUE"]]
         .apply(_slope)
         .rename("slope")
         .reset_index()
@@ -554,7 +563,7 @@ def build_feature_matrix(
             ``t_sample`` joined externally). Takes precedence over ``anchor_col``.
     """
     working = df.copy()
-    required_cols = {"DFCI_MRN", "LAB_NAME", "LAB_VALUE"}
+    required_cols = {ID_COL, "LAB_NAME", "LAB_VALUE"}
     missing_required = required_cols - set(working.columns)
     if missing_required:
         missing_str = ", ".join(sorted(missing_required))
@@ -567,7 +576,7 @@ def build_feature_matrix(
         if "LAB_DATE" not in working.columns:
             raise ValueError("Input data must contain t_lab or LAB_DATE.")
         if "FIRST_RECORD_DATE" not in working.columns:
-            working["FIRST_RECORD_DATE"] = _coerce_datetime(working["LAB_DATE"]).groupby(working["DFCI_MRN"]).transform("min")
+            working["FIRST_RECORD_DATE"] = _coerce_datetime(working["LAB_DATE"]).groupby(working[ID_COL]).transform("min")
         working["t_lab"] = (
             _coerce_datetime(working["LAB_DATE"]) - _coerce_datetime(working["FIRST_RECORD_DATE"])
         ).dt.days.astype(float)
@@ -576,7 +585,7 @@ def build_feature_matrix(
 
     if anchor_series is not None:
         anchor_map = anchor_series.astype(float)
-        working[anchor_col] = working["DFCI_MRN"].map(anchor_map).astype(float)
+        working[anchor_col] = working[ID_COL].map(anchor_map).astype(float)
     elif anchor_col not in working.columns:
         if anchor_col == "t_first_treatment" and {"FIRST_TREATMENT_DATE", "FIRST_RECORD_DATE"}.issubset(working.columns):
             working["t_first_treatment"] = (
@@ -591,7 +600,7 @@ def build_feature_matrix(
         working[anchor_col] = _coerce_duration(working[anchor_col])
 
     working = working.dropna(
-        subset=["DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab", anchor_col]
+        subset=[ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab", anchor_col]
     )
 
     landmark_time = working[anchor_col].astype(float) + float(landmark_offset_days)
@@ -599,14 +608,14 @@ def build_feature_matrix(
     if pre_treatment.empty:
         raise ValueError("No pre-landmark lab rows were available to build lab summary features.")
 
-    sort_cols = ["DFCI_MRN", "LAB_NAME", "t_lab"]
+    sort_cols = [ID_COL, "LAB_NAME", "t_lab"]
     if "LAB_DATE" in pre_treatment.columns:
         pre_treatment["LAB_DATE"] = _coerce_datetime(pre_treatment["LAB_DATE"])
         sort_cols.append("LAB_DATE")
     pre_treatment = pre_treatment.sort_values(sort_cols)
 
     feature_long = (
-        pre_treatment.groupby(["DFCI_MRN", "LAB_NAME"])["LAB_VALUE"]
+        pre_treatment.groupby([ID_COL, "LAB_NAME"])["LAB_VALUE"]
         .agg(
             mean="mean",
             min="min",
@@ -624,16 +633,16 @@ def build_feature_matrix(
     )
     feature_long = feature_long.drop(columns=["first"])
     slope_long = _compute_patient_lab_slopes(pre_treatment)
-    feature_long = feature_long.merge(slope_long, on=["DFCI_MRN", "LAB_NAME"], how="left")
+    feature_long = feature_long.merge(slope_long, on=[ID_COL, "LAB_NAME"], how="left")
     feature_df = (
-        feature_long.set_index(["DFCI_MRN", "LAB_NAME"])
+        feature_long.set_index([ID_COL, "LAB_NAME"])
         .stack()
         .rename("value")
         .reset_index()
         .rename(columns={"level_2": "feature_stat"})
     )
     feature_df["feature_name"] = feature_df["LAB_NAME"] + "__" + feature_df["feature_stat"]
-    feature_df = feature_df.pivot(index="DFCI_MRN", columns="feature_name", values="value")
+    feature_df = feature_df.pivot(index=ID_COL, columns="feature_name", values="value")
     feature_df = feature_df.sort_index(axis=1)
 
     print(f"Raw feature matrix: {feature_df.shape[0]} patients x {feature_df.shape[1]} summary-lab features")
@@ -702,7 +711,7 @@ def build_landmark_availability_table(
         landmark_cols.append(col)
         availability[col] = availability.index.isin(merged_by_landmark[landmark_day].index)
     availability["eligible_all_landmarks"] = availability[landmark_cols].all(axis=1)
-    availability = availability.rename_axis("DFCI_MRN").reset_index()
+    availability = availability.rename_axis(ID_COL).reset_index()
     return availability, (common_mrns if common_mrns is not None else pd.Index([]))
 
 
@@ -991,8 +1000,8 @@ def _apply_auc_admin_censoring(
     if max_time_unit <= 0:
         raise ValueError("max_time_unit must be positive when provided.")
 
-    within_horizon = event.astype(bool) & (duration > 0) & (duration < float(max_time_unit))
-    duration = np.where(duration < float(max_time_unit), duration, float(max_time_unit))
+    within_horizon = event.astype(bool) & (duration > 0) & (duration <= float(max_time_unit))
+    duration = np.where(duration <= float(max_time_unit), duration, float(max_time_unit))
     return within_horizon.astype(int), duration
 
 
@@ -1687,6 +1696,7 @@ def tune_multivariable_model(
             pre_treatment_lab_df,
             mrns=fold_train_idx,
             min_coverage=min_patient_coverage,
+            id_col=ID_COL,
         )
         fold_canonical_labs[fold] = canonical
         fold_train = train_val.iloc[tr_idx]
@@ -2062,7 +2072,7 @@ def fit_final_multivariable_model(
 
     predictions = pd.DataFrame(
         {
-            "DFCI_MRN": test.index,
+            ID_COL: test.index,
             "endpoint": endpoint,
             "dataset": "test",
             "duration_days": test[duration_col].to_numpy(dtype=float),
@@ -2131,7 +2141,7 @@ def _load_prebuilt_landmark(
             f"Missing aggregated input for landmark +{landmark_day}d at {agg_path}. "
             "Run build_prediction_inputs.py first."
         )
-    aggregated = pd.read_csv(agg_path).set_index("DFCI_MRN")
+    aggregated = pd.read_csv(agg_path).set_index(ID_COL)
     if "split" not in aggregated.columns:
         raise ValueError(f"{agg_path} is missing the 'split' column.")
     train_val = aggregated.loc[aggregated["split"].isin(["train", "valid"])].copy()
@@ -2179,9 +2189,11 @@ def _copy_with_admin_censor(
 
 
 def main(args: argparse.Namespace) -> None:
-    global RESULTS
+    global RESULTS, ID_COL, AGE_COL
     RESULTS = Path(args.output_dir)
     RESULTS.mkdir(parents=True, exist_ok=True)
+    ID_COL = args.id_col
+    AGE_COL = args.age_col
     endpoints = normalize_endpoints(args.endpoints)
     landmark_days = normalize_landmark_days(args.landmark_days)
     inputs_dir = Path(args.inputs_dir)
@@ -2265,6 +2277,7 @@ def main(args: argparse.Namespace) -> None:
             pre_treatment_lab_df,
             mrns=train_val.index,
             min_coverage=min_patient_coverage,
+            id_col=ID_COL,
         )
         for lab in canonical_labs:
             canonical_labs_train_val_rows.append(
@@ -2494,6 +2507,16 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--id-col",
+        default=ID_COL,
+        help="Patient identifier column name (default: DFCI_MRN for PROFILE; e.g. person_id for CAIA).",
+    )
+    parser.add_argument(
+        "--age-col",
+        default=AGE_COL,
+        help="Age covariate column name (default: AGE_AT_TREATMENTSTART for PROFILE; e.g. AGE_AT_DIAGNOSIS for CAIA).",
+    )
     parser.add_argument(
         "--inputs-dir",
         default=str(RESULTS / "prediction_inputs"),

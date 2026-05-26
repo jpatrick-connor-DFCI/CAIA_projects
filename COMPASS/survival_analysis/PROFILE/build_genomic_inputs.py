@@ -30,21 +30,24 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-SURVIVAL_DIR = Path(__file__).resolve().parent
-if str(SURVIVAL_DIR) not in sys.path:
-    sys.path.insert(0, str(SURVIVAL_DIR))
+SURVIVAL_DIR = Path(__file__).resolve().parent           # .../survival_analysis/PROFILE
+SURVIVAL_PARENT = SURVIVAL_DIR.parent                    # .../survival_analysis
+for _p in (str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from cox_aggregated import (  # noqa: E402
     AGE_COL,
     DATA_PATH,
     DEFAULT_MIN_PATIENT_COVERAGE,
     ENDPOINTS,
+    ID_COL,
     RESULTS,
     build_feature_matrix,
     build_pre_treatment_lab_long,
     make_outcome_df,
 )
-from helper import (  # noqa: E402
+from helpers.helper import (  # noqa: E402
     DEFAULT_AUC_QUANTILES,
     compute_horizon_grid,
     select_canonical_labs,
@@ -71,16 +74,16 @@ GENOMIC_BUILD_MANIFEST_FILENAME = "genomic_build_manifest.json"
 
 
 def load_somatic(path: Path) -> pd.DataFrame:
-    needed_cols = ["DFCI_MRN", "SAMPLE_COLLECTION_DT", *GENOMIC_FEATURE_COLS]
+    needed_cols = [ID_COL, "SAMPLE_COLLECTION_DT", *GENOMIC_FEATURE_COLS]
     raw = pd.read_csv(path, usecols=lambda c: c in needed_cols)
     missing = [c for c in needed_cols if c not in raw.columns]
     if missing:
         raise ValueError(f"Somatic CSV missing columns: {missing}")
-    raw["DFCI_MRN"] = pd.to_numeric(raw["DFCI_MRN"], errors="coerce")
-    raw = raw.loc[raw["DFCI_MRN"].notna()].copy()
-    raw["DFCI_MRN"] = raw["DFCI_MRN"].astype(int)
-    if raw["DFCI_MRN"].nunique() != len(raw):
-        n_dup = len(raw) - raw["DFCI_MRN"].nunique()
+    raw[ID_COL] = pd.to_numeric(raw[ID_COL], errors="coerce")
+    raw = raw.loc[raw[ID_COL].notna()].copy()
+    raw[ID_COL] = raw[ID_COL].astype(int)
+    if raw[ID_COL].nunique() != len(raw):
+        n_dup = len(raw) - raw[ID_COL].nunique()
         raise ValueError(
             f"Somatic CSV is not deduplicated by DFCI_MRN ({n_dup} duplicate rows). "
             "Decision §0.1 assumed one row per patient."
@@ -88,7 +91,7 @@ def load_somatic(path: Path) -> pd.DataFrame:
     raw["SAMPLE_COLLECTION_DT"] = pd.to_datetime(raw["SAMPLE_COLLECTION_DT"], errors="coerce")
     for col in GENOMIC_FEATURE_COLS:
         raw[col] = pd.to_numeric(raw[col], errors="coerce").fillna(0).astype(int)
-    return raw.set_index("DFCI_MRN")
+    return raw.set_index(ID_COL)
 
 
 def attach_t_sample(df: pd.DataFrame, somatic: pd.DataFrame) -> pd.DataFrame:
@@ -98,7 +101,7 @@ def attach_t_sample(df: pd.DataFrame, somatic: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["FIRST_RECORD_DATE"] = pd.to_datetime(out["FIRST_RECORD_DATE"], errors="coerce")
     sample_dt = somatic["SAMPLE_COLLECTION_DT"]
-    out["SAMPLE_COLLECTION_DT"] = out["DFCI_MRN"].map(sample_dt)
+    out["SAMPLE_COLLECTION_DT"] = out[ID_COL].map(sample_dt)
     out["t_sample"] = (
         out["SAMPLE_COLLECTION_DT"] - out["FIRST_RECORD_DATE"]
     ).dt.days.astype(float)
@@ -117,22 +120,22 @@ def main(args: argparse.Namespace) -> None:
             "genomic arm reuses its split."
         )
     split_assignments = (
-        pd.read_csv(split_path).set_index("DFCI_MRN")["split"].astype(str)
+        pd.read_csv(split_path).set_index(ID_COL)["split"].astype(str)
     )
 
     print(f"Loading longitudinal data from {args.data} ...")
     df = pd.read_csv(args.data, low_memory=False)
-    df["DFCI_MRN"] = pd.to_numeric(df["DFCI_MRN"], errors="coerce")
-    df = df.loc[df["DFCI_MRN"].notna()].copy()
-    df["DFCI_MRN"] = df["DFCI_MRN"].astype(int)
-    print(f"Loaded cohort: {df['DFCI_MRN'].nunique()} unique MRNs")
+    df[ID_COL] = pd.to_numeric(df[ID_COL], errors="coerce")
+    df = df.loc[df[ID_COL].notna()].copy()
+    df[ID_COL] = df[ID_COL].astype(int)
+    print(f"Loaded cohort: {df[ID_COL].nunique()} unique MRNs")
 
     somatic = load_somatic(Path(args.somatic_path))
     print(f"Somatic patients: {len(somatic)}")
 
     df = attach_t_sample(df, somatic)
     df = df.loc[df["t_sample"].notna()].copy()
-    print(f"Cohort after t_sample join (notna): {df['DFCI_MRN'].nunique()} patients")
+    print(f"Cohort after t_sample join (notna): {df[ID_COL].nunique()} patients")
 
     # Outcome table rebased to t_sample
     outcome_df = make_outcome_df(
@@ -185,7 +188,7 @@ def main(args: argparse.Namespace) -> None:
         raise ValueError("Genomic cohort has empty train_val or test after split alignment.")
 
     agg_path = output_dir / GENOMIC_AGGREGATED_FILENAME
-    merged.rename_axis("DFCI_MRN").reset_index().to_csv(agg_path, index=False)
+    merged.rename_axis(ID_COL).reset_index().to_csv(agg_path, index=False)
     print(f"Wrote {agg_path}")
 
     # Pre-sample lab long for per-fold canonical labs
@@ -206,6 +209,7 @@ def main(args: argparse.Namespace) -> None:
         pre_sample_lab_df,
         mrns=train_val.index,
         min_coverage=args.min_patient_coverage,
+        id_col=ID_COL,
     )
     canonical_path = output_dir / GENOMIC_CANONICAL_LABS_FILENAME
     pd.DataFrame({"landmark": "sample", "lab_name": canonical_labs}).to_csv(
