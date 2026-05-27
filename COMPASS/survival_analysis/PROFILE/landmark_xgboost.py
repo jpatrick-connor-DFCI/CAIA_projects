@@ -616,8 +616,20 @@ def cv_one_endpoint(
     cv_df["all_folds_valid"] = cv_df["n_valid_folds"].eq(int(args.n_folds))
 
     if cv_df["n_valid_folds"].eq(0).all():
+        notes = (
+            fold_df.loc[fold_df["note"].astype(str).str.len() > 0, "note"]
+            .astype(str)
+            .value_counts()
+            .head(5)
+        )
+        notes_str = (
+            "\n  ".join(f"({n}x) {msg}" for msg, n in notes.items())
+            if not notes.empty
+            else "(no per-fold notes captured; predict_risk likely returned NaN)"
+        )
         raise RuntimeError(
-            f"All XGBoost CV fits failed for endpoint '{endpoint}'."
+            f"All XGBoost CV fits failed for endpoint '{endpoint}'.\n"
+            f"Top fold-failure notes:\n  {notes_str}"
         )
     candidate = cv_df.loc[cv_df["all_folds_valid"]]
     if candidate.empty:
