@@ -151,36 +151,10 @@ ENDPOINTS = {
     },
 }
 
-# Admin-censor everyone beyond this many days post-landmark so Cox / XGBoost /
-# DeepHit train and evaluate on identical event populations. Matches DeepHit's
-# DEFAULT_MAX_PRED_WINDOW (260) * build_manifest.auc_time_unit_days (7) = 1820.
-ADMIN_CENSOR_DAYS = 1820
-
-
-def _apply_admin_censor(
-    df: pd.DataFrame,
-    *,
-    landmark_day: int,
-    horizon_days: int = ADMIN_CENSOR_DAYS,
-) -> pd.DataFrame:
-    """Cap landmark-rebased durations at `horizon_days` and zero out late events.
-
-    Mutates and returns `df`. Applied per (event_col, duration_col) pair in
-    ENDPOINTS so PLATINUM and DEATH are censored independently.
-    """
-    _ = landmark_day
-    cap = float(horizon_days)
-    for spec in ENDPOINTS.values():
-        dcol = spec["duration_col"]
-        ecol = spec["event_col"]
-        if dcol not in df.columns or ecol not in df.columns:
-            continue
-        duration = pd.to_numeric(df[dcol], errors="coerce")
-        beyond = duration > cap
-        if beyond.any():
-            df.loc[beyond, ecol] = 0
-            df.loc[beyond, dcol] = cap
-    return df
+# Administrative censoring removed: previously capped follow-up at 1820 days
+# (= DeepHit's DEFAULT_MAX_PRED_WINDOW * 7) so all three models trained on the
+# same event population.  With DeepHit silenced, Cox + XGBoost now use full
+# follow-up.
 OUTCOME_COLUMNS = {
     AGE_COL,
     "FIRST_RECORD_DATE",
@@ -2162,32 +2136,6 @@ def _load_prebuilt_landmark(
     return aggregated, train_val, test, pre_treatment_lab_df
 
 
-def _copy_with_admin_censor(
-    aggregated: pd.DataFrame,
-    *,
-    landmark_day: int,
-) -> pd.DataFrame:
-    """Return a finite-horizon model copy capped to the DeepHit window."""
-    pre_censor_events = {
-        ecol: int(pd.to_numeric(aggregated[ecol], errors="coerce").fillna(0).sum())
-        for ecol in (spec["event_col"] for spec in ENDPOINTS.values())
-        if ecol in aggregated.columns
-    }
-    censored = _apply_admin_censor(aggregated.copy(), landmark_day=landmark_day)
-    post_censor_events = {
-        ecol: int(pd.to_numeric(censored[ecol], errors="coerce").fillna(0).sum())
-        for ecol in pre_censor_events
-    }
-    for ecol, pre in pre_censor_events.items():
-        post = post_censor_events[ecol]
-        if post != pre:
-            print(
-                f"  admin-censor (landmark +{landmark_day}d, horizon "
-                f"{ADMIN_CENSOR_DAYS}d): {ecol} events {pre} -> {post}"
-            )
-    return censored
-
-
 def main(args: argparse.Namespace) -> None:
     global RESULTS, ID_COL, AGE_COL
     RESULTS = Path(args.output_dir)
@@ -2368,13 +2316,10 @@ def main(args: argparse.Namespace) -> None:
                 )
 
         if args.analysis in {"multivariable", "both"}:
-            multivariable_data = _copy_with_admin_censor(merged, landmark_day=landmark_day)
-            multivariable_train_val = multivariable_data.loc[
-                multivariable_data["split"].isin(["train", "valid"])
-            ].copy()
-            multivariable_test = multivariable_data.loc[
-                multivariable_data["split"].eq("test")
-            ].copy()
+            # Admin censoring removed (DeepHit silenced); multivariable arm now
+            # uses full follow-up, matching the univariate arm.
+            multivariable_train_val = train_val.copy()
+            multivariable_test = test.copy()
             print("\n##### ARM 2: MULTIVARIABLE ELASTIC-NET (all endpoints) #####")
             for endpoint in endpoints:
                 print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")

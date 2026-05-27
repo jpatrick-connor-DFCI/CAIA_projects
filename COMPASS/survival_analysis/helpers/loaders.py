@@ -22,8 +22,6 @@ import numpy as np
 import pandas as pd
 
 
-ADMIN_CENSOR_DAYS = 1820
-
 # CAIA parquet column -> PROFILE pipeline column name
 CAIA_COLUMN_RENAME = {
     "age_at_diagnosis": "AGE_AT_DIAGNOSIS",

@@ -43,7 +43,6 @@ for _p in (str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
 
 from cox_aggregated import (  # noqa: E402
     AGE_COL,
-    ADMIN_CENSOR_DAYS,
     DATA_PATH,
     DEFAULT_LANDMARK_DAYS,
     DEFAULT_SEED,
@@ -579,8 +578,8 @@ def main(args: argparse.Namespace) -> None:
         print(f"  canonical labs (train+valid): {len(canonical_labs)}")
 
         # Per-endpoint AUC horizon grid, derived ONCE from train+valid event
-        # times after finite-window censoring. All three downstream models read
-        # these from the manifest so mean AUC(t) is on the same horizon set.
+        # times (full follow-up; no admin censoring). All downstream models
+        # read these from the manifest so mean AUC(t) is on the same horizon set.
         train_val_block = aggregated.loc[aggregated["split"].isin(["train", "valid"])]
         landmark_horizons: dict[str, list[int]] = {}
         for endpoint, cfg in ENDPOINTS.items():
@@ -590,7 +589,6 @@ def main(args: argparse.Namespace) -> None:
                 event_col=cfg["event_col"],
                 quantiles=auc_quantiles,
                 time_unit_days=args.time_unit_days,
-                admin_censor_days=ADMIN_CENSOR_DAYS,
             )
             landmark_horizons[endpoint] = [int(h) for h in grid]
             print(
@@ -691,7 +689,6 @@ def main(args: argparse.Namespace) -> None:
         "n_patients_common_cohort": int(len(common_mrns)),
         "auc_quantiles": list(auc_quantiles),
         "auc_time_unit_days": int(args.time_unit_days),
-        "auc_admin_censor_days": int(ADMIN_CENSOR_DAYS),
         "auc_horizons_by_landmark": auc_horizons_by_landmark,
         "auc_max_horizon": int(max_horizon),
     }
