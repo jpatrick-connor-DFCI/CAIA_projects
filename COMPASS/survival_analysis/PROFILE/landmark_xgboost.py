@@ -126,6 +126,13 @@ def strip_suffix(value: str, suffix: str) -> str:
     return value
 
 
+def _xgb_safe_name(name: str) -> str:
+    """XGBoost rejects '[', ']', '<' in feature names (CAIA's LOINC lab names
+    contain '[' and ']').  Map to unambiguous replacements so the original ↔
+    sanitized mapping stays bijective within a canonical-lab set."""
+    return name.replace("[", "(").replace("]", ")").replace("<", "_lt_")
+
+
 def fit_preprocessor(train_df: pd.DataFrame, *, feature_cols: list[str]) -> dict:
     base_feature_cols = [
         col
@@ -155,10 +162,16 @@ def fit_preprocessor(train_df: pd.DataFrame, *, feature_cols: list[str]) -> dict
 
     age_scaler = StandardScaler()
     age_scaler.fit(train_df[[AGE_COL]])
+    xgb_feature_names = [_xgb_safe_name(c) for c in covariate_cols]
+    if len(set(xgb_feature_names)) != len(xgb_feature_names):
+        raise ValueError(
+            "XGBoost-sanitized feature names collided; update _xgb_safe_name."
+        )
     return {
         "base_feature_cols": base_feature_cols,
         "missing_cols": missing_cols,
         "covariate_cols": covariate_cols,
+        "xgb_feature_names": xgb_feature_names,
         "imputer": imputer,
         "scaler": scaler,
         "age_scaler": age_scaler,
@@ -236,11 +249,12 @@ def fit_xgb_cox(
     require_xgboost()
     preprocessor = fit_preprocessor(train_df, feature_cols=feature_cols)
     covariate_cols = preprocessor["covariate_cols"]
+    xgb_names = preprocessor["xgb_feature_names"]
     x_train = transform_xgb_matrix(train_df, preprocessor)
     dtrain = xgb.DMatrix(
         x_train,
         label=signed_cox_label(train_df[duration_col], train_df[event_col]),
-        feature_names=covariate_cols,
+        feature_names=xgb_names,
     )
     evals = [(dtrain, "train")]
     if len(valid_df):
@@ -248,7 +262,7 @@ def fit_xgb_cox(
         dvalid = xgb.DMatrix(
             x_valid,
             label=signed_cox_label(valid_df[duration_col], valid_df[event_col]),
-            feature_names=covariate_cols,
+            feature_names=xgb_names,
         )
         evals.append((dvalid, "valid"))
 
@@ -298,7 +312,7 @@ def predict_risk(
 ) -> tuple[np.ndarray, list[str]]:
     covariate_cols = preprocessor["covariate_cols"]
     x_eval = transform_xgb_matrix(eval_df, preprocessor)
-    dtest = xgb.DMatrix(x_eval, feature_names=covariate_cols)
+    dtest = xgb.DMatrix(x_eval, feature_names=preprocessor["xgb_feature_names"])
     best_iter = best_iteration(model)
     if best_iter is None:
         risk = model.predict(dtest)
@@ -316,7 +330,7 @@ def predict_xgb_margin(
     """Raw margin (log relative hazard) — needed by Breslow for survival probs."""
     covariate_cols = preprocessor["covariate_cols"]
     x_eval = transform_xgb_matrix(eval_df, preprocessor)
-    dtest = xgb.DMatrix(x_eval, feature_names=covariate_cols)
+    dtest = xgb.DMatrix(x_eval, feature_names=preprocessor["xgb_feature_names"])
     best_iter = best_iteration(model)
     if best_iter is None:
         margin = model.predict(dtest, output_margin=True)
@@ -367,14 +381,21 @@ def feature_importance_frame(
     covariate_cols: list[str],
     endpoint: str,
     landmark_day: int,
+    xgb_feature_names: list[str] | None = None,
 ) -> pd.DataFrame:
+    # `model.get_score()` keys by whatever names the DMatrix was built with
+    # (sanitized for CAIA's LOINC labs).  Map back to the human-readable
+    # covariate_cols so the importance CSV stays readable.
+    lookup_keys = list(xgb_feature_names) if xgb_feature_names is not None else list(covariate_cols)
+    if len(lookup_keys) != len(covariate_cols):
+        raise ValueError("xgb_feature_names and covariate_cols length mismatch.")
     frames = []
     for importance_type in ["gain", "weight", "cover"]:
         raw = model.get_score(importance_type=importance_type)
         frame = pd.DataFrame(
             {
                 "feature": covariate_cols,
-                importance_type: [raw.get(feature, 0.0) for feature in covariate_cols],
+                importance_type: [raw.get(k, 0.0) for k in lookup_keys],
             }
         )
         frames.append(frame.set_index("feature"))
@@ -863,6 +884,7 @@ def run_one_endpoint(
     importance = feature_importance_frame(
         model,
         covariate_cols=covariate_cols,
+        xgb_feature_names=preprocessor["xgb_feature_names"],
         endpoint=endpoint,
         landmark_day=landmark_day,
     )
