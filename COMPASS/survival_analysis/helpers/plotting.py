@@ -179,7 +179,7 @@ def overlay_hist(
     colors = dict(colors) if colors else dict(COHORT_COLORS)
     finite_values = []
     for s in series_by_label.values():
-        v = pd.to_numeric(s, errors="coerce").dropna().to_numpy()
+        v = pd.to_numeric(s, errors="coerce").dropna().to_numpy(dtype=float)
         v = v[np.isfinite(v)]
         finite_values.append(v)
     if isinstance(bins, int) and finite_values:
@@ -230,7 +230,10 @@ def overlay_km(
         if mask.sum() == 0:
             continue
         kmf = KaplanMeierFitter(label=f"{label} (n={int(mask.sum()):,})")
-        kmf.fit(durations=dur.loc[mask], event_observed=evt.loc[mask])
+        kmf.fit(
+            durations=dur.loc[mask].to_numpy(dtype=float),
+            event_observed=evt.loc[mask].to_numpy(dtype=float),
+        )
         kmf.plot_survival_function(ax=ax, color=colors.get(label), ci_show=True)
     if title:
         ax.set_title(title)
