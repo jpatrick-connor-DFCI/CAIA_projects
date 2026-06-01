@@ -101,9 +101,13 @@ def load_germline(path: Path) -> pd.DataFrame:
 
 
 def load_aggregated(path: Path) -> pd.DataFrame:
+    # NOTE: this PGS sensitivity arm intentionally fits univariate Cox on the FULL
+    # cohort (it does not filter on the `split` column). These are single-coefficient
+    # associations with no held-out evaluation, so test rows are included by design —
+    # unlike the predictive arms. Do not copy this pattern into a predictive context.
     df = pd.read_csv(path)
     if ID_COL not in df.columns:
-        raise ValueError(f"{path} missing DFCI_MRN column.")
+        raise ValueError(f"{path} missing the id column {ID_COL!r}.")
     df[ID_COL] = pd.to_numeric(df[ID_COL], errors="coerce")
     df = df.loc[df[ID_COL].notna()].copy()
     df[ID_COL] = df[ID_COL].astype(int)

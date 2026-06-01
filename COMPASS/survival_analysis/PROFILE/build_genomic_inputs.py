@@ -49,6 +49,7 @@ from cox_aggregated import (  # noqa: E402
 )
 from helpers.helper import (  # noqa: E402
     DEFAULT_AUC_QUANTILES,
+    assert_no_test_leakage,
     compute_horizon_grid,
     select_canonical_labs,
 )
@@ -133,11 +134,20 @@ def main(args: argparse.Namespace) -> None:
     somatic = load_somatic(Path(args.somatic_path))
     print(f"Somatic patients: {len(somatic)}")
 
+    n_before_tsample = df[ID_COL].nunique()
     df = attach_t_sample(df, somatic)
-    df = df.loc[df["t_sample"].notna()].copy()
-    print(f"Cohort after t_sample join (notna): {df[ID_COL].nunique()} patients")
+    has_tsample = df["t_sample"].notna()
+    n_with_tsample = df.loc[has_tsample, ID_COL].nunique()
+    n_negative = df.loc[has_tsample & (df["t_sample"] < 0), ID_COL].nunique()
+    df = df.loc[has_tsample].copy()
+    print(
+        f"Cohort after t_sample join: {n_with_tsample} patients with a sample date "
+        f"(dropped {n_before_tsample - n_with_tsample} without one). "
+        f"{n_negative} have a sample dated before their first record and will be "
+        f"dropped by the landmark filter below."
+    )
 
-    # Outcome table rebased to t_sample
+    # Outcome table rebased to t_sample (drops t_sample<0 and any sample at/after an event)
     outcome_df = make_outcome_df(
         df,
         landmark_offset_days=0,
@@ -145,7 +155,10 @@ def main(args: argparse.Namespace) -> None:
         extra_anchor_cols=("t_sample", "SAMPLE_COLLECTION_DT"),
         require_first_treatment=False,
     )
-    print(f"Outcome cohort (post t_sample landmark filter): {len(outcome_df)} patients")
+    print(
+        f"Outcome cohort (post t_sample landmark filter): {len(outcome_df)} patients "
+        f"(dropped {n_with_tsample - len(outcome_df)} with t_sample<0 or an event at/before the sample)"
+    )
 
     # Per-patient lab summary features (pre-sample window)
     feature_df = build_feature_matrix(
@@ -162,6 +175,13 @@ def main(args: argparse.Namespace) -> None:
         raise ValueError("No patients survived feature+outcome join in the genomic arm.")
 
     genomics = somatic.loc[somatic.index.intersection(merged.index), GENOMIC_FEATURE_COLS]
+    n_missing_genomics = int(merged.index.difference(somatic.index).size)
+    if n_missing_genomics:
+        print(
+            f"WARNING: {n_missing_genomics} patients in the genomic cohort had no somatic row; "
+            "their 12 genomic indicators are being set to 0 (indistinguishable from a true "
+            "all-negative profile)."
+        )
     merged = merged.join(genomics, how="left")
     for col in GENOMIC_FEATURE_COLS:
         merged[col] = merged[col].fillna(0).astype(int)
@@ -186,6 +206,12 @@ def main(args: argparse.Namespace) -> None:
     )
     if train_val.empty or test.empty:
         raise ValueError("Genomic cohort has empty train_val or test after split alignment.")
+    # Guard: reused split must keep test disjoint from train+valid.
+    assert_no_test_leakage(
+        test_mrns=set(test.index),
+        train_mrns=set(train_val.index),
+        context="build_genomic_inputs: test vs train+valid",
+    )
 
     agg_path = output_dir / GENOMIC_AGGREGATED_FILENAME
     merged.rename_axis(ID_COL).reset_index().to_csv(agg_path, index=False)

@@ -261,6 +261,11 @@ def main(args: argparse.Namespace) -> None:
         "note",
     ]
 
+    # NOTE on the train/test boundary: canonical-lab/feature *selection* above uses
+    # train+valid only (no selection leakage), but the univariate Cox fits below run
+    # on the FULL `aggregated` cohort (including test). This is a univariate sensitivity
+    # arm with no held-out evaluation, so test rows are included by design; the `test`
+    # frame computed above is intentionally unused.
     for endpoint in endpoints:
         cfg = ENDPOINTS[endpoint]
         print(f"\n=== {endpoint.upper()} (anchor=t_sample) ===")

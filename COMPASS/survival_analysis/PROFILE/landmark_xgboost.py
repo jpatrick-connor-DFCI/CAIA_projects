@@ -77,6 +77,7 @@ for _p in (str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
 
 from cox_aggregated import (  # noqa: E402
     AGE_COL,
+    DEFAULT_AUC_MAX_TIME_UNITS,
     DEFAULT_LANDMARK_DAYS,
     DEFAULT_SEED,
     ENDPOINTS,
@@ -130,6 +131,20 @@ def _xgb_safe_name(name: str) -> str:
     contain '[' and ']').  Map to unambiguous replacements so the original ↔
     sanitized mapping stays bijective within a canonical-lab set."""
     return name.replace("[", "(").replace("]", ")").replace("<", "_lt_")
+
+
+def _truncate_features_by_rank(selected, feature_meta, max_features):
+    """Keep the top `max_features` selected features, ranked by coverage (desc) then
+    feature name (asc). Used identically in CV folds and the final fit so the CV-selected
+    hyperparameters are tuned on the same feature universe as the deployed model."""
+    if max_features is None or len(selected) <= max_features:
+        return list(selected)
+    return (
+        feature_meta.loc[feature_meta["selected"]]
+        .sort_values(["coverage", "feature"], ascending=[False, True])
+        .head(max_features)["feature"]
+        .tolist()
+    )
 
 
 def fit_preprocessor(train_df: pd.DataFrame, *, feature_cols: list[str]) -> dict:
@@ -285,10 +300,10 @@ def fit_xgb_cox(
         "dtrain": dtrain,
         "num_boost_round": args.num_boost_round,
         "evals": evals,
-        # Per-round prints are silenced — the outer CV bar tracks progress per
-        # parameter combo. Set --verbose-eval explicitly if you want xgboost's
-        # own logger back.
-        "verbose_eval": False,
+        # Per-round prints are silenced by default (--verbose-eval 0) — the outer CV
+        # bar tracks progress per parameter combo. Pass --verbose-eval N to print every
+        # N rounds via xgboost's own logger.
+        "verbose_eval": args.verbose_eval if args.verbose_eval else False,
     }
     if len(valid_df) and args.early_stopping_rounds:
         train_kwargs["early_stopping_rounds"] = args.early_stopping_rounds
@@ -455,14 +470,13 @@ def cv_one_endpoint(
         )
         fold_canonical_labs[fold] = canonical
         fold_train = train_val.iloc[tr_idx]
-        selected, _ = select_feature_columns(
+        selected, fold_feature_meta = select_feature_columns(
             fold_train,
             raw_feature_cols,
             min_patient_coverage=args.min_patient_coverage,
             restrict_to_labs=canonical,
         )
-        if args.max_features is not None and len(selected) > args.max_features:
-            selected = selected[: args.max_features]
+        selected = _truncate_features_by_rank(selected, fold_feature_meta, args.max_features)
         fold_selected_features[fold] = selected
         for lab in canonical:
             fold_canonical_labs_rows.append(
@@ -745,13 +759,7 @@ def run_one_endpoint(
     )
     if args.max_features is not None and len(selected_features) > args.max_features:
         feature_meta = feature_meta.copy()
-        ranked = (
-            feature_meta.loc[feature_meta["selected"]]
-            .sort_values(["coverage", "feature"], ascending=[False, True])
-            .head(args.max_features)["feature"]
-            .tolist()
-        )
-        selected_features = ranked
+        selected_features = _truncate_features_by_rank(selected_features, feature_meta, args.max_features)
         feature_meta["selected"] = feature_meta["feature"].isin(selected_features)
 
     train_fit, valid_fit = make_train_valid_split(
@@ -920,7 +928,8 @@ def main(args: argparse.Namespace) -> None:
     args.min_patient_coverage = float(build_manifest["min_patient_coverage"])
     args.auc_time_unit_days = int(build_manifest["auc_time_unit_days"])
     args.auc_quantiles = tuple(build_manifest["auc_quantiles"])
-    args.auc_max_time_units = 260
+    if getattr(args, "auc_max_time_units", None) is None:
+        args.auc_max_time_units = DEFAULT_AUC_MAX_TIME_UNITS
     auc_horizons_by_landmark = build_manifest["auc_horizons_by_landmark"]
     print(
         f"Loading prebuilt prediction inputs from {inputs_dir} "
@@ -1066,6 +1075,15 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--val-frac", type=float, default=0.20)
     parser.add_argument("--max-features", type=int, default=None)
+    parser.add_argument(
+        "--auc-max-time-units",
+        type=int,
+        default=None,
+        help=(
+            f"Cap (in time-units) for the IPCW AUC(t)/Brier evaluation horizons "
+            f"(default {DEFAULT_AUC_MAX_TIME_UNITS}). Caps evaluation only, not fitting."
+        ),
+    )
     parser.add_argument("--num-boost-round", type=int, default=1000)
     parser.add_argument("--early-stopping-rounds", type=int, default=50)
     parser.add_argument("--eta", type=float, default=0.03)
@@ -1076,7 +1094,12 @@ if __name__ == "__main__":
     parser.add_argument("--reg-lambda", type=float, default=2.0)
     parser.add_argument("--reg-alpha", type=float, default=0.0)
     parser.add_argument("--tree-method", default="hist")
-    parser.add_argument("--verbose-eval", type=int, default=50)
+    parser.add_argument(
+        "--verbose-eval",
+        type=int,
+        default=0,
+        help="Print xgboost's per-round eval every N rounds (0 = silent, the default).",
+    )
     parser.add_argument("--n-folds", type=int, default=DEFAULT_N_FOLDS)
     parser.add_argument(
         "--cv-max-depths",

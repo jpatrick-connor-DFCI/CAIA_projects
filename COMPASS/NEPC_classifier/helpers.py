@@ -45,6 +45,9 @@ DEFAULT_RAW_TEXT_PATHS = (
     Path("/data/gusev/PROFILE/CLINICAL/OncDRS/CLINICAL_TEXTS_2025_11/"),
 )
 NOTE_BUNDLE_FILENAME = "LLM_NEPC_classifier_note_bundle.json.gz"
+# Compiled prostate notes CSV (produced by data_preprocessing/compile_prostate_notes.py).
+# This is the default note source for all LLM pipelines.
+PROSTATE_TEXT_CSV = DEFAULT_DATA_PATH / "prostate_text_data.csv"
 
 NOTE_BUNDLE_COLUMNS = (
     "DFCI_MRN",
@@ -483,6 +486,26 @@ def write_note_bundle(path, note_df, *, raw_text_paths=None, selected_mrns=None)
         json.dump(payload, handle, ensure_ascii=False)
 
 
+def write_notes_csv(path, note_df):
+    """Write standardized note rows to a CSV (the default LLM-pipeline note source)."""
+    if note_df.empty:
+        standardized = pd.DataFrame(columns=list(NOTE_BUNDLE_COLUMNS))
+    else:
+        keep_cols = [c for c in NOTE_BUNDLE_COLUMNS if c in note_df.columns]
+        standardized = note_df[keep_cols].copy()
+        if "EVENT_DATE" in standardized.columns:
+            standardized["EVENT_DATE"] = pd.to_datetime(
+                standardized["EVENT_DATE"], errors="coerce"
+            ).dt.strftime("%Y-%m-%d")
+        standardized = standardized.sort_values(
+            ["DFCI_MRN", "EVENT_DATE", "NOTE_TYPE"], na_position="last"
+        )
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    standardized.to_csv(output_path, index=False)
+    return standardized
+
+
 def load_note_bundle(path, selected_mrns=None):
     bundle_path = Path(path)
     if not bundle_path.exists():
@@ -505,10 +528,35 @@ def load_note_bundle(path, selected_mrns=None):
     return df
 
 
-def load_notes(*, bundle_path=None, raw_text_paths=None, selected_mrns=None):
-    """Load from bundle if it exists, else fall back to raw OncDRS JSONs."""
+def load_notes_csv(csv_path, selected_mrns=None):
+    """Load the compiled prostate notes CSV produced by compile_prostate_notes.py."""
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Prostate notes CSV not found: {csv_path}")
+    df = pd.read_csv(csv_path, low_memory=False)
+    if "CLINICAL_TEXT" not in df.columns:
+        raise ValueError(f"Prostate notes CSV missing CLINICAL_TEXT column: {csv_path}")
+    df = normalize_mrn_column(df)
+    if df.empty:
+        raise ValueError(f"No note rows in CSV: {csv_path}")
+    if selected_mrns is not None:
+        df = df.loc[df["DFCI_MRN"].isin(selected_mrns)].copy()
+        if df.empty:
+            raise ValueError("No notes after MRN filter.")
+    return df
+
+
+def load_notes(*, csv_path=None, bundle_path=None, raw_text_paths=None, selected_mrns=None):
+    """Load prostate notes for the LLM pipelines.
+
+    Precedence: an explicitly-provided bundle that exists > the compiled
+    prostate_text_data.csv > raw OncDRS JSONs. The CSV is the default source.
+    """
     if bundle_path is not None and Path(bundle_path).exists():
         return load_note_bundle(bundle_path, selected_mrns)
+    csv_path = csv_path or PROSTATE_TEXT_CSV
+    if Path(csv_path).exists():
+        return load_notes_csv(csv_path, selected_mrns)
     return load_raw_text_notes(resolve_raw_text_paths(raw_text_paths), selected_mrns)
 
 

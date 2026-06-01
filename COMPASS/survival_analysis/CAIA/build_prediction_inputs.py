@@ -47,8 +47,10 @@ CAIA_DEFAULTS: dict[str, str] = {
 
 def _inject_defaults(defaults: dict[str, str]) -> None:
     for flag, value in defaults.items():
-        if flag not in sys.argv:
-            sys.argv.extend([flag, value])
+        # Skip if the flag is already present in either "--flag value" or "--flag=value" form.
+        if any(arg == flag or arg.startswith(flag + "=") for arg in sys.argv):
+            continue
+        sys.argv.extend([flag, value])
 
 
 if __name__ == "__main__":

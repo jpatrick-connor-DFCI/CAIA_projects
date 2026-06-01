@@ -69,7 +69,10 @@ UNIVERSAL_RULES = [
 CLINICIAN_RULES = [
     {
         'name': 'vitals_block',
-        'pattern': r'(?:BP|Pulse|Temp|Resp|Ht|Wt|BMI).*?(?:kg|lb|cm|m|C|F)',
+        # Anchor to a line that starts with a vitals label and require a word-boundaried,
+        # multi-character unit. The old pattern allowed bare single-letter units (m/C/F),
+        # so a stray "BP"/"Temp" in prose would match up to the next c/f/m and delete text.
+        'pattern': r'^[ \t]*(?:BP|Pulse|Temp|Resp|Ht|Wt|BMI)\b.*?\b(?:kg|lbs?|cm|mmHg|bpm)\b',
         'replacement': '',
         'flags': re.MULTILINE | re.IGNORECASE,
         'confidence': 'high',

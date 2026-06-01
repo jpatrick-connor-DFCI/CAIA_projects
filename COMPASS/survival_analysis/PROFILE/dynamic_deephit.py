@@ -202,44 +202,6 @@ def patient_targets(
     return pd.DataFrame(rows).set_index(id_col)
 
 
-def fixed_horizon_grid_from_targets(
-    train_val_targets: pd.DataFrame,
-    *,
-    event_idx: int,
-    event_name: str,
-    quantiles: tuple[float, ...],
-    max_pred_window: int,
-) -> np.ndarray:
-    """Match Cox/XGBoost horizon selection: train/valid event-time quantiles.
-
-    DeepHit durations are already in the same integer time unit as the
-    longitudinal input. We use uncensored event durations for quantile selection
-    and require the model prediction window to cover the selected grid.
-    """
-    if {"uncensored_label", "uncensored_duration"}.issubset(train_val_targets.columns):
-        event_mask = train_val_targets["uncensored_label"].eq(event_idx)
-        event_durations = train_val_targets.loc[event_mask, "uncensored_duration"]
-    else:
-        event_mask = train_val_targets["label"].eq(event_idx)
-        event_durations = train_val_targets.loc[event_mask, "duration"]
-    event_durations = pd.to_numeric(event_durations, errors="coerce").to_numpy(dtype=float)
-    event_durations = event_durations[np.isfinite(event_durations) & (event_durations > 0)]
-    if len(event_durations) == 0:
-        return np.asarray([], dtype=float)
-    horizons = np.asarray(
-        [int(v) for v in np.quantile(event_durations, list(quantiles))],
-        dtype=float,
-    )
-    horizons = np.unique(horizons[horizons > 0])
-    if len(horizons) and horizons.max() > float(max_pred_window):
-        raise ValueError(
-            f"DeepHit --max-pred-window={max_pred_window} is shorter than the "
-            f"largest train/valid quantile horizon for {event_name} ({int(horizons.max())}). "
-            "Increase --max-pred-window so DeepHit and Cox/XGBoost AUC horizons are comparable."
-        )
-    return horizons
-
-
 def fit_normalization(df: pd.DataFrame, *, feature_cols: list[str], train_ids: set) -> tuple[pd.Series, pd.Series]:
     train = df.loc[df[ID_COL].astype(str).isin(train_ids), feature_cols]
     mean = train.mean(skipna=True).fillna(0.0)

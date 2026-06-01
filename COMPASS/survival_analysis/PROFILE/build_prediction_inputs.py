@@ -59,6 +59,7 @@ from cox_aggregated import (  # noqa: E402
 )
 from helpers.helper import (  # noqa: E402
     DEFAULT_AUC_QUANTILES,
+    assert_no_test_leakage,
     compute_horizon_grid,
     select_canonical_labs,
 )
@@ -544,6 +545,14 @@ def main(args: argparse.Namespace) -> None:
 
     train_mrns = set(split.index[split.eq("train")])
     train_val_mrns = set(split.index[split.isin(["train", "valid"])])
+    test_mrns = set(split.index[split.eq("test")])
+    # Guard: the test set must be disjoint from train+valid before any downstream
+    # canonical-lab selection / horizon fitting uses train_val_mrns.
+    assert_no_test_leakage(
+        test_mrns=test_mrns,
+        train_mrns=train_val_mrns,
+        context="build_prediction_inputs: test vs train+valid",
+    )
 
     canonical_labs_rows: list[dict] = []
     auc_horizons_by_landmark: dict[str, dict[str, list[int]]] = {}

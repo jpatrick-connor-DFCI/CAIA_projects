@@ -110,6 +110,10 @@ DEFAULT_N_FOLDS = 5
 DEFAULT_LANDMARK_DAYS = [0, 90]  # treatment start and 90 days post first treatment
 DEFAULT_MIN_PATIENT_COVERAGE = 0.20
 DEFAULT_MIN_EVENTS_PER_FEATURE = 10
+# Upper bound (in time-units) for the IPCW AUC(t)/Brier evaluation horizons. This
+# administratively censors only the *evaluation* grid (not model fitting), so AUC/Brier
+# stay comparable across Cox / XGBoost / DeepHit. Overridable via --auc-max-time-units.
+DEFAULT_AUC_MAX_TIME_UNITS = 260
 DEFAULT_CV_PENALIZERS = [
     0.001,
     0.0025,
@@ -151,10 +155,10 @@ ENDPOINTS = {
     },
 }
 
-# Administrative censoring removed: previously capped follow-up at 1820 days
-# (= DeepHit's DEFAULT_MAX_PRED_WINDOW * 7) so all three models trained on the
-# same event population.  With DeepHit silenced, Cox + XGBoost now use full
-# follow-up.
+# Administrative censoring of *model fitting* was removed: Cox + XGBoost now train on
+# full follow-up (previously capped at 1820 days = DeepHit's DEFAULT_MAX_PRED_WINDOW * 7).
+# NOTE: the IPCW AUC(t)/Brier *evaluation* grid is still capped at DEFAULT_AUC_MAX_TIME_UNITS
+# (see below) so the reported discrimination/calibration metrics stay comparable across models.
 OUTCOME_COLUMNS = {
     AGE_COL,
     "FIRST_RECORD_DATE",
@@ -331,7 +335,7 @@ def make_outcome_df(
     ]
     available_cols = [col for col in patient_level_cols if col in df.columns]
     if ID_COL not in available_cols:
-        raise ValueError("Input data must contain DFCI_MRN.")
+        raise ValueError(f"Input data must contain the id column {ID_COL!r}.")
 
     pat = df[available_cols].drop_duplicates(ID_COL).set_index(ID_COL)
 
@@ -738,54 +742,6 @@ def split_train_test(
     train_val = merged.iloc[train_idx].copy()
     test = merged.iloc[test_idx].copy()
     return train_val, test, split_assignments, label_name
-
-
-def build_aligned_cohort(
-    df: pd.DataFrame,
-    *,
-    test_frac: float,
-    seed: int,
-    landmark_offset_days: int = 0,
-    required_mrns: pd.Index | None = None,
-    split_assignments: pd.Series | None = None,
-    split_stratification: str | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, str]:
-    """Build the shared landmarked patient cohort and held-out test split."""
-    outcome_df, feature_df, merged = build_landmark_merged(
-        df,
-        landmark_offset_days=landmark_offset_days,
-    )
-    if required_mrns is not None:
-        merged = merged.loc[merged.index.intersection(required_mrns)].copy()
-        if merged.empty:
-            raise ValueError(
-                f"No patients remained after restricting to the requested landmark cohort at +{landmark_offset_days}d."
-            )
-
-    if split_assignments is None:
-        train_val, test, split_assignments, split_stratification = split_train_test(
-            merged,
-            test_frac=test_frac,
-            seed=seed,
-        )
-        merged = merged.copy()
-        merged["split"] = split_assignments
-        train_val = train_val.copy()
-        train_val["split"] = "train_val"
-        test = test.copy()
-        test["split"] = "test"
-    else:
-        if split_stratification is None:
-            raise ValueError("split_stratification must be provided when reusing split_assignments.")
-        merged, train_val, test, split_assignments, split_stratification = apply_split_assignments(
-            merged,
-            split_assignments=split_assignments,
-            split_stratification=split_stratification,
-        )
-
-    outcome_df = outcome_df.loc[outcome_df.index.intersection(merged.index)].copy()
-    feature_df = feature_df.loc[feature_df.index.intersection(merged.index)].copy()
-    return outcome_df, feature_df, merged, train_val, test, split_assignments, split_stratification
 
 
 def select_feature_columns(
@@ -1276,127 +1232,6 @@ def coxnet_coefficients(
     if coefs.ndim == 2:
         coefs = coefs[:, -1]
     return pd.Series(coefs.reshape(-1), index=covariate_cols, name="coef")
-
-
-def run_univariate_associations(
-    data: pd.DataFrame,
-    *,
-    feature_cols: list[str],
-    endpoint: str,
-    min_events_per_feature: int,
-    fallback_penalizer: float,
-) -> pd.DataFrame:
-    """Arm 1: for each feature, fit Cox on [AGE + feature] using the full dataset."""
-    duration_col = ENDPOINTS[endpoint]["duration_col"]
-    event_col = ENDPOINTS[endpoint]["event_col"]
-    total_patients = len(data)
-    rows = []
-
-    for feature in feature_cols:
-        lab_name, feature_stat = parse_feature_name(feature)
-        feature_df = data[[feature, duration_col, event_col, AGE_COL]].copy()
-        coverage = float(feature_df[feature].notna().mean())
-
-        feature_df = feature_df.dropna(subset=[duration_col, event_col, AGE_COL])
-
-        observed_non_missing = int(feature_df[feature].notna().sum())
-        imputed_count = int(len(feature_df) - observed_non_missing)
-        result = {
-            "endpoint": endpoint,
-            "feature": feature,
-            "lab_name": lab_name,
-            "feature_stat": feature_stat,
-            "coverage": coverage,
-            "n_patients_total": total_patients,
-            "n_patients_used": len(feature_df),
-            "n_patients_observed": observed_non_missing,
-            "n_patients_imputed": imputed_count,
-            "n_events_used": int(feature_df[event_col].sum()),
-            "coef_feature": np.nan,
-            "hazard_ratio_per_sd": np.nan,
-            "ci_lower": np.nan,
-            "ci_upper": np.nan,
-            "p_value": np.nan,
-            "coef_missing": np.nan,
-            "p_value_missing": np.nan,
-            "coef_age": np.nan,
-            "p_value_age": np.nan,
-            "fit_penalizer": np.nan,
-            "note": "",
-        }
-
-        if len(feature_df) == 0:
-            result["note"] = "no_rows_with_outcomes"
-            rows.append(result)
-            continue
-
-        if observed_non_missing == 0:
-            result["note"] = "no_non_missing_rows"
-            rows.append(result)
-            continue
-
-        if result["n_events_used"] < min_events_per_feature:
-            result["note"] = f"too_few_events_lt_{min_events_per_feature}"
-            rows.append(result)
-            continue
-
-        missing_indicator = feature_df[feature].isna().astype(float).to_numpy()
-        include_missing_indicator = bool(np.unique(missing_indicator).size > 1)
-
-        imputer = SimpleImputer(strategy="mean")
-        feature_values = imputer.fit_transform(feature_df[[feature]]).reshape(-1)
-        feature_sd = float(np.std(feature_values, ddof=0))
-        if not np.isfinite(feature_sd) or feature_sd <= 0:
-            result["note"] = "feature_has_no_variation"
-            rows.append(result)
-            continue
-
-        feature_mean = float(np.mean(feature_values))
-        feature_df = feature_df.copy()
-        feature_df["feature_z"] = (feature_values - feature_mean) / feature_sd
-        age_values = feature_df[AGE_COL].to_numpy(dtype=float)
-        age_sd = float(np.std(age_values, ddof=0))
-        if np.isfinite(age_sd) and age_sd > 0:
-            feature_df["age"] = (age_values - float(np.mean(age_values))) / age_sd
-        else:
-            feature_df["age"] = age_values - float(np.mean(age_values))
-        model_cols = ["feature_z", "age"]
-        if include_missing_indicator:
-            feature_df["feature_missing"] = missing_indicator
-            model_cols.insert(1, "feature_missing")
-
-        model, used_penalizer, note = fit_cox_with_fallback(
-            feature_df[model_cols + [duration_col, event_col]],
-            duration_col=duration_col,
-            event_col=event_col,
-            penalizers=[0.0, fallback_penalizer],
-            l1_ratio=0.0,
-        )
-        result["fit_penalizer"] = used_penalizer
-        result["note"] = note
-
-        if model is None:
-            rows.append(result)
-            continue
-
-        summary_row = model.summary.loc["feature_z"]
-        result["coef_feature"] = float(summary_row["coef"])
-        result["hazard_ratio_per_sd"] = float(summary_row["exp(coef)"])
-        result["ci_lower"] = float(summary_row["exp(coef) lower 95%"])
-        result["ci_upper"] = float(summary_row["exp(coef) upper 95%"])
-        result["p_value"] = float(summary_row["p"])
-        if include_missing_indicator and "feature_missing" in model.summary.index:
-            missing_row = model.summary.loc["feature_missing"]
-            result["coef_missing"] = float(missing_row["coef"])
-            result["p_value_missing"] = float(missing_row["p"])
-        age_row = model.summary.loc["age"]
-        result["coef_age"] = float(age_row["coef"])
-        result["p_value_age"] = float(age_row["p"])
-        rows.append(result)
-
-    associations = pd.DataFrame(rows)
-    associations["q_value"] = benjamini_hochberg(associations["p_value"])
-    return associations.sort_values(["p_value", "q_value", "feature"], na_position="last").reset_index(drop=True)
 
 
 def run_univariate_nobs_adjusted_associations(
@@ -2153,7 +1988,8 @@ def main(args: argparse.Namespace) -> None:
     min_patient_coverage = float(build_manifest["min_patient_coverage"])
     args.auc_time_unit_days = int(build_manifest["auc_time_unit_days"])
     args.auc_quantiles = tuple(build_manifest["auc_quantiles"])
-    args.auc_max_time_units = 260
+    if getattr(args, "auc_max_time_units", None) is None:
+        args.auc_max_time_units = DEFAULT_AUC_MAX_TIME_UNITS
     auc_horizons_by_landmark = build_manifest["auc_horizons_by_landmark"]
     print(
         f"Loading prebuilt prediction inputs from {inputs_dir} "
@@ -2316,8 +2152,9 @@ def main(args: argparse.Namespace) -> None:
                 )
 
         if args.analysis in {"multivariable", "both"}:
-            # Admin censoring removed (DeepHit silenced); multivariable arm now
-            # uses full follow-up, matching the univariate arm.
+            # Model fitting uses full follow-up (admin censoring of fitting removed when
+            # DeepHit was silenced), matching the univariate arm. Note the AUC/Brier
+            # evaluation grid is still capped at args.auc_max_time_units.
             multivariable_train_val = train_val.copy()
             multivariable_test = test.copy()
             print("\n##### ARM 2: MULTIVARIABLE ELASTIC-NET (all endpoints) #####")
@@ -2491,6 +2328,15 @@ if __name__ == "__main__":
         choices=["univariate", "multivariable", "both"],
         default="both",
         help="Association analyses to run on the aggregated feature set.",
+    )
+    parser.add_argument(
+        "--auc-max-time-units",
+        type=int,
+        default=None,
+        help=(
+            "Cap (in time-units) for the IPCW AUC(t)/Brier evaluation horizons. "
+            f"Defaults to {DEFAULT_AUC_MAX_TIME_UNITS} if unset. Caps evaluation only, not fitting."
+        ),
     )
     parser.add_argument(
         "--seed",

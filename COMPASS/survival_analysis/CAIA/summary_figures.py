@@ -70,6 +70,23 @@ def _coerce_days(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
 
+def _optional_series(df: pd.DataFrame, col: str) -> pd.Series:
+    """Return df[col] if present, else an empty float Series (so overlay plots
+    degrade gracefully instead of raising on a missing optional column)."""
+    if col in df.columns:
+        return df[col]
+    return pd.Series(dtype=float)
+
+
+def _event_mask(df: pd.DataFrame, col: str = "PLATINUM") -> pd.Series:
+    """Boolean event mask from a 0/1 column. Coerces to numeric and treats NaN as
+    0 (not True) — `df.get(col, 0).astype(bool)` would turn NaN into True and
+    mislabel censored patients as events."""
+    if col not in df.columns:
+        return pd.Series(False, index=df.index)
+    return pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int).astype(bool)
+
+
 def build_time_distributions_figure(
     profile_patient: pd.DataFrame,
     caia_patient: pd.DataFrame,
@@ -93,8 +110,8 @@ def build_time_distributions_figure(
     axes[0].set_ylabel("Density")
     axes[0].set_title("Per-patient lab record span")
 
-    p_dx2tx = _coerce_days(profile_patient.get("t_dx_to_tx"))
-    c_dx2tx = _coerce_days(caia_patient.get("t_dx_to_tx"))
+    p_dx2tx = _coerce_days(_optional_series(profile_patient, "t_dx_to_tx"))
+    c_dx2tx = _coerce_days(_optional_series(caia_patient, "t_dx_to_tx"))
     overlay_hist(
         axes[1],
         {"PROFILE": p_dx2tx, "CAIA": c_dx2tx},
@@ -105,10 +122,10 @@ def build_time_distributions_figure(
     axes[1].set_title("Diagnosis -> first treatment")
 
     p_tplat_evt = _coerce_days(
-        profile_patient.loc[profile_patient.get("PLATINUM", 0).astype(bool), "t_platinum"]
+        profile_patient.loc[_event_mask(profile_patient, "PLATINUM"), "t_platinum"]
     )
     c_tplat_evt = _coerce_days(
-        caia_patient.loc[caia_patient.get("PLATINUM", 0).astype(bool), "t_platinum"]
+        caia_patient.loc[_event_mask(caia_patient, "PLATINUM"), "t_platinum"]
     )
     overlay_hist(
         axes[2],

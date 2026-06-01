@@ -21,11 +21,7 @@ prostate_mrns = cancer_types.loc[cancer_types['med_genomics_merged_cancer_group'
 
 prostate_text_df = pd.read_csv(os.path.join(NEPC_PROJ_PATH, 'prostate_text_data.csv'))
 meds = pd.read_csv(os.path.join(NEPC_PROJ_PATH, 'prostate_medications_data.csv'))
-total_psa = pd.read_csv(os.path.join(NEPC_PROJ_PATH, 'total_psa_records.csv'))
-
 platinum_meds = pd.read_csv(os.path.join(NEPC_PROJ_PATH, 'platinum_chemo_records.csv'))
-
-mrns_with_note_counts = platinum_meds.merge(prostate_text_df['DFCI_MRN'].value_counts().reset_index().rename({'count' : 'number_of_clinical_notes'}), on='DFCI_MRN', how='inner')
 
 mrns_with_note_count = (prostate_text_df
                         .pivot_table(index="DFCI_MRN", 
@@ -51,9 +47,8 @@ med_mention_df = med_mention_df.loc[med_mention_df['MED_NAME_IN_NOTES']]
 df_to_send = (med_mention_df
               .merge(mrns_with_note_count, on='DFCI_MRN')
               .drop(columns=['MED_NAME_IN_NOTES'])
-              .rename(columns={'medication_start_time' : 'PLATINUM_START_TIME', 
-                               'medication' : 'PLATINUM_NM', 
-                               'count' : 'NUMBER_OF_TOTAL_CLINICAL_NOTES'})
+              .rename(columns={'medication_start_time' : 'PLATINUM_START_TIME',
+                               'medication' : 'PLATINUM_NM'})
              .sort_values(by='NUM_NOTES_WITH_MED_NAME', ascending=False))
 
 unfiltered_df = df_to_send[['DFCI_MRN', 'PLATINUM_NM', 'PLATINUM_START_TIME', 'NUM_NOTES_WITH_MED_NAME', 
@@ -64,7 +59,9 @@ prostate_icds = pd.read_csv(os.path.join(NEPC_PROJ_PATH, 'prostate_icd_data.csv'
 codes = prostate_icds['DIAGNOSIS_ICD10_CD'].astype(str).str.upper().str.strip()
 letter = codes.str.extract(r'^([A-Z])', expand=False)
 number = pd.to_numeric(codes.str.extract(r'^[A-Z](\d{1,3})', expand=False), errors='coerce')
-prostate_icds['PRIMARY_NON_PROSTATE'] = ((letter == 'C') & (number >= 0) & (number <= 75) & (codes != 'C61'))
+# C61 is the prostate code itself; exclude on the parsed number so decimal forms
+# (e.g. C61.9 -> number 61) are also excluded rather than leaking in as non-prostate primaries.
+prostate_icds['PRIMARY_NON_PROSTATE'] = ((letter == 'C') & (number >= 0) & (number <= 75) & (number != 61))
 df_clean = (
     prostate_icds.loc[prostate_icds['PRIMARY_NON_PROSTATE'],
                       ['DFCI_MRN', 'DIAGNOSIS_ICD10_CD', 'START_DT']]
@@ -95,7 +92,7 @@ parp_df = (meds.loc[meds['NCI_PREFERRED_MED_NM'].isin(['OLAPARIB', 'RUCAPARIB', 
 
 prostate_somatic_df = pd.read_csv(os.path.join(NEPC_PROJ_PATH, 'prostate_somatic_data.csv'))
 brca_cols = [col for col in prostate_somatic_df.columns if 'BRCA2' in col]
-brca_df = prostate_somatic_df[['DFCI_MRN'] + brca_cols]
+brca_df = prostate_somatic_df[['DFCI_MRN'] + brca_cols].copy()
 brca_df['ANY_BRCA2_MUTATION'] = brca_df[brca_cols].sum(axis=1) > 0
 brca_cols.append('ANY_BRCA2_MUTATION')
 
@@ -117,11 +114,11 @@ filtered_df['HAS_NON_PROSTATE'] = (~filtered_df['NON_PROSTATE_PRIMARY_ICD10_CD']
 filtered_df['HAS_PARPi'] = (~filtered_df['PARPi_NM'].isna())
 filtered_df['HAS_OncoPanel'] = (~filtered_df['ANY_BRCA2_MUTATION'].isna())
 
-print(f'Num px with non_prostate = {filtered_df['HAS_NON_PROSTATE'].sum()}')
-print(f'Num px with PARPi = {filtered_df['HAS_PARPi'].sum()}')
-print(f'Num px with non_prostate AND PARPi = {(filtered_df['HAS_PARPi'] & filtered_df['HAS_NON_PROSTATE']).sum()}')
-print(f'Num px with prostate AND PARPi = {(filtered_df['HAS_PARPi'] & ~filtered_df['HAS_NON_PROSTATE']).sum()} \n')
+print(f"Num px with non_prostate = {filtered_df['HAS_NON_PROSTATE'].sum()}")
+print(f"Num px with PARPi = {filtered_df['HAS_PARPi'].sum()}")
+print(f"Num px with non_prostate AND PARPi = {(filtered_df['HAS_PARPi'] & filtered_df['HAS_NON_PROSTATE']).sum()}")
+print(f"Num px with prostate AND PARPi = {(filtered_df['HAS_PARPi'] & ~filtered_df['HAS_NON_PROSTATE']).sum()} \n")
 
-print(f'Num px with BRCA2 = {(filtered_df['ANY_BRCA2_MUTATION'].sum())}')
-print(f'Num px with OncoPanel and PARPi = {(filtered_df['HAS_OncoPanel'] & filtered_df['HAS_PARPi']).sum()}')
-print(f'Num px with OncoPanel + BRCA2 AND PARPi = {(filtered_df['HAS_OncoPanel'] & filtered_df['ANY_BRCA2_MUTATION'] & filtered_df['HAS_PARPi']).sum()}')
+print(f"Num px with BRCA2 = {(filtered_df['ANY_BRCA2_MUTATION'].sum())}")
+print(f"Num px with OncoPanel and PARPi = {(filtered_df['HAS_OncoPanel'] & filtered_df['HAS_PARPi']).sum()}")
+print(f"Num px with OncoPanel + BRCA2 AND PARPi = {(filtered_df['HAS_OncoPanel'] & filtered_df['ANY_BRCA2_MUTATION'] & filtered_df['HAS_PARPi']).sum()}")

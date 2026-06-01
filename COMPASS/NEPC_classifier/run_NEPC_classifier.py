@@ -11,7 +11,7 @@ from helpers import (
     CLINICAL_SAFETY_CONTEXT,
     DEFAULT_MODEL_NAME,
     DEFAULT_OUTPUT_DIR,
-    NOTE_BUNDLE_FILENAME,
+    PROSTATE_TEXT_CSV,
     build_client,
     build_patient_snippets,
     call_with_retry,
@@ -48,10 +48,17 @@ def parse_args():
     parser.add_argument("--mrn-file", type=Path, default=None)
     parser.add_argument("--mrns", default=None)
     parser.add_argument(
+        "--notes-csv",
+        type=Path,
+        default=PROSTATE_TEXT_CSV,
+        help="Compiled prostate notes CSV (default note source).",
+    )
+    parser.add_argument(
         "--note-bundle-path",
         type=Path,
         default=None,
-        help="Optional gzipped note bundle. If absent, loads raw OncDRS JSONs.",
+        help="Optional gzipped note bundle. Overrides the CSV when it exists; "
+        "falls back to raw OncDRS JSONs if neither is present.",
     )
     parser.add_argument("--raw-text-path", type=Path, action="append", default=None)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
@@ -115,6 +122,21 @@ def classify_patient(client, model, max_retries, mrn, snippets):
     return result, None
 
 
+def _as_list(value):
+    """Coerce an LLM field to a list. A bare string is wrapped (not iterated as
+    characters); None/empty becomes []. Guards against the model returning e.g.
+    biomarker_genes="BRCA2" instead of ["BRCA2"], which would otherwise serialize
+    as "B | R | C | A | 2"."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = value.strip()
+        return [value] if value else []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
 def make_row(mrn, num_snippets, result):
     return {
         "DFCI_MRN": int(mrn),
@@ -124,14 +146,14 @@ def make_row(mrn, num_snippets, result):
         "has_biomarker": result.get("has_biomarker"),
         "has_molecular_avpc": result.get("has_molecular_avpc"),
         "has_non_prostate_primary": result.get("has_non_prostate_primary"),
-        "biomarker_genes": " | ".join(str(g) for g in (result.get("biomarker_genes") or [])),
-        "avpc_criteria": " | ".join(str(c) for c in (result.get("avpc_criteria") or [])),
+        "biomarker_genes": " | ".join(str(g) for g in _as_list(result.get("biomarker_genes"))),
+        "avpc_criteria": " | ".join(str(c) for c in _as_list(result.get("avpc_criteria"))),
         "visceral_met_pattern": result.get("visceral_met_pattern"),
         "non_prostate_primary_types": " | ".join(
-            str(t) for t in (result.get("non_prostate_primary_types") or [])
+            str(t) for t in _as_list(result.get("non_prostate_primary_types"))
         ),
-        "supporting_quotes": " | ".join(str(q) for q in (result.get("supporting_quotes") or [])),
-        "supporting_quote_dates": " | ".join(str(d) for d in (result.get("supporting_quote_dates") or [])),
+        "supporting_quotes": " | ".join(str(q) for q in _as_list(result.get("supporting_quotes"))),
+        "supporting_quote_dates": " | ".join(str(d) for d in _as_list(result.get("supporting_quote_dates"))),
         "confidence": result.get("confidence"),
         "rationale": result.get("rationale"),
         "num_snippets": int(num_snippets),
@@ -169,9 +191,10 @@ def run(args):
         failures_path.unlink(missing_ok=True)
 
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
-    bundle_path = args.note_bundle_path or args.output_dir / NOTE_BUNDLE_FILENAME
+    bundle_path = args.note_bundle_path
 
     notes_df = load_notes(
+        csv_path=args.notes_csv,
         bundle_path=bundle_path,
         raw_text_paths=args.raw_text_path,
         selected_mrns=selected_mrns,

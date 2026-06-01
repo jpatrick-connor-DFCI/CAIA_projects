@@ -146,15 +146,32 @@ def build_longitudinal_prediction_data(
         [ID_COL, "DATE", "collapsed_measurement", "numeric_result_standardized"]
     ].dropna().copy()
 
-    pred_df = (
-        prediction_df.merge(first_prostate_diagnosis, on=ID_COL, how="inner")
-        .merge(death_df, on=ID_COL, how="inner")
-        .merge(
-            platinum_df[[ID_COL, "medication", "medication_start_time"]],
-            on=ID_COL,
-            how="left",
-        )
+    # Collapse the platinum table to one row per patient (earliest platinum start).
+    # Without this, the left-join below fans out every lab row by the number of
+    # platinum medication records the patient has.
+    platinum_first = platinum_df[[ID_COL, "medication", "medication_start_time"]].copy()
+    platinum_first["_plat_dt"] = pd.to_datetime(
+        platinum_first["medication_start_time"], errors="coerce"
     )
+    platinum_first = (
+        platinum_first.sort_values("_plat_dt")
+        .drop_duplicates(subset=ID_COL, keep="first")
+        .drop(columns="_plat_dt")
+    )
+
+    n_lab_mrns = prediction_df[ID_COL].nunique()
+    after_dx = prediction_df.merge(first_prostate_diagnosis, on=ID_COL, how="inner")
+    n_after_dx = after_dx[ID_COL].nunique()
+    after_death = after_dx.merge(death_df, on=ID_COL, how="inner")
+    n_after_death = after_death[ID_COL].nunique()
+    print(
+        f"[build_longitudinal_prediction_data] patients with labs={n_lab_mrns}; "
+        f"after first-prostate-diagnosis inner-join={n_after_dx} "
+        f"(dropped {n_lab_mrns - n_after_dx}); "
+        f"after death-table inner-join={n_after_death} "
+        f"(dropped {n_after_dx - n_after_death})."
+    )
+    pred_df = after_death.merge(platinum_first, on=ID_COL, how="left")
 
     pred_df = (
         pred_df.rename(
@@ -205,6 +222,11 @@ def build_longitudinal_prediction_data(
     pred_df["t_last_contact"] = (
         pred_df["LAST_CONTACT_DATE"] - pred_df["FIRST_RECORD_DATE"]
     ).dt.days.astype(float)
+    # NOTE: the death source table (death_met_surv_df) carries only `last_contact_date`
+    # and a `death` flag — there is no true date-of-death. We therefore use last-contact
+    # time as the death-endpoint duration for everyone. The DEATH *event* indicator is
+    # real, but dead and censored patients share the same duration. Replace this with a
+    # true death date if one becomes available.
     pred_df["t_death"] = pred_df["t_last_contact"]
 
     pred_df["t_diagnosis"] = (
