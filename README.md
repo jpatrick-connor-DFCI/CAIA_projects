@@ -38,8 +38,8 @@ COMPASS/
 │   ├── compile_prostate_note_bundle.py   # (optional) pre-compile notes → gzip bundle
 │   └── run_NEPC_classifier.py            # ENTRY: classify patients → labels.tsv
 │
-├── longitudinal_LLM/                     # per-note LLM extraction → patient timelines
-│   ├── helpers.py                        # per-note snippet iteration; reuses NEPC_classifier plumbing
+├── longitudinal_LLM/                     # per-patient (chunked) LLM extraction → patient timelines
+│   ├── helpers.py                        # snippet iteration + per-patient chunking; reuses NEPC_classifier plumbing
 │   ├── extract_gleason_timeline.py       # ENTRY: every Gleason score + date per patient
 │   └── extract_avpc_nepc_timeline.py     # ENTRY: AVPC C1–C7 / NEPC criteria onset timeline
 │
@@ -172,21 +172,27 @@ Auth is AAD via `DefaultAzureCredential` (no API key in code).
 
 ## Stage 2b — Longitudinal LLM timelines (`longitudinal_LLM/`)
 
-Two **per-note** extraction pipelines that turn the same `prostate_text_data.csv` into patient-level
-*timelines*. Unlike the NEPC classifier (one call per patient → one label), these make one LLM call per
-trigger-bearing note (copy-forward duplicates collapsed per patient) and then deterministically aggregate
-the per-note extractions. Both reuse the NEPC classifier's Azure client / retry / JSON-parsing / note
-loaders via `longitudinal_LLM/helpers.py`, run triggers on `clean_note`-cleaned text, are resumable (a
-`*_processed_notes.tsv` log tracks finished notes + failures), and accept `--overwrite`. Outputs default
-under `CAIA_COMPASS_DATA_PATH`.
+Two **per-patient (chunked)** extraction pipelines that turn the same `prostate_text_data.csv` into
+patient-level *timelines*. For each patient, trigger-bearing notes are collected, de-duplicated, ordered
+chronologically, and packed into **one LLM call per patient** (a few "chunks" for heavily-documented
+patients, sized by `--payload-max-chars`); the model extracts findings across all the notes in the call,
+and the results are deterministically aggregated into a timeline. Chunking *packs* notes rather than
+*capping* them, so no note is dropped — earliest-occurrence dates and rare findings survive. This makes
+the call count ~one per patient instead of one per note (a 10–50× reduction vs. a per-note design). Both
+reuse the NEPC classifier's Azure client / retry / JSON-parsing / note loaders via
+`longitudinal_LLM/helpers.py`, run triggers on `clean_note`-cleaned text, are resumable (a
+`*_processed_patients.tsv` log tracks finished patients + failures; reruns skip `status == ok`), and
+accept `--overwrite`. Concurrency defaults to `--max-workers 16`. Outputs default under
+`CAIA_COMPASS_DATA_PATH`.
 
 **1. Gleason timeline — `extract_gleason_timeline.py`** (`→ LLM_gleason_timeline/`)
-Trigger: any mention of Gleason / Grade Group / ISUP. Each call extracts every documented Gleason score
-with the date the grade was assigned (specimen date if stated, else the note date — recorded in
-`date_source`), specimen type, and whether it is a historical reference. Aggregation validates patterns
-(1–5) / totals (2–10), derives the ISUP Grade Group when absent, and de-duplicates per patient.
-`gleason_timeline.tsv` = one row per distinct `(score, date, specimen)` — every Gleason score the patient
-received, with its date. (`gleason_extractions_raw.tsv` keeps pre-dedup per-note provenance.)
+Trigger: any mention of Gleason / Grade Group / ISUP. The model extracts every documented Gleason score
+across the patient's notes with the date the grade was assigned (specimen date if stated, else the source
+note's date — recorded in `date_source`), specimen type, and whether it is a historical reference.
+Aggregation validates patterns (1–5) / totals (2–10, recomputed from patterns when both are present),
+derives the ISUP Grade Group when absent, and de-duplicates per patient. `gleason_timeline.tsv` = one row
+per distinct `(score, date, specimen)` — every Gleason score the patient received, with its date.
+(`gleason_extractions_raw.tsv` keeps the pre-dedup per-finding provenance.)
 
 **2. AVPC / NEPC criteria timeline — `extract_avpc_nepc_timeline.py`** (`→ LLM_avpc_nepc_timeline/`)
 Triggers: the NEPC classifier's `nepc` + `avpc` regexes. Each call records which criteria are documented
@@ -197,17 +203,20 @@ each finding's diagnosis date. Aggregation takes each criterion's **earliest** d
 carrying the `cumulative_criteria` set documented up to that date.
 
 ```bash
-python COMPASS/longitudinal_LLM/extract_gleason_timeline.py --max-workers 4
-python COMPASS/longitudinal_LLM/extract_avpc_nepc_timeline.py --max-workers 4
-# scope/test first with e.g. --mrn-file <mrns.txt> --limit-notes 50
+python COMPASS/longitudinal_LLM/extract_gleason_timeline.py --max-workers 16
+python COMPASS/longitudinal_LLM/extract_avpc_nepc_timeline.py --max-workers 16
+# scope/test first with e.g. --mrn-file <mrns.txt> --limit-patients 50
 ```
 
-**Cost levers (Gleason especially).** Gleason is mentioned in nearly every prostate note, so a
-full-cohort run is one LLM call per Gleason-mentioning note. Two flags control this:
-- `--note-types Pathology` — Gleason is *assigned* in pathology; restricting to it is far cheaper and
-  higher-fidelity (default is all notes, per "any mention triggers collection").
+**Cost / speed levers.** Call count is ~one per patient (plus extra chunks for heavy charts), so the
+dominant knobs are concurrency and how aggressively notes are packed/filtered:
+- `--max-workers N` — concurrent patients (default **16**); raise toward your Azure TPM/RPM quota.
+- `--payload-max-chars N` — snippet chars packed per call (default **60k ≈ 15k tokens**). Larger = fewer
+  calls per patient (but bigger contexts); smaller = more chunks.
+- `--note-types Pathology` (Gleason) — Gleason is *assigned* in pathology; restricting to it is far
+  cheaper and higher-fidelity (default is all notes, per "any mention triggers collection").
 - `--context-chars N` — chars kept on each side of a match (Gleason default **600**, criteria **2000**).
-  Smaller windows raise the copy-forward dedup hit-rate and shrink per-call tokens; the criteria
+  Smaller windows raise the copy-forward dedup hit-rate and pack more notes per call; the criteria
   pipeline keeps a wide window because it must judge e.g. ">= 5 cm" measurements and visceral-vs-bone.
 
 ---
@@ -335,9 +344,9 @@ python COMPASS/data_preprocessing/compile_prostate_notes.py --derive-prostate-mr
 # Stage 2 — see COMPASS/NEPC_classifier/README.md
 python COMPASS/NEPC_classifier/run_NEPC_classifier.py --mrn-file <mrns.txt> --max-workers 4
 
-# Stage 2b — longitudinal LLM timelines (per-note)
-python COMPASS/longitudinal_LLM/extract_gleason_timeline.py --max-workers 4
-python COMPASS/longitudinal_LLM/extract_avpc_nepc_timeline.py --max-workers 4
+# Stage 2b — longitudinal LLM timelines (per-patient, chunked)
+python COMPASS/longitudinal_LLM/extract_gleason_timeline.py --max-workers 16
+python COMPASS/longitudinal_LLM/extract_avpc_nepc_timeline.py --max-workers 16
 
 # Stage 3 — or just run PROFILE/run_locally.ipynb top to bottom
 python COMPASS/survival_analysis/PROFILE/longitudinal_data_processing.py

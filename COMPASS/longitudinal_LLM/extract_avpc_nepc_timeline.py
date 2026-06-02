@@ -1,16 +1,17 @@
-"""Pipeline 2 — Longitudinal AVPC / NEPC criteria extraction.
+"""Pipeline 2 — Longitudinal AVPC / NEPC criteria extraction (per-patient, chunked).
 
-For every prostate patient, any note mentioning AVPC or NEPC language is
-collected, and one LLM call per note records which Aparicio aggressive-variant
-criteria (C1-C7) and which NEPC sub-features are documented as present, with the
-date each was diagnosed. Per-note extractions are aggregated into a per-patient
-onset timeline: one row each time a NEW criterion is first added to the patient's
-record, carrying the cumulative set of criteria documented up to that date.
+For every prostate patient, notes mentioning AVPC or NEPC language are collected,
+de-duplicated, ordered chronologically, and packed into one LLM call per patient
+(a few for heavily-documented patients). Each call records which Aparicio
+aggressive-variant criteria (C1-C7) and which NEPC sub-features are documented as
+present, with the date each was diagnosed. Per-call extractions are aggregated
+into a per-patient onset timeline: one row each time a NEW criterion is first added
+to the patient's record, carrying the cumulative set of criteria to that date.
 
 Outputs (under <output-dir>):
   avpc_nepc_timeline.tsv          one row per newly-added criterion (with cumulative set)
-  avpc_nepc_extractions_raw.tsv   per-note extractions (provenance, pre-aggregation)
-  avpc_nepc_processed_notes.tsv   processed-note log (resumability + failures)
+  avpc_nepc_extractions_raw.tsv   per-finding extractions (provenance, pre-aggregation)
+  avpc_nepc_processed_patients.tsv  processed-patient log (resumability + failures)
 """
 
 import argparse
@@ -25,12 +26,13 @@ from helpers import (
     CLINICAL_SAFETY_CONTEXT,
     DEFAULT_DATA_PATH,
     DEFAULT_MODEL_NAME,
+    DEFAULT_PAYLOAD_MAX_CHARS,
     NEPC_TRIGGER_REGEX,
     PROSTATE_TEXT_CSV,
     build_client,
     call_with_retry,
     filter_note_types,
-    iter_note_snippets,
+    group_patient_snippets,
     load_notes,
     load_selected_mrns,
     parse_json_response,
@@ -59,10 +61,8 @@ VALID_CRITERIA = set(CRITERION_LABELS)
 VISCERAL_PATTERNS = {"visceral_only", "visceral_and_bone", "none"}
 
 RAW_COLUMNS = [
-    "note_uid",
     "DFCI_MRN",
-    "note_date",
-    "note_type",
+    "source_note_date",
     "criterion",
     "diagnosis_date",
     "modality",
@@ -83,22 +83,23 @@ TIMELINE_COLUMNS = [
     "num_criteria_to_date",
     "supporting_quote",
     "confidence",
-    "note_date",
-    "note_type",
+    "source_note_date",
 ]
 
-PROCESSED_COLUMNS = ["note_uid", "DFCI_MRN", "num_criteria", "status"]
+PROCESSED_COLUMNS = ["DFCI_MRN", "num_chunks", "num_criteria", "status"]
 
 SYSTEM_PROMPT = """
 You are a clinical data extraction system for an IRB-approved prostate cancer research study.
 
-You will receive a JSON payload with ONE de-identified clinical note snippet for a
-single patient. The snippet mentions language relevant to aggressive-variant
-prostate cancer (AVPC) or neuroendocrine prostate cancer (NEPC).
+You will receive a JSON payload with a SINGLE patient's de-identified clinical note
+snippets. Each snippet is labeled with its `note_date` and `note_type`, and mentions
+language relevant to aggressive-variant prostate cancer (AVPC) or neuroendocrine
+prostate cancer (NEPC).
 
 ## TASK
-Identify which of the following criteria are DOCUMENTED AS PRESENT in this snippet.
-Report each present criterion once, with its attributed date and a verbatim quote.
+Identify which of the following criteria are DOCUMENTED AS PRESENT anywhere in the
+snippets. Report each present criterion ONCE, using its EARLIEST documented occurrence,
+with that occurrence's date and a verbatim quote.
 
 ### Aparicio aggressive-variant criteria (AVPC)
 C1 small-cell histology
@@ -123,12 +124,14 @@ NEPC:positive_ne_ihc         positive neuroendocrine IHC on a prostate-derived s
                              (synaptophysin, chromogranin, CD56, NSE, INSM1)
 
 ## RULES
-- Use only this snippet. Report a criterion only when documented as PRESENT — not
+- Use only the snippets. Report a criterion only when documented as PRESENT — not
   suspected, planned, pending, ruled out, negative, or family history.
 - Pathology is most authoritative for histology / IHC; imaging for metastatic pattern.
 - diagnosis_date: the date the finding was documented / diagnosed AS STATED in the text
-  (YYYY-MM-DD; for partial dates use the first of the month/year). If no date is stated
-  in the snippet, return null.
+  (YYYY-MM-DD; for partial dates use the first of the month/year). If no date is stated,
+  return null.
+- source_note_date: the `note_date` of the snippet where the earliest occurrence appears.
+  Copy it verbatim from the payload. (Used as a fallback date when diagnosis_date is null.)
 - modality: "pathology" | "imaging" | "clinical" | "labs".
 - quote: a verbatim excerpt (~30-80 words) supporting the criterion.
 - confidence: "high" | "medium" | "low".
@@ -137,8 +140,8 @@ NEPC:positive_ne_ihc         positive neuroendocrine IHC on a prostate-derived s
 Return ONLY valid JSON:
 {
   "criteria_found": [
-    {"criterion": "C2", "diagnosis_date": "2021-06-01", "modality": "imaging",
-     "quote": "<verbatim>", "confidence": "high"}
+    {"criterion": "C2", "diagnosis_date": "2021-06-01", "source_note_date": "2021-06-03",
+     "modality": "imaging", "quote": "<verbatim>", "confidence": "high"}
   ],
   "visceral_met_pattern": "visceral_only | visceral_and_bone | none"
 }
@@ -168,11 +171,17 @@ def parse_args():
         help="Chars of context kept on each side of an AVPC/NEPC match. Criteria need "
         "broad context (e.g. >= 5 cm measurements, visceral vs bone), so this stays wide.",
     )
+    parser.add_argument(
+        "--payload-max-chars",
+        type=int,
+        default=DEFAULT_PAYLOAD_MAX_CHARS,
+        help="Max snippet chars packed into one LLM call (one chunk per patient until full).",
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--model", default=DEFAULT_MODEL_NAME)
-    parser.add_argument("--max-workers", type=int, default=4)
+    parser.add_argument("--max-workers", type=int, default=16)
     parser.add_argument("--max-retries", type=int, default=3)
-    parser.add_argument("--limit-notes", type=int, default=None)
+    parser.add_argument("--limit-patients", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -189,53 +198,54 @@ def append_rows(path, rows, columns):
     )
 
 
-def extract_note(client, model, max_retries, item):
-    payload = {
-        "patient_mrn": int(item["DFCI_MRN"]),
-        "note_date": item["note_date"],
-        "note_type": item["note_type"],
-        "note_text": item["snippet"],
-    }
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT + CLINICAL_SAFETY_CONTEXT},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-    ]
-    response_text, error = call_with_retry(client, model, messages, max_retries)
-    if error:
-        return None, error
-    try:
-        result = parse_json_response(response_text)
-    except json.JSONDecodeError as exc:
-        return None, f"json_parse: {exc}"
-    if not isinstance(result, dict):
-        return None, f"non_dict_response: {type(result).__name__}"
-    found = result.get("criteria_found")
-    if not isinstance(found, list):
-        return None, "missing_criteria_found"
-    vmp = result.get("visceral_met_pattern")
-    vmp = vmp if vmp in VISCERAL_PATTERNS else "none"
-    return {"criteria_found": found, "visceral_met_pattern": vmp}, None
+def extract_patient(client, model, max_retries, mrn, chunks):
+    """Run one LLM call per chunk; return the merged criteria findings for the patient."""
+    findings = []
+    for chunk in chunks:
+        payload = {
+            "patient_mrn": int(mrn),
+            "notes": [
+                {"note_date": r["note_date"], "note_type": r["note_type"], "note_text": r["snippet"]}
+                for r in chunk
+            ],
+        }
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT + CLINICAL_SAFETY_CONTEXT},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+        response_text, error = call_with_retry(client, model, messages, max_retries)
+        if error:
+            return None, error
+        try:
+            result = parse_json_response(response_text)
+        except json.JSONDecodeError as exc:
+            return None, f"json_parse: {exc}"
+        if not isinstance(result, dict):
+            return None, f"non_dict_response: {type(result).__name__}"
+        found = result.get("criteria_found")
+        if not isinstance(found, list):
+            return None, "missing_criteria_found"
+        vmp = result.get("visceral_met_pattern")
+        vmp = vmp if vmp in VISCERAL_PATTERNS else "none"
+        for finding in found:
+            if isinstance(finding, dict):
+                findings.append((finding, vmp))
+    return findings, None
 
 
-def raw_rows_from_result(item, result):
+def raw_rows_from_findings(mrn, findings):
     rows = []
-    for finding in result["criteria_found"]:
-        if not isinstance(finding, dict):
-            continue
+    for finding, vmp in findings:
         criterion = finding.get("criterion")
         if criterion not in VALID_CRITERIA:
             continue
         rows.append({
-            "note_uid": item["note_uid"],
-            "DFCI_MRN": int(item["DFCI_MRN"]),
-            "note_date": item["note_date"],
-            "note_type": item["note_type"],
+            "DFCI_MRN": int(mrn),
+            "source_note_date": finding.get("source_note_date"),
             "criterion": criterion,
             "diagnosis_date": finding.get("diagnosis_date"),
             "modality": finding.get("modality"),
-            "visceral_met_pattern": (
-                result["visceral_met_pattern"] if criterion == "C2" else None
-            ),
+            "visceral_met_pattern": vmp if criterion == "C2" else None,
             "quote": finding.get("quote"),
             "confidence": finding.get("confidence"),
         })
@@ -243,7 +253,7 @@ def raw_rows_from_result(item, result):
 
 
 def build_timeline(raw_path, timeline_path):
-    """Aggregate raw per-note criteria into a per-patient onset timeline."""
+    """Aggregate raw per-finding criteria into a per-patient onset timeline."""
     if not raw_path.exists() or raw_path.stat().st_size == 0:
         pd.DataFrame(columns=TIMELINE_COLUMNS).to_csv(timeline_path, sep="\t", index=False)
         return 0
@@ -258,7 +268,7 @@ def build_timeline(raw_path, timeline_path):
             continue
         mrn = int(getattr(r, "DFCI_MRN"))
         event_date, date_source = resolve_date(
-            getattr(r, "diagnosis_date", None), getattr(r, "note_date", None)
+            getattr(r, "diagnosis_date", None), getattr(r, "source_note_date", None)
         )
         record = {
             "DFCI_MRN": mrn,
@@ -270,8 +280,7 @@ def build_timeline(raw_path, timeline_path):
             "visceral_met_pattern": getattr(r, "visceral_met_pattern", None),
             "supporting_quote": getattr(r, "quote", None),
             "confidence": getattr(r, "confidence", None),
-            "note_date": getattr(r, "note_date", None),
-            "note_type": getattr(r, "note_type", None),
+            "source_note_date": getattr(r, "source_note_date", None),
         }
         key = (mrn, criterion)
         existing = onsets.get(key)
@@ -308,7 +317,7 @@ def build_timeline(raw_path, timeline_path):
 def run(args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
     raw_path = args.output_dir / "avpc_nepc_extractions_raw.tsv"
-    processed_path = args.output_dir / "avpc_nepc_processed_notes.tsv"
+    processed_path = args.output_dir / "avpc_nepc_processed_patients.tsv"
     timeline_path = args.output_dir / "avpc_nepc_timeline.tsv"
 
     if args.overwrite:
@@ -331,56 +340,57 @@ def run(args):
         notes_df = filter_note_types(notes_df, args.note_types)
         print(f"After note-type filter {args.note_types}: {len(notes_df)} rows")
 
-    items = list(
-        iter_note_snippets(notes_df, TRIGGER_REGEX, context_chars=args.context_chars)
+    patient_chunks = group_patient_snippets(
+        notes_df,
+        TRIGGER_REGEX,
+        context_chars=args.context_chars,
+        payload_max_chars=args.payload_max_chars,
     )
-    print(f"Notes mentioning AVPC/NEPC language (deduped): {len(items)}")
+    total_chunks = sum(len(c) for c in patient_chunks.values())
+    print(
+        f"Patients mentioning AVPC/NEPC language: {len(patient_chunks)} "
+        f"({total_chunks} LLM calls across chunks)"
+    )
 
     completed = set()
     if processed_path.exists() and processed_path.stat().st_size > 0:
-        completed = set(pd.read_csv(processed_path, sep="\t")["note_uid"].astype(str))
-    print(f"Already processed notes: {len(completed)}")
+        log = pd.read_csv(processed_path, sep="\t")
+        completed = set(log.loc[log["status"] == "ok", "DFCI_MRN"].astype(int))
+    print(f"Already completed patients: {len(completed)}")
 
-    todo = [it for it in items if it["note_uid"] not in completed]
-    if args.limit_notes is not None:
-        todo = todo[: args.limit_notes]
-    print(f"Notes to extract with LLM: {len(todo)}")
+    todo = [m for m in sorted(patient_chunks) if m not in completed]
+    if args.limit_patients is not None:
+        todo = todo[: args.limit_patients]
+    print(f"Patients to extract with LLM: {len(todo)}")
 
     if todo:
         client = build_client()
 
-        def worker(item):
-            result, error = extract_note(client, args.model, args.max_retries, item)
-            return item, result, error
+        def worker(mrn):
+            chunks = patient_chunks[mrn]
+            findings, error = extract_patient(client, args.model, args.max_retries, mrn, chunks)
+            return mrn, len(chunks), findings, error
 
         with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
-            futures = {executor.submit(worker, it): it for it in todo}
+            futures = {executor.submit(worker, m): m for m in todo}
             for future in tqdm(
-                as_completed(futures), total=len(futures), desc="Notes", unit="note"
+                as_completed(futures), total=len(futures), desc="Patients", unit="pt"
             ):
-                item, result, error = future.result()
-                if error or result is None:
+                mrn, n_chunks, findings, error = future.result()
+                if error or findings is None:
                     append_rows(
                         processed_path,
-                        [{
-                            "note_uid": item["note_uid"],
-                            "DFCI_MRN": int(item["DFCI_MRN"]),
-                            "num_criteria": 0,
-                            "status": error or "no_result",
-                        }],
+                        [{"DFCI_MRN": int(mrn), "num_chunks": n_chunks, "num_criteria": 0,
+                          "status": error or "no_result"}],
                         PROCESSED_COLUMNS,
                     )
                     continue
-                rows = raw_rows_from_result(item, result)
+                rows = raw_rows_from_findings(mrn, findings)
                 append_rows(raw_path, rows, RAW_COLUMNS)
                 append_rows(
                     processed_path,
-                    [{
-                        "note_uid": item["note_uid"],
-                        "DFCI_MRN": int(item["DFCI_MRN"]),
-                        "num_criteria": len(rows),
-                        "status": "ok",
-                    }],
+                    [{"DFCI_MRN": int(mrn), "num_chunks": n_chunks, "num_criteria": len(rows),
+                      "status": "ok"}],
                     PROCESSED_COLUMNS,
                 )
 

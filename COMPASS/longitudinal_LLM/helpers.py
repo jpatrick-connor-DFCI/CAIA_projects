@@ -38,6 +38,9 @@ from NEPC_classifier.helpers import (  # noqa: E402,F401
 
 SNIPPET_CONTEXT_CHARS = 2000
 SNIPPET_MAX_CHARS = 10000
+# Max snippet chars packed into one LLM call (one chunk). ~60k chars ≈ 15k tokens,
+# leaving ample room under a 128k-token model for the system prompt + JSON output.
+DEFAULT_PAYLOAD_MAX_CHARS = 60000
 
 
 def find_matches(text, trigger_regex):
@@ -147,6 +150,50 @@ def resolve_date(stated_date, note_date):
     if note_iso:
         return note_iso, "note_date"
     return None, "unknown"
+
+
+def group_patient_snippets(
+    notes_df,
+    trigger_regex,
+    *,
+    context_chars=SNIPPET_CONTEXT_CHARS,
+    snippet_max_chars=SNIPPET_MAX_CHARS,
+    payload_max_chars=DEFAULT_PAYLOAD_MAX_CHARS,
+):
+    """Group deduped per-note snippets by patient into payload-sized chunks.
+
+    Returns {mrn: [chunk, ...]} where each chunk is a list of snippet records
+    (same dicts iter_note_snippets yields). Snippets are de-duplicated per patient,
+    ordered chronologically (oldest first), then packed greedily up to
+    `payload_max_chars`. Chunking — rather than capping — means NO snippet is
+    dropped, so earliest-occurrence dates and rare findings survive even for
+    heavily-documented patients; the number of LLM calls is one per chunk
+    (one for most patients, a few for outliers) instead of one per note.
+    """
+    by_mrn = {}
+    for rec in iter_note_snippets(
+        notes_df,
+        trigger_regex,
+        context_chars=context_chars,
+        snippet_max_chars=snippet_max_chars,
+    ):
+        by_mrn.setdefault(rec["DFCI_MRN"], []).append(rec)
+
+    patient_chunks = {}
+    for mrn, recs in by_mrn.items():
+        recs.sort(key=lambda r: (r["note_date"] or "9999-99-99"))
+        chunks, current, current_len = [], [], 0
+        for rec in recs:
+            slen = len(rec["snippet"])
+            if current and current_len + slen > payload_max_chars:
+                chunks.append(current)
+                current, current_len = [], 0
+            current.append(rec)
+            current_len += slen
+        if current:
+            chunks.append(current)
+        patient_chunks[mrn] = chunks
+    return patient_chunks
 
 
 def derive_grade_group(primary, secondary):
