@@ -90,6 +90,7 @@ from cox_aggregated import (  # noqa: E402
     normalize_endpoints,
     normalize_landmark_days,
     select_feature_columns,
+    stage_available_mask,
     stage_feature_columns,
 )
 from helpers.helper import (  # noqa: E402
@@ -973,6 +974,24 @@ def main(args: argparse.Namespace) -> None:
         )
         # Admin censoring removed (DeepHit silenced) — train/test use full follow-up.
 
+        if args.restrict_to_stage:
+            stage_cols_avail = stage_feature_columns(merged)
+            if not stage_cols_avail:
+                raise SystemExit(
+                    "--restrict-to-stage requires CANCER_STAGE_* columns in the aggregated "
+                    "inputs (build with --stage-file; PROFILE only)."
+                )
+            keep = merged.index[stage_available_mask(merged, stage_cols_avail)]
+            n_before = len(merged)
+            merged = merged.loc[merged.index.intersection(keep)]
+            train_val = train_val.loc[train_val.index.intersection(keep)]
+            test = test.loc[test.index.intersection(keep)]
+            print(
+                f"  [restrict-to-stage] complete-case (stage-available) cohort: "
+                f"{len(merged)}/{n_before} patients "
+                f"(train_val={len(train_val)}, test={len(test)})"
+            )
+
         assert_no_test_leakage(
             test_mrns=test.index,
             train_mrns=train_val.index,
@@ -1111,6 +1130,16 @@ if __name__ == "__main__":
             "Fit an age(+cancer-stage)-only baseline: skip lab feature selection "
             "and CV; covariates = CANCER_STAGE_* (if present) + age. Writes "
             "landmark_xgboost_baseline_*.csv on the same horizon grid."
+        ),
+    )
+    parser.add_argument(
+        "--restrict-to-stage",
+        action="store_true",
+        help=(
+            "Restrict the cohort to stage-available patients (non-missing "
+            "CANCER_STAGE_*) before fitting/evaluating, for a complete-case "
+            "comparison on a matched population. Errors if no stage columns "
+            "are present (PROFILE only)."
         ),
     )
     parser.add_argument(

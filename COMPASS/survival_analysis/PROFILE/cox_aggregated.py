@@ -199,6 +199,18 @@ def stage_feature_columns(data: pd.DataFrame) -> list[str]:
     return [c for c in STAGE_FEATURE_COLUMNS if c in data.columns]
 
 
+def stage_available_mask(data: pd.DataFrame, stage_cols: list[str]) -> pd.Series:
+    """Boolean mask of rows with a known cancer stage (all stage dummies finite).
+
+    Unknown/absent stage is encoded as all-NaN dummies by build_prediction_inputs,
+    so non-missing across the stage columns means a stage was assigned. With no
+    stage columns (CAIA) every row is treated as available.
+    """
+    if not stage_cols:
+        return pd.Series(True, index=data.index)
+    return data[stage_cols].notna().all(axis=1)
+
+
 def require_lifelines() -> None:
     if CoxPHFitter is None or concordance_index is None:
         raise ModuleNotFoundError(
@@ -2063,6 +2075,23 @@ def main(args: argparse.Namespace) -> None:
         merged, train_val, test, pre_treatment_lab_df = _load_prebuilt_landmark(
             inputs_dir, landmark_day
         )
+        if args.restrict_to_stage:
+            stage_cols = stage_feature_columns(merged)
+            if not stage_cols:
+                raise SystemExit(
+                    "--restrict-to-stage requires CANCER_STAGE_* columns in the aggregated "
+                    "inputs (build with --stage-file; PROFILE only)."
+                )
+            keep = merged.index[stage_available_mask(merged, stage_cols)]
+            n_before = len(merged)
+            merged = merged.loc[merged.index.intersection(keep)]
+            train_val = train_val.loc[train_val.index.intersection(keep)]
+            test = test.loc[test.index.intersection(keep)]
+            print(
+                f"  [restrict-to-stage] complete-case (stage-available) cohort: "
+                f"{len(merged)}/{n_before} patients "
+                f"(train_val={len(train_val)}, test={len(test)})"
+            )
         raw_feature_cols = [c for c in merged.columns if c not in OUTCOME_COLUMNS]
         univariate_data = merged.copy()
 
@@ -2422,6 +2451,16 @@ if __name__ == "__main__":
             "Association analyses to run on the aggregated feature set. "
             "'baseline' fits an age(+cancer-stage)-only Cox model (no labs, no CV) "
             "on the same horizon grid for benchmarking."
+        ),
+    )
+    parser.add_argument(
+        "--restrict-to-stage",
+        action="store_true",
+        help=(
+            "Restrict the cohort to stage-available patients (non-missing "
+            "CANCER_STAGE_*) before fitting/evaluating, for a complete-case "
+            "age+stage-baseline vs. labs comparison on a matched population. "
+            "Errors if no stage columns are present (PROFILE only)."
         ),
     )
     parser.add_argument(
