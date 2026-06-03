@@ -90,6 +90,7 @@ from cox_aggregated import (  # noqa: E402
     normalize_endpoints,
     normalize_landmark_days,
     select_feature_columns,
+    stage_feature_columns,
 )
 from helpers.helper import (  # noqa: E402
     assert_disjoint_folds,
@@ -159,20 +160,24 @@ def fit_preprocessor(train_df: pd.DataFrame, *, feature_cols: list[str]) -> dict
         if train_df[col].isna().nunique(dropna=False) > 1
     ]
     covariate_cols = list(base_feature_cols) + missing_cols + ["age"]
-    if not base_feature_cols:
-        raise ValueError("No usable XGBoost covariates remained after train-fold filtering.")
 
-    imputer = SimpleImputer(strategy="mean")
-    scaler = StandardScaler()
-    x_train_values = imputer.fit_transform(train_df[base_feature_cols])
+    # The age(+stage) baseline can have zero lab features (CAIA has no stage
+    # source, so base_feature_cols is empty). In that case the matrix is age
+    # alone; skip the lab imputer/scaler entirely.
+    imputer: SimpleImputer | None = None
+    scaler: StandardScaler | None = None
+    if base_feature_cols:
+        imputer = SimpleImputer(strategy="mean")
+        scaler = StandardScaler()
+        x_train_values = imputer.fit_transform(train_df[base_feature_cols])
 
-    if missing_cols:
-        missing_source = [strip_suffix(col, "__missing") for col in missing_cols]
-        x_train_values = np.hstack(
-            [x_train_values, train_df[missing_source].isna().astype(float).to_numpy()]
-        )
+        if missing_cols:
+            missing_source = [strip_suffix(col, "__missing") for col in missing_cols]
+            x_train_values = np.hstack(
+                [x_train_values, train_df[missing_source].isna().astype(float).to_numpy()]
+            )
 
-    scaler.fit(x_train_values)
+        scaler.fit(x_train_values)
 
     age_scaler = StandardScaler()
     age_scaler.fit(train_df[[AGE_COL]])
@@ -195,6 +200,10 @@ def fit_preprocessor(train_df: pd.DataFrame, *, feature_cols: list[str]) -> dict
 def transform_xgb_matrix(df: pd.DataFrame, preprocessor: dict) -> np.ndarray:
     base_feature_cols = preprocessor["base_feature_cols"]
     missing_cols = preprocessor["missing_cols"]
+    age = preprocessor["age_scaler"].transform(df[[AGE_COL]]).reshape(-1, 1)
+    if not base_feature_cols:
+        # Age-only baseline: no lab features to impute/scale.
+        return age.astype(float)
     x_values = preprocessor["imputer"].transform(df[base_feature_cols])
     if missing_cols:
         missing_source = [strip_suffix(col, "__missing") for col in missing_cols]
@@ -202,7 +211,6 @@ def transform_xgb_matrix(df: pd.DataFrame, preprocessor: dict) -> np.ndarray:
             [x_values, df[missing_source].isna().astype(float).to_numpy()]
         )
     x_values = preprocessor["scaler"].transform(x_values)
-    age = preprocessor["age_scaler"].transform(df[[AGE_COL]]).reshape(-1, 1)
     return np.hstack([x_values, age]).astype(float)
 
 
@@ -694,6 +702,8 @@ def run_one_endpoint(
     endpoint: str,
     landmark_day: int,
     args: argparse.Namespace,
+    baseline: bool = False,
+    stage_cols: list[str] | None = None,
 ) -> tuple[
     pd.DataFrame,
     pd.DataFrame,
@@ -721,7 +731,7 @@ def run_one_endpoint(
     cv_summary_df: pd.DataFrame = pd.DataFrame()
     fold_canonical_labs_df = pd.DataFrame()
     chosen: dict | None = None
-    if not args.no_cv:
+    if not args.no_cv and not baseline:
         cv_fold_df, cv_summary_df, best_row, fold_canonical_labs_df = cv_one_endpoint(
             train_val=train_val,
             raw_feature_cols=raw_feature_cols,
@@ -750,13 +760,23 @@ def run_one_endpoint(
             f"IBS={chosen['cv_mean_integrated_brier']:.4f}"
         )
 
-    # Final selection on full train_val with the canonical labs already in scope.
-    selected_features, feature_meta = select_feature_columns(
-        train_val,
-        raw_feature_cols,
-        min_patient_coverage=args.min_patient_coverage,
-        restrict_to_labs=canonical_labs,
-    )
+    if baseline:
+        # Age(+stage)-only baseline: no lab features, no per-fold selection.
+        # `stage_cols` is empty for CAIA, leaving an age-only model (age is added
+        # by fit_preprocessor regardless of the feature set).
+        selected_features = list(stage_cols or [])
+        feature_meta = pd.DataFrame(
+            {"feature": selected_features, "lab_name": selected_features,
+             "feature_stat": "stage", "selected": True}
+        )
+    else:
+        # Final selection on full train_val with the canonical labs already in scope.
+        selected_features, feature_meta = select_feature_columns(
+            train_val,
+            raw_feature_cols,
+            min_patient_coverage=args.min_patient_coverage,
+            restrict_to_labs=canonical_labs,
+        )
     if args.max_features is not None and len(selected_features) > args.max_features:
         feature_meta = feature_meta.copy()
         selected_features = _truncate_features_by_rank(selected_features, feature_meta, args.max_features)
@@ -962,10 +982,16 @@ def main(args: argparse.Namespace) -> None:
         raw_feature_cols = [
             col for col in merged.columns if col not in OUTCOME_COLUMNS
         ]
+        stage_cols = stage_feature_columns(merged) if args.baseline else []
         print(
             f"\nLandmark +{landmark_day}d: train_val={len(train_val)} test={len(test)} "
             f"raw_features={len(raw_feature_cols)}"
         )
+        if args.baseline:
+            print(
+                "  baseline mode: age"
+                + (f" + {', '.join(stage_cols)}" if stage_cols else " (no stage source)")
+            )
         canonical_labs = select_canonical_labs(
             pre_treatment_lab_df,
             mrns=train_val.index,
@@ -1006,6 +1032,8 @@ def main(args: argparse.Namespace) -> None:
                 endpoint=endpoint,
                 landmark_day=landmark_day,
                 args=args,
+                baseline=args.baseline,
+                stage_cols=stage_cols,
             )
             all_metrics.append(metrics)
             all_auc.append(auc_t)
@@ -1023,15 +1051,16 @@ def main(args: argparse.Namespace) -> None:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    metrics_path = output_dir / "landmark_xgboost_metrics.csv"
-    auc_path = output_dir / "landmark_xgboost_auc_t.csv"
-    brier_path = output_dir / "landmark_xgboost_brier.csv"
-    risks_path = output_dir / "landmark_xgboost_patient_risks.csv"
-    features_path = output_dir / "landmark_xgboost_feature_selection.csv"
-    importance_path = output_dir / "landmark_xgboost_feature_importance.csv"
-    cv_folds_path = output_dir / "landmark_xgboost_cv_folds.csv"
-    cv_summary_path = output_dir / "landmark_xgboost_cv_summary.csv"
-    fold_labs_path = output_dir / "landmark_xgboost_canonical_labs_folds.csv"
+    suffix = "_baseline" if args.baseline else ""
+    metrics_path = output_dir / f"landmark_xgboost{suffix}_metrics.csv"
+    auc_path = output_dir / f"landmark_xgboost{suffix}_auc_t.csv"
+    brier_path = output_dir / f"landmark_xgboost{suffix}_brier.csv"
+    risks_path = output_dir / f"landmark_xgboost{suffix}_patient_risks.csv"
+    features_path = output_dir / f"landmark_xgboost{suffix}_feature_selection.csv"
+    importance_path = output_dir / f"landmark_xgboost{suffix}_feature_importance.csv"
+    cv_folds_path = output_dir / f"landmark_xgboost{suffix}_cv_folds.csv"
+    cv_summary_path = output_dir / f"landmark_xgboost{suffix}_cv_summary.csv"
+    fold_labs_path = output_dir / f"landmark_xgboost{suffix}_canonical_labs_folds.csv"
 
     pd.concat(all_metrics, ignore_index=True).to_csv(metrics_path, index=False)
     pd.concat(all_auc, ignore_index=True).to_csv(auc_path, index=False)
@@ -1075,6 +1104,15 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--val-frac", type=float, default=0.20)
     parser.add_argument("--max-features", type=int, default=None)
+    parser.add_argument(
+        "--baseline",
+        action="store_true",
+        help=(
+            "Fit an age(+cancer-stage)-only baseline: skip lab feature selection "
+            "and CV; covariates = CANCER_STAGE_* (if present) + age. Writes "
+            "landmark_xgboost_baseline_*.csv on the same horizon grid."
+        ),
+    )
     parser.add_argument(
         "--auc-max-time-units",
         type=int,

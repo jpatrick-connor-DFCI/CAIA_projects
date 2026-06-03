@@ -180,7 +180,23 @@ OUTCOME_COLUMNS = {
     "t_death_from_first_record",
     "t_either",
     "split",
+    # Static cancer-stage dummies (PROFILE baseline only). Excluded here so the
+    # full univariate/multivariable arms never sweep them into raw_feature_cols;
+    # the baseline arm consumes them explicitly via stage_feature_columns().
+    "CANCER_STAGE_II",
+    "CANCER_STAGE_III",
+    "CANCER_STAGE_IV",
 }
+
+# Static cancer-stage dummy columns produced by build_prediction_inputs.py when
+# a --stage-file is supplied (PROFILE only). The age(+stage) baseline arm uses
+# whichever of these are present; CAIA has none, so the baseline is age-only.
+STAGE_FEATURE_COLUMNS = ("CANCER_STAGE_II", "CANCER_STAGE_III", "CANCER_STAGE_IV")
+
+
+def stage_feature_columns(data: pd.DataFrame) -> list[str]:
+    """Return the cancer-stage dummy columns present in ``data`` (may be empty)."""
+    return [c for c in STAGE_FEATURE_COLUMNS if c in data.columns]
 
 
 def require_lifelines() -> None:
@@ -2003,6 +2019,10 @@ def main(args: argparse.Namespace) -> None:
     multivariable_metric_rows: list[dict] = []
     multivariable_test_auc_frames: list[pd.DataFrame] = []
     multivariable_test_brier_frames: list[pd.DataFrame] = []
+    baseline_metric_rows: list[dict] = []
+    baseline_frames: list[pd.DataFrame] = []
+    baseline_test_auc_frames: list[pd.DataFrame] = []
+    baseline_test_brier_frames: list[pd.DataFrame] = []
     horizon_grid_rows: list[pd.DataFrame] = []
     canonical_labs_train_val_rows: list[dict] = []
     canonical_labs_fold_rows: list[pd.DataFrame] = []
@@ -2233,6 +2253,59 @@ def main(args: argparse.Namespace) -> None:
                 print("Top multivariable coefficients:")
                 print(top.to_string(index=False))
 
+        if args.analysis == "baseline":
+            # Age(+stage)-only baseline: no lab features, no CV / feature
+            # selection. Reuses the multivariable final-fit + evaluation path so
+            # C-index / AUC(t) / Brier are on the identical horizon grid and the
+            # metrics CSV schema matches cox_agg_multivariable_metrics.csv.
+            stage_cols = stage_feature_columns(merged)
+            baseline_penalizer = float(args.cv_penalizers[0])
+            baseline_l1_ratio = float(args.cv_l1_ratios[0])
+            print("\n##### BASELINE: AGE(+STAGE)-ONLY (all endpoints) #####")
+            print(
+                f"  covariates: age" + (f" + {', '.join(stage_cols)}" if stage_cols else " (no stage source)")
+            )
+            for endpoint in endpoints:
+                print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
+                print(ENDPOINTS[endpoint]["description"])
+                (
+                    metrics_row,
+                    summary_df,
+                    _,
+                    test_auc_df,
+                    test_brier_df,
+                ) = fit_final_multivariable_model(
+                    train_val.copy(),
+                    test.copy(),
+                    feature_cols=stage_cols,
+                    endpoint=endpoint,
+                    penalizer=baseline_penalizer,
+                    l1_ratio=baseline_l1_ratio,
+                    penalizer_grid=args.cv_penalizers,
+                    split_stratification=split_stratification,
+                    cv_stratification="baseline_no_cv",
+                    auc_time_unit_days=args.auc_time_unit_days,
+                    auc_max_time_units=args.auc_max_time_units,
+                    horizon_grid=endpoint_horizon_grids[endpoint],
+                    canonical_labs=[],
+                )
+                metrics_row["landmark_days"] = landmark_day
+                metrics_row["n_stage_cols"] = len(stage_cols)
+                summary_df.insert(0, "landmark_days", landmark_day)
+                baseline_metric_rows.append(metrics_row)
+                baseline_frames.append(summary_df)
+                if not test_auc_df.empty:
+                    test_auc_df = test_auc_df.copy()
+                    test_auc_df.insert(0, "landmark_days", landmark_day)
+                    baseline_test_auc_frames.append(test_auc_df)
+                if not test_brier_df.empty:
+                    test_brier_df = test_brier_df.copy()
+                    test_brier_df.insert(0, "landmark_days", landmark_day)
+                    baseline_test_brier_frames.append(test_brier_df)
+                print(f"  held-out test C-index={metrics_row['test_c_index']:.4f}")
+                print(f"  held-out test mean AUC(t)={metrics_row['test_mean_auc_t']:.4f}")
+                print(f"  held-out test integrated Brier={metrics_row['test_integrated_brier']:.4f}")
+
     if feature_selection_frames:
         pd.concat(feature_selection_frames, ignore_index=True).to_csv(
             RESULTS / "cox_agg_feature_selection.csv", index=False
@@ -2268,6 +2341,22 @@ def main(args: argparse.Namespace) -> None:
         pd.DataFrame(multivariable_metric_rows).to_csv(
             RESULTS / "cox_agg_multivariable_metrics.csv", index=False
         )
+    if baseline_frames:
+        pd.concat(baseline_frames, ignore_index=True).to_csv(
+            RESULTS / "cox_agg_baseline.csv", index=False
+        )
+    if baseline_test_auc_frames:
+        pd.concat(baseline_test_auc_frames, ignore_index=True).to_csv(
+            RESULTS / "cox_agg_baseline_test_auc_t.csv", index=False
+        )
+    if baseline_test_brier_frames:
+        pd.concat(baseline_test_brier_frames, ignore_index=True).to_csv(
+            RESULTS / "cox_agg_baseline_test_brier.csv", index=False
+        )
+    if baseline_metric_rows:
+        pd.DataFrame(baseline_metric_rows).to_csv(
+            RESULTS / "cox_agg_baseline_metrics.csv", index=False
+        )
 
     print("\nSaved:")
     print("  results/cox_agg_feature_selection.csv")
@@ -2285,6 +2374,8 @@ def main(args: argparse.Namespace) -> None:
         print("  results/cox_agg_multivariable_test_brier.csv")
     if multivariable_metric_rows:
         print("  results/cox_agg_multivariable_metrics.csv")
+    if baseline_metric_rows:
+        print("  results/cox_agg_baseline_metrics.csv")
 
 
 if __name__ == "__main__":
@@ -2325,9 +2416,13 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--analysis",
-        choices=["univariate", "multivariable", "both"],
+        choices=["univariate", "multivariable", "both", "baseline"],
         default="both",
-        help="Association analyses to run on the aggregated feature set.",
+        help=(
+            "Association analyses to run on the aggregated feature set. "
+            "'baseline' fits an age(+cancer-stage)-only Cox model (no labs, no CV) "
+            "on the same horizon grid for benchmarking."
+        ),
     )
     parser.add_argument(
         "--auc-max-time-units",

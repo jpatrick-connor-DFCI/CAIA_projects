@@ -31,6 +31,7 @@ from helpers import (
     call_with_retry,
     derive_grade_group,
     filter_note_types,
+    flatten_ws,
     group_patient_snippets,
     load_notes,
     load_selected_mrns,
@@ -215,7 +216,7 @@ def raw_rows_from_findings(mrn, findings):
             "specimen_type": finding.get("specimen_type"),
             "scoring_date": finding.get("scoring_date"),
             "is_historical_reference": finding.get("is_historical_reference"),
-            "quote": finding.get("quote"),
+            "quote": flatten_ws(finding.get("quote")),
         })
     return rows
 
@@ -233,10 +234,19 @@ def build_timeline(raw_path, timeline_path):
         pd.DataFrame(columns=TIMELINE_COLUMNS).to_csv(timeline_path, sep="\t", index=False)
         return 0
 
-    raw = pd.read_csv(raw_path, sep="\t")
+    # Read every field as text and validate per row, so a single malformed/misaligned
+    # row (e.g. free-text that shifted columns) can't abort the whole timeline build.
+    raw = pd.read_csv(raw_path, sep="\t", dtype=str, on_bad_lines="skip")
     seen = set()
     rows = []
+    skipped = 0
     for r in raw.itertuples(index=False):
+        mrn_val = pd.to_numeric(getattr(r, "DFCI_MRN", None), errors="coerce")
+        if pd.isna(mrn_val):
+            skipped += 1
+            continue
+        mrn = int(mrn_val)
+
         primary = _to_int(getattr(r, "gleason_primary", None))
         secondary = _to_int(getattr(r, "gleason_secondary", None))
         total = _to_int(getattr(r, "gleason_total", None))
@@ -260,7 +270,6 @@ def build_timeline(raw_path, timeline_path):
             getattr(r, "scoring_date", None), getattr(r, "source_note_date", None)
         )
         specimen_type = getattr(r, "specimen_type", None)
-        mrn = int(getattr(r, "DFCI_MRN"))
 
         key = (mrn, primary, secondary, total, gleason_date, specimen_type)
         if key in seen:
@@ -279,6 +288,9 @@ def build_timeline(raw_path, timeline_path):
             "supporting_quote": getattr(r, "quote", None),
             "source_note_date": getattr(r, "source_note_date", None),
         })
+
+    if skipped:
+        print(f"  Skipped {skipped} malformed/misaligned raw rows during timeline build")
 
     timeline = pd.DataFrame(rows, columns=TIMELINE_COLUMNS)
     if not timeline.empty:

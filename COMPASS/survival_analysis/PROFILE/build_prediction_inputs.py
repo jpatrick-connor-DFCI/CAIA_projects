@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -91,6 +92,131 @@ def longitudinal_manifest_filename(landmark_day: int) -> str:
 
 def pre_treatment_lab_filename(landmark_day: int) -> str:
     return f"pre_treatment_lab_long_landmark{int(landmark_day)}.csv"
+
+
+# Cancer-stage baseline covariate (PROFILE only; ported from the clinical-text
+# embedding project). Stage is a static per-patient attribute derived from
+# clinical text, keyed by DFCI_MRN. One-hot with Stage I as the reference, so the
+# fixed dummy set is exactly these three columns.
+STAGE_CATEGORIES = ["I", "II", "III", "IV"]
+STAGE_COLUMNS = ["CANCER_STAGE_II", "CANCER_STAGE_III", "CANCER_STAGE_IV"]
+_STAGE_TOKEN = re.compile(r"^(IV|III|II|I|4|3|2|1)[A-D]?$")
+_ARABIC_TO_ROMAN = {"1": "I", "2": "II", "3": "III", "4": "IV"}
+
+
+def normalize_cancer_stage(raw) -> str | None:
+    """Collapse a raw stage value to a major stage in {I,II,III,IV}.
+
+    Mirrors the clinical-text-embedding project: strips a leading "STAGE",
+    drops substage letters (IVA -> IV), maps arabic numerals (4 -> IV), and
+    handles float reprs (2.0 -> II). Returns None for unknown / in-situ /
+    unstageable values so they are treated as missing downstream.
+    """
+    if pd.isna(raw):
+        return None
+    s = str(raw).upper().strip().replace("STAGE", "").strip()
+    s = re.sub(r"\.0+$", "", s)
+    m = _STAGE_TOKEN.match(s)
+    if not m:
+        return None
+    token = m.group(1)
+    return _ARABIC_TO_ROMAN.get(token, token)
+
+
+def _major_stage_from_pickle(stage_file: Path, id_col: str) -> pd.Series:
+    """Read a ``{DFCI_MRN: stage}`` pickle into a major-stage Series."""
+    raw = pd.read_pickle(stage_file)
+    if not isinstance(raw, dict):
+        raise ValueError(f"Expected a {{id: stage}} dict in {stage_file}, got {type(raw)}.")
+    items: dict[int, str | None] = {}
+    for key, value in raw.items():
+        try:
+            mrn = int(key)
+        except (TypeError, ValueError):
+            continue
+        items[mrn] = normalize_cancer_stage(value)
+    major = pd.Series(items, name="CANCER_STAGE")
+    major.index.name = id_col
+    return major
+
+
+def _major_stage_from_dummy_csv(stage_file: Path, id_col: str) -> pd.Series:
+    """Read the pre-encoded ``cancer_stage_df.csv.gz`` into a major-stage Series.
+
+    That file is ``DFCI_MRN`` + one-hot ``CANCER_STAGE_<value>`` dummies built
+    with ``drop_first=True`` (Stage I reference = all-zero) and WITHOUT substage
+    normalization. We reconstruct each patient's raw stage from whichever dummy
+    is set (all-zero rows -> the dropped Stage I reference) and collapse to a
+    major stage in {I,II,III,IV}; suffixes that don't map to a major stage (e.g.
+    in-situ / unknown) become NaN.
+    """
+    df = pd.read_csv(stage_file)
+    id_name = next((c for c in (id_col, "DFCI_MRN") if c in df.columns), None)
+    if id_name is None:
+        raise ValueError(
+            f"{stage_file} has no '{id_col}'/'DFCI_MRN' column; columns={list(df.columns)[:8]}"
+        )
+    df = df.loc[pd.to_numeric(df[id_name], errors="coerce").notna()].copy()
+    df[id_name] = pd.to_numeric(df[id_name], errors="coerce").astype(int)
+    df = df.drop_duplicates(subset=[id_name], keep="first").set_index(id_name)
+
+    dummy_cols = [c for c in df.columns if c.startswith("CANCER_STAGE_")]
+    if not dummy_cols:
+        raise ValueError(f"{stage_file} has no CANCER_STAGE_* dummy columns.")
+    onehot = df[dummy_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    any_hit = pd.Series(onehot.to_numpy().sum(axis=1) > 0, index=df.index)
+    # idxmax gives the set dummy for one-hot rows; all-zero rows fall back to the
+    # dropped Stage I reference.
+    picked = onehot.idxmax(axis=1).str[len("CANCER_STAGE_"):]
+    raw = picked.where(any_hit, "I")
+    major = raw.map(normalize_cancer_stage)
+    major.name = "CANCER_STAGE"
+    major.index.name = id_col
+    return major
+
+
+def load_stage_dummies(stage_file: Path, cohort_index: pd.Index, id_col: str) -> pd.DataFrame:
+    """Build fixed CANCER_STAGE_II/III/IV dummies indexed by ``id_col``.
+
+    Accepts either the raw ``{DFCI_MRN: stage}`` pickle or the pre-encoded
+    ``cancer_stage_df.csv[.gz]`` one-hot table; both are collapsed to a major
+    stage and re-encoded with Stage I as the reference. Patients absent from the
+    source (or with an unstageable value) get all-NaN dummies — NOT all-zero —
+    so the downstream imputer treats them as missing rather than collapsing them
+    into the Stage I reference. The column set is fixed via an ordered
+    Categorical, so it is identical regardless of which stages happen to appear.
+    """
+    if stage_file.suffix.lower() in {".pkl", ".pickle"}:
+        major = _major_stage_from_pickle(stage_file, id_col)
+    elif ".csv" in "".join(stage_file.suffixes).lower():
+        major = _major_stage_from_dummy_csv(stage_file, id_col)
+    else:
+        raise ValueError(
+            f"Unsupported --stage-file type: {stage_file} (expected .pkl or .csv[.gz])."
+        )
+
+    normalized = pd.Series(
+        {mrn: major.get(mrn) for mrn in cohort_index},
+        name="CANCER_STAGE",
+    )
+    normalized.index = cohort_index
+    normalized.index.name = id_col
+    categorical = pd.Categorical(normalized, categories=STAGE_CATEGORIES, ordered=True)
+    dummies = pd.get_dummies(
+        pd.DataFrame({"CANCER_STAGE": categorical}, index=cohort_index),
+        columns=["CANCER_STAGE"],
+        drop_first=True,
+    )
+    # Guarantee the fixed column set even if a stage level is entirely absent.
+    for col in STAGE_COLUMNS:
+        if col not in dummies.columns:
+            dummies[col] = 0
+    dummies = dummies[STAGE_COLUMNS].astype(float)
+    # Unknown/absent stage -> NaN dummies (missing), not a false Stage I.
+    unknown = normalized.isna().to_numpy()
+    dummies.loc[unknown, STAGE_COLUMNS] = np.nan
+    dummies.index.name = id_col
+    return dummies
 
 
 def derive_three_way_split(
@@ -518,6 +644,19 @@ def main(args: argparse.Namespace) -> None:
         raise ValueError("No MRNs were eligible at every requested landmark.")
     print(f"\nCommon MRN cohort across landmarks {landmark_days}: {len(common_mrns)} patients")
 
+    # Optional static cancer-stage baseline covariate (PROFILE only). Built once
+    # on the full common cohort so the CANCER_STAGE_* column set is identical
+    # across the train/valid/test split and every landmark.
+    stage_dummies = None
+    if args.stage_file:
+        stage_dummies = load_stage_dummies(Path(args.stage_file), common_mrns, ID_COL)
+        n_known = int(stage_dummies.notna().any(axis=1).sum())
+        print(
+            f"Loaded cancer-stage dummies from {args.stage_file}: "
+            f"{n_known}/{len(common_mrns)} patients have a known stage "
+            f"(columns: {', '.join(STAGE_COLUMNS)})"
+        )
+
     base_landmark_day = landmark_days[0]
     base_merged = merged_by_landmark[base_landmark_day].loc[common_mrns].copy()
     split, test_stratification, val_stratification = derive_three_way_split(
@@ -562,6 +701,8 @@ def main(args: argparse.Namespace) -> None:
         print(f"\n##### LANDMARK +{landmark_day}d: BUILD INPUTS #####")
         merged = merged_by_landmark[landmark_day].loc[common_mrns].copy()
         aggregated = build_aggregated_table(merged, split=split)
+        if stage_dummies is not None:
+            aggregated = aggregated.join(stage_dummies, how="left")
 
         agg_path = output_dir / aggregated_filename(landmark_day)
         aggregated.rename_axis(ID_COL).reset_index().to_csv(agg_path, index=False)
@@ -688,6 +829,8 @@ def main(args: argparse.Namespace) -> None:
         "test_frac": float(args.test_frac),
         "val_frac": float(args.val_frac),
         "min_patient_coverage": float(args.min_patient_coverage),
+        "stage_file": str(args.stage_file) if args.stage_file else None,
+        "stage_columns": STAGE_COLUMNS if stage_dummies is not None else [],
         "time_unit_days": int(args.time_unit_days),
         "long_min_coverage": float(args.long_min_coverage),
         "no_canonical_labs": bool(args.no_canonical_labs),
@@ -766,6 +909,17 @@ if __name__ == "__main__":
     )
     parser.add_argument("--outlier-lo", type=float, default=DEFAULT_OUTLIER_LO)
     parser.add_argument("--outlier-hi", type=float, default=DEFAULT_OUTLIER_HI)
+    parser.add_argument(
+        "--stage-file",
+        default=None,
+        help=(
+            "Optional cancer-stage source for the age(+stage) baseline: either "
+            "the pre-encoded cancer_stage_df.csv[.gz] (DFCI_MRN + one-hot "
+            "CANCER_STAGE_* dummies) or the raw {DFCI_MRN: stage} pickle. When "
+            "set, adds static CANCER_STAGE_II/III/IV dummies (Stage I reference) "
+            "to each aggregated_landmark{D}.csv. PROFILE only (CAIA has no stage)."
+        ),
+    )
     parser.add_argument(
         "--auc-quantiles",
         nargs="+",

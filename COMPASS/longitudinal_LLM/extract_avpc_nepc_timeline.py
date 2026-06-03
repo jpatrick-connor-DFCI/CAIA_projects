@@ -32,6 +32,7 @@ from helpers import (
     build_client,
     call_with_retry,
     filter_note_types,
+    flatten_ws,
     group_patient_snippets,
     load_notes,
     load_selected_mrns,
@@ -246,7 +247,7 @@ def raw_rows_from_findings(mrn, findings):
             "diagnosis_date": finding.get("diagnosis_date"),
             "modality": finding.get("modality"),
             "visceral_met_pattern": vmp if criterion == "C2" else None,
-            "quote": finding.get("quote"),
+            "quote": flatten_ws(finding.get("quote")),
             "confidence": finding.get("confidence"),
         })
     return rows
@@ -258,15 +259,22 @@ def build_timeline(raw_path, timeline_path):
         pd.DataFrame(columns=TIMELINE_COLUMNS).to_csv(timeline_path, sep="\t", index=False)
         return 0
 
-    raw = pd.read_csv(raw_path, sep="\t")
+    # Read every field as text and validate per row, so a single malformed/misaligned
+    # row (e.g. free-text that shifted columns) can't abort the whole timeline build.
+    raw = pd.read_csv(raw_path, sep="\t", dtype=str, on_bad_lines="skip")
 
     # For each (patient, criterion) keep the earliest documented occurrence as its onset.
     onsets = {}  # (mrn, criterion) -> establishing record
+    skipped = 0
     for r in raw.itertuples(index=False):
         criterion = getattr(r, "criterion", None)
         if criterion not in VALID_CRITERIA:
             continue
-        mrn = int(getattr(r, "DFCI_MRN"))
+        mrn_val = pd.to_numeric(getattr(r, "DFCI_MRN", None), errors="coerce")
+        if pd.isna(mrn_val):
+            skipped += 1
+            continue
+        mrn = int(mrn_val)
         event_date, date_source = resolve_date(
             getattr(r, "diagnosis_date", None), getattr(r, "source_note_date", None)
         )
@@ -289,6 +297,9 @@ def build_timeline(raw_path, timeline_path):
             existing["event_date"] or "9999-99-99"
         ):
             onsets[key] = record
+
+    if skipped:
+        print(f"  Skipped {skipped} malformed/misaligned raw rows during timeline build")
 
     # Emit one row per onset, in chronological order per patient, with a cumulative set.
     rows = []

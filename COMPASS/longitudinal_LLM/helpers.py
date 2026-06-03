@@ -43,6 +43,18 @@ SNIPPET_MAX_CHARS = 10000
 DEFAULT_PAYLOAD_MAX_CHARS = 60000
 
 
+def flatten_ws(value):
+    """Collapse tabs/newlines/whitespace runs to single spaces for safe TSV storage.
+
+    Free-text fields (verbatim quotes) can contain tabs or newlines that would shift
+    columns / split rows in a tab-separated file; flattening them keeps the TSV aligned.
+    """
+    if value is None:
+        return None
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    return text or None
+
+
 def find_matches(text, trigger_regex):
     """Return sorted (label, start, end) tuples for every trigger hit in text."""
     matches = []
