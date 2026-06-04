@@ -97,6 +97,10 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
 
 DEFAULT_COXNET_MAX_ITER = 20000
 DEFAULT_MAX_ABS_COXNET_COEF = 25.0
+# Effectively-unpenalized alpha used when every covariate is unpenalized (the
+# age-only baseline). sksurv's Coxnet rejects alpha=0 outright, but a negligible
+# alpha with a uniform penalty_factor recovers the unpenalized Cox MLE.
+DEFAULT_UNPENALIZED_ALPHA = 1e-6
 
 BASE = Path(__file__).resolve().parent
 DATA_PATH = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/")
@@ -1160,6 +1164,15 @@ def fit_coxnet_with_fallback(
         [0.0 if c in unpenalized else 1.0 for c in covariate_cols],
         dtype=float,
     )
+
+    # When every covariate is unpenalized (the age-only baseline), sksurv
+    # rescales penalty_factor to sum to n_features via pf * n_features / pf.sum(),
+    # so an all-zero vector divides by zero and silently zeroes every coefficient
+    # -> constant risk score, C-index collapses to exactly 0.5. Fall back to the
+    # unpenalized MLE: a uniform penalty_factor with a negligible alpha.
+    if float(penalty_factor.sum()) == 0.0 and len(covariate_cols) > 0:
+        penalty_factor = np.ones(len(covariate_cols), dtype=float)
+        penalizers = [DEFAULT_UNPENALIZED_ALPHA]
 
     last_error = ""
     for penalizer in penalizers:
