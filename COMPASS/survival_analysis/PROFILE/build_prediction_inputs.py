@@ -43,24 +43,26 @@ for _p in (str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
         sys.path.insert(0, _p)
 
 from cox_aggregated import (  # noqa: E402
-    AGE_COL,
     DATA_PATH,
     DEFAULT_LANDMARK_DAYS,
     DEFAULT_SEED,
     DEFAULT_TEST_FRAC,
     DEFAULT_MIN_PATIENT_COVERAGE,
     ENDPOINTS,
-    ID_COL,
     RESULTS,
+)
+from helpers.cohort import (  # noqa: E402
+    AGE_COL,
+    ID_COL,
     build_landmark_availability_table,
     build_landmark_merged,
     build_pre_treatment_lab_long,
-    choose_stratification_labels,
     normalize_landmark_days,
 )
 from helpers.helper import (  # noqa: E402
     DEFAULT_AUC_QUANTILES,
     assert_no_test_leakage,
+    choose_stratification_labels,
     compute_horizon_grid,
     select_canonical_labs,
 )
@@ -217,6 +219,25 @@ def load_stage_dummies(stage_file: Path, cohort_index: pd.Index, id_col: str) ->
     dummies.loc[unknown, STAGE_COLUMNS] = np.nan
     dummies.index.name = id_col
     return dummies
+
+
+def load_mrn_subset(mrn_file: Path, id_col: str) -> set[int]:
+    """Read the restrict-to-MRNs CSV and return the subset as a set of int ids.
+
+    Expects a CSV with an ``id_col`` (default DFCI_MRN) column; any other columns
+    are ignored. MRNs are coerced to int to match the cohort id dtype set in
+    ``main`` so the downstream ``isin`` filter aligns on type.
+    """
+    subset = pd.read_csv(mrn_file)
+    col = id_col if id_col in subset.columns else "DFCI_MRN"
+    if col not in subset.columns:
+        raise ValueError(
+            f"{mrn_file} has no '{id_col}'/'DFCI_MRN' column; columns={list(subset.columns)[:8]}"
+        )
+    ids = pd.to_numeric(subset[col], errors="coerce").dropna().astype(int)
+    if ids.empty:
+        raise ValueError(f"{mrn_file} contains no valid MRNs in column '{col}'.")
+    return set(ids.tolist())
 
 
 def derive_three_way_split(
@@ -607,9 +628,11 @@ def main(args: argparse.Namespace) -> None:
     global ID_COL, AGE_COL
     ID_COL = args.id_col
     AGE_COL = args.age_col
-    import cox_aggregated as _ca
-    _ca.ID_COL = ID_COL
-    _ca.AGE_COL = AGE_COL
+    # Push the runtime schema into the shared cohort builders so make_outcome_df /
+    # build_feature_matrix / build_landmark_merged operate on the requested id/age
+    # columns (CAIA injects person_id / AGE_AT_DIAGNOSIS via runpy).
+    import helpers.cohort as _cohort
+    _cohort.configure_id_columns(ID_COL, AGE_COL)
     landmark_days = normalize_landmark_days(args.landmark_days)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -631,6 +654,24 @@ def main(args: argparse.Namespace) -> None:
     df = df.loc[df[ID_COL].notna()].copy()
     df[ID_COL] = df[ID_COL].astype(int)
     print(f"Loaded cohort: {df[ID_COL].nunique()} unique MRNs")
+
+    # Optional restrict-to-MRNs subset: filter the raw cohort to the requested
+    # MRN list BEFORE building landmark cohorts, so the train/valid/test split,
+    # canonical lab set, and feature selection are all derived on the subset.
+    if args.restrict_to_mrns:
+        mrn_subset = load_mrn_subset(Path(args.restrict_to_mrns), ID_COL)
+        n_before = df[ID_COL].nunique()
+        df = df.loc[df[ID_COL].isin(mrn_subset)].copy()
+        n_after = df[ID_COL].nunique()
+        if n_after == 0:
+            raise ValueError(
+                f"--restrict-to-mrns {args.restrict_to_mrns}: none of the "
+                f"{len(mrn_subset)} requested MRNs are present in the cohort."
+            )
+        print(
+            f"  [restrict-to-mrns] subset cohort: {n_after}/{n_before} loaded MRNs "
+            f"retained ({len(mrn_subset)} requested in {args.restrict_to_mrns})"
+        )
 
     merged_by_landmark: dict[int, pd.DataFrame] = {}
     for landmark_day in landmark_days:
@@ -830,6 +871,7 @@ def main(args: argparse.Namespace) -> None:
         "val_frac": float(args.val_frac),
         "min_patient_coverage": float(args.min_patient_coverage),
         "stage_file": str(args.stage_file) if args.stage_file else None,
+        "restrict_to_mrns": str(args.restrict_to_mrns) if args.restrict_to_mrns else None,
         "stage_columns": STAGE_COLUMNS if stage_dummies is not None else [],
         "time_unit_days": int(args.time_unit_days),
         "long_min_coverage": float(args.long_min_coverage),
@@ -858,6 +900,15 @@ if __name__ == "__main__":
     parser.add_argument("--age-col", default=AGE_COL,
                         help="Age covariate column name (default AGE_AT_TREATMENTSTART; e.g. AGE_AT_DIAGNOSIS for CAIA).")
     parser.add_argument("--data", default=str(DATA_PATH / "longitudinal_prediction_data.csv"))
+    parser.add_argument(
+        "--restrict-to-mrns",
+        default=None,
+        help=(
+            "Optional CSV with a DFCI_MRN (or --id-col) column. When set, the raw "
+            "cohort is filtered to this MRN subset before the landmark/split build, "
+            "so association testing runs on only those patients."
+        ),
+    )
     parser.add_argument(
         "--landmark-days",
         nargs="+",

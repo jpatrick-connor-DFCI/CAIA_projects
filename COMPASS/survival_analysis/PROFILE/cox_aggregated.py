@@ -1,5 +1,13 @@
 """
-Two-arm survival analysis on landmarked lab summary features.
+Shared library for the landmarked Cox survival analyses.
+
+This module holds the model-fitting primitives (univariate n_obs-adjusted Cox,
+elastic-net Coxnet with CV, IPCW AUC(t)/Brier evaluation), the prebuilt-input
+loaders, and the shared per-landmark setup (prepare_landmark_context /
+build_endpoint_horizon_grids). The runnable analyses live in two thin scripts
+that import from here:
+  * cox_univariate.py    — Arm 1 univariate (n_obs-adjusted) associations.
+  * cox_multivariable.py — Arm 2 multivariable elastic-net Cox + age(+stage) baseline.
 
 Features per lab (all pre-landmark): mean, min, max, last, slope, delta
 (last - first), n_observations.
@@ -43,9 +51,9 @@ Outputs:
 
 from __future__ import annotations
 
-import argparse
 import sys
 import warnings
+from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
 
@@ -62,13 +70,29 @@ for _p in (str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
         sys.path.insert(0, _p)
 
 from helpers.helper import (  # noqa: E402
+    _make_survival_array,
     assert_disjoint_folds,
     assert_no_test_leakage,
     breslow_survival_at_horizons,
+    choose_stratification_labels,
     compute_brier,
     compute_horizon_grid,
     horizon_grid_frame,
     select_canonical_labs,
+)
+# Cohort construction + pre-landmark feature engineering live in helpers.cohort
+# (the shared input-building layer used by build_prediction_inputs /
+# build_genomic_inputs). Imported here so the patient-id/age config and the
+# builders stay importable as `cox_aggregated.<name>` for the analysis scripts.
+from helpers.cohort import (  # noqa: E402,F401
+    AGE_COL,
+    ID_COL,
+    build_feature_matrix,
+    build_landmark_availability_table,
+    build_landmark_merged,
+    build_pre_treatment_lab_long,
+    make_outcome_df,
+    normalize_landmark_days,
 )
 
 try:
@@ -106,8 +130,6 @@ BASE = Path(__file__).resolve().parent
 DATA_PATH = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/")
 RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis/PROFILE")
 
-AGE_COL = "AGE_AT_TREATMENTSTART"
-ID_COL = "DFCI_MRN"
 DEFAULT_SEED = 42
 DEFAULT_TEST_FRAC = 0.20
 DEFAULT_N_FOLDS = 5
@@ -135,15 +157,7 @@ DEFAULT_CV_PENALIZERS = [
 DEFAULT_CV_L1_RATIOS = [0.1, 0.3, 0.5, 0.7, 0.9, 1.0]
 DEFAULT_AUC_QUANTILES = (0.25, 0.375, 0.50, 0.625, 0.75)
 DEFAULT_AUC_TIME_UNIT_DAYS = 7
-PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
-MIN_SLOPE_OBS = 4
-MIN_SLOPE_UNIQUE_TIMES = 3
-MIN_SLOPE_SPAN_DAYS = 14.0
-MIN_DELTA_OBS = 2
-SPLIT_ASSIGNMENTS_FILENAME = "cox_agg_split_assignments.csv"
-LANDMARK_AVAILABILITY_FILENAME = "cox_agg_landmark_mrn_availability.csv"
 HORIZON_GRID_FILENAME = "cox_agg_horizon_grid.csv"
-CANONICAL_LABS_TRAIN_VAL_FILENAME = "cox_agg_canonical_labs_train_val.csv"
 CANONICAL_LABS_FOLDS_FILENAME = "cox_agg_canonical_labs_folds.csv"
 
 ENDPOINTS = {
@@ -270,510 +284,6 @@ def normalize_endpoints(raw_endpoints: list[str]) -> list[str]:
         if normalized not in endpoints:
             endpoints.append(normalized)
     return endpoints
-
-
-def normalize_landmark_days(raw_landmark_days: list[int]) -> list[int]:
-    landmark_days: list[int] = []
-    for raw_day in raw_landmark_days:
-        day = int(raw_day)
-        if day < 0:
-            raise ValueError(f"Landmark days must be non-negative, got {day}.")
-        if day not in landmark_days:
-            landmark_days.append(day)
-    return sorted(landmark_days)
-
-
-def _coerce_datetime(series: pd.Series) -> pd.Series:
-    return pd.to_datetime(series, errors="coerce")
-
-
-def _coerce_duration(series: pd.Series | None) -> pd.Series | None:
-    if series is None:
-        return None
-    return pd.to_numeric(series, errors="coerce").astype(float)
-
-
-def _derive_duration(
-    patient_df: pd.DataFrame,
-    *,
-    duration_col: str,
-    event_date_col: str,
-    fallback_duration_col: str | None = None,
-) -> pd.Series:
-    if duration_col in patient_df.columns:
-        existing = _coerce_duration(patient_df[duration_col])
-        if existing is not None:
-            return existing
-
-    derived = pd.Series(np.nan, index=patient_df.index, dtype=float)
-    if event_date_col in patient_df.columns and "FIRST_RECORD_DATE" in patient_df.columns:
-        event_date = _coerce_datetime(patient_df[event_date_col])
-        first_record = _coerce_datetime(patient_df["FIRST_RECORD_DATE"])
-        derived = (event_date - first_record).dt.days.astype(float)
-
-    if fallback_duration_col and fallback_duration_col in patient_df.columns:
-        fallback = _coerce_duration(patient_df[fallback_duration_col])
-        if fallback is not None:
-            derived = derived.fillna(fallback)
-
-    return derived
-
-
-def _coerce_platinum(series: pd.Series) -> pd.Series:
-    numeric = pd.to_numeric(series, errors="coerce")
-    platinum = series.astype(str).str.upper().isin(PLATINUM_MEDS)
-    return numeric.fillna(platinum.astype(int)).fillna(0).astype(int)
-
-
-def make_outcome_df(
-    df: pd.DataFrame,
-    *,
-    landmark_offset_days: int = 0,
-    anchor_col: str = "t_first_treatment",
-    extra_anchor_cols: tuple[str, ...] = (),
-    require_first_treatment: bool = True,
-) -> pd.DataFrame:
-    """Build the per-patient outcome table rebased to a landmark.
-
-    Args:
-        landmark_offset_days: days added to ``anchor_col`` to define the landmark.
-        anchor_col: column whose value (in days from first record) anchors the
-            landmark. Defaults to ``t_first_treatment``; the genomic arm passes
-            ``t_sample``.
-        extra_anchor_cols: additional patient-level columns to preserve through
-            the dedup (e.g. ``("t_sample", "SAMPLE_COLLECTION_DT")`` for the
-            genomic arm). These are kept in the returned frame.
-        require_first_treatment: whether the cohort filter requires
-            ``FIRST_TREATMENT == 1``. Off for the genomic arm where treatment
-            timing is irrelevant to the outcome window.
-    """
-    patient_level_cols = [
-        ID_COL,
-        AGE_COL,
-        "FIRST_RECORD_DATE",
-        "DIAGNOSIS_DATE",
-        "FIRST_TREATMENT_DATE",
-        "FIRST_TREATMENT",
-        "LAST_CONTACT_DATE",
-        "PLATINUM_DATE",
-        "PLATINUM",
-        "DEATH",
-        "t_diagnosis",
-        "t_first_treatment",
-        "t_platinum",
-        "t_last_contact",
-        "t_death",
-        *extra_anchor_cols,
-    ]
-    available_cols = [col for col in patient_level_cols if col in df.columns]
-    if ID_COL not in available_cols:
-        raise ValueError(f"Input data must contain the id column {ID_COL!r}.")
-
-    pat = df[available_cols].drop_duplicates(ID_COL).set_index(ID_COL)
-
-    if "FIRST_RECORD_DATE" not in pat.columns:
-        if "LAB_DATE" not in df.columns:
-            raise ValueError("Input data must contain FIRST_RECORD_DATE or LAB_DATE.")
-        first_record = _coerce_datetime(df["LAB_DATE"]).groupby(df[ID_COL]).min()
-        pat["FIRST_RECORD_DATE"] = first_record
-
-    for date_col in [
-        "FIRST_RECORD_DATE",
-        "DIAGNOSIS_DATE",
-        "FIRST_TREATMENT_DATE",
-        "LAST_CONTACT_DATE",
-        "PLATINUM_DATE",
-    ]:
-        if date_col in pat.columns:
-            pat[date_col] = _coerce_datetime(pat[date_col])
-
-    if AGE_COL in pat.columns:
-        pat[AGE_COL] = pd.to_numeric(pat[AGE_COL], errors="coerce")
-    else:
-        pat[AGE_COL] = np.nan
-    pat["DEATH"] = pd.to_numeric(pat.get("DEATH"), errors="coerce").fillna(0).astype(int)
-    pat["PLATINUM"] = _coerce_platinum(pat.get("PLATINUM", pd.Series(0, index=pat.index)))
-    pat["FIRST_TREATMENT"] = pd.to_numeric(
-        pat.get(
-            "FIRST_TREATMENT",
-            pat.get("FIRST_TREATMENT_DATE", pd.Series(index=pat.index)).notna(),
-        ),
-        errors="coerce",
-    ).fillna(0).astype(int)
-
-    pat["t_last_contact"] = _derive_duration(
-        pat,
-        duration_col="t_last_contact",
-        event_date_col="LAST_CONTACT_DATE",
-    )
-    pat["t_death"] = _derive_duration(
-        pat,
-        duration_col="t_death",
-        event_date_col="LAST_CONTACT_DATE",
-        fallback_duration_col="t_last_contact",
-    )
-    pat["t_diagnosis"] = _derive_duration(
-        pat,
-        duration_col="t_diagnosis",
-        event_date_col="DIAGNOSIS_DATE",
-        fallback_duration_col="t_last_contact",
-    )
-    pat["t_first_treatment"] = _derive_duration(
-        pat,
-        duration_col="t_first_treatment",
-        event_date_col="FIRST_TREATMENT_DATE",
-        fallback_duration_col="t_last_contact",
-    )
-    pat["t_platinum"] = _derive_duration(
-        pat,
-        duration_col="t_platinum",
-        event_date_col="PLATINUM_DATE",
-    )
-    pat["t_platinum"] = pat["t_platinum"].where(
-        pat["PLATINUM"].eq(1),
-        pat["t_platinum"].fillna(pat["t_last_contact"]),
-    )
-
-    if anchor_col not in pat.columns:
-        raise ValueError(f"make_outcome_df: anchor_col {anchor_col!r} missing from input.")
-    landmark_time = pat[anchor_col].astype(float) + float(landmark_offset_days)
-    for duration_col in ["t_last_contact", "t_death", "t_platinum"]:
-        pat[f"{duration_col}_from_first_record"] = pat[duration_col]
-        pat[duration_col] = pat[duration_col].astype(float) - landmark_time
-
-    platinum_event_time = np.where(pat["PLATINUM"].eq(1), pat["t_platinum"], np.inf)
-    death_event_time = np.where(pat["DEATH"].eq(1), pat["t_death"], np.inf)
-    first_event_time = np.minimum(platinum_event_time, death_event_time)
-
-    pat["EITHER"] = np.isfinite(first_event_time).astype(int)
-    pat["t_either"] = np.where(pat["EITHER"].eq(1), first_event_time, pat["t_death"])
-
-    valid = (
-        pat["FIRST_RECORD_DATE"].notna()
-        & pat[anchor_col].notna()
-        & pat[anchor_col].ge(0)
-        & pat["t_platinum"].notna()
-        & pat["t_death"].notna()
-        & pat["t_last_contact"].notna()
-        & pat["t_either"].notna()
-        & pat["t_platinum"].gt(0)
-        & pat["t_death"].gt(0)
-        & pat["t_last_contact"].gt(0)
-        & pat["t_either"].gt(0)
-    )
-    if require_first_treatment:
-        valid = valid & pat["FIRST_TREATMENT"].eq(1)
-    return pat.loc[valid].copy()
-
-
-def build_pre_treatment_lab_long(
-    df: pd.DataFrame,
-    *,
-    cohort_index: pd.Index | None = None,
-    landmark_offset_days: int = 0,
-    anchor_col: str = "t_first_treatment",
-    anchor_series: pd.Series | None = None,
-) -> pd.DataFrame:
-    """Long-format pre-landmark lab observations used for canonical-lab selection.
-
-    Returns columns DFCI_MRN, LAB_NAME, LAB_VALUE, t_lab, <anchor_col>.
-    Restricts to observations with t_lab < <anchor_col> + landmark_offset_days
-    so the lab presence used for coverage matches the aggregated feature
-    engineering and Dynamic DeepHit person-period builder windows.
-
-    ``anchor_series`` (MRN-indexed) overrides the column lookup, supporting the
-    genomic arm where ``t_sample`` is per-patient and not carried on every row.
-    """
-    base_required = {ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab"}
-    missing = base_required - set(df.columns)
-    if missing:
-        raise ValueError(
-            f"build_pre_treatment_lab_long missing columns: {sorted(missing)}"
-        )
-
-    cols = list(base_required)
-    if anchor_series is None:
-        if anchor_col not in df.columns:
-            raise ValueError(
-                f"build_pre_treatment_lab_long needs anchor column {anchor_col!r} on df or via anchor_series."
-            )
-        cols.append(anchor_col)
-    out = df[cols].copy()
-    out["LAB_NAME"] = out["LAB_NAME"].astype(str).str.strip()
-    out["LAB_VALUE"] = pd.to_numeric(out["LAB_VALUE"], errors="coerce")
-    out["t_lab"] = pd.to_numeric(out["t_lab"], errors="coerce")
-    if anchor_series is not None:
-        out[anchor_col] = out[ID_COL].map(anchor_series.astype(float)).astype(float)
-    else:
-        out[anchor_col] = pd.to_numeric(out[anchor_col], errors="coerce")
-    out = out.dropna(subset=[ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab", anchor_col])
-    landmark_t = out[anchor_col] + float(landmark_offset_days)
-    out = out.loc[out["t_lab"] < landmark_t].copy()
-    if cohort_index is not None:
-        out = out.loc[out[ID_COL].isin(cohort_index)].copy()
-    return out
-
-
-def _patient_lab_std(values: pd.Series) -> float:
-    if len(values) <= 1:
-        return np.nan
-    return float(np.std(values.to_numpy(dtype=float), ddof=0))
-
-
-def _compute_patient_lab_slopes(pre_treatment: pd.DataFrame) -> pd.DataFrame:
-    """OLS slope of LAB_VALUE vs t_lab (per day) per (DFCI_MRN, LAB_NAME).
-
-    Returns NaN unless a patient has enough observations, enough unique
-    timepoints, and a sufficient time span; these stricter requirements keep
-    the original OLS-style slope definition while reducing unstable estimates
-    from sparse, short-span trajectories.
-    """
-    def _slope(group: pd.DataFrame) -> float:
-        if len(group) < MIN_SLOPE_OBS:
-            return np.nan
-        if group["t_lab"].nunique(dropna=True) < MIN_SLOPE_UNIQUE_TIMES:
-            return np.nan
-
-        x = group["t_lab"].to_numpy(dtype=float)
-        y = group["LAB_VALUE"].to_numpy(dtype=float)
-        if (x.max() - x.min()) < MIN_SLOPE_SPAN_DAYS:
-            return np.nan
-        cov = np.cov(x, y, ddof=0)
-        var_x = cov[0, 0]
-        if not np.isfinite(var_x) or var_x <= 0:
-            return np.nan
-        slope = float(cov[0, 1] / var_x)
-        return slope if np.isfinite(slope) else np.nan
-
-    slopes = (
-        pre_treatment.groupby([ID_COL, "LAB_NAME"])[["t_lab", "LAB_VALUE"]]
-        .apply(_slope)
-        .rename("slope")
-        .reset_index()
-    )
-    return slopes
-
-
-def build_feature_matrix(
-    df: pd.DataFrame,
-    *,
-    landmark_offset_days: int = 0,
-    anchor_col: str = "t_first_treatment",
-    anchor_series: pd.Series | None = None,
-) -> pd.DataFrame:
-    """Per-patient lab summary features for the pre-landmark window.
-
-    Args:
-        landmark_offset_days: days added to ``anchor_col`` to define the landmark.
-        anchor_col: column on ``df`` whose value (in days from first record) is
-            the anchor. Default ``t_first_treatment``; the genomic arm uses
-            ``t_sample``.
-        anchor_series: optional MRN-indexed Series providing per-patient anchor
-            values when the column isn't carried on every lab row (e.g.
-            ``t_sample`` joined externally). Takes precedence over ``anchor_col``.
-    """
-    working = df.copy()
-    required_cols = {ID_COL, "LAB_NAME", "LAB_VALUE"}
-    missing_required = required_cols - set(working.columns)
-    if missing_required:
-        missing_str = ", ".join(sorted(missing_required))
-        raise ValueError(f"Input data is missing required columns for feature engineering: {missing_str}")
-
-    working["LAB_NAME"] = working["LAB_NAME"].astype(str).str.strip()
-    working["LAB_VALUE"] = pd.to_numeric(working["LAB_VALUE"], errors="coerce")
-
-    if "t_lab" not in working.columns:
-        if "LAB_DATE" not in working.columns:
-            raise ValueError("Input data must contain t_lab or LAB_DATE.")
-        if "FIRST_RECORD_DATE" not in working.columns:
-            working["FIRST_RECORD_DATE"] = _coerce_datetime(working["LAB_DATE"]).groupby(working[ID_COL]).transform("min")
-        working["t_lab"] = (
-            _coerce_datetime(working["LAB_DATE"]) - _coerce_datetime(working["FIRST_RECORD_DATE"])
-        ).dt.days.astype(float)
-    else:
-        working["t_lab"] = _coerce_duration(working["t_lab"])
-
-    if anchor_series is not None:
-        anchor_map = anchor_series.astype(float)
-        working[anchor_col] = working[ID_COL].map(anchor_map).astype(float)
-    elif anchor_col not in working.columns:
-        if anchor_col == "t_first_treatment" and {"FIRST_TREATMENT_DATE", "FIRST_RECORD_DATE"}.issubset(working.columns):
-            working["t_first_treatment"] = (
-                _coerce_datetime(working["FIRST_TREATMENT_DATE"])
-                - _coerce_datetime(working["FIRST_RECORD_DATE"])
-            ).dt.days.astype(float)
-        else:
-            raise ValueError(
-                f"build_feature_matrix needs anchor column {anchor_col!r} on the df or via anchor_series."
-            )
-    else:
-        working[anchor_col] = _coerce_duration(working[anchor_col])
-
-    working = working.dropna(
-        subset=[ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab", anchor_col]
-    )
-
-    landmark_time = working[anchor_col].astype(float) + float(landmark_offset_days)
-    pre_treatment = working.loc[working["t_lab"].lt(landmark_time)].copy()
-    if pre_treatment.empty:
-        raise ValueError("No pre-landmark lab rows were available to build lab summary features.")
-
-    sort_cols = [ID_COL, "LAB_NAME", "t_lab"]
-    if "LAB_DATE" in pre_treatment.columns:
-        pre_treatment["LAB_DATE"] = _coerce_datetime(pre_treatment["LAB_DATE"])
-        sort_cols.append("LAB_DATE")
-    pre_treatment = pre_treatment.sort_values(sort_cols)
-
-    feature_long = (
-        pre_treatment.groupby([ID_COL, "LAB_NAME"])["LAB_VALUE"]
-        .agg(
-            mean="mean",
-            min="min",
-            max="max",
-            first="first",
-            last="last",
-            n_observations="count",
-        )
-        .reset_index()
-    )
-    feature_long["delta"] = np.where(
-        feature_long["n_observations"] >= MIN_DELTA_OBS,
-        feature_long["last"] - feature_long["first"],
-        np.nan,
-    )
-    feature_long = feature_long.drop(columns=["first"])
-    slope_long = _compute_patient_lab_slopes(pre_treatment)
-    feature_long = feature_long.merge(slope_long, on=[ID_COL, "LAB_NAME"], how="left")
-    feature_df = (
-        feature_long.set_index([ID_COL, "LAB_NAME"])
-        .stack()
-        .rename("value")
-        .reset_index()
-        .rename(columns={"level_2": "feature_stat"})
-    )
-    feature_df["feature_name"] = feature_df["LAB_NAME"] + "__" + feature_df["feature_stat"]
-    feature_df = feature_df.pivot(index=ID_COL, columns="feature_name", values="value")
-    feature_df = feature_df.sort_index(axis=1)
-
-    print(f"Raw feature matrix: {feature_df.shape[0]} patients x {feature_df.shape[1]} summary-lab features")
-    return feature_df
-
-
-def build_landmark_merged(
-    df: pd.DataFrame,
-    *,
-    landmark_offset_days: int,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    outcome_df = make_outcome_df(df, landmark_offset_days=landmark_offset_days)
-    print(f"Outcome table @ landmark +{landmark_offset_days}d: {len(outcome_df)} patients")
-
-    print(f"Building raw aggregated lab summary feature matrix through landmark +{landmark_offset_days}d...")
-    feature_df = build_feature_matrix(df, landmark_offset_days=landmark_offset_days)
-
-    merged = feature_df.join(outcome_df, how="inner")
-    merged = merged.loc[merged[AGE_COL].notna()].copy()
-    if merged.empty:
-        raise ValueError("No patients have both engineered features and valid outcomes.")
-    return outcome_df, feature_df, merged
-
-
-def apply_split_assignments(
-    merged: pd.DataFrame,
-    *,
-    split_assignments: pd.Series,
-    split_stratification: str,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, str]:
-    aligned_splits = split_assignments.reindex(merged.index)
-    if aligned_splits.isna().any():
-        missing = aligned_splits.index[aligned_splits.isna()].tolist()
-        missing_preview = ", ".join(str(mrn) for mrn in missing[:5])
-        raise ValueError(
-            "Provided split assignments do not cover the merged cohort"
-            + (f" (e.g. {missing_preview})" if missing_preview else "")
-            + "."
-        )
-
-    merged = merged.copy()
-    merged["split"] = aligned_splits
-    train_val = merged.loc[aligned_splits.eq("train_val")].copy()
-    test = merged.loc[aligned_splits.eq("test")].copy()
-    train_val["split"] = "train_val"
-    test["split"] = "test"
-    return merged, train_val, test, aligned_splits, split_stratification
-
-
-def build_landmark_availability_table(
-    merged_by_landmark: dict[int, pd.DataFrame],
-) -> tuple[pd.DataFrame, pd.Index]:
-    if not merged_by_landmark:
-        raise ValueError("No landmark cohorts were provided.")
-
-    all_mrns = pd.Index([])
-    common_mrns: pd.Index | None = None
-    for merged in merged_by_landmark.values():
-        all_mrns = all_mrns.union(merged.index)
-        common_mrns = merged.index if common_mrns is None else common_mrns.intersection(merged.index)
-
-    availability = pd.DataFrame(index=all_mrns)
-    landmark_cols: list[str] = []
-    for landmark_day in sorted(merged_by_landmark):
-        col = f"eligible_landmark_{landmark_day}"
-        landmark_cols.append(col)
-        availability[col] = availability.index.isin(merged_by_landmark[landmark_day].index)
-    availability["eligible_all_landmarks"] = availability[landmark_cols].all(axis=1)
-    availability = availability.rename_axis(ID_COL).reset_index()
-    return availability, (common_mrns if common_mrns is not None else pd.Index([]))
-
-
-def combined_event_label(df: pd.DataFrame) -> np.ndarray:
-    p = df["PLATINUM"].astype(int).to_numpy()
-    d = df["DEATH"].astype(int).to_numpy()
-    return p + 2 * d
-
-
-def choose_stratification_labels(df: pd.DataFrame, *, min_count: int) -> tuple[np.ndarray | None, str]:
-    candidates = [
-        ("combined", combined_event_label(df)),
-        ("either", df["EITHER"].astype(int).to_numpy()),
-        ("platinum", df["PLATINUM"].astype(int).to_numpy()),
-        ("death", df["DEATH"].astype(int).to_numpy()),
-    ]
-    for label_name, labels in candidates:
-        counts = pd.Series(labels).value_counts()
-        if len(counts) > 1 and counts.min() >= min_count:
-            return labels, label_name
-    return None, "unstratified"
-
-
-def split_train_test(
-    merged: pd.DataFrame,
-    *,
-    test_frac: float,
-    seed: int,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, str]:
-    labels, label_name = choose_stratification_labels(merged, min_count=2)
-    stratify = labels if labels is not None else None
-
-    try:
-        train_idx, test_idx = train_test_split(
-            np.arange(len(merged)),
-            test_size=test_frac,
-            stratify=stratify,
-            random_state=seed,
-        )
-    except ValueError:
-        label_name = "unstratified"
-        train_idx, test_idx = train_test_split(
-            np.arange(len(merged)),
-            test_size=test_frac,
-            random_state=seed,
-        )
-
-    split_assignments = pd.Series("train_val", index=merged.index, name="split")
-    split_assignments.iloc[test_idx] = "test"
-    train_val = merged.iloc[train_idx].copy()
-    test = merged.iloc[test_idx].copy()
-    return train_val, test, split_assignments, label_name
 
 
 def select_feature_columns(
@@ -938,16 +448,6 @@ def _duration_to_auc_units(duration: pd.Series, *, time_unit_days: int) -> np.nd
     return np.ceil(duration_days / float(time_unit_days))
 
 
-def _make_survival_array(event: np.ndarray, duration: np.ndarray) -> np.ndarray:
-    survival = np.empty(
-        dtype=[("event", bool), ("time", np.float64)],
-        shape=len(duration),
-    )
-    survival["event"] = event.astype(bool)
-    survival["time"] = duration.astype(float)
-    return survival
-
-
 def _apply_auc_admin_censoring(
     event: np.ndarray,
     duration: np.ndarray,
@@ -1100,22 +600,6 @@ def compute_ipcw_auc_t(
     except ValueError:
         mean_auc = np.nan
     return float(mean_auc) if np.isfinite(mean_auc) else np.nan, auc_df
-
-
-def score_cox_model(
-    model: CoxPHFitter,
-    model_df: pd.DataFrame,
-    *,
-    duration_col: str,
-    event_col: str,
-) -> tuple[float, np.ndarray]:
-    # Use the linear predictor (log partial hazard) rather than exp(linear predictor):
-    # ranking is identical, and it avoids exp() overflow when the linear predictor
-    # is large for a handful of outlier rows — which would otherwise produce inf and
-    # crash downstream AUC routines.
-    log_pred = np.asarray(model.predict_log_partial_hazard(model_df)).reshape(-1)
-    c_index = float(concordance_index(model_df[duration_col], -log_pred, model_df[event_col]))
-    return c_index, log_pred
 
 
 def _build_coxnet_xy(
@@ -2012,517 +1496,176 @@ def _load_prebuilt_landmark(
     return aggregated, train_val, test, pre_treatment_lab_df
 
 
-def main(args: argparse.Namespace) -> None:
-    global RESULTS, ID_COL, AGE_COL
-    RESULTS = Path(args.output_dir)
-    RESULTS.mkdir(parents=True, exist_ok=True)
-    ID_COL = args.id_col
-    AGE_COL = args.age_col
-    endpoints = normalize_endpoints(args.endpoints)
-    landmark_days = normalize_landmark_days(args.landmark_days)
-    inputs_dir = Path(args.inputs_dir)
-    if not inputs_dir.exists():
-        raise FileNotFoundError(
-            f"Inputs dir {inputs_dir} not found. Run build_prediction_inputs.py first."
+@dataclass
+class LandmarkContext:
+    """Shared per-landmark setup consumed by the univariate / multivariable /
+    baseline arms (cox_univariate.py and cox_multivariable.py).
+
+    Produced once per landmark by :func:`prepare_landmark_context` so both arms
+    operate on an identical cohort, canonical lab set, and selected-feature set.
+    """
+
+    landmark_day: int
+    merged: pd.DataFrame
+    train_val: pd.DataFrame
+    test: pd.DataFrame
+    pre_treatment_lab_df: pd.DataFrame
+    raw_feature_cols: list[str]
+    univariate_data: pd.DataFrame
+    split_stratification: str
+    canonical_labs: list[str]
+    selected_feature_cols: list[str]
+    feature_meta_selected: pd.DataFrame
+
+
+def prepare_landmark_context(
+    inputs_dir: Path,
+    landmark_day: int,
+    *,
+    min_patient_coverage: float,
+    restrict_to_stage: bool,
+) -> LandmarkContext:
+    """Load prebuilt inputs and run the shared cohort + feature setup for a landmark.
+
+    Loads the aggregated table written by build_prediction_inputs.py, optionally
+    restricts to stage-available patients, derives the canonical lab set from
+    train_val pre-treatment labs, and runs the train_val feature selection. The
+    returned context is everything the univariate and multivariable/baseline arms
+    consume, so the two analysis scripts share an identical cohort, canonical lab
+    set, and selected-feature set.
+    """
+    print(f"\n##### LANDMARK ANALYSES: +{landmark_day} DAYS #####")
+    merged, train_val, test, pre_treatment_lab_df = _load_prebuilt_landmark(
+        inputs_dir, landmark_day
+    )
+    if restrict_to_stage:
+        stage_cols = stage_feature_columns(merged)
+        if not stage_cols:
+            raise SystemExit(
+                "--restrict-to-stage requires CANCER_STAGE_* columns in the aggregated "
+                "inputs (build with --stage-file; PROFILE only)."
+            )
+        keep = merged.index[stage_available_mask(merged, stage_cols)]
+        n_before = len(merged)
+        merged = merged.loc[merged.index.intersection(keep)]
+        train_val = train_val.loc[train_val.index.intersection(keep)]
+        test = test.loc[test.index.intersection(keep)]
+        print(
+            f"  [restrict-to-stage] complete-case (stage-available) cohort: "
+            f"{len(merged)}/{n_before} patients "
+            f"(train_val={len(train_val)}, test={len(test)})"
         )
-    build_manifest = _load_build_manifest(inputs_dir)
-    min_patient_coverage = float(build_manifest["min_patient_coverage"])
-    args.auc_time_unit_days = int(build_manifest["auc_time_unit_days"])
-    args.auc_quantiles = tuple(build_manifest["auc_quantiles"])
-    if getattr(args, "auc_max_time_units", None) is None:
-        args.auc_max_time_units = DEFAULT_AUC_MAX_TIME_UNITS
-    auc_horizons_by_landmark = build_manifest["auc_horizons_by_landmark"]
-    print(
-        f"Loading prebuilt prediction inputs from {inputs_dir} "
-        f"(min_patient_coverage={min_patient_coverage}, "
-        f"auc_time_unit_days={args.auc_time_unit_days} per build manifest)"
+    raw_feature_cols = [c for c in merged.columns if c not in OUTCOME_COLUMNS]
+    univariate_data = merged.copy()
+
+    split_stratification = "prebuilt"
+
+    assert_no_test_leakage(
+        test_mrns=test.index,
+        train_mrns=train_val.index,
+        context=f"prepare_landmark_context[landmark+{landmark_day}d]",
     )
 
-    feature_selection_frames: list[pd.DataFrame] = []
-    univariate_nobs_adjusted_frames: list[pd.DataFrame] = []
-    multivariable_frames: list[pd.DataFrame] = []
-    multivariable_metric_rows: list[dict] = []
-    multivariable_test_auc_frames: list[pd.DataFrame] = []
-    multivariable_test_brier_frames: list[pd.DataFrame] = []
-    baseline_metric_rows: list[dict] = []
-    baseline_frames: list[pd.DataFrame] = []
-    baseline_test_auc_frames: list[pd.DataFrame] = []
-    baseline_test_brier_frames: list[pd.DataFrame] = []
-    horizon_grid_rows: list[pd.DataFrame] = []
-    canonical_labs_train_val_rows: list[dict] = []
-    canonical_labs_fold_rows: list[pd.DataFrame] = []
+    # Canonical lab list: derived from pre-treatment lab observations of
+    # train_val MRNs only, mirroring build_prediction_inputs.py so the
+    # per-stat feature filter agrees with the upstream canonical set.
+    canonical_labs = select_canonical_labs(
+        pre_treatment_lab_df,
+        mrns=train_val.index,
+        min_coverage=min_patient_coverage,
+        id_col=ID_COL,
+    )
 
-    univariate_nobs_adjusted_keep_cols = [
-        "landmark_days",
-        "endpoint",
-        "feature",
-        "lab_name",
-        "feature_stat",
-        "n_obs_feature",
-        "coverage",
-        "n_obs_coverage",
-        "n_patients_used",
-        "n_patients_observed",
-        "n_patients_imputed",
-        "n_patients_n_obs_observed",
-        "n_patients_n_obs_imputed",
-        "n_events_used",
-        "coef_feature",
-        "hazard_ratio_per_sd",
-        "ci_lower",
-        "ci_upper",
-        "p_value",
-        "q_value",
-        "coef_n_obs",
-        "hazard_ratio_n_obs_per_sd",
-        "ci_lower_n_obs",
-        "ci_upper_n_obs",
-        "p_value_n_obs",
-        "coef_missing",
-        "p_value_missing",
-        "note",
-    ]
+    # Feature selection on train_val only to avoid leaking test-set coverage,
+    # restricted to the canonical lab set so Cox / XGBoost / DeepHit operate
+    # on the same labs (different feature representations only).
+    selected_feature_cols, feature_meta = select_feature_columns(
+        train_val,
+        raw_feature_cols,
+        min_patient_coverage=min_patient_coverage,
+        restrict_to_labs=canonical_labs,
+    )
+    feature_meta_selected = feature_meta.loc[
+        feature_meta["selected"],
+        ["feature", "lab_name", "feature_stat", "coverage", "unique_non_missing"],
+    ].copy()
+    feature_meta_selected.insert(0, "landmark_days", landmark_day)
 
-    for landmark_day in landmark_days:
-        print(f"\n##### LANDMARK ANALYSES: +{landmark_day} DAYS #####")
-        merged, train_val, test, pre_treatment_lab_df = _load_prebuilt_landmark(
-            inputs_dir, landmark_day
+    # NOTE: do NOT subset train_val / merged / test to selected_feature_cols.
+    # The multivariable arm's per-fold selection rebuilds the canonical lab
+    # set and per-stat filter against the *raw* feature universe inside each
+    # CV fold (see tune_multivariable_model), so it needs access to all
+    # raw_feature_cols on train_val. Downstream call sites already specify
+    # the column subset they consume via select_feature_columns and
+    # build_model_matrices, so leaving the full feature universe in place
+    # is harmless for univariate / final-fit paths.
+
+    print(f"Full cohort: {len(merged)} patients")
+    print(f"Train/val (Arm 2): {len(train_val)} patients")
+    print(f"Test (Arm 2):      {len(test)} patients")
+    print(f"Canonical labs (train_val): {len(canonical_labs)}")
+    print(f"Selected summary-lab features (train_val pre-filter): {len(selected_feature_cols)}")
+
+    return LandmarkContext(
+        landmark_day=landmark_day,
+        merged=merged,
+        train_val=train_val,
+        test=test,
+        pre_treatment_lab_df=pre_treatment_lab_df,
+        raw_feature_cols=raw_feature_cols,
+        univariate_data=univariate_data,
+        split_stratification=split_stratification,
+        canonical_labs=canonical_labs,
+        selected_feature_cols=selected_feature_cols,
+        feature_meta_selected=feature_meta_selected,
+    )
+
+
+def build_endpoint_horizon_grids(
+    landmark_day: int,
+    *,
+    endpoints: list[str],
+    auc_horizons_by_landmark: dict,
+    auc_quantiles: tuple[float, ...],
+    auc_time_unit_days: int,
+) -> tuple[dict[str, np.ndarray], pd.DataFrame]:
+    """Load the per-endpoint AUC(t) horizon grid for a landmark from build_manifest.
+
+    Returns the endpoint -> grid mapping plus a tidy frame (one row per horizon)
+    for cox_agg_horizon_grid.csv. Grids come from build_manifest.json so Cox /
+    XGBoost / DeepHit evaluate on the identical horizon set per (landmark, endpoint).
+    """
+    landmark_horizons = auc_horizons_by_landmark.get(str(int(landmark_day)))
+    if landmark_horizons is None:
+        raise KeyError(
+            f"build_manifest.json has no auc_horizons_by_landmark entry for landmark +{landmark_day}d. "
+            "Re-run build_prediction_inputs.py for this landmark."
         )
-        if args.restrict_to_stage:
-            stage_cols = stage_feature_columns(merged)
-            if not stage_cols:
-                raise SystemExit(
-                    "--restrict-to-stage requires CANCER_STAGE_* columns in the aggregated "
-                    "inputs (build with --stage-file; PROFILE only)."
-                )
-            keep = merged.index[stage_available_mask(merged, stage_cols)]
-            n_before = len(merged)
-            merged = merged.loc[merged.index.intersection(keep)]
-            train_val = train_val.loc[train_val.index.intersection(keep)]
-            test = test.loc[test.index.intersection(keep)]
-            print(
-                f"  [restrict-to-stage] complete-case (stage-available) cohort: "
-                f"{len(merged)}/{n_before} patients "
-                f"(train_val={len(train_val)}, test={len(test)})"
-            )
-        raw_feature_cols = [c for c in merged.columns if c not in OUTCOME_COLUMNS]
-        univariate_data = merged.copy()
-
-        split_stratification = "prebuilt"
-
-        assert_no_test_leakage(
-            test_mrns=test.index,
-            train_mrns=train_val.index,
-            context=f"main[landmark+{landmark_day}d]",
-        )
-
-        # Canonical lab list: derived from pre-treatment lab observations of
-        # train_val MRNs only, mirroring build_prediction_inputs.py so the
-        # per-stat feature filter agrees with the upstream canonical set.
-        canonical_labs = select_canonical_labs(
-            pre_treatment_lab_df,
-            mrns=train_val.index,
-            min_coverage=min_patient_coverage,
-            id_col=ID_COL,
-        )
-        for lab in canonical_labs:
-            canonical_labs_train_val_rows.append(
-                {"landmark_days": landmark_day, "lab_name": lab}
-            )
-
-        # Feature selection on train_val only to avoid leaking test-set coverage,
-        # restricted to the canonical lab set so Cox / XGBoost / DeepHit operate
-        # on the same labs (different feature representations only).
-        selected_feature_cols, feature_meta = select_feature_columns(
-            train_val,
-            raw_feature_cols,
-            min_patient_coverage=min_patient_coverage,
-            restrict_to_labs=canonical_labs,
-        )
-        feature_meta_selected = feature_meta.loc[
-            feature_meta["selected"],
-            ["feature", "lab_name", "feature_stat", "coverage", "unique_non_missing"],
-        ].copy()
-        feature_meta_selected.insert(0, "landmark_days", landmark_day)
-        feature_selection_frames.append(feature_meta_selected)
-
-        # NOTE: do NOT subset train_val / merged / test to selected_feature_cols.
-        # The multivariable arm's per-fold selection rebuilds the canonical lab
-        # set and per-stat filter against the *raw* feature universe inside each
-        # CV fold (see tune_multivariable_model), so it needs access to all
-        # raw_feature_cols on train_val. Downstream call sites already specify
-        # the column subset they consume via select_feature_columns and
-        # build_model_matrices, so leaving the full feature universe in place
-        # is harmless for univariate / final-fit paths.
-
-        print(f"Full cohort: {len(merged)} patients")
-        print(f"Train/val (Arm 2): {len(train_val)} patients")
-        print(f"Test (Arm 2):      {len(test)} patients")
-        print(f"Canonical labs (train_val): {len(canonical_labs)}")
-        print(f"Selected summary-lab features (train_val pre-filter): {len(selected_feature_cols)}")
-
-        # AUC(t) horizon grid is loaded from build_manifest.json so Cox / XGBoost /
-        # DeepHit all evaluate on the identical horizon set per (landmark, endpoint).
-        landmark_horizons = auc_horizons_by_landmark.get(str(int(landmark_day)))
-        if landmark_horizons is None:
+    endpoint_horizon_grids: dict[str, np.ndarray] = {}
+    grid_frames: list[pd.DataFrame] = []
+    for endpoint in endpoints:
+        if endpoint not in landmark_horizons:
             raise KeyError(
-                f"build_manifest.json has no auc_horizons_by_landmark entry for landmark +{landmark_day}d. "
-                "Re-run build_prediction_inputs.py for this landmark."
+                f"build_manifest.json missing horizons for endpoint {endpoint!r} at landmark +{landmark_day}d."
             )
-        endpoint_horizon_grids: dict[str, np.ndarray] = {}
-        for endpoint in endpoints:
-            if endpoint not in landmark_horizons:
-                raise KeyError(
-                    f"build_manifest.json missing horizons for endpoint {endpoint!r} at landmark +{landmark_day}d."
-                )
-            grid = np.asarray(landmark_horizons[endpoint], dtype=float)
-            endpoint_horizon_grids[endpoint] = grid
-            grid_df = horizon_grid_frame(
-                grid,
-                quantiles=args.auc_quantiles,
-                time_unit_days=args.auc_time_unit_days,
-                endpoint=endpoint,
-            )
-            grid_df.insert(0, "landmark_days", landmark_day)
-            horizon_grid_rows.append(grid_df)
-            print(
-                f"Horizon grid ({endpoint}, from manifest): "
-                + ", ".join(f"{int(h)}" for h in grid)
-                + f" {args.auc_time_unit_days}-day units"
-            )
-
-        if args.analysis in {"univariate", "both"}:
-            print("\n##### ARM 1: UNIVARIATE (n_obs-adjusted, full follow-up, all endpoints) #####")
-            for endpoint in endpoints:
-                print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
-                print(ENDPOINTS[endpoint]["description"])
-                adjusted_df = run_univariate_nobs_adjusted_associations(
-                    univariate_data,
-                    feature_cols=selected_feature_cols,
-                    endpoint=endpoint,
-                    min_events_per_feature=args.min_events_per_feature,
-                    fallback_penalizer=args.univariate_penalizer,
-                )
-                adjusted_df.insert(0, "landmark_days", landmark_day)
-                univariate_nobs_adjusted_frames.append(
-                    adjusted_df[univariate_nobs_adjusted_keep_cols].copy()
-                )
-                print_top_hits(
-                    adjusted_df,
-                    endpoint=endpoint,
-                    label="n_obs-adjusted univariate",
-                )
-
-        if args.analysis in {"multivariable", "both"}:
-            # Model fitting uses full follow-up (admin censoring of fitting removed when
-            # DeepHit was silenced), matching the univariate arm. Note the AUC/Brier
-            # evaluation grid is still capped at args.auc_max_time_units.
-            multivariable_train_val = train_val.copy()
-            multivariable_test = test.copy()
-            print("\n##### ARM 2: MULTIVARIABLE ELASTIC-NET (all endpoints) #####")
-            for endpoint in endpoints:
-                print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
-                print(ENDPOINTS[endpoint]["description"])
-                horizon_grid = endpoint_horizon_grids[endpoint]
-                _, _, best_row, fold_canonical_labs_df = tune_multivariable_model(
-                    multivariable_train_val,
-                    raw_feature_cols=raw_feature_cols,
-                    endpoint=endpoint,
-                    penalizers=args.cv_penalizers,
-                    l1_ratios=args.cv_l1_ratios,
-                    n_folds=args.n_folds,
-                    seed=args.seed,
-                    auc_time_unit_days=args.auc_time_unit_days,
-                    auc_max_time_units=args.auc_max_time_units,
-                    pre_treatment_lab_df=pre_treatment_lab_df,
-                    horizon_grid=horizon_grid,
-                    min_patient_coverage=min_patient_coverage,
-                )
-                if not fold_canonical_labs_df.empty:
-                    fold_canonical_labs_df.insert(0, "landmark_days", landmark_day)
-                    canonical_labs_fold_rows.append(fold_canonical_labs_df)
-
-                (
-                    metrics_row,
-                    summary_df,
-                    _,
-                    test_auc_df,
-                    test_brier_df,
-                ) = fit_final_multivariable_model(
-                    multivariable_train_val,
-                    multivariable_test,
-                    feature_cols=selected_feature_cols,
-                    endpoint=endpoint,
-                    penalizer=float(best_row["penalizer"]),
-                    l1_ratio=float(best_row["l1_ratio"]),
-                    penalizer_grid=args.cv_penalizers,
-                    split_stratification=split_stratification,
-                    cv_stratification=str(best_row["cv_stratification"]),
-                    auc_time_unit_days=args.auc_time_unit_days,
-                    auc_max_time_units=args.auc_max_time_units,
-                    horizon_grid=horizon_grid,
-                    canonical_labs=canonical_labs,
-                )
-                metrics_row["landmark_days"] = landmark_day
-                summary_df.insert(0, "landmark_days", landmark_day)
-                multivariable_metric_rows.append(metrics_row)
-                multivariable_frames.append(summary_df)
-                if not test_auc_df.empty:
-                    test_auc_df = test_auc_df.copy()
-                    test_auc_df.insert(0, "landmark_days", landmark_day)
-                    multivariable_test_auc_frames.append(test_auc_df)
-                if not test_brier_df.empty:
-                    test_brier_df = test_brier_df.copy()
-                    test_brier_df.insert(0, "landmark_days", landmark_day)
-                    multivariable_test_brier_frames.append(test_brier_df)
-
-                top_cols = [c for c in ["feature", "coef", "exp(coef)"] if c in summary_df.columns]
-                top = summary_df.loc[~summary_df["is_age_covariate"], top_cols].head(10)
-                print("\nChosen hyperparameters (elastic-net, age unpenalized):")
-                print(
-                    f"  penalizer={best_row['penalizer']}  l1_ratio={best_row['l1_ratio']}  "
-                    f"cv_mean C-index={best_row['cv_mean']:.4f}"
-                )
-                print(f"  CV mean AUC(t)={best_row['mean_auc_t_cv_mean']:.4f}")
-                print(f"  CV mean integrated Brier={best_row['integrated_brier_cv_mean']:.4f}")
-                print(
-                    f"  train/val C-index={metrics_row['train_val_c_index']:.4f}  "
-                    f"mean AUC(t)={metrics_row['train_val_mean_auc_t']:.4f}"
-                )
-                print(f"  held-out test C-index={metrics_row['test_c_index']:.4f}")
-                print(f"  held-out test mean AUC(t)={metrics_row['test_mean_auc_t']:.4f}")
-                print(f"  held-out test integrated Brier={metrics_row['test_integrated_brier']:.4f}")
-                print("Top multivariable coefficients:")
-                print(top.to_string(index=False))
-
-        if args.analysis == "baseline":
-            # Age(+stage)-only baseline: no lab features, no CV / feature
-            # selection. Reuses the multivariable final-fit + evaluation path so
-            # C-index / AUC(t) / Brier are on the identical horizon grid and the
-            # metrics CSV schema matches cox_agg_multivariable_metrics.csv.
-            stage_cols = stage_feature_columns(merged)
-            baseline_penalizer = float(args.cv_penalizers[0])
-            baseline_l1_ratio = float(args.cv_l1_ratios[0])
-            print("\n##### BASELINE: AGE(+STAGE)-ONLY (all endpoints) #####")
-            print(
-                f"  covariates: age" + (f" + {', '.join(stage_cols)}" if stage_cols else " (no stage source)")
-            )
-            for endpoint in endpoints:
-                print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
-                print(ENDPOINTS[endpoint]["description"])
-                (
-                    metrics_row,
-                    summary_df,
-                    _,
-                    test_auc_df,
-                    test_brier_df,
-                ) = fit_final_multivariable_model(
-                    train_val.copy(),
-                    test.copy(),
-                    feature_cols=stage_cols,
-                    endpoint=endpoint,
-                    penalizer=baseline_penalizer,
-                    l1_ratio=baseline_l1_ratio,
-                    penalizer_grid=args.cv_penalizers,
-                    split_stratification=split_stratification,
-                    cv_stratification="baseline_no_cv",
-                    auc_time_unit_days=args.auc_time_unit_days,
-                    auc_max_time_units=args.auc_max_time_units,
-                    horizon_grid=endpoint_horizon_grids[endpoint],
-                    canonical_labs=[],
-                )
-                metrics_row["landmark_days"] = landmark_day
-                metrics_row["n_stage_cols"] = len(stage_cols)
-                summary_df.insert(0, "landmark_days", landmark_day)
-                baseline_metric_rows.append(metrics_row)
-                baseline_frames.append(summary_df)
-                if not test_auc_df.empty:
-                    test_auc_df = test_auc_df.copy()
-                    test_auc_df.insert(0, "landmark_days", landmark_day)
-                    baseline_test_auc_frames.append(test_auc_df)
-                if not test_brier_df.empty:
-                    test_brier_df = test_brier_df.copy()
-                    test_brier_df.insert(0, "landmark_days", landmark_day)
-                    baseline_test_brier_frames.append(test_brier_df)
-                print(f"  held-out test C-index={metrics_row['test_c_index']:.4f}")
-                print(f"  held-out test mean AUC(t)={metrics_row['test_mean_auc_t']:.4f}")
-                print(f"  held-out test integrated Brier={metrics_row['test_integrated_brier']:.4f}")
-
-    if feature_selection_frames:
-        pd.concat(feature_selection_frames, ignore_index=True).to_csv(
-            RESULTS / "cox_agg_feature_selection.csv", index=False
+        grid = np.asarray(landmark_horizons[endpoint], dtype=float)
+        endpoint_horizon_grids[endpoint] = grid
+        grid_df = horizon_grid_frame(
+            grid,
+            quantiles=auc_quantiles,
+            time_unit_days=auc_time_unit_days,
+            endpoint=endpoint,
         )
-    if horizon_grid_rows:
-        pd.concat(horizon_grid_rows, ignore_index=True).to_csv(
-            RESULTS / HORIZON_GRID_FILENAME, index=False
+        grid_df.insert(0, "landmark_days", landmark_day)
+        grid_frames.append(grid_df)
+        print(
+            f"Horizon grid ({endpoint}, from manifest): "
+            + ", ".join(f"{int(h)}" for h in grid)
+            + f" {auc_time_unit_days}-day units"
         )
-    # canonical_labs_train_val is owned by build_prediction_inputs.py; we keep
-    # canonical_labs_train_val_rows in memory only for cross-checking.
-    _ = canonical_labs_train_val_rows
-    if canonical_labs_fold_rows:
-        pd.concat(canonical_labs_fold_rows, ignore_index=True).to_csv(
-            RESULTS / CANONICAL_LABS_FOLDS_FILENAME, index=False
-        )
-    if univariate_nobs_adjusted_frames:
-        pd.concat(univariate_nobs_adjusted_frames, ignore_index=True).to_csv(
-            RESULTS / "cox_agg_univariate_nobs_adjusted.csv", index=False
-        )
-    if multivariable_frames:
-        pd.concat(multivariable_frames, ignore_index=True).to_csv(
-            RESULTS / "cox_agg_multivariable.csv", index=False
-        )
-    if multivariable_test_auc_frames:
-        pd.concat(multivariable_test_auc_frames, ignore_index=True).to_csv(
-            RESULTS / "cox_agg_multivariable_test_auc_t.csv", index=False
-        )
-    if multivariable_test_brier_frames:
-        pd.concat(multivariable_test_brier_frames, ignore_index=True).to_csv(
-            RESULTS / "cox_agg_multivariable_test_brier.csv", index=False
-        )
-    if multivariable_metric_rows:
-        pd.DataFrame(multivariable_metric_rows).to_csv(
-            RESULTS / "cox_agg_multivariable_metrics.csv", index=False
-        )
-    if baseline_frames:
-        pd.concat(baseline_frames, ignore_index=True).to_csv(
-            RESULTS / "cox_agg_baseline.csv", index=False
-        )
-    if baseline_test_auc_frames:
-        pd.concat(baseline_test_auc_frames, ignore_index=True).to_csv(
-            RESULTS / "cox_agg_baseline_test_auc_t.csv", index=False
-        )
-    if baseline_test_brier_frames:
-        pd.concat(baseline_test_brier_frames, ignore_index=True).to_csv(
-            RESULTS / "cox_agg_baseline_test_brier.csv", index=False
-        )
-    if baseline_metric_rows:
-        pd.DataFrame(baseline_metric_rows).to_csv(
-            RESULTS / "cox_agg_baseline_metrics.csv", index=False
-        )
-
-    print("\nSaved:")
-    print("  results/cox_agg_feature_selection.csv")
-    if horizon_grid_rows:
-        print(f"  results/{HORIZON_GRID_FILENAME}")
-    if canonical_labs_fold_rows:
-        print(f"  results/{CANONICAL_LABS_FOLDS_FILENAME}")
-    if univariate_nobs_adjusted_frames:
-        print("  results/cox_agg_univariate_nobs_adjusted.csv")
-    if multivariable_frames:
-        print("  results/cox_agg_multivariable.csv")
-    if multivariable_test_auc_frames:
-        print("  results/cox_agg_multivariable_test_auc_t.csv")
-    if multivariable_test_brier_frames:
-        print("  results/cox_agg_multivariable_test_brier.csv")
-    if multivariable_metric_rows:
-        print("  results/cox_agg_multivariable_metrics.csv")
-    if baseline_metric_rows:
-        print("  results/cox_agg_baseline_metrics.csv")
+    horizon_grid_df = (
+        pd.concat(grid_frames, ignore_index=True) if grid_frames else pd.DataFrame()
+    )
+    return endpoint_horizon_grids, horizon_grid_df
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--id-col",
-        default=ID_COL,
-        help="Patient identifier column name (default: DFCI_MRN for PROFILE; e.g. person_id for CAIA).",
-    )
-    parser.add_argument(
-        "--age-col",
-        default=AGE_COL,
-        help="Age covariate column name (default: AGE_AT_TREATMENTSTART for PROFILE; e.g. AGE_AT_DIAGNOSIS for CAIA).",
-    )
-    parser.add_argument(
-        "--inputs-dir",
-        default=str(RESULTS / "prediction_inputs"),
-        help="Directory containing prebuilt inputs from build_prediction_inputs.py.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default=str(RESULTS),
-        help="Directory for Cox result CSVs.",
-    )
-    parser.add_argument(
-        "--endpoints",
-        nargs="+",
-        default=["platinum", "death"],
-        choices=list(ENDPOINTS),
-        help="Endpoints to analyze.",
-    )
-    parser.add_argument(
-        "--landmark-days",
-        nargs="+",
-        type=int,
-        default=DEFAULT_LANDMARK_DAYS,
-        help="Landmark offsets to analyze. Each must have prebuilt inputs in --inputs-dir.",
-    )
-    parser.add_argument(
-        "--analysis",
-        choices=["univariate", "multivariable", "both", "baseline"],
-        default="both",
-        help=(
-            "Association analyses to run on the aggregated feature set. "
-            "'baseline' fits an age(+cancer-stage)-only Cox model (no labs, no CV) "
-            "on the same horizon grid for benchmarking."
-        ),
-    )
-    parser.add_argument(
-        "--restrict-to-stage",
-        action="store_true",
-        help=(
-            "Restrict the cohort to stage-available patients (non-missing "
-            "CANCER_STAGE_*) before fitting/evaluating, for a complete-case "
-            "age+stage-baseline vs. labs comparison on a matched population. "
-            "Errors if no stage columns are present (PROFILE only)."
-        ),
-    )
-    parser.add_argument(
-        "--auc-max-time-units",
-        type=int,
-        default=None,
-        help=(
-            "Cap (in time-units) for the IPCW AUC(t)/Brier evaluation horizons. "
-            f"Defaults to {DEFAULT_AUC_MAX_TIME_UNITS} if unset. Caps evaluation only, not fitting."
-        ),
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=DEFAULT_SEED,
-        help="Random seed for cross-validation. The patient split is fixed by build_prediction_inputs.py.",
-    )
-    parser.add_argument(
-        "--n-folds",
-        type=int,
-        default=DEFAULT_N_FOLDS,
-        help="Number of cross-validation folds within the train/validation cohort.",
-    )
-    parser.add_argument(
-        "--min-events-per-feature",
-        type=int,
-        default=DEFAULT_MIN_EVENTS_PER_FEATURE,
-        help="Skip univariate associations when too few endpoint events remain after outcome filtering.",
-    )
-    parser.add_argument(
-        "--univariate-penalizer",
-        type=float,
-        default=0.05,
-        help="Fallback penalizer used only when an univariate Cox model does not converge without regularization.",
-    )
-    parser.add_argument(
-        "--cv-penalizers",
-        nargs="+",
-        type=float,
-        default=DEFAULT_CV_PENALIZERS,
-        help="Penalizer values searched during 5-fold CV on the 80%% train/val block.",
-    )
-    parser.add_argument(
-        "--cv-l1-ratios",
-        nargs="+",
-        type=float,
-        default=DEFAULT_CV_L1_RATIOS,
-        help="Elastic-net L1 mixing values (0=ridge, 1=lasso) searched during 5-fold CV.",
-    )
-    # AUC(t) time unit, quantiles, horizons all come from build_manifest.json
-    # so Cox/XGB/DeepHit evaluate on the identical horizon set.
-    main(parser.parse_args())

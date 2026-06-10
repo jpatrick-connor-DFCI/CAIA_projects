@@ -1,7 +1,8 @@
-"""CAIA twin of PROFILE/cox_aggregated.py.
+"""CAIA twin of PROFILE/cox_multivariable.py.
 
-Same Cox / elastic-net code path, just injects CAIA defaults into `sys.argv`
-before delegating to the PROFILE module via `runpy`.
+Same multivariable / baseline Cox code path, just injects CAIA defaults into
+`sys.argv` before delegating to the PROFILE module via `runpy`. The `--baseline`
+flag (if any) is passed through from the caller untouched.
 """
 
 from __future__ import annotations
@@ -37,4 +38,4 @@ def _inject_defaults(defaults: dict[str, str]) -> None:
 
 if __name__ == "__main__":
     _inject_defaults(CAIA_DEFAULTS)
-    runpy.run_module("cox_aggregated", run_name="__main__")
+    runpy.run_module("cox_multivariable", run_name="__main__")

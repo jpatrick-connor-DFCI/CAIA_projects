@@ -37,12 +37,14 @@ for _p in (str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
         sys.path.insert(0, _p)
 
 from cox_aggregated import (  # noqa: E402
-    AGE_COL,
     DATA_PATH,
     DEFAULT_MIN_PATIENT_COVERAGE,
     ENDPOINTS,
-    ID_COL,
     RESULTS,
+)
+from helpers.cohort import (  # noqa: E402
+    AGE_COL,
+    ID_COL,
     build_feature_matrix,
     build_pre_treatment_lab_long,
     make_outcome_df,
