@@ -20,3 +20,4 @@ __pycache__/
 !IPIO/
 !.gitignore
 !README.md
+.csv
