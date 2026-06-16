@@ -54,6 +54,7 @@ from cox_aggregated import (  # noqa: E402
 from helpers.cohort import (  # noqa: E402
     AGE_COL,
     ID_COL,
+    build_anchored_gleason_group,
     build_landmark_availability_table,
     build_landmark_merged,
     build_pre_treatment_lab_long,
@@ -104,6 +105,19 @@ STAGE_CATEGORIES = ["I", "II", "III", "IV"]
 STAGE_COLUMNS = ["CANCER_STAGE_II", "CANCER_STAGE_III", "CANCER_STAGE_IV"]
 _STAGE_TOKEN = re.compile(r"^(IV|III|II|I|4|3|2|1)[A-D]?$")
 _ARABIC_TO_ROMAN = {"1": "I", "2": "II", "3": "III", "4": "IV"}
+
+# Gleason grade-group covariate (PROFILE; from the LLM clinical-annotation gleason
+# pipeline). Anchor-relative ordinal 1-5 value (closest record on/before the anchor),
+# written as a single column GLEASON_GROUP to each aggregated_landmark{D}.csv.
+GLEASON_COL = "GLEASON_GROUP"
+GLEASON_GROUP_COL_CANDIDATES = [
+    "gleason_group", "grade_group", "gleason_grade_group",
+    "isup_grade_group", "isup_group", "ISUP", "GLEASON_GROUP",
+]
+GLEASON_DATE_COL_CANDIDATES = [
+    "gleason_date", "specimen_collect_dt", "specimen_collection_dt", "specimen_date",
+    "biopsy_date", "report_date", "path_date", "date", "GLEASON_DATE",
+]
 
 
 def normalize_cancer_stage(raw) -> str | None:
@@ -219,6 +233,64 @@ def load_stage_dummies(stage_file: Path, cohort_index: pd.Index, id_col: str) ->
     dummies.loc[unknown, STAGE_COLUMNS] = np.nan
     dummies.index.name = id_col
     return dummies
+
+
+def _pick_column(df: pd.DataFrame, candidates: list[str], *, override: str | None, kind: str) -> str:
+    """Resolve a column name from an override or a case-insensitive candidate list."""
+    if override:
+        if override not in df.columns:
+            raise ValueError(f"--gleason-{kind}-col {override!r} not in file columns={list(df.columns)[:12]}")
+        return override
+    lower = {c.lower(): c for c in df.columns}
+    for cand in candidates:
+        if cand in df.columns:
+            return cand
+        if cand.lower() in lower:
+            return lower[cand.lower()]
+    raise ValueError(
+        f"Could not auto-detect the Gleason {kind} column in {list(df.columns)[:12]}. "
+        f"Pass --gleason-{kind}-col explicitly."
+    )
+
+
+def load_gleason_timeline(
+    gleason_file: Path,
+    *,
+    id_col: str,
+    date_col: str | None = None,
+    group_col: str | None = None,
+) -> pd.DataFrame:
+    """Read the LLM gleason timeline into a long ``[id, GLEASON_DATE, GLEASON_GROUP]`` frame.
+
+    ``gleason_timeline.tsv`` is one row per Gleason record (tab-separated). The
+    grade-group column already holds an ISUP group (1-5); column names are
+    auto-detected from candidate lists and overridable via ``date_col``/``group_col``.
+    Groups outside 1-5 (or non-numeric) and unparseable dates are dropped.
+    """
+    sep = "\t" if "".join(gleason_file.suffixes).lower().startswith(".tsv") else None
+    raw = pd.read_csv(gleason_file, sep=sep, engine="python")
+    id_name = next((c for c in (id_col, "DFCI_MRN") if c in raw.columns), None)
+    if id_name is None:
+        raise ValueError(f"{gleason_file} has no '{id_col}'/'DFCI_MRN' column; columns={list(raw.columns)[:12]}")
+    gcol = _pick_column(raw, GLEASON_GROUP_COL_CANDIDATES, override=group_col, kind="group")
+    dcol = _pick_column(raw, GLEASON_DATE_COL_CANDIDATES, override=date_col, kind="date")
+
+    out = raw[[id_name, dcol, gcol]].rename(
+        columns={id_name: id_col, dcol: "GLEASON_DATE", gcol: "GLEASON_GROUP"}
+    ).copy()
+    out[id_col] = pd.to_numeric(out[id_col], errors="coerce")
+    out["GLEASON_DATE"] = pd.to_datetime(out["GLEASON_DATE"], errors="coerce")
+    out["GLEASON_GROUP"] = pd.to_numeric(out["GLEASON_GROUP"], errors="coerce")
+    out = out.dropna(subset=[id_col, "GLEASON_DATE", "GLEASON_GROUP"])
+    out[id_col] = out[id_col].astype(int)
+    out = out.loc[out["GLEASON_GROUP"].between(1, 5)].copy()
+    out["GLEASON_GROUP"] = out["GLEASON_GROUP"].round().astype(int)
+    if out.empty:
+        raise ValueError(
+            f"{gleason_file}: no valid Gleason records after parsing "
+            f"(group col {gcol!r}, date col {dcol!r}). Check --gleason-*-col overrides."
+        )
+    return out
 
 
 def load_mrn_subset(mrn_file: Path, id_col: str) -> set[int]:
@@ -673,10 +745,29 @@ def main(args: argparse.Namespace) -> None:
             f"retained ({len(mrn_subset)} requested in {args.restrict_to_mrns})"
         )
 
+    anchor_col = args.anchor_col
+    if anchor_col not in df.columns:
+        raise ValueError(
+            f"--anchor-col {anchor_col!r} not found in {data_path}. Available t_* "
+            f"columns: {[c for c in df.columns if c.startswith('t_')]}"
+        )
+    if anchor_col != "t_first_treatment":
+        n_with_anchor = df.loc[df[anchor_col].notna(), ID_COL].nunique()
+        print(
+            f"Anchor column: {anchor_col} "
+            f"({n_with_anchor} patients have a non-null anchor; the rest are dropped "
+            f"by the landmark filter)"
+        )
+
     merged_by_landmark: dict[int, pd.DataFrame] = {}
     for landmark_day in landmark_days:
         print(f"\n##### COHORT BUILD: LANDMARK +{landmark_day} DAYS #####")
-        _, _, merged = build_landmark_merged(df, landmark_offset_days=landmark_day)
+        _, _, merged = build_landmark_merged(
+            df,
+            landmark_offset_days=landmark_day,
+            anchor_col=anchor_col,
+            require_first_treatment=args.require_first_treatment,
+        )
         merged_by_landmark[landmark_day] = merged
 
     availability, common_mrns = build_landmark_availability_table(merged_by_landmark)
@@ -696,6 +787,22 @@ def main(args: argparse.Namespace) -> None:
             f"Loaded cancer-stage dummies from {args.stage_file}: "
             f"{n_known}/{len(common_mrns)} patients have a known stage "
             f"(columns: {', '.join(STAGE_COLUMNS)})"
+        )
+
+    # Optional anchored Gleason grade-group covariate. The closest-on/before-anchor
+    # value is landmark-independent, so the long timeline is loaded once here and
+    # resolved against each landmark's anchor below (all landmarks share the anchor).
+    gleason_long = None
+    if args.gleason_file:
+        gleason_long = load_gleason_timeline(
+            Path(args.gleason_file),
+            id_col=ID_COL,
+            date_col=args.gleason_date_col,
+            group_col=args.gleason_group_col,
+        )
+        print(
+            f"Loaded Gleason timeline from {args.gleason_file}: "
+            f"{gleason_long[ID_COL].nunique()} patients with >=1 ISUP grade-group record"
         )
 
     base_landmark_day = landmark_days[0]
@@ -744,6 +851,16 @@ def main(args: argparse.Namespace) -> None:
         aggregated = build_aggregated_table(merged, split=split)
         if stage_dummies is not None:
             aggregated = aggregated.join(stage_dummies, how="left")
+        if gleason_long is not None:
+            gleason_group = build_anchored_gleason_group(
+                gleason_long, merged, anchor_col=anchor_col
+            )
+            aggregated[GLEASON_COL] = gleason_group.reindex(aggregated.index)
+            n_gleason = int(aggregated[GLEASON_COL].notna().sum())
+            print(
+                f"  gleason:           {n_gleason}/{len(aggregated)} patients have a "
+                f"grade group on/before the anchor"
+            )
 
         agg_path = output_dir / aggregated_filename(landmark_day)
         aggregated.rename_axis(ID_COL).reset_index().to_csv(agg_path, index=False)
@@ -865,6 +982,8 @@ def main(args: argparse.Namespace) -> None:
     )
     build_manifest = {
         "data": str(args.data),
+        "anchor_col": str(args.anchor_col),
+        "require_first_treatment": bool(args.require_first_treatment),
         "landmark_days": [int(d) for d in landmark_days],
         "seed": int(args.seed),
         "test_frac": float(args.test_frac),
@@ -873,6 +992,8 @@ def main(args: argparse.Namespace) -> None:
         "stage_file": str(args.stage_file) if args.stage_file else None,
         "restrict_to_mrns": str(args.restrict_to_mrns) if args.restrict_to_mrns else None,
         "stage_columns": STAGE_COLUMNS if stage_dummies is not None else [],
+        "gleason_file": str(args.gleason_file) if args.gleason_file else None,
+        "gleason_col": GLEASON_COL if gleason_long is not None else None,
         "time_unit_days": int(args.time_unit_days),
         "long_min_coverage": float(args.long_min_coverage),
         "no_canonical_labs": bool(args.no_canonical_labs),
@@ -908,6 +1029,29 @@ if __name__ == "__main__":
             "cohort is filtered to this MRN subset before the landmark/split build, "
             "so association testing runs on only those patients."
         ),
+    )
+    parser.add_argument(
+        "--anchor-col",
+        default="t_first_treatment",
+        help=(
+            "Per-patient index-time column (days from FIRST_RECORD_DATE) that anchors "
+            "the landmark. Default t_first_treatment (standard pipeline). Use "
+            "t_treatment_anchor to predict time-to-platinum from the first "
+            "highlighted-treatment date. Patients with a null anchor are dropped."
+        ),
+    )
+    parser.add_argument(
+        "--require-first-treatment",
+        dest="require_first_treatment",
+        action="store_true",
+        default=True,
+        help="Require FIRST_TREATMENT == 1 in the cohort filter (default; on).",
+    )
+    parser.add_argument(
+        "--no-require-first-treatment",
+        dest="require_first_treatment",
+        action="store_false",
+        help="Drop the FIRST_TREATMENT == 1 requirement (e.g. for a non-treatment anchor).",
     )
     parser.add_argument(
         "--landmark-days",
@@ -970,6 +1114,26 @@ if __name__ == "__main__":
             "set, adds static CANCER_STAGE_II/III/IV dummies (Stage I reference) "
             "to each aggregated_landmark{D}.csv. PROFILE only (CAIA has no stage)."
         ),
+    )
+    parser.add_argument(
+        "--gleason-file",
+        default=None,
+        help=(
+            "Optional LLM gleason_timeline.tsv (one row per Gleason record, keyed by "
+            "DFCI_MRN). When set, adds a GLEASON_GROUP column (ISUP grade group 1-5, "
+            "closest record on/before the anchor) to each aggregated_landmark{D}.csv "
+            "for the Gleason-siloed analysis. PROFILE only."
+        ),
+    )
+    parser.add_argument(
+        "--gleason-group-col",
+        default=None,
+        help="Override the grade-group column name in the gleason file (auto-detected otherwise).",
+    )
+    parser.add_argument(
+        "--gleason-date-col",
+        default=None,
+        help="Override the date column name in the gleason file (auto-detected otherwise).",
     )
     parser.add_argument(
         "--auc-quantiles",

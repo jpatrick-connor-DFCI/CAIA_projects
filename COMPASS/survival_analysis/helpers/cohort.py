@@ -283,6 +283,52 @@ def build_pre_treatment_lab_long(
     return out
 
 
+def build_anchored_gleason_group(
+    gleason_long: pd.DataFrame,
+    merged: pd.DataFrame,
+    *,
+    anchor_col: str = "t_first_treatment",
+) -> pd.Series:
+    """Per-patient ISUP Gleason grade group closest on/before the anchor.
+
+    For each patient in ``merged`` (indexed by ``ID_COL``, carrying
+    ``FIRST_RECORD_DATE`` and ``anchor_col`` in days from first record), pick the
+    Gleason record with the largest ``t_gleason <= anchor`` where
+    ``t_gleason = (GLEASON_DATE - FIRST_RECORD_DATE).days``. This is the grade
+    group at/before treatment start and is landmark-independent (the anchor itself,
+    not anchor+offset), so the same value is used at every landmark.
+
+    ``gleason_long`` columns: ``ID_COL``, ``GLEASON_DATE`` (datetime-like),
+    ``GLEASON_GROUP`` (int 1-5). Returns an ``ID_COL``-indexed Series named
+    ``GLEASON_GROUP``; patients with no pre-anchor Gleason are absent (NaN on
+    reindex).
+    """
+    required = {ID_COL, "GLEASON_DATE", "GLEASON_GROUP"}
+    missing = required - set(gleason_long.columns)
+    if missing:
+        raise ValueError(f"build_anchored_gleason_group missing columns: {sorted(missing)}")
+    if "FIRST_RECORD_DATE" not in merged.columns:
+        raise ValueError("merged must carry FIRST_RECORD_DATE to anchor Gleason records.")
+    if anchor_col not in merged.columns:
+        raise ValueError(f"merged must carry the anchor column {anchor_col!r}.")
+
+    first_record = _coerce_datetime(merged["FIRST_RECORD_DATE"])
+    anchor = merged[anchor_col].astype(float)
+
+    g = gleason_long[[ID_COL, "GLEASON_DATE", "GLEASON_GROUP"]].copy()
+    g["GLEASON_DATE"] = _coerce_datetime(g["GLEASON_DATE"])
+    g["GLEASON_GROUP"] = pd.to_numeric(g["GLEASON_GROUP"], errors="coerce")
+    g["_first_record"] = g[ID_COL].map(first_record)
+    g["_anchor"] = g[ID_COL].map(anchor)
+    g = g.dropna(subset=[ID_COL, "GLEASON_DATE", "GLEASON_GROUP", "_first_record", "_anchor"])
+    g["t_gleason"] = (g["GLEASON_DATE"] - g["_first_record"]).dt.days.astype(float)
+
+    # closest on/before the anchor -> largest t_gleason not exceeding the anchor
+    g = g.loc[g["t_gleason"] <= g["_anchor"]]
+    g = g.sort_values([ID_COL, "t_gleason"]).drop_duplicates(ID_COL, keep="last")
+    return g.set_index(ID_COL)["GLEASON_GROUP"].astype(float)
+
+
 def _compute_patient_lab_slopes(pre_treatment: pd.DataFrame) -> pd.DataFrame:
     """OLS slope of LAB_VALUE vs t_lab (per day) per (DFCI_MRN, LAB_NAME).
 
@@ -426,12 +472,31 @@ def build_landmark_merged(
     df: pd.DataFrame,
     *,
     landmark_offset_days: int,
+    anchor_col: str = "t_first_treatment",
+    require_first_treatment: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    outcome_df = make_outcome_df(df, landmark_offset_days=landmark_offset_days)
+    """Build the landmarked outcome + feature merge for a given anchor.
+
+    ``anchor_col`` defaults to ``t_first_treatment`` (the standard pipeline). A
+    non-standard anchor (e.g. ``t_treatment_anchor``) is not among the patient-level
+    columns make_outcome_df keeps by default, so it is passed through
+    ``extra_anchor_cols`` to survive the per-patient dedup — mirroring how the
+    genomic arm carries ``t_sample``.
+    """
+    extra_anchor_cols = () if anchor_col == "t_first_treatment" else (anchor_col,)
+    outcome_df = make_outcome_df(
+        df,
+        landmark_offset_days=landmark_offset_days,
+        anchor_col=anchor_col,
+        extra_anchor_cols=extra_anchor_cols,
+        require_first_treatment=require_first_treatment,
+    )
     print(f"Outcome table @ landmark +{landmark_offset_days}d: {len(outcome_df)} patients")
 
     print(f"Building raw aggregated lab summary feature matrix through landmark +{landmark_offset_days}d...")
-    feature_df = build_feature_matrix(df, landmark_offset_days=landmark_offset_days)
+    feature_df = build_feature_matrix(
+        df, landmark_offset_days=landmark_offset_days, anchor_col=anchor_col
+    )
 
     merged = feature_df.join(outcome_df, how="inner")
     merged = merged.loc[merged[AGE_COL].notna()].copy()

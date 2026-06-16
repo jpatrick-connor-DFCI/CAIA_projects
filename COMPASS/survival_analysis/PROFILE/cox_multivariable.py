@@ -55,6 +55,7 @@ from cox_aggregated import (  # noqa: E402
     DEFAULT_N_FOLDS,
     DEFAULT_SEED,
     ENDPOINTS,
+    GLEASON_COL,
     HORIZON_GRID_FILENAME,
     ID_COL,
     RESULTS,
@@ -82,9 +83,12 @@ def _run_multivariable_landmark(
     out,
 ):
     """Multivariable elastic-net arm for one landmark; appends to ``out`` lists."""
+    static_covariate_cols = (GLEASON_COL,) if args.with_gleason else ()
     multivariable_train_val = ctx.train_val.copy()
     multivariable_test = ctx.test.copy()
     print("\n##### ARM 2: MULTIVARIABLE ELASTIC-NET (all endpoints) #####")
+    if static_covariate_cols:
+        print(f"  always-included covariates: age + {', '.join(static_covariate_cols)} (unpenalized)")
     for endpoint in endpoints:
         print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
         print(ENDPOINTS[endpoint]["description"])
@@ -102,6 +106,7 @@ def _run_multivariable_landmark(
             pre_treatment_lab_df=ctx.pre_treatment_lab_df,
             horizon_grid=horizon_grid,
             min_patient_coverage=min_patient_coverage,
+            static_covariate_cols=static_covariate_cols,
         )
         if not fold_canonical_labs_df.empty:
             fold_canonical_labs_df.insert(0, "landmark_days", landmark_day)
@@ -127,6 +132,7 @@ def _run_multivariable_landmark(
             auc_max_time_units=auc_max_time_units,
             horizon_grid=horizon_grid,
             canonical_labs=ctx.canonical_labs,
+            static_covariate_cols=static_covariate_cols,
         )
         metrics_row["landmark_days"] = landmark_day
         summary_df.insert(0, "landmark_days", landmark_day)
@@ -179,11 +185,13 @@ def _run_baseline_landmark(
     horizon grid and the metrics CSV schema matches the multivariable arm.
     """
     stage_cols = stage_feature_columns(ctx.merged)
+    static_covariate_cols = (GLEASON_COL,) if args.with_gleason else ()
     baseline_penalizer = float(args.cv_penalizers[0])
     baseline_l1_ratio = float(args.cv_l1_ratios[0])
-    print("\n##### BASELINE: AGE(+STAGE)-ONLY (all endpoints) #####")
+    extra = list(stage_cols) + list(static_covariate_cols)
+    print("\n##### BASELINE: AGE(+STAGE+GLEASON)-ONLY (all endpoints) #####")
     print(
-        "  covariates: age" + (f" + {', '.join(stage_cols)}" if stage_cols else " (no stage source)")
+        "  covariates: age" + (f" + {', '.join(extra)}" if extra else " (no stage/gleason source)")
     )
     for endpoint in endpoints:
         print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
@@ -208,6 +216,7 @@ def _run_baseline_landmark(
             auc_max_time_units=auc_max_time_units,
             horizon_grid=endpoint_horizon_grids[endpoint],
             canonical_labs=[],
+            static_covariate_cols=static_covariate_cols,
         )
         metrics_row["landmark_days"] = landmark_day
         metrics_row["n_stage_cols"] = len(stage_cols)
@@ -274,7 +283,13 @@ def main(args: argparse.Namespace) -> None:
             landmark_day,
             min_patient_coverage=min_patient_coverage,
             restrict_to_stage=args.restrict_to_stage,
+            restrict_to_gleason=args.restrict_to_gleason,
         )
+        if args.with_gleason and GLEASON_COL not in ctx.merged.columns:
+            raise SystemExit(
+                "--with-gleason requires a GLEASON_GROUP column in the aggregated inputs "
+                "(build with --gleason-file; PROFILE only)."
+            )
         feature_selection_frames.append(ctx.feature_meta_selected)
 
         endpoint_horizon_grids, horizon_grid_df = build_endpoint_horizon_grids(
@@ -412,6 +427,23 @@ if __name__ == "__main__":
             "CANCER_STAGE_*) before fitting/evaluating, for a complete-case "
             "age+stage-baseline vs. labs comparison on a matched population. "
             "Errors if no stage columns are present (PROFILE only)."
+        ),
+    )
+    parser.add_argument(
+        "--restrict-to-gleason",
+        action="store_true",
+        help=(
+            "Restrict the cohort to Gleason-available patients (non-missing "
+            "GLEASON_GROUP) before fitting/evaluating — the siloed Gleason analysis. "
+            "Errors if no GLEASON_GROUP column is present (build with --gleason-file)."
+        ),
+    )
+    parser.add_argument(
+        "--with-gleason",
+        action="store_true",
+        help=(
+            "Include GLEASON_GROUP as an always-present, unpenalized covariate in the "
+            "multivariable (and baseline) Cox model, alongside age (and stage)."
         ),
     )
     parser.add_argument(

@@ -81,12 +81,14 @@ from cox_aggregated import (  # noqa: E402
     DEFAULT_LANDMARK_DAYS,
     DEFAULT_SEED,
     ENDPOINTS,
+    GLEASON_COL,
     ID_COL,
     OUTCOME_COLUMNS,
     RESULTS,
     _load_build_manifest,
     _load_prebuilt_landmark,
     compute_ipcw_auc_t,
+    gleason_available_mask,
     normalize_endpoints,
     normalize_landmark_days,
     select_feature_columns,
@@ -149,7 +151,12 @@ def _truncate_features_by_rank(selected, feature_meta, max_features):
     )
 
 
-def fit_preprocessor(train_df: pd.DataFrame, *, feature_cols: list[str]) -> dict:
+def fit_preprocessor(
+    train_df: pd.DataFrame,
+    *,
+    feature_cols: list[str],
+    static_cols: tuple[str, ...] = (),
+) -> dict:
     base_feature_cols = [
         col
         for col in feature_cols
@@ -160,7 +167,8 @@ def fit_preprocessor(train_df: pd.DataFrame, *, feature_cols: list[str]) -> dict
         for col in base_feature_cols
         if train_df[col].isna().nunique(dropna=False) > 1
     ]
-    covariate_cols = list(base_feature_cols) + missing_cols + ["age"]
+    static_cols = tuple(static_cols)
+    covariate_cols = list(base_feature_cols) + missing_cols + ["age"] + list(static_cols)
 
     # The age(+stage) baseline can have zero lab features (CAIA has no stage
     # source, so base_feature_cols is empty). In that case the matrix is age
@@ -182,6 +190,16 @@ def fit_preprocessor(train_df: pd.DataFrame, *, feature_cols: list[str]) -> dict
 
     age_scaler = StandardScaler()
     age_scaler.fit(train_df[[AGE_COL]])
+
+    # Always-included static covariates (e.g. GLEASON_GROUP): own imputer + scaler,
+    # appended after age. XGBoost is unpenalized, so inclusion is the whole story.
+    static_imputer: SimpleImputer | None = None
+    static_scaler: StandardScaler | None = None
+    if static_cols:
+        static_imputer = SimpleImputer(strategy="mean")
+        static_scaler = StandardScaler()
+        static_scaler.fit(static_imputer.fit_transform(train_df[list(static_cols)]))
+
     xgb_feature_names = [_xgb_safe_name(c) for c in covariate_cols]
     if len(set(xgb_feature_names)) != len(xgb_feature_names):
         raise ValueError(
@@ -190,29 +208,36 @@ def fit_preprocessor(train_df: pd.DataFrame, *, feature_cols: list[str]) -> dict
     return {
         "base_feature_cols": base_feature_cols,
         "missing_cols": missing_cols,
+        "static_cols": list(static_cols),
         "covariate_cols": covariate_cols,
         "xgb_feature_names": xgb_feature_names,
         "imputer": imputer,
         "scaler": scaler,
         "age_scaler": age_scaler,
+        "static_imputer": static_imputer,
+        "static_scaler": static_scaler,
     }
 
 
 def transform_xgb_matrix(df: pd.DataFrame, preprocessor: dict) -> np.ndarray:
     base_feature_cols = preprocessor["base_feature_cols"]
     missing_cols = preprocessor["missing_cols"]
+    static_cols = preprocessor.get("static_cols", [])
     age = preprocessor["age_scaler"].transform(df[[AGE_COL]]).reshape(-1, 1)
-    if not base_feature_cols:
-        # Age-only baseline: no lab features to impute/scale.
-        return age.astype(float)
-    x_values = preprocessor["imputer"].transform(df[base_feature_cols])
-    if missing_cols:
-        missing_source = [strip_suffix(col, "__missing") for col in missing_cols]
-        x_values = np.hstack(
-            [x_values, df[missing_source].isna().astype(float).to_numpy()]
-        )
-    x_values = preprocessor["scaler"].transform(x_values)
-    return np.hstack([x_values, age]).astype(float)
+    blocks: list[np.ndarray] = []
+    if base_feature_cols:
+        x_values = preprocessor["imputer"].transform(df[base_feature_cols])
+        if missing_cols:
+            missing_source = [strip_suffix(col, "__missing") for col in missing_cols]
+            x_values = np.hstack(
+                [x_values, df[missing_source].isna().astype(float).to_numpy()]
+            )
+        blocks.append(preprocessor["scaler"].transform(x_values))
+    blocks.append(age)
+    if static_cols:
+        static_vals = preprocessor["static_imputer"].transform(df[static_cols])
+        blocks.append(preprocessor["static_scaler"].transform(static_vals))
+    return np.hstack(blocks).astype(float)
 
 
 def signed_cox_label(duration: pd.Series, event: pd.Series) -> np.ndarray:
@@ -270,7 +295,8 @@ def fit_xgb_cox(
     hyperparameters (subsample / colsample / lambda / alpha) come from args.
     """
     require_xgboost()
-    preprocessor = fit_preprocessor(train_df, feature_cols=feature_cols)
+    static_cols = (GLEASON_COL,) if getattr(args, "with_gleason", False) else ()
+    preprocessor = fit_preprocessor(train_df, feature_cols=feature_cols, static_cols=static_cols)
     covariate_cols = preprocessor["covariate_cols"]
     xgb_names = preprocessor["xgb_feature_names"]
     x_train = transform_xgb_matrix(train_df, preprocessor)
@@ -974,6 +1000,28 @@ def main(args: argparse.Namespace) -> None:
         )
         # Admin censoring removed (DeepHit silenced) — train/test use full follow-up.
 
+        if args.restrict_to_gleason:
+            if GLEASON_COL not in merged.columns:
+                raise SystemExit(
+                    "--restrict-to-gleason requires a GLEASON_GROUP column in the aggregated "
+                    "inputs (build with --gleason-file; PROFILE only)."
+                )
+            keep = merged.index[gleason_available_mask(merged)]
+            n_before = len(merged)
+            merged = merged.loc[merged.index.intersection(keep)]
+            train_val = train_val.loc[train_val.index.intersection(keep)]
+            test = test.loc[test.index.intersection(keep)]
+            print(
+                f"  [restrict-to-gleason] Gleason-available (siloed) cohort: "
+                f"{len(merged)}/{n_before} patients "
+                f"(train_val={len(train_val)}, test={len(test)})"
+            )
+        if args.with_gleason and GLEASON_COL not in merged.columns:
+            raise SystemExit(
+                "--with-gleason requires a GLEASON_GROUP column in the aggregated inputs "
+                "(build with --gleason-file; PROFILE only)."
+            )
+
         if args.restrict_to_stage:
             stage_cols_avail = stage_feature_columns(merged)
             if not stage_cols_avail:
@@ -1140,6 +1188,23 @@ if __name__ == "__main__":
             "CANCER_STAGE_*) before fitting/evaluating, for a complete-case "
             "comparison on a matched population. Errors if no stage columns "
             "are present (PROFILE only)."
+        ),
+    )
+    parser.add_argument(
+        "--restrict-to-gleason",
+        action="store_true",
+        help=(
+            "Restrict the cohort to Gleason-available patients (non-missing "
+            "GLEASON_GROUP) before fitting/evaluating — the siloed Gleason analysis. "
+            "Errors if no GLEASON_GROUP column is present (build with --gleason-file)."
+        ),
+    )
+    parser.add_argument(
+        "--with-gleason",
+        action="store_true",
+        help=(
+            "Include GLEASON_GROUP as an additional input feature (mean-imputed, scaled) "
+            "alongside the lab features and age."
         ),
     )
     parser.add_argument(

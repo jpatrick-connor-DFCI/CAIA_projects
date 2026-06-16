@@ -190,6 +190,7 @@ OUTCOME_COLUMNS = {
     "EITHER",
     "t_diagnosis",
     "t_first_treatment",
+    "t_treatment_anchor",
     "t_platinum",
     "t_platinum_from_first_record",
     "t_last_contact",
@@ -204,6 +205,10 @@ OUTCOME_COLUMNS = {
     "CANCER_STAGE_II",
     "CANCER_STAGE_III",
     "CANCER_STAGE_IV",
+    # Anchored Gleason grade group (PROFILE Gleason-siloed analysis). Excluded from
+    # the lab-feature universe; consumed explicitly as a static covariate via the
+    # --with-gleason flag in the univariate / multivariable / xgboost arms.
+    "GLEASON_GROUP",
 }
 
 # Static cancer-stage dummy columns produced by build_prediction_inputs.py when
@@ -211,10 +216,26 @@ OUTCOME_COLUMNS = {
 # whichever of these are present; CAIA has none, so the baseline is age-only.
 STAGE_FEATURE_COLUMNS = ("CANCER_STAGE_II", "CANCER_STAGE_III", "CANCER_STAGE_IV")
 
+# Anchored Gleason grade-group covariate (ordinal ISUP 1-5), written by
+# build_prediction_inputs.py --gleason-file. A single always-included covariate in
+# the Gleason-siloed analysis.
+GLEASON_COL = "GLEASON_GROUP"
+
 
 def stage_feature_columns(data: pd.DataFrame) -> list[str]:
     """Return the cancer-stage dummy columns present in ``data`` (may be empty)."""
     return [c for c in STAGE_FEATURE_COLUMNS if c in data.columns]
+
+
+def gleason_available_mask(data: pd.DataFrame) -> pd.Series:
+    """Boolean mask of rows with a non-missing Gleason grade group.
+
+    With no GLEASON_GROUP column present, every row is treated as available (so
+    callers that don't build with --gleason-file are unaffected).
+    """
+    if GLEASON_COL not in data.columns:
+        return pd.Series(True, index=data.index)
+    return data[GLEASON_COL].notna()
 
 
 def stage_available_mask(data: pd.DataFrame, stage_cols: list[str]) -> pd.Series:
@@ -377,8 +398,13 @@ def build_model_matrices(
     feature_cols: list[str],
     duration_col: str,
     event_col: str,
+    static_covariate_cols: tuple[str, ...] = (),
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
-    """Always includes age as the last covariate; age is the unpenalized column."""
+    """Always includes age as a covariate; age is unpenalized.
+
+    ``static_covariate_cols`` (e.g. ``("GLEASON_GROUP",)``) are scaled with their
+    own scaler and appended like age, so callers can mark them unpenalized too.
+    """
     base_feature_cols = [
         col
         for col in feature_cols
@@ -430,6 +456,23 @@ def build_model_matrices(
     train_model["age"] = train_age
     eval_model["age"] = eval_age
     covariate_cols.append("age")
+
+    # Always-included static covariates (e.g. GLEASON_GROUP): mean-imputed + scaled
+    # with their own scaler, appended like age. Callers add them to unpenalized_cols.
+    for cov in static_covariate_cols:
+        if cov not in train_df.columns:
+            raise ValueError(f"static covariate {cov!r} not present in the model frame.")
+        cov_imputer = SimpleImputer(strategy="mean")
+        cov_scaler = StandardScaler()
+        train_cov = cov_scaler.fit_transform(
+            cov_imputer.fit_transform(train_df[[cov]].to_numpy(dtype=float))
+        ).reshape(-1)
+        eval_cov = cov_scaler.transform(
+            cov_imputer.transform(eval_df[[cov]].to_numpy(dtype=float))
+        ).reshape(-1)
+        train_model[cov] = train_cov
+        eval_model[cov] = eval_cov
+        covariate_cols.append(cov)
 
     if not covariate_cols:
         raise ValueError("No usable covariates remained after train-fold filtering.")
@@ -759,6 +802,110 @@ def coxnet_coefficients(
     return pd.Series(coefs.reshape(-1), index=covariate_cols, name="coef")
 
 
+def _static_covariate_association_row(
+    data: pd.DataFrame,
+    *,
+    covariate_col: str,
+    endpoint: str,
+    duration_col: str,
+    event_col: str,
+    min_events_per_feature: int,
+    fallback_penalizer: float,
+) -> dict:
+    """Univariate Cox [AGE + covariate] for one static covariate (e.g. GLEASON_GROUP).
+
+    Returns a row in the same schema as the lab-feature associations (n_obs / missing
+    columns left NaN) so it slots straight into the univariate table and the shared
+    BH q-value pool.
+    """
+    total_patients = len(data)
+    result = {
+        "endpoint": endpoint,
+        "feature": covariate_col,
+        "lab_name": covariate_col,
+        "feature_stat": "",
+        "n_obs_feature": "",
+        "coverage": np.nan,
+        "n_obs_coverage": np.nan,
+        "n_patients_total": total_patients,
+        "n_patients_used": 0,
+        "n_patients_observed": 0,
+        "n_patients_imputed": 0,
+        "n_patients_n_obs_observed": 0,
+        "n_patients_n_obs_imputed": 0,
+        "n_events_used": 0,
+        "coef_feature": np.nan,
+        "hazard_ratio_per_sd": np.nan,
+        "ci_lower": np.nan,
+        "ci_upper": np.nan,
+        "p_value": np.nan,
+        "coef_n_obs": np.nan,
+        "hazard_ratio_n_obs_per_sd": np.nan,
+        "ci_lower_n_obs": np.nan,
+        "ci_upper_n_obs": np.nan,
+        "p_value_n_obs": np.nan,
+        "coef_missing": np.nan,
+        "p_value_missing": np.nan,
+        "coef_age": np.nan,
+        "p_value_age": np.nan,
+        "fit_penalizer": np.nan,
+        "note": "static_covariate",
+    }
+    if covariate_col not in data.columns:
+        result["note"] = "static_covariate_missing_column"
+        return result
+
+    cov_df = data[[covariate_col, duration_col, event_col, AGE_COL]].copy()
+    result["coverage"] = float(cov_df[covariate_col].notna().mean())
+    cov_df = cov_df.dropna(subset=[covariate_col, duration_col, event_col, AGE_COL])
+    result["n_patients_used"] = len(cov_df)
+    result["n_patients_observed"] = len(cov_df)
+    result["n_events_used"] = int(cov_df[event_col].sum()) if len(cov_df) else 0
+    if len(cov_df) == 0:
+        result["note"] = "no_rows_with_outcomes"
+        return result
+    if result["n_events_used"] < min_events_per_feature:
+        result["note"] = f"too_few_events_lt_{min_events_per_feature}"
+        return result
+
+    cov_values = cov_df[covariate_col].to_numpy(dtype=float)
+    cov_sd = float(np.std(cov_values, ddof=0))
+    if not np.isfinite(cov_sd) or cov_sd <= 0:
+        result["note"] = "static_covariate_no_variation"
+        return result
+    cov_df["feature_z"] = (cov_values - float(np.mean(cov_values))) / cov_sd
+
+    age_values = cov_df[AGE_COL].to_numpy(dtype=float)
+    age_sd = float(np.std(age_values, ddof=0))
+    if np.isfinite(age_sd) and age_sd > 0:
+        cov_df["age"] = (age_values - float(np.mean(age_values))) / age_sd
+    else:
+        cov_df["age"] = age_values - float(np.mean(age_values))
+
+    model, used_penalizer, note = fit_cox_with_fallback(
+        cov_df[["feature_z", "age", duration_col, event_col]],
+        duration_col=duration_col,
+        event_col=event_col,
+        penalizers=[0.0, fallback_penalizer],
+        l1_ratio=0.0,
+    )
+    result["fit_penalizer"] = used_penalizer
+    result["note"] = f"static_covariate;{note}" if note else "static_covariate"
+    if model is None:
+        return result
+
+    summary_row = model.summary.loc["feature_z"]
+    result["coef_feature"] = float(summary_row["coef"])
+    result["hazard_ratio_per_sd"] = float(summary_row["exp(coef)"])
+    result["ci_lower"] = float(summary_row["exp(coef) lower 95%"])
+    result["ci_upper"] = float(summary_row["exp(coef) upper 95%"])
+    result["p_value"] = float(summary_row["p"])
+    age_row = model.summary.loc["age"]
+    result["coef_age"] = float(age_row["coef"])
+    result["p_value_age"] = float(age_row["p"])
+    return result
+
+
 def run_univariate_nobs_adjusted_associations(
     data: pd.DataFrame,
     *,
@@ -766,8 +913,14 @@ def run_univariate_nobs_adjusted_associations(
     endpoint: str,
     min_events_per_feature: int,
     fallback_penalizer: float,
+    static_covariate_cols: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """Arm 1b: fit Cox on [AGE + matching LAB__n_observations + feature]."""
+    """Arm 1b: fit Cox on [AGE + matching LAB__n_observations + feature].
+
+    ``static_covariate_cols`` (e.g. ``("GLEASON_GROUP",)``) are additionally fit as
+    [AGE + covariate] and appended as rows in the same schema, so they share the
+    BH q-value pool with the lab associations.
+    """
     duration_col = ENDPOINTS[endpoint]["duration_col"]
     event_col = ENDPOINTS[endpoint]["event_col"]
     total_patients = len(data)
@@ -928,6 +1081,19 @@ def run_univariate_nobs_adjusted_associations(
         result["p_value_age"] = float(age_row["p"])
         rows.append(result)
 
+    for covariate_col in static_covariate_cols:
+        rows.append(
+            _static_covariate_association_row(
+                data,
+                covariate_col=covariate_col,
+                endpoint=endpoint,
+                duration_col=duration_col,
+                event_col=event_col,
+                min_events_per_feature=min_events_per_feature,
+                fallback_penalizer=fallback_penalizer,
+            )
+        )
+
     associations = pd.DataFrame(rows)
     associations["q_value"] = benjamini_hochberg(associations["p_value"])
     return associations.sort_values(["p_value", "q_value", "feature"], na_position="last").reset_index(drop=True)
@@ -990,6 +1156,7 @@ def tune_multivariable_model(
     pre_treatment_lab_df: pd.DataFrame,
     horizon_grid: np.ndarray,
     min_patient_coverage: float,
+    static_covariate_cols: tuple[str, ...] = (),
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict, pd.DataFrame]:
     """Arm 2: 5-fold CV over (penalizer x l1_ratio) grid (elastic-net), AGE unpenalized.
 
@@ -1079,6 +1246,7 @@ def tune_multivariable_model(
                     feature_cols=fold_features,
                     duration_col=duration_col,
                     event_col=event_col,
+                    static_covariate_cols=static_covariate_cols,
                 )
                 model, _, note = fit_coxnet_with_fallback(
                     train_mdf,
@@ -1087,7 +1255,7 @@ def tune_multivariable_model(
                     penalizers=[float(penalizer)],
                     l1_ratio=float(l1_ratio),
                     covariate_cols=covariate_cols,
-                    unpenalized_cols=["age"],
+                    unpenalized_cols=["age", *static_covariate_cols],
                 )
                 row["note"] = note
                 row["n_covariates"] = len(covariate_cols)
@@ -1213,6 +1381,7 @@ def fit_final_multivariable_model(
     auc_max_time_units: int | None,
     horizon_grid: np.ndarray,
     canonical_labs: list[str],
+    static_covariate_cols: tuple[str, ...] = (),
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Refit on full train_val using the train_val canonical labs and evaluate on test.
 
@@ -1236,6 +1405,7 @@ def fit_final_multivariable_model(
         feature_cols=feature_cols,
         duration_col=duration_col,
         event_col=event_col,
+        static_covariate_cols=static_covariate_cols,
     )
     fallback_penalizers = [float(penalizer)] + sorted(
         {float(p) for p in penalizer_grid if float(p) > float(penalizer)}
@@ -1247,7 +1417,7 @@ def fit_final_multivariable_model(
         penalizers=fallback_penalizers,
         l1_ratio=float(l1_ratio),
         covariate_cols=covariate_cols,
-        unpenalized_cols=["age"],
+        unpenalized_cols=["age", *static_covariate_cols],
     )
     if model is None:
         raise RuntimeError(f"Final multivariable model failed for endpoint '{endpoint}': {note}")
@@ -1524,20 +1694,37 @@ def prepare_landmark_context(
     *,
     min_patient_coverage: float,
     restrict_to_stage: bool,
+    restrict_to_gleason: bool = False,
 ) -> LandmarkContext:
     """Load prebuilt inputs and run the shared cohort + feature setup for a landmark.
 
     Loads the aggregated table written by build_prediction_inputs.py, optionally
-    restricts to stage-available patients, derives the canonical lab set from
-    train_val pre-treatment labs, and runs the train_val feature selection. The
-    returned context is everything the univariate and multivariable/baseline arms
-    consume, so the two analysis scripts share an identical cohort, canonical lab
-    set, and selected-feature set.
+    restricts to stage-available (and/or Gleason-available) patients, derives the
+    canonical lab set from train_val pre-treatment labs, and runs the train_val
+    feature selection. The returned context is everything the univariate and
+    multivariable/baseline arms consume, so the two analysis scripts share an
+    identical cohort, canonical lab set, and selected-feature set.
     """
     print(f"\n##### LANDMARK ANALYSES: +{landmark_day} DAYS #####")
     merged, train_val, test, pre_treatment_lab_df = _load_prebuilt_landmark(
         inputs_dir, landmark_day
     )
+    if restrict_to_gleason:
+        if GLEASON_COL not in merged.columns:
+            raise SystemExit(
+                "--restrict-to-gleason requires a GLEASON_GROUP column in the aggregated "
+                "inputs (build with --gleason-file; PROFILE only)."
+            )
+        keep = merged.index[gleason_available_mask(merged)]
+        n_before = len(merged)
+        merged = merged.loc[merged.index.intersection(keep)]
+        train_val = train_val.loc[train_val.index.intersection(keep)]
+        test = test.loc[test.index.intersection(keep)]
+        print(
+            f"  [restrict-to-gleason] Gleason-available (siloed) cohort: "
+            f"{len(merged)}/{n_before} patients "
+            f"(train_val={len(train_val)}, test={len(test)})"
+        )
     if restrict_to_stage:
         stage_cols = stage_feature_columns(merged)
         if not stage_cols:

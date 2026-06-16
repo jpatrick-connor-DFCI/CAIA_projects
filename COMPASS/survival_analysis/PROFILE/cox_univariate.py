@@ -35,6 +35,7 @@ from cox_aggregated import (  # noqa: E402
     DEFAULT_LANDMARK_DAYS,
     DEFAULT_MIN_EVENTS_PER_FEATURE,
     ENDPOINTS,
+    GLEASON_COL,
     ID_COL,
     RESULTS,
     _load_build_manifest,
@@ -99,6 +100,8 @@ def main(args: argparse.Namespace) -> None:
         f"(min_patient_coverage={min_patient_coverage})"
     )
 
+    static_covariate_cols: tuple[str, ...] = (GLEASON_COL,) if args.with_gleason else ()
+
     feature_selection_frames: list[pd.DataFrame] = []
     univariate_frames: list[pd.DataFrame] = []
 
@@ -108,7 +111,13 @@ def main(args: argparse.Namespace) -> None:
             landmark_day,
             min_patient_coverage=min_patient_coverage,
             restrict_to_stage=args.restrict_to_stage,
+            restrict_to_gleason=args.restrict_to_gleason,
         )
+        if args.with_gleason and GLEASON_COL not in ctx.univariate_data.columns:
+            raise SystemExit(
+                "--with-gleason requires a GLEASON_GROUP column in the aggregated inputs "
+                "(build with --gleason-file; PROFILE only)."
+            )
         feature_selection_frames.append(ctx.feature_meta_selected)
 
         print("\n##### ARM 1: UNIVARIATE (n_obs-adjusted, full follow-up, all endpoints) #####")
@@ -121,6 +130,7 @@ def main(args: argparse.Namespace) -> None:
                 endpoint=endpoint,
                 min_events_per_feature=args.min_events_per_feature,
                 fallback_penalizer=args.univariate_penalizer,
+                static_covariate_cols=static_covariate_cols,
             )
             adjusted_df.insert(0, "landmark_days", landmark_day)
             univariate_frames.append(adjusted_df[UNIVARIATE_KEEP_COLS].copy())
@@ -190,6 +200,23 @@ if __name__ == "__main__":
             "Restrict the cohort to stage-available patients (non-missing "
             "CANCER_STAGE_*) before fitting, for a complete-case comparison on a "
             "matched population. Errors if no stage columns are present (PROFILE only)."
+        ),
+    )
+    parser.add_argument(
+        "--restrict-to-gleason",
+        action="store_true",
+        help=(
+            "Restrict the cohort to Gleason-available patients (non-missing "
+            "GLEASON_GROUP) before fitting — the siloed Gleason analysis. Errors if no "
+            "GLEASON_GROUP column is present (build with --gleason-file; PROFILE only)."
+        ),
+    )
+    parser.add_argument(
+        "--with-gleason",
+        action="store_true",
+        help=(
+            "Additionally test GLEASON_GROUP as a univariate covariate ([AGE + gleason]), "
+            "appended to the associations table and the shared BH q-value pool."
         ),
     )
     parser.add_argument(
