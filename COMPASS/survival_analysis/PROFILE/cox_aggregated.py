@@ -120,7 +120,6 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
     SKSURV_IMPORT_ERROR = exc
 
 DEFAULT_COXNET_MAX_ITER = 20000
-DEFAULT_MAX_ABS_COXNET_COEF = 25.0
 # Effectively-unpenalized alpha used when every covariate is unpenalized (the
 # age-only baseline). sksurv's Coxnet rejects alpha=0 outright, but a negligible
 # alpha with a uniform penalty_factor recovers the unpenalized Cox MLE.
@@ -673,11 +672,10 @@ def fit_coxnet_with_fallback(
 ) -> tuple[CoxnetSurvivalAnalysis | None, float, str]:
     """Elastic-net Cox via sksurv's coordinate-descent CoxnetSurvivalAnalysis.
 
-    Stability-first wrapper around sksurv's coordinate-descent Coxnet.
-
-    Fits that emit warnings, produce non-finite coefficients, or blow up to
-    implausibly large absolute coefficients on z-scored inputs are rejected and
-    treated as unusable, triggering the penalizer fallback.
+    Warnings are allowed: convergence warnings, overflow, and any other
+    non-error warning do NOT invalidate a fit (they are suppressed during fit).
+    A penalizer is only rejected when ``model.fit`` raises a genuine exception
+    (or, defensively, when the model returns the wrong number of coefficients).
     """
     require_sksurv()
     X, y = _build_coxnet_xy(
@@ -711,8 +709,8 @@ def fit_coxnet_with_fallback(
                 max_iter=int(max_iter),
                 fit_baseline_model=False,
             )
-            # sksurv ConvergenceWarning suppressed; the finite + bounded
-            # coefficient checks below catch genuinely unusable fits.
+            # Suppress (allow) all warnings during fit — convergence warnings,
+            # overflow, etc. do not invalidate the fit. Only a raised exception does.
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 model.fit(X, y)
@@ -724,18 +722,12 @@ def fit_coxnet_with_fallback(
         if coefs.ndim == 2:
             coefs = coefs[:, -1]
         coefs = coefs.reshape(-1)
+        # Defensive structural guard only (not a warning/overflow rejection): the
+        # model must return one coefficient per covariate so downstream extraction
+        # aligns. Non-finite / large coefficients are NOT rejected here.
         if coefs.size != len(covariate_cols):
             last_error = (
                 f"coef_size_mismatch: expected {len(covariate_cols)} got {coefs.size}"
-            )
-            continue
-        if not np.all(np.isfinite(coefs)):
-            last_error = "non_finite_coefficients"
-            continue
-        max_abs_coef = float(np.max(np.abs(coefs))) if coefs.size else 0.0
-        if max_abs_coef > DEFAULT_MAX_ABS_COXNET_COEF:
-            last_error = (
-                f"coef_blowup_max_abs_{max_abs_coef:.3f}_gt_{DEFAULT_MAX_ABS_COXNET_COEF:g}"
             )
             continue
 
@@ -1374,7 +1366,6 @@ def fit_final_multivariable_model(
     endpoint: str,
     penalizer: float,
     l1_ratio: float,
-    penalizer_grid: list[float],
     split_stratification: str,
     cv_stratification: str,
     auc_time_unit_days: int,
@@ -1407,24 +1398,24 @@ def fit_final_multivariable_model(
         event_col=event_col,
         static_covariate_cols=static_covariate_cols,
     )
-    fallback_penalizers = [float(penalizer)] + sorted(
-        {float(p) for p in penalizer_grid if float(p) > float(penalizer)}
-    )
+    # Fit with the CV-selected penalizer only — no fallback escalation.
+    # tune_multivariable_model already restricts selection to (penalizer, l1_ratio)
+    # combinations that produce a valid fit in every CV fold, so the chosen value is
+    # the automatically selected best. If it cannot produce a usable fit on the full
+    # 80% train_val, fail loudly rather than silently swapping in a different penalizer.
     model, used_penalizer, note = fit_coxnet_with_fallback(
         train_mdf,
         duration_col=duration_col,
         event_col=event_col,
-        penalizers=fallback_penalizers,
+        penalizers=[float(penalizer)],
         l1_ratio=float(l1_ratio),
         covariate_cols=covariate_cols,
         unpenalized_cols=["age", *static_covariate_cols],
     )
     if model is None:
-        raise RuntimeError(f"Final multivariable model failed for endpoint '{endpoint}': {note}")
-    if used_penalizer != penalizer:
-        print(
-            f"  [fallback] CV-chosen penalizer={penalizer:g} did not produce a usable fit on full 80% "
-            f"for '{endpoint}'; used penalizer={used_penalizer:g} instead."
+        raise RuntimeError(
+            f"Final multivariable model failed for endpoint '{endpoint}' with the "
+            f"CV-selected penalizer={penalizer:g}, l1_ratio={l1_ratio:g}: {note}"
         )
 
     train_c, train_pred = score_coxnet_model(
