@@ -38,7 +38,7 @@ if str(SURVIVAL_DIR) not in sys.path:
 
 sys.path.insert(
     0,
-    "/Users/connorpa/Documents/BIG PhD/Gusev Lab/Projects/Official CAIA Project Repos/PROFILE-testing/COMPASS/survival_analysis",
+    "/data/gusev/USERS/jpconnor/code/CAIA/COMPASS/survival_analysis",
 )
 
 from helpers.cohort import (  # noqa: E402

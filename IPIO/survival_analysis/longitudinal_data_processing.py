@@ -9,7 +9,7 @@ import pandas as pd
 # physiologic-range filtering) is dataset-agnostic and reused here unchanged.
 sys.path.insert(
     0,
-    "/Users/connorpa/Documents/BIG PhD/Gusev Lab/Projects/Official CAIA Project Repos/PROFILE-testing/COMPASS/survival_analysis",
+    "/data/gusev/USERS/jpconnor/code/CAIA/COMPASS/survival_analysis",
 )
 from helpers.consolidate_dfci_labs import consolidate_dfci_labs  # noqa: E402
 
