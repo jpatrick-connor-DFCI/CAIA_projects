@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -178,7 +179,7 @@ def build_longitudinal_prediction_data(
     death_df: pd.DataFrame,
     platinum_df: pd.DataFrame,
     treatment_anchor_df: pd.DataFrame,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, dict]:
     prediction_df = consolidated_df[
         [ID_COL, "DATE", "collapsed_measurement", "numeric_result_standardized"]
     ].dropna().copy()
@@ -208,6 +209,11 @@ def build_longitudinal_prediction_data(
         f"after death-table inner-join={n_after_death} "
         f"(dropped {n_after_dx - n_after_death})."
     )
+    attrition = {
+        "n_with_labs": n_lab_mrns,
+        "n_after_diagnosis_join": n_after_dx,
+        "n_after_death_table_join": n_after_death,
+    }
     pred_df = after_death.merge(platinum_first, on=ID_COL, how="left")
     pred_df = pred_df.merge(treatment_anchor_df, on=ID_COL, how="left")
 
@@ -318,7 +324,7 @@ def build_longitudinal_prediction_data(
         "LAB_NAME",
         "LAB_VALUE",
     ]
-    return pred_df[ordered_cols].copy()
+    return pred_df[ordered_cols].copy(), attrition
 
 
 def apply_cohort_filters(
@@ -326,7 +332,7 @@ def apply_cohort_filters(
     *,
     medications_df: pd.DataFrame,
     min_psa_count: int = MIN_PSA_COUNT,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, dict]:
     """Patient-level inclusion/exclusion on the row-level prediction frame.
 
     Inclusion:
@@ -375,7 +381,14 @@ def apply_cohort_filters(
         f"(remaining: {n_after_parpi})"
     )
 
-    return pred_df
+    attrition = {
+        "n_before_treatment_psa_parpi_filters": n_before,
+        "n_after_first_treatment_filter": n_after_treated,
+        "n_after_psa_count_filter": n_after_psa,
+        "min_psa_count": min_psa_count,
+        "n_after_parpi_exclusion": n_after_parpi,
+    }
+    return pred_df, attrition
 
 
 def parse_args() -> argparse.Namespace:
@@ -494,7 +507,7 @@ def main() -> None:
         f"highlighted treatment ({', '.join(sorted(TREATMENT_ANCHOR_MEDS))})"
     )
 
-    longitudinal_prediction_df = build_longitudinal_prediction_data(
+    longitudinal_prediction_df, build_attrition = build_longitudinal_prediction_data(
         consolidated_df,
         first_prostate_diagnosis,
         death_df,
@@ -502,17 +515,29 @@ def main() -> None:
         treatment_anchor_df,
     )
 
-    longitudinal_prediction_df = apply_cohort_filters(
+    longitudinal_prediction_df, filter_attrition = apply_cohort_filters(
         longitudinal_prediction_df,
         medications_df=medications_df,
     )
 
     longitudinal_prediction_df.to_csv(args.output_csv, index=False)
 
+    # Structured attrition counts for the Figure 1 CONSORT diagram -- these are
+    # exactly the counts already printed above, just persisted alongside the
+    # other outputs instead of only living in the run log.
+    cohort_attrition = {
+        **build_attrition,
+        **filter_attrition,
+        "n_with_highlighted_treatment_anchor": len(treatment_anchor_df),
+    }
+    attrition_path = args.output_csv.parent / "cohort_attrition.json"
+    attrition_path.write_text(json.dumps(cohort_attrition, indent=2))
+
     print(f"Wrote unique lab inventory to {args.unique_labs_csv}")
     print(f"Wrote raw longitudinal rows to {args.uncondensed_output_csv}")
     print(f"Wrote consolidated longitudinal rows to {args.consolidated_output_csv}")
     print(f"Wrote survival-ready longitudinal rows to {args.output_csv}")
+    print(f"Wrote cohort attrition counts to {attrition_path}")
 
 
 if __name__ == "__main__":

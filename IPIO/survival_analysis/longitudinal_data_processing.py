@@ -44,9 +44,52 @@ def generate_new_test_name(code: object, descr: object) -> str:
 
 
 CANCER_TYPE_PREFIX = "CANCER_TYPE_"
+CANCER_TYPE_OTHER_COL = f"{CANCER_TYPE_PREFIX}OTHER"
+DEFAULT_MIN_CANCER_TYPE_COUNT = 200
 
 
-def resolve_cancer_type_columns(cohort_df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+def merge_rare_cancer_types(
+    cohort_df: pd.DataFrame,
+    cancer_type_cols: list[str],
+    *,
+    min_count: int = DEFAULT_MIN_CANCER_TYPE_COUNT,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Merge cancer types with fewer than `min_count` patients in the whole
+    cohort into a single CANCER_TYPE_OTHER bucket, so rare types don't each
+    get their own mostly-empty, unstable covariate. Counted on the full
+    compiled cohort (one row per patient), before any lab-based landmark
+    eligibility filtering.
+    """
+    counts = cohort_df[cancer_type_cols].sum(axis=0)
+    rare_cols = counts.loc[counts < min_count].index.tolist()
+    common_cols = [c for c in cancer_type_cols if c not in rare_cols]
+    if not rare_cols:
+        print(f"No cancer types below the {min_count}-patient merge threshold.")
+        return cohort_df, cancer_type_cols
+
+    cohort_df = cohort_df.copy()
+    other_flag = cohort_df[rare_cols].sum(axis=1).gt(0).astype(int)
+    if CANCER_TYPE_OTHER_COL in common_cols:
+        # An existing (already-common) OTHER-named column would collide; fold
+        # the newly-merged rare types into it instead of overwriting.
+        other_flag = (cohort_df[CANCER_TYPE_OTHER_COL].fillna(0).astype(int) | other_flag).astype(int)
+    cohort_df[CANCER_TYPE_OTHER_COL] = other_flag
+    cohort_df = cohort_df.drop(columns=[c for c in rare_cols if c != CANCER_TYPE_OTHER_COL])
+    merged_cols = common_cols + (
+        [] if CANCER_TYPE_OTHER_COL in common_cols else [CANCER_TYPE_OTHER_COL]
+    )
+    print(
+        f"Merged {len(rare_cols)} cancer type(s) with <{min_count} cohort patients into "
+        f"'{CANCER_TYPE_OTHER_COL}' ({int(other_flag.sum())} patients): {', '.join(sorted(rare_cols))}"
+    )
+    return cohort_df, merged_cols
+
+
+def resolve_cancer_type_columns(
+    cohort_df: pd.DataFrame,
+    *,
+    min_type_count: int = DEFAULT_MIN_CANCER_TYPE_COUNT,
+) -> tuple[pd.DataFrame, list[str]]:
     """Discover the cancer-type indicator columns already present in cohort_df.
 
     No fixed list of cancer types is assumed -- compile_irae_data.py's
@@ -56,14 +99,17 @@ def resolve_cancer_type_columns(cohort_df: pd.DataFrame) -> tuple[pd.DataFrame, 
     present, so a change in how many/which types exist upstream needs no
     code change here.
 
-    If every patient's CANCER_TYPE_* row sums to exactly 1 (a true mutually
-    exclusive, exhaustive one-hot partition), the most prevalent column is
-    dropped as the implicit reference category -- mirrors COMPASS's
-    CANCER_STAGE_II/III/IV pattern (Stage I is never emitted, kept implicit)
-    and avoids perfect collinearity in the Cox design matrix. If the columns
-    are NOT mutually exclusive/exhaustive (e.g. a patient can have 0 or 2+
-    flags set), there's no natural reference category and no collinearity
-    risk, so all columns are kept.
+    Types with fewer than `min_type_count` patients in the cohort are merged
+    into a single CANCER_TYPE_OTHER bucket first (see merge_rare_cancer_types).
+
+    If every patient's (post-merge) CANCER_TYPE_* row sums to exactly 1 (a
+    true mutually exclusive, exhaustive one-hot partition), the most
+    prevalent column is dropped as the implicit reference category -- mirrors
+    COMPASS's CANCER_STAGE_II/III/IV pattern (Stage I is never emitted, kept
+    implicit) and avoids perfect collinearity in the Cox design matrix. If the
+    columns are NOT mutually exclusive/exhaustive (e.g. a patient can have 0
+    or 2+ flags set), there's no natural reference category and no
+    collinearity risk, so all columns are kept.
     """
     cancer_type_cols = [c for c in cohort_df.columns if c.startswith(CANCER_TYPE_PREFIX)]
     if not cancer_type_cols:
@@ -76,6 +122,12 @@ def resolve_cancer_type_columns(cohort_df: pd.DataFrame) -> tuple[pd.DataFrame, 
     cohort_df = cohort_df.copy()
     indicators = cohort_df[cancer_type_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
     cohort_df[cancer_type_cols] = indicators
+
+    cohort_df, cancer_type_cols = merge_rare_cancer_types(
+        cohort_df, cancer_type_cols, min_count=min_type_count
+    )
+
+    indicators = cohort_df[cancer_type_cols]
     row_sums = indicators.sum(axis=1)
     is_one_hot_partition = bool((row_sums == 1).all())
 

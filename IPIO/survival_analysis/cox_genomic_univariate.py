@@ -218,6 +218,23 @@ def main(args: argparse.Namespace) -> None:
     genomic_feature_cols = detect_genomic_feature_cols(aggregated.columns)
     print(f"Detected genomic indicator columns: {len(genomic_feature_cols)}")
 
+    # Only test genomic indicators with at least --min-genomic-prevalence
+    # positive-call frequency in the cohort being tested (the full aggregated
+    # cohort, matching the univariate sweep's own train+valid+test scope below)
+    # -- ultra-rare indicators produce unstable/uninterpretable HRs.
+    prevalence = aggregated[genomic_feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0).mean()
+    below_threshold = prevalence.loc[prevalence < args.min_genomic_prevalence].index.tolist()
+    if below_threshold:
+        print(
+            f"Dropping {len(below_threshold)}/{len(genomic_feature_cols)} genomic indicators "
+            f"below {args.min_genomic_prevalence:.1%} prevalence: {', '.join(sorted(below_threshold))}"
+        )
+    genomic_feature_cols = [c for c in genomic_feature_cols if c not in set(below_threshold)]
+    print(
+        f"Testing {len(genomic_feature_cols)} genomic indicators at "
+        f">= {args.min_genomic_prevalence:.1%} prevalence"
+    )
+
     # raw lab features = aggregated cols not in OUTCOME_COLUMNS, not genomic indicators
     genomic_set = set(genomic_feature_cols)
     raw_lab_feature_cols = [
@@ -350,5 +367,14 @@ if __name__ == "__main__":
         type=float,
         default=0.05,
         help="Fallback penalizer when an unpenalized Cox fit doesn't converge.",
+    )
+    parser.add_argument(
+        "--min-genomic-prevalence",
+        type=float,
+        default=0.025,
+        help=(
+            "Only test genomic indicators with at least this positive-call "
+            "frequency in the cohort (default 2.5%%)."
+        ),
     )
     main(parser.parse_args())

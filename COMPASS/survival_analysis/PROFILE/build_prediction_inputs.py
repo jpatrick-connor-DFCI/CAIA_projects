@@ -77,6 +77,7 @@ DEFAULT_OUTLIER_HI = 0.995
 
 SPLIT_ASSIGNMENTS_FILENAME = "split_assignments.csv"
 LANDMARK_AVAILABILITY_FILENAME = "landmark_mrn_availability.csv"
+LANDMARK_ATTRITION_FILENAME = "landmark_attrition.json"
 CANONICAL_LABS_FILENAME = "canonical_labs_train_val.csv"
 BUILD_MANIFEST_FILENAME = "build_manifest.json"
 
@@ -725,7 +726,8 @@ def main(args: argparse.Namespace) -> None:
     df[ID_COL] = pd.to_numeric(df[ID_COL], errors="coerce")
     df = df.loc[df[ID_COL].notna()].copy()
     df[ID_COL] = df[ID_COL].astype(int)
-    print(f"Loaded cohort: {df[ID_COL].nunique()} unique MRNs")
+    n_loaded_cohort = df[ID_COL].nunique()
+    print(f"Loaded cohort: {n_loaded_cohort} unique MRNs")
 
     # Optional restrict-to-MRNs subset: filter the raw cohort to the requested
     # MRN list BEFORE building landmark cohorts, so the train/valid/test split,
@@ -829,6 +831,21 @@ def main(args: argparse.Namespace) -> None:
     availability_path = output_dir / LANDMARK_AVAILABILITY_FILENAME
     availability.to_csv(availability_path, index=False)
     print(f"Wrote {availability_path}")
+
+    # Structured attrition counts for the Figure 1 CONSORT diagram, continuing
+    # the chain persisted by longitudinal_data_processing.py's cohort_attrition.json.
+    landmark_attrition = {
+        "n_loaded_cohort": int(n_loaded_cohort),
+        "eligible_by_landmark": {
+            str(lm): int(availability[f"eligible_landmark_{lm}"].sum())
+            for lm in landmark_days
+        },
+        "n_common_across_landmarks": int(len(common_mrns)),
+        "split_sizes": {k: int(v) for k, v in counts.items()},
+    }
+    attrition_path = output_dir / LANDMARK_ATTRITION_FILENAME
+    attrition_path.write_text(json.dumps(landmark_attrition, indent=2))
+    print(f"Wrote {attrition_path}")
 
     train_mrns = set(split.index[split.eq("train")])
     train_val_mrns = set(split.index[split.isin(["train", "valid"])])

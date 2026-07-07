@@ -272,12 +272,19 @@ def select_feature_columns(
     *,
     min_patient_coverage: float,
     restrict_to_labs: list[str] | None = None,
+    always_include: list[str] | None = None,
 ) -> tuple[list[str], pd.DataFrame]:
     """Select features on the training/validation block to avoid test leakage.
 
     `restrict_to_labs`, when provided, intersects the per-stat survivors with
     the canonical lab list (computed upstream on the same MRN block). This is
     the gate that enforces an identical lab set across pipelines.
+
+    `always_include`, when provided, is an explicit allowlist of feature names
+    (e.g. genomic indicator columns) exempted from the `restrict_to_labs` gate
+    -- they are not lab summary features and have no "canonical lab" concept,
+    so gating them against the canonical lab list would incorrectly drop them.
+    They still must pass the coverage/variability filter above.
     """
     coverage = data[raw_feature_cols].notna().mean()
     unique_non_missing = data[raw_feature_cols].nunique(dropna=True)
@@ -299,6 +306,11 @@ def select_feature_columns(
     if restrict_to_labs is not None:
         canonical = set(str(lab) for lab in restrict_to_labs)
         feature_meta["in_canonical_labs"] = feature_meta["lab_name"].astype(str).isin(canonical)
+        if always_include:
+            always_include_set = set(always_include)
+            feature_meta["in_canonical_labs"] = feature_meta["in_canonical_labs"] | feature_meta["feature"].isin(
+                always_include_set
+            )
         feature_meta["selected"] = feature_meta["selected"] & feature_meta["in_canonical_labs"]
     feature_meta = feature_meta.sort_values(
         ["selected", "coverage", "feature"],
@@ -1116,6 +1128,7 @@ def tune_multivariable_model(
     horizon_grid: np.ndarray,
     min_patient_coverage: float,
     static_covariate_cols: tuple[str, ...] = (),
+    always_include_feature_cols: tuple[str, ...] = (),
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict, pd.DataFrame]:
     """Arm 2: 5-fold CV over (penalizer x l1_ratio) grid (elastic-net), AGE unpenalized.
 
@@ -1126,6 +1139,11 @@ def tune_multivariable_model(
     Strict no-leakage: canonical labs are recomputed inside each fold from
     fold_train MRNs only, and AUC(t)/Brier use the fixed horizon_grid passed
     in (derived once on full train_val). Test never participates.
+
+    `always_include_feature_cols` (e.g. genomic indicator columns) are exempt
+    from the per-fold canonical-lab restriction -- see select_feature_columns's
+    `always_include` parameter -- so a mixed labs+genomics `raw_feature_cols`
+    doesn't have its non-lab features incorrectly dropped by the lab gate.
 
     Returns (fold_df, cv_df, best_row, fold_canonical_labs_df).
     """
@@ -1165,6 +1183,7 @@ def tune_multivariable_model(
             raw_feature_cols,
             min_patient_coverage=min_patient_coverage,
             restrict_to_labs=canonical,
+            always_include=list(always_include_feature_cols),
         )
         fold_selected_features[fold] = selected
         for lab in canonical:
