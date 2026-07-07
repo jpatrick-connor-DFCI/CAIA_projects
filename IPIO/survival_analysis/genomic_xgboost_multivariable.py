@@ -1,21 +1,23 @@
 """
-XGBoost survival:cox on the genomic (sample-anchored) cohort.
+XGBoost survival:cox on the genomic-eligible cohort (build_genomic_inputs.py).
 
 New file (no direct COMPASS precedent -- COMPASS never had a genomics arm).
-Mirrors cox_genomic_multivariable.py's structure (sample-anchored genomic
-cohort, no landmark sweep, --feature-sets genomics/labs_genomics) but fits
-XGBoost survival:cox models instead of elastic-net Coxnet, reusing the
-XGBoost engine (tune_xgboost_model / fit_final_xgboost_model /
-chosen_from_best_row) from landmark_xgboost.py -- exactly how
-cox_genomic_multivariable.py reuses cox_aggregated.tune_multivariable_model /
-fit_final_multivariable_model.
+Mirrors cox_genomic_multivariable.py's structure (no landmark sweep,
+--feature-sets genomics/labs/labs_genomics) but fits XGBoost survival:cox
+models instead of elastic-net Coxnet, reusing the XGBoost engine
+(tune_xgboost_model / fit_final_xgboost_model / chosen_from_best_row) from
+landmark_xgboost.py -- exactly how cox_genomic_multivariable.py reuses
+cox_aggregated.tune_multivariable_model / fit_final_multivariable_model.
 
-Two feature-set configs (--feature-sets):
+Three feature-set configs (--feature-sets):
   genomics       : age + baseline covariates + genomic indicators (no labs)
+  labs           : age + baseline covariates + labs (no genomics)
   labs_genomics  : age + baseline covariates + labs + genomic indicators
 
-There is no 0/90-day landmark sweep here -- one run per feature-set, anchored
-to each patient's sample date (t_sample). Genomic indicator columns are
+Anchored to IO_START (t_first_treatment = 0), the SAME time origin as the main
+cohort's landmark 0 -- NOT the somatic sample collection date (see
+build_genomic_inputs.py's module docstring for why). There is no 0/90-day
+landmark sweep here -- one run per feature-set. Genomic indicator columns are
 exempted from the per-fold canonical-lab gate via always_include_feature_cols
 (see cox_aggregated.select_feature_columns's `always_include` parameter),
 since they have no "canonical lab" concept and would otherwise be incorrectly
@@ -71,7 +73,7 @@ from landmark_xgboost import (  # noqa: E402
     tune_xgboost_model,
 )
 
-FEATURE_SETS = ("genomics", "labs_genomics")
+FEATURE_SETS = ("genomics", "labs", "labs_genomics")
 
 
 def _prepare_genomic_context(inputs_dir: Path, *, min_genomic_prevalence: float):
@@ -155,6 +157,9 @@ def _run_feature_set(
     if feature_set == "genomics":
         raw_feature_cols = list(genomic_feature_cols)
         always_include_feature_cols = tuple(genomic_feature_cols)
+    elif feature_set == "labs":
+        raw_feature_cols = list(raw_lab_feature_cols)
+        always_include_feature_cols = ()
     elif feature_set == "labs_genomics":
         raw_feature_cols = list(raw_lab_feature_cols) + list(genomic_feature_cols)
         always_include_feature_cols = tuple(genomic_feature_cols)
@@ -167,7 +172,7 @@ def _run_feature_set(
     print(f"  candidate features: {len(raw_feature_cols)} ({feature_set})")
 
     for endpoint in endpoints:
-        print(f"\n=== {endpoint.upper()} | FEATURE-SET {feature_set} (anchor=t_sample) ===")
+        print(f"\n=== {endpoint.upper()} | FEATURE-SET {feature_set} (anchor=IO_START) ===")
         print(ENDPOINTS[endpoint]["description"])
         horizon_grid = horizon_grids[endpoint]
 
@@ -372,8 +377,8 @@ def main(args: argparse.Namespace) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description=(
-            "XGBoost survival:cox on the sample-anchored genomic cohort "
-            "(baseline+genomics and baseline+labs+genomics feature sets)."
+            "XGBoost survival:cox on the genomic-eligible cohort, anchored to "
+            "IO_START (genomics, labs, and labs+genomics feature sets)."
         )
     )
     parser.add_argument(
@@ -398,7 +403,7 @@ if __name__ == "__main__":
         nargs="+",
         default=list(FEATURE_SETS),
         choices=list(FEATURE_SETS),
-        help="Which genomics-involving feature sets to fit (default: both).",
+        help="Which genomics-involving feature sets to fit (default: all three).",
     )
     parser.add_argument(
         "--min-genomic-prevalence",

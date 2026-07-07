@@ -1,23 +1,32 @@
 """
-Build prediction inputs for the genomic-landmark univariate survival arm (IPIO).
+Build prediction inputs for the genomic survival arm (IPIO).
 
-Index time = SAMPLE_COLLECTION_DT (per patient, from the somatic table).
-Predicts irAE from sample collection forward (death/censor are right-censoring),
-with features derived from labs measured strictly before t_sample plus dynamic
-per-gene x per-variant-type binary indicators (pan-cancer cohort -- all genes
-present in the somatic table, not a fixed 3-gene prostate panel).
+Index time = IO_START (t_first_treatment = 0), the SAME anchor as the main
+landmark-0 cohort -- NOT the somatic sample collection date. Predicting from
+the sequencing date isn't clinically actionable (sequencing can land before or
+after treatment start); anchoring to treatment start instead lets this arm
+isolate genomics' added predictive value over labs on a shared population and
+time origin, rather than mixing in a second, less meaningful anchor.
 
-Cohort = main IPIO cohort INTERSECTED with patients that have a genomic sample
-AND have a split label in the existing prediction_inputs/split_assignments.csv
-(so test stays test across arms).
+Predicts irAE from treatment start forward (death/censor are right-censoring),
+with features derived from labs measured strictly before IO_START (identical
+window to the main cohort's landmark 0) plus dynamic per-gene x per-variant-type
+binary indicators (pan-cancer cohort -- all genes present in the somatic table,
+not a fixed 3-gene prostate panel).
+
+Cohort = main IPIO cohort INTERSECTED with patients that have an actual genomic
+sample (no 0-fill for untested patients -- being untested is not the same as
+testing negative) AND have a split label in the existing
+prediction_inputs/split_assignments.csv (so test stays test across arms).
 
 Outputs (under <inputs-dir>/genomic):
   genomic_aggregated.csv             one row per MRN: lab features + genomic
-                                     indicators + outcome rebased to t_sample +
+                                     indicators + outcome rebased to IO_START +
                                      split column
-  pre_sample_lab_long.csv            long-format pre-sample labs for per-fold
-                                     canonical-lab selection
-  genomic_canonical_labs_train_val.csv  landmark='sample', lab_name
+  pre_sample_lab_long.csv            long-format pre-IO_START labs (genomics-
+                                     eligible subset) for per-fold canonical-lab
+                                     selection
+  genomic_canonical_labs_train_val.csv  landmark=0, lab_name
   genomic_build_manifest.json        provenance + AUC horizons + cohort sizes
 """
 
@@ -87,16 +96,17 @@ GENOMIC_BUILD_MANIFEST_FILENAME = "genomic_build_manifest.json"
 
 
 def load_somatic(path: Path) -> tuple[pd.DataFrame, list[str]]:
-    """Read the somatic table, restricted to ID_COL + SAMPLE_COLLECTION_DT +
-    whatever <GENE>_<VARIANT> columns are present (pan-cancer -- data-dependent
-    gene set). Reads the full header first to detect the gene-variant columns,
-    then restricts `usecols` to just what's needed.
+    """Read the somatic table, restricted to ID_COL + whatever <GENE>_<VARIANT>
+    columns are present (pan-cancer -- data-dependent gene set). Reads the full
+    header first to detect the gene-variant columns, then restricts `usecols`
+    to just what's needed. SAMPLE_COLLECTION_DT is not read -- this arm anchors
+    to IO_START (t_first_treatment), not the sequencing date.
     """
     header = pd.read_csv(path, nrows=0)
     feature_cols = detect_genomic_feature_cols(header.columns)
     if not feature_cols:
         raise ValueError(f"Somatic CSV {path} has no <GENE>_<SV|SNV|AMP|DEL> columns.")
-    needed_cols = [ID_COL, "SAMPLE_COLLECTION_DT", *feature_cols]
+    needed_cols = [ID_COL, *feature_cols]
     missing = [c for c in needed_cols if c not in header.columns]
     if missing:
         raise ValueError(f"Somatic CSV missing columns: {missing}")
@@ -111,24 +121,9 @@ def load_somatic(path: Path) -> tuple[pd.DataFrame, list[str]]:
             f"Somatic CSV is not deduplicated by {ID_COL} ({n_dup} duplicate rows). "
             "One row per patient is assumed."
         )
-    raw["SAMPLE_COLLECTION_DT"] = pd.to_datetime(raw["SAMPLE_COLLECTION_DT"], errors="coerce")
     for col in feature_cols:
         raw[col] = pd.to_numeric(raw[col], errors="coerce").fillna(0).astype(int)
     return raw.set_index(ID_COL), feature_cols
-
-
-def attach_t_sample(df: pd.DataFrame, somatic: pd.DataFrame) -> pd.DataFrame:
-    """Merge SAMPLE_COLLECTION_DT into df and compute t_sample (days from FIRST_RECORD_DATE)."""
-    if "FIRST_RECORD_DATE" not in df.columns:
-        raise ValueError("Longitudinal df missing FIRST_RECORD_DATE; cannot derive t_sample.")
-    out = df.copy()
-    out["FIRST_RECORD_DATE"] = pd.to_datetime(out["FIRST_RECORD_DATE"], errors="coerce")
-    sample_dt = somatic["SAMPLE_COLLECTION_DT"]
-    out["SAMPLE_COLLECTION_DT"] = out[ID_COL].map(sample_dt)
-    out["t_sample"] = (
-        out["SAMPLE_COLLECTION_DT"] - out["FIRST_RECORD_DATE"]
-    ).dt.days.astype(float)
-    return out
 
 
 def main(args: argparse.Namespace) -> None:
@@ -167,60 +162,56 @@ def main(args: argparse.Namespace) -> None:
     df[ID_COL] = df[ID_COL].astype(int)
     print(f"Loaded cohort: {df[ID_COL].nunique()} unique MRNs")
 
+    # Design invariant: FIRST_TREATMENT_DATE == FIRST_RECORD_DATE == IO_START for
+    # every patient, so t_first_treatment (days from FIRST_RECORD_DATE) is 0 for
+    # everyone (mirrors build_prediction_inputs.py's landmark-0 setup).
+    if "t_first_treatment" not in df.columns and {"FIRST_TREATMENT_DATE", "FIRST_RECORD_DATE"}.issubset(df.columns):
+        df["t_first_treatment"] = (
+            df["FIRST_TREATMENT_DATE"] - df["FIRST_RECORD_DATE"]
+        ).dt.days.astype(float)
+
     somatic, genomic_feature_cols = load_somatic(Path(args.somatic_path))
     print(f"Somatic patients: {len(somatic)} ({len(genomic_feature_cols)} gene-variant features detected)")
 
-    n_before_tsample = df[ID_COL].nunique()
-    df = attach_t_sample(df, somatic)
-    has_tsample = df["t_sample"].notna()
-    n_with_tsample = df.loc[has_tsample, ID_COL].nunique()
-    n_negative = df.loc[has_tsample & (df["t_sample"] < 0), ID_COL].nunique()
-    df = df.loc[has_tsample].copy()
+    # Anchor to IO_START (t_first_treatment = 0), identical to the main
+    # cohort's landmark 0 -- NOT the sample collection date. Restrict to
+    # patients with an actual genomic sample (no 0-fill for untested patients).
+    n_before_genomics = df[ID_COL].nunique()
+    df = df.loc[df[ID_COL].isin(somatic.index)].copy()
+    n_with_genomics = df[ID_COL].nunique()
     print(
-        f"Cohort after t_sample join: {n_with_tsample} patients with a sample date "
-        f"(dropped {n_before_tsample - n_with_tsample} without one). "
-        f"{n_negative} have a sample dated before their first record and will be "
-        f"dropped by the landmark filter below."
+        f"Cohort restricted to patients with a genomic sample: {n_with_genomics} "
+        f"(dropped {n_before_genomics - n_with_genomics} without one)."
     )
 
-    # Outcome table rebased to t_sample (drops t_sample<0 and any sample at/after
-    # an event). No require_first_treatment concept here -- IPIO's outcome
-    # doesn't depend on FIRST_TREATMENT the way COMPASS's did (the invariant
-    # FIRST_TREATMENT_DATE == FIRST_RECORD_DATE == IO_START already holds for
-    # every patient in the source data).
+    # Outcome table rebased to IO_START (t_first_treatment = 0), same anchor as
+    # the main cohort's landmark 0.
     outcome_df = make_irae_outcome_df(
         df,
         landmark_offset_days=0,
-        anchor_col="t_sample",
-        extra_anchor_cols=("t_sample", "SAMPLE_COLLECTION_DT"),
+        anchor_col="t_first_treatment",
     )
     print(
-        f"Outcome cohort (post t_sample landmark filter): {len(outcome_df)} patients "
-        f"(dropped {n_with_tsample - len(outcome_df)} with t_sample<0 or an event at/before the sample)"
+        f"Outcome cohort (post landmark-0 filter): {len(outcome_df)} patients "
+        f"(dropped {n_with_genomics - len(outcome_df)} with an event at/before treatment start)"
     )
 
-    # Per-patient lab summary features (pre-sample window)
+    # Per-patient lab summary features (pre-IO_START window, same as landmark 0)
     feature_df = build_feature_matrix(
         df,
         landmark_offset_days=0,
-        anchor_col="t_sample",
+        anchor_col="t_first_treatment",
     )
     print(f"Feature matrix: {feature_df.shape[0]} patients x {feature_df.shape[1]} lab features")
 
-    # Inner join + attach genomics
+    # Inner join + attach genomics (every remaining patient has a real somatic
+    # row by construction, since df was already restricted to somatic.index above).
     merged = feature_df.join(outcome_df, how="inner")
     merged = merged.loc[merged[AGE_COL].notna()].copy()
     if merged.empty:
         raise ValueError("No patients survived feature+outcome join in the genomic arm.")
 
     genomics = somatic.loc[somatic.index.intersection(merged.index), genomic_feature_cols]
-    n_missing_genomics = int(merged.index.difference(somatic.index).size)
-    if n_missing_genomics:
-        print(
-            f"WARNING: {n_missing_genomics} patients in the genomic cohort had no somatic row; "
-            "their genomic indicators are being set to 0 (indistinguishable from a true "
-            "all-negative profile)."
-        )
     merged = merged.join(genomics, how="left")
     for col in genomic_feature_cols:
         merged[col] = merged[col].fillna(0).astype(int)
@@ -264,20 +255,18 @@ def main(args: argparse.Namespace) -> None:
     aggregated.rename_axis(ID_COL).reset_index().to_csv(agg_path, index=False)
     print(f"Wrote {agg_path}")
 
-    # Pre-sample lab long for per-fold canonical labs
-    anchor_series = outcome_df["t_sample"].astype(float)
+    # Pre-IO_START lab long (genomics-eligible subset) for per-fold canonical labs
     pre_sample_lab_df = build_pre_treatment_lab_long(
         df,
         cohort_index=merged.index,
         landmark_offset_days=0,
-        anchor_col="t_sample",
-        anchor_series=anchor_series,
+        anchor_col="t_first_treatment",
     )
     pre_path = output_dir / GENOMIC_PRE_SAMPLE_LAB_FILENAME
     pre_sample_lab_df.to_csv(pre_path, index=False)
     print(f"Wrote {pre_path} ({len(pre_sample_lab_df)} rows)")
 
-    # Canonical labs (train+valid, pre-sample coverage)
+    # Canonical labs (train+valid, pre-IO_START coverage, genomics-eligible subset)
     canonical_labs = select_canonical_labs(
         pre_sample_lab_df,
         mrns=train_val.index,
@@ -285,7 +274,7 @@ def main(args: argparse.Namespace) -> None:
         id_col=ID_COL,
     )
     canonical_path = output_dir / GENOMIC_CANONICAL_LABS_FILENAME
-    pd.DataFrame({"landmark": "sample", "lab_name": canonical_labs}).to_csv(
+    pd.DataFrame({"landmark": 0, "lab_name": canonical_labs}).to_csv(
         canonical_path, index=False
     )
     print(f"Canonical labs: {len(canonical_labs)} -> {canonical_path}")
@@ -312,7 +301,7 @@ def main(args: argparse.Namespace) -> None:
     manifest = {
         "data": str(args.data),
         "somatic_path": str(args.somatic_path),
-        "anchor": "t_sample",
+        "anchor": "t_first_treatment",
         "sample_pick_rule": f"input csv assumed deduplicated by {ID_COL}",
         "min_patient_coverage": float(args.min_patient_coverage),
         "time_unit_days": int(args.time_unit_days),

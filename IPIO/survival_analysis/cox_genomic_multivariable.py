@@ -1,30 +1,29 @@
 """
-Multivariable elastic-net Cox on the genomic (sample-anchored) cohort.
+Multivariable elastic-net Cox on the genomic-eligible cohort (build_genomic_inputs.py).
 
-Two feature-set configs (--feature-set):
+Three feature-set configs (--feature-set):
   genomics       : age + baseline covariates + genomic indicators (no labs)
+  labs           : age + baseline covariates + labs (no genomics)
   labs_genomics  : age + baseline covariates + labs + genomic indicators
 
-This is the genomics half of the requested 4-way multivariable comparison
-(baseline / baseline+labs / baseline+genomics / baseline+labs+genomics).
-baseline and baseline+labs are unchanged and still come from cox_multivariable.py
-(--baseline / default) on the treatment-anchored 0/90-day landmark cohort.
-baseline+genomics and baseline+labs+genomics run here instead, on the
-sample-anchored genomic cohort (genomic_aggregated.csv from
-build_genomic_inputs.py) -- genomics are only known for patients with an
-actual somatic sample, so this is evaluated on that cohort rather than being
-merged (with a 0-fill-as-negative ambiguity) into the main landmark cohort.
-There is no 0/90-day landmark sweep here -- one run per feature-set, anchored
-to each patient's sample date.
+Anchored to IO_START (t_first_treatment = 0), the SAME time origin as the main
+cohort's landmark 0 -- NOT the somatic sample collection date. Predicting from
+the sequencing date isn't clinically actionable, so this arm's cohort
+(genomic_aggregated.csv from build_genomic_inputs.py) is restricted to patients
+with an actual genomic sample but windows labs/rebases the outcome relative to
+treatment start, same as the main pipeline. This lets the three feature-sets
+isolate genomics' added predictive value over labs on one shared population and
+time origin. `baseline`-only (no labs, no genomics) is unchanged and still
+comes from cox_multivariable.py (--baseline) on the full main cohort.
 
 Reuses cox_aggregated.tune_multivariable_model / fit_final_multivariable_model
 (the same CV-tuned elastic-net engine cox_multivariable.py uses) and
-cox_genomic_univariate._load_genomic_inputs for the cohort loader. Labs and
-genomics share one raw_feature_cols universe for CV-tuning; genomic indicator
-columns are exempted from the per-fold canonical-lab gate via
-always_include_feature_cols (see cox_aggregated.select_feature_columns), since
-they have no "canonical lab" concept and would otherwise be incorrectly
-dropped by it.
+cox_genomic_univariate._load_genomic_inputs for the cohort loader. For
+`labs_genomics`, labs and genomics share one raw_feature_cols universe for
+CV-tuning; genomic indicator columns are exempted from the per-fold
+canonical-lab gate via always_include_feature_cols (see
+cox_aggregated.select_feature_columns), since they have no "canonical lab"
+concept and would otherwise be incorrectly dropped by it.
 
 Outputs (under --output-dir), one set per --feature-set value:
   cox_genomic_multivariable_<feature_set>.csv             coefs
@@ -66,7 +65,7 @@ from cox_genomic_univariate import _load_genomic_inputs  # noqa: E402
 from build_genomic_inputs import detect_genomic_feature_cols  # noqa: E402
 from build_prediction_inputs import DEFAULT_OUTPUT_SUBDIR  # noqa: E402
 
-FEATURE_SETS = ("genomics", "labs_genomics")
+FEATURE_SETS = ("genomics", "labs", "labs_genomics")
 
 
 def _prepare_genomic_context(inputs_dir: Path, *, min_genomic_prevalence: float):
@@ -146,6 +145,8 @@ def _run_feature_set(
 ):
     if feature_set == "genomics":
         raw_feature_cols = list(genomic_feature_cols)
+    elif feature_set == "labs":
+        raw_feature_cols = list(raw_lab_feature_cols)
     elif feature_set == "labs_genomics":
         raw_feature_cols = list(raw_lab_feature_cols) + list(genomic_feature_cols)
     else:  # pragma: no cover - guarded by argparse choices
@@ -157,7 +158,7 @@ def _run_feature_set(
     print(f"  candidate features: {len(raw_feature_cols)} ({feature_set})")
 
     for endpoint in endpoints:
-        print(f"\n=== {endpoint.upper()} | FEATURE-SET {feature_set} (anchor=t_sample) ===")
+        print(f"\n=== {endpoint.upper()} | FEATURE-SET {feature_set} (anchor=IO_START) ===")
         print(ENDPOINTS[endpoint]["description"])
         horizon_grid = horizon_grids[endpoint]
 
@@ -333,8 +334,8 @@ def main(args: argparse.Namespace) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description=(
-            "Multivariable elastic-net Cox on the sample-anchored genomic cohort "
-            "(baseline+genomics and baseline+labs+genomics feature sets)."
+            "Multivariable elastic-net Cox on the genomic-eligible cohort, anchored to "
+            "IO_START (genomics, labs, and labs+genomics feature sets)."
         )
     )
     parser.add_argument(
@@ -359,7 +360,7 @@ if __name__ == "__main__":
         nargs="+",
         default=list(FEATURE_SETS),
         choices=list(FEATURE_SETS),
-        help="Which genomics-involving feature sets to fit (default: both).",
+        help="Which genomics-involving feature sets to fit (default: all three).",
     )
     parser.add_argument(
         "--min-genomic-prevalence",

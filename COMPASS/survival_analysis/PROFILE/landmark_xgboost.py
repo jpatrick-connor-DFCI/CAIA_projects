@@ -104,9 +104,9 @@ from helpers.helper import (  # noqa: E402
     select_canonical_labs,
 )
 
-DEFAULT_CV_MAX_DEPTHS = [2, 3, 4]
-DEFAULT_CV_ETAS = [0.03, 0.05, 0.10]
-DEFAULT_CV_MIN_CHILD_WEIGHTS = [3.0, 5.0, 10.0]
+DEFAULT_CV_MAX_DEPTHS = [2, 3, 4, 5]
+DEFAULT_CV_ETAS = [0.02, 0.03, 0.05, 0.075, 0.10]
+DEFAULT_CV_MIN_CHILD_WEIGHTS = [1.0, 3.0, 5.0, 7.5, 10.0]
 DEFAULT_N_FOLDS = 5
 
 
@@ -485,7 +485,7 @@ def cv_one_endpoint(
     cv_stratification = fold_partitions[0][3]
 
     # Materialize fold-level canonical labs and selected features once so the
-    # 27-combo grid traverses identical fold partitions.
+    # full grid traverses identical fold partitions.
     fold_canonical_labs: dict[int, list[str]] = {}
     fold_selected_features: dict[int, list[str]] = {}
     fold_canonical_labs_rows: list[dict] = []

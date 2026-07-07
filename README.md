@@ -4,7 +4,10 @@ Research workflow for assembling a prostate-cancer cohort from local DFCI / Prof
 exports and running landmark survival analysis (Cox / XGBoost / Dynamic-DeepHit) on the resulting cohort.
 
 The code is pandas-based. Entry points are command-line scripts orchestrated from per-arm
-`run_locally.ipynb` notebooks; figures are produced by `generate_figures.ipynb`.
+`*_run_locally.ipynb` notebooks; figures are produced by the matching `*_generate_figures.ipynb`.
+PROFILE has three such pairs, prefixed by anchor/cohort: `first_treatment_*` (default,
+`t_first_treatment`, full cohort), `tx_anchor_*` (`t_treatment_anchor`, highlighted-treatment
+sub-cohort), and `gleason_*` (Gleason-siloed sub-cohort, both anchors).
 
 > This README is the canonical reference for editing the pipeline. It documents the directory
 > layout, the data flow, every script's inputs/outputs, the **conventions and invariants that
@@ -45,8 +48,12 @@ COMPASS/
     │   ├── dynamic_deephit.py               # ENTRY 2: GRU competing-risks DeepHit
     │   ├── cox_pgs_adjusted.py              # ENTRY 2b: PGS-adjusted Cox sensitivity sweep
     │   ├── cox_genomic_univariate.py        # ENTRY 2b: univariate Cox on genomic arm
-    │   ├── run_locally.ipynb                # driver: runs stages 1->2 end-to-end
-    │   └── generate_figures.ipynb           # 4 platinum-arm figures
+    │   ├── first_treatment_run_locally.ipynb       # driver: default arm (t_first_treatment), stages 1->2
+    │   ├── first_treatment_generate_figures.ipynb  # figures for the default arm
+    │   ├── tx_anchor_run_locally.ipynb             # driver: treatment-anchored arm (t_treatment_anchor)
+    │   ├── tx_anchor_generate_figures.ipynb        # figures for the treatment-anchored arm
+    │   ├── gleason_run_locally.ipynb               # driver: Gleason-siloed sub-cohort, both anchors
+    │   └── gleason_generate_figures.ipynb          # figures for the Gleason-siloed sub-cohort
     │
     └── CAIA/                             # thin wrappers over PROFILE (parquet cohort)
         ├── load_caia_parquet.py             # re-export shim -> helpers.loaders.load_caia_parquet
@@ -80,7 +87,7 @@ COMPASS/
         ▼  cox_aggregated / landmark_xgboost / dynamic_deephit
            cox_pgs_adjusted / cox_genomic_univariate
         │
-        ▼  generate_figures.ipynb
+        ▼  *_generate_figures.ipynb (first_treatment_ / tx_anchor_ / gleason_)
  figures/
 ```
 
@@ -171,11 +178,22 @@ both copies are live; consolidate carefully.)
 
 ### 2.4 — Notebooks
 
-- `PROFILE/run_locally.ipynb` — drives stages 1→3 in one kernel via `subprocess`/`!{PYTHON}`. Section 5
-  loops a `TASKS` list (cox + xgboost at landmarks 0/90; deephit commented out) then a PGS sweep.
+PROFILE has three parallel `*_run_locally.ipynb` / `*_generate_figures.ipynb` pairs, one per
+arm/cohort — same underlying scripts, different `--anchor-col` / MRN subset / output paths:
+
+- `PROFILE/first_treatment_run_locally.ipynb` (default arm, `t_first_treatment`, full cohort) —
+  drives stages 1→3 in one kernel via `subprocess`/`!{PYTHON}`. Section 5 loops a `TASKS` list
+  (cox + xgboost at landmarks 0/90; deephit commented out) then a PGS sweep.
   ⚠️ contains a comment-inside-list bug, see Known issues.
-- `PROFILE/generate_figures.ipynb` — 4 platinum-arm figures (paired univariate volcano, grouped AUC
-  barplot, 2×2 importance grid, PGS interpretation). Writes `.png`+`.pdf` to `figures/`.
+- `PROFILE/first_treatment_generate_figures.ipynb` — Figure 1 (cohort overview), Figure 3 (paired
+  univariate volcano), Figure 4a/4b/compiled (discrimination + importance grid), plus a
+  supplementary PGS-interpretation section. Writes `.png`+`.pdf` to `figures/`.
+- `PROFILE/tx_anchor_run_locally.ipynb` / `tx_anchor_generate_figures.ipynb` — same driver/figures,
+  anchored on `t_treatment_anchor` (first highlighted treatment) instead, over the sub-cohort that
+  has one. No PGS section (not run for this cohort).
+- `PROFILE/gleason_run_locally.ipynb` / `gleason_generate_figures.ipynb` — Gleason-siloed sub-cohort
+  (patients with an ISUP grade group on/before the anchor), Gleason added as a covariate, covers
+  both anchors.
 - `CAIA/summary_figures.py` (+ `.ipynb`) — standalone PROFILE-vs-CAIA cohort comparison
   (time distributions, platinum incidence, overall-survival KM, per-lab raw + IRNT histograms).
 
@@ -226,7 +244,7 @@ both copies are live; consolidate carefully.)
 # Stage 1 (cluster paths hard-coded)
 python COMPASS/data_preprocessing/compile_prostate_data.py
 
-# Stage 2 — or just run PROFILE/run_locally.ipynb top to bottom
+# Stage 2 — or just run PROFILE/first_treatment_run_locally.ipynb top to bottom
 python COMPASS/survival_analysis/PROFILE/longitudinal_data_processing.py
 python COMPASS/survival_analysis/PROFILE/build_prediction_inputs.py --landmark-days 0 90 --time-unit-days 7
 python COMPASS/survival_analysis/PROFILE/build_genomic_inputs.py
@@ -251,7 +269,7 @@ surprised by them.
 
 ### High impact
 
-- **`run_locally.ipynb` swallows a comma in a comment.** `"--endpoints", "platinum"  # death excluded for now,`
+- **`first_treatment_run_locally.ipynb` swallows a comma in a comment.** `"--endpoints", "platinum"  # death excluded for now,`
   — the comma is inside the comment, so Python concatenates `"platinum" "--n-folds"` →
   `"platinum--n-folds"` (3 occurrences: cox, xgboost, PGS). Move the comment out of the list literal.
 - **`t_death == t_last_contact` for all patients** (`longitudinal_data_processing.py:208`, and the same in

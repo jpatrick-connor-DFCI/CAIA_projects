@@ -130,9 +130,9 @@ from helpers.helper import (  # noqa: E402
     select_canonical_labs,
 )
 
-DEFAULT_CV_MAX_DEPTHS = [2, 3, 4]
-DEFAULT_CV_ETAS = [0.03, 0.05, 0.10]
-DEFAULT_CV_MIN_CHILD_WEIGHTS = [3.0, 5.0, 10.0]
+DEFAULT_CV_MAX_DEPTHS = [2, 3, 4, 5, 6]
+DEFAULT_CV_ETAS = [0.01, 0.03, 0.05, 0.10, 0.15]
+DEFAULT_CV_MIN_CHILD_WEIGHTS = [1.0, 3.0, 5.0, 10.0, 15.0]
 
 
 def require_xgboost() -> None:

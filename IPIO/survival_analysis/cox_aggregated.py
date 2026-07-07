@@ -145,20 +145,30 @@ DEFAULT_MIN_EVENTS_PER_FEATURE = 10
 # stay comparable across Cox / XGBoost / DeepHit. Overridable via --auc-max-time-units.
 DEFAULT_AUC_MAX_TIME_UNITS = 260
 DEFAULT_CV_PENALIZERS = [
+    0.0005,
     0.001,
     0.0025,
     0.005,
+    0.0075,
     0.01,
     0.025,
     0.05,
+    0.075,
     0.10,
+    0.15,
     0.20,
+    0.30,
     0.40,
+    0.60,
     0.80,
+    1.20,
     1.60,
+    2.40,
     3.20,
+    4.80,
+    6.40,
 ]
-DEFAULT_CV_L1_RATIOS = [0.1, 0.3, 0.5, 0.7, 0.9, 1.0]
+DEFAULT_CV_L1_RATIOS = [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0]
 DEFAULT_AUC_QUANTILES = (0.25, 0.375, 0.50, 0.625, 0.75)
 DEFAULT_AUC_TIME_UNIT_DAYS = 7
 HORIZON_GRID_FILENAME = "cox_agg_horizon_grid.csv"
