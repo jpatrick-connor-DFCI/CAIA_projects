@@ -7,7 +7,7 @@ from pathlib import Path
 
 SURVIVAL_DIR = Path(__file__).resolve().parent
 SURVIVAL_PARENT = SURVIVAL_DIR.parent
-REPO_ROOT = SURVIVAL_DIR.parents[2]
+REPO_ROOT = SURVIVAL_PARENT.parent
 for _p in (str(REPO_ROOT), str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)

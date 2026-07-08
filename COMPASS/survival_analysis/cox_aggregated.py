@@ -17,7 +17,7 @@ import pandas as pd
 
 SURVIVAL_DIR = Path(__file__).resolve().parent
 SURVIVAL_PARENT = SURVIVAL_DIR.parent
-REPO_ROOT = SURVIVAL_DIR.parents[2]
+REPO_ROOT = SURVIVAL_PARENT.parent
 DATA_PREPROCESSING_DIR = SURVIVAL_PARENT / "data_preprocessing"
 for _p in (str(REPO_ROOT), str(SURVIVAL_PARENT), str(DATA_PREPROCESSING_DIR), str(SURVIVAL_DIR)):
     if _p not in sys.path:
