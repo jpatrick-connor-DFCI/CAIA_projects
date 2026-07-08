@@ -1,6 +1,6 @@
 """Per-patient irAE outcome construction for the IPIO landmark cohort.
 
-Mirrors the landmark-rebasing pattern of COMPASS's helpers.cohort.make_outcome_df,
+Mirrors the landmark-rebasing pattern of survival_common.cohort.make_outcome_df,
 simplified to a single right-censored endpoint (death and censor are both treated
 as censoring; only `event == "irAE"` is the event of interest).
 """
@@ -9,6 +9,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from survival_common import cohort
+
+# Kept for backward compatibility (callers/tests that import ipio_cohort.ID_COL).
+# The runtime source of truth is survival_common.cohort.ID_COL, set by
+# configure_id_columns(); make_irae_outcome_df reads that dynamically so a
+# non-default --id-col is honored instead of this import-time constant.
 ID_COL = "DFCI_MRN"
 
 # Baseline covariates that must survive the per-patient dedup and be carried
@@ -43,10 +49,15 @@ def make_irae_outcome_df(
     (the latter two are debug-only duration duplicates; downstream callers may
     drop them before persisting the final aggregated table).
     """
+    # Read the id column at call time from the shared cohort config so a runtime
+    # configure_id_columns() (non-default --id-col) is honored; falls back to the
+    # default "DFCI_MRN" when never configured.
+    id_col = cohort.ID_COL
+
     cancer_type_cols = tuple(c for c in df.columns if c.startswith("CANCER_TYPE_"))
 
     patient_level_cols = [
-        ID_COL,
+        id_col,
         *BASELINE_COVARIATE_COLS,
         *cancer_type_cols,
         "FIRST_RECORD_DATE",
@@ -65,8 +76,8 @@ def make_irae_outcome_df(
             ordered_cols.append(col)
 
     available_cols = [col for col in ordered_cols if col in df.columns]
-    if ID_COL not in available_cols:
-        raise ValueError(f"Input data must contain the id column {ID_COL!r}.")
+    if id_col not in available_cols:
+        raise ValueError(f"Input data must contain the id column {id_col!r}.")
 
     required = {"FIRST_RECORD_DATE", "LAST_CONTACT_DATE", "IRAE"}
     missing_required = required - set(available_cols)
@@ -77,7 +88,7 @@ def make_irae_outcome_df(
     if anchor_col not in available_cols:
         raise ValueError(f"make_irae_outcome_df: anchor_col {anchor_col!r} missing from input.")
 
-    pat = df[available_cols].drop_duplicates(ID_COL).set_index(ID_COL)
+    pat = df[available_cols].drop_duplicates(id_col).set_index(id_col)
 
     pat["FIRST_RECORD_DATE"] = pd.to_datetime(pat["FIRST_RECORD_DATE"], errors="coerce")
     pat["LAST_CONTACT_DATE"] = pd.to_datetime(pat["LAST_CONTACT_DATE"], errors="coerce")

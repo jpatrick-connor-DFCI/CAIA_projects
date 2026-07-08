@@ -1,9 +1,9 @@
-"""IPIO-specific adapter for shared landmarked survival-analysis code.
+"""PROFILE-specific adapter for shared landmarked survival-analysis code.
 
 The generic Cox model mechanics live in ``survival_common.cox_models`` and
-``survival_common.cox_engine``. This module keeps the IPIO endpoint/schema
-constants, baseline-covariate discovery, and per-landmark context assembly used
-by the runnable scripts.
+``survival_common.cox_engine``. This module keeps the PROFILE endpoint/schema
+constants, optional stage cohort restrictions, and the per-landmark
+context assembly used by the runnable scripts.
 """
 
 from __future__ import annotations
@@ -16,14 +16,12 @@ import numpy as np
 import pandas as pd
 
 SURVIVAL_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = SURVIVAL_DIR.parent
-DATA_PREPROCESSING_DIR = PROJECT_DIR / "data_preprocessing"
-if str(DATA_PREPROCESSING_DIR) not in sys.path:
-    sys.path.insert(0, str(DATA_PREPROCESSING_DIR))
-
-from _paths import ensure_survival_common_on_path  # noqa: E402
-
-ensure_survival_common_on_path()
+SURVIVAL_PARENT = SURVIVAL_DIR.parent
+REPO_ROOT = SURVIVAL_DIR.parents[2]
+DATA_PREPROCESSING_DIR = SURVIVAL_PARENT / "data_preprocessing"
+for _p in (str(REPO_ROOT), str(SURVIVAL_PARENT), str(DATA_PREPROCESSING_DIR), str(SURVIVAL_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from survival_common.cohort import (  # noqa: E402,F401
     AGE_COL,
@@ -75,9 +73,9 @@ from survival_common.helper import (  # noqa: E402,F401
     select_canonical_labs,
 )
 
-BASE = SURVIVAL_DIR
-DATA_PATH = Path("/data/gusev/USERS/jpconnor/data/CAIA/IPIO/")
-RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/IPIO/survival_analysis")
+BASE = Path(__file__).resolve().parent
+DATA_PATH = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/")
+RESULTS = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis")
 
 DEFAULT_SEED = 42
 DEFAULT_TEST_FRAC = 0.20
@@ -91,36 +89,28 @@ DEFAULT_CV_PENALIZERS = [
     0.001,
     0.0025,
     0.005,
-    0.0075,
     0.01,
     0.025,
     0.05,
-    0.075,
     0.10,
-    0.15,
     0.20,
-    0.30,
     0.40,
-    0.60,
     0.80,
-    1.20,
     1.60,
-    2.40,
     3.20,
-    4.80,
     6.40,
 ]
-DEFAULT_CV_L1_RATIOS = [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0]
+DEFAULT_CV_L1_RATIOS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 DEFAULT_AUC_QUANTILES = (0.25, 0.375, 0.50, 0.625, 0.75)
 DEFAULT_AUC_TIME_UNIT_DAYS = 7
 HORIZON_GRID_FILENAME = "cox_agg_horizon_grid.csv"
 CANONICAL_LABS_FOLDS_FILENAME = "cox_agg_canonical_labs_folds.csv"
 
 ENDPOINTS = {
-    "irae": {
-        "duration_col": "t_irae",
-        "event_col": "IRAE",
-        "description": "Time from IO start to first immune-related adverse event",
+    "platinum": {
+        "duration_col": "t_platinum",
+        "event_col": "PLATINUM",
+        "description": "Time from first treatment start to first platinum exposure",
     },
 }
 
@@ -131,15 +121,28 @@ ENDPOINTS = {
 # real age column into the feature set.
 OUTCOME_METADATA_COLUMNS = {
     "FIRST_RECORD_DATE",
+    "DIAGNOSIS_DATE",
     "FIRST_TREATMENT_DATE",
     "FIRST_TREATMENT",
     "LAST_CONTACT_DATE",
-    "IO_START",
-    "LAST_DATE",
-    "IRAE",
-    "t_irae",
-    "t_irae_from_first_record",
+    "PLATINUM_DATE",
+    "PLATINUM",
+    "DEATH",
+    "EITHER",
+    "t_diagnosis",
+    "t_first_treatment",
+    "t_treatment_anchor",
+    "t_platinum",
+    "t_platinum_from_first_record",
+    "t_last_contact",
+    "t_last_contact_from_first_record",
+    "t_death",
+    "t_death_from_first_record",
+    "t_either",
     "split",
+    "CANCER_STAGE_II",
+    "CANCER_STAGE_III",
+    "CANCER_STAGE_IV",
 }
 
 
@@ -151,14 +154,17 @@ def outcome_columns() -> set[str]:
     """
     return OUTCOME_METADATA_COLUMNS | {AGE_COL}
 
-BASELINE_STATIC_FIXED = ("GENDER_MALE", "pd1pdl1", "ctla4")
-BASELINE_STATIC_PREFIX = "CANCER_TYPE_"
+STAGE_FEATURE_COLUMNS = ("CANCER_STAGE_II", "CANCER_STAGE_III", "CANCER_STAGE_IV")
 
 
-def baseline_covariate_columns(df: pd.DataFrame) -> list[str]:
-    cols = [c for c in BASELINE_STATIC_FIXED if c in df.columns]
-    cols += sorted(c for c in df.columns if c.startswith(BASELINE_STATIC_PREFIX))
-    return cols
+def stage_feature_columns(data: pd.DataFrame) -> list[str]:
+    return [c for c in STAGE_FEATURE_COLUMNS if c in data.columns]
+
+
+def stage_available_mask(data: pd.DataFrame, stage_cols: list[str]) -> pd.Series:
+    if not stage_cols:
+        return pd.Series(True, index=data.index)
+    return data[stage_cols].notna().all(axis=1)
 
 
 def normalize_endpoints(raw_endpoints: list[str]) -> list[str]:
@@ -349,14 +355,32 @@ def prepare_landmark_context(
     landmark_day: int,
     *,
     min_patient_coverage: float,
+    restrict_to_stage: bool,
 ) -> LandmarkContext:
     print(f"\n##### LANDMARK ANALYSES: +{landmark_day} DAYS #####")
     merged, train_val, test, pre_treatment_lab_df = _load_prebuilt_landmark(
         inputs_dir, landmark_day
     )
 
-    excluded = outcome_columns() | set(baseline_covariate_columns(merged))
-    raw_feature_cols = [c for c in merged.columns if c not in excluded]
+    if restrict_to_stage:
+        stage_cols = stage_feature_columns(merged)
+        if not stage_cols:
+            raise SystemExit(
+                "--restrict-to-stage requires CANCER_STAGE_* columns in the "
+                "aggregated inputs (build with --stage-file; PROFILE only)."
+            )
+        keep = merged.index[stage_available_mask(merged, stage_cols)]
+        n_before = len(merged)
+        merged = merged.loc[merged.index.intersection(keep)]
+        train_val = train_val.loc[train_val.index.intersection(keep)]
+        test = test.loc[test.index.intersection(keep)]
+        print(
+            f"  [restrict-to-stage] stage-available cohort: "
+            f"{len(merged)}/{n_before} patients "
+            f"(train_val={len(train_val)}, test={len(test)})"
+        )
+
+    raw_feature_cols = [c for c in merged.columns if c not in outcome_columns()]
     univariate_data = merged.copy()
     split_stratification = "prebuilt"
 

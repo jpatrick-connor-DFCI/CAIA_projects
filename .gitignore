@@ -14,10 +14,18 @@ __pycache__/
 *.swp
 *~
 
-# Only track COMPASS and IPIO folders
+# Only track project folders plus shared code/resources
 /*
 !COMPASS/
 !IPIO/
+!survival_common/
+!data_preprocessing_common/
+!data_preprocessing_common/**
 !.gitignore
 !README.md
-.csv
+
+# Re-apply generated/cache ignores after the project-directory unignore rules.
+**/__pycache__/
+*.py[cod]
+*.csv
+!data_preprocessing_common/resources/lab_mappings/OMOP_to_DFCI_lab_ids.csv
