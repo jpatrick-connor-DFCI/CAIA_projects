@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, List, Tuple
 
 import pandas as pd
 
 
-CovariateHook = Callable[[Any, Namespace, Any], tuple[str, ...]]
-FeatureHook = Callable[[Any, Namespace, Any], list[str]]
+CovariateHook = Callable[[Any, Namespace, Any], Tuple[str, ...]]
+FeatureHook = Callable[[Any, Namespace, Any], List[str]]
 KwargsHook = Callable[[Namespace], dict]
 ParserHook = Callable[[ArgumentParser, Any], None]
 # XGBoost-specific: builds the per-endpoint feature-selection metadata frame

@@ -9,9 +9,10 @@ fits, manifest loading, and endpoint horizon-grid handling.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from itertools import product
 from pathlib import Path
+from typing import Mapping
 
 import numpy as np
 import pandas as pd
