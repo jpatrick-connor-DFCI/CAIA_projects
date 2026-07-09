@@ -86,19 +86,21 @@ COMPASS/
 
 ## Stage 1 — Compile prostate cohort source data
 
-`data_preprocessing/compile_prostate_data.py` (module-level script, no CLI). Derives the prostate
-MRN set from the DFCI first-treatments table, loads batched note JSONs into `prostate_text_data.csv`,
-then filters the raw ICD / health-history / medication / lab / somatic exports down to the cohort and
-derives `total_psa_records.csv` and `platinum_chemo_records.csv`.
+`data_preprocessing/compile_prostate_data.py` (module-level script, no CLI). Derives the broad
+prostate MRN set from ICDs (`C61`, excluding non-prostate primary ICDs), loads any available batched
+note JSONs into `prostate_text_data.csv`, then filters the raw ICD / health-history / medication /
+lab / somatic exports down to that broad prostate set and derives `total_psa_records.csv` and
+`platinum_chemo_records.csv`.
 
 - **Inputs (hard-coded under `DATA_PATH = /data/gusev/USERS/jpconnor/data/`):**
-  `first_treatments_dfci_w_inferred_cancers.csv`, `full_VTE_embeddings_metadata.csv`,
-  `VTE_notes_with_full_metadata_batch_*.json`, `timestamped_icd_info.csv.gz`, `HEALTH_HISTORY.csv`,
+  `full_VTE_embeddings_metadata.csv`, `VTE_notes_with_full_metadata_batch_*.json`,
+  `timestamped_icd_info.csv.gz`, `HEALTH_HISTORY.csv`,
   `MEDICATIONS.csv`, `OUTPT_LAB_RESULTS_LABS.csv`, `complete_somatic_data_df.csv`.
 - **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** the eight `prostate_*` /
   `*_records.csv` tables listed in the data-flow diagram.
-- **Cohort definition:** "prostate patients **that have batched note text**" — the related tables are
-  filtered against the notes dataframe (`complete_df`), not the bare prostate MRN list.
+- **Cohort definition:** ICD-defined prostate patients, not only patients with first-treatment anchors
+  or batched note text. Notes remain a useful subset, but the structured longitudinal lab pipeline is
+  built from the full prostate set and cohort-specific selection happens downstream.
 
 `compile_MRNs_for_manual_review.py` builds an auxiliary manual-review MRN sheet from the
 stage-1 outputs (platinum mentions, non-prostate-primary ICDs, PARPi exposure, BRCA2 status).
@@ -119,11 +121,13 @@ COMPASS PROFILE and IPIO live in `survival_common/`.
 
 Consolidates/standardizes labs (via `data_preprocessing_common/dfci_labs.py`), attaches the first
 prostate (`C61`) diagnosis date and outcomes, rebases all timing to
-`FIRST_RECORD_DATE = min(first lab, diagnosis, first treatment)`, and applies patient-level cohort
-filters.
+`FIRST_RECORD_DATE = min(first lab, diagnosis, first treatment)`, and writes the broad row-level
+prostate lab frame. Patient-level cohort filters are deferred to `build_prediction_inputs.py` so
+different anchors can select their own cohorts.
 
-- **Cohort filters (`apply_cohort_filters`, logged per step):** C61 prostate required & non-prostate
-  primary excluded (done at ICD stage); `FIRST_TREATMENT == 1`; ≥ 5 PSA rows; PARPi-exposed patients dropped.
+- **Broad processing:** C61 prostate required & non-prostate primary excluded at the ICD stage; no
+  first-treatment, PSA-count, or PARPi filter is applied to `longitudinal_prediction_data.csv`.
+  `PARPI_EXPOSED` is carried as a patient-level flag for downstream filtering.
 - **Lab QC (`consolidate_dfci_labs`):** unit standardization to canonical units, sentinel nulling
   (e.g. `9999999`), physiologic-range nulling, combined-BP splitting. Out-of-range values are **nulled,
   not row-dropped** — downstream must filter on `conversion_status` (or pass `--successful-only`).
@@ -144,7 +148,11 @@ aggregated tables plus pre-treatment long labs and shared split / canonical-lab 
 - **Key CLI:** `--data`, `--landmark-days 0 90` (default from `cox_aggregated.DEFAULT_LANDMARK_DAYS`),
   `--seed`, `--test-frac`, `--val-frac`, `--time-unit-days 7`, `--min-patient-coverage`,
   `--auc-quantiles`, `--id-col`, `--age-col`, `--anchor-col`, `--stage-file`,
-  `--restrict-to-mrns`, `--require-first-treatment` / `--no-require-first-treatment`.
+  `--restrict-to-mrns`, `--require-first-treatment` / `--no-require-first-treatment`,
+  `--min-psa-count`, `--exclude-parpi` / `--include-parpi`.
+- **Default downstream cohort filters:** `FIRST_TREATMENT == 1`, ≥5 PSA rows, and PARPi exclusion
+  (when `PARPI_EXPOSED` is present). These defaults preserve the original first-treatment cohort, but
+  alternate anchors can relax them explicitly.
 - **Outputs:** `aggregated_landmark{D}.csv`, `pre_treatment_lab_long_landmark{D}.csv`,
   `split_assignments.csv`, `landmark_mrn_availability.csv`, `canonical_labs_train_val.csv`,
   `landmark_attrition.json`, `build_manifest.json`.
@@ -258,8 +266,8 @@ surprised by them.
 - **`auc_max_time_units = 260` is the default** in `cox_aggregated.py` and `multivariate_analysis.py` and
   admin-censors AUC/Brier unless `--auc-max-time-units` is overridden.
 - **Silent patient drops** at several inner-joins and `valid`-mask filters (diagnosis/death inner joins,
-  duration `> 0` filter). `apply_cohort_filters` is the good model — it logs
-  every step; the build scripts should too.
+  duration `> 0` filter). Downstream cohort filters now log attrition in `build_prediction_inputs.py`;
+  keep that pattern for any new cohort-selection rule.
 
 ### Low impact / cleanliness
 

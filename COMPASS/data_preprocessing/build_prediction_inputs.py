@@ -2,7 +2,8 @@
 Single source of truth for survival-analysis prediction inputs.
 
 For each requested landmark, this script:
-  1. Loads + current cohort-filters the raw longitudinal lab CSV.
+  1. Loads the broad row-level longitudinal prostate lab CSV and applies the
+     requested downstream cohort filters.
   2. Builds the landmarked patient cohort and intersects MRNs across all
      requested landmarks so every downstream model sees the same patients.
   3. Derives a 3-way train/valid/test split ONCE on the intersection cohort
@@ -67,6 +68,7 @@ from survival_common.helper import (  # noqa: E402
 DEFAULT_OUTPUT_SUBDIR = "prediction_inputs"
 DEFAULT_VAL_FRAC = 0.20
 DEFAULT_TIME_UNIT_DAYS = 7
+DEFAULT_MIN_PSA_COUNT = 5
 
 SPLIT_ASSIGNMENTS_FILENAME = "split_assignments.csv"
 LANDMARK_AVAILABILITY_FILENAME = "landmark_mrn_availability.csv"
@@ -226,6 +228,83 @@ def load_mrn_subset(mrn_file: Path, id_col: str) -> set[int]:
     return set(ids.tolist())
 
 
+def apply_downstream_cohort_filters(
+    df: pd.DataFrame,
+    *,
+    require_first_treatment: bool,
+    min_psa_count: int,
+    exclude_parpi: bool,
+) -> tuple[pd.DataFrame, dict]:
+    """Apply patient-level cohort filters after loading the broad lab frame."""
+    if min_psa_count < 0:
+        raise ValueError(f"min_psa_count must be >= 0, got {min_psa_count}.")
+
+    out = df.copy()
+    n_start = out[ID_COL].nunique()
+    print(f"Downstream cohort filter start: {n_start} patients")
+
+    if require_first_treatment:
+        if "FIRST_TREATMENT" not in out.columns:
+            raise ValueError(
+                "--require-first-treatment was set but input data has no FIRST_TREATMENT column."
+            )
+        out = out.loc[pd.to_numeric(out["FIRST_TREATMENT"], errors="coerce").fillna(0).eq(1)].copy()
+        n_after_first_treatment = out[ID_COL].nunique()
+        print(f"  First-treatment inclusion: kept {n_after_first_treatment}/{n_start}")
+    else:
+        n_after_first_treatment = n_start
+        print("  First-treatment inclusion: disabled")
+
+    if min_psa_count > 0:
+        if "LAB_NAME" not in out.columns:
+            raise ValueError("--min-psa-count requires a LAB_NAME column.")
+        psa_counts = (
+            out.loc[out["LAB_NAME"].astype(str).str.strip().eq("PSA")]
+            .groupby(ID_COL)
+            .size()
+        )
+        keep_psa = psa_counts.loc[psa_counts >= min_psa_count].index
+        out = out.loc[out[ID_COL].isin(keep_psa)].copy()
+        n_after_psa = out[ID_COL].nunique()
+        print(
+            f"  PSA count filter (>= {min_psa_count}): "
+            f"kept {n_after_psa}/{n_after_first_treatment}"
+        )
+    else:
+        n_after_psa = out[ID_COL].nunique()
+        print("  PSA count filter: disabled")
+
+    if exclude_parpi:
+        if "PARPI_EXPOSED" in out.columns:
+            parpi = pd.to_numeric(out["PARPI_EXPOSED"], errors="coerce").fillna(0).astype(int)
+            out = out.loc[~parpi.eq(1)].copy()
+            n_after_parpi = out[ID_COL].nunique()
+            print(
+                f"  PARPi exclusion: dropped {n_after_psa - n_after_parpi} "
+                f"(remaining: {n_after_parpi})"
+            )
+        else:
+            n_after_parpi = n_after_psa
+            print("  PARPi exclusion requested, but PARPI_EXPOSED is missing; skipping")
+    else:
+        n_after_parpi = n_after_psa
+        print("  PARPi exclusion: disabled")
+
+    if out.empty:
+        raise ValueError("No rows remain after downstream cohort filters.")
+
+    attrition = {
+        "n_before_downstream_cohort_filters": int(n_start),
+        "require_first_treatment": bool(require_first_treatment),
+        "n_after_first_treatment_filter": int(n_after_first_treatment),
+        "min_psa_count": int(min_psa_count),
+        "n_after_psa_count_filter": int(n_after_psa),
+        "exclude_parpi": bool(exclude_parpi),
+        "n_after_parpi_exclusion": int(n_after_parpi),
+    }
+    return out, attrition
+
+
 def derive_three_way_split(
     base_merged: pd.DataFrame,
     *,
@@ -368,6 +447,13 @@ def main(args: argparse.Namespace) -> None:
             f"retained ({len(mrn_subset)} requested in {args.restrict_to_mrns})"
         )
 
+    df, cohort_filter_attrition = apply_downstream_cohort_filters(
+        df,
+        require_first_treatment=args.require_first_treatment,
+        min_psa_count=args.min_psa_count,
+        exclude_parpi=args.exclude_parpi,
+    )
+
     anchor_col = args.anchor_col
     if anchor_col not in df.columns:
         raise ValueError(
@@ -441,6 +527,7 @@ def main(args: argparse.Namespace) -> None:
     # the chain persisted by longitudinal_data_processing.py's cohort_attrition.json.
     landmark_attrition = {
         "n_loaded_cohort": int(n_loaded_cohort),
+        "downstream_cohort_filters": cohort_filter_attrition,
         "eligible_by_landmark": {
             str(lm): int(availability[f"eligible_landmark_{lm}"].sum())
             for lm in landmark_days
@@ -531,6 +618,7 @@ def main(args: argparse.Namespace) -> None:
         "data": str(args.data),
         "anchor_col": str(args.anchor_col),
         "require_first_treatment": bool(args.require_first_treatment),
+        "downstream_cohort_filters": cohort_filter_attrition,
         "landmark_days": [int(d) for d in landmark_days],
         "seed": int(args.seed),
         "test_frac": float(args.test_frac),
@@ -595,11 +683,33 @@ if __name__ == "__main__":
         help="Drop the FIRST_TREATMENT == 1 requirement (e.g. for a non-treatment anchor).",
     )
     parser.add_argument(
+        "--min-psa-count",
+        type=int,
+        default=DEFAULT_MIN_PSA_COUNT,
+        help=(
+            "Minimum number of PSA rows required before landmark building. "
+            "Set to 0 to disable this downstream cohort filter."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-parpi",
+        dest="exclude_parpi",
+        action="store_true",
+        default=True,
+        help="Exclude PARPi-exposed patients when PARPI_EXPOSED is present (default; on).",
+    )
+    parser.add_argument(
+        "--include-parpi",
+        dest="exclude_parpi",
+        action="store_false",
+        help="Do not exclude PARPi-exposed patients.",
+    )
+    parser.add_argument(
         "--landmark-days",
         nargs="+",
         type=int,
         default=DEFAULT_LANDMARK_DAYS,
-        help="Landmark offsets in days relative to first treatment.",
+        help="Landmark offsets in days relative to --anchor-col.",
     )
     parser.add_argument(
         "--output-dir",

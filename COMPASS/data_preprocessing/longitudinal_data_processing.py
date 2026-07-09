@@ -338,68 +338,85 @@ def build_longitudinal_prediction_data(
     return pred_df[ordered_cols].copy(), attrition
 
 
-def apply_cohort_filters(
+def annotate_parpi_exposure(
     pred_df: pd.DataFrame,
     *,
     medications_df: pd.DataFrame,
-    min_psa_count: int = MIN_PSA_COUNT,
-) -> tuple[pd.DataFrame, dict]:
-    """Patient-level inclusion/exclusion on the row-level prediction frame.
-
-    Inclusion:
-      - recorded first treatment (FIRST_TREATMENT == 1); never-treated
-        patients are excluded so that the "pre-treatment" window used by
-        downstream feature engineering is well-defined.
-      - >= ``min_psa_count`` PSA rows in the longitudinal prediction frame
-        (LAB_NAME == "PSA", after lab consolidation)
-    Exclusion:
-      - any PARPi exposure, identified from the pre-existing prostate
-        medications table via NCI_PREFERRED_MED_NM membership in PARPI_MEDS
-
-    Prostate-diagnosis inclusion and non-prostate-primary exclusion are
-    already enforced upstream (ICD-based, via compute_first_prostate_diagnosis).
-    """
-    n_before = pred_df[ID_COL].nunique()
-    print(f"Cohort before treatment/PSA/PARPi filters: {n_before} patients")
-
-    pred_df = pred_df.loc[pred_df["FIRST_TREATMENT"].eq(1)].copy()
-    n_after_treated = pred_df[ID_COL].nunique()
-    print(f"  First-treatment inclusion: kept {n_after_treated}/{n_before}")
-
-    psa_counts = (
-        pred_df.loc[pred_df["LAB_NAME"].eq("PSA")]
-        .groupby(ID_COL)
-        .size()
-    )
-    keep_psa = psa_counts.loc[psa_counts >= min_psa_count].index
-    pred_df = pred_df.loc[pred_df[ID_COL].isin(keep_psa)].copy()
-    n_after_psa = pred_df[ID_COL].nunique()
-    print(
-        f"  PSA count filter (>= {min_psa_count}): "
-        f"kept {n_after_psa}/{n_after_treated}"
-    )
-
+) -> pd.DataFrame:
+    """Carry PARPi exposure as a patient-level flag for downstream cohort builds."""
+    out = pred_df.copy()
     parpi_mrns = set(
         medications_df.loc[
             medications_df["NCI_PREFERRED_MED_NM"].astype(str).str.upper().isin(PARPI_MEDS),
             ID_COL,
         ].unique()
     )
-    pred_df = pred_df.loc[~pred_df[ID_COL].isin(parpi_mrns)].copy()
-    n_after_parpi = pred_df[ID_COL].nunique()
+    out["PARPI_EXPOSED"] = out[ID_COL].isin(parpi_mrns).astype(int)
+    return out
+
+
+def summarize_default_cohort_filters(
+    pred_df: pd.DataFrame,
+    *,
+    min_psa_count: int = MIN_PSA_COUNT,
+) -> dict:
+    """Preview the default downstream cohort filters on the broad lab frame.
+
+    These filters used to be applied in this script, which meant every anchor
+    inherited the first-treatment cohort before `build_prediction_inputs.py`
+    could apply anchor-specific selection. The row-level output is now the broad
+    prostate lab frame; the prediction-input builder applies these rules by
+    default and can relax them for non-first-treatment anchors.
+
+    Default downstream inclusion:
+      - recorded first treatment (FIRST_TREATMENT == 1); never-treated
+        patients are excluded so that the "pre-treatment" window used by
+        the first-treatment anchor is well-defined.
+      - >= ``min_psa_count`` PSA rows in the longitudinal prediction frame
+        (LAB_NAME == "PSA", after lab consolidation)
+    Default downstream exclusion:
+      - any PARPi exposure, identified from the pre-existing prostate
+        medications table and carried as PARPI_EXPOSED
+
+    Prostate-diagnosis inclusion and non-prostate-primary exclusion are
+    already enforced upstream (ICD-based, via compute_first_prostate_diagnosis).
+    """
+    n_before = pred_df[ID_COL].nunique()
+    print(f"Broad longitudinal prostate lab frame: {n_before} patients")
+
+    preview_df = pred_df.loc[pred_df["FIRST_TREATMENT"].eq(1)].copy()
+    n_after_treated = preview_df[ID_COL].nunique()
+    print(f"  Default first-treatment inclusion would keep {n_after_treated}/{n_before}")
+
+    psa_counts = (
+        preview_df.loc[preview_df["LAB_NAME"].eq("PSA")]
+        .groupby(ID_COL)
+        .size()
+    )
+    keep_psa = psa_counts.loc[psa_counts >= min_psa_count].index
+    preview_df = preview_df.loc[preview_df[ID_COL].isin(keep_psa)].copy()
+    n_after_psa = preview_df[ID_COL].nunique()
     print(
-        f"  PARPi exclusion: dropped {n_after_psa - n_after_parpi} "
+        f"  Default PSA count filter (>= {min_psa_count}) would keep "
+        f"{n_after_psa}/{n_after_treated}"
+    )
+
+    if "PARPI_EXPOSED" in preview_df.columns:
+        preview_df = preview_df.loc[~preview_df["PARPI_EXPOSED"].eq(1)].copy()
+    n_after_parpi = preview_df[ID_COL].nunique()
+    print(
+        f"  Default PARPi exclusion would drop {n_after_psa - n_after_parpi} "
         f"(remaining: {n_after_parpi})"
     )
 
-    attrition = {
+    return {
+        "filters_applied_to_longitudinal_output": False,
         "n_before_treatment_psa_parpi_filters": n_before,
         "n_after_first_treatment_filter": n_after_treated,
         "n_after_psa_count_filter": n_after_psa,
         "min_psa_count": min_psa_count,
         "n_after_parpi_exclusion": n_after_parpi,
     }
-    return pred_df, attrition
 
 
 def parse_args() -> argparse.Namespace:
@@ -430,7 +447,7 @@ def parse_args() -> argparse.Namespace:
         "--medications-csv",
         type=Path,
         default=NEPC_PROJ_PATH / "prostate_medications_data.csv",
-        help="Pre-compiled prostate-cohort medications table (used for PARPi exclusion).",
+        help="Pre-compiled prostate-cohort medications table (used for treatment anchor and PARPi flag).",
     )
     parser.add_argument(
         "--death-csv",
@@ -507,7 +524,7 @@ def main() -> None:
     first_prostate_diagnosis = compute_first_prostate_diagnosis(icds)
 
     # Loaded once and reused for both the treatment anchor (needs MED_START_DT) and
-    # the PARPi exclusion in apply_cohort_filters (needs NCI_PREFERRED_MED_NM only).
+    # the downstream PARPi-exposure flag (needs NCI_PREFERRED_MED_NM only).
     medications_df = pd.read_csv(
         args.medications_csv,
         usecols=[ID_COL, "NCI_PREFERRED_MED_NM", "MED_START_DT"],
@@ -526,10 +543,11 @@ def main() -> None:
         treatment_anchor_df,
     )
 
-    longitudinal_prediction_df, filter_attrition = apply_cohort_filters(
+    longitudinal_prediction_df = annotate_parpi_exposure(
         longitudinal_prediction_df,
         medications_df=medications_df,
     )
+    filter_attrition = summarize_default_cohort_filters(longitudinal_prediction_df)
 
     longitudinal_prediction_df.to_csv(args.output_csv, index=False)
 
@@ -540,6 +558,7 @@ def main() -> None:
         **build_attrition,
         **filter_attrition,
         "n_with_highlighted_treatment_anchor": len(treatment_anchor_df),
+        "n_output_patients": int(longitudinal_prediction_df[ID_COL].nunique()),
     }
     attrition_path = args.output_csv.parent / "cohort_attrition.json"
     attrition_path.write_text(json.dumps(cohort_attrition, indent=2))
