@@ -12,6 +12,22 @@ def _static_covariates(ctx: Any, _args: argparse.Namespace, cox: Any) -> tuple[s
     return tuple(cox.baseline_covariate_columns(ctx.merged))
 
 
+def _prepare_context_kwargs(args: argparse.Namespace) -> dict:
+    return {"feature_subset": args.feature_subset}
+
+
+def _add_cli_args(parser: argparse.ArgumentParser, _cox: Any) -> None:
+    parser.add_argument(
+        "--feature-subset",
+        choices=["all", "labs", "genomics"],
+        default="all",
+        help=(
+            "Candidate feature subset for non-baseline IPIO models: all "
+            "(labs + genomic indicators), labs, or genomics."
+        ),
+    )
+
+
 CONFIG = CoxProjectConfig(
     name="ipio",
     default_endpoints=("irae",),
@@ -21,5 +37,7 @@ CONFIG = CoxProjectConfig(
         "Fit an age(+baseline-covariates)-only Cox model (no labs, no CV) on "
         "the same horizon grid for benchmarking."
     ),
+    prepare_context_kwargs=_prepare_context_kwargs,
     static_covariates=_static_covariates,
+    add_cli_args=_add_cli_args,
 )

@@ -174,9 +174,9 @@ models share a grid.
 
 | Script | Model | CLI notes |
 |---|---|---|
-| `univariate_analysis.py` | Cox: univariate n_obs-adjusted associations | `--landmark-days`, `--endpoints` |
-| `multivariate_analysis.py --model elastic-net` | Elastic-net Cox multivariable model (sksurv `CoxnetSurvivalAnalysis`, 5-fold CV, AGE unpenalized) | `--landmark-days`, `--endpoints`, `--n-folds` |
-| `multivariate_analysis.py --model xgboost` | XGBoost `survival:cox`, 5-fold CV grid (`max_depth × eta × min_child_weight`) | `--landmark-days`, `--endpoints`, `--max-features` |
+| `univariate_analysis.py` | Cox: univariate n_obs-adjusted associations | `--landmark-days`, `--endpoints`; IPIO also supports `--feature-subset {labs,genomics,all}` |
+| `multivariate_analysis.py --model elastic-net` | Elastic-net Cox multivariable model (sksurv `CoxnetSurvivalAnalysis`, 5-fold CV, AGE unpenalized) | `--landmark-days`, `--endpoints`, `--n-folds`; IPIO also supports `--feature-subset {labs,genomics,all}` |
+| `multivariate_analysis.py --model xgboost` | XGBoost `survival:cox`, 5-fold CV grid (`max_depth × eta × min_child_weight`) | `--landmark-days`, `--endpoints`, `--max-features`; IPIO also supports `--feature-subset {labs,genomics,all}` |
 
 `cox_aggregated.py` is now a project adapter: endpoint constants, cohort-specific covariates/restrictions,
 and per-landmark context. The univariate/elastic-net CLI orchestration lives in
@@ -200,10 +200,11 @@ COMPASS PROFILE has one run notebook and one figure notebook:
 IPIO has a paired run/figure notebook as well:
 
 - `IPIO_run_locally.ipynb` — builds standard lab landmark inputs at 0/90 plus the genomic landmark-0
-  inputs, then runs univariate Cox, elastic-net Cox, and XGBoost for the lab arm and genomic arm
-  separately.
+  inputs, then runs univariate Cox, elastic-net Cox, and XGBoost for the lab arm, genomics-only arm,
+  and genomics+labs arm separately.
 - `IPIO_generate_figures.ipynb` — writes a labs-only paired volcano and a separate genomics-only
-  volcano, plus the lab-arm discrimination and importance figures.
+  volcano, plus the lab-arm discrimination, genomic-arm discrimination, and lab-arm importance
+  figures.
 ---
 
 ## Conventions & invariants (preserve these when editing)

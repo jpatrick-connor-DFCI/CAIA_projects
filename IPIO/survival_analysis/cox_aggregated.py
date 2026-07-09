@@ -167,6 +167,24 @@ def genomic_feature_columns(df: pd.DataFrame) -> list[str]:
     return sorted(c for c in df.columns if GENOMIC_FEATURE_RE.match(str(c)))
 
 
+def normalize_feature_subset(feature_subset: str) -> str:
+    normalized = str(feature_subset).lower().replace("-", "_")
+    aliases = {
+        "all": "all",
+        "both": "all",
+        "labs": "labs",
+        "lab": "labs",
+        "genomics": "genomics",
+        "genomic": "genomics",
+        "genomics_only": "genomics",
+        "genomic_only": "genomics",
+    }
+    if normalized not in aliases:
+        valid = ", ".join(["all", "labs", "genomics"])
+        raise ValueError(f"Unsupported feature subset {feature_subset!r}. Choose from: {valid}.")
+    return aliases[normalized]
+
+
 def normalize_endpoints(raw_endpoints: list[str]) -> list[str]:
     return _shared_normalize_endpoints(raw_endpoints, ENDPOINTS)
 
@@ -356,17 +374,27 @@ def prepare_landmark_context(
     landmark_day: int,
     *,
     min_patient_coverage: float,
+    feature_subset: str = "all",
 ) -> LandmarkContext:
     print(f"\n##### LANDMARK ANALYSES: +{landmark_day} DAYS #####")
     merged, train_val, test, pre_treatment_lab_df = _load_prebuilt_landmark(
         inputs_dir, landmark_day
     )
 
+    feature_subset = normalize_feature_subset(feature_subset)
     excluded = outcome_columns() | set(baseline_covariate_columns(merged))
-    raw_feature_cols = [c for c in merged.columns if c not in excluded]
-    always_include_feature_cols = tuple(
-        c for c in genomic_feature_columns(merged) if c in raw_feature_cols
-    )
+    raw_feature_cols_all = [c for c in merged.columns if c not in excluded]
+    genomic_cols = tuple(c for c in genomic_feature_columns(merged) if c in raw_feature_cols_all)
+    genomic_set = set(genomic_cols)
+    if feature_subset == "genomics":
+        raw_feature_cols = list(genomic_cols)
+        always_include_feature_cols = genomic_cols
+    elif feature_subset == "labs":
+        raw_feature_cols = [c for c in raw_feature_cols_all if c not in genomic_set]
+        always_include_feature_cols = ()
+    else:
+        raw_feature_cols = raw_feature_cols_all
+        always_include_feature_cols = genomic_cols
     univariate_data = merged.copy()
     split_stratification = "prebuilt"
 
@@ -382,11 +410,12 @@ def prepare_landmark_context(
         min_coverage=min_patient_coverage,
         id_col=ID_COL,
     )
+    model_canonical_labs = [] if feature_subset == "genomics" else canonical_labs
     selected_feature_cols, feature_meta = select_feature_columns(
         train_val,
         raw_feature_cols,
         min_patient_coverage=min_patient_coverage,
-        restrict_to_labs=canonical_labs,
+        restrict_to_labs=model_canonical_labs,
         always_include=list(always_include_feature_cols),
     )
     feature_meta_selected = feature_meta.loc[
@@ -398,7 +427,8 @@ def prepare_landmark_context(
     print(f"Full cohort: {len(merged)} patients")
     print(f"Train/val (Arm 2): {len(train_val)} patients")
     print(f"Test (Arm 2):      {len(test)} patients")
-    print(f"Canonical labs (train_val): {len(canonical_labs)}")
+    print(f"Feature subset: {feature_subset}")
+    print(f"Canonical labs (train_val): {len(model_canonical_labs)}")
     print(f"Selected summary-lab features (train_val pre-filter): {len(selected_feature_cols)}")
     if always_include_feature_cols:
         n_selected_genomics = len(set(always_include_feature_cols).intersection(selected_feature_cols))
@@ -416,7 +446,7 @@ def prepare_landmark_context(
         raw_feature_cols=raw_feature_cols,
         univariate_data=univariate_data,
         split_stratification=split_stratification,
-        canonical_labs=canonical_labs,
+        canonical_labs=model_canonical_labs,
         selected_feature_cols=selected_feature_cols,
         feature_meta_selected=feature_meta_selected,
         always_include_feature_cols=always_include_feature_cols,

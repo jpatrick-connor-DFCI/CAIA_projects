@@ -16,6 +16,8 @@ For XGBoost, two modes mirror the elastic-net baseline flag:
     from selection.
   --baseline: age(+baseline-covariate)-only model (no lab features, no CV)
     on the same horizon grid for benchmarking against the lab model.
+  --feature-subset genomics: non-baseline model using only genomic indicators.
+    `all` keeps labs + genomic indicators; `labs` excludes genomic indicators.
 
 Baseline covariates (GENDER_MALE, pd1pdl1, ctla4, CANCER_TYPE_*, from
 cox_aggregated.baseline_covariate_columns) are always included (unconditionally,
@@ -795,6 +797,7 @@ def run_xgboost(args: argparse.Namespace) -> None:
             inputs_dir,
             landmark_day,
             min_patient_coverage=min_patient_coverage,
+            feature_subset=args.feature_subset,
         )
         endpoint_horizon_grids, _horizon_grid_df = build_endpoint_horizon_grids(
             landmark_day,
@@ -916,6 +919,15 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--val-frac", type=float, default=0.20)
     parser.add_argument("--max-features", type=int, default=None)
+    parser.add_argument(
+        "--feature-subset",
+        choices=["all", "labs", "genomics"],
+        default="all",
+        help=(
+            "Candidate feature subset for non-baseline models: all "
+            "(labs + genomic indicators), labs, or genomics."
+        ),
+    )
     parser.add_argument(
         "--baseline",
         action="store_true",
