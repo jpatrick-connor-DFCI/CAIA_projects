@@ -4,8 +4,12 @@ prediction inputs. Adapted from COMPASS's PROFILE/build_prediction_inputs.py.
 
 Unlike COMPASS, the outcome (death vs. censor vs. irAE) is already clean in
 the source `longitudinal_prediction_data.csv` -- there is no raw ICD/med-table
-date inference. Only `event == "irAE"` is the event of interest; death and
-censoring are both right-censoring. See `ipio_cohort.make_irae_outcome_df`.
+date inference. For the cause-specific (plain Cox) arm, `event == "irAE"` is
+the event of interest and death and censoring are both right-censoring. The
+aggregated table also carries DEATH/event_type so univariate runs can
+additionally fit a Fine-Gray subdistribution-hazard arm where death is a
+competing event for irAE (survival_common.finegray). See
+`ipio_cohort.make_irae_outcome_df`.
 
 For each requested landmark, this script:
   1. Loads the IPIO longitudinal lab CSV (long format; patient-level columns
@@ -117,8 +121,8 @@ def pre_treatment_lab_filename(landmark_day: int) -> str:
 
 # ---------------------------------------------------------------------------
 # Local data loader for the IPIO longitudinal_prediction_data.csv schema.
-# Not survival_common.loaders.load_profile_longitudinal -- that loader's patient-level
-# column list (PLATINUM/DEATH-specific) doesn't match IPIO's schema.
+# IPIO-specific because its patient-level column list (IRAE/DEATH-based, no
+# PLATINUM) doesn't match COMPASS's schema.
 # ---------------------------------------------------------------------------
 
 def load_ipio_longitudinal(path: Path, *, id_col: str = "DFCI_MRN") -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -127,10 +131,9 @@ def load_ipio_longitudinal(path: Path, *, id_col: str = "DFCI_MRN") -> tuple[pd.
     Long format, one row per (patient x lab observation); patient-level columns
     repeat per row. Patient-level: DFCI_MRN, AGE_AT_TREATMENTSTART, GENDER_MALE,
     CANCER_TYPE_* (dynamic one-hot set), pd1pdl1, ctla4, FIRST_RECORD_DATE,
-    FIRST_TREATMENT_DATE, FIRST_TREATMENT, LAST_CONTACT_DATE, IRAE. Lab-level:
-    LAB_NAME, LAB_VALUE, LAB_UNIT, LAB_DATE, t_lab (recomputed from
-    LAB_DATE - FIRST_RECORD_DATE if not already present, mirroring how
-    survival_common.loaders.load_profile_longitudinal handles a missing t_lab).
+    FIRST_TREATMENT_DATE, FIRST_TREATMENT, LAST_CONTACT_DATE, IRAE, DEATH.
+    Lab-level: LAB_NAME, LAB_VALUE, LAB_UNIT, LAB_DATE, t_lab (recomputed from
+    LAB_DATE - FIRST_RECORD_DATE if not already present).
     """
     df = pd.read_csv(path, low_memory=False)
     for date_col in ("FIRST_RECORD_DATE", "FIRST_TREATMENT_DATE", "LAST_CONTACT_DATE", "LAB_DATE"):

@@ -216,6 +216,14 @@ def make_outcome_df(
     pat["EITHER"] = np.isfinite(first_event_time).astype(int)
     pat["t_either"] = np.where(pat["EITHER"].eq(1), first_event_time, pat["t_death"])
 
+    # 3-level event type for Fine-Gray competing-risks fitting (survival_common.finegray):
+    # 1 = event of interest (platinum), 2 = competing event (death), 0 = censored.
+    # Platinum takes precedence when both are flagged -- t_platinum is already the
+    # correct subdistribution time (time to platinum, regardless of later death).
+    pat["event_type"] = np.where(
+        pat["PLATINUM"].eq(1), 1, np.where(pat["DEATH"].eq(1), 2, 0)
+    ).astype(int)
+
     valid = (
         pat["FIRST_RECORD_DATE"].notna()
         & pat[anchor_col].notna()

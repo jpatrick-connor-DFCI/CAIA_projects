@@ -55,6 +55,7 @@ from survival_common.cox_engine import (  # noqa: E402,F401
 from survival_common.cox_models import (  # noqa: E402
     build_endpoint_horizon_grids as _shared_build_endpoint_horizon_grids,
     build_model_matrices as _shared_build_model_matrices,
+    endpoint_competing as _shared_endpoint_competing,
     fit_final_multivariable_model as _shared_fit_final_multivariable_model,
     load_build_manifest as _shared_load_build_manifest,
     load_prebuilt_landmark as _shared_load_prebuilt_landmark,
@@ -111,6 +112,14 @@ ENDPOINTS = {
         "duration_col": "t_platinum",
         "event_col": "PLATINUM",
         "description": "Time from first treatment start to first platinum exposure",
+        # Competing-risks spec (survival_common.finegray): death is a competing
+        # event for platinum. event_type (built in survival_common.cohort.
+        # make_outcome_df) is 1=platinum, 2=death, 0=censored. Univariate runs
+        # emit both a cause-specific Cox arm and a Fine-Gray subdistribution
+        # arm for this endpoint -- see survival_common.cox_runners.run_univariate.
+        "event_type_col": "event_type",
+        "event_of_interest": 1,
+        "competing_event": 2,
     },
 }
 
@@ -139,6 +148,7 @@ OUTCOME_METADATA_COLUMNS = {
     "t_death",
     "t_death_from_first_record",
     "t_either",
+    "event_type",
     "split",
     "CANCER_STAGE_II",
     "CANCER_STAGE_III",
@@ -216,6 +226,10 @@ def run_univariate_nobs_adjusted_associations(
     min_events_per_feature: int,
     fallback_penalizer: float,
     static_covariate_cols: tuple[str, ...] = (),
+    model_type: str = "cox",
+    event_type_col: str | None = None,
+    event_of_interest: int = 1,
+    competing_event: int = 2,
 ) -> pd.DataFrame:
     return _shared_run_univariate_nobs_adjusted_associations(
         data,
@@ -226,7 +240,15 @@ def run_univariate_nobs_adjusted_associations(
         static_covariate_cols=static_covariate_cols,
         endpoint_map=ENDPOINTS,
         age_col=AGE_COL,
+        model_type=model_type,
+        event_type_col=event_type_col,
+        event_of_interest=event_of_interest,
+        competing_event=competing_event,
     )
+
+
+def endpoint_competing(endpoint: str) -> tuple[str, int, int] | None:
+    return _shared_endpoint_competing(ENDPOINTS, endpoint)
 
 
 def tune_multivariable_model(

@@ -46,6 +46,22 @@ class CoxProjectConfig:
     The shared runners own CLI flow, per-landmark loops, output writing, and
     model orchestration. Project configs only describe study-specific pieces:
     endpoint defaults and static/baseline covariates.
+
+    Endpoint specs (each project's own ``cox_aggregated.ENDPOINTS`` dict, not
+    this dataclass) are ``{"duration_col": str, "event_col": str, "description":
+    str}`` plus three OPTIONAL competing-risks keys, all-or-nothing:
+
+        "event_type_col": str    # 3-level column: 0=censored, event_of_interest, competing_event
+        "event_of_interest": int # defaults to 1 if event_type_col is set
+        "competing_event": int   # defaults to 2 if event_type_col is set
+
+    When ``event_type_col`` is present, ``survival_common.cox_runners.
+    run_univariate`` fits BOTH the existing cause-specific Cox arm and a
+    Fine-Gray subdistribution-hazard arm (survival_common.finegray) for that
+    endpoint, emitting both into the same univariate output CSV distinguished
+    by a ``model_type`` column ("cox" / "finegray"). Endpoints without these
+    keys are completely unaffected -- see ``cox_models.endpoint_competing``.
+    Univariate-only: multivariable/prediction runners do not read these keys.
     """
 
     name: str
@@ -73,8 +89,3 @@ class CoxProjectConfig:
     # Defaults preserve IPIO's schema; COMPASS overrides for its wider schema.
     xgb_feature_meta_frame: XGBFeatureMetaHook | None = None
     xgb_risk_frame: XGBRiskFrameHook | None = None
-
-
-def existing_columns(df: pd.DataFrame, columns: list[str] | tuple[str, ...]) -> list[str]:
-    """Return configured columns that are present in a frame, preserving order."""
-    return [col for col in columns if col in df.columns]

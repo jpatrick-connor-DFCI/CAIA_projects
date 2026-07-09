@@ -41,6 +41,7 @@ UNIVARIATE_KEEP_COLS = [
     "coef_missing",
     "p_value_missing",
     "note",
+    "model_type",
 ]
 
 
@@ -187,21 +188,47 @@ def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
         for endpoint in endpoints:
             print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
             print(cox.ENDPOINTS[endpoint]["description"])
-            adjusted_df = cox.run_univariate_nobs_adjusted_associations(
-                ctx.univariate_data,
-                feature_cols=ctx.selected_feature_cols,
-                endpoint=endpoint,
-                min_events_per_feature=args.min_events_per_feature,
-                fallback_penalizer=args.univariate_penalizer,
-                static_covariate_cols=static_covariate_cols,
-            )
-            adjusted_df.insert(0, "landmark_days", landmark_day)
-            univariate_frames.append(adjusted_df[UNIVARIATE_KEEP_COLS].copy())
-            cox.print_top_hits(
-                adjusted_df,
-                endpoint=endpoint,
-                label="n_obs-adjusted univariate",
-            )
+            adjusted_frames = [
+                cox.run_univariate_nobs_adjusted_associations(
+                    ctx.univariate_data,
+                    feature_cols=ctx.selected_feature_cols,
+                    endpoint=endpoint,
+                    min_events_per_feature=args.min_events_per_feature,
+                    fallback_penalizer=args.univariate_penalizer,
+                    static_covariate_cols=static_covariate_cols,
+                    model_type="cox",
+                )
+            ]
+            # When the endpoint declares a competing event (e.g. death for
+            # platinum/irAE), also fit the Fine-Gray subdistribution-hazard
+            # arm and emit it alongside the cause-specific rows in the same
+            # output file, distinguished by model_type.
+            competing = cox.endpoint_competing(endpoint)
+            if competing is not None:
+                event_type_col, event_of_interest, competing_event = competing
+                adjusted_frames.append(
+                    cox.run_univariate_nobs_adjusted_associations(
+                        ctx.univariate_data,
+                        feature_cols=ctx.selected_feature_cols,
+                        endpoint=endpoint,
+                        min_events_per_feature=args.min_events_per_feature,
+                        fallback_penalizer=args.univariate_penalizer,
+                        static_covariate_cols=static_covariate_cols,
+                        model_type="finegray",
+                        event_type_col=event_type_col,
+                        event_of_interest=event_of_interest,
+                        competing_event=competing_event,
+                    )
+                )
+            for adjusted_df in adjusted_frames:
+                adjusted_df.insert(0, "landmark_days", landmark_day)
+                univariate_frames.append(adjusted_df[UNIVARIATE_KEEP_COLS].copy())
+                model_label = adjusted_df["model_type"].iloc[0] if len(adjusted_df) else "cox"
+                cox.print_top_hits(
+                    adjusted_df,
+                    endpoint=endpoint,
+                    label=f"n_obs-adjusted univariate ({model_label})",
+                )
 
     if feature_selection_frames:
         pd.concat(feature_selection_frames, ignore_index=True).to_csv(

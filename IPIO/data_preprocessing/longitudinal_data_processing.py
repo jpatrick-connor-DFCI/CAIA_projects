@@ -214,6 +214,14 @@ def main() -> None:
     cohort_df["FIRST_TREATMENT"] = 1
     cohort_df["LAST_CONTACT_DATE"] = cohort_df["LAST_DATE"]
     cohort_df["IRAE"] = cohort_df["event"].astype(str).eq("irAE").astype(int)
+    # DEATH: derived from the same raw `event` categorical column as IRAE
+    # (values irAE / death / censor). IPIO has no separate death-date column --
+    # LAST_DATE IS the death date when event=='death' (same source as
+    # LAST_CONTACT_DATE), matching how t_irae already uses LAST_CONTACT_DATE
+    # for every patient regardless of event type. Used downstream by
+    # ipio_cohort.make_irae_outcome_df to build event_type for Fine-Gray
+    # competing-risks univariate fitting (survival_common.finegray).
+    cohort_df["DEATH"] = cohort_df["event"].astype(str).str.lower().eq("death").astype(int)
 
     static_cols = (
         [ID_COL, "AGE_AT_TREATMENTSTART", "GENDER_MALE"]
@@ -226,6 +234,7 @@ def main() -> None:
             "FIRST_TREATMENT",
             "LAST_CONTACT_DATE",
             "IRAE",
+            "DEATH",
         ]
     )
     static_df = cohort_df[static_cols].copy()
@@ -277,6 +286,7 @@ def main() -> None:
             "FIRST_TREATMENT",
             "LAST_CONTACT_DATE",
             "IRAE",
+            "DEATH",
             "LAB_DATE",
             "t_lab",
             "LAB_NAME",
@@ -291,9 +301,11 @@ def main() -> None:
     n_patients = static_df[ID_COL].nunique()
     n_patients_with_labs = longitudinal_df[ID_COL].nunique()
     irae_rate = static_df["IRAE"].mean() if n_patients else float("nan")
+    death_rate = static_df["DEATH"].mean() if n_patients else float("nan")
     print(f"Cohort patients: {n_patients}")
     print(f"Patients with >=1 standardized lab row: {n_patients_with_labs}")
     print(f"IRAE event rate (cohort-level): {irae_rate:.4f}")
+    print(f"DEATH event rate (cohort-level, competing event for irAE): {death_rate:.4f}")
     print(f"Lab row count in output: {len(longitudinal_df)}")
     if len(longitudinal_df):
         print(
