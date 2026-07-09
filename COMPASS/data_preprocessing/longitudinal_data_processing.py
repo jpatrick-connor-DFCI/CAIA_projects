@@ -142,19 +142,11 @@ def mark_non_prostate_primary_icd(icds: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_first_prostate_diagnosis(icds: pd.DataFrame) -> pd.DataFrame:
-    icds = mark_non_prostate_primary_icd(icds)
-    non_prostate_primary_mrns = set(
-        icds.loc[icds["NON_PROSTATE_PRIMARY_ICD10"], ID_COL].unique()
-    )
-    mrns_to_include = icds.loc[
-        ~icds[ID_COL].isin(non_prostate_primary_mrns),
-        ID_COL,
-    ].unique()
     codes = icds["DIAGNOSIS_ICD10_CD"].astype(str).str.upper().str.strip()
 
     return (
         icds.loc[
-            codes.str.startswith("C61") & icds[ID_COL].isin(mrns_to_include),
+            codes.str.startswith("C61"),
             [ID_COL, "START_DT"],
         ]
         .groupby(ID_COL, as_index=False)["START_DT"]
@@ -209,20 +201,19 @@ def build_longitudinal_prediction_data(
     )
 
     n_lab_mrns = prediction_df[ID_COL].nunique()
-    after_dx = prediction_df.merge(first_prostate_diagnosis, on=ID_COL, how="inner")
-    n_after_dx = after_dx[ID_COL].nunique()
+    after_dx = prediction_df.merge(first_prostate_diagnosis, on=ID_COL, how="left")
+    n_with_c61_dx = after_dx.loc[after_dx["DIAGNOSIS_DATE"].notna(), ID_COL].nunique()
     after_death = after_dx.merge(death_df, on=ID_COL, how="inner")
     n_after_death = after_death[ID_COL].nunique()
     print(
         f"[build_longitudinal_prediction_data] patients with labs={n_lab_mrns}; "
-        f"after first-prostate-diagnosis inner-join={n_after_dx} "
-        f"(dropped {n_lab_mrns - n_after_dx}); "
+        f"with C61 diagnosis date={n_with_c61_dx}; "
         f"after death-table inner-join={n_after_death} "
-        f"(dropped {n_after_dx - n_after_death})."
+        f"(dropped {n_lab_mrns - n_after_death})."
     )
     attrition = {
         "n_with_labs": n_lab_mrns,
-        "n_after_diagnosis_join": n_after_dx,
+        "n_with_c61_diagnosis_date": n_with_c61_dx,
         "n_after_death_table_join": n_after_death,
     }
     pred_df = after_death.merge(platinum_first, on=ID_COL, how="left")
@@ -378,8 +369,10 @@ def summarize_default_cohort_filters(
       - any PARPi exposure, identified from the pre-existing prostate
         medications table and carried as PARPI_EXPOSED
 
-    Prostate-diagnosis inclusion and non-prostate-primary exclusion are
-    already enforced upstream (ICD-based, via compute_first_prostate_diagnosis).
+    Non-prostate-primary exclusion is already enforced upstream at stage 1.
+    A C61 diagnosis date is attached when available, but is not an inclusion
+    requirement because the broad source population is the inferred-cancer
+    prostate cohort.
     """
     n_before = pred_df[ID_COL].nunique()
     print(f"Broad longitudinal prostate lab frame: {n_before} patients")

@@ -12,6 +12,7 @@ PROC_PATH = os.path.join(EMBED_PROJ_PATH, 'batched_datasets/processed_datasets/'
 TEXT_PATH = os.path.join(EMBED_PROJ_PATH, 'batched_datasets/batched_text/')
 
 PROFILE_PATH = '/data/gusev/PROFILE/CLINICAL/'
+INTAE_DATA_PATH = os.path.join(PROFILE_PATH, 'robust_VTE_pred_project_2025_03_cohort/data/')
 ONCDRS_PATH = os.path.join(PROFILE_PATH, 'OncDRS/ALL_2025_03/')
 
 SURV_PATH = os.path.join(EMBED_PROJ_PATH, 'time-to-event_analysis/')
@@ -45,14 +46,10 @@ def mark_non_prostate_primary_icd(icds):
     return icds
 
 
-def compute_prostate_mrns_from_icd(icds):
+def compute_non_prostate_primary_mrns_from_icd(icds):
     icds = mark_non_prostate_primary_icd(icds)
-    non_prostate_primary_mrns = set(
-        icds.loc[icds['NON_PROSTATE_PRIMARY_ICD10'], 'DFCI_MRN'].unique()
-    )
-    codes = icds['DIAGNOSIS_ICD10_CD'].astype(str).str.upper().str.strip()
     mrns = icds.loc[
-        codes.str.startswith('C61') & ~icds['DFCI_MRN'].isin(non_prostate_primary_mrns),
+        icds['NON_PROSTATE_PRIMARY_ICD10'],
         'DFCI_MRN',
     ]
     return pd.to_numeric(mrns, errors='coerce').dropna().astype(int).unique()
@@ -71,14 +68,34 @@ def filter_and_save(filename, outname, cohort_mrns, cols=None):
 # Load metadata
 full_meta = pd.read_csv(os.path.join(PROC_PATH, 'full_VTE_embeddings_metadata.csv'))
 
+cancer_types = pd.read_csv(os.path.join(INTAE_DATA_PATH, 'first_treatments_dfci_w_inferred_cancers.csv'))[['DFCI_MRN', 'med_genomics_merged_cancer_group']]
+inferred_prostate_mrns = (
+    pd.to_numeric(
+        cancer_types.loc[cancer_types['med_genomics_merged_cancer_group'] == 'PROSTATE', 'DFCI_MRN'],
+        errors='coerce',
+    )
+    .dropna()
+    .astype(int)
+    .unique()
+)
+
 icd_path = os.path.join(EMBED_PROJ_PATH, 'time-to-event_analysis/timestamped_icd_info.csv.gz')
 icd_source = pd.read_csv(icd_path)
-prostate_mrns = compute_prostate_mrns_from_icd(icd_source)
+non_prostate_primary_mrns = set(compute_non_prostate_primary_mrns_from_icd(icd_source))
+prostate_mrns = [
+    mrn for mrn in inferred_prostate_mrns
+    if mrn not in non_prostate_primary_mrns
+]
 prostate_mrn_set = set(prostate_mrns)
-print(f"ICD-defined prostate cohort: {len(prostate_mrns)} MRNs")
+print(
+    f"Inferred-cancer prostate cohort: {len(inferred_prostate_mrns)} MRNs; "
+    f"removed {len(set(inferred_prostate_mrns) & non_prostate_primary_mrns)} "
+    f"with a non-prostate-primary ICD; retained {len(prostate_mrns)}."
+)
 
 # Collect prostate text notes when available. Related structured tables are
-# filtered against the full ICD-defined prostate set below, not this note subset.
+# filtered against the inferred-prostate set after ICD non-prostate-primary
+# exclusion below, not this note subset.
 prostate_meta = full_meta.loc[
     pd.to_numeric(full_meta['DFCI_MRN'], errors='coerce').isin(prostate_mrn_set)
 ]

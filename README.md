@@ -87,20 +87,21 @@ COMPASS/
 ## Stage 1 — Compile prostate cohort source data
 
 `data_preprocessing/compile_prostate_data.py` (module-level script, no CLI). Derives the broad
-prostate MRN set from ICDs (`C61`, excluding non-prostate primary ICDs), loads any available batched
-note JSONs into `prostate_text_data.csv`, then filters the raw ICD / health-history / medication /
-lab / somatic exports down to that broad prostate set and derives `total_psa_records.csv` and
-`platinum_chemo_records.csv`.
+prostate MRN set from the inferred-cancer table, removes patients with a clear non-prostate-primary
+ICD, loads any available batched note JSONs into `prostate_text_data.csv`, then filters the raw ICD /
+health-history / medication / lab / somatic exports down to that broad prostate set and derives
+`total_psa_records.csv` and `platinum_chemo_records.csv`.
 
 - **Inputs (hard-coded under `DATA_PATH = /data/gusev/USERS/jpconnor/data/`):**
-  `full_VTE_embeddings_metadata.csv`, `VTE_notes_with_full_metadata_batch_*.json`,
-  `timestamped_icd_info.csv.gz`, `HEALTH_HISTORY.csv`,
+  `first_treatments_dfci_w_inferred_cancers.csv`, `full_VTE_embeddings_metadata.csv`,
+  `VTE_notes_with_full_metadata_batch_*.json`, `timestamped_icd_info.csv.gz`, `HEALTH_HISTORY.csv`,
   `MEDICATIONS.csv`, `OUTPT_LAB_RESULTS_LABS.csv`, `complete_somatic_data_df.csv`.
 - **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** the eight `prostate_*` /
   `*_records.csv` tables listed in the data-flow diagram.
-- **Cohort definition:** ICD-defined prostate patients, not only patients with first-treatment anchors
-  or batched note text. Notes remain a useful subset, but the structured longitudinal lab pipeline is
-  built from the full prostate set and cohort-specific selection happens downstream.
+- **Cohort definition:** inferred-cancer prostate patients after ICD-based non-prostate-primary
+  exclusion, not only patients with first-treatment anchors or batched note text. Notes remain a
+  useful subset, but the structured longitudinal lab pipeline is built from the full prostate set and
+  cohort-specific selection happens downstream.
 
 `compile_MRNs_for_manual_review.py` builds an auxiliary manual-review MRN sheet from the
 stage-1 outputs (platinum mentions, non-prostate-primary ICDs, PARPi exposure, BRCA2 status).
@@ -120,14 +121,15 @@ COMPASS PROFILE and IPIO live in `survival_common/`.
 ### 2.1 — `data_preprocessing/longitudinal_data_processing.py` → `longitudinal_prediction_data.csv`
 
 Consolidates/standardizes labs (via `data_preprocessing_common/dfci_labs.py`), attaches the first
-prostate (`C61`) diagnosis date and outcomes, rebases all timing to
+prostate (`C61`) diagnosis date when available and outcomes, rebases all timing to
 `FIRST_RECORD_DATE = min(first lab, diagnosis, first treatment)`, and writes the broad row-level
 prostate lab frame. Patient-level cohort filters are deferred to `build_prediction_inputs.py` so
 different anchors can select their own cohorts.
 
-- **Broad processing:** C61 prostate required & non-prostate primary excluded at the ICD stage; no
-  first-treatment, PSA-count, or PARPi filter is applied to `longitudinal_prediction_data.csv`.
-  `PARPI_EXPOSED` is carried as a patient-level flag for downstream filtering.
+- **Broad processing:** inferred-cancer prostate required and non-prostate-primary ICDs excluded at
+  stage 1; a C61 diagnosis date is attached when present but is not required. No first-treatment,
+  PSA-count, or PARPi filter is applied to `longitudinal_prediction_data.csv`. `PARPI_EXPOSED` is
+  carried as a patient-level flag for downstream filtering.
 - **Lab QC (`consolidate_dfci_labs`):** unit standardization to canonical units, sentinel nulling
   (e.g. `9999999`), physiologic-range nulling, combined-BP splitting. Out-of-range values are **nulled,
   not row-dropped** — downstream must filter on `conversion_status` (or pass `--successful-only`).
