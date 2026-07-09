@@ -254,6 +254,9 @@ def _run_multivariable_landmark(
             horizon_grid=horizon_grid,
             min_patient_coverage=min_patient_coverage,
             static_covariate_cols=static_covariate_cols,
+            always_include_feature_cols=tuple(
+                getattr(ctx, "always_include_feature_cols", ())
+            ),
         )
         if not fold_canonical_labs_df.empty:
             fold_canonical_labs_df.insert(0, "landmark_days", landmark_day)

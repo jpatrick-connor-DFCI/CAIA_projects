@@ -23,11 +23,17 @@ Outputs (under <inputs-dir>/genomic):
   genomic_aggregated.csv             one row per MRN: lab features + genomic
                                      indicators + outcome rebased to IO_START +
                                      split column
+  aggregated_landmark0.csv           runner-compatible alias for the genomic
+                                     landmark-0 arm
   pre_sample_lab_long.csv            long-format pre-IO_START labs (genomics-
                                      eligible subset) for per-fold canonical-lab
                                      selection
-  genomic_canonical_labs_train_val.csv  landmark=0, lab_name
+  pre_treatment_lab_long_landmark0.csv
+                                     runner-compatible alias
+  genomic_canonical_labs_train_val.csv  landmark_days=0, lab_name
+  canonical_labs_train_val.csv       runner-compatible alias
   genomic_build_manifest.json        provenance + AUC horizons + cohort sizes
+  build_manifest.json                runner-compatible alias
 """
 
 from __future__ import annotations
@@ -69,12 +75,16 @@ from survival_common.helper import (  # noqa: E402
 
 from ipio_cohort import make_irae_outcome_df  # noqa: E402
 from build_prediction_inputs import (  # noqa: E402
+    BUILD_MANIFEST_FILENAME,
+    CANONICAL_LABS_FILENAME,
     DEFAULT_OUTPUT_SUBDIR,
     DEFAULT_MIN_PATIENT_COVERAGE,
     DATA_PATH,
     ENDPOINTS,
     RESULTS,
     SPLIT_ASSIGNMENTS_FILENAME,
+    aggregated_filename,
+    pre_treatment_lab_filename,
 )
 
 DEFAULT_SOMATIC_PATH = Path(
@@ -266,6 +276,9 @@ def main(args: argparse.Namespace) -> None:
     agg_path = output_dir / GENOMIC_AGGREGATED_FILENAME
     aggregated.rename_axis(ID_COL).reset_index().to_csv(agg_path, index=False)
     print(f"Wrote {agg_path}")
+    compat_agg_path = output_dir / aggregated_filename(0)
+    aggregated.rename_axis(ID_COL).reset_index().to_csv(compat_agg_path, index=False)
+    print(f"Wrote runner-compatible alias {compat_agg_path}")
 
     # Pre-IO_START lab long (genomics-eligible subset) for per-fold canonical labs
     pre_sample_lab_df = build_pre_treatment_lab_long(
@@ -277,6 +290,9 @@ def main(args: argparse.Namespace) -> None:
     pre_path = output_dir / GENOMIC_PRE_SAMPLE_LAB_FILENAME
     pre_sample_lab_df.to_csv(pre_path, index=False)
     print(f"Wrote {pre_path} ({len(pre_sample_lab_df)} rows)")
+    compat_pre_path = output_dir / pre_treatment_lab_filename(0)
+    pre_sample_lab_df.to_csv(compat_pre_path, index=False)
+    print(f"Wrote runner-compatible alias {compat_pre_path}")
 
     # Canonical labs (train+valid, pre-IO_START coverage, genomics-eligible subset)
     canonical_labs = select_canonical_labs(
@@ -285,11 +301,13 @@ def main(args: argparse.Namespace) -> None:
         min_coverage=args.min_patient_coverage,
         id_col=ID_COL,
     )
+    canonical_labs_df = pd.DataFrame({"landmark_days": 0, "lab_name": canonical_labs})
     canonical_path = output_dir / GENOMIC_CANONICAL_LABS_FILENAME
-    pd.DataFrame({"landmark": 0, "lab_name": canonical_labs}).to_csv(
-        canonical_path, index=False
-    )
+    canonical_labs_df.to_csv(canonical_path, index=False)
     print(f"Canonical labs: {len(canonical_labs)} -> {canonical_path}")
+    compat_canonical_path = output_dir / CANONICAL_LABS_FILENAME
+    canonical_labs_df.to_csv(compat_canonical_path, index=False)
+    print(f"Wrote runner-compatible alias {compat_canonical_path}")
 
     # Per-endpoint AUC horizons (independent from main pipeline since cohort + landmark differ)
     auc_quantiles = tuple(args.auc_quantiles)
@@ -320,7 +338,9 @@ def main(args: argparse.Namespace) -> None:
         "auc_quantiles": list(auc_quantiles),
         "auc_time_unit_days": int(args.time_unit_days),
         "auc_horizons": auc_horizons,
+        "auc_horizons_by_landmark": {"0": auc_horizons},
         "auc_max_horizon": int(max((h for hs in auc_horizons.values() for h in hs), default=0)),
+        "landmark_days": [0],
         "genomic_features": genomic_feature_cols,
         "n_patients_total": int(len(aggregated)),
         "n_patients_train_val": int(len(train_val)),
@@ -331,6 +351,9 @@ def main(args: argparse.Namespace) -> None:
     manifest_path = output_dir / GENOMIC_BUILD_MANIFEST_FILENAME
     manifest_path.write_text(json.dumps(manifest, indent=2))
     print(f"Wrote {manifest_path}")
+    compat_manifest_path = output_dir / BUILD_MANIFEST_FILENAME
+    compat_manifest_path.write_text(json.dumps(manifest, indent=2))
+    print(f"Wrote runner-compatible alias {compat_manifest_path}")
     print("\nGenomic prediction inputs ready.")
 
 

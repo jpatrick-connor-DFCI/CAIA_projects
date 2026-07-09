@@ -8,6 +8,7 @@ by the runnable scripts.
 
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,12 +154,17 @@ def outcome_columns() -> set[str]:
 
 BASELINE_STATIC_FIXED = ("GENDER_MALE", "pd1pdl1", "ctla4")
 BASELINE_STATIC_PREFIX = "CANCER_TYPE_"
+GENOMIC_FEATURE_RE = re.compile(r"^[A-Za-z0-9]+_(SV|SNV|AMP|DEL)$")
 
 
 def baseline_covariate_columns(df: pd.DataFrame) -> list[str]:
     cols = [c for c in BASELINE_STATIC_FIXED if c in df.columns]
     cols += sorted(c for c in df.columns if c.startswith(BASELINE_STATIC_PREFIX))
     return cols
+
+
+def genomic_feature_columns(df: pd.DataFrame) -> list[str]:
+    return sorted(c for c in df.columns if GENOMIC_FEATURE_RE.match(str(c)))
 
 
 def normalize_endpoints(raw_endpoints: list[str]) -> list[str]:
@@ -342,6 +348,7 @@ class LandmarkContext:
     canonical_labs: list[str]
     selected_feature_cols: list[str]
     feature_meta_selected: pd.DataFrame
+    always_include_feature_cols: tuple[str, ...] = ()
 
 
 def prepare_landmark_context(
@@ -357,6 +364,9 @@ def prepare_landmark_context(
 
     excluded = outcome_columns() | set(baseline_covariate_columns(merged))
     raw_feature_cols = [c for c in merged.columns if c not in excluded]
+    always_include_feature_cols = tuple(
+        c for c in genomic_feature_columns(merged) if c in raw_feature_cols
+    )
     univariate_data = merged.copy()
     split_stratification = "prebuilt"
 
@@ -377,6 +387,7 @@ def prepare_landmark_context(
         raw_feature_cols,
         min_patient_coverage=min_patient_coverage,
         restrict_to_labs=canonical_labs,
+        always_include=list(always_include_feature_cols),
     )
     feature_meta_selected = feature_meta.loc[
         feature_meta["selected"],
@@ -389,6 +400,12 @@ def prepare_landmark_context(
     print(f"Test (Arm 2):      {len(test)} patients")
     print(f"Canonical labs (train_val): {len(canonical_labs)}")
     print(f"Selected summary-lab features (train_val pre-filter): {len(selected_feature_cols)}")
+    if always_include_feature_cols:
+        n_selected_genomics = len(set(always_include_feature_cols).intersection(selected_feature_cols))
+        print(
+            f"Genomic indicators detected: {len(always_include_feature_cols)} "
+            f"({n_selected_genomics} selected after coverage/variability filters)"
+        )
 
     return LandmarkContext(
         landmark_day=landmark_day,
@@ -402,6 +419,7 @@ def prepare_landmark_context(
         canonical_labs=canonical_labs,
         selected_feature_cols=selected_feature_cols,
         feature_meta_selected=feature_meta_selected,
+        always_include_feature_cols=always_include_feature_cols,
     )
 
 

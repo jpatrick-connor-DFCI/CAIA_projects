@@ -590,6 +590,9 @@ def _run_multivariable_landmark(
                 horizon_grid=horizon_grid,
                 min_patient_coverage=min_patient_coverage,
                 static_covariate_cols=static_covariate_cols,
+                always_include_feature_cols=tuple(
+                    getattr(ctx, "always_include_feature_cols", ())
+                ),
                 args=args,
             )
             chosen = chosen_from_best_row(best_row)

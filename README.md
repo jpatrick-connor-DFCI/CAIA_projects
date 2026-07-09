@@ -158,9 +158,12 @@ aggregated tables plus pre-treatment long labs and shared split / canonical-lab 
 - **Outputs:** `aggregated_landmark{D}.csv`, `pre_treatment_lab_long_landmark{D}.csv`,
   `split_assignments.csv`, `landmark_mrn_availability.csv`, `canonical_labs_train_val.csv`,
   `landmark_attrition.json`, `build_manifest.json`.
-- `build_genomic_inputs.py` builds the parallel `prediction_inputs/genomic/` arm (index time =
-  `SAMPLE_COLLECTION_DT`, plus 12 binary genomic indicators `{TP53,RB1,PTEN}×{SV,DEL,AMP,SNV}`). It
-  **reuses** the main `split_assignments.csv` so test stays test.
+- `IPIO/data_preprocessing/build_genomic_inputs.py` builds the parallel
+  `prediction_inputs/genomic/` landmark-0 arm anchored at IO start (`t_first_treatment`), restricts
+  to patients with an actual somatic sample, attaches dynamic binary `<GENE>_<SV|SNV|AMP|DEL>`
+  indicators, and **reuses** the main `split_assignments.csv` so test stays test. It writes both
+  genomic provenance files and runner-compatible aliases (`aggregated_landmark0.csv`,
+  `pre_treatment_lab_long_landmark0.csv`, `canonical_labs_train_val.csv`, `build_manifest.json`).
 
 ### 2.3 — Models
 
@@ -193,6 +196,14 @@ COMPASS PROFILE has one run notebook and one figure notebook:
 - `COMPASS_generate_figures.ipynb` — has separate sections for the first-treatment and
   treatment-anchored arms. Each section builds Figure 1 (cohort overview), Figure 3 (paired
   univariate volcano), and Figure 4a/4b/compiled (discrimination + importance grid).
+
+IPIO has a paired run/figure notebook as well:
+
+- `IPIO_run_locally.ipynb` — builds standard lab landmark inputs at 0/90 plus the genomic landmark-0
+  inputs, then runs univariate Cox, elastic-net Cox, and XGBoost for the lab arm and genomic arm
+  separately.
+- `IPIO_generate_figures.ipynb` — writes a labs-only paired volcano and a separate genomics-only
+  volcano, plus the lab-arm discrimination and importance figures.
 ---
 
 ## Conventions & invariants (preserve these when editing)
