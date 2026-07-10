@@ -52,6 +52,25 @@ try:  # pragma: no cover - depends on local environment
 except ModuleNotFoundError:  # pragma: no cover - mirror survival_common.cox_engine fallback
     ConvergenceError = RuntimeError
 
+try:
+    from tqdm.auto import tqdm
+
+    TQDM_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover - tqdm is optional
+    TQDM_AVAILABLE = False
+
+    def tqdm(iterable=None, **kwargs):  # type: ignore[no-redef]
+        if iterable is None:
+            class _Null:
+                def update(self, *_a, **_kw): pass
+                def set_postfix(self, *_a, **_kw): pass
+                def set_description(self, *_a, **_kw): pass
+                def close(self): pass
+                def __enter__(self): return self
+                def __exit__(self, *_): return False
+            return _Null()
+        return iterable
+
 # Expected numerical / convergence failures for a single CV fold. Matches the
 # exception sets caught by fit_cox_with_fallback (ConvergenceError, ValueError,
 # LinAlgError) and fit_coxnet_with_fallback (ArithmeticError, ValueError,
@@ -444,7 +463,7 @@ def run_univariate_nobs_adjusted_associations(
             km_df[outcome_col].to_numpy(),
         )
 
-    for feature in feature_cols:
+    for feature in tqdm(feature_cols, desc=f"univariate[{endpoint}]", dynamic_ncols=True):
         if feature in genomic_feature_set:
             rows.append(
                 _binary_genomic_association_row(
@@ -714,7 +733,10 @@ def tune_multivariable_model(
                 {"endpoint": endpoint, "fold": fold, "lab_name": lab}
             )
 
-    for penalizer, l1_ratio in product(penalizers, l1_ratios):
+    grid = list(product(penalizers, l1_ratios))
+    total_runs = len(grid) * len(fold_partitions)
+    cv_bar = tqdm(total=total_runs, desc=f"coxnet CV[{endpoint}]", dynamic_ncols=True)
+    for penalizer, l1_ratio in grid:
         for fold, (tr_idx, val_idx) in fold_partitions:
             fold_train = train_val.iloc[tr_idx]
             fold_val = train_val.iloc[val_idx]
@@ -820,6 +842,8 @@ def tune_multivariable_model(
                 row["note"] = f"fold_failed: {exc}"
 
             fold_rows.append(row)
+            cv_bar.update(1)
+    cv_bar.close()
 
     fold_df = pd.DataFrame(fold_rows)
     cv_df = (
