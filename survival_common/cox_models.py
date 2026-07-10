@@ -259,27 +259,33 @@ def build_model_matrices(
     return train_model, eval_model, covariate_cols
 
 
-def _static_covariate_association_row(
+def _binary_genomic_association_row(
     data: pd.DataFrame,
     *,
-    covariate_col: str,
+    feature: str,
     endpoint: str,
     duration_col: str,
     event_col: str,
     min_events_per_feature: int,
     fallback_penalizer: float,
     age_col: str,
+    baseline_covariate_cols: tuple[str, ...] = (),
     model_type: str = "cox",
     event_type_col: str | None = None,
     event_of_interest: int = 1,
     competing_event: int = 2,
     censoring_km=None,
 ) -> dict:
+    """Test a static binary genomic indicator (feature_z + age + baseline covariates, no n_obs).
+
+    Genomic indicators are one-time calls, not repeated-measurement labs, so
+    there is no matching `_n_observations` column and none is required here.
+    """
     total_patients = len(data)
     result = {
         "endpoint": endpoint,
-        "feature": covariate_col,
-        "lab_name": covariate_col,
+        "feature": feature,
+        "lab_name": feature,
         "feature_stat": "",
         "n_obs_feature": "",
         "coverage": np.nan,
@@ -306,54 +312,59 @@ def _static_covariate_association_row(
         "coef_age": np.nan,
         "p_value_age": np.nan,
         "fit_penalizer": np.nan,
-        "note": "static_covariate",
+        "note": "genomic_binary",
         "model_type": model_type,
     }
-    if covariate_col not in data.columns:
-        result["note"] = "static_covariate_missing_column"
+    if feature not in data.columns:
+        result["note"] = "genomic_missing_column"
         return result
 
     is_finegray = model_type == "finegray"
     outcome_col = event_type_col if is_finegray else event_col
+    baseline_cols = [c for c in baseline_covariate_cols if c in data.columns]
 
-    cov_df = data[[covariate_col, duration_col, outcome_col, age_col]].copy()
-    result["coverage"] = float(cov_df[covariate_col].notna().mean())
-    cov_df = cov_df.dropna(subset=[covariate_col, duration_col, outcome_col, age_col])
-    result["n_patients_used"] = len(cov_df)
-    result["n_patients_observed"] = len(cov_df)
+    feature_df = data[[feature, duration_col, outcome_col, age_col, *baseline_cols]].copy()
+    result["coverage"] = float(feature_df[feature].notna().mean())
+    feature_df = feature_df.dropna(
+        subset=[feature, duration_col, outcome_col, age_col, *baseline_cols]
+    )
+    result["n_patients_used"] = len(feature_df)
+    result["n_patients_observed"] = len(feature_df)
     if is_finegray:
         result["n_events_used"] = (
-            int((cov_df[outcome_col] == event_of_interest).sum()) if len(cov_df) else 0
+            int((feature_df[outcome_col] == event_of_interest).sum()) if len(feature_df) else 0
         )
     else:
-        result["n_events_used"] = int(cov_df[event_col].sum()) if len(cov_df) else 0
-    if len(cov_df) == 0:
+        result["n_events_used"] = int(feature_df[event_col].sum()) if len(feature_df) else 0
+    if len(feature_df) == 0:
         result["note"] = "no_rows_with_outcomes"
         return result
     if result["n_events_used"] < min_events_per_feature:
         result["note"] = f"too_few_events_lt_{min_events_per_feature}"
         return result
 
-    cov_values = cov_df[covariate_col].to_numpy(dtype=float)
-    cov_sd = float(np.std(cov_values, ddof=0))
-    if not np.isfinite(cov_sd) or cov_sd <= 0:
-        result["note"] = "static_covariate_no_variation"
+    feature_values = feature_df[feature].to_numpy(dtype=float)
+    feature_sd = float(np.std(feature_values, ddof=0))
+    if not np.isfinite(feature_sd) or feature_sd <= 0:
+        result["note"] = "feature_has_no_variation"
         return result
-    cov_df["feature_z"] = (cov_values - float(np.mean(cov_values))) / cov_sd
+    feature_df["feature_z"] = (feature_values - float(np.mean(feature_values))) / feature_sd
 
-    age_values = cov_df[age_col].to_numpy(dtype=float)
+    age_values = feature_df[age_col].to_numpy(dtype=float)
     age_sd = float(np.std(age_values, ddof=0))
     if np.isfinite(age_sd) and age_sd > 0:
-        cov_df["age"] = (age_values - float(np.mean(age_values))) / age_sd
+        feature_df["age"] = (age_values - float(np.mean(age_values))) / age_sd
     else:
-        cov_df["age"] = age_values - float(np.mean(age_values))
+        feature_df["age"] = age_values - float(np.mean(age_values))
+
+    model_cols = ["feature_z", "age", *baseline_cols]
 
     if is_finegray:
         model, used_penalizer, note = fit_finegray_univariate_with_fallback(
-            cov_df[["feature_z", "age", duration_col, outcome_col]],
+            feature_df[model_cols + [duration_col, outcome_col]],
             duration_col=duration_col,
             event_type_col=outcome_col,
-            covariate_cols=["feature_z", "age"],
+            covariate_cols=model_cols,
             penalizers=[0.0, fallback_penalizer],
             event_of_interest=event_of_interest,
             competing_event=competing_event,
@@ -361,14 +372,14 @@ def _static_covariate_association_row(
         )
     else:
         model, used_penalizer, note = fit_cox_with_fallback(
-            cov_df[["feature_z", "age", duration_col, event_col]],
+            feature_df[model_cols + [duration_col, event_col]],
             duration_col=duration_col,
             event_col=event_col,
             penalizers=[0.0, fallback_penalizer],
             l1_ratio=0.0,
         )
     result["fit_penalizer"] = used_penalizer
-    result["note"] = f"static_covariate;{note}" if note else "static_covariate"
+    result["note"] = f"genomic_binary;{note}" if note else "genomic_binary"
     if model is None:
         return result
 
@@ -392,14 +403,15 @@ def run_univariate_nobs_adjusted_associations(
     min_events_per_feature: int,
     fallback_penalizer: float,
     endpoint_map: EndpointMap,
-    static_covariate_cols: tuple[str, ...] = (),
+    baseline_covariate_cols: tuple[str, ...] = (),
+    genomic_feature_cols: list[str] | tuple[str, ...] | None = None,
     age_col: str = DEFAULT_AGE_COL,
     model_type: str = "cox",
     event_type_col: str | None = None,
     event_of_interest: int = 1,
     competing_event: int = 2,
 ) -> pd.DataFrame:
-    """Fit Cox (or Fine-Gray) models on age + n-observation count + one feature at a time.
+    """Fit Cox (or Fine-Gray) models on age + baseline covariates + n-observation count + one feature at a time.
 
     model_type="finegray" fits the subdistribution hazard (Fine & Gray 1999) for
     the event of interest with `competing_event` (default: death, code 2) as a
@@ -408,7 +420,16 @@ def run_univariate_nobs_adjusted_associations(
     (0=censored, event_of_interest=event, competing_event=competing) -- see
     endpoint_competing(). model_type="cox" (default) is the original plain
     cause-specific behavior and is unaffected by these new parameters.
+
+    `baseline_covariate_cols` (e.g. gender, cancer type, treatment) are
+    always-included adjustment terms in every per-feature fit, alongside age.
+
+    `genomic_feature_cols` identifies features that are static binary genomic
+    indicators rather than repeated-measurement labs: they have no matching
+    `_n_observations` column and are tested as the raw binary indicator + age
+    + baseline covariates, instead of the lab n_obs-adjusted model.
     """
+    genomic_feature_set = set(genomic_feature_cols) if genomic_feature_cols else set()
     duration_col, event_col = _endpoint_columns(endpoint_map, endpoint)
     is_finegray = model_type == "finegray"
     outcome_col = event_type_col if is_finegray else event_col
@@ -424,6 +445,27 @@ def run_univariate_nobs_adjusted_associations(
         )
 
     for feature in feature_cols:
+        if feature in genomic_feature_set:
+            rows.append(
+                _binary_genomic_association_row(
+                    data,
+                    feature=feature,
+                    endpoint=endpoint,
+                    duration_col=duration_col,
+                    event_col=event_col,
+                    min_events_per_feature=min_events_per_feature,
+                    fallback_penalizer=fallback_penalizer,
+                    age_col=age_col,
+                    baseline_covariate_cols=baseline_covariate_cols,
+                    model_type=model_type,
+                    event_type_col=event_type_col,
+                    event_of_interest=event_of_interest,
+                    competing_event=competing_event,
+                    censoring_km=censoring_km,
+                )
+            )
+            continue
+
         lab_name, feature_stat = parse_feature_name(feature)
         n_obs_feature = matching_n_obs_feature(feature)
         result = {
@@ -470,11 +512,14 @@ def run_univariate_nobs_adjusted_associations(
             rows.append(result)
             continue
 
-        feature_df = data[[feature, n_obs_feature, duration_col, outcome_col, age_col]].copy()
+        baseline_cols = [c for c in baseline_covariate_cols if c in data.columns]
+        feature_df = data[
+            [feature, n_obs_feature, duration_col, outcome_col, age_col, *baseline_cols]
+        ].copy()
         result["coverage"] = float(feature_df[feature].notna().mean())
         result["n_obs_coverage"] = float(feature_df[n_obs_feature].notna().mean())
 
-        feature_df = feature_df.dropna(subset=[duration_col, outcome_col, age_col])
+        feature_df = feature_df.dropna(subset=[duration_col, outcome_col, age_col, *baseline_cols])
         observed_non_missing = int(feature_df[feature].notna().sum())
         observed_n_obs = int(feature_df[n_obs_feature].notna().sum())
         result["n_patients_used"] = len(feature_df)
@@ -539,7 +584,7 @@ def run_univariate_nobs_adjusted_associations(
         else:
             feature_df["age"] = age_values - float(np.mean(age_values))
 
-        model_cols = ["feature_z", "n_obs_z", "age"]
+        model_cols = ["feature_z", "n_obs_z", "age", *baseline_cols]
         if include_missing_indicator:
             feature_df["feature_missing"] = missing_indicator
             model_cols.insert(1, "feature_missing")
@@ -593,25 +638,6 @@ def run_univariate_nobs_adjusted_associations(
         result["coef_age"] = float(age_row["coef"])
         result["p_value_age"] = float(age_row["p"])
         rows.append(result)
-
-    for covariate_col in static_covariate_cols:
-        rows.append(
-            _static_covariate_association_row(
-                data,
-                covariate_col=covariate_col,
-                endpoint=endpoint,
-                duration_col=duration_col,
-                event_col=event_col,
-                min_events_per_feature=min_events_per_feature,
-                fallback_penalizer=fallback_penalizer,
-                age_col=age_col,
-                model_type=model_type,
-                event_type_col=event_type_col,
-                event_of_interest=event_of_interest,
-                competing_event=competing_event,
-                censoring_km=censoring_km,
-            )
-        )
 
     associations = pd.DataFrame(rows)
     associations["q_value"] = benjamini_hochberg(associations["p_value"])

@@ -187,9 +187,12 @@ def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
         for endpoint in endpoints:
             print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
             print(cox.ENDPOINTS[endpoint]["description"])
-            # Univariate testing is restricted to labs and genomics (ctx.selected_feature_cols).
-            # Cancer type, treatment, and gender are only ever adjusted for as
-            # static covariates in the multivariable model, never tested here.
+            # Univariate testing is restricted to labs and genomics
+            # (ctx.selected_feature_cols); cancer type, treatment, and gender
+            # are never tested as their own feature, but are always included
+            # as adjustment covariates (alongside age) in every feature test.
+            genomic_feature_cols = getattr(ctx, "always_include_feature_cols", ())
+            baseline_covariate_cols = config.static_covariates(ctx, args, cox)
             adjusted_frames = [
                 cox.run_univariate_nobs_adjusted_associations(
                     ctx.univariate_data,
@@ -198,6 +201,8 @@ def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
                     min_events_per_feature=args.min_events_per_feature,
                     fallback_penalizer=args.univariate_penalizer,
                     model_type="cox",
+                    genomic_feature_cols=genomic_feature_cols,
+                    baseline_covariate_cols=baseline_covariate_cols,
                 )
             ]
             # When the endpoint declares a competing event (e.g. death for
@@ -218,6 +223,8 @@ def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
                         event_type_col=event_type_col,
                         event_of_interest=event_of_interest,
                         competing_event=competing_event,
+                        genomic_feature_cols=genomic_feature_cols,
+                        baseline_covariate_cols=baseline_covariate_cols,
                     )
                 )
             for adjusted_df in adjusted_frames:
