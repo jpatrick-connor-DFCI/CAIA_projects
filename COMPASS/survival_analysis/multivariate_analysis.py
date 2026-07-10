@@ -100,9 +100,9 @@ from survival_common.xgboost_engine import (  # noqa: E402
 )
 from survival_common.projects.compass_profile import CONFIG  # noqa: E402
 
-DEFAULT_CV_MAX_DEPTHS = [2, 3, 4, 5]
-DEFAULT_CV_ETAS = [0.02, 0.03, 0.05, 0.075, 0.10]
-DEFAULT_CV_MIN_CHILD_WEIGHTS = [1.0, 3.0, 5.0, 7.5, 10.0]
+DEFAULT_CV_MAX_DEPTHS = [2, 4, 6]
+DEFAULT_CV_ETAS = [0.02, 0.05, 0.10]
+DEFAULT_CV_MIN_CHILD_WEIGHTS = [1.0, 5.0, 10.0]
 DEFAULT_N_FOLDS = 5
 
 

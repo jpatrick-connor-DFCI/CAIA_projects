@@ -88,31 +88,8 @@ DEFAULT_LANDMARK_DAYS = [0, 90]
 DEFAULT_MIN_PATIENT_COVERAGE = 0.20
 DEFAULT_MIN_EVENTS_PER_FEATURE = 10
 DEFAULT_AUC_MAX_TIME_UNITS = 260
-DEFAULT_CV_PENALIZERS = [
-    0.0005,
-    0.001,
-    0.0025,
-    0.005,
-    0.0075,
-    0.01,
-    0.025,
-    0.05,
-    0.075,
-    0.10,
-    0.15,
-    0.20,
-    0.30,
-    0.40,
-    0.60,
-    0.80,
-    1.20,
-    1.60,
-    2.40,
-    3.20,
-    4.80,
-    6.40,
-]
-DEFAULT_CV_L1_RATIOS = [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0]
+DEFAULT_CV_PENALIZERS = [0.001, 0.01, 0.05, 0.20, 0.80, 3.20]
+DEFAULT_CV_L1_RATIOS = [0.0, 0.5, 1.0]
 DEFAULT_AUC_QUANTILES = (0.25, 0.375, 0.50, 0.625, 0.75)
 DEFAULT_AUC_TIME_UNIT_DAYS = 7
 HORIZON_GRID_FILENAME = "cox_agg_horizon_grid.csv"
@@ -167,6 +144,7 @@ def outcome_columns() -> set[str]:
 BASELINE_STATIC_FIXED = ("GENDER_MALE", "pd1pdl1", "ctla4")
 BASELINE_STATIC_PREFIX = "CANCER_TYPE_"
 GENOMIC_FEATURE_RE = re.compile(r"^[A-Za-z0-9]+_(SV|SNV|AMP|DEL)$")
+DEFAULT_MIN_GENOMIC_PREVALENCE = 0.025
 
 
 def baseline_covariate_columns(df: pd.DataFrame) -> list[str]:
@@ -208,6 +186,8 @@ def select_feature_columns(
     min_patient_coverage: float,
     restrict_to_labs: list[str] | None = None,
     always_include: list[str] | None = None,
+    genomic_feature_cols: list[str] | None = None,
+    min_genomic_prevalence: float | None = DEFAULT_MIN_GENOMIC_PREVALENCE,
 ) -> tuple[list[str], pd.DataFrame]:
     return _shared_select_feature_columns(
         data,
@@ -215,6 +195,8 @@ def select_feature_columns(
         min_patient_coverage=min_patient_coverage,
         restrict_to_labs=restrict_to_labs,
         always_include=always_include,
+        genomic_feature_cols=genomic_feature_cols,
+        min_genomic_prevalence=min_genomic_prevalence,
     )
 
 
@@ -287,6 +269,7 @@ def tune_multivariable_model(
     min_patient_coverage: float,
     static_covariate_cols: tuple[str, ...] = (),
     always_include_feature_cols: tuple[str, ...] = (),
+    min_genomic_prevalence: float | None = DEFAULT_MIN_GENOMIC_PREVALENCE,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict, pd.DataFrame]:
     return _shared_tune_multivariable_model(
         train_val,
@@ -303,6 +286,7 @@ def tune_multivariable_model(
         min_patient_coverage=min_patient_coverage,
         static_covariate_cols=static_covariate_cols,
         always_include_feature_cols=always_include_feature_cols,
+        min_genomic_prevalence=min_genomic_prevalence,
         endpoint_map=ENDPOINTS,
         id_col=ID_COL,
         age_col=AGE_COL,
@@ -441,6 +425,8 @@ def prepare_landmark_context(
         min_patient_coverage=min_patient_coverage,
         restrict_to_labs=model_canonical_labs,
         always_include=list(always_include_feature_cols),
+        genomic_feature_cols=list(genomic_cols),
+        min_genomic_prevalence=DEFAULT_MIN_GENOMIC_PREVALENCE,
     )
     feature_meta_selected = feature_meta.loc[
         feature_meta["selected"],

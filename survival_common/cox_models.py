@@ -111,13 +111,17 @@ def select_feature_columns(
     min_patient_coverage: float,
     restrict_to_labs: list[str] | None = None,
     always_include: list[str] | None = None,
+    genomic_feature_cols: list[str] | None = None,
+    min_genomic_prevalence: float | None = None,
 ) -> tuple[list[str], pd.DataFrame]:
     """Select candidate features on a train/validation block to avoid leakage.
 
     `restrict_to_labs`, when provided, gates lab-summary features to the
     canonical lab set. `always_include` exempts explicit non-lab features, such
     as genomic indicators, from that lab gate while still applying coverage and
-    variability filters.
+    variability filters. `genomic_feature_cols`, when provided together with
+    `min_genomic_prevalence`, additionally requires those binary indicators to
+    have value 1 (mutated) in at least that fraction of patients.
     """
     coverage = data[raw_feature_cols].notna().mean()
     unique_non_missing = data[raw_feature_cols].nunique(dropna=True)
@@ -145,6 +149,17 @@ def select_feature_columns(
                 | feature_meta["feature"].isin(set(always_include))
             )
         feature_meta["selected"] = feature_meta["selected"] & feature_meta["in_canonical_labs"]
+    if genomic_feature_cols and min_genomic_prevalence is not None:
+        genomic_set = set(genomic_feature_cols)
+        is_genomic = feature_meta["feature"].isin(genomic_set)
+        mutation_prevalence = data[raw_feature_cols].eq(1).mean()
+        feature_meta["mutation_prevalence"] = np.where(
+            is_genomic,
+            mutation_prevalence.reindex(raw_feature_cols).values,
+            np.nan,
+        )
+        meets_prevalence = feature_meta["mutation_prevalence"].ge(min_genomic_prevalence)
+        feature_meta["selected"] = feature_meta["selected"] & (~is_genomic | meets_prevalence)
     feature_meta = feature_meta.sort_values(
         ["selected", "coverage", "feature"],
         ascending=[False, False, True],
@@ -620,6 +635,7 @@ def tune_multivariable_model(
     endpoint_map: EndpointMap,
     static_covariate_cols: tuple[str, ...] = (),
     always_include_feature_cols: tuple[str, ...] = (),
+    min_genomic_prevalence: float | None = None,
     id_col: str = DEFAULT_ID_COL,
     age_col: str = DEFAULT_AGE_COL,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict, pd.DataFrame]:
@@ -663,6 +679,8 @@ def tune_multivariable_model(
             min_patient_coverage=min_patient_coverage,
             restrict_to_labs=canonical,
             always_include=list(always_include_feature_cols),
+            genomic_feature_cols=list(always_include_feature_cols),
+            min_genomic_prevalence=min_genomic_prevalence,
         )
         fold_selected_features[fold] = selected
         for lab in canonical:

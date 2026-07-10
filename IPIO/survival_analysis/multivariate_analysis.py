@@ -123,9 +123,9 @@ from survival_common.xgboost_engine import (  # noqa: E402
 )
 from survival_common.projects.ipio import CONFIG  # noqa: E402
 
-DEFAULT_CV_MAX_DEPTHS = [2, 3, 4, 5, 6]
-DEFAULT_CV_ETAS = [0.01, 0.03, 0.05, 0.10, 0.15]
-DEFAULT_CV_MIN_CHILD_WEIGHTS = [1.0, 3.0, 5.0, 10.0, 15.0]
+DEFAULT_CV_MAX_DEPTHS = [2, 4, 6]
+DEFAULT_CV_ETAS = [0.02, 0.05, 0.10]
+DEFAULT_CV_MIN_CHILD_WEIGHTS = [1.0, 5.0, 10.0]
 
 
 def require_lifelines() -> None:
@@ -207,6 +207,7 @@ def tune_xgboost_model(
             min_patient_coverage=min_patient_coverage,
             restrict_to_labs=canonical,
             always_include=list(always_include_feature_cols),
+            genomic_feature_cols=list(always_include_feature_cols),
         )
         selected = _truncate_features_by_rank(selected, fold_feature_meta, max_features)
         fold_selected_features[fold] = selected

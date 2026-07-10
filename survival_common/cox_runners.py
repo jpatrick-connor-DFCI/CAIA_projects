@@ -181,13 +181,15 @@ def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
             min_patient_coverage=min_patient_coverage,
             **config.prepare_context_kwargs(args),
         )
-        static_covariate_cols = config.static_covariates(ctx, args, cox)
         feature_selection_frames.append(ctx.feature_meta_selected)
 
         print("\n##### ARM 1: UNIVARIATE (n_obs-adjusted, full follow-up, all endpoints) #####")
         for endpoint in endpoints:
             print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
             print(cox.ENDPOINTS[endpoint]["description"])
+            # Univariate testing is restricted to labs and genomics (ctx.selected_feature_cols).
+            # Cancer type, treatment, and gender are only ever adjusted for as
+            # static covariates in the multivariable model, never tested here.
             adjusted_frames = [
                 cox.run_univariate_nobs_adjusted_associations(
                     ctx.univariate_data,
@@ -195,7 +197,6 @@ def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
                     endpoint=endpoint,
                     min_events_per_feature=args.min_events_per_feature,
                     fallback_penalizer=args.univariate_penalizer,
-                    static_covariate_cols=static_covariate_cols,
                     model_type="cox",
                 )
             ]
@@ -213,7 +214,6 @@ def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
                         endpoint=endpoint,
                         min_events_per_feature=args.min_events_per_feature,
                         fallback_penalizer=args.univariate_penalizer,
-                        static_covariate_cols=static_covariate_cols,
                         model_type="finegray",
                         event_type_col=event_type_col,
                         event_of_interest=event_of_interest,

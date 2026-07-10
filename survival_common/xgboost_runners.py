@@ -194,6 +194,7 @@ def tune_xgboost_model(
             min_patient_coverage=min_patient_coverage,
             restrict_to_labs=canonical,
             always_include=list(always_include_feature_cols),
+            genomic_feature_cols=list(always_include_feature_cols),
         )
         selected = truncate_features_by_rank(selected, fold_feature_meta, max_features)
         fold_selected_features[fold] = selected
