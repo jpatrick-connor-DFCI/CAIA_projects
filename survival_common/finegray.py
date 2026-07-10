@@ -19,14 +19,23 @@ import pandas as pd
 
 try:
     from lifelines import CoxPHFitter, KaplanMeierFitter
-    from lifelines.exceptions import ConvergenceError
+    from lifelines.exceptions import ConvergenceError, ConvergenceWarning
 
     LIFELINES_IMPORT_ERROR: ModuleNotFoundError | None = None
 except ModuleNotFoundError as exc:  # pragma: no cover - depends on local environment
     CoxPHFitter = None
     KaplanMeierFitter = None
     ConvergenceError = RuntimeError
+    ConvergenceWarning = RuntimeWarning
     LIFELINES_IMPORT_ERROR = exc
+
+# See survival_common.cox_engine._MAX_NEWTON_STEPS: caps lifelines' Newton-
+# Raphson step budget so rare/near-separated covariates fail fast instead of
+# burning the full 500-step default, and escalates ConvergenceWarning (which
+# lifelines raises instead of an exception on non-convergence) to an error so
+# a capped, non-converged fit is treated as a failure rather than silently
+# returning divergent coefficients.
+_MAX_NEWTON_STEPS = 25
 
 # Floor applied to the censoring survival function G(t) to avoid division by
 # zero when weighting competing-event subjects past the last censoring time.
@@ -230,6 +239,7 @@ def fit_finegray_univariate_with_fallback(
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
+                warnings.filterwarnings("error", category=ConvergenceWarning)
                 model = CoxPHFitter(penalizer=float(penalizer), l1_ratio=0.0)
                 model.fit(
                     weighted,
@@ -238,10 +248,11 @@ def fit_finegray_univariate_with_fallback(
                     entry_col="_fg_start",
                     weights_col="_fg_weight",
                     robust=True,
+                    fit_options={"max_steps": _MAX_NEWTON_STEPS},
                 )
             note = "finegray_fit_ok" if penalizer == 0 else f"finegray_fit_ok_penalizer_{penalizer:g}"
             return model, penalizer, note
-        except (ConvergenceError, ValueError, np.linalg.LinAlgError) as exc:
+        except (ConvergenceError, ConvergenceWarning, ValueError, np.linalg.LinAlgError) as exc:
             last_error = str(exc)
 
     return None, float("nan"), f"finegray_fit_failed: {last_error}"

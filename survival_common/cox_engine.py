@@ -16,13 +16,14 @@ from survival_common.helper import (
 
 try:
     from lifelines import CoxPHFitter
-    from lifelines.exceptions import ConvergenceError
+    from lifelines.exceptions import ConvergenceError, ConvergenceWarning
     from lifelines.utils import concordance_index
 
     LIFELINES_IMPORT_ERROR: ModuleNotFoundError | None = None
 except ModuleNotFoundError as exc:  # pragma: no cover - depends on local environment
     CoxPHFitter = None
     ConvergenceError = RuntimeError
+    ConvergenceWarning = RuntimeWarning
     concordance_index = None
     LIFELINES_IMPORT_ERROR = exc
 
@@ -89,6 +90,21 @@ def benjamini_hochberg(p_values: pd.Series) -> pd.Series:
     return q_values
 
 
+
+# Caps lifelines' Newton-Raphson step budget (default 500) for univariate/
+# per-fold fits. Rare binary indicators (e.g. low-prevalence genomic
+# mutations) combined with sparse categorical adjustment covariates
+# (CANCER_TYPE_* dummies) can quasi-separate, causing the unpenalized MLE to
+# never converge -- each such fit would otherwise burn all 500 steps (a full
+# Hessian solve per step) before lifelines gives up and merely *warns*
+# (ConvergenceWarning), returning the best-effort, non-converged coefficients
+# as if the fit had succeeded. We escalate that warning to an exception (see
+# the catch_warnings block below) so a capped, non-converged fit is treated
+# as a failure -- same as today -- rather than silently reporting a
+# divergent/unreliable coefficient. This makes non-convergent fits fail fast.
+_MAX_NEWTON_STEPS = 25
+
+
 def fit_cox_with_fallback(
     model_df: pd.DataFrame,
     *,
@@ -118,11 +134,17 @@ def fit_cox_with_fallback(
                 pen_arg = float(penalizer)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
+                warnings.filterwarnings("error", category=ConvergenceWarning)
                 model = CoxPHFitter(penalizer=pen_arg, l1_ratio=l1_ratio)
-                model.fit(model_df, duration_col=duration_col, event_col=event_col)
+                model.fit(
+                    model_df,
+                    duration_col=duration_col,
+                    event_col=event_col,
+                    fit_options={"max_steps": _MAX_NEWTON_STEPS},
+                )
             note = "fit_ok" if penalizer == 0 else f"fit_ok_penalizer_{penalizer:g}"
             return model, penalizer, note
-        except (ConvergenceError, ValueError, np.linalg.LinAlgError) as exc:
+        except (ConvergenceError, ConvergenceWarning, ValueError, np.linalg.LinAlgError) as exc:
             last_error = str(exc)
 
     return None, float("nan"), f"fit_failed: {last_error}"
