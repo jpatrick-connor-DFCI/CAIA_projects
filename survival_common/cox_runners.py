@@ -205,28 +205,6 @@ def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
                     baseline_covariate_cols=baseline_covariate_cols,
                 )
             ]
-            # When the endpoint declares a competing event (e.g. death for
-            # platinum/irAE), also fit the Fine-Gray subdistribution-hazard
-            # arm and emit it alongside the cause-specific rows in the same
-            # output file, distinguished by model_type.
-            competing = cox.endpoint_competing(endpoint)
-            if competing is not None:
-                event_type_col, event_of_interest, competing_event = competing
-                adjusted_frames.append(
-                    cox.run_univariate_nobs_adjusted_associations(
-                        ctx.univariate_data,
-                        feature_cols=ctx.selected_feature_cols,
-                        endpoint=endpoint,
-                        min_events_per_feature=args.min_events_per_feature,
-                        fallback_penalizer=args.univariate_penalizer,
-                        model_type="finegray",
-                        event_type_col=event_type_col,
-                        event_of_interest=event_of_interest,
-                        competing_event=competing_event,
-                        genomic_feature_cols=genomic_feature_cols,
-                        baseline_covariate_cols=baseline_covariate_cols,
-                    )
-                )
             for adjusted_df in adjusted_frames:
                 adjusted_df.insert(0, "landmark_days", landmark_day)
                 univariate_frames.append(adjusted_df[UNIVARIATE_KEEP_COLS].copy())
