@@ -2,35 +2,41 @@
 Build prediction inputs for the genomic survival arm (IPIO).
 
 Index time = IO_START (t_first_treatment = 0), the SAME anchor as the main
-landmark-0 cohort -- NOT the somatic sample collection date. Predicting from
+cohort's landmarks -- NOT the somatic sample collection date. Predicting from
 the sequencing date isn't clinically actionable (sequencing can land before or
 after treatment start); anchoring to treatment start instead lets this arm
 isolate genomics' added predictive value over labs on a shared population and
 time origin, rather than mixing in a second, less meaningful anchor.
 
 Predicts irAE from treatment start forward (death/censor are right-censoring),
-with features derived from labs measured strictly before IO_START (identical
-window to the main cohort's landmark 0) plus dynamic per-gene x per-variant-type
-binary indicators (pan-cancer cohort -- all genes present in the somatic table,
-not a fixed 3-gene prostate panel).
+with features derived from labs measured strictly before each requested
+landmark (identical window to the main cohort's landmarks) plus dynamic
+per-gene x per-variant-type binary indicators (pan-cancer cohort -- all genes
+present in the somatic table, not a fixed 3-gene prostate panel). Genomic
+indicators themselves are static (not landmark-dependent) and are joined
+unchanged at every landmark.
 
 Cohort = main IPIO cohort INTERSECTED with patients that have an actual genomic
 sample (no 0-fill for untested patients -- being untested is not the same as
 testing negative) AND have a split label in the existing
-prediction_inputs/split_assignments.csv (so test stays test across arms).
+prediction_inputs/split_assignments.csv (so test stays test across arms). The
+cohort/split is derived once at the base (first requested) landmark and reused
+at every other landmark, mirroring build_prediction_inputs.py's common-MRN
+handling.
 
-Outputs (under <inputs-dir>/genomic):
-  genomic_aggregated.csv             one row per MRN: lab features + genomic
-                                     indicators + outcome rebased to IO_START +
-                                     split column
-  aggregated_landmark0.csv           runner-compatible alias for the genomic
-                                     landmark-0 arm
-  pre_sample_lab_long.csv            long-format pre-IO_START labs (genomics-
+Outputs (under <inputs-dir>/genomic), written once per requested landmark day
+<lm> (aliases below use the runner-compatible landmark-0 filenames only when
+<lm> == 0):
+  genomic_aggregated_landmark<lm>.csv one row per MRN: lab features + genomic
+                                     indicators + outcome rebased to the
+                                     landmark + split column
+  aggregated_landmark<lm>.csv        runner-compatible alias
+  pre_sample_lab_long_landmark<lm>.csv long-format pre-landmark labs (genomics-
                                      eligible subset) for per-fold canonical-lab
                                      selection
-  pre_treatment_lab_long_landmark0.csv
+  pre_treatment_lab_long_landmark<lm>.csv
                                      runner-compatible alias
-  genomic_canonical_labs_train_val.csv  landmark_days=0, lab_name
+  genomic_canonical_labs_train_val.csv  landmark_days, lab_name (all landmarks)
   canonical_labs_train_val.csv       runner-compatible alias
   genomic_build_manifest.json        provenance + AUC horizons + cohort sizes
   build_manifest.json                runner-compatible alias
@@ -62,9 +68,11 @@ ensure_survival_common_on_path()
 from survival_common.cohort import (  # noqa: E402
     AGE_COL,
     ID_COL,
-    build_feature_matrix,
+    build_landmark_availability_table,
+    build_landmark_merged,
     build_pre_treatment_lab_long,
     configure_id_columns,
+    normalize_landmark_days,
 )
 from survival_common.helper import (  # noqa: E402
     DEFAULT_AUC_QUANTILES,
@@ -73,10 +81,10 @@ from survival_common.helper import (  # noqa: E402
     select_canonical_labs,
 )
 
-from ipio_cohort import make_irae_outcome_df  # noqa: E402
 from build_prediction_inputs import (  # noqa: E402
     BUILD_MANIFEST_FILENAME,
     CANONICAL_LABS_FILENAME,
+    DEFAULT_LANDMARK_DAYS,
     DEFAULT_OUTPUT_SUBDIR,
     DEFAULT_MIN_PATIENT_COVERAGE,
     DATA_PATH,
@@ -145,10 +153,11 @@ def main(args: argparse.Namespace) -> None:
     ID_COL = args.id_col
     AGE_COL = args.age_col
     # Push the runtime schema into the shared cohort builders BEFORE any cohort/
-    # split logic runs, so split_assignments.csv reuse and build_feature_matrix /
+    # split logic runs, so split_assignments.csv reuse and build_landmark_merged /
     # build_pre_treatment_lab_long all key on the requested id/age columns
     # (mirrors build_prediction_inputs.py's main()).
     configure_id_columns(ID_COL, AGE_COL)
+    landmark_days = normalize_landmark_days(args.landmark_days)
     inputs_dir = Path(args.inputs_dir)
     output_dir = inputs_dir / GENOMIC_OUTPUT_SUBDIR
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -186,7 +195,7 @@ def main(args: argparse.Namespace) -> None:
 
     # Design invariant: FIRST_TREATMENT_DATE == FIRST_RECORD_DATE == IO_START for
     # every patient, so t_first_treatment (days from FIRST_RECORD_DATE) is 0 for
-    # everyone (mirrors build_prediction_inputs.py's landmark-0 setup).
+    # everyone (mirrors build_prediction_inputs.py's landmark setup).
     if "t_first_treatment" not in df.columns and {"FIRST_TREATMENT_DATE", "FIRST_RECORD_DATE"}.issubset(df.columns):
         df["t_first_treatment"] = (
             df["FIRST_TREATMENT_DATE"] - df["FIRST_RECORD_DATE"]
@@ -195,9 +204,9 @@ def main(args: argparse.Namespace) -> None:
     somatic, genomic_feature_cols = load_somatic(Path(args.somatic_path))
     print(f"Somatic patients: {len(somatic)} ({len(genomic_feature_cols)} gene-variant features detected)")
 
-    # Anchor to IO_START (t_first_treatment = 0), identical to the main
-    # cohort's landmark 0 -- NOT the sample collection date. Restrict to
-    # patients with an actual genomic sample (no 0-fill for untested patients).
+    # Anchor to IO_START (t_first_treatment), identical to the main cohort's
+    # landmarks -- NOT the sample collection date. Restrict to patients with an
+    # actual genomic sample (no 0-fill for untested patients).
     n_before_genomics = df[ID_COL].nunique()
     df = df.loc[df[ID_COL].isin(somatic.index)].copy()
     n_with_genomics = df[ID_COL].nunique()
@@ -206,128 +215,144 @@ def main(args: argparse.Namespace) -> None:
         f"(dropped {n_before_genomics - n_with_genomics} without one)."
     )
 
-    # Outcome table rebased to IO_START (t_first_treatment = 0), same anchor as
-    # the main cohort's landmark 0.
-    outcome_df = make_irae_outcome_df(
-        df,
-        landmark_offset_days=0,
-        anchor_col="t_first_treatment",
-    )
-    print(
-        f"Outcome cohort (post landmark-0 filter): {len(outcome_df)} patients "
-        f"(dropped {n_with_genomics - len(outcome_df)} with an event at/before treatment start)"
-    )
+    # Build the per-landmark (outcome + lab feature) cohort, same shared helper
+    # build_prediction_inputs.py uses, then attach the (landmark-invariant)
+    # genomic indicators at each landmark.
+    merged_by_landmark: dict[int, pd.DataFrame] = {}
+    for landmark_day in landmark_days:
+        print(f"\n##### GENOMIC COHORT BUILD: LANDMARK +{landmark_day} DAYS #####")
+        _, _, merged = build_landmark_merged(
+            df,
+            landmark_offset_days=landmark_day,
+            anchor_col="t_first_treatment",
+        )
+        genomics = somatic.loc[somatic.index.intersection(merged.index), genomic_feature_cols]
+        merged = merged.join(genomics, how="left")
+        for col in genomic_feature_cols:
+            merged[col] = merged[col].fillna(0).astype(int)
+        merged_by_landmark[landmark_day] = merged
+        print(f"Cohort with genomics joined @ landmark +{landmark_day}d: {len(merged)} patients")
 
-    # Per-patient lab summary features (pre-IO_START window, same as landmark 0)
-    feature_df = build_feature_matrix(
-        df,
-        landmark_offset_days=0,
-        anchor_col="t_first_treatment",
-    )
-    print(f"Feature matrix: {feature_df.shape[0]} patients x {feature_df.shape[1]} lab features")
+    _, common_mrns = build_landmark_availability_table(merged_by_landmark)
+    common_mrns = merged_by_landmark[landmark_days[0]].index.intersection(common_mrns)
+    if len(common_mrns) == 0:
+        raise ValueError("No MRNs were eligible at every requested genomic landmark.")
+    print(f"\nCommon MRN cohort across genomic landmarks {landmark_days}: {len(common_mrns)} patients")
 
-    # Inner join + attach genomics (every remaining patient has a real somatic
-    # row by construction, since df was already restricted to somatic.index above).
-    merged = feature_df.join(outcome_df, how="inner")
-    merged = merged.loc[merged[AGE_COL].notna()].copy()
-    if merged.empty:
-        raise ValueError("No patients survived feature+outcome join in the genomic arm.")
-
-    genomics = somatic.loc[somatic.index.intersection(merged.index), genomic_feature_cols]
-    merged = merged.join(genomics, how="left")
-    for col in genomic_feature_cols:
-        merged[col] = merged[col].fillna(0).astype(int)
-    print(f"Cohort with genomics joined: {len(merged)} patients")
-
-    # Reuse main split — drop patients without a label there
-    aligned_split = split_assignments.reindex(merged.index)
+    # Reuse main split — drop patients without a label there. Split membership
+    # doesn't depend on landmark, so this is derived once from the common cohort.
+    aligned_split = split_assignments.reindex(common_mrns)
     n_no_split = int(aligned_split.isna().sum())
     if n_no_split:
         print(
             f"Dropping {n_no_split} MRNs that lack a label in {split_path.name} "
             "(genomic cohort > main cohort)"
         )
-    merged = merged.loc[aligned_split.notna()].copy()
-    merged["split"] = aligned_split.loc[merged.index].astype(str)
+    common_mrns = aligned_split.dropna().index
+    aligned_split = aligned_split.loc[common_mrns].astype(str)
 
-    train_val = merged.loc[merged["split"].isin(["train", "valid"])]
-    test = merged.loc[merged["split"].eq("test")]
+    train_val_mrns = set(aligned_split.index[aligned_split.isin(["train", "valid"])])
+    test_mrns = set(aligned_split.index[aligned_split.eq("test")])
     print(
-        f"Final genomic cohort: train+valid={len(train_val)}  test={len(test)} "
-        f"(total {len(merged)})"
+        f"Final genomic cohort: train+valid={len(train_val_mrns)}  test={len(test_mrns)} "
+        f"(total {len(common_mrns)})"
     )
-    if train_val.empty or test.empty:
+    if not train_val_mrns or not test_mrns:
         raise ValueError("Genomic cohort has empty train_val or test after split alignment.")
     # Guard: reused split must keep test disjoint from train+valid.
     assert_no_test_leakage(
-        test_mrns=set(test.index),
-        train_mrns=set(train_val.index),
+        test_mrns=test_mrns,
+        train_mrns=train_val_mrns,
         context="build_genomic_inputs: test vs train+valid",
     )
 
-    # Drop the debug-only date/duration duplicates (mirrors build_prediction_inputs'
-    # AGGREGATED_DROP_COLUMNS) but keep baseline covariates + genomic indicators.
-    drop_cols = [
-        c for c in ("FIRST_RECORD_DATE", "LAST_CONTACT_DATE", "t_irae_from_first_record")
-        if c in merged.columns
-    ]
-    aggregated = merged.drop(columns=drop_cols) if drop_cols else merged
+    canonical_labs_rows: list[dict] = []
+    auc_horizons_by_landmark: dict[str, dict[str, list[int]]] = {}
+    auc_quantiles = tuple(args.auc_quantiles)
 
-    agg_path = output_dir / GENOMIC_AGGREGATED_FILENAME
-    aggregated.rename_axis(ID_COL).reset_index().to_csv(agg_path, index=False)
-    print(f"Wrote {agg_path}")
-    compat_agg_path = output_dir / aggregated_filename(0)
-    aggregated.rename_axis(ID_COL).reset_index().to_csv(compat_agg_path, index=False)
-    print(f"Wrote runner-compatible alias {compat_agg_path}")
+    for landmark_day in landmark_days:
+        print(f"\n##### GENOMIC LANDMARK +{landmark_day}d: BUILD INPUTS #####")
+        merged = merged_by_landmark[landmark_day].loc[common_mrns].copy()
+        merged["split"] = aligned_split.loc[merged.index]
 
-    # Pre-IO_START lab long (genomics-eligible subset) for per-fold canonical labs
-    pre_sample_lab_df = build_pre_treatment_lab_long(
-        df,
-        cohort_index=merged.index,
-        landmark_offset_days=0,
-        anchor_col="t_first_treatment",
-    )
-    pre_path = output_dir / GENOMIC_PRE_SAMPLE_LAB_FILENAME
-    pre_sample_lab_df.to_csv(pre_path, index=False)
-    print(f"Wrote {pre_path} ({len(pre_sample_lab_df)} rows)")
-    compat_pre_path = output_dir / pre_treatment_lab_filename(0)
-    pre_sample_lab_df.to_csv(compat_pre_path, index=False)
-    print(f"Wrote runner-compatible alias {compat_pre_path}")
+        # Drop the debug-only date/duration duplicates (mirrors
+        # build_prediction_inputs' AGGREGATED_DROP_COLUMNS) but keep baseline
+        # covariates + genomic indicators.
+        drop_cols = [
+            c for c in ("FIRST_RECORD_DATE", "LAST_CONTACT_DATE", "t_irae_from_first_record")
+            if c in merged.columns
+        ]
+        aggregated = merged.drop(columns=drop_cols) if drop_cols else merged
 
-    # Canonical labs (train+valid, pre-IO_START coverage, genomics-eligible subset)
-    canonical_labs = select_canonical_labs(
-        pre_sample_lab_df,
-        mrns=train_val.index,
-        min_coverage=args.min_patient_coverage,
-        id_col=ID_COL,
-    )
-    canonical_labs_df = pd.DataFrame({"landmark_days": 0, "lab_name": canonical_labs})
+        agg_path = output_dir / (
+            GENOMIC_AGGREGATED_FILENAME if landmark_day == 0
+            else f"genomic_aggregated_landmark{landmark_day}.csv"
+        )
+        aggregated.rename_axis(ID_COL).reset_index().to_csv(agg_path, index=False)
+        print(f"  aggregated:        {len(aggregated)} patients -> {agg_path}")
+        compat_agg_path = output_dir / aggregated_filename(landmark_day)
+        aggregated.rename_axis(ID_COL).reset_index().to_csv(compat_agg_path, index=False)
+        print(f"  runner-compatible alias -> {compat_agg_path}")
+
+        # Pre-landmark lab long (genomics-eligible subset) for per-fold canonical labs
+        pre_sample_lab_df = build_pre_treatment_lab_long(
+            df,
+            cohort_index=merged.index,
+            landmark_offset_days=landmark_day,
+            anchor_col="t_first_treatment",
+        )
+        pre_path = output_dir / (
+            GENOMIC_PRE_SAMPLE_LAB_FILENAME if landmark_day == 0
+            else f"pre_sample_lab_long_landmark{landmark_day}.csv"
+        )
+        pre_sample_lab_df.to_csv(pre_path, index=False)
+        print(f"  pre-landmark labs: {len(pre_sample_lab_df)} rows -> {pre_path}")
+        compat_pre_path = output_dir / pre_treatment_lab_filename(landmark_day)
+        pre_sample_lab_df.to_csv(compat_pre_path, index=False)
+        print(f"  runner-compatible alias -> {compat_pre_path}")
+
+        # Canonical labs (train+valid, pre-landmark coverage, genomics-eligible subset)
+        canonical_labs = select_canonical_labs(
+            pre_sample_lab_df,
+            mrns=pd.Index(sorted(train_val_mrns)),
+            min_coverage=args.min_patient_coverage,
+            id_col=ID_COL,
+        )
+        for lab in canonical_labs:
+            canonical_labs_rows.append({"landmark_days": landmark_day, "lab_name": lab})
+        print(f"  canonical labs (train+valid): {len(canonical_labs)}")
+
+        # Per-endpoint AUC horizons (independent from main pipeline since cohort + landmark differ)
+        landmark_horizons: dict[str, list[int]] = {}
+        train_val_block = aggregated.loc[aggregated["split"].isin(["train", "valid"])]
+        for endpoint, cfg in ENDPOINTS.items():
+            grid = compute_horizon_grid(
+                train_val_block,
+                duration_col=cfg["duration_col"],
+                event_col=cfg["event_col"],
+                quantiles=auc_quantiles,
+                time_unit_days=args.time_unit_days,
+            )
+            landmark_horizons[endpoint] = [int(h) for h in grid]
+            print(
+                f"  AUC horizons ({endpoint}): "
+                + ", ".join(str(h) for h in landmark_horizons[endpoint])
+                + f" {args.time_unit_days}-day units"
+            )
+        auc_horizons_by_landmark[str(int(landmark_day))] = landmark_horizons
+
+    canonical_labs_df = pd.DataFrame(canonical_labs_rows)
     canonical_path = output_dir / GENOMIC_CANONICAL_LABS_FILENAME
     canonical_labs_df.to_csv(canonical_path, index=False)
-    print(f"Canonical labs: {len(canonical_labs)} -> {canonical_path}")
+    print(f"\nWrote {canonical_path}")
     compat_canonical_path = output_dir / CANONICAL_LABS_FILENAME
     canonical_labs_df.to_csv(compat_canonical_path, index=False)
     print(f"Wrote runner-compatible alias {compat_canonical_path}")
 
-    # Per-endpoint AUC horizons (independent from main pipeline since cohort + landmark differ)
-    auc_quantiles = tuple(args.auc_quantiles)
-    auc_horizons: dict[str, list[int]] = {}
-    train_val_block = aggregated.loc[aggregated["split"].isin(["train", "valid"])]
-    for endpoint, cfg in ENDPOINTS.items():
-        grid = compute_horizon_grid(
-            train_val_block,
-            duration_col=cfg["duration_col"],
-            event_col=cfg["event_col"],
-            quantiles=auc_quantiles,
-            time_unit_days=args.time_unit_days,
-        )
-        auc_horizons[endpoint] = [int(h) for h in grid]
-        print(
-            f"AUC horizons ({endpoint}): "
-            + ", ".join(str(h) for h in auc_horizons[endpoint])
-            + f" {args.time_unit_days}-day units"
-        )
-
+    max_horizon = max(
+        (h for endpoints in auc_horizons_by_landmark.values() for hs in endpoints.values() for h in hs),
+        default=0,
+    )
     manifest = {
         "data": str(args.data),
         "somatic_path": str(args.somatic_path),
@@ -337,14 +362,13 @@ def main(args: argparse.Namespace) -> None:
         "time_unit_days": int(args.time_unit_days),
         "auc_quantiles": list(auc_quantiles),
         "auc_time_unit_days": int(args.time_unit_days),
-        "auc_horizons": auc_horizons,
-        "auc_horizons_by_landmark": {"0": auc_horizons},
-        "auc_max_horizon": int(max((h for hs in auc_horizons.values() for h in hs), default=0)),
-        "landmark_days": [0],
+        "auc_horizons_by_landmark": auc_horizons_by_landmark,
+        "auc_max_horizon": int(max_horizon),
+        "landmark_days": [int(d) for d in landmark_days],
         "genomic_features": genomic_feature_cols,
-        "n_patients_total": int(len(aggregated)),
-        "n_patients_train_val": int(len(train_val)),
-        "n_patients_test": int(len(test)),
+        "n_patients_total": int(len(common_mrns)),
+        "n_patients_train_val": int(len(train_val_mrns)),
+        "n_patients_test": int(len(test_mrns)),
         "n_dropped_no_split": n_no_split,
         "split_source": str(split_path),
     }
@@ -369,6 +393,13 @@ if __name__ == "__main__":
         "--inputs-dir",
         default=str(RESULTS / DEFAULT_OUTPUT_SUBDIR),
         help="Existing prediction_inputs dir (genomic outputs go in <inputs-dir>/genomic).",
+    )
+    parser.add_argument(
+        "--landmark-days",
+        nargs="+",
+        type=int,
+        default=DEFAULT_LANDMARK_DAYS,
+        help="Landmark offsets in days relative to treatment start.",
     )
     parser.add_argument(
         "--min-patient-coverage",
