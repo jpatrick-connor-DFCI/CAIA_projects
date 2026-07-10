@@ -15,6 +15,8 @@ cox_aggregated → helper is a one-way dependency.
 
 from __future__ import annotations
 
+import warnings
+from contextlib import contextmanager
 from typing import Iterable, Iterator
 
 import numpy as np
@@ -44,6 +46,22 @@ def require_sksurv() -> None:
         raise ModuleNotFoundError(
             "sksurv is required for helper.py utilities."
         ) from SKSURV_IMPORT_ERROR
+
+
+@contextmanager
+def suppress_sksurv_warnings():
+    """Silence RuntimeWarning/UserWarning/FutureWarning noise from sksurv calls.
+
+    sksurv (and the numpy it drives internally) frequently warns on
+    ill-conditioned folds/horizons -- e.g. division-by-zero in IPCW weighting
+    or deprecation notices -- that are expected and already handled by the
+    caller's own NaN/`note` fallback, so they're non-actionable clutter.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        warnings.simplefilter("ignore", category=UserWarning)
+        warnings.simplefilter("ignore", category=FutureWarning)
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -266,8 +284,9 @@ def breslow_survival_at_horizons(
     horizons = np.asarray(horizons, dtype=float).reshape(-1)
 
     estimator = BreslowEstimator()
-    estimator.fit(train_lp, train_event, train_duration)
-    surv_funcs = estimator.get_survival_function(eval_lp)
+    with suppress_sksurv_warnings():
+        estimator.fit(train_lp, train_event, train_duration)
+        surv_funcs = estimator.get_survival_function(eval_lp)
     out = np.empty((len(eval_lp), len(horizons)), dtype=float)
     for i, sf in enumerate(surv_funcs):
         out[i, :] = sf(horizons)
@@ -344,7 +363,8 @@ def compute_brier(
         col_idx = np.where(in_range)[0]
         surv_in = surv_at_horizons[:, col_idx]
         try:
-            times, brier_vals = brier_score(train_surv, eval_surv, surv_in, h_in)
+            with suppress_sksurv_warnings():
+                times, brier_vals = brier_score(train_surv, eval_surv, surv_in, h_in)
         except ValueError as exc:
             for h in h_in:
                 rows.append(
@@ -371,9 +391,10 @@ def compute_brier(
                 )
             if len(times) >= 2:
                 try:
-                    integrated = float(
-                        integrated_brier_score(train_surv, eval_surv, surv_in, h_in)
-                    )
+                    with suppress_sksurv_warnings():
+                        integrated = float(
+                            integrated_brier_score(train_surv, eval_surv, surv_in, h_in)
+                        )
                 except ValueError:
                     integrated = float("nan")
 

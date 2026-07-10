@@ -12,6 +12,7 @@ from survival_common.helper import (
     _make_survival_array,
     breslow_survival_at_horizons,
     choose_stratification_labels,
+    suppress_sksurv_warnings,
 )
 
 try:
@@ -261,12 +262,13 @@ def compute_ipcw_auc_t(
             note = "non_positive_horizon"
         else:
             try:
-                auc_values, _ = cumulative_dynamic_auc(
-                    train_surv,
-                    eval_surv,
-                    eval_risk,
-                    np.asarray([horizon], dtype=float),
-                )
+                with suppress_sksurv_warnings():
+                    auc_values, _ = cumulative_dynamic_auc(
+                        train_surv,
+                        eval_surv,
+                        eval_risk,
+                        np.asarray([horizon], dtype=float),
+                    )
                 auc_t = float(auc_values[0])
             except ValueError as exc:
                 note = f"auc_failed: {exc}"
@@ -293,12 +295,13 @@ def compute_ipcw_auc_t(
         return np.nan, auc_df
 
     try:
-        _, mean_auc = cumulative_dynamic_auc(
-            train_surv,
-            eval_surv,
-            eval_risk,
-            mean_auc_times,
-        )
+        with suppress_sksurv_warnings():
+            _, mean_auc = cumulative_dynamic_auc(
+                train_surv,
+                eval_surv,
+                eval_risk,
+                mean_auc_times,
+            )
     except ValueError:
         mean_auc = np.nan
     return float(mean_auc) if np.isfinite(mean_auc) else np.nan, auc_df
@@ -358,8 +361,7 @@ def fit_coxnet_with_fallback(
                 max_iter=int(max_iter),
                 fit_baseline_model=False,
             )
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
+            with suppress_sksurv_warnings():
                 model.fit(X, y)
         except (ArithmeticError, ValueError, np.linalg.LinAlgError) as exc:
             last_error = str(exc)
