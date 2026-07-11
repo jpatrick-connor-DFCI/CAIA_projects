@@ -69,7 +69,6 @@ from survival_common.cohort import (  # noqa: E402
     AGE_COL,
     ID_COL,
     build_landmark_availability_table,
-    build_landmark_merged,
     build_pre_treatment_lab_long,
     configure_id_columns,
     normalize_landmark_days,
@@ -81,6 +80,9 @@ from survival_common.helper import (  # noqa: E402
     select_canonical_labs,
 )
 
+# build_landmark_merged is IPIO-local (wraps ipio_cohort.make_irae_outcome_df) --
+# NOT survival_common.cohort.build_landmark_merged, which is COMPASS-oriented
+# (hard-wired PLATINUM/DEATH) and has no irAE outcome columns at all.
 from build_prediction_inputs import (  # noqa: E402
     BUILD_MANIFEST_FILENAME,
     CANONICAL_LABS_FILENAME,
@@ -92,6 +94,7 @@ from build_prediction_inputs import (  # noqa: E402
     RESULTS,
     SPLIT_ASSIGNMENTS_FILENAME,
     aggregated_filename,
+    build_landmark_merged,
     pre_treatment_lab_filename,
 )
 
@@ -215,8 +218,8 @@ def main(args: argparse.Namespace) -> None:
         f"(dropped {n_before_genomics - n_with_genomics} without one)."
     )
 
-    # Build the per-landmark (outcome + lab feature) cohort, same shared helper
-    # build_prediction_inputs.py uses, then attach the (landmark-invariant)
+    # Build the per-landmark (outcome + lab feature) cohort using the IPIO-local
+    # build_landmark_merged (irAE-aware), then attach the (landmark-invariant)
     # genomic indicators at each landmark.
     merged_by_landmark: dict[int, pd.DataFrame] = {}
     for landmark_day in landmark_days:
