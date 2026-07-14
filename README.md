@@ -44,7 +44,7 @@ data_preprocessing_common/               # shared data-preprocessing utilities/r
 
 COMPASS/
 ├── data_preprocessing/                   # raw exports + survival model input builders
-│   ├── compile_prostate_data.py          # ENTRY: build prostate_* source tables
+│   ├── compile_COMPASS_cohort_data.py    # ENTRY: build prostate_* source tables + survival cohort
 │   ├── compile_MRNs_for_manual_review.py # build review sheet (platinum + ICD + PARPi + BRCA2)
 │   ├── longitudinal_data_processing.py   # ENTRY: raw exports -> longitudinal_prediction_data.csv
 │   ├── build_prediction_inputs.py        # ENTRY: landmark cohorts, split, canonical labs, horizons
@@ -64,10 +64,10 @@ COMPASS/
 ```text
  raw DFCI / OncDRS / Profile exports  (/data/gusev/USERS/jpconnor/data/...)
         │
-        ▼  data_preprocessing/compile_prostate_data.py
+        ▼  data_preprocessing/compile_COMPASS_cohort_data.py
  prostate_text_data.csv, prostate_icd_data.csv, prostate_health_history_data.csv,
  prostate_medications_data.csv, prostate_labs_data.csv, prostate_somatic_data.csv,
- total_psa_records.csv, platinum_chemo_records.csv
+ total_psa_records.csv, platinum_chemo_records.csv, prostate_arpi_survival_cohort.csv
         │
         ▼  data_preprocessing/longitudinal_data_processing.py
  longitudinal_prediction_data.csv
@@ -86,22 +86,23 @@ COMPASS/
 
 ## Stage 1 — Compile prostate cohort source data
 
-`data_preprocessing/compile_prostate_data.py` (module-level script, no CLI). Derives the broad
-prostate MRN set from the inferred-cancer table, removes patients with a clear non-prostate-primary
-ICD, loads any available batched note JSONs into `prostate_text_data.csv`, then filters the raw ICD /
-health-history / medication / lab / somatic exports down to that broad prostate set and derives
-`total_psa_records.csv` and `platinum_chemo_records.csv`.
+`data_preprocessing/compile_COMPASS_cohort_data.py` (module-level script, argparse CLI for path
+overrides). Derives the prostate cohort directly from ICD-10 code C61, removes patients with a clear
+non-prostate-primary ICD, loads any available batched note JSONs into `prostate_text_data.csv`, then
+filters the raw ICD / health-history / medication / lab / somatic exports down to that ICD-C61 cohort
+and derives `total_psa_records.csv` and `platinum_chemo_records.csv`. The same script also builds the
+ARPI/chemo-anchored survival cohort (age, treatment anchor, death, time-to-platinum) directly from
+the raw OncDRS pull, sharing the medications table already filtered above.
 
-- **Inputs (hard-coded under `DATA_PATH = /data/gusev/USERS/jpconnor/data/`):**
-  `first_treatments_dfci_w_inferred_cancers.csv`, `full_VTE_embeddings_metadata.csv`,
-  `VTE_notes_with_full_metadata_batch_*.json`, `timestamped_icd_info.csv.gz`, `HEALTH_HISTORY.csv`,
-  `MEDICATIONS.csv`, `OUTPT_LAB_RESULTS_LABS.csv`, `complete_somatic_data_df.csv`.
+- **Inputs (hard-coded under `DATA_PATH = /data/gusev/USERS/jpconnor/data/`, plus the raw OncDRS pull
+  at `ONCDRS_PATH`):** `timestamped_icd_info.csv.gz`, `full_VTE_embeddings_metadata.csv`,
+  `VTE_notes_with_full_metadata_batch_*.json`, `HEALTH_HISTORY.csv`, `MEDICATIONS.csv`,
+  `OUTPT_LAB_RESULTS_LABS.csv`, `complete_somatic_data_df.csv`, `PT_INFO_STATUS_REGISTRATION.csv`.
 - **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** the eight `prostate_*` /
-  `*_records.csv` tables listed in the data-flow diagram.
-- **Cohort definition:** inferred-cancer prostate patients after ICD-based non-prostate-primary
-  exclusion, not only patients with first-treatment anchors or batched note text. Notes remain a
-  useful subset, but the structured longitudinal lab pipeline is built from the full prostate set and
-  cohort-specific selection happens downstream.
+  `*_records.csv` tables plus `prostate_arpi_survival_cohort.csv`, listed in the data-flow diagram.
+- **Cohort definition:** ICD-10 C61 patients after ICD-based non-prostate-primary exclusion — one
+  shared cohort definition drives every output, including the survival cohort (previously the
+  cohort-filtered tables used a separate inferred-cancer cohort; that source is no longer read).
 
 `compile_MRNs_for_manual_review.py` builds an auxiliary manual-review MRN sheet from the
 stage-1 outputs (platinum mentions, non-prostate-primary ICDs, PARPi exposure, BRCA2 status).
@@ -126,7 +127,7 @@ prostate (`C61`) diagnosis date when available and outcomes, rebases all timing 
 prostate lab frame. Patient-level cohort filters are deferred to `build_prediction_inputs.py` so
 different anchors can select their own cohorts.
 
-- **Broad processing:** inferred-cancer prostate required and non-prostate-primary ICDs excluded at
+- **Broad processing:** ICD-C61 prostate cohort required and non-prostate-primary ICDs excluded at
   stage 1; a C61 diagnosis date is attached when present but is not required. No first-treatment,
   PSA-count, or PARPi filter is applied to `longitudinal_prediction_data.csv`. `PARPI_EXPOSED` is
   carried as a patient-level flag for downstream filtering.
@@ -137,9 +138,10 @@ different anchors can select their own cohorts.
   `data_preprocessing_common/resources/lab_mappings/OMOP_to_DFCI_lab_ids.csv`. The
   `unique_lab_ids_w_units.csv` inventory is generated per project under the project data root for
   diagnostics / optional mapping refreshes; it is not a repo source of truth.
-- **Timing semantics:** `t_lab`, `t_diagnosis`, `t_first_treatment`, `t_platinum`, `t_last_contact`.
-  `DEATH` / `t_death` may remain in source tables as follow-up metadata, but COMPASS models do not use
-  death as an endpoint.
+- **Timing semantics:** `t_lab`, `t_diagnosis`, `t_first_treatment`, `t_treatment_anchor`,
+  `t_platinum`, `t_last_contact`, `t_death`. `t_death` is a real death-date-derived duration when the
+  survival cohort's `death_date` is available (falls back to the last-contact proxy for dead patients
+  with no recorded date); COMPASS models still use the `platinum` endpoint only.
 
 ### 2.2 — `data_preprocessing/build_prediction_inputs.py` → `prediction_inputs/`
 
@@ -246,8 +248,8 @@ IPIO has a paired run/figure notebook as well:
 ## Recommended run order
 
 ```bash
-# Stage 1 (cluster paths hard-coded)
-python COMPASS/data_preprocessing/compile_prostate_data.py
+# Stage 1 (cluster paths hard-coded, override via CLI flags if needed)
+python COMPASS/data_preprocessing/compile_COMPASS_cohort_data.py
 
 # Stage 2 — or just run COMPASS/survival_analysis/COMPASS_run_locally.ipynb top to bottom
 python COMPASS/data_preprocessing/longitudinal_data_processing.py
@@ -269,11 +271,6 @@ for the modern type-hint syntax used by the shared modules.
 
 These are real, verified items found in code review. Fix opportunistically; at minimum, don't be
 surprised by them.
-
-### High impact
-
-- **No true date of death in source data** (`longitudinal_data_processing.py`). `DEATH` / `t_death`
-  remain metadata only; COMPASS modeling intentionally ignores death as an endpoint.
 
 ### Medium impact
 

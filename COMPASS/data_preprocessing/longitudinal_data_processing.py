@@ -27,12 +27,17 @@ from data_preprocessing_common.projects.compass_profile import (  # noqa: E402
 ID_COL = "DFCI_MRN"
 AGE_COL = "AGE_AT_TREATMENTSTART"
 
-
 DATA_ROOT = Path("/data/gusev/USERS/jpconnor/data")
 EMBED_PROJ_PATH = DATA_ROOT / "clinical_text_embedding_project"
 NEPC_PROJ_PATH = DATA_ROOT / "CAIA" / "COMPASS"
 PROFILE_PATH = Path("/data/gusev/PROFILE/CLINICAL")
 SURV_PATH = EMBED_PROJ_PATH / "time-to-event_analysis"
+
+# Per-patient survival cohort produced by compile_COMPASS_cohort_data.py
+# straight from the raw OncDRS pull. It supplies the outcome/anchor columns
+# (age, treatment anchor, death, last-contact, platinum) that used to come from
+# death_met_surv_df.csv.gz. See load_death_df_from_survival_cohort.
+DEFAULT_SURVIVAL_COHORT_CSV = NEPC_PROJ_PATH / "prostate_arpi_survival_cohort.csv"
 
 PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
 PARPI_MEDS = {"OLAPARIB", "RUCAPARIB", "NIRAPARIB", "TALAZOPARIB", "VELIPARIB"}
@@ -52,6 +57,60 @@ TREATMENT_ANCHOR_MEDS = {
     "CABAZITAXEL",
     "RADIUM RA 223 DICHLORIDE",
 }
+
+
+def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFrame:
+    """Load the per-patient survival cohort into the ``death_df`` schema.
+
+    ``build_longitudinal_prediction_data`` expects a per-patient frame with
+    columns ``first_treatment_date``, ``last_contact_date``, ``death`` and
+    ``AGE_AT_TREATMENTSTART``. The cohort file (built by
+    compile_COMPASS_cohort_data.py) is ARPI/chemo-anchored, so its
+    ``TREATMENT_ANCHOR_DATE`` is the treatment index date used as
+    ``first_treatment_date`` here — matching the project's ARPI-anchored-as-primary
+    convention.
+
+    Unlike the old death_met_surv_df.csv.gz, this file carries a TRUE death date
+    (``DEATH_DATE``). It is passed through as ``death_date`` so downstream code can
+    use a real time-to-death duration instead of the last-contact proxy; when a
+    patient is flagged dead but has no recorded date, downstream falls back to
+    last contact.
+    """
+    cohort = pd.read_csv(survival_cohort_csv)
+
+    required = {
+        ID_COL,
+        "TREATMENT_ANCHOR_DATE",
+        "LAST_CONTACT_DATE",
+        "DEATH",
+        "AGE",
+    }
+    missing = required - set(cohort.columns)
+    if missing:
+        raise ValueError(
+            f"{survival_cohort_csv} is missing expected columns: {sorted(missing)}"
+        )
+
+    death_df = cohort.rename(
+        columns={
+            "TREATMENT_ANCHOR_DATE": "first_treatment_date",
+            "LAST_CONTACT_DATE": "last_contact_date",
+            "DEATH": "death",
+            "AGE": "AGE_AT_TREATMENTSTART",
+            "DEATH_DATE": "death_date",
+        }
+    )
+
+    keep_cols = [
+        ID_COL,
+        "first_treatment_date",
+        "last_contact_date",
+        "death",
+        "AGE_AT_TREATMENTSTART",
+    ]
+    if "death_date" in death_df.columns:
+        keep_cols.append("death_date")
+    return death_df[keep_cols].copy()
 
 
 def generate_new_test_name(code: object, descr: object) -> str:
@@ -242,6 +301,8 @@ def build_longitudinal_prediction_data(
         "PLATINUM_DATE",
         "TREATMENT_ANCHOR_DATE",
     ]
+    if "death_date" in pred_df.columns:
+        date_cols.append("death_date")
     for col in date_cols:
         pred_df[col] = pd.to_datetime(pred_df[col], errors="coerce").dt.floor("D")
 
@@ -269,12 +330,25 @@ def build_longitudinal_prediction_data(
     pred_df["t_last_contact"] = (
         pred_df["LAST_CONTACT_DATE"] - pred_df["FIRST_RECORD_DATE"]
     ).dt.days.astype(float)
-    # NOTE: the death source table (death_met_surv_df) carries only `last_contact_date`
-    # and a `death` flag — there is no true date-of-death. We therefore use last-contact
-    # time as the death-endpoint duration for everyone. The DEATH *event* indicator is
-    # real, but dead and censored patients share the same duration. Replace this with a
-    # true death date if one becomes available.
-    pred_df["t_death"] = pred_df["t_last_contact"]
+    # The survival cohort (compile_COMPASS_cohort_data.py) carries a TRUE
+    # death date, so time-to-death is the real interval from first record to death
+    # for dead patients and last-contact time for censored patients. When a patient
+    # is flagged dead but has no recorded date, fall back to last contact so the
+    # duration stays finite (the DEATH event indicator is still honored).
+    if "death_date" in pred_df.columns:
+        death_days = (
+            pred_df["death_date"] - pred_df["FIRST_RECORD_DATE"]
+        ).dt.days.astype(float)
+        pred_df["t_death"] = np.where(
+            pred_df["DEATH"].eq(1),
+            death_days,
+            pred_df["t_last_contact"],
+        ).astype(float)
+        pred_df["t_death"] = pred_df["t_death"].fillna(pred_df["t_last_contact"])
+    else:
+        # Legacy source with no date-of-death: dead and censored patients share the
+        # last-contact duration; only the DEATH event indicator distinguishes them.
+        pred_df["t_death"] = pred_df["t_last_contact"]
 
     pred_df["t_diagnosis"] = (
         (pred_df["DIAGNOSIS_DATE"] - pred_df["FIRST_RECORD_DATE"]).dt.days.astype(float)
@@ -443,9 +517,14 @@ def parse_args() -> argparse.Namespace:
         help="Pre-compiled prostate-cohort medications table (used for treatment anchor and PARPi flag).",
     )
     parser.add_argument(
-        "--death-csv",
+        "--survival-cohort-csv",
         type=Path,
-        default=SURV_PATH / "death_met_surv_df.csv.gz",
+        default=DEFAULT_SURVIVAL_COHORT_CSV,
+        help=(
+            "Per-patient survival cohort from compile_COMPASS_cohort_data.py. "
+            "Supplies the treatment anchor, age, death, and last-contact outcome columns "
+            "(replaces the legacy death_met_surv_df.csv.gz)."
+        ),
     )
     parser.add_argument(
         "--mapping-csv",
@@ -504,15 +583,7 @@ def main() -> None:
 
     icds = pd.read_csv(args.icd_csv)
     platinum_df = pd.read_csv(args.platinum_csv)
-    death_df = pd.read_csv(args.death_csv)[
-        [
-            ID_COL,
-            "first_treatment_date",
-            "last_contact_date",
-            "death",
-            "AGE_AT_TREATMENTSTART",
-        ]
-    ].copy()
+    death_df = load_death_df_from_survival_cohort(args.survival_cohort_csv)
 
     first_prostate_diagnosis = compute_first_prostate_diagnosis(icds)
 
