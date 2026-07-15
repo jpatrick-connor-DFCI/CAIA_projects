@@ -231,29 +231,21 @@ def load_mrn_subset(mrn_file: Path, id_col: str) -> set[int]:
 def apply_downstream_cohort_filters(
     df: pd.DataFrame,
     *,
-    require_first_treatment: bool,
     min_psa_count: int,
     exclude_parpi: bool,
 ) -> tuple[pd.DataFrame, dict]:
-    """Apply patient-level cohort filters after loading the broad lab frame."""
+    """Apply patient-level cohort filters after loading the broad lab frame.
+
+    Treated status is enforced downstream by the treatment-anchor landmark filter
+    (a null/negative t_treatment_anchor drops the patient in make_outcome_df), so
+    there is no first-treatment inclusion step here.
+    """
     if min_psa_count < 0:
         raise ValueError(f"min_psa_count must be >= 0, got {min_psa_count}.")
 
     out = df.copy()
     n_start = out[ID_COL].nunique()
     print(f"Downstream cohort filter start: {n_start} patients")
-
-    if require_first_treatment:
-        if "FIRST_TREATMENT" not in out.columns:
-            raise ValueError(
-                "--require-first-treatment was set but input data has no FIRST_TREATMENT column."
-            )
-        out = out.loc[pd.to_numeric(out["FIRST_TREATMENT"], errors="coerce").fillna(0).eq(1)].copy()
-        n_after_first_treatment = out[ID_COL].nunique()
-        print(f"  First-treatment inclusion: kept {n_after_first_treatment}/{n_start}")
-    else:
-        n_after_first_treatment = n_start
-        print("  First-treatment inclusion: disabled")
 
     if min_psa_count > 0:
         if "LAB_NAME" not in out.columns:
@@ -268,7 +260,7 @@ def apply_downstream_cohort_filters(
         n_after_psa = out[ID_COL].nunique()
         print(
             f"  PSA count filter (>= {min_psa_count}): "
-            f"kept {n_after_psa}/{n_after_first_treatment}"
+            f"kept {n_after_psa}/{n_start}"
         )
     else:
         n_after_psa = out[ID_COL].nunique()
@@ -295,8 +287,6 @@ def apply_downstream_cohort_filters(
 
     attrition = {
         "n_before_downstream_cohort_filters": int(n_start),
-        "require_first_treatment": bool(require_first_treatment),
-        "n_after_first_treatment_filter": int(n_after_first_treatment),
         "min_psa_count": int(min_psa_count),
         "n_after_psa_count_filter": int(n_after_psa),
         "exclude_parpi": bool(exclude_parpi),
@@ -372,15 +362,20 @@ AGGREGATED_DROP_COLUMNS = (
     # Raw date strings — duplicate of the rebased durations; not consumed downstream.
     "FIRST_RECORD_DATE",
     "DIAGNOSIS_DATE",
-    "FIRST_TREATMENT_DATE",
     "LAST_CONTACT_DATE",
     "PLATINUM_DATE",
+    "TREATMENT_ANCHOR_DATE",
     # Pre-rebase duration duplicates kept for debugging by make_outcome_df.
     "t_platinum_from_first_record",
     "t_last_contact_from_first_record",
     "t_death_from_first_record",
-    # Always 1 after make_outcome_df's cohort filter.
+    # Shared make_outcome_df still derives these first-treatment fields (falling
+    # back to last-contact when the columns are absent, as they are for the
+    # treatment-anchored COMPASS pipeline); drop them so they never leak into the
+    # feature matrix.
+    "FIRST_TREATMENT_DATE",
     "FIRST_TREATMENT",
+    "t_first_treatment",
 )
 
 
@@ -449,7 +444,6 @@ def main(args: argparse.Namespace) -> None:
 
     df, cohort_filter_attrition = apply_downstream_cohort_filters(
         df,
-        require_first_treatment=args.require_first_treatment,
         min_psa_count=args.min_psa_count,
         exclude_parpi=args.exclude_parpi,
     )
@@ -460,22 +454,24 @@ def main(args: argparse.Namespace) -> None:
             f"--anchor-col {anchor_col!r} not found in {data_path}. Available t_* "
             f"columns: {[c for c in df.columns if c.startswith('t_')]}"
         )
-    if anchor_col != "t_first_treatment":
-        n_with_anchor = df.loc[df[anchor_col].notna(), ID_COL].nunique()
-        print(
-            f"Anchor column: {anchor_col} "
-            f"({n_with_anchor} patients have a non-null anchor; the rest are dropped "
-            f"by the landmark filter)"
-        )
+    n_with_anchor = df.loc[df[anchor_col].notna(), ID_COL].nunique()
+    print(
+        f"Anchor column: {anchor_col} "
+        f"({n_with_anchor} patients have a non-null anchor; the rest are dropped "
+        f"by the landmark filter)"
+    )
 
     merged_by_landmark: dict[int, pd.DataFrame] = {}
     for landmark_day in landmark_days:
         print(f"\n##### COHORT BUILD: LANDMARK +{landmark_day} DAYS #####")
+        # COMPASS is treatment-anchored only: the anchor's non-null-and-positive
+        # requirement in make_outcome_df is what enforces "treated", so the shared
+        # builder's first-treatment gate is always off here.
         _, _, merged = build_landmark_merged(
             df,
             landmark_offset_days=landmark_day,
             anchor_col=anchor_col,
-            require_first_treatment=args.require_first_treatment,
+            require_first_treatment=False,
         )
         merged_by_landmark[landmark_day] = merged
 
@@ -617,7 +613,6 @@ def main(args: argparse.Namespace) -> None:
     build_manifest = {
         "data": str(args.data),
         "anchor_col": str(args.anchor_col),
-        "require_first_treatment": bool(args.require_first_treatment),
         "downstream_cohort_filters": cohort_filter_attrition,
         "landmark_days": [int(d) for d in landmark_days],
         "seed": int(args.seed),
@@ -661,26 +656,13 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--anchor-col",
-        default="t_first_treatment",
+        default="t_treatment_anchor",
         help=(
             "Per-patient index-time column (days from FIRST_RECORD_DATE) that anchors "
-            "the landmark. Default t_first_treatment (standard pipeline). Use "
-            "t_treatment_anchor to predict time-to-platinum from the first "
-            "highlighted-treatment date. Patients with a null anchor are dropped."
+            "the landmark. Default t_treatment_anchor: predict time-to-platinum from "
+            "the first highlighted-treatment date (first ARPI/taxane/radium-223 "
+            "exposure). Patients with a null anchor are dropped by the landmark filter."
         ),
-    )
-    parser.add_argument(
-        "--require-first-treatment",
-        dest="require_first_treatment",
-        action="store_true",
-        default=True,
-        help="Require FIRST_TREATMENT == 1 in the cohort filter (default; on).",
-    )
-    parser.add_argument(
-        "--no-require-first-treatment",
-        dest="require_first_treatment",
-        action="store_false",
-        help="Drop the FIRST_TREATMENT == 1 requirement (e.g. for a non-treatment anchor).",
     )
     parser.add_argument(
         "--min-psa-count",

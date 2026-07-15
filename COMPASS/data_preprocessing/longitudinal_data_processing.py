@@ -63,12 +63,11 @@ def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFram
     """Load the per-patient survival cohort into the ``death_df`` schema.
 
     ``build_longitudinal_prediction_data`` expects a per-patient frame with
-    columns ``first_treatment_date``, ``last_contact_date``, ``death`` and
+    columns ``treatment_anchor_date``, ``last_contact_date``, ``death`` and
     ``AGE_AT_TREATMENTSTART``. The cohort file (built by
-    compile_COMPASS_cohort_data.py) is ARPI/chemo-anchored, so its
-    ``TREATMENT_ANCHOR_DATE`` is the treatment index date used as
-    ``first_treatment_date`` here — matching the project's ARPI-anchored-as-primary
-    convention.
+    compile_COMPASS_cohort_data.py) is ARPI/chemo-anchored: its
+    ``TREATMENT_ANCHOR_DATE`` (first ARPI/taxane/radium-223 exposure) is the sole
+    treatment index date for this pipeline.
 
     Unlike the old death_met_surv_df.csv.gz, this file carries a TRUE death date
     (``DEATH_DATE``). It is passed through as ``death_date`` so downstream code can
@@ -93,7 +92,7 @@ def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFram
 
     death_df = cohort.rename(
         columns={
-            "TREATMENT_ANCHOR_DATE": "first_treatment_date",
+            "TREATMENT_ANCHOR_DATE": "treatment_anchor_date",
             "LAST_CONTACT_DATE": "last_contact_date",
             "DEATH": "death",
             "AGE": "AGE_AT_TREATMENTSTART",
@@ -103,7 +102,7 @@ def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFram
 
     keep_cols = [
         ID_COL,
-        "first_treatment_date",
+        "treatment_anchor_date",
         "last_contact_date",
         "death",
         "AGE_AT_TREATMENTSTART",
@@ -281,13 +280,19 @@ def build_longitudinal_prediction_data(
     pred_df = after_death.merge(platinum_first, on=ID_COL, how="left")
     pred_df = pred_df.merge(treatment_anchor_df, on=ID_COL, how="left")
 
+    # ``treatment_anchor_date`` from the survival cohort is the same clinical
+    # concept as ``TREATMENT_ANCHOR_DATE`` recomputed from the medications table
+    # (first ARPI/taxane/radium-223 exposure). The meds-derived column is
+    # authoritative here, so drop the cohort copy to avoid carrying a redundant
+    # anchor date.
+    pred_df = pred_df.drop(columns=["treatment_anchor_date"], errors="ignore")
+
     pred_df = (
         pred_df.rename(
             columns={
                 "collapsed_measurement": "LAB_NAME",
                 "numeric_result_standardized": "LAB_VALUE",
                 "DATE": "LAB_DATE",
-                "first_treatment_date": "FIRST_TREATMENT_DATE",
                 "last_contact_date": "LAST_CONTACT_DATE",
                 "death": "DEATH",
                 "medication": "PLATINUM_MEDICATION",
@@ -299,7 +304,6 @@ def build_longitudinal_prediction_data(
     date_cols = [
         "LAB_DATE",
         "DIAGNOSIS_DATE",
-        "FIRST_TREATMENT_DATE",
         "LAST_CONTACT_DATE",
         "PLATINUM_DATE",
         "TREATMENT_ANCHOR_DATE",
@@ -314,7 +318,6 @@ def build_longitudinal_prediction_data(
         pred_df["AGE_AT_TREATMENTSTART"],
         errors="coerce",
     )
-    pred_df["FIRST_TREATMENT"] = pred_df["FIRST_TREATMENT_DATE"].notna().astype(int)
     pred_df["PLATINUM"] = (
         pred_df["PLATINUM_MEDICATION"]
         .astype(str)
@@ -326,7 +329,7 @@ def build_longitudinal_prediction_data(
 
     first_lab_date = pred_df.groupby(ID_COL)["LAB_DATE"].transform("min")
     pred_df["FIRST_RECORD_DATE"] = pd.concat(
-        [first_lab_date, pred_df["DIAGNOSIS_DATE"], pred_df["FIRST_TREATMENT_DATE"]],
+        [first_lab_date, pred_df["DIAGNOSIS_DATE"], pred_df["TREATMENT_ANCHOR_DATE"]],
         axis=1,
     ).min(axis=1)
     pred_df["t_lab"] = (pred_df["LAB_DATE"] - pred_df["FIRST_RECORD_DATE"]).dt.days.astype(float)
@@ -356,16 +359,8 @@ def build_longitudinal_prediction_data(
     pred_df["t_diagnosis"] = (
         (pred_df["DIAGNOSIS_DATE"] - pred_df["FIRST_RECORD_DATE"]).dt.days.astype(float)
     )
-    first_treatment_days = (
-        pred_df["FIRST_TREATMENT_DATE"] - pred_df["FIRST_RECORD_DATE"]
-    ).dt.days
     platinum_days = (pred_df["PLATINUM_DATE"] - pred_df["FIRST_RECORD_DATE"]).dt.days
 
-    pred_df["t_first_treatment"] = np.where(
-        pred_df["FIRST_TREATMENT"].eq(1),
-        first_treatment_days,
-        pred_df["t_last_contact"],
-    ).astype(float)
     pred_df["t_platinum"] = np.where(
         pred_df["PLATINUM"].eq(1),
         platinum_days,
@@ -373,8 +368,10 @@ def build_longitudinal_prediction_data(
     ).astype(float)
 
     # Treatment-anchor index time: days from FIRST_RECORD_DATE to the first
-    # highlighted-treatment start. NaN for patients who never received one of the
-    # highlighted drugs; the anchor's landmark filter drops them downstream.
+    # highlighted-treatment start (first ARPI/taxane/radium-223 exposure). This is
+    # the sole treatment index for the COMPASS pipeline. NaN for patients who never
+    # received one of the highlighted drugs; the anchor's landmark filter drops
+    # them downstream.
     pred_df["t_treatment_anchor"] = (
         (pred_df["TREATMENT_ANCHOR_DATE"] - pred_df["FIRST_RECORD_DATE"]).dt.days.astype(float)
     )
@@ -384,8 +381,6 @@ def build_longitudinal_prediction_data(
         "AGE_AT_TREATMENTSTART",
         "FIRST_RECORD_DATE",
         "DIAGNOSIS_DATE",
-        "FIRST_TREATMENT_DATE",
-        "FIRST_TREATMENT",
         "LAST_CONTACT_DATE",
         "DEATH",
         "PLATINUM_MEDICATION",
@@ -395,7 +390,6 @@ def build_longitudinal_prediction_data(
         "LAB_DATE",
         "t_lab",
         "t_diagnosis",
-        "t_first_treatment",
         "t_platinum",
         "t_treatment_anchor",
         "t_last_contact",
@@ -430,45 +424,38 @@ def summarize_default_cohort_filters(
 ) -> dict:
     """Preview the default downstream cohort filters on the broad lab frame.
 
-    These filters used to be applied in this script, which meant every anchor
-    inherited the first-treatment cohort before `build_prediction_inputs.py`
-    could apply anchor-specific selection. The row-level output is now the broad
-    prostate lab frame; the prediction-input builder applies these rules by
-    default and can relax them for non-first-treatment anchors.
+    These filters are applied by `build_prediction_inputs.py`, not here; the
+    row-level output stays the broad prostate lab frame. This preview reports the
+    attrition they would produce so the counts land in cohort_attrition.json.
 
     Default downstream inclusion:
-      - recorded first treatment (FIRST_TREATMENT == 1); never-treated
-        patients are excluded so that the "pre-treatment" window used by
-        the first-treatment anchor is well-defined.
       - >= ``min_psa_count`` PSA rows in the longitudinal prediction frame
         (LAB_NAME == "PSA", after lab consolidation)
     Default downstream exclusion:
       - any PARPi exposure, identified from the pre-existing prostate
         medications table and carried as PARPI_EXPOSED
 
-    Non-prostate-primary exclusion is already enforced upstream at stage 1.
-    A C61 diagnosis date is attached when available, but is not an inclusion
-    requirement because the broad source population is the inferred-cancer
-    prostate cohort.
+    Treated status for the COMPASS pipeline is enforced downstream by the
+    treatment-anchor landmark filter (patients with no ARPI/taxane/radium-223
+    anchor have a null t_treatment_anchor and are dropped there), not by a
+    separate first-treatment inclusion step. Non-prostate-primary exclusion is
+    already enforced upstream at stage 1. A C61 diagnosis date is attached when
+    available, but is not an inclusion requirement.
     """
     n_before = pred_df[ID_COL].nunique()
     print(f"Broad longitudinal prostate lab frame: {n_before} patients")
 
-    preview_df = pred_df.loc[pred_df["FIRST_TREATMENT"].eq(1)].copy()
-    n_after_treated = preview_df[ID_COL].nunique()
-    print(f"  Default first-treatment inclusion would keep {n_after_treated}/{n_before}")
-
     psa_counts = (
-        preview_df.loc[preview_df["LAB_NAME"].eq("PSA")]
+        pred_df.loc[pred_df["LAB_NAME"].eq("PSA")]
         .groupby(ID_COL)
         .size()
     )
     keep_psa = psa_counts.loc[psa_counts >= min_psa_count].index
-    preview_df = preview_df.loc[preview_df[ID_COL].isin(keep_psa)].copy()
+    preview_df = pred_df.loc[pred_df[ID_COL].isin(keep_psa)].copy()
     n_after_psa = preview_df[ID_COL].nunique()
     print(
         f"  Default PSA count filter (>= {min_psa_count}) would keep "
-        f"{n_after_psa}/{n_after_treated}"
+        f"{n_after_psa}/{n_before}"
     )
 
     if "PARPI_EXPOSED" in preview_df.columns:
@@ -481,8 +468,7 @@ def summarize_default_cohort_filters(
 
     return {
         "filters_applied_to_longitudinal_output": False,
-        "n_before_treatment_psa_parpi_filters": n_before,
-        "n_after_first_treatment_filter": n_after_treated,
+        "n_before_psa_parpi_filters": n_before,
         "n_after_psa_count_filter": n_after_psa,
         "min_psa_count": min_psa_count,
         "n_after_parpi_exclusion": n_after_parpi,
