@@ -94,7 +94,7 @@ def make_outcome_df(
     df: pd.DataFrame,
     *,
     landmark_offset_days: int = 0,
-    anchor_col: str = "t_first_treatment",
+    anchor_col: str | None = "t_first_treatment",
     extra_anchor_cols: tuple[str, ...] = (),
     require_first_treatment: bool = True,
 ) -> pd.DataFrame:
@@ -104,7 +104,10 @@ def make_outcome_df(
         landmark_offset_days: days added to ``anchor_col`` to define the landmark.
         anchor_col: column whose value (in days from first record) anchors the
             landmark. Defaults to ``t_first_treatment``; the genomic arm passes
-            ``t_sample``.
+            ``t_sample``. Pass ``None`` when the durations are already measured
+            from the index date (e.g. COMPASS's treatment-anchor-relative clock):
+            the landmark is then the pure offset ``landmark_offset_days`` from time
+            0, with no anchor term and no anchor-based patient filtering.
         extra_anchor_cols: additional patient-level columns to preserve through
             the dedup (e.g. ``("t_sample", "SAMPLE_COLLECTION_DT")`` for the
             genomic arm). These are kept in the returned frame.
@@ -199,9 +202,14 @@ def make_outcome_df(
         pat["t_platinum"].fillna(pat["t_last_contact"]),
     )
 
-    if anchor_col not in pat.columns:
-        raise ValueError(f"make_outcome_df: anchor_col {anchor_col!r} missing from input.")
-    landmark_time = pat[anchor_col].astype(float) + float(landmark_offset_days)
+    if anchor_col is None:
+        # Durations are already measured from the index date; the landmark is a
+        # pure offset from time 0 (no anchor term, no anchor-based filtering).
+        landmark_time = float(landmark_offset_days)
+    else:
+        if anchor_col not in pat.columns:
+            raise ValueError(f"make_outcome_df: anchor_col {anchor_col!r} missing from input.")
+        landmark_time = pat[anchor_col].astype(float) + float(landmark_offset_days)
     for duration_col in ["t_last_contact", "t_death", "t_platinum"]:
         pat[f"{duration_col}_from_first_record"] = pat[duration_col]
         pat[duration_col] = pat[duration_col].astype(float) - landmark_time
@@ -223,8 +231,6 @@ def make_outcome_df(
 
     valid = (
         pat["FIRST_RECORD_DATE"].notna()
-        & pat[anchor_col].notna()
-        & pat[anchor_col].ge(0)
         & pat["t_platinum"].notna()
         & pat["t_death"].notna()
         & pat["t_last_contact"].notna()
@@ -234,6 +240,11 @@ def make_outcome_df(
         & pat["t_last_contact"].gt(0)
         & pat["t_either"].gt(0)
     )
+    if anchor_col is not None:
+        # A real anchor column must be present and on-or-after first record; with
+        # anchor_col=None the durations are already index-relative and there is no
+        # anchor to gate on.
+        valid = valid & pat[anchor_col].notna() & pat[anchor_col].ge(0)
     if require_first_treatment:
         valid = valid & pat["FIRST_TREATMENT"].eq(1)
     return pat.loc[valid].copy()
@@ -244,18 +255,22 @@ def build_pre_treatment_lab_long(
     *,
     cohort_index: pd.Index | None = None,
     landmark_offset_days: int = 0,
-    anchor_col: str = "t_first_treatment",
+    anchor_col: str | None = "t_first_treatment",
     anchor_series: pd.Series | None = None,
 ) -> pd.DataFrame:
     """Long-format pre-landmark lab observations used for canonical-lab selection.
 
-    Returns columns DFCI_MRN, LAB_NAME, LAB_VALUE, t_lab, <anchor_col>.
+    Returns columns DFCI_MRN, LAB_NAME, LAB_VALUE, t_lab[, <anchor_col>].
     Restricts to observations with t_lab < <anchor_col> + landmark_offset_days
     so the lab presence used for coverage matches the aggregated feature
     engineering and Dynamic DeepHit person-period builder windows.
 
     ``anchor_series`` (MRN-indexed) overrides the column lookup, supporting the
     genomic arm where ``t_sample`` is per-patient and not carried on every row.
+
+    Pass ``anchor_col=None`` when ``t_lab`` is already measured from the index
+    date (COMPASS's treatment-anchor clock): the window is then the pure offset
+    ``t_lab < landmark_offset_days`` with no anchor column required.
     """
     base_required = {ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab"}
     missing = base_required - set(df.columns)
@@ -265,7 +280,7 @@ def build_pre_treatment_lab_long(
         )
 
     cols = list(base_required)
-    if anchor_series is None:
+    if anchor_col is not None and anchor_series is None:
         if anchor_col not in df.columns:
             raise ValueError(
                 f"build_pre_treatment_lab_long needs anchor column {anchor_col!r} on df or via anchor_series."
@@ -275,12 +290,19 @@ def build_pre_treatment_lab_long(
     out["LAB_NAME"] = out["LAB_NAME"].astype(str).str.strip()
     out["LAB_VALUE"] = pd.to_numeric(out["LAB_VALUE"], errors="coerce")
     out["t_lab"] = pd.to_numeric(out["t_lab"], errors="coerce")
-    if anchor_series is not None:
-        out[anchor_col] = out[ID_COL].map(anchor_series.astype(float)).astype(float)
+    dropna_cols = [ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab"]
+    if anchor_col is not None:
+        if anchor_series is not None:
+            out[anchor_col] = out[ID_COL].map(anchor_series.astype(float)).astype(float)
+        else:
+            out[anchor_col] = pd.to_numeric(out[anchor_col], errors="coerce")
+        dropna_cols.append(anchor_col)
+    out = out.dropna(subset=dropna_cols)
+    if anchor_col is None:
+        # t_lab is already index-relative; window is the pure offset from 0.
+        landmark_t = float(landmark_offset_days)
     else:
-        out[anchor_col] = pd.to_numeric(out[anchor_col], errors="coerce")
-    out = out.dropna(subset=[ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab", anchor_col])
-    landmark_t = out[anchor_col] + float(landmark_offset_days)
+        landmark_t = out[anchor_col] + float(landmark_offset_days)
     out = out.loc[out["t_lab"] < landmark_t].copy()
     if cohort_index is not None:
         out = out.loc[out[ID_COL].isin(cohort_index)].copy()
@@ -291,7 +313,7 @@ def build_feature_matrix(
     df: pd.DataFrame,
     *,
     landmark_offset_days: int = 0,
-    anchor_col: str = "t_first_treatment",
+    anchor_col: str | None = "t_first_treatment",
     anchor_series: pd.Series | None = None,
 ) -> pd.DataFrame:
     """Per-patient lab summary features for the pre-landmark window.
@@ -300,7 +322,9 @@ def build_feature_matrix(
         landmark_offset_days: days added to ``anchor_col`` to define the landmark.
         anchor_col: column on ``df`` whose value (in days from first record) is
             the anchor. Default ``t_first_treatment``; the genomic arm uses
-            ``t_sample``.
+            ``t_sample``. Pass ``None`` when ``t_lab`` is already index-relative
+            (COMPASS's treatment-anchor clock): the window is the pure offset
+            ``t_lab < landmark_offset_days`` with no anchor column required.
         anchor_series: optional MRN-indexed Series providing per-patient anchor
             values when the column isn't carried on every lab row (e.g.
             ``t_sample`` joined externally). Takes precedence over ``anchor_col``.
@@ -326,27 +350,31 @@ def build_feature_matrix(
     else:
         working["t_lab"] = _coerce_duration(working["t_lab"])
 
-    if anchor_series is not None:
-        anchor_map = anchor_series.astype(float)
-        working[anchor_col] = working[ID_COL].map(anchor_map).astype(float)
-    elif anchor_col not in working.columns:
-        if anchor_col == "t_first_treatment" and {"FIRST_TREATMENT_DATE", "FIRST_RECORD_DATE"}.issubset(working.columns):
-            working["t_first_treatment"] = (
-                _coerce_datetime(working["FIRST_TREATMENT_DATE"])
-                - _coerce_datetime(working["FIRST_RECORD_DATE"])
-            ).dt.days.astype(float)
-        else:
-            raise ValueError(
-                f"build_feature_matrix needs anchor column {anchor_col!r} on the df or via anchor_series."
-            )
+    dropna_cols = [ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab"]
+    if anchor_col is None:
+        # t_lab is already index-relative; the pre-landmark window is the pure
+        # offset from time 0, with no anchor column required.
+        working = working.dropna(subset=dropna_cols)
+        landmark_time = float(landmark_offset_days)
     else:
-        working[anchor_col] = _coerce_duration(working[anchor_col])
+        if anchor_series is not None:
+            anchor_map = anchor_series.astype(float)
+            working[anchor_col] = working[ID_COL].map(anchor_map).astype(float)
+        elif anchor_col not in working.columns:
+            if anchor_col == "t_first_treatment" and {"FIRST_TREATMENT_DATE", "FIRST_RECORD_DATE"}.issubset(working.columns):
+                working["t_first_treatment"] = (
+                    _coerce_datetime(working["FIRST_TREATMENT_DATE"])
+                    - _coerce_datetime(working["FIRST_RECORD_DATE"])
+                ).dt.days.astype(float)
+            else:
+                raise ValueError(
+                    f"build_feature_matrix needs anchor column {anchor_col!r} on the df or via anchor_series."
+                )
+        else:
+            working[anchor_col] = _coerce_duration(working[anchor_col])
+        working = working.dropna(subset=[*dropna_cols, anchor_col])
+        landmark_time = working[anchor_col].astype(float) + float(landmark_offset_days)
 
-    working = working.dropna(
-        subset=[ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab", anchor_col]
-    )
-
-    landmark_time = working[anchor_col].astype(float) + float(landmark_offset_days)
     pre_treatment = working.loc[working["t_lab"].lt(landmark_time)].copy()
     if pre_treatment.empty:
         raise ValueError("No pre-landmark lab rows were available to build lab summary features.")
@@ -394,18 +422,21 @@ def build_landmark_merged(
     df: pd.DataFrame,
     *,
     landmark_offset_days: int,
-    anchor_col: str = "t_first_treatment",
+    anchor_col: str | None = "t_first_treatment",
     require_first_treatment: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Build the landmarked outcome + feature merge for a given anchor.
 
     ``anchor_col`` defaults to ``t_first_treatment`` (the standard pipeline). A
-    non-standard anchor (e.g. ``t_treatment_anchor``) is not among the patient-level
-    columns make_outcome_df keeps by default, so it is passed through
-    ``extra_anchor_cols`` to survive the per-patient dedup — mirroring how the
-    genomic arm carries ``t_sample``.
+    non-standard anchor (e.g. ``t_sample``) is not among the patient-level columns
+    make_outcome_df keeps by default, so it is passed through ``extra_anchor_cols``
+    to survive the per-patient dedup — mirroring how the genomic arm carries
+    ``t_sample``. Pass ``anchor_col=None`` when durations are already index-relative
+    (COMPASS): the landmark is then a pure offset and no anchor column is needed.
     """
-    extra_anchor_cols = () if anchor_col == "t_first_treatment" else (anchor_col,)
+    extra_anchor_cols = (
+        () if anchor_col in (None, "t_first_treatment") else (anchor_col,)
+    )
     outcome_df = make_outcome_df(
         df,
         landmark_offset_days=landmark_offset_days,

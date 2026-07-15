@@ -44,9 +44,10 @@ PARPI_MEDS = {"OLAPARIB", "RUCAPARIB", "NIRAPARIB", "TALAZOPARIB", "VELIPARIB"}
 MIN_PSA_COUNT = 5
 
 # Highlighted antineoplastic treatments used to anchor the "time to platinum"
-# prediction window. The treatment anchor (t_treatment_anchor) is the first date
-# a patient received ANY of these drugs (earliest MED_START_DT in the medications
-# table, across all treatment lines). Mirrors `drugs_to_filter_for` in
+# prediction window. The treatment anchor (TREATMENT_ANCHOR_DATE) is the first
+# date a patient received ANY of these drugs (earliest MED_START_DT in the
+# medications table, across all treatment lines) and defines time 0 for every
+# duration in the output. Mirrors `drugs_to_filter_for` in
 # analyze_prostate_metadata.py: ARPIs/androgen-axis, taxanes, and radium-223.
 TREATMENT_ANCHOR_MEDS = {
     "ABIRATERONE ACETATE",
@@ -305,24 +306,30 @@ def build_longitudinal_prediction_data(
     )
     pred_df["PLATINUM_DATE"] = pred_df["PLATINUM_DATE"].fillna(pred_df["LAST_CONTACT_DATE"])
 
+    # TREATMENT_ANCHOR_DATE (first ARPI/taxane/radium-223 exposure) is the
+    # timeline origin for this pipeline: every duration below -- t_lab included --
+    # is measured in days FROM the treatment anchor. Positive => after the anchor,
+    # negative => before. FIRST_RECORD_DATE is still carried for reference
+    # (earliest of first lab, diagnosis, and anchor) but is NOT the clock.
     first_lab_date = pred_df.groupby(ID_COL)["LAB_DATE"].transform("min")
     pred_df["FIRST_RECORD_DATE"] = pd.concat(
         [first_lab_date, pred_df["DIAGNOSIS_DATE"], pred_df["TREATMENT_ANCHOR_DATE"]],
         axis=1,
     ).min(axis=1)
-    pred_df["t_lab"] = (pred_df["LAB_DATE"] - pred_df["FIRST_RECORD_DATE"]).dt.days.astype(float)
+
+    anchor = pred_df["TREATMENT_ANCHOR_DATE"]
+    pred_df["t_lab"] = (pred_df["LAB_DATE"] - anchor).dt.days.astype(float)
     pred_df["t_last_contact"] = (
-        pred_df["LAST_CONTACT_DATE"] - pred_df["FIRST_RECORD_DATE"]
+        pred_df["LAST_CONTACT_DATE"] - anchor
     ).dt.days.astype(float)
     # The survival cohort (compile_COMPASS_cohort_data.py) carries a TRUE
-    # death date, so time-to-death is the real interval from first record to death
-    # for dead patients and last-contact time for censored patients. When a patient
-    # is flagged dead but has no recorded date, fall back to last contact so the
-    # duration stays finite (the DEATH event indicator is still honored).
+    # death date, so time-to-death is the real interval from the treatment anchor
+    # to death for dead patients and the anchor->last-contact time for censored
+    # patients. When a patient is flagged dead but has no recorded date, fall back
+    # to last contact so the duration stays finite (the DEATH event indicator is
+    # still honored).
     if "death_date" in pred_df.columns:
-        death_days = (
-            pred_df["death_date"] - pred_df["FIRST_RECORD_DATE"]
-        ).dt.days.astype(float)
+        death_days = (pred_df["death_date"] - anchor).dt.days.astype(float)
         pred_df["t_death"] = np.where(
             pred_df["DEATH"].eq(1),
             death_days,
@@ -334,25 +341,24 @@ def build_longitudinal_prediction_data(
         # last-contact duration; only the DEATH event indicator distinguishes them.
         pred_df["t_death"] = pred_df["t_last_contact"]
 
-    pred_df["t_diagnosis"] = (
-        (pred_df["DIAGNOSIS_DATE"] - pred_df["FIRST_RECORD_DATE"]).dt.days.astype(float)
-    )
-    platinum_days = (pred_df["PLATINUM_DATE"] - pred_df["FIRST_RECORD_DATE"]).dt.days
+    pred_df["t_diagnosis"] = (pred_df["DIAGNOSIS_DATE"] - anchor).dt.days.astype(float)
 
+    # Prediction target: days from the treatment anchor to platinum initiation for
+    # platinum-positive patients, otherwise days from the anchor to last contact
+    # (censored). This is measured directly from the anchor -- it is the interval
+    # we want to predict.
+    platinum_days = (pred_df["PLATINUM_DATE"] - anchor).dt.days
     pred_df["t_platinum"] = np.where(
         pred_df["PLATINUM"].eq(1),
         platinum_days,
         pred_df["t_last_contact"],
     ).astype(float)
 
-    # Treatment-anchor index time: days from FIRST_RECORD_DATE to the first
-    # highlighted-treatment start (first ARPI/taxane/radium-223 exposure). This is
-    # the sole treatment index for the COMPASS pipeline. NaN for patients who never
-    # received one of the highlighted drugs; the anchor's landmark filter drops
-    # them downstream.
-    pred_df["t_treatment_anchor"] = (
-        (pred_df["TREATMENT_ANCHOR_DATE"] - pred_df["FIRST_RECORD_DATE"]).dt.days.astype(float)
-    )
+    # Patients who never received a highlighted drug have no anchor date, so every
+    # anchor-relative duration is NaN and they are dropped by the outcome builder's
+    # notna() validity checks. No separate anchor index column is emitted: the
+    # treatment anchor IS time 0, so the durations above already encode it and the
+    # downstream landmark is a pure offset (anchor_col=None in make_outcome_df).
 
     ordered_cols = [
         ID_COL,
@@ -369,7 +375,6 @@ def build_longitudinal_prediction_data(
         "t_lab",
         "t_diagnosis",
         "t_platinum",
-        "t_treatment_anchor",
         "t_last_contact",
         "t_death",
         "LAB_NAME",
@@ -413,12 +418,12 @@ def summarize_default_cohort_filters(
       - any PARPi exposure, identified from the pre-existing prostate
         medications table and carried as PARPI_EXPOSED
 
-    Treated status for the COMPASS pipeline is enforced downstream by the
-    treatment-anchor landmark filter (patients with no ARPI/taxane/radium-223
-    anchor have a null t_treatment_anchor and are dropped there), not by a
-    separate first-treatment inclusion step. Non-prostate-primary exclusion is
-    already enforced upstream at stage 1. A C61 diagnosis date is attached when
-    available, but is not an inclusion requirement.
+    Treated status for the COMPASS pipeline is enforced downstream in
+    make_outcome_df: durations are measured from the treatment anchor, so patients
+    with no ARPI/taxane/radium-223 anchor have all-NaN durations and fail its
+    validity checks. There is no separate first-treatment inclusion step.
+    Non-prostate-primary exclusion is already enforced upstream at stage 1. A C61
+    diagnosis date is attached when available, but is not an inclusion requirement.
     """
     n_before = pred_df[ID_COL].nunique()
     print(f"Broad longitudinal prostate lab frame: {n_before} patients")

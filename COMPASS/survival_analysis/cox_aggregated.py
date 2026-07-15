@@ -123,7 +123,6 @@ OUTCOME_METADATA_COLUMNS = {
     "DEATH",
     "EITHER",
     "t_diagnosis",
-    "t_treatment_anchor",
     "t_platinum",
     "t_platinum_from_first_record",
     "t_last_contact",

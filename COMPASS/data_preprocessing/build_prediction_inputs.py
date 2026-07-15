@@ -77,6 +77,11 @@ CANONICAL_LABS_FILENAME = "canonical_labs_train_val.csv"
 BUILD_MANIFEST_FILENAME = "build_manifest.json"
 
 
+def _is_none_anchor(value: str | None) -> bool:
+    """Whether --anchor-col requests the pure-offset (no anchor column) landmark."""
+    return value is None or str(value).strip().lower() in {"", "none"}
+
+
 def aggregated_filename(landmark_day: int) -> str:
     return f"aggregated_landmark{int(landmark_day)}.csv"
 
@@ -236,9 +241,10 @@ def apply_downstream_cohort_filters(
 ) -> tuple[pd.DataFrame, dict]:
     """Apply patient-level cohort filters after loading the broad lab frame.
 
-    Treated status is enforced downstream by the treatment-anchor landmark filter
-    (a null/negative t_treatment_anchor drops the patient in make_outcome_df), so
-    there is no first-treatment inclusion step here.
+    Treated status is enforced downstream by make_outcome_df: durations are
+    measured from the treatment anchor, so patients with no highlighted-drug anchor
+    have all-NaN durations and fail its notna() validity checks. There is no
+    first-treatment inclusion step here.
     """
     if min_psa_count < 0:
         raise ValueError(f"min_psa_count must be >= 0, got {min_psa_count}.")
@@ -448,25 +454,33 @@ def main(args: argparse.Namespace) -> None:
         exclude_parpi=args.exclude_parpi,
     )
 
-    anchor_col = args.anchor_col
-    if anchor_col not in df.columns:
+    # COMPASS durations are already measured from the treatment anchor (time 0),
+    # so anchor_col is None: the landmark is a pure offset and there is no separate
+    # anchor index column. "Treated" is enforced by the anchor-relative durations
+    # themselves -- patients with no highlighted-drug anchor have all-NaN durations
+    # and are dropped by make_outcome_df's notna() validity checks.
+    anchor_col = None if _is_none_anchor(args.anchor_col) else args.anchor_col
+    if anchor_col is not None and anchor_col not in df.columns:
         raise ValueError(
             f"--anchor-col {anchor_col!r} not found in {data_path}. Available t_* "
             f"columns: {[c for c in df.columns if c.startswith('t_')]}"
         )
-    n_with_anchor = df.loc[df[anchor_col].notna(), ID_COL].nunique()
-    print(
-        f"Anchor column: {anchor_col} "
-        f"({n_with_anchor} patients have a non-null anchor; the rest are dropped "
-        f"by the landmark filter)"
-    )
+    if anchor_col is None:
+        print(
+            "Anchor column: none (durations are treatment-anchor-relative; "
+            "landmark is a pure offset from the anchor)"
+        )
+    else:
+        n_with_anchor = df.loc[df[anchor_col].notna(), ID_COL].nunique()
+        print(
+            f"Anchor column: {anchor_col} "
+            f"({n_with_anchor} patients have a non-null anchor; the rest are dropped "
+            f"by the landmark filter)"
+        )
 
     merged_by_landmark: dict[int, pd.DataFrame] = {}
     for landmark_day in landmark_days:
         print(f"\n##### COHORT BUILD: LANDMARK +{landmark_day} DAYS #####")
-        # COMPASS is treatment-anchored only: the anchor's non-null-and-positive
-        # requirement in make_outcome_df is what enforces "treated", so the shared
-        # builder's first-treatment gate is always off here.
         _, _, merged = build_landmark_merged(
             df,
             landmark_offset_days=landmark_day,
@@ -613,7 +627,7 @@ def main(args: argparse.Namespace) -> None:
     )
     build_manifest = {
         "data": str(args.data),
-        "anchor_col": str(args.anchor_col),
+        "anchor_col": "none" if anchor_col is None else str(anchor_col),
         "downstream_cohort_filters": cohort_filter_attrition,
         "landmark_days": [int(d) for d in landmark_days],
         "seed": int(args.seed),
@@ -657,12 +671,14 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--anchor-col",
-        default="t_treatment_anchor",
+        default="none",
         help=(
-            "Per-patient index-time column (days from FIRST_RECORD_DATE) that anchors "
-            "the landmark. Default t_treatment_anchor: predict time-to-platinum from "
-            "the first highlighted-treatment date (first ARPI/taxane/radium-223 "
-            "exposure). Patients with a null anchor are dropped by the landmark filter."
+            "Per-patient index-time column that anchors the landmark. COMPASS "
+            "durations (t_lab, t_platinum, ...) are already measured from the "
+            "treatment anchor (first ARPI/taxane/radium-223 exposure = time 0), so "
+            "the default 'none' makes the landmark a pure offset from the anchor "
+            "with no anchor column. Pass a t_* column name to anchor on a different "
+            "index-time instead (days from FIRST_RECORD_DATE)."
         ),
     )
     parser.add_argument(
