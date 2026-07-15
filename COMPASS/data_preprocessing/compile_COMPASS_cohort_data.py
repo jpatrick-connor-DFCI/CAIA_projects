@@ -36,7 +36,7 @@ Inputs (OncDRS raw pull + auxiliary project files):
   * PT_INFO_STATUS_REGISTRATION.csv          (birth date, sex, death/last-alive)
   * HEALTH_HISTORY.csv
   * OUTPT_LAB_RESULTS_LABS.csv
-  * complete_somatic_data_df.csv
+  * complete_somatic_data_df.csv.gz
 
 Outputs (in NEPC_PROJ_PATH):
   * prostate_icd_data.csv
@@ -57,6 +57,8 @@ import os
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.csv as pa_csv
 
 ID_COL = "DFCI_MRN"
 
@@ -173,11 +175,36 @@ def load_and_explode_icd(icd_path):
 # compile_prostate_data.py-style cohort-filtered table dumps
 # ---------------------------------------------------------------------------
 
-def filter_and_save(filename, outname, cohort_mrns, cols=None):
+def filter_and_save(filename, outname, cohort_mrns, cols=None, chunksize=250_000):
+    """Stream `filename` in batches via pyarrow, keep only cohort_mrns rows
+    (and `cols` columns, if given), and write the concatenated result to
+    `outname`.
+
+    pyarrow's CSV reader is used instead of pandas because it parses each
+    batch in C++ (no chunk-by-chunk Python/regex dtype sniffing), transparently
+    decompresses `.gz` inputs, and avoids the mixed-type column warnings pandas
+    emits on files like OUTPT_LAB_RESULTS_LABS.csv. `chunksize` sets the
+    pyarrow read block size (rows per batch) to bound peak memory.
+    """
     cohort_mrns = set(pd.to_numeric(pd.Series(list(cohort_mrns)), errors='coerce').dropna().astype(int))
-    df = pd.read_csv(filename)
-    ids = pd.to_numeric(df[ID_COL], errors='coerce')
-    filtered = df.loc[ids.isin(cohort_mrns)].copy()
+    usecols = None
+    if cols:
+        usecols = list(cols) if ID_COL in cols else [ID_COL] + list(cols)
+
+    read_options = pa_csv.ReadOptions(block_size=chunksize * 200)
+    convert_options = pa_csv.ConvertOptions(include_columns=usecols) if usecols else None
+
+    reader = pa_csv.open_csv(filename, read_options=read_options, convert_options=convert_options)
+    filtered_batches = []
+    schema = reader.schema
+    for batch in reader:
+        table = pa.Table.from_batches([batch])
+        ids = pd.to_numeric(table.column(ID_COL).to_pandas(), errors='coerce')
+        mask = pa.array(ids.isin(cohort_mrns).to_numpy())
+        filtered_batches.append(table.filter(mask))
+
+    filtered_table = pa.concat_tables(filtered_batches) if filtered_batches else pa.table({c: [] for c in schema.names})
+    filtered = filtered_table.to_pandas()
     if cols:
         filtered = filtered[cols]
     filtered.to_csv(outname, index=False)
@@ -206,7 +233,7 @@ def compile_cohort_tables(prostate_mrns, icds, icd_path):
               'RESULT_TYPE_CD', 'RESULT_TYPE_DESCR', 'NUMERIC_RESULT', 'TEXT_RESULT', 'RESULT_UOM_NM', 'SPECIMEN_SRC_CD', 'SPECIMEN_SRC_DESCR'],
     )
     filter_and_save(
-        os.path.join(EMBED_PROJ_PATH, 'clinical_and_genomic_features/complete_somatic_data_df.csv'),
+        os.path.join(EMBED_PROJ_PATH, 'clinical_and_genomic_features/complete_somatic_data_df.csv.gz'),
         os.path.join(NEPC_PROJ_PATH, 'prostate_somatic_data.csv'),
         prostate_mrn_set,
     )

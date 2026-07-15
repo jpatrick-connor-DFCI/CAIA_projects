@@ -96,7 +96,7 @@ medications table already filtered above.
 
 - **Inputs (hard-coded under `DATA_PATH = /data/gusev/USERS/jpconnor/data/`, plus the raw OncDRS pull
   at `ONCDRS_PATH`):** `timestamped_icd_info.csv.gz`, `HEALTH_HISTORY.csv`, `MEDICATIONS.csv`,
-  `OUTPT_LAB_RESULTS_LABS.csv`, `complete_somatic_data_df.csv`, `PT_INFO_STATUS_REGISTRATION.csv`.
+  `OUTPT_LAB_RESULTS_LABS.csv`, `complete_somatic_data_df.csv.gz`, `PT_INFO_STATUS_REGISTRATION.csv`.
 - **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** the seven `prostate_*` /
   `*_records.csv` tables plus `prostate_arpi_survival_cohort.csv`, listed in the data-flow diagram.
 - **Cohort definition:** ICD-10 C61 patients after ICD-based non-prostate-primary exclusion — one
