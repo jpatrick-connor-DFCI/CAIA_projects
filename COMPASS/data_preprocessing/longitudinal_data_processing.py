@@ -203,12 +203,15 @@ def mark_non_prostate_primary_icd(icds: pd.DataFrame) -> pd.DataFrame:
 def compute_first_prostate_diagnosis(icds: pd.DataFrame) -> pd.DataFrame:
     codes = icds["DIAGNOSIS_ICD10_CD"].astype(str).str.upper().str.strip()
 
+    prostate = icds.loc[
+        codes.str.startswith("C61"),
+        [ID_COL, "START_DT"],
+    ].copy()
+    prostate["START_DT"] = pd.to_datetime(prostate["START_DT"], errors="coerce")
+    prostate = prostate.dropna(subset=["START_DT"])
+
     return (
-        icds.loc[
-            codes.str.startswith("C61"),
-            [ID_COL, "START_DT"],
-        ]
-        .groupby(ID_COL, as_index=False)["START_DT"]
+        prostate.groupby(ID_COL, as_index=False)["START_DT"]
         .min()
         .rename(columns={"START_DT": "DIAGNOSIS_DATE"})
     )
