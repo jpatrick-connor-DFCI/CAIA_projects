@@ -70,8 +70,6 @@ NEPC_PROJ_PATH = os.path.join(DATA_PATH, 'CAIA/COMPASS/')
 PROFILE_PATH = '/data/gusev/PROFILE/CLINICAL/'
 ONCDRS_PATH = os.path.join(PROFILE_PATH, 'OncDRS/ALL_2025_03/')
 
-SURV_PATH = os.path.join(EMBED_PROJ_PATH, 'time-to-event_analysis/')
-
 # ARPI / defined-chemo anchor drugs (matches TREATMENT_ANCHOR_MEDS in
 # longitudinal_data_processing.py: ARPIs/androgen-axis, taxanes, radium-223).
 TREATMENT_ANCHOR_MEDS = {
@@ -159,16 +157,51 @@ def compute_prostate_cohort(icds):
 
 
 def load_and_explode_icd(icd_path):
-    """Load the ICD source (timestamped_icd_info.csv.gz) and explode any
-    comma-separated ICD list column into one code per row, matching the
-    raw-OncDRS EHR_DIAGNOSIS convention used elsewhere in this pipeline."""
-    icds = pd.read_csv(icd_path)
-    if 'DIAGNOSIS_ICD10_LIST' in icds.columns and 'DIAGNOSIS_ICD10_CD' not in icds.columns:
-        icds['DIAGNOSIS_ICD10_CD'] = icds['DIAGNOSIS_ICD10_LIST'].astype(str).str.split(',')
-        icds = icds.explode('DIAGNOSIS_ICD10_CD')
-        icds['DIAGNOSIS_ICD10_CD'] = icds['DIAGNOSIS_ICD10_CD'].astype(str).str.strip().str.upper()
-        icds = icds.loc[icds['DIAGNOSIS_ICD10_CD'] != '']
-    return icds
+    """Load the raw OncDRS EHR_DIAGNOSIS.csv and normalize it to one ICD-10
+    code per row (columns DFCI_MRN, START_DT, DIAGNOSIS_ICD10_CD,
+    DIAGNOSIS_ICD10_NM) -- the shape every downstream consumer here expects.
+
+    Raw EHR_DIAGNOSIS packs up to THREE codes per diagnosis row across paired
+    columns DIAGNOSIS_ICD10_CD/_NM, _CD2/_NM2, _CD3/_NM3. This mirrors the
+    unpacking in the embedding project's extract_ICD_times.py: melt the three
+    code/name pairs into one long table so a C61 sitting in _CD2 or _CD3 is not
+    silently missed (the old single-column read only saw _CD).
+
+    A pre-derived source that already has one code per row (i.e. only
+    DIAGNOSIS_ICD10_CD, no _CD2/_CD3) is passed through unchanged so this
+    remains compatible with timestamped_icd_info.csv.gz-style inputs.
+    """
+    icds = pd.read_csv(icd_path, dtype=str)
+
+    pair_cols = [
+        ('DIAGNOSIS_ICD10_CD', 'DIAGNOSIS_ICD10_NM'),
+        ('DIAGNOSIS_ICD10_CD2', 'DIAGNOSIS_ICD10_NM2'),
+        ('DIAGNOSIS_ICD10_CD3', 'DIAGNOSIS_ICD10_NM3'),
+    ]
+    extra_pairs = [(c, n) for c, n in pair_cols[1:] if c in icds.columns]
+
+    # Legacy / already-flat source: only the primary code column present.
+    if not extra_pairs:
+        return icds
+
+    # Raw EHR_DIAGNOSIS: melt CD/CD2/CD3 (+ names) into one code per row,
+    # carrying every other (non-code) column along on each melted row.
+    carry_cols = [c for c in icds.columns
+                  if c not in {col for pair in pair_cols for col in pair}]
+    parts = []
+    for cd_col, nm_col in pair_cols:
+        if cd_col not in icds.columns:
+            continue
+        part = icds[carry_cols].copy()
+        part['DIAGNOSIS_ICD10_CD'] = icds[cd_col]
+        part['DIAGNOSIS_ICD10_NM'] = icds[nm_col] if nm_col in icds.columns else pd.NA
+        parts.append(part)
+
+    exploded = pd.concat(parts, ignore_index=True)
+    # Drop rows whose (secondary/tertiary) code slot was empty.
+    exploded['DIAGNOSIS_ICD10_CD'] = exploded['DIAGNOSIS_ICD10_CD'].astype(str).str.strip().str.upper()
+    exploded = exploded.loc[~exploded['DIAGNOSIS_ICD10_CD'].isin(['', 'NAN', 'NONE'])]
+    return exploded
 
 
 # ---------------------------------------------------------------------------
@@ -429,8 +462,9 @@ def main():
     parser.add_argument(
         "--icd-source",
         type=str,
-        default=os.path.join(SURV_PATH, 'timestamped_icd_info.csv.gz'),
-        help="Pre-compiled ICD source (timestamped_icd_info.csv.gz) used to define the cohort.",
+        default=os.path.join(ONCDRS_PATH, 'EHR_DIAGNOSIS.csv'),
+        help="Raw OncDRS ICD source (EHR_DIAGNOSIS.csv) used to define the C61 cohort "
+             "over the full patient universe.",
     )
     parser.add_argument(
         "--oncdrs-path",
