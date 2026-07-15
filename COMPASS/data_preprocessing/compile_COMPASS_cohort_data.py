@@ -181,10 +181,17 @@ def filter_and_save(filename, outname, cohort_mrns, cols=None, chunksize=250_000
     `outname`.
 
     pyarrow's CSV reader is used instead of pandas because it parses each
-    batch in C++ (no chunk-by-chunk Python/regex dtype sniffing), transparently
-    decompresses `.gz` inputs, and avoids the mixed-type column warnings pandas
-    emits on files like OUTPT_LAB_RESULTS_LABS.csv. `chunksize` sets the
-    pyarrow read block size (rows per batch) to bound peak memory.
+    batch in C++ (no chunk-by-chunk Python/regex dtype sniffing) and
+    transparently decompresses `.gz` inputs. Unlike pandas' `low_memory=False`
+    (which settles on a single permissive dtype after seeing the whole file),
+    pyarrow infers each column's type from only the first block and then
+    raises on later rows that don't fit (e.g. OncDRS free-text fields like
+    RESULT_NBR that are numeric for most rows but occasionally hold values
+    such as '05055/D'). To sidestep that, every column is parsed as a plain
+    string; after filtering, columns that are fully numeric-parseable across
+    the *filtered* (small) result are cast back to numeric, mirroring what
+    pandas' whole-file dtype inference would have produced. `chunksize` sets
+    the pyarrow read block size (rows per batch) to bound peak memory.
     """
     cohort_mrns = set(pd.to_numeric(pd.Series(list(cohort_mrns)), errors='coerce').dropna().astype(int))
     usecols = None
@@ -192,7 +199,11 @@ def filter_and_save(filename, outname, cohort_mrns, cols=None, chunksize=250_000
         usecols = list(cols) if ID_COL in cols else [ID_COL] + list(cols)
 
     read_options = pa_csv.ReadOptions(block_size=chunksize * 200)
-    convert_options = pa_csv.ConvertOptions(include_columns=usecols) if usecols else None
+    header = pa_csv.open_csv(filename, read_options=read_options).schema.names
+    col_names = usecols if usecols else header
+    column_types = {c: pa.string() for c in col_names}
+    convert_options = pa_csv.ConvertOptions(include_columns=usecols, column_types=column_types) \
+        if usecols else pa_csv.ConvertOptions(column_types=column_types)
 
     reader = pa_csv.open_csv(filename, read_options=read_options, convert_options=convert_options)
     filtered_batches = []
@@ -205,6 +216,14 @@ def filter_and_save(filename, outname, cohort_mrns, cols=None, chunksize=250_000
 
     filtered_table = pa.concat_tables(filtered_batches) if filtered_batches else pa.table({c: [] for c in schema.names})
     filtered = filtered_table.to_pandas()
+    # Forcing every pyarrow column to string() turns empty/NA CSV cells into
+    # "" rather than NaN -- restore real NaNs before any dtype recovery below.
+    filtered = filtered.mask(filtered == '', np.nan)
+    for col in filtered.columns:
+        as_num = pd.to_numeric(filtered[col], errors='coerce')
+        non_null = filtered[col].notna()
+        if non_null.any() and as_num[non_null].notna().all():
+            filtered[col] = as_num
     if cols:
         filtered = filtered[cols]
     filtered.to_csv(outname, index=False)
