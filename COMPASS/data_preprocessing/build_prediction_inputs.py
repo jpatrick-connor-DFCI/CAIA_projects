@@ -565,6 +565,7 @@ def main(args: argparse.Namespace) -> None:
             df,
             cohort_index=aggregated.index,
             landmark_offset_days=landmark_day,
+            anchor_col=anchor_col,
         )
         pre_treatment_path = output_dir / pre_treatment_lab_filename(landmark_day)
         pre_treatment_lab_df.to_csv(pre_treatment_path, index=False)

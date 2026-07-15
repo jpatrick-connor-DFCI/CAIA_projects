@@ -216,33 +216,11 @@ def compute_first_prostate_diagnosis(icds: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def compute_treatment_anchor(medications_df: pd.DataFrame) -> pd.DataFrame:
-    """Earliest highlighted-treatment start date per patient.
-
-    Filters the medications table to rows whose NCI_PREFERRED_MED_NM is one of
-    ``TREATMENT_ANCHOR_MEDS`` and returns one row per patient with the earliest
-    ``MED_START_DT`` (across all treatment lines). Patients who never received a
-    highlighted drug are simply absent, so the downstream left-join leaves their
-    ``TREATMENT_ANCHOR_DATE`` NaN and the anchor's landmark filter drops them when
-    this anchor is selected.
-    """
-    meds = medications_df.copy()
-    meds["NCI_PREFERRED_MED_NM"] = meds["NCI_PREFERRED_MED_NM"].astype(str).str.upper().str.strip()
-    meds = meds.loc[meds["NCI_PREFERRED_MED_NM"].isin(TREATMENT_ANCHOR_MEDS)].copy()
-    meds["TREATMENT_ANCHOR_DATE"] = pd.to_datetime(meds["MED_START_DT"], errors="coerce")
-    meds = meds.dropna(subset=["TREATMENT_ANCHOR_DATE"])
-    return (
-        meds.groupby(ID_COL, as_index=False)["TREATMENT_ANCHOR_DATE"]
-        .min()
-    )
-
-
 def build_longitudinal_prediction_data(
     consolidated_df: pd.DataFrame,
     first_prostate_diagnosis: pd.DataFrame,
     death_df: pd.DataFrame,
     platinum_df: pd.DataFrame,
-    treatment_anchor_df: pd.DataFrame,
 ) -> tuple[pd.DataFrame, dict]:
     prediction_df = consolidated_df[
         [ID_COL, "DATE", "collapsed_measurement", "numeric_result_standardized"]
@@ -278,21 +256,21 @@ def build_longitudinal_prediction_data(
         "n_after_death_table_join": n_after_death,
     }
     pred_df = after_death.merge(platinum_first, on=ID_COL, how="left")
-    pred_df = pred_df.merge(treatment_anchor_df, on=ID_COL, how="left")
 
-    # ``treatment_anchor_date`` from the survival cohort is the same clinical
-    # concept as ``TREATMENT_ANCHOR_DATE`` recomputed from the medications table
-    # (first ARPI/taxane/radium-223 exposure). The meds-derived column is
-    # authoritative here, so drop the cohort copy to avoid carrying a redundant
-    # anchor date.
-    pred_df = pred_df.drop(columns=["treatment_anchor_date"], errors="ignore")
-
+    # The treatment anchor (first ARPI/taxane/radium-223 exposure) comes straight
+    # from the survival cohort as ``treatment_anchor_date``. That date was
+    # reconstructed in compile_COMPASS_cohort_data.py from the de-identified
+    # ``D_MED_START_DT`` day offsets, which is the ONLY reliable start date for
+    # OncDRS medications -- the raw calendar ``MED_START_DT`` column is largely
+    # null. Renaming it to ``TREATMENT_ANCHOR_DATE`` here (rather than recomputing
+    # from the meds table) keeps a single authoritative anchor.
     pred_df = (
         pred_df.rename(
             columns={
                 "collapsed_measurement": "LAB_NAME",
                 "numeric_result_standardized": "LAB_VALUE",
                 "DATE": "LAB_DATE",
+                "treatment_anchor_date": "TREATMENT_ANCHOR_DATE",
                 "last_contact_date": "LAST_CONTACT_DATE",
                 "death": "DEATH",
                 "medication": "PLATINUM_MEDICATION",
@@ -576,16 +554,17 @@ def main() -> None:
 
     first_prostate_diagnosis = compute_first_prostate_diagnosis(icds)
 
-    # Loaded once and reused for both the treatment anchor (needs MED_START_DT) and
-    # the downstream PARPi-exposure flag (needs NCI_PREFERRED_MED_NM only).
+    # The treatment anchor itself comes from the survival cohort (death_df); the
+    # medications table is only needed here for the downstream PARPi-exposure flag
+    # (NCI_PREFERRED_MED_NM only).
     medications_df = pd.read_csv(
         args.medications_csv,
-        usecols=[ID_COL, "NCI_PREFERRED_MED_NM", "MED_START_DT"],
+        usecols=[ID_COL, "NCI_PREFERRED_MED_NM"],
     )
-    treatment_anchor_df = compute_treatment_anchor(medications_df)
+    n_anchor = death_df["treatment_anchor_date"].notna().sum()
     print(
-        f"Treatment anchor: {len(treatment_anchor_df)} patients received a "
-        f"highlighted treatment ({', '.join(sorted(TREATMENT_ANCHOR_MEDS))})"
+        f"Treatment anchor: {n_anchor} patients received a highlighted treatment "
+        f"({', '.join(sorted(TREATMENT_ANCHOR_MEDS))})"
     )
 
     longitudinal_prediction_df, build_attrition = build_longitudinal_prediction_data(
@@ -593,7 +572,6 @@ def main() -> None:
         first_prostate_diagnosis,
         death_df,
         platinum_df,
-        treatment_anchor_df,
     )
 
     longitudinal_prediction_df = annotate_parpi_exposure(
@@ -610,7 +588,7 @@ def main() -> None:
     cohort_attrition = {
         **build_attrition,
         **filter_attrition,
-        "n_with_highlighted_treatment_anchor": len(treatment_anchor_df),
+        "n_with_highlighted_treatment_anchor": int(n_anchor),
         "n_output_patients": int(longitudinal_prediction_df[ID_COL].nunique()),
     }
     attrition_path = args.output_csv.parent / "cohort_attrition.json"
