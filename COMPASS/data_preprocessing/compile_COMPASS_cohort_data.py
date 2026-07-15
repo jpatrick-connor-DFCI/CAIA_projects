@@ -36,11 +36,9 @@ Inputs (OncDRS raw pull + auxiliary project files):
   * PT_INFO_STATUS_REGISTRATION.csv          (birth date, sex, death/last-alive)
   * HEALTH_HISTORY.csv
   * OUTPT_LAB_RESULTS_LABS.csv
-  * full_VTE_embeddings_metadata.csv + batched text JSON             (notes)
   * complete_somatic_data_df.csv
 
 Outputs (in NEPC_PROJ_PATH):
-  * prostate_text_data.csv
   * prostate_icd_data.csv
   * prostate_health_history_data.csv
   * prostate_medications_data.csv
@@ -56,11 +54,9 @@ Date: 2026-07-14
 
 import argparse
 import os
-import re
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
 ID_COL = "DFCI_MRN"
 
@@ -68,9 +64,6 @@ ID_COL = "DFCI_MRN"
 DATA_PATH = '/data/gusev/USERS/jpconnor/data/'
 EMBED_PROJ_PATH = os.path.join(DATA_PATH, 'clinical_text_embedding_project/')
 NEPC_PROJ_PATH = os.path.join(DATA_PATH, 'CAIA/COMPASS/')
-
-PROC_PATH = os.path.join(EMBED_PROJ_PATH, 'batched_datasets/processed_datasets/')
-TEXT_PATH = os.path.join(EMBED_PROJ_PATH, 'batched_datasets/batched_text/')
 
 PROFILE_PATH = '/data/gusev/PROFILE/CLINICAL/'
 ONCDRS_PATH = os.path.join(PROFILE_PATH, 'OncDRS/ALL_2025_03/')
@@ -192,29 +185,10 @@ def filter_and_save(filename, outname, cohort_mrns, cols=None):
 
 
 def compile_cohort_tables(prostate_mrns, icds, icd_path):
-    """Build the cohort-filtered text/ICD/health/meds/labs/somatic/PSA/
+    """Build the cohort-filtered ICD/health/meds/labs/somatic/PSA/
     platinum tables. Returns (meds_df, platinum_df) for reuse by the
     survival cohort builder below."""
     prostate_mrn_set = set(prostate_mrns)
-
-    # Text notes.
-    full_meta = pd.read_csv(os.path.join(PROC_PATH, 'full_VTE_embeddings_metadata.csv'))
-    prostate_meta = full_meta.loc[
-        pd.to_numeric(full_meta[ID_COL], errors='coerce').isin(prostate_mrn_set)
-    ]
-    batch_ids = [re.split('_', sid)[1] for sid in prostate_meta['SUB_BATCH_FILE_ID'].unique()]
-
-    all_notes = []
-    for batch_id in tqdm(batch_ids, desc='Loading prostate text batches'):
-        file_path = os.path.join(TEXT_PATH, f'VTE_notes_with_full_metadata_batch_{batch_id}.json')
-        batch = pd.read_json(file_path)
-        prostate_batch = batch.loc[
-            pd.to_numeric(batch[ID_COL], errors='coerce').isin(prostate_mrn_set)
-        ]
-        all_notes.append(prostate_batch)
-
-    complete_df = pd.concat(all_notes, ignore_index=True) if all_notes else prostate_meta.iloc[0:0].copy()
-    complete_df.to_csv(os.path.join(NEPC_PROJ_PATH, 'prostate_text_data.csv'), index=False)
 
     # Filter related datasets by the prostate cohort.
     icds_filtered = icds.loc[
@@ -402,7 +376,7 @@ def summarize_survival_cohort(cohort):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compile the full COMPASS prostate cohort data (text/ICD/health/"
+        description="Compile the full COMPASS prostate cohort data (ICD/health/"
         "meds/labs/somatic/PSA/platinum tables + ARPI/chemo-anchored survival cohort) "
         "from the raw OncDRS pull, all sharing one ICD-C61 cohort definition.",
     )

@@ -65,7 +65,7 @@ COMPASS/
  raw DFCI / OncDRS / Profile exports  (/data/gusev/USERS/jpconnor/data/...)
         │
         ▼  data_preprocessing/compile_COMPASS_cohort_data.py
- prostate_text_data.csv, prostate_icd_data.csv, prostate_health_history_data.csv,
+ prostate_icd_data.csv, prostate_health_history_data.csv,
  prostate_medications_data.csv, prostate_labs_data.csv, prostate_somatic_data.csv,
  total_psa_records.csv, platinum_chemo_records.csv, prostate_arpi_survival_cohort.csv
         │
@@ -88,24 +88,23 @@ COMPASS/
 
 `data_preprocessing/compile_COMPASS_cohort_data.py` (module-level script, argparse CLI for path
 overrides). Derives the prostate cohort directly from ICD-10 code C61, removes patients with a clear
-non-prostate-primary ICD, loads any available batched note JSONs into `prostate_text_data.csv`, then
-filters the raw ICD / health-history / medication / lab / somatic exports down to that ICD-C61 cohort
-and derives `total_psa_records.csv` and `platinum_chemo_records.csv`. The same script also builds the
-ARPI/chemo-anchored survival cohort (age, treatment anchor, death, time-to-platinum) directly from
-the raw OncDRS pull, sharing the medications table already filtered above.
+non-prostate-primary ICD, then filters the raw ICD / health-history / medication / lab / somatic
+exports down to that ICD-C61 cohort and derives `total_psa_records.csv` and
+`platinum_chemo_records.csv`. The same script also builds the ARPI/chemo-anchored survival cohort
+(age, treatment anchor, death, time-to-platinum) directly from the raw OncDRS pull, sharing the
+medications table already filtered above.
 
 - **Inputs (hard-coded under `DATA_PATH = /data/gusev/USERS/jpconnor/data/`, plus the raw OncDRS pull
-  at `ONCDRS_PATH`):** `timestamped_icd_info.csv.gz`, `full_VTE_embeddings_metadata.csv`,
-  `VTE_notes_with_full_metadata_batch_*.json`, `HEALTH_HISTORY.csv`, `MEDICATIONS.csv`,
+  at `ONCDRS_PATH`):** `timestamped_icd_info.csv.gz`, `HEALTH_HISTORY.csv`, `MEDICATIONS.csv`,
   `OUTPT_LAB_RESULTS_LABS.csv`, `complete_somatic_data_df.csv`, `PT_INFO_STATUS_REGISTRATION.csv`.
-- **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** the eight `prostate_*` /
+- **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** the seven `prostate_*` /
   `*_records.csv` tables plus `prostate_arpi_survival_cohort.csv`, listed in the data-flow diagram.
 - **Cohort definition:** ICD-10 C61 patients after ICD-based non-prostate-primary exclusion — one
   shared cohort definition drives every output, including the survival cohort (previously the
   cohort-filtered tables used a separate inferred-cancer cohort; that source is no longer read).
 
 `compile_MRNs_for_manual_review.py` builds an auxiliary manual-review MRN sheet from the
-stage-1 outputs (platinum mentions, non-prostate-primary ICDs, PARPi exposure, BRCA2 status).
+stage-1 outputs (platinum records, non-prostate-primary ICDs, PARPi exposure, BRCA2 status).
 
 ---
 

@@ -23,9 +23,6 @@ ID_COL = "DFCI_MRN"
 AGE_COL = "AGE_AT_TREATMENTSTART"
 
 PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
-MIN_SLOPE_OBS = 4
-MIN_SLOPE_UNIQUE_TIMES = 3
-MIN_SLOPE_SPAN_DAYS = 14.0
 MIN_DELTA_OBS = 2
 
 
@@ -290,40 +287,6 @@ def build_pre_treatment_lab_long(
     return out
 
 
-def _compute_patient_lab_slopes(pre_treatment: pd.DataFrame) -> pd.DataFrame:
-    """OLS slope of LAB_VALUE vs t_lab (per day) per (DFCI_MRN, LAB_NAME).
-
-    Returns NaN unless a patient has enough observations, enough unique
-    timepoints, and a sufficient time span; these stricter requirements keep
-    the original OLS-style slope definition while reducing unstable estimates
-    from sparse, short-span trajectories.
-    """
-    def _slope(group: pd.DataFrame) -> float:
-        if len(group) < MIN_SLOPE_OBS:
-            return np.nan
-        if group["t_lab"].nunique(dropna=True) < MIN_SLOPE_UNIQUE_TIMES:
-            return np.nan
-
-        x = group["t_lab"].to_numpy(dtype=float)
-        y = group["LAB_VALUE"].to_numpy(dtype=float)
-        if (x.max() - x.min()) < MIN_SLOPE_SPAN_DAYS:
-            return np.nan
-        cov = np.cov(x, y, ddof=0)
-        var_x = cov[0, 0]
-        if not np.isfinite(var_x) or var_x <= 0:
-            return np.nan
-        slope = float(cov[0, 1] / var_x)
-        return slope if np.isfinite(slope) else np.nan
-
-    slopes = (
-        pre_treatment.groupby([ID_COL, "LAB_NAME"])[["t_lab", "LAB_VALUE"]]
-        .apply(_slope)
-        .rename("slope")
-        .reset_index()
-    )
-    return slopes
-
-
 def build_feature_matrix(
     df: pd.DataFrame,
     *,
@@ -412,8 +375,6 @@ def build_feature_matrix(
         np.nan,
     )
     feature_long = feature_long.drop(columns=["first"])
-    slope_long = _compute_patient_lab_slopes(pre_treatment)
-    feature_long = feature_long.merge(slope_long, on=[ID_COL, "LAB_NAME"], how="left")
     feature_df = (
         feature_long.set_index([ID_COL, "LAB_NAME"])
         .stack()
