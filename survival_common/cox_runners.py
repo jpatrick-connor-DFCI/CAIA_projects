@@ -113,6 +113,16 @@ def build_univariate_parser(config: CoxProjectConfig, cox: Any) -> argparse.Argu
         default=0.05,
         help="Fallback penalizer used only when a univariate Cox model does not converge without regularization.",
     )
+    parser.add_argument(
+        "--shared-canonical-labs",
+        action="store_true",
+        help=(
+            "Test one lab set shared across all --landmark-days (their canonical-"
+            "lab intersection) instead of re-deriving canonical labs per landmark. "
+            "Makes per-lab associations comparable across landmarks (e.g. +0d vs "
+            "+90d). Requires >=2 landmarks to be meaningful."
+        ),
+    )
     config.add_cli_args(parser, cox)
     return parser
 
@@ -171,15 +181,33 @@ def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
         f"(min_patient_coverage={min_patient_coverage})"
     )
 
+    shared_canonical_labs = None
+    if getattr(args, "shared_canonical_labs", False):
+        if not hasattr(cox, "compute_shared_canonical_labs"):
+            raise SystemExit(
+                "--shared-canonical-labs is not supported by this project "
+                f"({cox.__name__}): it has no compute_shared_canonical_labs / "
+                "canonical_labs_override support."
+            )
+        print("\n##### SHARED CANONICAL LABS: intersect across landmarks #####")
+        shared_canonical_labs = cox.compute_shared_canonical_labs(
+            inputs_dir,
+            landmark_days,
+            min_patient_coverage=min_patient_coverage,
+        )
+
     feature_selection_frames: list[pd.DataFrame] = []
     univariate_frames: list[pd.DataFrame] = []
 
     for landmark_day in landmark_days:
+        context_kwargs = dict(config.prepare_context_kwargs(args))
+        if shared_canonical_labs is not None:
+            context_kwargs["canonical_labs_override"] = shared_canonical_labs
         ctx = cox.prepare_landmark_context(
             inputs_dir,
             landmark_day,
             min_patient_coverage=min_patient_coverage,
-            **config.prepare_context_kwargs(args),
+            **context_kwargs,
         )
         feature_selection_frames.append(ctx.feature_meta_selected)
 
@@ -397,6 +425,17 @@ def run_multivariable(config: CoxProjectConfig, cox: Any, args: Namespace) -> No
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     _set_runtime_schema(cox, args)
+    if getattr(args, "shared_canonical_labs", False):
+        # The elastic-net arm re-selects canonical labs per CV fold inside
+        # tune_multivariable_model (see below), so a cross-landmark shared set
+        # cannot be honored end-to-end here without also gating fold selection.
+        # The shared-canonical-labs arm is therefore univariate-only; fail loudly
+        # rather than silently ignore the flag on the multivariable path.
+        raise SystemExit(
+            "--shared-canonical-labs is only supported for the univariate arm "
+            "(univariate_analysis.py). The multivariable elastic-net re-selects "
+            "canonical labs per CV fold, so a shared set does not apply."
+        )
     endpoints, landmark_days, inputs_dir, build_manifest = _load_common_inputs(cox, args)
     min_patient_coverage = float(build_manifest["min_patient_coverage"])
     auc_time_unit_days = int(build_manifest["auc_time_unit_days"])

@@ -362,12 +362,57 @@ class LandmarkContext:
     feature_meta_selected: pd.DataFrame
 
 
+def compute_shared_canonical_labs(
+    inputs_dir: Path,
+    landmark_days: list[int],
+    *,
+    min_patient_coverage: float,
+) -> list[str]:
+    """Canonical lab set shared across all landmarks (their intersection).
+
+    For each landmark, derive the coverage-based canonical labs on that
+    landmark's train_val block and pre-landmark long table, then intersect so
+    the returned set is the labs that clear the coverage/variability bar at
+    EVERY landmark. Passing this into ``prepare_landmark_context`` via
+    ``canonical_labs_override`` makes every landmark test an identical lab list,
+    so associations are comparable across landmarks (e.g. +0d vs +90d).
+    """
+    per_landmark: list[set[str]] = []
+    for landmark_day in landmark_days:
+        _, train_val, _, pre_treatment_lab_df = _load_prebuilt_landmark(
+            inputs_dir, landmark_day
+        )
+        labs = select_canonical_labs(
+            pre_treatment_lab_df,
+            mrns=train_val.index,
+            min_coverage=min_patient_coverage,
+            id_col=ID_COL,
+        )
+        per_landmark.append(set(str(lab) for lab in labs))
+        print(f"  [shared-canonical-labs] landmark +{landmark_day}d: {len(labs)} canonical labs")
+
+    shared = set.intersection(*per_landmark) if per_landmark else set()
+    shared_sorted = sorted(shared)
+    print(
+        f"  [shared-canonical-labs] intersection across landmarks "
+        f"{landmark_days}: {len(shared_sorted)} labs"
+    )
+    if not shared_sorted:
+        raise ValueError(
+            "Shared canonical lab set is empty: no lab clears the coverage/"
+            "variability bar at every requested landmark. Lower "
+            "--min-patient-coverage or drop a landmark."
+        )
+    return shared_sorted
+
+
 def prepare_landmark_context(
     inputs_dir: Path,
     landmark_day: int,
     *,
     min_patient_coverage: float,
     restrict_to_stage: bool,
+    canonical_labs_override: list[str] | None = None,
 ) -> LandmarkContext:
     print(f"\n##### LANDMARK ANALYSES: +{landmark_day} DAYS #####")
     merged, train_val, test, pre_treatment_lab_df = _load_prebuilt_landmark(
@@ -402,12 +447,19 @@ def prepare_landmark_context(
         context=f"prepare_landmark_context[landmark+{landmark_day}d]",
     )
 
-    canonical_labs = select_canonical_labs(
-        pre_treatment_lab_df,
-        mrns=train_val.index,
-        min_coverage=min_patient_coverage,
-        id_col=ID_COL,
-    )
+    if canonical_labs_override is not None:
+        # Shared-canonical-labs arm: the caller has fixed the canonical set (e.g.
+        # the intersection across all landmarks) so every landmark tests an
+        # identical lab list. Skip the per-landmark coverage-based selection.
+        canonical_labs = sorted(str(lab) for lab in canonical_labs_override)
+        print(f"  [shared-canonical-labs] using {len(canonical_labs)} caller-supplied labs")
+    else:
+        canonical_labs = select_canonical_labs(
+            pre_treatment_lab_df,
+            mrns=train_val.index,
+            min_coverage=min_patient_coverage,
+            id_col=ID_COL,
+        )
     selected_feature_cols, feature_meta = select_feature_columns(
         train_val,
         raw_feature_cols,
