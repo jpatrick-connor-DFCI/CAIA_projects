@@ -427,6 +427,7 @@ def summarize_default_cohort_filters(
     pred_df: pd.DataFrame,
     *,
     min_psa_count: int = MIN_PSA_COUNT,
+    total_psa_file: Path = NEPC_PROJ_PATH / "total_psa_records.csv",
 ) -> dict:
     """Preview the default downstream cohort filters on the broad lab frame.
 
@@ -435,8 +436,10 @@ def summarize_default_cohort_filters(
     attrition they would produce so the counts land in cohort_attrition.json.
 
     Default downstream inclusion:
-      - >= ``min_psa_count`` PSA rows in the longitudinal prediction frame
-        (LAB_NAME == "PSA", after lab consolidation)
+      - >= ``min_psa_count`` PSA labs counted from the BROAD PSA set
+        (total_psa_records.csv: total/free/complexed/ultrasensitive/etc.),
+        mirroring build_prediction_inputs.py. This is deliberately NOT the
+        narrow OMOP-collapsed LAB_NAME == "PSA" set, which drives predictions.
     Default downstream exclusion:
       - any PARPi exposure, identified from the pre-existing prostate
         medications table and carried as PARPI_EXPOSED
@@ -451,11 +454,26 @@ def summarize_default_cohort_filters(
     n_before = pred_df[ID_COL].nunique()
     print(f"Broad longitudinal prostate lab frame: {n_before} patients")
 
-    psa_counts = (
-        pred_df.loc[pred_df["LAB_NAME"].eq("PSA")]
-        .groupby(ID_COL)
-        .size()
-    )
+    # Count PSA labs from the broad total_psa_records.csv set (all assay types),
+    # matching the prevalence gate in build_prediction_inputs.py. Fall back to the
+    # narrow in-frame LAB_NAME=="PSA" count only if that file is unavailable, so
+    # the preview still runs but flags the mismatch.
+    if total_psa_file.exists():
+        broad_psa = pd.read_csv(total_psa_file, low_memory=False)
+        broad_col = ID_COL if ID_COL in broad_psa.columns else "DFCI_MRN"
+        broad_ids = pd.to_numeric(broad_psa[broad_col], errors="coerce").dropna().astype(int)
+        psa_counts = broad_ids.value_counts()
+    else:
+        print(
+            f"  [warn] {total_psa_file} missing; PSA preview falls back to the "
+            f"narrow LAB_NAME=='PSA' count, which will UNDER-count vs the applied "
+            f"broad filter."
+        )
+        psa_counts = (
+            pred_df.loc[pred_df["LAB_NAME"].eq("PSA")]
+            .groupby(ID_COL)
+            .size()
+        )
     keep_psa = psa_counts.loc[psa_counts >= min_psa_count].index
     preview_df = pred_df.loc[pred_df[ID_COL].isin(keep_psa)].copy()
     n_after_psa = preview_df[ID_COL].nunique()
