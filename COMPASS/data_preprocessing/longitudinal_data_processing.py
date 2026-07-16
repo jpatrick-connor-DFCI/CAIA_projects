@@ -449,12 +449,38 @@ def summarize_default_cohort_filters(
         f"(remaining: {n_after_parpi})"
     )
 
+    # Anchored-patient funnel: how the same PSA/PARPi filters attrite the subset
+    # of patients who actually carry a treatment anchor (first ARPI/taxane/
+    # radium-223 exposure). The downstream landmark builder keeps only anchored
+    # patients (non-anchor patients have all-NaN durations), so this is the funnel
+    # that determines the treated model cohort. Without this the large PSA>=5 loss
+    # among treated patients is invisible until a manual reconciliation. Mirrors
+    # the survival-cohort anchor count in compile_COMPASS_cohort_data.py.
+    anchored_mrns = set(
+        pred_df.loc[pred_df["TREATMENT_ANCHOR_DATE"].notna(), ID_COL].unique()
+    )
+    n_anchored_with_labs = len(anchored_mrns)
+    n_anchored_after_psa = len(anchored_mrns & set(keep_psa))
+    n_anchored_final = preview_df.loc[
+        preview_df["TREATMENT_ANCHOR_DATE"].notna(), ID_COL
+    ].nunique()
+    print(
+        f"  Anchored (treated) funnel: {n_anchored_with_labs} anchored patients with "
+        f"labs -> {n_anchored_after_psa} after PSA>={min_psa_count} "
+        f"(dropped {n_anchored_with_labs - n_anchored_after_psa}) -> "
+        f"{n_anchored_final} after PARPi exclusion "
+        f"(dropped {n_anchored_after_psa - n_anchored_final})."
+    )
+
     return {
         "filters_applied_to_longitudinal_output": False,
         "n_before_psa_parpi_filters": n_before,
         "n_after_psa_count_filter": n_after_psa,
         "min_psa_count": min_psa_count,
         "n_after_parpi_exclusion": n_after_parpi,
+        "n_anchored_with_labs": n_anchored_with_labs,
+        "n_anchored_after_psa_count_filter": n_anchored_after_psa,
+        "n_anchored_after_parpi_exclusion": n_anchored_final,
     }
 
 
