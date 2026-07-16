@@ -229,24 +229,51 @@ def make_outcome_df(
         pat["PLATINUM"].eq(1), 1, np.where(pat["DEATH"].eq(1), 2, 0)
     ).astype(int)
 
-    valid = (
-        pat["FIRST_RECORD_DATE"].notna()
-        & pat["t_platinum"].notna()
-        & pat["t_death"].notna()
-        & pat["t_last_contact"].notna()
-        & pat["t_either"].notna()
-        & pat["t_platinum"].gt(0)
-        & pat["t_death"].gt(0)
-        & pat["t_last_contact"].gt(0)
-        & pat["t_either"].gt(0)
-    )
+    # Individual validity conditions, kept separate so the attrition each one
+    # causes can be reported below. Durations here are already landmark-rebased
+    # (shifted by landmark_time above), so a non-positive value means the event /
+    # last contact falls at or before the landmark.
+    conditions: dict[str, pd.Series] = {
+        "FIRST_RECORD_DATE notna": pat["FIRST_RECORD_DATE"].notna(),
+        "t_platinum notna": pat["t_platinum"].notna(),
+        "t_death notna": pat["t_death"].notna(),
+        "t_last_contact notna": pat["t_last_contact"].notna(),
+        "t_either notna": pat["t_either"].notna(),
+        "t_platinum > 0": pat["t_platinum"].gt(0),
+        "t_death > 0": pat["t_death"].gt(0),
+        "t_last_contact > 0": pat["t_last_contact"].gt(0),
+        "t_either > 0": pat["t_either"].gt(0),
+    }
     if anchor_col is not None:
         # A real anchor column must be present and on-or-after first record; with
         # anchor_col=None the durations are already index-relative and there is no
         # anchor to gate on.
-        valid = valid & pat[anchor_col].notna() & pat[anchor_col].ge(0)
+        conditions[f"{anchor_col} notna"] = pat[anchor_col].notna()
+        conditions[f"{anchor_col} >= 0"] = pat[anchor_col].ge(0)
     if require_first_treatment:
-        valid = valid & pat["FIRST_TREATMENT"].eq(1)
+        conditions["FIRST_TREATMENT == 1"] = pat["FIRST_TREATMENT"].eq(1)
+
+    valid = pd.Series(True, index=pat.index)
+    for cond in conditions.values():
+        valid = valid & cond
+
+    # Per-condition attrition report: for each condition, how many patients it
+    # fails on its own ("failed alone") and how many are lost cumulatively as the
+    # conditions are ANDed in order ("dropped this step"). "failed alone" columns
+    # sum to more than the total dropped because a patient can fail several.
+    n_in = len(pat)
+    print(f"[make_outcome_df @ landmark +{landmark_offset_days}d] "
+          f"validity attrition from {n_in} patients:")
+    running = pd.Series(True, index=pat.index)
+    for name, cond in conditions.items():
+        failed_alone = int((~cond).sum())
+        before = int(running.sum())
+        running = running & cond
+        dropped_step = before - int(running.sum())
+        print(f"    {name:<24} failed alone={failed_alone:<5} "
+              f"dropped this step={dropped_step:<5} remaining={int(running.sum())}")
+    print(f"    => {int(valid.sum())}/{n_in} patients pass all conditions.")
+
     return pat.loc[valid].copy()
 
 
