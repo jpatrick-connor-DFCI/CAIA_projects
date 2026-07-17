@@ -537,6 +537,20 @@ def main(args: argparse.Namespace) -> None:
         raise ValueError("No MRNs were eligible at every requested landmark.")
     print(f"\nCommon MRN cohort across landmarks {landmark_days}: {len(common_mrns)} patients")
 
+    if len(landmark_days) >= 2:
+        for earlier, later in zip(landmark_days, landmark_days[1:]):
+            idx_earlier = merged_by_landmark[earlier].index
+            idx_later = merged_by_landmark[later].index
+            only_earlier = idx_earlier.difference(idx_later)
+            only_later = idx_later.difference(idx_earlier)
+            print(
+                f"[debug] merged landmark +{earlier}d ({len(idx_earlier)}) vs +{later}d "
+                f"({len(idx_later)}): in +{earlier}d only={len(only_earlier)}, "
+                f"in +{later}d only={len(only_later)}"
+            )
+            if len(only_earlier):
+                print(f"[debug]   +{earlier}d-only MRNs (first 20): {list(only_earlier)[:20]}")
+
     # Optional static cancer-stage baseline covariate (PROFILE only). Built once
     # on the full common cohort so the CANCER_STAGE_* column set is identical
     # across the train/valid/test split and every landmark.

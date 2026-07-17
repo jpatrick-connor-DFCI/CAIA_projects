@@ -478,13 +478,23 @@ def build_landmark_merged(
         df, landmark_offset_days=landmark_offset_days, anchor_col=anchor_col
     )
 
+    n_outcome_only = len(outcome_df.index.difference(feature_df.index))
+    n_feature_only = len(feature_df.index.difference(outcome_df.index))
     print(
-        f"[debug] outcome_df index: n={outcome_df.index.nunique()} unique / {len(outcome_df)} rows; "
-        f"feature_df index: n={feature_df.index.nunique()} unique / {len(feature_df)} rows; "
-        f"outcome-not-in-feature={len(outcome_df.index.difference(feature_df.index))}; "
-        f"feature-not-in-outcome={len(feature_df.index.difference(outcome_df.index))}"
+        f"Feature/outcome index overlap @ landmark +{landmark_offset_days}d: "
+        f"outcome_df n={len(outcome_df)}, feature_df n={len(feature_df)}; "
+        f"{n_outcome_only} outcome-valid patients have no pre-landmark lab feature "
+        f"(kept, features left all-NaN for downstream imputation); "
+        f"{n_feature_only} feature-only patients dropped (no valid outcome)."
     )
-    merged = feature_df.join(outcome_df, how="inner")
+    # Left join on outcome_df: every patient with a valid landmark outcome is kept
+    # even if they have zero pre-landmark labs (build_feature_matrix's pivot only
+    # emits rows for patients with >=1 qualifying lab, so an inner join here would
+    # silently drop otherwise-eligible, just lab-sparse patients). Missing feature
+    # columns are handled downstream via per-feature mean imputation (see
+    # SimpleImputer usage in cox_models.py), so an all-NaN feature row is valid
+    # input, not a defect.
+    merged = outcome_df.join(feature_df, how="left")
     n_before_age_filter = len(merged)
     n_missing_age = int(merged[AGE_COL].isna().sum())
     merged = merged.loc[merged[AGE_COL].notna()].copy()
