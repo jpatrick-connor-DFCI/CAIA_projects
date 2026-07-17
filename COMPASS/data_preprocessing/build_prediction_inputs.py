@@ -68,7 +68,7 @@ from survival_common.helper import (  # noqa: E402
 DEFAULT_OUTPUT_SUBDIR = "prediction_inputs"
 DEFAULT_VAL_FRAC = 0.20
 DEFAULT_TIME_UNIT_DAYS = 7
-DEFAULT_MIN_PSA_COUNT = 5
+DEFAULT_MIN_PSA_COUNT = 3
 
 SPLIT_ASSIGNMENTS_FILENAME = "split_assignments.csv"
 LANDMARK_AVAILABILITY_FILENAME = "landmark_mrn_availability.csv"
@@ -630,6 +630,14 @@ def main(args: argparse.Namespace) -> None:
         agg_path = output_dir / aggregated_filename(landmark_day)
         aggregated.rename_axis(ID_COL).reset_index().to_csv(agg_path, index=False)
         print(f"  aggregated:        {len(aggregated)} patients -> {agg_path}")
+        n_platinum = int(aggregated["PLATINUM"].eq(1).sum())
+        n_platinum_by_split = (
+            aggregated.loc[aggregated["PLATINUM"].eq(1), "split"].value_counts().to_dict()
+        )
+        print(
+            f"  platinum events:   {n_platinum}/{len(aggregated)} patients "
+            f"({', '.join(f'{k}={v}' for k, v in n_platinum_by_split.items())})"
+        )
 
         pre_treatment_lab_df = build_pre_treatment_lab_long(
             df,
