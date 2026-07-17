@@ -184,6 +184,15 @@ def build_raw_longitudinal_labs(labs_df: pl.DataFrame) -> pl.DataFrame:
     This mirrors the labs half of COMPASS's build_raw_longitudinal_data; IPIO has
     no HEALTH_HISTORY vital-signs table to fold in.
     """
+    # labs_df is scanned all-String (infer_schema_length=0), so DFCI_MRN arrives
+    # as Utf8. Cast it back to Int64 here -- otherwise it stays `object` through
+    # to_pandas()/consolidate_dfci_labs() and fails to merge against the int64
+    # DFCI_MRN in cohort_df/static_df (pandas raises "trying to merge on object
+    # and int64 columns").
+    labs_df = labs_df.with_columns(
+        pl.col(ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
+    )
+
     working = labs_df.select(
         [
             ID_COL,

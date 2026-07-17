@@ -167,6 +167,19 @@ def build_raw_longitudinal_data(
     health_df: pl.DataFrame,
     labs_df: pl.DataFrame,
 ) -> pl.DataFrame:
+    # Both inputs are scanned all-String (infer_schema_length=0), so DFCI_MRN
+    # arrives as Utf8 here. Cast it back to Int64 before it flows into
+    # to_pandas()/consolidate_dfci_labs() downstream in main() -- otherwise it
+    # stays `object` in pandas and fails to merge against the int64 DFCI_MRN
+    # read from icd/platinum/medications CSVs (pandas raises "trying to merge
+    # on object and int64 columns").
+    health_df = health_df.with_columns(
+        pl.col(ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
+    )
+    labs_df = labs_df.with_columns(
+        pl.col(ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
+    )
+
     vital_signs_df = health_df.filter(pl.col("CODE_TYPE") == "Vital Signs").select(
         [ID_COL, "START_DT", "HEALTH_HISTORY_TYPE", "RESULTS", "UNITS_CD"]
     )
