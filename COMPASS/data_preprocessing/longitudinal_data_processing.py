@@ -332,8 +332,8 @@ def build_longitudinal_prediction_data(
     # The treatment anchor (first ARPI/taxane/radium-223 exposure) is recomputed
     # from the medications table's ``MED_START_DT`` (see compute_treatment_anchor)
     # and carried as ``TREATMENT_ANCHOR_DATE``. The survival cohort also ships a
-    # ``treatment_anchor_date`` (reconstructed from de-identified ``D_MED_START_DT``
-    # day offsets), but the meds-derived date is authoritative here, so drop the
+    # ``treatment_anchor_date`` (derived from the same raw ``MED_START_DT``
+    # calendar dates), but the meds-derived date is authoritative here, so drop the
     # cohort copy to avoid carrying a redundant anchor date.
     pred_df = pred_df.drop(columns=["treatment_anchor_date"], errors="ignore")
 

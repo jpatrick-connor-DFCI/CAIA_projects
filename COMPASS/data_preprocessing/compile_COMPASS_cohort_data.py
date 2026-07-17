@@ -24,11 +24,10 @@ first_treatments_dfci_w_inferred_cancers.csv; that source is no longer
 read).
 
 Raw date handling:
-OncDRS de-identifies dates by shifting them; the raw files expose integer
-"days since reference" columns (D_MED_START_DT, D_START_DT, D_BIRTH_DT, ...).
-A single reference_date reconstructs calendar dates as
-    real_date = reference_date + Timedelta(days=D_*).
-Reference-date sanity checks are asserted against several files.
+All dates use the raw calendar columns directly (MED_START_DT, BIRTH_DT,
+HYBRID_DEATH_DT, DERIVED_LAST_ALIVE_DATE, SPECIMEN_COLLECT_DT), parsed with
+polars str.to_datetime. The de-identified "days since reference" offset columns
+(D_MED_START_DT, D_BIRTH_DT, ...) are NOT used.
 
 Inputs (OncDRS raw pull + auxiliary project files):
   * EHR_DIAGNOSIS.csv                        (ICD-10 -> cohort + exclusion)
@@ -59,7 +58,6 @@ recovery (`recover_numeric`) helpers.
 """
 
 import argparse
-import datetime as dt
 import os
 import sys
 
@@ -99,23 +97,6 @@ PLATINUM_MEDS = {
     "CISPLATIN/CYCLOPHOSPHAMIDE/ETOPOSIDE",
 }
 
-# Reference date for the OncDRS de-identified day offsets. [IMPORTANT: update
-# for each new data pull.] Kept as a datetime (not date) so it composes as a
-# polars Datetime literal, matching the Datetime dtype produced by
-# str.to_datetime() elsewhere (DEATH_DATE, LAST_CONTACT_DATE) -- mixing Date
-# and Datetime dtypes in later subtractions would otherwise be an easy trap.
-REFERENCE_DATE = dt.datetime(2021, 2, 22) - dt.timedelta(days=44158)
-
-
-def assert_reference_date(anchor_real_date, offset_days, label, tol_days=2):
-    """Reconstruct the reference date implied by (anchor_real_date, offset_days)
-    from a given file and assert it matches REFERENCE_DATE within tol_days."""
-    if isinstance(anchor_real_date, dt.datetime):
-        anchor_real_date = anchor_real_date.date()
-    implied = anchor_real_date - dt.timedelta(days=int(offset_days))
-    delta = abs((REFERENCE_DATE.date() - implied).days)
-    print(f"Reference date check [{label}]: implied {implied} (delta {delta}d)")
-    assert delta <= tol_days, f"Reference date mismatch for {label}!"
 
 
 # ---------------------------------------------------------------------------
@@ -270,12 +251,23 @@ def compile_cohort_tables(prostate_mrns, icds: pl.DataFrame, icd_path):
 
     health = filter_and_save(os.path.join(ONCDRS_PATH, 'HEALTH_HISTORY.csv'), os.path.join(NEPC_PROJ_PATH, 'prostate_health_history_data.csv'), prostate_mrn_set)
     meds = filter_and_save(os.path.join(ONCDRS_PATH, 'MEDICATIONS.csv'), os.path.join(NEPC_PROJ_PATH, 'prostate_medications_data.csv'), prostate_mrn_set)
+    # Read/write only the labs columns actually consumed downstream:
+    #   longitudinal_data_processing.build_raw_longitudinal_data selects
+    #     DFCI_MRN, SPECIMEN_COLLECT_DT, TEST_TYPE_CD, TEST_TYPE_DESCR,
+    #     NUMERIC_RESULT, RESULT_UOM_NM
+    #   the PSA filter below needs TEST_TYPE_CD + NUMERIC_RESULT (subset of above)
+    #   build_prediction_inputs' broad PSA count needs DFCI_MRN + TEST_TYPE_CD +
+    #     NUMERIC_RESULT (also a subset)
+    # The other 7 columns previously carried (D_SPECIMEN_COLLECT_DT, RESULT_NBR,
+    # RESULT_TYPE_CD, RESULT_TYPE_DESCR, TEXT_RESULT, SPECIMEN_SRC_CD,
+    # SPECIMEN_SRC_DESCR) are not read by any consumer, so they are dropped from
+    # both the scan and the emitted prostate_labs_data.csv / total_psa_records.csv.
     labs = filter_and_save(
         os.path.join(ONCDRS_PATH, 'OUTPT_LAB_RESULTS_LABS.csv'),
         os.path.join(NEPC_PROJ_PATH, 'prostate_labs_data.csv'),
         prostate_mrn_set,
-        cols=['DFCI_MRN', 'SPECIMEN_COLLECT_DT', 'D_SPECIMEN_COLLECT_DT', 'TEST_TYPE_CD', 'TEST_TYPE_DESCR', 'RESULT_NBR',
-              'RESULT_TYPE_CD', 'RESULT_TYPE_DESCR', 'NUMERIC_RESULT', 'TEXT_RESULT', 'RESULT_UOM_NM', 'SPECIMEN_SRC_CD', 'SPECIMEN_SRC_DESCR'],
+        cols=['DFCI_MRN', 'SPECIMEN_COLLECT_DT', 'TEST_TYPE_CD', 'TEST_TYPE_DESCR',
+              'NUMERIC_RESULT', 'RESULT_UOM_NM'],
     )
     filter_and_save(
         os.path.join(EMBED_PROJ_PATH, 'clinical_and_genomic_features/complete_somatic_data_df.csv.gz'),
@@ -302,8 +294,19 @@ def compile_cohort_tables(prostate_mrns, icds: pl.DataFrame, icd_path):
     )
     platinum_df = (
         meds_norm.filter(pl.col('NCI_PREFERRED_MED_NM').is_in(list(PLATINUM_MEDS)))
-        .sort('MED_START_DT')
+        # Sort on a parsed datetime, not the raw string: a lexicographic sort of
+        # MED_START_DT only coincides with chronological order for ISO
+        # (YYYY-MM-DD) dates, so first-per-patient could otherwise pick the wrong
+        # "earliest" platinum record. Null/unparseable dates sort last (nulls_last)
+        # so a patient with any real date keeps it. The helper column is dropped
+        # before write_csv so the emitted medication_start_time is the original
+        # raw string, unchanged.
+        .with_columns(
+            pl.col('MED_START_DT').str.to_datetime(strict=False).alias('_med_start_dt_parsed')
+        )
+        .sort('_med_start_dt_parsed', nulls_last=True)
         .unique(subset=[ID_COL], keep='first')
+        .drop('_med_start_dt_parsed')
         .rename({'NCI_PREFERRED_MED_NM': 'medication', 'MED_START_DT': 'medication_start_time'})
     )
     platinum_df.write_csv(os.path.join(NEPC_PROJ_PATH, 'platinum_chemo_records.csv'))
@@ -316,22 +319,20 @@ def compile_cohort_tables(prostate_mrns, icds: pl.DataFrame, icd_path):
 # ---------------------------------------------------------------------------
 
 def load_medications_for_survival(meds: pl.DataFrame) -> pl.DataFrame:
-    """Reconstruct MED_START_DT from D_MED_START_DT for the anchor + platinum
-    drug rows already filtered to the prostate cohort by compile_cohort_tables.
+    """Parse the raw calendar MED_START_DT for the anchor + platinum drug rows
+    already filtered to the prostate cohort by compile_cohort_tables. Uses the
+    original date column directly (NOT the de-identified D_MED_START_DT offset),
+    matching how longitudinal_data_processing.py reads MED_START_DT downstream.
     """
     keep_meds = {m.upper() for m in TREATMENT_ANCHOR_MEDS | PLATINUM_MEDS}
     out = meds.with_columns(
         pl.col('NCI_PREFERRED_MED_NM').cast(pl.Utf8).str.to_uppercase().str.strip_chars().alias('NCI_PREFERRED_MED_NM')
     )
     out = out.filter(pl.col('NCI_PREFERRED_MED_NM').is_in(list(keep_meds)))
-    out = out.filter(pl.col('D_MED_START_DT').is_not_null())
-    d_offset = pl.col('D_MED_START_DT').cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
     out = out.with_columns(
-        (pl.lit(REFERENCE_DATE, dtype=pl.Datetime) + pl.duration(days=d_offset)).alias('MED_START_DT')
+        pl.col('MED_START_DT').str.to_datetime(strict=False).alias('MED_START_DT')
     )
-
-    row0 = out.row(0, named=True)
-    assert_reference_date(row0['MED_START_DT'], row0['D_MED_START_DT'], 'MEDICATIONS')
+    out = out.filter(pl.col('MED_START_DT').is_not_null())
     return out
 
 
@@ -361,23 +362,18 @@ def compute_first_platinum(meds: pl.DataFrame) -> pl.DataFrame:
 
 def load_patient_status(path) -> pl.DataFrame:
     """Load birth date, sex, and death / last-alive info from
-    PT_INFO_STATUS_REGISTRATION.csv, reconstructing calendar dates.
+    PT_INFO_STATUS_REGISTRATION.csv. All dates use the raw calendar columns
+    (BIRTH_DT, HYBRID_DEATH_DT, DERIVED_LAST_ALIVE_DATE) directly -- NOT the
+    de-identified D_BIRTH_DT offset.
 
     Returns a dataframe with:
         DFCI_MRN, BIRTH_DATE, GENDER, DEATH_DATE, LAST_CONTACT_DATE
     """
     pt = pl.scan_csv(os.path.join(path, 'PT_INFO_STATUS_REGISTRATION.csv'), infer_schema_length=0).collect()
 
-    d_birth = pl.col('D_BIRTH_DT').cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
+    # All dates are raw calendar strings.
     pt = pt.with_columns(
-        (pl.lit(REFERENCE_DATE, dtype=pl.Datetime) + pl.duration(days=d_birth)).alias('BIRTH_DATE')
-    )
-
-    row0 = pt.filter(pl.col('D_BIRTH_DT').is_not_null()).row(0, named=True)
-    assert_reference_date(row0['BIRTH_DATE'], row0['D_BIRTH_DT'], 'PT_INFO_BIRTH')
-
-    # Death and last-alive dates are provided as calendar strings.
-    pt = pt.with_columns(
+        pl.col('BIRTH_DT').str.to_datetime(strict=False).alias('BIRTH_DATE'),
         pl.col('HYBRID_DEATH_DT').str.to_datetime(strict=False).alias('DEATH_DATE'),
         pl.col('DERIVED_LAST_ALIVE_DATE').str.to_datetime(strict=False).alias('LAST_CONTACT_DATE'),
     )
@@ -495,8 +491,6 @@ def main():
         help="Directory to write all cohort CSVs.",
     )
     args = parser.parse_args()
-
-    print(f"Reference date: {REFERENCE_DATE.date()}")
 
     # 1. Shared ICD-C61 cohort (drives every output below).
     icds = load_and_explode_icd(args.icd_source)

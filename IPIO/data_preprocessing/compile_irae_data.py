@@ -115,12 +115,19 @@ cohort_df = cohort_df.drop('combination')
 # Filter raw OncDRS labs to this cohort
 cohort_mrns_series = cohort_df['DFCI_MRN'].cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
 cohort_mrns = set(cohort_mrns_series.drop_nulls().unique().to_list())
+# Read/write only the labs columns consumed downstream: the longitudinal
+# reshape (IPIO longitudinal_data_processing.build_raw_longitudinal_labs)
+# selects DFCI_MRN, SPECIMEN_COLLECT_DT, TEST_TYPE_CD, TEST_TYPE_DESCR,
+# NUMERIC_RESULT, RESULT_UOM_NM. IPIO has no PSA/somatic path off this frame,
+# so the other 7 previously-carried columns (D_SPECIMEN_COLLECT_DT, RESULT_NBR,
+# RESULT_TYPE_CD, RESULT_TYPE_DESCR, TEXT_RESULT, SPECIMEN_SRC_CD,
+# SPECIMEN_SRC_DESCR) are unused and dropped from scan + emitted CSV.
 labs = filter_and_save(
     ONCDRS_PATH / 'OUTPT_LAB_RESULTS_LABS.csv',
     DATA_PATH / 'irae_labs_data.csv',
     cohort_mrns,
-    cols=['DFCI_MRN', 'SPECIMEN_COLLECT_DT', 'D_SPECIMEN_COLLECT_DT', 'TEST_TYPE_CD', 'TEST_TYPE_DESCR', 'RESULT_NBR',
-          'RESULT_TYPE_CD', 'RESULT_TYPE_DESCR', 'NUMERIC_RESULT', 'TEXT_RESULT', 'RESULT_UOM_NM', 'SPECIMEN_SRC_CD', 'SPECIMEN_SRC_DESCR']
+    cols=['DFCI_MRN', 'SPECIMEN_COLLECT_DT', 'TEST_TYPE_CD', 'TEST_TYPE_DESCR',
+          'NUMERIC_RESULT', 'RESULT_UOM_NM']
 )
 
 # Write merged cohort+cancer-type table
