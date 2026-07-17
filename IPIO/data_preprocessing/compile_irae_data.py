@@ -27,7 +27,14 @@ def filter_and_save(filename, outname, cohort_mrns, cols=None) -> pl.DataFrame:
     """
     lf = fast_io.scan_filter(filename, cohort_mrns, cols=cols)
     filtered = lf.collect()
-    filtered = fast_io.recover_numeric(filtered)
+    # Exclude ID_COL from recover_numeric's generic Utf8->Float64 cast: MRNs
+    # are all-digit, so they'd otherwise become Float64, inconsistent with the
+    # Int64 DFCI_MRN used elsewhere in this pipeline (cohort_df, cancer_type_df,
+    # etc.) and prone to join dtype mismatches. Cast explicitly to Int64 instead.
+    filtered = fast_io.recover_numeric(filtered, exclude=(fast_io.ID_COL,))
+    filtered = filtered.with_columns(
+        pl.col(fast_io.ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
+    )
     if cols:
         filtered = filtered.select(list(cols))
     filtered.write_csv(outname)

@@ -231,7 +231,15 @@ def filter_and_save(filename, outname, cohort_mrns, cols=None) -> pl.DataFrame:
     """
     lf = fast_io.scan_filter(filename, cohort_mrns, cols=cols)
     filtered = lf.collect()
-    filtered = fast_io.recover_numeric(filtered)
+    # Exclude ID_COL from recover_numeric's generic Utf8->Float64 cast: MRNs
+    # are all-digit, so they'd otherwise become Float64, which doesn't match
+    # the Int64 DFCI_MRN used everywhere else in this file (cohort, icds_filtered,
+    # etc.) and fails polars joins on dtype mismatch. Cast explicitly to Int64
+    # instead, consistent with the rest of the pipeline.
+    filtered = fast_io.recover_numeric(filtered, exclude=(fast_io.ID_COL,))
+    filtered = filtered.with_columns(
+        pl.col(fast_io.ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
+    )
     if cols:
         filtered = filtered.select(list(cols))
     filtered.write_csv(outname)
@@ -376,6 +384,11 @@ def load_patient_status(path) -> pl.DataFrame:
         pl.col('BIRTH_DT').str.to_datetime(strict=False).alias('BIRTH_DATE'),
         pl.col('HYBRID_DEATH_DT').str.to_datetime(strict=False).alias('DEATH_DATE'),
         pl.col('DERIVED_LAST_ALIVE_DATE').str.to_datetime(strict=False).alias('LAST_CONTACT_DATE'),
+        # infer_schema_length=0 reads every column (including DFCI_MRN) as
+        # Utf8; cast back to Int64 here so this frame's join key matches the
+        # Int64 DFCI_MRN used everywhere else (e.g. build_survival_cohort's
+        # `cohort` frame), instead of failing the join on dtype mismatch.
+        pl.col(ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False).alias(ID_COL),
     )
 
     return pt.select(
