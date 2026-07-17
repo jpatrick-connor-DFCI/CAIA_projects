@@ -1,0 +1,42 @@
+# Dependencies for the COMPASS/IPIO data compilation + longitudinal reshape
+# pipeline (polars) and downstream modeling (pandas/lifelines/xgboost/sklearn).
+#
+# Pins reflect the cluster conda environment this pipeline runs in (Python 3.8,
+# conda-forge), captured from `pip freeze`. NOTE: the live environment is conda,
+# not pip -- several packages there are conda file:// builds. This file is a
+# best-effort pip-installable mirror of the versions that pipeline code depends
+# on; the conda environment remains the source of truth. If you rebuild from
+# this file on a different Python, exact solves may differ.
+#
+# polars is a hard, required dependency of the data-compilation scripts as of
+# this port (COMPASS/data_preprocessing/compile_COMPASS_cohort_data.py,
+# IPIO/data_preprocessing/compile_irae_data.py, and the reshape portions of
+# both longitudinal_data_processing.py scripts) -- these now `import polars`
+# unconditionally and will fail fast at import time if it is missing. The
+# ported code uses pl.len() and collect(streaming=True), both supported by the
+# cluster's polars 1.x build (2024-08-15). Keep polars >=1.0.
+# Exact versions confirmed from the cluster `pip freeze`:
+pyarrow==17.0.0
+xgboost==2.1.1
+scipy==1.10.1
+
+# polars: cluster build is dated 2024-08-15 (polars 1.x); exact patch not exposed
+# by the conda file:// URL. pl.len()/collect(streaming=True) need >=1.0.
+polars>=1.0
+
+# BEST-GUESS pins: the cluster installs these via conda file:// builds whose
+# version string is NOT in `pip freeze`, so the values below are inferred from
+# the Python 3.8 / conda-forge / mid-2023 vintage and are UNVERIFIED. Confirm
+# with `conda list pandas numpy scikit-learn scikit-survival lifelines` on the
+# cluster and correct if they differ.
+pandas==2.0.3            # unverified
+numpy==1.24.4            # unverified
+scikit-learn==1.3.2      # unverified
+scikit-survival==0.22.2  # unverified
+lifelines==0.27.8        # unverified
+
+# --- Optional: deep-learning survival model stack (DeepHit et al.) ---
+# Only needed if running the torch-based models, not the data compilation.
+# torch==2.1.1
+# torchvision==0.16.1
+# torchdiffeq==0.2.3

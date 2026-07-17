@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import polars as pl
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
@@ -39,8 +40,22 @@ SURV_PATH = EMBED_PROJ_PATH / "time-to-event_analysis"
 # death_met_surv_df.csv.gz. See load_death_df_from_survival_cohort.
 DEFAULT_SURVIVAL_COHORT_CSV = NEPC_PROJ_PATH / "prostate_arpi_survival_cohort.csv"
 
-PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
-PARPI_MEDS = {"OLAPARIB", "RUCAPARIB", "NIRAPARIB", "TALAZOPARIB", "VELIPARIB"}
+# Cisplatin appears both as a single agent and coded within a combination
+# regimen name; both count as platinum exposure. Oxaliplatin is intentionally
+# excluded (not a relevant platinum agent for this cohort). Kept in sync with
+# PLATINUM_MEDS in compile_COMPASS_cohort_data.py.
+PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN", "CISPLATIN/CYCLOPHOSPHAMIDE/ETOPOSIDE"}
+# PARPi names include salt forms as coded in OncDRS (RUCAPARIB CAMSYLATE,
+# TALAZOPARIB TOSYLATE), which do not match the base names above.
+PARPI_MEDS = {
+    "OLAPARIB",
+    "RUCAPARIB",
+    "RUCAPARIB CAMSYLATE",
+    "NIRAPARIB",
+    "TALAZOPARIB",
+    "TALAZOPARIB TOSYLATE",
+    "VELIPARIB",
+}
 MIN_PSA_COUNT = 5
 
 # Highlighted antineoplastic treatments used to anchor the "time to platinum"
@@ -114,6 +129,10 @@ def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFram
 
 
 def generate_new_test_name(code: object, descr: object) -> str:
+    """Row-at-a-time reference implementation (kept for documentation /
+    parity checking); the production path uses the vectorized polars
+    expression `generate_new_test_name_expr` below instead of `.apply(...)`.
+    """
     if pd.isna(code):
         return str(descr)
     if code == descr:
@@ -121,16 +140,38 @@ def generate_new_test_name(code: object, descr: object) -> str:
     return f"{code} ({descr})"
 
 
-def build_raw_longitudinal_data(
-    health_df: pd.DataFrame,
-    labs_df: pd.DataFrame,
-) -> pd.DataFrame:
-    vital_signs_df = health_df.loc[
-        health_df["CODE_TYPE"] == "Vital Signs",
-        [ID_COL, "START_DT", "HEALTH_HISTORY_TYPE", "RESULTS", "UNITS_CD"],
-    ].copy()
+def generate_new_test_name_expr(code_col: str, descr_col: str) -> pl.Expr:
+    """Vectorized polars equivalent of `generate_new_test_name`.
 
-    labs_df_col_sub = labs_df[
+    - code is null -> str(descr). Faithfully reproduces the original's
+      `str(descr)` call even when descr is itself null/NaN: pandas'
+      `str(float('nan'))` is the literal string "nan", so a null descr in
+      this branch is coalesced to the "nan" literal rather than left null.
+    - code == descr -> str(code).
+    - otherwise -> "{code} ({descr})".
+    """
+    code = pl.col(code_col)
+    descr = pl.col(descr_col)
+    descr_as_str = pl.when(descr.is_null()).then(pl.lit("nan")).otherwise(descr.cast(pl.Utf8))
+    code_as_str = code.cast(pl.Utf8)
+    return (
+        pl.when(code.is_null())
+        .then(descr_as_str)
+        .when(code == descr)
+        .then(code_as_str)
+        .otherwise(code_as_str + pl.lit(" (") + descr.cast(pl.Utf8) + pl.lit(")"))
+    )
+
+
+def build_raw_longitudinal_data(
+    health_df: pl.DataFrame,
+    labs_df: pl.DataFrame,
+) -> pl.DataFrame:
+    vital_signs_df = health_df.filter(pl.col("CODE_TYPE") == "Vital Signs").select(
+        [ID_COL, "START_DT", "HEALTH_HISTORY_TYPE", "RESULTS", "UNITS_CD"]
+    )
+
+    labs_df_col_sub = labs_df.select(
         [
             ID_COL,
             "SPECIMEN_COLLECT_DT",
@@ -139,36 +180,43 @@ def build_raw_longitudinal_data(
             "NUMERIC_RESULT",
             "RESULT_UOM_NM",
         ]
-    ].copy()
-
-    labs_df_col_sub["TEST_NAME"] = labs_df_col_sub.apply(
-        lambda row: generate_new_test_name(row["TEST_TYPE_CD"], row["TEST_TYPE_DESCR"]),
-        axis=1,
     )
 
-    vital_signs_df = (
-        vital_signs_df.rename(
-            columns={
-                "START_DT": "DATE",
-                "RESULTS": "LAB_VALUE",
-                "HEALTH_HISTORY_TYPE": "LAB_NAME",
-                "UNITS_CD": "LAB_UNIT",
-            }
-        )[[ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE"]]
+    labs_df_col_sub = labs_df_col_sub.with_columns(
+        generate_new_test_name_expr("TEST_TYPE_CD", "TEST_TYPE_DESCR").alias("TEST_NAME")
     )
 
-    labs_df_col_sub = (
-        labs_df_col_sub.rename(
-            columns={
-                "SPECIMEN_COLLECT_DT": "DATE",
-                "NUMERIC_RESULT": "LAB_VALUE",
-                "RESULT_UOM_NM": "LAB_UNIT",
-                "TEST_NAME": "LAB_NAME",
-            }
-        )[[ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE"]]
-    )
+    vital_signs_df = vital_signs_df.rename(
+        {
+            "START_DT": "DATE",
+            "RESULTS": "LAB_VALUE",
+            "HEALTH_HISTORY_TYPE": "LAB_NAME",
+            "UNITS_CD": "LAB_UNIT",
+        }
+    ).select([ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE"])
 
-    return pd.concat([vital_signs_df, labs_df_col_sub], ignore_index=True)
+    labs_df_col_sub = labs_df_col_sub.rename(
+        {
+            "SPECIMEN_COLLECT_DT": "DATE",
+            "NUMERIC_RESULT": "LAB_VALUE",
+            "RESULT_UOM_NM": "LAB_UNIT",
+            "TEST_NAME": "LAB_NAME",
+        }
+    ).select([ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE"])
+
+    # Both inputs are scanned all-String (infer_schema_length=0), so LAB_VALUE
+    # is already Utf8 on both halves here. This explicit cast is defensive --
+    # it guarantees a common Utf8 LAB_VALUE dtype (HEALTH_HISTORY.RESULTS is
+    # inherently free-text; labs' NUMERIC_RESULT is numeric-as-string) so
+    # `pl.concat` never has to reconcile a numeric vs. string LAB_VALUE column
+    # if either input is ever read with real schema inference upstream.
+    # consolidate_dfci_labs() re-parses NUMERIC_RESULT via pd.to_numeric
+    # regardless, so keeping it as a string here loses nothing -- this mirrors
+    # the mixed-type `object` column pandas' `pd.concat` produced originally.
+    vital_signs_df = vital_signs_df.with_columns(pl.col("LAB_VALUE").cast(pl.Utf8, strict=False))
+    labs_df_col_sub = labs_df_col_sub.with_columns(pl.col("LAB_VALUE").cast(pl.Utf8, strict=False))
+
+    return pl.concat([vital_signs_df, labs_df_col_sub], how="vertical_relaxed")
 
 
 def mark_non_prostate_primary_icd(icds: pd.DataFrame) -> pd.DataFrame:
@@ -604,17 +652,24 @@ def main() -> None:
     ]:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    health_df = pd.read_csv(args.health_csv)
-    labs_df = pd.read_csv(args.labs_csv)
-    raw_longitudinal_df = build_raw_longitudinal_data(health_df, labs_df)
+    # --- Polars reshape (scope boundary: everything up to consolidate_dfci_labs) ---
+    health_df_pl = pl.scan_csv(args.health_csv, infer_schema_length=0).collect()
+    labs_df_pl = pl.scan_csv(args.labs_csv, infer_schema_length=0).collect()
+    raw_longitudinal_df_pl = build_raw_longitudinal_data(health_df_pl, labs_df_pl)
 
-    unique_labs_df = (
-        raw_longitudinal_df[["LAB_NAME", "LAB_UNIT"]]
-        .value_counts()
-        .reset_index(name="count")
+    unique_labs_df_pl = (
+        raw_longitudinal_df_pl.group_by(["LAB_NAME", "LAB_UNIT"])
+        .agg(pl.len().alias("count"))
+        .sort("count", descending=True)
     )
-    unique_labs_df.to_csv(args.unique_labs_csv, index=False)
-    raw_longitudinal_df.to_csv(args.uncondensed_output_csv, index=False)
+    unique_labs_df_pl.write_csv(args.unique_labs_csv)
+    raw_longitudinal_df_pl.write_csv(args.uncondensed_output_csv)
+
+    # Conversion boundary: consolidate_dfci_labs (data_preprocessing_common/dfci_labs.py)
+    # takes and returns pandas DataFrames and is explicitly out of scope for this
+    # port (1192 lines of per-row unit math + BP splitting). Convert polars->pandas
+    # here; everything from this point on in main() stays pandas, unchanged.
+    raw_longitudinal_df = raw_longitudinal_df_pl.to_pandas()
 
     mapping_df = pd.read_csv(args.mapping_csv)
     consolidated_df = consolidate_dfci_labs(raw_longitudinal_df, mapping_df)

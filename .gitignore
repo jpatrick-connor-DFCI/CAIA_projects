@@ -23,6 +23,7 @@ __pycache__/
 !data_preprocessing_common/**
 !.gitignore
 !README.md
+!requirements.txt
 
 # Re-apply generated/cache ignores after the project-directory unignore rules.
 **/__pycache__/

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import polars as pl
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
@@ -36,11 +37,38 @@ OUTPUT_CSV = DATA_PATH / "longitudinal_prediction_data.csv"
 
 
 def generate_new_test_name(code: object, descr: object) -> str:
+    """Row-at-a-time reference implementation (kept for documentation /
+    parity checking); the production path uses the vectorized polars
+    expression `generate_new_test_name_expr` below instead of `.apply(...)`.
+    """
     if pd.isna(code):
         return str(descr)
     if code == descr:
         return str(code)
     return f"{code} ({descr})"
+
+
+def generate_new_test_name_expr(code_col: str, descr_col: str) -> pl.Expr:
+    """Vectorized polars equivalent of `generate_new_test_name`.
+
+    - code is null -> str(descr). Faithfully reproduces the original's
+      `str(descr)` call even when descr is itself null/NaN: pandas'
+      `str(float('nan'))` is the literal string "nan", so a null descr in
+      this branch is coalesced to the "nan" literal rather than left null.
+    - code == descr -> str(code).
+    - otherwise -> "{code} ({descr})".
+    """
+    code = pl.col(code_col)
+    descr = pl.col(descr_col)
+    descr_as_str = pl.when(descr.is_null()).then(pl.lit("nan")).otherwise(descr.cast(pl.Utf8))
+    code_as_str = code.cast(pl.Utf8)
+    return (
+        pl.when(code.is_null())
+        .then(descr_as_str)
+        .when(code == descr)
+        .then(code_as_str)
+        .otherwise(code_as_str + pl.lit(" (") + descr.cast(pl.Utf8) + pl.lit(")"))
+    )
 
 
 CANCER_TYPE_PREFIX = "CANCER_TYPE_"
@@ -150,13 +178,13 @@ def resolve_cancer_type_columns(
     return cohort_df, cancer_type_cols
 
 
-def build_raw_longitudinal_labs(labs_df: pd.DataFrame) -> pd.DataFrame:
+def build_raw_longitudinal_labs(labs_df: pl.DataFrame) -> pl.DataFrame:
     """Reshape raw OncDRS lab rows into the long ID_COL/DATE/LAB_NAME/LAB_UNIT/LAB_VALUE
     schema expected by data_preprocessing_common.dfci_labs.consolidate_dfci_labs.
     This mirrors the labs half of COMPASS's build_raw_longitudinal_data; IPIO has
     no HEALTH_HISTORY vital-signs table to fold in.
     """
-    working = labs_df[
+    working = labs_df.select(
         [
             ID_COL,
             "SPECIMEN_COLLECT_DT",
@@ -165,21 +193,20 @@ def build_raw_longitudinal_labs(labs_df: pd.DataFrame) -> pd.DataFrame:
             "NUMERIC_RESULT",
             "RESULT_UOM_NM",
         ]
-    ].copy()
+    )
 
-    working["TEST_NAME"] = working.apply(
-        lambda row: generate_new_test_name(row["TEST_TYPE_CD"], row["TEST_TYPE_DESCR"]),
-        axis=1,
+    working = working.with_columns(
+        generate_new_test_name_expr("TEST_TYPE_CD", "TEST_TYPE_DESCR").alias("TEST_NAME")
     )
 
     working = working.rename(
-        columns={
+        {
             "SPECIMEN_COLLECT_DT": "DATE",
             "NUMERIC_RESULT": "LAB_VALUE",
             "RESULT_UOM_NM": "LAB_UNIT",
             "TEST_NAME": "LAB_NAME",
         }
-    )[[ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE"]]
+    ).select([ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE"])
 
     return working
 
@@ -188,7 +215,6 @@ def main() -> None:
     OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
 
     cohort_df = pd.read_csv(COHORT_CSV)
-    labs_df = pd.read_csv(LABS_CSV)
 
     # --- Static per-patient columns ---
     cohort_df["IO_START"] = pd.to_datetime(cohort_df["IO_START"], errors="coerce")
@@ -239,15 +265,21 @@ def main() -> None:
     )
     static_df = cohort_df[static_cols].copy()
 
-    # --- Shared DFCI lab standardization ---
-    raw_longitudinal_labs = build_raw_longitudinal_labs(labs_df)
+    # --- Shared DFCI lab standardization (polars reshape up to consolidate_dfci_labs) ---
+    labs_df_pl = pl.scan_csv(LABS_CSV, infer_schema_length=0).collect()
+    raw_longitudinal_labs_pl = build_raw_longitudinal_labs(labs_df_pl)
 
-    unique_labs_df = (
-        raw_longitudinal_labs[["LAB_NAME", "LAB_UNIT"]]
-        .value_counts()
-        .reset_index(name="count")
+    unique_labs_df_pl = (
+        raw_longitudinal_labs_pl.group_by(["LAB_NAME", "LAB_UNIT"])
+        .agg(pl.len().alias("count"))
+        .sort("count", descending=True)
     )
-    unique_labs_df.to_csv(UNIQUE_LABS_CSV, index=False)
+    unique_labs_df_pl.write_csv(UNIQUE_LABS_CSV)
+
+    # Conversion boundary: consolidate_dfci_labs (data_preprocessing_common/dfci_labs.py)
+    # takes and returns pandas DataFrames and is out of scope for this port. Convert
+    # polars->pandas here; everything from this point on stays pandas, unchanged.
+    raw_longitudinal_labs = raw_longitudinal_labs_pl.to_pandas()
 
     mapping_df = pd.read_csv(MAPPING_CSV)
     consolidated_df = consolidate_dfci_labs(raw_longitudinal_labs, mapping_df)

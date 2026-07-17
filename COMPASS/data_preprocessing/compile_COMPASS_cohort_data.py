@@ -50,15 +50,23 @@ Outputs (in NEPC_PROJ_PATH):
 
 Author: J. Patrick Connor
 Date: 2026-07-14
+
+Implementation note:
+This script is fully polars (zero pandas) up through writing the cohort
+CSVs and the survival cohort. `data_preprocessing_common/fast_io.py`
+supplies the shared cohort-filtering (`scan_filter`) and dirty-numeric
+recovery (`recover_numeric`) helpers.
 """
 
 import argparse
+import datetime as dt
 import os
+import sys
 
-import numpy as np
-import pandas as pd
-import pyarrow as pa
-import pyarrow.csv as pa_csv
+import polars as pl
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from data_preprocessing_common import fast_io  # noqa: E402
 
 ID_COL = "DFCI_MRN"
 
@@ -82,19 +90,31 @@ TREATMENT_ANCHOR_MEDS = {
     "RADIUM RA 223 DICHLORIDE",
 }
 
-PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
+# Cisplatin appears both as a single agent and coded within a combination
+# regimen name; both count as platinum exposure. Oxaliplatin is intentionally
+# excluded (not a relevant platinum agent for this cohort).
+PLATINUM_MEDS = {
+    "CARBOPLATIN",
+    "CISPLATIN",
+    "CISPLATIN/CYCLOPHOSPHAMIDE/ETOPOSIDE",
+}
 
 # Reference date for the OncDRS de-identified day offsets. [IMPORTANT: update
-# for each new data pull.]
-REFERENCE_DATE = pd.to_datetime("2021-02-22") - pd.Timedelta(days=44158)
+# for each new data pull.] Kept as a datetime (not date) so it composes as a
+# polars Datetime literal, matching the Datetime dtype produced by
+# str.to_datetime() elsewhere (DEATH_DATE, LAST_CONTACT_DATE) -- mixing Date
+# and Datetime dtypes in later subtractions would otherwise be an easy trap.
+REFERENCE_DATE = dt.datetime(2021, 2, 22) - dt.timedelta(days=44158)
 
 
 def assert_reference_date(anchor_real_date, offset_days, label, tol_days=2):
     """Reconstruct the reference date implied by (anchor_real_date, offset_days)
     from a given file and assert it matches REFERENCE_DATE within tol_days."""
-    implied = pd.to_datetime(anchor_real_date) - pd.Timedelta(days=offset_days)
-    delta = abs((REFERENCE_DATE - implied).days)
-    print(f"Reference date check [{label}]: implied {implied.date()} (delta {delta}d)")
+    if isinstance(anchor_real_date, dt.datetime):
+        anchor_real_date = anchor_real_date.date()
+    implied = anchor_real_date - dt.timedelta(days=int(offset_days))
+    delta = abs((REFERENCE_DATE.date() - implied).days)
+    print(f"Reference date check [{label}]: implied {implied} (delta {delta}d)")
     assert delta <= tol_days, f"Reference date mismatch for {label}!"
 
 
@@ -102,49 +122,55 @@ def assert_reference_date(anchor_real_date, offset_days, label, tol_days=2):
 # ICD cohort definition (shared by every output below)
 # ---------------------------------------------------------------------------
 
-def mark_non_prostate_primary_icd(icds):
+def mark_non_prostate_primary_icd(icds: pl.DataFrame) -> pl.DataFrame:
     """Flag ICD rows that indicate a non-prostate PRIMARY malignancy."""
-    icds = icds.copy()
-    codes = icds['DIAGNOSIS_ICD10_CD'].astype(str).str.upper().str.strip()
+    codes = pl.col("DIAGNOSIS_ICD10_CD").cast(pl.Utf8).str.to_uppercase().str.strip_chars()
 
-    letter = codes.str.extract(r'^([A-Z])', expand=False)
-    number = pd.to_numeric(codes.str.extract(r'^[A-Z](\d{2,3})', expand=False), errors='coerce')
+    letter = codes.str.extract(r'^([A-Z])', 1)
+    number = codes.str.extract(r'^[A-Z](\d{2,3})', 1).cast(pl.Float64, strict=False)
 
     is_c00_c76 = (letter == 'C') & (number >= 0) & (number <= 76)
     is_c81_c96 = (letter == 'C') & (number >= 81) & (number <= 96)
-    is_c97 = codes.str.startswith('C97')
-    is_c7a = codes.str.startswith('C7A')
-    is_c801 = codes.str.startswith('C801') | codes.str.startswith('C80.1')
+    is_c97 = codes.str.starts_with('C97')
+    is_c7a = codes.str.starts_with('C7A')
+    is_c801 = codes.str.starts_with('C801') | codes.str.starts_with('C80.1')
 
     is_primary = is_c00_c76 | is_c81_c96 | is_c97 | is_c7a | is_c801
-    is_prostate = codes.str.startswith('C61')
-    is_secondary = ((letter == 'C') & (number >= 77) & (number <= 79)) | codes.str.startswith('C7B')
-    is_nmsc = codes.str.startswith('C44')
-    is_nos = codes.str.startswith('C80.9') | codes.str.startswith('C809')
+    is_prostate = codes.str.starts_with('C61')
+    is_secondary = ((letter == 'C') & (number >= 77) & (number <= 79)) | codes.str.starts_with('C7B')
+    is_nmsc = codes.str.starts_with('C44')
+    is_nos = codes.str.starts_with('C80.9') | codes.str.starts_with('C809')
 
-    icds['NON_PROSTATE_PRIMARY_ICD10'] = (
+    non_prostate_primary = (
         is_primary
         & ~is_prostate
         & ~is_secondary
         & ~is_nmsc
         & ~is_nos
     )
-    return icds
+    return icds.with_columns(non_prostate_primary.alias("NON_PROSTATE_PRIMARY_ICD10"))
 
 
-def compute_prostate_cohort(icds):
+def compute_prostate_cohort(icds: pl.DataFrame):
     """Return (prostate_mrns, excluded_mrns) from an exploded ICD dataframe.
 
     prostate_mrns : patients with any C61 code, minus those with a
                     non-prostate primary ICD.
     """
-    codes = icds['DIAGNOSIS_ICD10_CD'].astype(str).str.upper().str.strip()
-    c61_mrns = set(pd.to_numeric(icds.loc[codes.str.startswith('C61'), ID_COL], errors='coerce').dropna().astype(int))
+    codes = icds["DIAGNOSIS_ICD10_CD"].cast(pl.Utf8).str.to_uppercase().str.strip_chars()
+    is_c61 = codes.str.starts_with('C61')
+    c61_ids = (
+        icds.filter(is_c61)[ID_COL].cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
+    )
+    c61_mrns = set(c61_ids.drop_nulls().to_list())
 
     marked = mark_non_prostate_primary_icd(icds)
-    non_prostate_primary_mrns = set(
-        pd.to_numeric(marked.loc[marked['NON_PROSTATE_PRIMARY_ICD10'], ID_COL], errors='coerce').dropna().astype(int)
+    non_prostate_ids = (
+        marked.filter(pl.col("NON_PROSTATE_PRIMARY_ICD10"))[ID_COL]
+        .cast(pl.Float64, strict=False)
+        .cast(pl.Int64, strict=False)
     )
+    non_prostate_primary_mrns = set(non_prostate_ids.drop_nulls().to_list())
 
     excluded = c61_mrns & non_prostate_primary_mrns
     prostate_mrns = c61_mrns - excluded
@@ -156,7 +182,7 @@ def compute_prostate_cohort(icds):
     return prostate_mrns, excluded
 
 
-def load_and_explode_icd(icd_path):
+def load_and_explode_icd(icd_path) -> pl.DataFrame:
     """Load the raw OncDRS EHR_DIAGNOSIS.csv and normalize it to one ICD-10
     code per row (columns DFCI_MRN, START_DT, DIAGNOSIS_ICD10_CD,
     DIAGNOSIS_ICD10_NM) -- the shape every downstream consumer here expects.
@@ -171,7 +197,7 @@ def load_and_explode_icd(icd_path):
     DIAGNOSIS_ICD10_CD, no _CD2/_CD3) is passed through unchanged so this
     remains compatible with timestamped_icd_info.csv.gz-style inputs.
     """
-    icds = pd.read_csv(icd_path, dtype=str)
+    icds = pl.scan_csv(icd_path, infer_schema_length=0).collect()
 
     pair_cols = [
         ('DIAGNOSIS_ICD10_CD', 'DIAGNOSIS_ICD10_NM'),
@@ -186,21 +212,27 @@ def load_and_explode_icd(icd_path):
 
     # Raw EHR_DIAGNOSIS: melt CD/CD2/CD3 (+ names) into one code per row,
     # carrying every other (non-code) column along on each melted row.
-    carry_cols = [c for c in icds.columns
-                  if c not in {col for pair in pair_cols for col in pair}]
+    all_pair_cols = {col for pair in pair_cols for col in pair}
+    carry_cols = [c for c in icds.columns if c not in all_pair_cols]
+
     parts = []
     for cd_col, nm_col in pair_cols:
         if cd_col not in icds.columns:
             continue
-        part = icds[carry_cols].copy()
-        part['DIAGNOSIS_ICD10_CD'] = icds[cd_col]
-        part['DIAGNOSIS_ICD10_NM'] = icds[nm_col] if nm_col in icds.columns else pd.NA
-        parts.append(part)
+        select_exprs = [pl.col(c) for c in carry_cols]
+        select_exprs.append(pl.col(cd_col).alias("DIAGNOSIS_ICD10_CD"))
+        if nm_col in icds.columns:
+            select_exprs.append(pl.col(nm_col).alias("DIAGNOSIS_ICD10_NM"))
+        else:
+            select_exprs.append(pl.lit(None, dtype=pl.Utf8).alias("DIAGNOSIS_ICD10_NM"))
+        parts.append(icds.select(select_exprs))
 
-    exploded = pd.concat(parts, ignore_index=True)
+    exploded = pl.concat(parts, how="vertical_relaxed")
     # Drop rows whose (secondary/tertiary) code slot was empty.
-    exploded['DIAGNOSIS_ICD10_CD'] = exploded['DIAGNOSIS_ICD10_CD'].astype(str).str.strip().str.upper()
-    exploded = exploded.loc[~exploded['DIAGNOSIS_ICD10_CD'].isin(['', 'NAN', 'NONE'])]
+    exploded = exploded.with_columns(
+        pl.col("DIAGNOSIS_ICD10_CD").cast(pl.Utf8).str.strip_chars().str.to_uppercase()
+    )
+    exploded = exploded.filter(~pl.col("DIAGNOSIS_ICD10_CD").is_in(['', 'NAN', 'NONE']))
     return exploded
 
 
@@ -208,72 +240,33 @@ def load_and_explode_icd(icd_path):
 # compile_prostate_data.py-style cohort-filtered table dumps
 # ---------------------------------------------------------------------------
 
-def filter_and_save(filename, outname, cohort_mrns, cols=None, chunksize=250_000):
-    """Stream `filename` in batches via pyarrow, keep only cohort_mrns rows
-    (and `cols` columns, if given), and write the concatenated result to
-    `outname`.
-
-    pyarrow's CSV reader is used instead of pandas because it parses each
-    batch in C++ (no chunk-by-chunk Python/regex dtype sniffing) and
-    transparently decompresses `.gz` inputs. Unlike pandas' `low_memory=False`
-    (which settles on a single permissive dtype after seeing the whole file),
-    pyarrow infers each column's type from only the first block and then
-    raises on later rows that don't fit (e.g. OncDRS free-text fields like
-    RESULT_NBR that are numeric for most rows but occasionally hold values
-    such as '05055/D'). To sidestep that, every column is parsed as a plain
-    string; after filtering, columns that are fully numeric-parseable across
-    the *filtered* (small) result are cast back to numeric, mirroring what
-    pandas' whole-file dtype inference would have produced. `chunksize` sets
-    the pyarrow read block size (rows per batch) to bound peak memory.
+def filter_and_save(filename, outname, cohort_mrns, cols=None) -> pl.DataFrame:
+    """Stream `filename` lazily via polars, keep only cohort_mrns rows
+    (and `cols` columns, if given), recover dirty-numeric columns, and write
+    the result to `outname`. See `data_preprocessing_common/fast_io.py` for
+    the shared scan/filter/recover implementation; this wrapper only adds the
+    column re-projection (to preserve the exact requested column order) and
+    the `.write_csv()` so output paths/signatures stay stable.
     """
-    cohort_mrns = set(pd.to_numeric(pd.Series(list(cohort_mrns)), errors='coerce').dropna().astype(int))
-    usecols = None
+    lf = fast_io.scan_filter(filename, cohort_mrns, cols=cols)
+    filtered = lf.collect()
+    filtered = fast_io.recover_numeric(filtered)
     if cols:
-        usecols = list(cols) if ID_COL in cols else [ID_COL] + list(cols)
-
-    read_options = pa_csv.ReadOptions(block_size=chunksize * 200)
-    header = pa_csv.open_csv(filename, read_options=read_options).schema.names
-    col_names = usecols if usecols else header
-    column_types = {c: pa.string() for c in col_names}
-    convert_options = pa_csv.ConvertOptions(include_columns=usecols, column_types=column_types) \
-        if usecols else pa_csv.ConvertOptions(column_types=column_types)
-
-    reader = pa_csv.open_csv(filename, read_options=read_options, convert_options=convert_options)
-    filtered_batches = []
-    schema = reader.schema
-    for batch in reader:
-        table = pa.Table.from_batches([batch])
-        ids = pd.to_numeric(table.column(ID_COL).to_pandas(), errors='coerce')
-        mask = pa.array(ids.isin(cohort_mrns).to_numpy())
-        filtered_batches.append(table.filter(mask))
-
-    filtered_table = pa.concat_tables(filtered_batches) if filtered_batches else pa.table({c: [] for c in schema.names})
-    filtered = filtered_table.to_pandas()
-    # Forcing every pyarrow column to string() turns empty/NA CSV cells into
-    # "" rather than NaN -- restore real NaNs before any dtype recovery below.
-    filtered = filtered.mask(filtered == '', np.nan)
-    for col in filtered.columns:
-        as_num = pd.to_numeric(filtered[col], errors='coerce')
-        non_null = filtered[col].notna()
-        if non_null.any() and as_num[non_null].notna().all():
-            filtered[col] = as_num
-    if cols:
-        filtered = filtered[cols]
-    filtered.to_csv(outname, index=False)
+        filtered = filtered.select(list(cols))
+    filtered.write_csv(outname)
     return filtered
 
 
-def compile_cohort_tables(prostate_mrns, icds, icd_path):
+def compile_cohort_tables(prostate_mrns, icds: pl.DataFrame, icd_path):
     """Build the cohort-filtered ICD/health/meds/labs/somatic/PSA/
     platinum tables. Returns (meds_df, platinum_df) for reuse by the
     survival cohort builder below."""
-    prostate_mrn_set = set(prostate_mrns)
+    prostate_mrn_set = set(int(m) for m in prostate_mrns)
 
     # Filter related datasets by the prostate cohort.
-    icds_filtered = icds.loc[
-        pd.to_numeric(icds[ID_COL], errors='coerce').isin(prostate_mrn_set)
-    ].copy()
-    icds_filtered.to_csv(os.path.join(NEPC_PROJ_PATH, 'prostate_icd_data.csv'), index=False)
+    mrn_num = icds[ID_COL].cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
+    icds_filtered = icds.filter(mrn_num.is_in(list(prostate_mrn_set)))
+    icds_filtered.write_csv(os.path.join(NEPC_PROJ_PATH, 'prostate_icd_data.csv'))
 
     health = filter_and_save(os.path.join(ONCDRS_PATH, 'HEALTH_HISTORY.csv'), os.path.join(NEPC_PROJ_PATH, 'prostate_health_history_data.csv'), prostate_mrn_set)
     meds = filter_and_save(os.path.join(ONCDRS_PATH, 'MEDICATIONS.csv'), os.path.join(NEPC_PROJ_PATH, 'prostate_medications_data.csv'), prostate_mrn_set)
@@ -292,23 +285,28 @@ def compile_cohort_tables(prostate_mrns, icds, icd_path):
 
     # PSA lab filtering.
     total_psa_labels = ['PSA', 'PSAR', 'PSATOTSCRN', 'CPSA', 'PSAMON', 'PSAULT', 'PSAT']
-    total_psa = labs.loc[(labs['TEST_TYPE_CD'].isin(total_psa_labels)) &
-                         (labs['NUMERIC_RESULT'].notna()) &
-                         (labs['NUMERIC_RESULT'] != 9999999.0)]
-    total_psa.to_csv(os.path.join(NEPC_PROJ_PATH, 'total_psa_records.csv'), index=False)
+    total_psa = labs.filter(
+        pl.col('TEST_TYPE_CD').is_in(total_psa_labels)
+        & pl.col('NUMERIC_RESULT').is_not_null()
+        & (pl.col('NUMERIC_RESULT') != 9999999.0)
+    )
+    total_psa.write_csv(os.path.join(NEPC_PROJ_PATH, 'total_psa_records.csv'))
 
     # Platinum meds filtering. Normalize NCI_PREFERRED_MED_NM (upper/strip)
     # before matching -- an un-normalized `==` comparison here previously
     # risked silently missing case/whitespace-variant platinum records that
     # the ARPI-anchored survival cohort (below) would still catch, since that
     # code path normalizes. Both now agree.
-    med_name = meds['NCI_PREFERRED_MED_NM'].astype(str).str.upper().str.strip()
-    platinum_df = (meds.loc[med_name.isin(PLATINUM_MEDS)]
-                   .assign(NCI_PREFERRED_MED_NM=med_name.loc[med_name.isin(PLATINUM_MEDS)])
-                   .sort_values(by='MED_START_DT').drop_duplicates(subset=ID_COL)
-                   .rename(columns={'NCI_PREFERRED_MED_NM': 'medication',
-                                    'MED_START_DT': 'medication_start_time'}))
-    platinum_df.to_csv(os.path.join(NEPC_PROJ_PATH, 'platinum_chemo_records.csv'), index=False)
+    meds_norm = meds.with_columns(
+        pl.col('NCI_PREFERRED_MED_NM').cast(pl.Utf8).str.to_uppercase().str.strip_chars().alias('NCI_PREFERRED_MED_NM')
+    )
+    platinum_df = (
+        meds_norm.filter(pl.col('NCI_PREFERRED_MED_NM').is_in(list(PLATINUM_MEDS)))
+        .sort('MED_START_DT')
+        .unique(subset=[ID_COL], keep='first')
+        .rename({'NCI_PREFERRED_MED_NM': 'medication', 'MED_START_DT': 'medication_start_time'})
+    )
+    platinum_df.write_csv(os.path.join(NEPC_PROJ_PATH, 'platinum_chemo_records.csv'))
 
     return meds, platinum_df
 
@@ -317,101 +315,119 @@ def compile_cohort_tables(prostate_mrns, icds, icd_path):
 # ARPI/chemo-anchored survival cohort (prostate_arpi_survival_preprocessing.py)
 # ---------------------------------------------------------------------------
 
-def load_medications_for_survival(meds):
+def load_medications_for_survival(meds: pl.DataFrame) -> pl.DataFrame:
     """Reconstruct MED_START_DT from D_MED_START_DT for the anchor + platinum
     drug rows already filtered to the prostate cohort by compile_cohort_tables.
     """
     keep_meds = {m.upper() for m in TREATMENT_ANCHOR_MEDS | PLATINUM_MEDS}
-    out = meds.copy()
-    out['NCI_PREFERRED_MED_NM'] = out['NCI_PREFERRED_MED_NM'].astype(str).str.upper().str.strip()
-    out = out.loc[out['NCI_PREFERRED_MED_NM'].isin(keep_meds)]
-    out = out.dropna(subset=['D_MED_START_DT'])
-    out['MED_START_DT'] = REFERENCE_DATE + pd.to_timedelta(out['D_MED_START_DT'], unit='D')
+    out = meds.with_columns(
+        pl.col('NCI_PREFERRED_MED_NM').cast(pl.Utf8).str.to_uppercase().str.strip_chars().alias('NCI_PREFERRED_MED_NM')
+    )
+    out = out.filter(pl.col('NCI_PREFERRED_MED_NM').is_in(list(keep_meds)))
+    out = out.filter(pl.col('D_MED_START_DT').is_not_null())
+    d_offset = pl.col('D_MED_START_DT').cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
+    out = out.with_columns(
+        (pl.lit(REFERENCE_DATE, dtype=pl.Datetime) + pl.duration(days=d_offset)).alias('MED_START_DT')
+    )
 
-    row0 = out.iloc[0]
+    row0 = out.row(0, named=True)
     assert_reference_date(row0['MED_START_DT'], row0['D_MED_START_DT'], 'MEDICATIONS')
     return out
 
 
-def compute_treatment_anchor(meds):
+def compute_treatment_anchor(meds: pl.DataFrame) -> pl.DataFrame:
     """Earliest anchor-drug MED_START_DT per patient -> TREATMENT_ANCHOR_DATE."""
-    anchor = meds.loc[meds['NCI_PREFERRED_MED_NM'].isin(TREATMENT_ANCHOR_MEDS)].copy()
-    anchor = anchor.dropna(subset=['MED_START_DT'])
+    anchor = meds.filter(pl.col('NCI_PREFERRED_MED_NM').is_in(list(TREATMENT_ANCHOR_MEDS)))
+    anchor = anchor.filter(pl.col('MED_START_DT').is_not_null())
     return (
-        anchor.groupby(ID_COL, as_index=False)['MED_START_DT']
-        .min()
-        .rename(columns={'MED_START_DT': 'TREATMENT_ANCHOR_DATE'})
+        anchor.group_by(ID_COL)
+        .agg(pl.col('MED_START_DT').min())
+        .rename({'MED_START_DT': 'TREATMENT_ANCHOR_DATE'})
     )
 
 
-def compute_first_platinum(meds):
+def compute_first_platinum(meds: pl.DataFrame) -> pl.DataFrame:
     """Earliest platinum MED_START_DT (and drug name) per patient."""
-    plat = meds.loc[meds['NCI_PREFERRED_MED_NM'].isin(PLATINUM_MEDS)].copy()
-    plat = plat.dropna(subset=['MED_START_DT'])
-    plat = plat.sort_values('MED_START_DT')
-    plat = plat.drop_duplicates(subset=ID_COL, keep='first')
-    return plat[[ID_COL, 'NCI_PREFERRED_MED_NM', 'MED_START_DT']].rename(
-        columns={
+    plat = meds.filter(pl.col('NCI_PREFERRED_MED_NM').is_in(list(PLATINUM_MEDS)))
+    plat = plat.filter(pl.col('MED_START_DT').is_not_null())
+    plat = plat.sort('MED_START_DT').unique(subset=[ID_COL], keep='first')
+    return plat.select([ID_COL, 'NCI_PREFERRED_MED_NM', 'MED_START_DT']).rename(
+        {
             'NCI_PREFERRED_MED_NM': 'PLATINUM_MED',
             'MED_START_DT': 'PLATINUM_DATE',
         }
     )
 
 
-def load_patient_status(path):
+def load_patient_status(path) -> pl.DataFrame:
     """Load birth date, sex, and death / last-alive info from
     PT_INFO_STATUS_REGISTRATION.csv, reconstructing calendar dates.
 
     Returns a dataframe with:
         DFCI_MRN, BIRTH_DATE, GENDER, DEATH_DATE, LAST_CONTACT_DATE
     """
-    pt = pd.read_csv(os.path.join(path, 'PT_INFO_STATUS_REGISTRATION.csv'))
+    pt = pl.scan_csv(os.path.join(path, 'PT_INFO_STATUS_REGISTRATION.csv'), infer_schema_length=0).collect()
 
-    pt['BIRTH_DATE'] = REFERENCE_DATE + pd.to_timedelta(pt['D_BIRTH_DT'], unit='D')
+    d_birth = pl.col('D_BIRTH_DT').cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
+    pt = pt.with_columns(
+        (pl.lit(REFERENCE_DATE, dtype=pl.Datetime) + pl.duration(days=d_birth)).alias('BIRTH_DATE')
+    )
 
-    row0 = pt.dropna(subset=['D_BIRTH_DT']).iloc[0]
+    row0 = pt.filter(pl.col('D_BIRTH_DT').is_not_null()).row(0, named=True)
     assert_reference_date(row0['BIRTH_DATE'], row0['D_BIRTH_DT'], 'PT_INFO_BIRTH')
 
     # Death and last-alive dates are provided as calendar strings.
-    pt['DEATH_DATE'] = pd.to_datetime(pt['HYBRID_DEATH_DT'], errors='coerce')
-    pt['LAST_CONTACT_DATE'] = pd.to_datetime(pt['DERIVED_LAST_ALIVE_DATE'], errors='coerce')
+    pt = pt.with_columns(
+        pl.col('HYBRID_DEATH_DT').str.to_datetime(strict=False).alias('DEATH_DATE'),
+        pl.col('DERIVED_LAST_ALIVE_DATE').str.to_datetime(strict=False).alias('LAST_CONTACT_DATE'),
+    )
 
-    return pt[
+    return pt.select(
         [ID_COL, 'BIRTH_DATE', 'GENDER_NM', 'DEATH_DATE', 'LAST_CONTACT_DATE']
-    ].rename(columns={'GENDER_NM': 'GENDER'})
+    ).rename({'GENDER_NM': 'GENDER'})
 
 
-def build_survival_cohort(prostate_mrns, anchor_df, platinum_df, status_df):
+def build_survival_cohort(prostate_mrns, anchor_df: pl.DataFrame, platinum_df: pl.DataFrame, status_df: pl.DataFrame) -> pl.DataFrame:
     """Assemble the per-patient ARPI/chemo-anchored survival table."""
-    cohort = pd.DataFrame({ID_COL: sorted(prostate_mrns)})
+    cohort = pl.DataFrame({ID_COL: sorted(int(m) for m in prostate_mrns)})
 
-    cohort = cohort.merge(status_df, on=ID_COL, how='left')
-    cohort = cohort.merge(anchor_df, on=ID_COL, how='left')
-    cohort = cohort.merge(platinum_df, on=ID_COL, how='left')
+    cohort = cohort.join(status_df, on=ID_COL, how='left')
+    cohort = cohort.join(anchor_df, on=ID_COL, how='left')
+    cohort = cohort.join(platinum_df, on=ID_COL, how='left')
 
-    cohort['AGE'] = (
-        (cohort['TREATMENT_ANCHOR_DATE'] - cohort['BIRTH_DATE'])
-        / pd.Timedelta(days=365.2425)
-    ).astype(float)
-
-    cohort['FOLLOW_UP_END_DATE'] = cohort['DEATH_DATE'].fillna(cohort['LAST_CONTACT_DATE'])
-
-    cohort['DEATH'] = cohort['DEATH_DATE'].notna().astype(int)
-    cohort['TT_DEATH'] = (
-        (cohort['FOLLOW_UP_END_DATE'] - cohort['TREATMENT_ANCHOR_DATE']).dt.days
+    cohort = cohort.with_columns(
+        (
+            (pl.col('TREATMENT_ANCHOR_DATE') - pl.col('BIRTH_DATE')).dt.total_days()
+            / 365.2425
+        ).alias('AGE')
     )
 
-    has_platinum = cohort['PLATINUM_DATE'].notna()
-    cohort['PLATINUM'] = has_platinum.astype(int)
-    platinum_end = cohort['PLATINUM_DATE'].where(has_platinum, cohort['FOLLOW_UP_END_DATE'])
-    cohort['TT_PLATINUM'] = (
-        (platinum_end - cohort['TREATMENT_ANCHOR_DATE']).dt.days
+    cohort = cohort.with_columns(
+        pl.col('DEATH_DATE').fill_null(pl.col('LAST_CONTACT_DATE')).alias('FOLLOW_UP_END_DATE')
     )
 
-    no_anchor = cohort['TREATMENT_ANCHOR_DATE'].isna()
-    cohort.loc[no_anchor, ['AGE', 'TT_DEATH', 'TT_PLATINUM']] = np.nan
+    cohort = cohort.with_columns(
+        pl.col('DEATH_DATE').is_not_null().cast(pl.Int64).alias('DEATH')
+    )
+    cohort = cohort.with_columns(
+        (pl.col('FOLLOW_UP_END_DATE') - pl.col('TREATMENT_ANCHOR_DATE')).dt.total_days().alias('TT_DEATH')
+    )
 
-    return cohort[
+    has_platinum = pl.col('PLATINUM_DATE').is_not_null()
+    cohort = cohort.with_columns(has_platinum.cast(pl.Int64).alias('PLATINUM'))
+    platinum_end = pl.when(has_platinum).then(pl.col('PLATINUM_DATE')).otherwise(pl.col('FOLLOW_UP_END_DATE'))
+    cohort = cohort.with_columns(
+        (platinum_end - pl.col('TREATMENT_ANCHOR_DATE')).dt.total_days().alias('TT_PLATINUM')
+    )
+
+    no_anchor = pl.col('TREATMENT_ANCHOR_DATE').is_null()
+    cohort = cohort.with_columns(
+        pl.when(no_anchor).then(None).otherwise(pl.col('AGE')).alias('AGE'),
+        pl.when(no_anchor).then(None).otherwise(pl.col('TT_DEATH')).alias('TT_DEATH'),
+        pl.when(no_anchor).then(None).otherwise(pl.col('TT_PLATINUM')).alias('TT_PLATINUM'),
+    )
+
+    return cohort.select(
         [
             ID_COL,
             'GENDER',
@@ -428,24 +444,24 @@ def build_survival_cohort(prostate_mrns, anchor_df, platinum_df, status_df):
             'TT_PLATINUM',
             'PLATINUM',
         ]
-    ]
+    )
 
 
-def summarize_survival_cohort(cohort):
+def summarize_survival_cohort(cohort: pl.DataFrame):
     n = len(cohort)
-    n_anchor = cohort['TREATMENT_ANCHOR_DATE'].notna().sum()
+    n_anchor = cohort['TREATMENT_ANCHOR_DATE'].is_not_null().sum()
     print("\n=== Survival cohort summary ===")
     print(f"Total ICD-C61 patients (post-exclusion): {n}")
     print(f"With an ARPI/chemo anchor drug: {n_anchor}")
     print(f"Deaths: {int(cohort['DEATH'].sum())}")
     print(f"Received platinum: {int(cohort['PLATINUM'].sum())}")
-    with_times = cohort.dropna(subset=['TT_DEATH'])
+    with_times = cohort.filter(pl.col('TT_DEATH').is_not_null())
     if len(with_times):
         print(
             f"Median TT_DEATH (days): {with_times['TT_DEATH'].median():.0f}; "
             f"median TT_PLATINUM (days): {with_times['TT_PLATINUM'].median():.0f}"
         )
-    neg = cohort.loc[cohort['TT_DEATH'] < 0]
+    neg = cohort.filter(pl.col('TT_DEATH') < 0)
     if len(neg):
         print(
             f"WARNING: {len(neg)} patients have negative TT_DEATH "
@@ -505,7 +521,7 @@ def main():
     summarize_survival_cohort(survival_cohort)
 
     out_path = os.path.join(args.out_dir, 'prostate_arpi_survival_cohort.csv')
-    survival_cohort.to_csv(out_path, index=False)
+    survival_cohort.write_csv(out_path)
     print(f"\nSaved survival cohort to {out_path}")
 
 
