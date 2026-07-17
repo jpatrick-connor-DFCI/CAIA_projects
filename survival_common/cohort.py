@@ -479,7 +479,13 @@ def build_landmark_merged(
     )
 
     merged = feature_df.join(outcome_df, how="inner")
+    n_before_age_filter = len(merged)
+    n_missing_age = int(merged[AGE_COL].isna().sum())
     merged = merged.loc[merged[AGE_COL].notna()].copy()
+    print(
+        f"Feature+outcome merge @ landmark +{landmark_offset_days}d: {n_before_age_filter} patients; "
+        f"{AGE_COL} missing for {n_missing_age}; {len(merged)} remaining."
+    )
     if merged.empty:
         raise ValueError("No patients have both engineered features and valid outcomes.")
     return outcome_df, feature_df, merged
