@@ -478,6 +478,12 @@ def build_landmark_merged(
         df, landmark_offset_days=landmark_offset_days, anchor_col=anchor_col
     )
 
+    print(
+        f"[debug] outcome_df index: n={outcome_df.index.nunique()} unique / {len(outcome_df)} rows; "
+        f"feature_df index: n={feature_df.index.nunique()} unique / {len(feature_df)} rows; "
+        f"outcome-not-in-feature={len(outcome_df.index.difference(feature_df.index))}; "
+        f"feature-not-in-outcome={len(feature_df.index.difference(outcome_df.index))}"
+    )
     merged = feature_df.join(outcome_df, how="inner")
     n_before_age_filter = len(merged)
     n_missing_age = int(merged[AGE_COL].isna().sum())
