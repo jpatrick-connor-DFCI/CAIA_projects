@@ -32,13 +32,19 @@ DATA_ROOT = Path("/data/gusev/USERS/jpconnor/data")
 EMBED_PROJ_PATH = DATA_ROOT / "clinical_text_embedding_project"
 NEPC_PROJ_PATH = DATA_ROOT / "CAIA" / "COMPASS"
 PROFILE_PATH = Path("/data/gusev/PROFILE/CLINICAL")
+ONCDRS_PATH = PROFILE_PATH / "OncDRS" / "ALL_2025_03"
 SURV_PATH = EMBED_PROJ_PATH / "time-to-event_analysis"
 
 # Per-patient survival cohort produced by compile_COMPASS_cohort_data.py
 # straight from the raw OncDRS pull. It supplies the outcome/anchor columns
 # (age, treatment anchor, death, last-contact, platinum) that used to come from
-# death_met_surv_df.csv.gz. See load_death_df_from_survival_cohort.
-DEFAULT_SURVIVAL_COHORT_CSV = NEPC_PROJ_PATH / "prostate_arpi_survival_cohort.csv"
+# death_met_surv_df.csv.gz. See load_death_df_from_survival_cohort. Defaults to
+# the icd_or_vte UNION cohort (not the icd-only file) so every patient in any
+# of compile_COMPASS_cohort_data.py's 6 cohort variants has real outcome data
+# here -- Stage 2 itself applies no MRN restriction (see build_raw_longitudinal_data
+# / build_longitudinal_prediction_data); cohort selection is a Stage 3
+# (build_prediction_inputs.py --restrict-to-mrns) concern.
+DEFAULT_SURVIVAL_COHORT_CSV = NEPC_PROJ_PATH / "prostate_arpi_survival_cohort_icd_or_vte.csv"
 
 # Cisplatin appears both as a single agent and coded within a combination
 # regimen name; both count as platinum exposure. Oxaliplatin is intentionally
@@ -57,6 +63,13 @@ PARPI_MEDS = {
     "VELIPARIB",
 }
 MIN_PSA_COUNT = 5
+# Broad PSA assay set (raw TEST_TYPE_CD, any assay type: total/free/complexed/
+# ultrasensitive/etc.), used only for the downstream PSA-count prevalence gate
+# in build_prediction_inputs.py / summarize_default_cohort_filters below. This
+# is deliberately NOT the narrow OMOP-collapsed LAB_NAME == "PSA" set, which
+# drives prediction features -- see RAW_TEST_CODE passthrough in
+# build_raw_longitudinal_data.
+BROAD_PSA_CODES = ["PSA", "PSAR", "PSATOTSCRN", "CPSA", "PSAMON", "PSAULT", "PSAT"]
 
 # Highlighted antineoplastic treatments used to anchor the "time to platinum"
 # prediction window. The treatment anchor (TREATMENT_ANCHOR_DATE) is the first
@@ -167,6 +180,16 @@ def build_raw_longitudinal_data(
     health_df: pl.DataFrame,
     labs_df: pl.DataFrame,
 ) -> pl.DataFrame:
+    """Reshape raw OncDRS HEALTH_HISTORY/OUTPT_LAB_RESULTS_LABS into one long
+    vitals+labs table.
+
+    `health_df`/`labs_df` are the FULL raw OncDRS tables, unfiltered by any
+    cohort MRN set -- Stage 2 applies no MRN restriction at all. Cohort
+    selection (icd / vte / icd_or_vte, each full or ARPI-restricted) is
+    applied downstream in build_prediction_inputs.py via --restrict-to-mrns,
+    so this reshape only needs to run once and every cohort variant can be
+    compared from the same broad longitudinal_prediction_data.csv output.
+    """
     # Both inputs are scanned all-String (infer_schema_length=0), so DFCI_MRN
     # arrives as Utf8 here. Cast it back to Int64 before it flows into
     # to_pandas()/consolidate_dfci_labs() downstream in main() -- otherwise it
@@ -199,6 +222,17 @@ def build_raw_longitudinal_data(
         generate_new_test_name_expr("TEST_TYPE_CD", "TEST_TYPE_DESCR").alias("TEST_NAME")
     )
 
+    # Carry the raw, un-synthesized TEST_TYPE_CD through as RAW_TEST_CODE so the
+    # broad-vs-narrow PSA distinction survives past TEST_NAME synthesis (above)
+    # and consolidate_dfci_labs' further canonicalization of LAB_NAME. Vitals
+    # have no TEST_TYPE_CD equivalent, so RAW_TEST_CODE is null for those rows.
+    vital_signs_df = vital_signs_df.with_columns(
+        pl.lit(None, dtype=pl.Utf8).alias("RAW_TEST_CODE")
+    )
+    labs_df_col_sub = labs_df_col_sub.with_columns(
+        pl.col("TEST_TYPE_CD").alias("RAW_TEST_CODE")
+    )
+
     vital_signs_df = vital_signs_df.rename(
         {
             "START_DT": "DATE",
@@ -206,7 +240,7 @@ def build_raw_longitudinal_data(
             "HEALTH_HISTORY_TYPE": "LAB_NAME",
             "UNITS_CD": "LAB_UNIT",
         }
-    ).select([ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE"])
+    ).select([ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE", "RAW_TEST_CODE"])
 
     labs_df_col_sub = labs_df_col_sub.rename(
         {
@@ -215,7 +249,7 @@ def build_raw_longitudinal_data(
             "RESULT_UOM_NM": "LAB_UNIT",
             "TEST_NAME": "LAB_NAME",
         }
-    ).select([ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE"])
+    ).select([ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE", "RAW_TEST_CODE"])
 
     # Both inputs are scanned all-String (infer_schema_length=0), so LAB_VALUE
     # is already Utf8 on both halves here. This explicit cast is defensive --
@@ -299,6 +333,32 @@ def compute_treatment_anchor(medications_df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def compute_first_platinum(medications_df: pd.DataFrame) -> pd.DataFrame:
+    """Earliest platinum MED_START_DT (and drug name) per patient, computed
+    in-memory from the raw medications table -- replaces the old
+    platinum_chemo_records.csv read (Stage 1 no longer persists that file).
+    Mirrors compute_first_platinum in compile_COMPASS_cohort_data.py; output
+    schema (``medication``/``medication_start_time``) matches what that file
+    used to carry, so build_longitudinal_prediction_data needs no changes.
+    """
+    meds = medications_df.copy()
+    meds["NCI_PREFERRED_MED_NM"] = meds["NCI_PREFERRED_MED_NM"].astype(str).str.upper().str.strip()
+    meds = meds.loc[meds["NCI_PREFERRED_MED_NM"].isin(PLATINUM_MEDS)].copy()
+    meds["_med_start_dt_parsed"] = pd.to_datetime(meds["MED_START_DT"], errors="coerce")
+    meds = meds.dropna(subset=["_med_start_dt_parsed"])
+    meds = (
+        meds.sort_values("_med_start_dt_parsed")
+        .drop_duplicates(subset=ID_COL, keep="first")
+        .drop(columns="_med_start_dt_parsed")
+    )
+    return meds[[ID_COL, "NCI_PREFERRED_MED_NM", "MED_START_DT"]].rename(
+        columns={
+            "NCI_PREFERRED_MED_NM": "medication",
+            "MED_START_DT": "medication_start_time",
+        }
+    )
+
+
 def build_longitudinal_prediction_data(
     consolidated_df: pd.DataFrame,
     first_prostate_diagnosis: pd.DataFrame,
@@ -306,9 +366,21 @@ def build_longitudinal_prediction_data(
     platinum_df: pd.DataFrame,
     treatment_anchor_df: pd.DataFrame,
 ) -> tuple[pd.DataFrame, dict]:
+    """Build the survival-ready longitudinal frame.
+
+    No MRN restriction is applied here: `consolidated_df` covers every
+    patient in the raw OncDRS pull, and `death_df` is left-joined (not
+    inner-joined) so patients outside every cohort in compile_COMPASS_cohort_data.py
+    are kept with all-null outcome columns rather than silently dropped.
+    Cohort selection happens downstream in build_prediction_inputs.py via
+    --restrict-to-mrns.
+    """
     prediction_df = consolidated_df[
-        [ID_COL, "DATE", "collapsed_measurement", "numeric_result_standardized"]
-    ].dropna().copy()
+        [ID_COL, "DATE", "collapsed_measurement", "numeric_result_standardized", "RAW_TEST_CODE"]
+    ].dropna(subset=[ID_COL, "DATE", "collapsed_measurement", "numeric_result_standardized"]).copy()
+
+    n_raw_mrns = prediction_df[ID_COL].nunique()
+    print(f"[build_longitudinal_prediction_data] raw longitudinal patients={n_raw_mrns}.")
 
     # Collapse the platinum table to one row per patient (earliest platinum start).
     # Without this, the left-join below fans out every lab row by the number of
@@ -326,18 +398,22 @@ def build_longitudinal_prediction_data(
     n_lab_mrns = prediction_df[ID_COL].nunique()
     after_dx = prediction_df.merge(first_prostate_diagnosis, on=ID_COL, how="left")
     n_with_c61_dx = after_dx.loc[after_dx["DIAGNOSIS_DATE"].notna(), ID_COL].nunique()
-    after_death = after_dx.merge(death_df, on=ID_COL, how="inner")
-    n_after_death = after_death[ID_COL].nunique()
+    # Left join: patients outside every compile_COMPASS_cohort_data.py cohort
+    # (no row in death_df) are kept with all-null outcome columns rather than
+    # dropped -- cohort selection is a Stage 3 (--restrict-to-mrns) concern.
+    after_death = after_dx.merge(death_df, on=ID_COL, how="left")
+    n_with_outcome_data = after_death.loc[after_death["death"].notna(), ID_COL].nunique()
     print(
         f"[build_longitudinal_prediction_data] patients with labs={n_lab_mrns}; "
         f"with C61 diagnosis date={n_with_c61_dx}; "
-        f"after death-table inner-join={n_after_death} "
-        f"(dropped {n_lab_mrns - n_after_death})."
+        f"with outcome data (any cohort, left-joined)={n_with_outcome_data} "
+        f"(no cohort match: {n_lab_mrns - n_with_outcome_data})."
     )
     attrition = {
+        "n_raw_longitudinal_patients": n_raw_mrns,
         "n_with_labs": n_lab_mrns,
         "n_with_c61_diagnosis_date": n_with_c61_dx,
-        "n_after_death_table_join": n_after_death,
+        "n_with_outcome_data": n_with_outcome_data,
     }
     pred_df = after_death.merge(platinum_first, on=ID_COL, how="left")
     pred_df = pred_df.merge(treatment_anchor_df, on=ID_COL, how="left")
@@ -463,6 +539,7 @@ def build_longitudinal_prediction_data(
         "t_death",
         "LAB_NAME",
         "LAB_VALUE",
+        "RAW_TEST_CODE",
     ]
     return pred_df[ordered_cols].copy(), attrition
 
@@ -488,7 +565,6 @@ def summarize_default_cohort_filters(
     pred_df: pd.DataFrame,
     *,
     min_psa_count: int = MIN_PSA_COUNT,
-    total_psa_file: Path = NEPC_PROJ_PATH / "total_psa_records.csv",
 ) -> dict:
     """Preview the default downstream cohort filters on the broad lab frame.
 
@@ -498,9 +574,10 @@ def summarize_default_cohort_filters(
 
     Default downstream inclusion:
       - >= ``min_psa_count`` PSA labs counted from the BROAD PSA set
-        (total_psa_records.csv: total/free/complexed/ultrasensitive/etc.),
-        mirroring build_prediction_inputs.py. This is deliberately NOT the
-        narrow OMOP-collapsed LAB_NAME == "PSA" set, which drives predictions.
+        (RAW_TEST_CODE in BROAD_PSA_CODES: total/free/complexed/ultrasensitive/
+        etc.), mirroring build_prediction_inputs.py. This is deliberately NOT
+        the narrow OMOP-collapsed LAB_NAME == "PSA" set, which drives
+        predictions.
     Default downstream exclusion:
       - any PARPi exposure, identified from the pre-existing prostate
         medications table and carried as PARPI_EXPOSED
@@ -515,26 +592,13 @@ def summarize_default_cohort_filters(
     n_before = pred_df[ID_COL].nunique()
     print(f"Broad longitudinal prostate lab frame: {n_before} patients")
 
-    # Count PSA labs from the broad total_psa_records.csv set (all assay types),
-    # matching the prevalence gate in build_prediction_inputs.py. Fall back to the
-    # narrow in-frame LAB_NAME=="PSA" count only if that file is unavailable, so
-    # the preview still runs but flags the mismatch.
-    if total_psa_file.exists():
-        broad_psa = pd.read_csv(total_psa_file, low_memory=False)
-        broad_col = ID_COL if ID_COL in broad_psa.columns else "DFCI_MRN"
-        broad_ids = pd.to_numeric(broad_psa[broad_col], errors="coerce").dropna().astype(int)
-        psa_counts = broad_ids.value_counts()
-    else:
-        print(
-            f"  [warn] {total_psa_file} missing; PSA preview falls back to the "
-            f"narrow LAB_NAME=='PSA' count, which will UNDER-count vs the applied "
-            f"broad filter."
-        )
-        psa_counts = (
-            pred_df.loc[pred_df["LAB_NAME"].eq("PSA")]
-            .groupby(ID_COL)
-            .size()
-        )
+    # Count PSA labs from the broad RAW_TEST_CODE set (all assay types),
+    # matching the prevalence gate in build_prediction_inputs.py.
+    psa_counts = (
+        pred_df.loc[pred_df["RAW_TEST_CODE"].isin(BROAD_PSA_CODES)]
+        .groupby(ID_COL)
+        .size()
+    )
     keep_psa = psa_counts.loc[psa_counts >= min_psa_count].index
     preview_df = pred_df.loc[pred_df[ID_COL].isin(keep_psa)].copy()
     n_after_psa = preview_df[ID_COL].nunique()
@@ -593,37 +657,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--health-csv",
         type=Path,
-        default=NEPC_PROJ_PATH / "prostate_health_history_data.csv",
+        default=ONCDRS_PATH / "HEALTH_HISTORY.csv",
+        help="Raw OncDRS HEALTH_HISTORY.csv (full, unfiltered pull).",
     )
     parser.add_argument(
         "--labs-csv",
         type=Path,
-        default=NEPC_PROJ_PATH / "prostate_labs_data.csv",
+        default=ONCDRS_PATH / "OUTPT_LAB_RESULTS_LABS.csv",
+        help="Raw OncDRS OUTPT_LAB_RESULTS_LABS.csv (full, unfiltered pull).",
     )
     parser.add_argument(
         "--icd-csv",
         type=Path,
         default=NEPC_PROJ_PATH / "prostate_icd_data.csv",
-    )
-    parser.add_argument(
-        "--platinum-csv",
-        type=Path,
-        default=NEPC_PROJ_PATH / "platinum_chemo_records.csv",
+        help="ICD-C61 cohort record written by compile_COMPASS_cohort_data.py; "
+             "supplies the optional DIAGNOSIS_DATE column (first C61 diagnosis "
+             "per patient, left-joined). Does NOT restrict the output cohort -- "
+             "patients absent from this file simply get a null DIAGNOSIS_DATE.",
     )
     parser.add_argument(
         "--medications-csv",
         type=Path,
-        default=NEPC_PROJ_PATH / "prostate_medications_data.csv",
-        help="Pre-compiled prostate-cohort medications table (used for treatment anchor and PARPi flag).",
+        default=ONCDRS_PATH / "MEDICATIONS.csv",
+        help="Raw OncDRS MEDICATIONS.csv (full, unfiltered pull, no MRN "
+             "restriction; used for treatment anchor, in-memory platinum "
+             "computation, and PARPi flag).",
     )
     parser.add_argument(
         "--survival-cohort-csv",
         type=Path,
         default=DEFAULT_SURVIVAL_COHORT_CSV,
         help=(
-            "Per-patient survival cohort from compile_COMPASS_cohort_data.py. "
-            "Supplies the treatment anchor, age, death, and last-contact outcome columns "
-            "(replaces the legacy death_met_surv_df.csv.gz)."
+            "Per-patient survival cohort from compile_COMPASS_cohort_data.py "
+            "(defaults to the icd_or_vte UNION cohort). Supplies the treatment "
+            "anchor, age, death, and last-contact outcome columns via a LEFT "
+            "join -- does NOT restrict the output cohort; patients absent from "
+            "this file get all-null outcome columns and are dropped later only "
+            "by Stage 3's landmark validity checks (no anchor/duration)."
         ),
     )
     parser.add_argument(
@@ -665,6 +735,13 @@ def main() -> None:
     ]:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # ICD-C61 records, kept for compute_first_prostate_diagnosis below. No
+    # MRN restriction is applied anywhere in this script -- HEALTH_HISTORY/
+    # OUTPT_LAB_RESULTS_LABS/MEDICATIONS are all processed for the full raw
+    # OncDRS universe. Cohort selection is exclusively a Stage 3 concern via
+    # build_prediction_inputs.py's --restrict-to-mrns.
+    icds = pd.read_csv(args.icd_csv)
+
     # --- Polars reshape (scope boundary: everything up to consolidate_dfci_labs) ---
     health_df_pl = pl.scan_csv(args.health_csv, infer_schema_length=0).collect()
     labs_df_pl = pl.scan_csv(args.labs_csv, infer_schema_length=0).collect()
@@ -688,24 +765,31 @@ def main() -> None:
     consolidated_df = consolidate_dfci_labs(raw_longitudinal_df, mapping_df)
     consolidated_df.to_csv(args.consolidated_output_csv, index=False)
 
-    icds = pd.read_csv(args.icd_csv)
-    platinum_df = pd.read_csv(args.platinum_csv)
     death_df = load_death_df_from_survival_cohort(args.survival_cohort_csv)
 
     first_prostate_diagnosis = compute_first_prostate_diagnosis(icds)
 
-    # Loaded once and reused for both the treatment anchor (needs MED_START_DT) and
-    # the downstream PARPi-exposure flag (needs NCI_PREFERRED_MED_NM only).
+    # Loaded once and reused for the treatment anchor, in-memory platinum
+    # computation, and the downstream PARPi-exposure flag. Read from the raw,
+    # unfiltered OncDRS pull -- no MRN restriction (Stage 1 no longer writes
+    # a pre-filtered prostate_medications_data.csv).
     medications_df = pd.read_csv(
         args.medications_csv,
         usecols=[ID_COL, "NCI_PREFERRED_MED_NM", "MED_START_DT"],
     )
+    medications_df[ID_COL] = pd.to_numeric(medications_df[ID_COL], errors="coerce")
+    medications_df = medications_df.dropna(subset=[ID_COL]).copy()
+    medications_df[ID_COL] = medications_df[ID_COL].astype(int)
+
     treatment_anchor_df = compute_treatment_anchor(medications_df)
     n_anchor = len(treatment_anchor_df)
     print(
         f"Treatment anchor: {n_anchor} patients received a highlighted treatment "
         f"({', '.join(sorted(TREATMENT_ANCHOR_MEDS))})"
     )
+
+    platinum_df = compute_first_platinum(medications_df)
+    print(f"Platinum: {len(platinum_df)} patients received a platinum agent (prostate cohort).")
 
     longitudinal_prediction_df, build_attrition = build_longitudinal_prediction_data(
         consolidated_df,

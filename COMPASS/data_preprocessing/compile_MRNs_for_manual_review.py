@@ -1,5 +1,11 @@
 import os
+import sys
+
 import pandas as pd
+import polars as pl
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from data_preprocessing_common import fast_io  # noqa: E402
 
 # Paths
 DATA_PATH = '/data/gusev/USERS/jpconnor/data/'
@@ -10,20 +16,44 @@ PROFILE_PATH = '/data/gusev/PROFILE/CLINICAL/'
 INTAE_DATA_PATH = os.path.join(PROFILE_PATH, 'robust_VTE_pred_project_2025_03_cohort/data/')
 ONCDRS_PATH = os.path.join(PROFILE_PATH, 'OncDRS/ALL_2025_03/')
 
+PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN", "CISPLATIN/CYCLOPHOSPHAMIDE/ETOPOSIDE"}
+
 # Load metadata
 cancer_types = pd.read_csv(os.path.join(INTAE_DATA_PATH, 'first_treatments_dfci_w_inferred_cancers.csv'))[['DFCI_MRN', 'med_genomics_merged_cancer_group']]
 prostate_mrns = cancer_types.loc[cancer_types['med_genomics_merged_cancer_group'] == 'PROSTATE', 'DFCI_MRN'].unique()
 
-meds = pd.read_csv(os.path.join(NEPC_PROJ_PATH, 'prostate_medications_data.csv'))
-platinum_meds = pd.read_csv(os.path.join(NEPC_PROJ_PATH, 'platinum_chemo_records.csv'))
+## ADDING INFO FOR NON-PROSTATE PRIMARY MALIGNANCIES
+# Read first so its MRN set can scope the raw medications/somatic reads below
+# (Stage 1 no longer persists cohort-filtered medications/somatic dumps).
+prostate_icds = pd.read_csv(os.path.join(NEPC_PROJ_PATH, 'prostate_icd_data.csv'))
+icd_c61_mrns = set(pd.to_numeric(prostate_icds['DFCI_MRN'], errors='coerce').dropna().astype(int).unique())
+
+meds = (
+    fast_io.recover_numeric(
+        fast_io.scan_filter(os.path.join(ONCDRS_PATH, 'MEDICATIONS.csv'), icd_c61_mrns).collect(),
+        exclude=(fast_io.ID_COL,),
+    )
+    .with_columns(pl.col(fast_io.ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False))
+    .to_pandas()
+)
+
+platinum_meds_pd = meds.copy()
+platinum_meds_pd['NCI_PREFERRED_MED_NM'] = (
+    platinum_meds_pd['NCI_PREFERRED_MED_NM'].astype(str).str.upper().str.strip()
+)
+platinum_meds = (
+    platinum_meds_pd.loc[platinum_meds_pd['NCI_PREFERRED_MED_NM'].isin(PLATINUM_MEDS)]
+    .assign(_med_start_dt_parsed=lambda d: pd.to_datetime(d['MED_START_DT'], errors='coerce'))
+    .sort_values('_med_start_dt_parsed')
+    .drop_duplicates(subset='DFCI_MRN', keep='first')
+    .drop(columns='_med_start_dt_parsed')
+    .rename(columns={'NCI_PREFERRED_MED_NM': 'medication', 'MED_START_DT': 'medication_start_time'})
+)
 
 unfiltered_df = (platinum_meds
                   .rename(columns={'medication_start_time' : 'PLATINUM_START_TIME',
                                     'medication' : 'PLATINUM_NM'})
                   [['DFCI_MRN', 'PLATINUM_NM', 'PLATINUM_START_TIME']])
-
-## ADDING INFO FOR NON-PROSTATE PRIMARY MALIGNANCIES
-prostate_icds = pd.read_csv(os.path.join(NEPC_PROJ_PATH, 'prostate_icd_data.csv'))
 codes = prostate_icds['DIAGNOSIS_ICD10_CD'].astype(str).str.upper().str.strip()
 letter = codes.str.extract(r'^([A-Z])', expand=False)
 number = pd.to_numeric(codes.str.extract(r'^[A-Z](\d{1,3})', expand=False), errors='coerce')
@@ -58,7 +88,17 @@ parp_df = (meds.loc[meds['NCI_PREFERRED_MED_NM'].isin(['OLAPARIB', 'RUCAPARIB', 
            .rename(columns={'NCI_PREFERRED_MED_NM' : 'PARPi_NM',
                             'MED_START_DT' : 'PARPi_START_TIME'}))[['DFCI_MRN', 'PARPi_NM', 'PARPi_START_TIME']]
 
-prostate_somatic_df = pd.read_csv(os.path.join(NEPC_PROJ_PATH, 'prostate_somatic_data.csv'))
+prostate_somatic_df = (
+    fast_io.recover_numeric(
+        fast_io.scan_filter(
+            os.path.join(EMBED_PROJ_PATH, 'clinical_and_genomic_features/complete_somatic_data_df.csv.gz'),
+            icd_c61_mrns,
+        ).collect(),
+        exclude=(fast_io.ID_COL,),
+    )
+    .with_columns(pl.col(fast_io.ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False))
+    .to_pandas()
+)
 brca_cols = [col for col in prostate_somatic_df.columns if 'BRCA2' in col]
 brca_df = prostate_somatic_df[['DFCI_MRN'] + brca_cols].copy()
 brca_df['ANY_BRCA2_MUTATION'] = brca_df[brca_cols].sum(axis=1) > 0

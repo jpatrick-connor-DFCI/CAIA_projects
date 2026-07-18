@@ -2,59 +2,73 @@
 Script Name: compile_COMPASS_cohort_data.py
 
 Description:
-Single entry point that builds the full COMPASS prostate-cancer cohort data
-directly from the raw OncDRS 2025-03 pull. Merges what used to be two
+Single entry point that builds the COMPASS prostate-cancer cohort's ICD
+inclusion/exclusion record and ARPI/chemo-anchored survival (outcomes)
+cohort directly from the raw OncDRS 2025-03 pull. Merges what used to be two
 separate scripts:
 
-  * compile_prostate_data.py    -- cohort-filtered text/ICD/health/meds/labs/
-                                    somatic tables, PSA records, platinum
-                                    chemo records.
+  * compile_prostate_data.py    -- ICD cohort definition (the rest of that
+                                    script's cohort-filtered health/meds/
+                                    labs/somatic/PSA/platinum table dumps
+                                    have been removed; downstream consumers
+                                    now read the raw OncDRS tables directly --
+                                    see longitudinal_data_processing.py).
   * prostate_arpi_survival_preprocessing.py -- per-patient ARPI/chemo-anchored
                                     survival cohort (age, treatment anchor,
                                     death, platinum time-to-event).
+  * build_vte_cohort_mrn_list.py -- VTE-prediction-project inferred-cancer-type
+                                    prostate MRN list (now folded in as one of
+                                    the three cohort definitions below, instead
+                                    of a separate script).
 
-Cohort definition (unified):
-All patients are defined by ICD-10 code C61 (prostate primary), minus
-patients whose ICD history shows a competing non-prostate primary
-malignancy (see `mark_non_prostate_primary_icd`). This single ICD-C61
-cohort now drives every output below -- the text/ICD/health/meds/labs/
-somatic/PSA/platinum tables AND the survival cohort file all share it
-(previously the former used an inferred-cancer cohort from
-first_treatments_dfci_w_inferred_cancers.csv; that source is no longer
-read).
+Cohort definitions:
+Three MRN sets are built, each driving its own full outcomes cohort plus an
+ARPI/chemo-exposure-restricted subset (non-null TREATMENT_ANCHOR_DATE) --
+six outputs total:
+
+  * icd        -- ICD-10 code C61 (prostate primary), minus patients whose
+                   ICD history shows a competing non-prostate primary
+                   malignancy (see `mark_non_prostate_primary_icd`). This is
+                   the primary cohort.
+  * vte         -- VTE-prediction-project's inferred-cancer-type tag
+                   (med_genomics_merged_cancer_group == 'PROSTATE' in
+                   first_treatments_dfci_w_inferred_cancers.csv), used as-is.
+                   This is the older, smaller MRN universe COMPASS's cohort
+                   used to be built from.
+  * icd_or_vte  -- union of the two sets above.
 
 Raw date handling:
 All dates use the raw calendar columns directly (MED_START_DT, BIRTH_DT,
-HYBRID_DEATH_DT, DERIVED_LAST_ALIVE_DATE, SPECIMEN_COLLECT_DT), parsed with
-polars str.to_datetime. The de-identified "days since reference" offset columns
+HYBRID_DEATH_DT, DERIVED_LAST_ALIVE_DATE), parsed with polars
+str.to_datetime. The de-identified "days since reference" offset columns
 (D_MED_START_DT, D_BIRTH_DT, ...) are NOT used.
 
-Inputs (OncDRS raw pull + auxiliary project files):
-  * EHR_DIAGNOSIS.csv                        (ICD-10 -> cohort + exclusion)
-  * MEDICATIONS.csv                          (anchor, PARPi + platinum drugs)
-  * PT_INFO_STATUS_REGISTRATION.csv          (birth date, sex, death/last-alive)
-  * HEALTH_HISTORY.csv
-  * OUTPT_LAB_RESULTS_LABS.csv
-  * complete_somatic_data_df.csv.gz
+Inputs:
+  * EHR_DIAGNOSIS.csv (OncDRS raw)            ICD-10 -> icd cohort + exclusion
+  * first_treatments_dfci_w_inferred_cancers.csv (VTE project) -> vte cohort
+  * MEDICATIONS.csv (OncDRS raw)              anchor + platinum drugs, read
+                                               in-memory only -- not persisted
+  * PT_INFO_STATUS_REGISTRATION.csv (OncDRS raw)  birth date, sex, death/last-alive
 
 Outputs (in NEPC_PROJ_PATH):
-  * prostate_icd_data.csv
-  * prostate_health_history_data.csv
-  * prostate_medications_data.csv
-  * prostate_labs_data.csv
-  * prostate_somatic_data.csv
-  * total_psa_records.csv
-  * platinum_chemo_records.csv
-  * prostate_arpi_survival_cohort.csv
+  * prostate_icd_data.csv                        (ICD inclusion/exclusion record)
+  * prostate_arpi_survival_cohort.csv             (icd, full -- the primary
+                                                   cohort; unchanged filename,
+                                                   since longitudinal_data_processing.py
+                                                   hardcodes this as its default input)
+  * prostate_arpi_survival_cohort_icd_arpi.csv    (icd, ARPI-restricted)
+  * prostate_arpi_survival_cohort_vte.csv         (vte, full)
+  * prostate_arpi_survival_cohort_vte_arpi.csv    (vte, ARPI-restricted)
+  * prostate_arpi_survival_cohort_icd_or_vte.csv       (icd_or_vte, full)
+  * prostate_arpi_survival_cohort_icd_or_vte_arpi.csv  (icd_or_vte, ARPI-restricted)
 
 Author: J. Patrick Connor
-Date: 2026-07-14
+Date: 2026-07-18
 
 Implementation note:
-This script is fully polars (zero pandas) up through writing the cohort
-CSVs and the survival cohort. `data_preprocessing_common/fast_io.py`
+This script is fully polars (zero pandas) throughout. `data_preprocessing_common/fast_io.py`
 supplies the shared cohort-filtering (`scan_filter`) and dirty-numeric
-recovery (`recover_numeric`) helpers.
+recovery (`recover_numeric`) helpers used to read MEDICATIONS.csv in memory.
 """
 
 import argparse
@@ -70,11 +84,11 @@ ID_COL = "DFCI_MRN"
 
 # Paths
 DATA_PATH = '/data/gusev/USERS/jpconnor/data/'
-EMBED_PROJ_PATH = os.path.join(DATA_PATH, 'clinical_text_embedding_project/')
 NEPC_PROJ_PATH = os.path.join(DATA_PATH, 'CAIA/COMPASS/')
 
 PROFILE_PATH = '/data/gusev/PROFILE/CLINICAL/'
 ONCDRS_PATH = os.path.join(PROFILE_PATH, 'OncDRS/ALL_2025_03/')
+INTAE_DATA_PATH = os.path.join(PROFILE_PATH, 'robust_VTE_pred_project_2025_03_cohort/data/')
 
 # ARPI / defined-chemo anchor drugs (matches TREATMENT_ANCHOR_MEDS in
 # longitudinal_data_processing.py: ARPIs/androgen-axis, taxanes, radium-223).
@@ -163,6 +177,24 @@ def compute_prostate_cohort(icds: pl.DataFrame):
     return prostate_mrns, excluded
 
 
+def load_vte_prostate_mrns(vte_cancer_types_path) -> set:
+    """VTE-prediction-project MRNs tagged PROSTATE by
+    med_genomics_merged_cancer_group, used as-is (no ICD intersection). This
+    is the older, smaller MRN universe COMPASS's cohort used to be built
+    from -- see module docstring."""
+    cancer_types = pl.scan_csv(vte_cancer_types_path, infer_schema_length=0).select(
+        [ID_COL, 'med_genomics_merged_cancer_group']
+    ).collect()
+    mrns = (
+        cancer_types.filter(pl.col('med_genomics_merged_cancer_group') == 'PROSTATE')[ID_COL]
+        .cast(pl.Float64, strict=False)
+        .cast(pl.Int64, strict=False)
+    )
+    vte_mrns = set(mrns.drop_nulls().to_list())
+    print(f"VTE-project PROSTATE-tagged MRNs: {len(vte_mrns)}")
+    return vte_mrns
+
+
 def load_and_explode_icd(icd_path) -> pl.DataFrame:
     """Load the raw OncDRS EHR_DIAGNOSIS.csv and normalize it to one ICD-10
     code per row (columns DFCI_MRN, START_DT, DIAGNOSIS_ICD10_CD,
@@ -218,7 +250,7 @@ def load_and_explode_icd(icd_path) -> pl.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# compile_prostate_data.py-style cohort-filtered table dumps
+# ICD inclusion/exclusion output + in-memory medications read
 # ---------------------------------------------------------------------------
 
 def filter_and_save(filename, outname, cohort_mrns, cols=None) -> pl.DataFrame:
@@ -229,6 +261,15 @@ def filter_and_save(filename, outname, cohort_mrns, cols=None) -> pl.DataFrame:
     column re-projection (to preserve the exact requested column order) and
     the `.write_csv()` so output paths/signatures stay stable.
     """
+    filtered = filter_cohort(filename, cohort_mrns, cols=cols)
+    filtered.write_csv(outname)
+    return filtered
+
+
+def filter_cohort(filename, cohort_mrns, cols=None) -> pl.DataFrame:
+    """Same as `filter_and_save` but in-memory only -- no `.write_csv()`.
+    Used for tables that feed the outcomes cohort but are not themselves
+    persisted (e.g. MEDICATIONS.csv)."""
     lf = fast_io.scan_filter(filename, cohort_mrns, cols=cols)
     filtered = lf.collect()
     # Exclude ID_COL from recover_numeric's generic Utf8->Float64 cast: MRNs
@@ -242,84 +283,27 @@ def filter_and_save(filename, outname, cohort_mrns, cols=None) -> pl.DataFrame:
     )
     if cols:
         filtered = filtered.select(list(cols))
-    filtered.write_csv(outname)
     return filtered
 
 
-def compile_cohort_tables(prostate_mrns, icds: pl.DataFrame, icd_path):
-    """Build the cohort-filtered ICD/health/meds/labs/somatic/PSA/
-    platinum tables. Returns (meds_df, platinum_df) for reuse by the
-    survival cohort builder below."""
-    prostate_mrn_set = set(int(m) for m in prostate_mrns)
+def compile_cohort_tables(icd_mrns, all_cohort_mrns, icds: pl.DataFrame):
+    """Write the ICD inclusion/exclusion record (scoped to the icd cohort
+    only) and return a medications table in memory (not persisted), scoped to
+    the union of every cohort (`all_cohort_mrns`) so it can feed the outcomes
+    cohort builder for all three cohort definitions below. No other
+    cohort-filtered raw-table dumps are written here -- longitudinal_data_processing.py
+    now reads+scopes the raw OncDRS health/labs tables itself, and the
+    somatic table is read directly by compile_MRNs_for_manual_review.py when
+    needed."""
+    icd_mrn_set = set(int(m) for m in icd_mrns)
 
-    # Filter related datasets by the prostate cohort.
     mrn_num = icds[ID_COL].cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
-    icds_filtered = icds.filter(mrn_num.is_in(list(prostate_mrn_set)))
+    icds_filtered = icds.filter(mrn_num.is_in(list(icd_mrn_set)))
     icds_filtered.write_csv(os.path.join(NEPC_PROJ_PATH, 'prostate_icd_data.csv'))
 
-    health = filter_and_save(os.path.join(ONCDRS_PATH, 'HEALTH_HISTORY.csv'), os.path.join(NEPC_PROJ_PATH, 'prostate_health_history_data.csv'), prostate_mrn_set)
-    meds = filter_and_save(os.path.join(ONCDRS_PATH, 'MEDICATIONS.csv'), os.path.join(NEPC_PROJ_PATH, 'prostate_medications_data.csv'), prostate_mrn_set)
-    # Read/write only the labs columns actually consumed downstream:
-    #   longitudinal_data_processing.build_raw_longitudinal_data selects
-    #     DFCI_MRN, SPECIMEN_COLLECT_DT, TEST_TYPE_CD, TEST_TYPE_DESCR,
-    #     NUMERIC_RESULT, RESULT_UOM_NM
-    #   the PSA filter below needs TEST_TYPE_CD + NUMERIC_RESULT (subset of above)
-    #   build_prediction_inputs' broad PSA count needs DFCI_MRN + TEST_TYPE_CD +
-    #     NUMERIC_RESULT (also a subset)
-    # The other 7 columns previously carried (D_SPECIMEN_COLLECT_DT, RESULT_NBR,
-    # RESULT_TYPE_CD, RESULT_TYPE_DESCR, TEXT_RESULT, SPECIMEN_SRC_CD,
-    # SPECIMEN_SRC_DESCR) are not read by any consumer, so they are dropped from
-    # both the scan and the emitted prostate_labs_data.csv / total_psa_records.csv.
-    labs = filter_and_save(
-        os.path.join(ONCDRS_PATH, 'OUTPT_LAB_RESULTS_LABS.csv'),
-        os.path.join(NEPC_PROJ_PATH, 'prostate_labs_data.csv'),
-        prostate_mrn_set,
-        cols=['DFCI_MRN', 'SPECIMEN_COLLECT_DT', 'TEST_TYPE_CD', 'TEST_TYPE_DESCR',
-              'NUMERIC_RESULT', 'RESULT_UOM_NM'],
-    )
-    filter_and_save(
-        os.path.join(EMBED_PROJ_PATH, 'clinical_and_genomic_features/complete_somatic_data_df.csv.gz'),
-        os.path.join(NEPC_PROJ_PATH, 'prostate_somatic_data.csv'),
-        prostate_mrn_set,
-    )
+    meds = filter_cohort(os.path.join(ONCDRS_PATH, 'MEDICATIONS.csv'), set(int(m) for m in all_cohort_mrns))
 
-    # PSA lab filtering.
-    total_psa_labels = ['PSA', 'PSAR', 'PSATOTSCRN', 'CPSA', 'PSAMON', 'PSAULT', 'PSAT']
-    total_psa = labs.filter(
-        pl.col('TEST_TYPE_CD').is_in(total_psa_labels)
-        & pl.col('NUMERIC_RESULT').is_not_null()
-        & (pl.col('NUMERIC_RESULT') != 9999999.0)
-    )
-    total_psa.write_csv(os.path.join(NEPC_PROJ_PATH, 'total_psa_records.csv'))
-
-    # Platinum meds filtering. Normalize NCI_PREFERRED_MED_NM (upper/strip)
-    # before matching -- an un-normalized `==` comparison here previously
-    # risked silently missing case/whitespace-variant platinum records that
-    # the ARPI-anchored survival cohort (below) would still catch, since that
-    # code path normalizes. Both now agree.
-    meds_norm = meds.with_columns(
-        pl.col('NCI_PREFERRED_MED_NM').cast(pl.Utf8).str.to_uppercase().str.strip_chars().alias('NCI_PREFERRED_MED_NM')
-    )
-    platinum_df = (
-        meds_norm.filter(pl.col('NCI_PREFERRED_MED_NM').is_in(list(PLATINUM_MEDS)))
-        # Sort on a parsed datetime, not the raw string: a lexicographic sort of
-        # MED_START_DT only coincides with chronological order for ISO
-        # (YYYY-MM-DD) dates, so first-per-patient could otherwise pick the wrong
-        # "earliest" platinum record. Null/unparseable dates sort last (nulls_last)
-        # so a patient with any real date keeps it. The helper column is dropped
-        # before write_csv so the emitted medication_start_time is the original
-        # raw string, unchanged.
-        .with_columns(
-            pl.col('MED_START_DT').str.to_datetime(strict=False).alias('_med_start_dt_parsed')
-        )
-        .sort('_med_start_dt_parsed', nulls_last=True)
-        .unique(subset=[ID_COL], keep='first')
-        .drop('_med_start_dt_parsed')
-        .rename({'NCI_PREFERRED_MED_NM': 'medication', 'MED_START_DT': 'medication_start_time'})
-    )
-    platinum_df.write_csv(os.path.join(NEPC_PROJ_PATH, 'platinum_chemo_records.csv'))
-
-    return meds, platinum_df
+    return meds
 
 
 # ---------------------------------------------------------------------------
@@ -456,11 +440,11 @@ def build_survival_cohort(prostate_mrns, anchor_df: pl.DataFrame, platinum_df: p
     )
 
 
-def summarize_survival_cohort(cohort: pl.DataFrame):
+def summarize_survival_cohort(cohort: pl.DataFrame, label="cohort"):
     n = len(cohort)
     n_anchor = cohort['TREATMENT_ANCHOR_DATE'].is_not_null().sum()
-    print("\n=== Survival cohort summary ===")
-    print(f"Total ICD-C61 patients (post-exclusion): {n}")
+    print(f"\n=== Survival cohort summary ({label}) ===")
+    print(f"Total patients (post-exclusion): {n}")
     print(f"With an ARPI/chemo anchor drug: {n_anchor}")
     print(f"Deaths: {int(cohort['DEATH'].sum())}")
     print(f"Received platinum: {int(cohort['PLATINUM'].sum())}")
@@ -480,9 +464,10 @@ def summarize_survival_cohort(cohort: pl.DataFrame):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compile the full COMPASS prostate cohort data (ICD/health/"
-        "meds/labs/somatic/PSA/platinum tables + ARPI/chemo-anchored survival cohort) "
-        "from the raw OncDRS pull, all sharing one ICD-C61 cohort definition.",
+        description="Compile the COMPASS prostate cohort's ICD inclusion/"
+        "exclusion record and ARPI/chemo-anchored survival (outcomes) cohorts "
+        "from the raw OncDRS pull, for the icd, vte, and icd_or_vte cohort "
+        "definitions (each with a full and an ARPI-exposure-restricted variant).",
     )
     parser.add_argument(
         "--icd-source",
@@ -490,6 +475,13 @@ def main():
         default=os.path.join(ONCDRS_PATH, 'EHR_DIAGNOSIS.csv'),
         help="Raw OncDRS ICD source (EHR_DIAGNOSIS.csv) used to define the C61 cohort "
              "over the full patient universe.",
+    )
+    parser.add_argument(
+        "--vte-cancer-types",
+        type=str,
+        default=os.path.join(INTAE_DATA_PATH, 'first_treatments_dfci_w_inferred_cancers.csv'),
+        help="VTE-prediction-project inferred-cancer-type file (DFCI_MRN, "
+             "med_genomics_merged_cancer_group columns) used to define the vte cohort.",
     )
     parser.add_argument(
         "--oncdrs-path",
@@ -505,31 +497,62 @@ def main():
     )
     args = parser.parse_args()
 
-    # 1. Shared ICD-C61 cohort (drives every output below).
+    # 1. The three cohort MRN sets.
     icds = load_and_explode_icd(args.icd_source)
-    prostate_mrns, _ = compute_prostate_cohort(icds)
+    icd_mrns, _ = compute_prostate_cohort(icds)
+    vte_mrns = load_vte_prostate_mrns(args.vte_cancer_types)
+    icd_or_vte_mrns = icd_mrns | vte_mrns
+    overlap = icd_mrns & vte_mrns
+    print(
+        f"icd_or_vte union: {len(icd_or_vte_mrns)} patients "
+        f"(icd={len(icd_mrns)}, vte={len(vte_mrns)}, overlap={len(overlap)})."
+    )
 
-    # 2. compile_prostate_data.py-style cohort-filtered table dumps.
-    meds, platinum_df_compat = compile_cohort_tables(prostate_mrns, icds, args.icd_source)
+    cohorts = {
+        "icd": icd_mrns,
+        "vte": vte_mrns,
+        "icd_or_vte": icd_or_vte_mrns,
+    }
+
+    # 2. ICD inclusion/exclusion output (icd cohort only) + in-memory
+    #    medications scoped to the union of every cohort.
+    meds = compile_cohort_tables(icd_mrns, icd_or_vte_mrns, icds)
 
     # 3. ARPI/chemo-anchored survival cohort, reusing the meds already
-    #    filtered to the prostate cohort above.
+    #    scoped to every cohort above -- shared across all three cohort
+    #    definitions since anchor/platinum dates don't depend on cohort.
     meds_for_survival = load_medications_for_survival(meds)
     anchor_df = compute_treatment_anchor(meds_for_survival)
     platinum_df = compute_first_platinum(meds_for_survival)
     print(
         f"Anchor drug recipients: {len(anchor_df)}; "
-        f"platinum recipients: {len(platinum_df)} (prostate cohort)."
+        f"platinum recipients: {len(platinum_df)} (across all cohorts)."
     )
 
     status_df = load_patient_status(args.oncdrs_path)
 
-    survival_cohort = build_survival_cohort(prostate_mrns, anchor_df, platinum_df, status_df)
-    summarize_survival_cohort(survival_cohort)
+    # icd's full variant keeps the original filename since
+    # longitudinal_data_processing.py hardcodes it as its default input.
+    out_names = {
+        "icd": "prostate_arpi_survival_cohort.csv",
+        "vte": "prostate_arpi_survival_cohort_vte.csv",
+        "icd_or_vte": "prostate_arpi_survival_cohort_icd_or_vte.csv",
+    }
 
-    out_path = os.path.join(args.out_dir, 'prostate_arpi_survival_cohort.csv')
-    survival_cohort.write_csv(out_path)
-    print(f"\nSaved survival cohort to {out_path}")
+    for cohort_key, cohort_mrns in cohorts.items():
+        survival_cohort = build_survival_cohort(cohort_mrns, anchor_df, platinum_df, status_df)
+        summarize_survival_cohort(survival_cohort, label=cohort_key)
+
+        out_path = os.path.join(args.out_dir, out_names[cohort_key])
+        survival_cohort.write_csv(out_path)
+        print(f"Saved {cohort_key} survival cohort to {out_path}")
+
+        arpi_cohort = survival_cohort.filter(pl.col('TREATMENT_ANCHOR_DATE').is_not_null())
+        summarize_survival_cohort(arpi_cohort, label=f"{cohort_key}_arpi")
+
+        arpi_out_path = os.path.join(args.out_dir, f"prostate_arpi_survival_cohort_{cohort_key}_arpi.csv")
+        arpi_cohort.write_csv(arpi_out_path)
+        print(f"Saved {cohort_key}_arpi survival cohort to {arpi_out_path}")
 
 
 if __name__ == "__main__":

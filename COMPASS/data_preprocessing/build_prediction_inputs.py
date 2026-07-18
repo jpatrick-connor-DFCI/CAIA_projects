@@ -75,6 +75,13 @@ DEFAULT_VAL_FRAC = 0.20
 DEFAULT_TIME_UNIT_DAYS = 7
 DEFAULT_MIN_PSA_COUNT = 5
 
+# Broad PSA assay set (raw TEST_TYPE_CD, any assay type: total/free/complexed/
+# ultrasensitive/etc.), read from longitudinal_prediction_data.csv's
+# RAW_TEST_CODE passthrough column. This is deliberately NOT the narrow
+# OMOP-collapsed LAB_NAME == "PSA" set, which drives prediction features.
+# Kept in sync with BROAD_PSA_CODES in longitudinal_data_processing.py.
+BROAD_PSA_CODES = ["PSA", "PSAR", "PSATOTSCRN", "CPSA", "PSAMON", "PSAULT", "PSAT"]
+
 SPLIT_ASSIGNMENTS_FILENAME = "split_assignments.csv"
 LANDMARK_AVAILABILITY_FILENAME = "landmark_mrn_availability.csv"
 LANDMARK_ATTRITION_FILENAME = "landmark_attrition.json"
@@ -238,31 +245,26 @@ def load_mrn_subset(mrn_file: Path, id_col: str) -> set[int]:
     return set(ids.tolist())
 
 
-def load_broad_psa_counts(total_psa_file: Path, id_col: str) -> pd.Series:
-    """Per-patient count of *broad* PSA labs from total_psa_records.csv.
+def load_broad_psa_counts(df: pd.DataFrame, id_col: str) -> pd.Series:
+    """Per-patient count of *broad* PSA labs from the already-loaded
+    longitudinal_prediction_data.csv frame's RAW_TEST_CODE column.
 
     Prevalence filtering counts any and all PSA assays (total, free, complexed,
-    ultrasensitive, percentage, etc.) as written by compile_COMPASS_cohort_data.py
-    -- i.e. the full TEST_TYPE_CD set, NOT the narrow OMOP-collapsed
-    ``LAB_NAME == "PSA"`` set that drives the prediction features. Each row in
-    this file is one PSA result, so the group size is the assay count per patient.
+    ultrasensitive, percentage, etc. -- BROAD_PSA_CODES) as carried through by
+    longitudinal_data_processing.py's RAW_TEST_CODE passthrough, NOT the narrow
+    OMOP-collapsed ``LAB_NAME == "PSA"`` set that drives the prediction
+    features. Each matching row is one PSA result, so the group size is the
+    assay count per patient.
 
     Returns an int Series indexed by patient id.
     """
-    if not total_psa_file.exists():
-        raise FileNotFoundError(
-            f"--min-psa-count requires the broad PSA records file, but "
-            f"{total_psa_file} does not exist. Point --total-psa-file at the "
-            f"total_psa_records.csv written by compile_COMPASS_cohort_data.py."
-        )
-    psa = pd.read_csv(total_psa_file, low_memory=False)
-    col = id_col if id_col in psa.columns else "DFCI_MRN"
-    if col not in psa.columns:
+    if "RAW_TEST_CODE" not in df.columns:
         raise ValueError(
-            f"{total_psa_file} has no '{id_col}'/'DFCI_MRN' column; "
-            f"columns={list(psa.columns)[:8]}"
+            "--min-psa-count requires a RAW_TEST_CODE column in --data "
+            "(written by longitudinal_data_processing.py); none found."
         )
-    ids = pd.to_numeric(psa[col], errors="coerce").dropna().astype(int)
+    psa = df.loc[df["RAW_TEST_CODE"].isin(BROAD_PSA_CODES)]
+    ids = pd.to_numeric(psa[id_col], errors="coerce").dropna().astype(int)
     return ids.value_counts()
 
 
@@ -309,14 +311,15 @@ def apply_downstream_cohort_filters(
     print(f"Downstream cohort filter start: {n_start} patients")
 
     if min_psa_count > 0:
-        # Prevalence gate uses the BROAD PSA set (all PSA assays from
-        # total_psa_records.csv), not the narrow OMOP-collapsed LAB_NAME=="PSA"
-        # rows in this frame. The latter still drives prediction features
-        # downstream; only cohort inclusion counts the broad set here.
+        # Prevalence gate uses the BROAD PSA set (all PSA assays, from
+        # --data's RAW_TEST_CODE column via load_broad_psa_counts), not the
+        # narrow OMOP-collapsed LAB_NAME=="PSA" rows in this frame. The latter
+        # still drives prediction features downstream; only cohort inclusion
+        # counts the broad set here.
         if broad_psa_counts is None:
             raise ValueError(
                 "--min-psa-count > 0 requires broad_psa_counts "
-                "(loaded from --total-psa-file)."
+                "(loaded from --data's RAW_TEST_CODE column)."
             )
         keep_psa = broad_psa_counts.loc[broad_psa_counts >= min_psa_count].index
         out = out.loc[out[ID_COL].isin(keep_psa)].copy()
@@ -509,9 +512,8 @@ def main(args: argparse.Namespace) -> None:
 
     broad_psa_counts = None
     if args.min_psa_count > 0:
-        total_psa_file = Path(args.total_psa_file)
-        print(f"Loading broad PSA records for prevalence filter from {total_psa_file} ...")
-        broad_psa_counts = load_broad_psa_counts(total_psa_file, ID_COL)
+        print(f"Computing broad PSA prevalence counts from RAW_TEST_CODE in {data_path} ...")
+        broad_psa_counts = load_broad_psa_counts(df, ID_COL)
         print(
             f"  Broad PSA records: {int(broad_psa_counts.sum())} labs across "
             f"{broad_psa_counts.size} patients"
@@ -779,18 +781,9 @@ if __name__ == "__main__":
         default=DEFAULT_MIN_PSA_COUNT,
         help=(
             "Minimum number of PSA labs (broad set: total/free/complexed/"
-            "ultrasensitive/etc. from --total-psa-file) required before landmark "
-            "building. Set to 0 to disable this downstream cohort filter."
-        ),
-    )
-    parser.add_argument(
-        "--total-psa-file",
-        default=str(DATA_PATH / "total_psa_records.csv"),
-        help=(
-            "Broad PSA records CSV (one row per PSA lab, any assay type) written "
-            "by compile_COMPASS_cohort_data.py. Used only for the --min-psa-count "
-            "prevalence gate; prediction features still use the OMOP-collapsed "
-            "LAB_NAME == 'PSA' set."
+            "ultrasensitive/etc., from --data's RAW_TEST_CODE column) required "
+            "before landmark building. Set to 0 to disable this downstream "
+            "cohort filter."
         ),
     )
     parser.add_argument(
