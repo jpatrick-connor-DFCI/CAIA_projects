@@ -64,11 +64,16 @@ from survival_common.helper import (  # noqa: E402
     compute_horizon_grid,
     select_canonical_labs,
 )
+from survival_common.plotting import (  # noqa: E402
+    DROP as VITALS_DROP,
+    VITALS,
+    canonicalize_lab_name,
+)
 
 DEFAULT_OUTPUT_SUBDIR = "prediction_inputs"
 DEFAULT_VAL_FRAC = 0.20
 DEFAULT_TIME_UNIT_DAYS = 7
-DEFAULT_MIN_PSA_COUNT = 3
+DEFAULT_MIN_PSA_COUNT = 5
 
 SPLIT_ASSIGNMENTS_FILENAME = "split_assignments.csv"
 LANDMARK_AVAILABILITY_FILENAME = "landmark_mrn_availability.csv"
@@ -259,6 +264,27 @@ def load_broad_psa_counts(total_psa_file: Path, id_col: str) -> pd.Series:
         )
     ids = pd.to_numeric(psa[col], errors="coerce").dropna().astype(int)
     return ids.value_counts()
+
+
+EXCLUDED_LAB_NAMES = VITALS | VITALS_DROP
+
+
+def drop_vitals_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop vitals LAB_NAME rows so vitals never enter the feature set.
+
+    Applied to the raw long-format lab frame before canonical-lab selection
+    and feature-matrix construction, so vitals are excluded everywhere
+    downstream (aggregated features, pre-treatment lab long export, canonical
+    labs list).
+    """
+    if "LAB_NAME" not in df.columns:
+        return df
+    canonical = df["LAB_NAME"].astype(str).str.strip().map(canonicalize_lab_name)
+    is_vital = canonical.isin(EXCLUDED_LAB_NAMES)
+    n_dropped = int(is_vital.sum())
+    if n_dropped:
+        print(f"  Vitals exclusion: dropped {n_dropped} rows ({sorted(canonical[is_vital].unique())})")
+    return df.loc[~is_vital].copy()
 
 
 def apply_downstream_cohort_filters(
@@ -460,6 +486,8 @@ def main(args: argparse.Namespace) -> None:
     df[ID_COL] = df[ID_COL].astype(int)
     n_loaded_cohort = df[ID_COL].nunique()
     print(f"Loaded cohort: {n_loaded_cohort} unique MRNs")
+
+    df = drop_vitals_rows(df)
 
     # Optional restrict-to-MRNs subset: filter the raw cohort to the requested
     # MRN list BEFORE building landmark cohorts, so the train/valid/test split,
