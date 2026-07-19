@@ -17,6 +17,7 @@ for _p in (str(REPO_ROOT), str(PROJECT_DIR), str(SURVIVAL_DIR), str(SCRIPT_DIR))
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from data_preprocessing_common import fast_io  # noqa: E402
 from data_preprocessing_common.dfci_labs import (  # noqa: E402
     DEFAULT_MAPPING_CSV,
     consolidate_dfci_labs,
@@ -39,10 +40,11 @@ SURV_PATH = EMBED_PROJ_PATH / "time-to-event_analysis"
 # straight from the raw OncDRS pull. It supplies the outcome/anchor columns
 # (age, treatment anchor, death, last-contact, platinum) that used to come from
 # death_met_surv_df.csv.gz. See load_death_df_from_survival_cohort. Defaults to
-# the icd_or_vte UNION cohort (not the icd-only file) so every patient in any
-# of compile_COMPASS_cohort_data.py's 6 cohort variants has real outcome data
-# here -- Stage 2 itself applies no MRN restriction (see build_raw_longitudinal_data
-# / build_longitudinal_prediction_data); cohort selection is a Stage 3
+# the icd_or_vte UNION cohort (not the icd-only file). main() loads this file
+# first and uses its MRN set both to scan-filter the raw HEALTH_HISTORY/
+# OUTPT_LAB_RESULTS_LABS/MEDICATIONS reads and to restrict the final output --
+# this is the one cohort-membership filter Stage 2 applies. Narrower cohort
+# variants (icd-only, vte-only, either ARPI-restricted) remain a Stage 3
 # (build_prediction_inputs.py --restrict-to-mrns) concern.
 DEFAULT_SURVIVAL_COHORT_CSV = NEPC_PROJ_PATH / "prostate_arpi_survival_cohort_icd_or_vte.csv"
 
@@ -183,12 +185,14 @@ def build_raw_longitudinal_data(
     """Reshape raw OncDRS HEALTH_HISTORY/OUTPT_LAB_RESULTS_LABS into one long
     vitals+labs table.
 
-    `health_df`/`labs_df` are the FULL raw OncDRS tables, unfiltered by any
-    cohort MRN set -- Stage 2 applies no MRN restriction at all. Cohort
+    This function itself applies no MRN restriction -- it reshapes whatever
+    `health_df`/`labs_df` it is given. main() passes frames already
+    scan-filtered to the icd_or_vte union cohort (see union_cohort_mrns), but
+    that filtering happens at the call site, not here. Narrower cohort
     selection (icd / vte / icd_or_vte, each full or ARPI-restricted) is
     applied downstream in build_prediction_inputs.py via --restrict-to-mrns,
-    so this reshape only needs to run once and every cohort variant can be
-    compared from the same broad longitudinal_prediction_data.csv output.
+    so every narrower cohort variant can be compared from the same
+    longitudinal_prediction_data.csv output.
     """
     # Both inputs are scanned all-String (infer_schema_length=0), so DFCI_MRN
     # arrives as Utf8 here. Cast it back to Int64 before it flows into
@@ -368,12 +372,14 @@ def build_longitudinal_prediction_data(
 ) -> tuple[pd.DataFrame, dict]:
     """Build the survival-ready longitudinal frame.
 
-    No MRN restriction is applied here: `consolidated_df` covers every
-    patient in the raw OncDRS pull, and `death_df` is left-joined (not
-    inner-joined) so patients outside every cohort in compile_COMPASS_cohort_data.py
-    are kept with all-null outcome columns rather than silently dropped.
-    Cohort selection happens downstream in build_prediction_inputs.py via
-    --restrict-to-mrns.
+    No MRN restriction is applied here: this function reshapes whatever
+    `consolidated_df` it is given (main() passes data already scan-filtered
+    to the icd_or_vte union), and `death_df` is left-joined (not
+    inner-joined) so any patient without a death_df row is kept with
+    all-null outcome columns rather than silently dropped. The caller
+    (main()) applies a belt-and-suspenders union-cohort filter to the
+    returned frame afterward; narrower cohort variants remain a
+    build_prediction_inputs.py --restrict-to-mrns concern.
     """
     prediction_df = consolidated_df[
         [ID_COL, "DATE", "collapsed_measurement", "numeric_result_standardized", "RAW_TEST_CODE"]
@@ -658,13 +664,17 @@ def parse_args() -> argparse.Namespace:
         "--health-csv",
         type=Path,
         default=ONCDRS_PATH / "HEALTH_HISTORY.csv",
-        help="Raw OncDRS HEALTH_HISTORY.csv (full, unfiltered pull).",
+        help="Raw OncDRS HEALTH_HISTORY.csv. Lazily scan-filtered to the "
+             "--survival-cohort-csv MRN set (see that flag) before it is "
+             "ever fully materialized.",
     )
     parser.add_argument(
         "--labs-csv",
         type=Path,
         default=ONCDRS_PATH / "OUTPT_LAB_RESULTS_LABS.csv",
-        help="Raw OncDRS OUTPT_LAB_RESULTS_LABS.csv (full, unfiltered pull).",
+        help="Raw OncDRS OUTPT_LAB_RESULTS_LABS.csv. Lazily scan-filtered to "
+             "the --survival-cohort-csv MRN set (see that flag) before it is "
+             "ever fully materialized.",
     )
     parser.add_argument(
         "--icd-csv",
@@ -679,9 +689,10 @@ def parse_args() -> argparse.Namespace:
         "--medications-csv",
         type=Path,
         default=ONCDRS_PATH / "MEDICATIONS.csv",
-        help="Raw OncDRS MEDICATIONS.csv (full, unfiltered pull, no MRN "
-             "restriction; used for treatment anchor, in-memory platinum "
-             "computation, and PARPi flag).",
+        help="Raw OncDRS MEDICATIONS.csv, used for treatment anchor, "
+             "in-memory platinum computation, and PARPi flag. Lazily "
+             "scan-filtered to the --survival-cohort-csv MRN set (see that "
+             "flag) before it is ever fully materialized.",
     )
     parser.add_argument(
         "--survival-cohort-csv",
@@ -691,9 +702,10 @@ def parse_args() -> argparse.Namespace:
             "Per-patient survival cohort from compile_COMPASS_cohort_data.py "
             "(defaults to the icd_or_vte UNION cohort). Supplies the treatment "
             "anchor, age, death, and last-contact outcome columns via a LEFT "
-            "join -- does NOT restrict the output cohort; patients absent from "
-            "this file get all-null outcome columns and are dropped later only "
-            "by Stage 3's landmark validity checks (no anchor/duration)."
+            "join, and ALSO defines the output cohort: main() restricts the "
+            "final longitudinal_prediction_df to this file's MRN set after the "
+            "join. Point this at a narrower/wider cohort file to change which "
+            "patients Stage 2 outputs."
         ),
     )
     parser.add_argument(
@@ -735,16 +747,26 @@ def main() -> None:
     ]:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # ICD-C61 records, kept for compute_first_prostate_diagnosis below. No
-    # MRN restriction is applied anywhere in this script -- HEALTH_HISTORY/
-    # OUTPT_LAB_RESULTS_LABS/MEDICATIONS are all processed for the full raw
-    # OncDRS universe. Cohort selection is exclusively a Stage 3 concern via
-    # build_prediction_inputs.py's --restrict-to-mrns.
+    # ICD-C61 records, kept for compute_first_prostate_diagnosis below. Small
+    # and left-joined later, so it is read in full (unfiltered) rather than
+    # gated on union_cohort_mrns.
     icds = pd.read_csv(args.icd_csv)
 
+    # Output cohort = the icd_or_vte union (every MRN in args.survival_cohort_csv,
+    # which defaults to prostate_arpi_survival_cohort_icd_or_vte.csv). Loaded
+    # first so HEALTH_HISTORY/OUTPT_LAB_RESULTS_LABS/MEDICATIONS -- each tens of
+    # millions of rows across the full raw OncDRS universe -- can be filtered to
+    # this MRN set during the lazy scan itself, rather than read in full and
+    # filtered afterward. Narrower cohort variants (icd-only, vte-only,
+    # ARPI-restricted) remain a Stage 3 concern via build_prediction_inputs.py's
+    # --restrict-to-mrns.
+    death_df = load_death_df_from_survival_cohort(args.survival_cohort_csv)
+    union_cohort_mrns = set(int(m) for m in death_df[ID_COL].unique())
+    print(f"[main] icd_or_vte union cohort: {len(union_cohort_mrns)} patients.")
+
     # --- Polars reshape (scope boundary: everything up to consolidate_dfci_labs) ---
-    health_df_pl = pl.scan_csv(args.health_csv, infer_schema_length=0).collect()
-    labs_df_pl = pl.scan_csv(args.labs_csv, infer_schema_length=0).collect()
+    health_df_pl = fast_io.scan_filter(args.health_csv, union_cohort_mrns).collect()
+    labs_df_pl = fast_io.scan_filter(args.labs_csv, union_cohort_mrns).collect()
     raw_longitudinal_df_pl = build_raw_longitudinal_data(health_df_pl, labs_df_pl)
 
     unique_labs_df_pl = (
@@ -765,17 +787,20 @@ def main() -> None:
     consolidated_df = consolidate_dfci_labs(raw_longitudinal_df, mapping_df)
     consolidated_df.to_csv(args.consolidated_output_csv, index=False)
 
-    death_df = load_death_df_from_survival_cohort(args.survival_cohort_csv)
-
     first_prostate_diagnosis = compute_first_prostate_diagnosis(icds)
 
     # Loaded once and reused for the treatment anchor, in-memory platinum
-    # computation, and the downstream PARPi-exposure flag. Read from the raw,
-    # unfiltered OncDRS pull -- no MRN restriction (Stage 1 no longer writes
-    # a pre-filtered prostate_medications_data.csv).
-    medications_df = pd.read_csv(
-        args.medications_csv,
-        usecols=[ID_COL, "NCI_PREFERRED_MED_NM", "MED_START_DT"],
+    # computation, and the downstream PARPi-exposure flag. Filtered to
+    # union_cohort_mrns during the lazy scan for the same reason as
+    # health/labs above.
+    medications_df = (
+        fast_io.scan_filter(
+            args.medications_csv,
+            union_cohort_mrns,
+            cols=[ID_COL, "NCI_PREFERRED_MED_NM", "MED_START_DT"],
+        )
+        .collect()
+        .to_pandas()
     )
     medications_df[ID_COL] = pd.to_numeric(medications_df[ID_COL], errors="coerce")
     medications_df = medications_df.dropna(subset=[ID_COL]).copy()
@@ -799,6 +824,22 @@ def main() -> None:
         treatment_anchor_df,
     )
 
+    # health/labs/medications were already scan-filtered to union_cohort_mrns
+    # above, so this should be a no-op; kept as a cheap belt-and-suspenders
+    # check (e.g. against icds/first_prostate_diagnosis, which are read
+    # unfiltered) and to record the attrition count explicitly.
+    n_before_union_filter = longitudinal_prediction_df[ID_COL].nunique()
+    longitudinal_prediction_df = longitudinal_prediction_df.loc[
+        longitudinal_prediction_df[ID_COL].isin(union_cohort_mrns)
+    ].copy()
+    n_after_union_filter = longitudinal_prediction_df[ID_COL].nunique()
+    print(
+        f"[main] icd_or_vte union cohort restriction: {n_after_union_filter}/"
+        f"{n_before_union_filter} patients retained "
+        f"(dropped {n_before_union_filter - n_after_union_filter} not in "
+        f"{args.survival_cohort_csv.name})."
+    )
+
     longitudinal_prediction_df = annotate_parpi_exposure(
         longitudinal_prediction_df,
         medications_df=medications_df,
@@ -812,6 +853,8 @@ def main() -> None:
     # other outputs instead of only living in the run log.
     cohort_attrition = {
         **build_attrition,
+        "n_before_icd_or_vte_union_filter": int(n_before_union_filter),
+        "n_after_icd_or_vte_union_filter": int(n_after_union_filter),
         **filter_attrition,
         "n_with_highlighted_treatment_anchor": int(n_anchor),
         "n_output_patients": int(longitudinal_prediction_df[ID_COL].nunique()),
