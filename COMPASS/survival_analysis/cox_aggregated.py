@@ -96,7 +96,7 @@ ENDPOINTS = {
     "platinum": {
         "duration_col": "t_platinum",
         "event_col": "PLATINUM",
-        "description": "Time from first treatment start to first platinum exposure",
+        "description": "Time from the treatment anchor (first ARPI/taxane/radium-223 exposure = time 0) to first platinum exposure",
         # Competing-risks spec (survival_common.finegray): death is a competing
         # event for platinum. event_type (built in survival_common.cohort.
         # make_outcome_df) is 1=platinum, 2=death, 0=censored. Univariate runs
@@ -132,9 +132,6 @@ OUTCOME_METADATA_COLUMNS = {
     "t_either",
     "event_type",
     "split",
-    "CANCER_STAGE_II",
-    "CANCER_STAGE_III",
-    "CANCER_STAGE_IV",
 }
 
 
@@ -145,18 +142,6 @@ def outcome_columns() -> set[str]:
     respected. Callers must use this rather than a module-level set literal.
     """
     return OUTCOME_METADATA_COLUMNS | {AGE_COL}
-
-STAGE_FEATURE_COLUMNS = ("CANCER_STAGE_II", "CANCER_STAGE_III", "CANCER_STAGE_IV")
-
-
-def stage_feature_columns(data: pd.DataFrame) -> list[str]:
-    return [c for c in STAGE_FEATURE_COLUMNS if c in data.columns]
-
-
-def stage_available_mask(data: pd.DataFrame, stage_cols: list[str]) -> pd.Series:
-    if not stage_cols:
-        return pd.Series(True, index=data.index)
-    return data[stage_cols].notna().all(axis=1)
 
 
 def normalize_endpoints(raw_endpoints: list[str]) -> list[str]:
@@ -411,31 +396,12 @@ def prepare_landmark_context(
     landmark_day: int,
     *,
     min_patient_coverage: float,
-    restrict_to_stage: bool,
     canonical_labs_override: list[str] | None = None,
 ) -> LandmarkContext:
     print(f"\n##### LANDMARK ANALYSES: +{landmark_day} DAYS #####")
     merged, train_val, test, pre_treatment_lab_df = _load_prebuilt_landmark(
         inputs_dir, landmark_day
     )
-
-    if restrict_to_stage:
-        stage_cols = stage_feature_columns(merged)
-        if not stage_cols:
-            raise SystemExit(
-                "--restrict-to-stage requires CANCER_STAGE_* columns in the "
-                "aggregated inputs (build with --stage-file; PROFILE only)."
-            )
-        keep = merged.index[stage_available_mask(merged, stage_cols)]
-        n_before = len(merged)
-        merged = merged.loc[merged.index.intersection(keep)]
-        train_val = train_val.loc[train_val.index.intersection(keep)]
-        test = test.loc[test.index.intersection(keep)]
-        print(
-            f"  [restrict-to-stage] stage-available cohort: "
-            f"{len(merged)}/{n_before} patients "
-            f"(train_val={len(train_val)}, test={len(test)})"
-        )
 
     raw_feature_cols = [c for c in merged.columns if c not in outcome_columns()]
     univariate_data = merged.copy()

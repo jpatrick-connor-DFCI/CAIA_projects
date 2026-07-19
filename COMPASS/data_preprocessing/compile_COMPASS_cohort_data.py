@@ -32,10 +32,17 @@ six outputs total:
                    the primary cohort.
   * vte         -- VTE-prediction-project's inferred-cancer-type tag
                    (med_genomics_merged_cancer_group == 'PROSTATE' in
-                   first_treatments_dfci_w_inferred_cancers.csv), used as-is.
-                   This is the older, smaller MRN universe COMPASS's cohort
-                   used to be built from.
-  * icd_or_vte  -- union of the two sets above.
+                   first_treatments_dfci_w_inferred_cancers.csv), minus the
+                   SAME non-prostate-primary exclusion applied to `icd` above
+                   (see `compute_non_prostate_primary_mrns`). This is the
+                   older, smaller MRN universe COMPASS's cohort used to be
+                   built from.
+  * icd_or_vte  -- union of the two (already-excluded) sets above.
+
+The non-prostate-primary exclusion is computed once from the full ICD
+history and applied identically to all three cohort definitions, so no
+cohort arm can retain a patient with a documented competing primary
+malignancy that another arm excludes.
 
 Raw date handling:
 All dates use the raw calendar columns directly (MED_START_DT, BIRTH_DT,
@@ -61,6 +68,11 @@ Outputs (in NEPC_PROJ_PATH):
   * prostate_arpi_survival_cohort_vte_arpi.csv    (vte, ARPI-restricted)
   * prostate_arpi_survival_cohort_icd_or_vte.csv       (icd_or_vte, full)
   * prostate_arpi_survival_cohort_icd_or_vte_arpi.csv  (icd_or_vte, ARPI-restricted)
+
+Also writes six bare DFCI_MRN-only CSVs (one per cohort arm above) to
+mrn_lists_dir (default NEPC_PROJ_PATH/mrn_lists/): icd_mrns.csv,
+icd_arpi_mrns.csv, vte_mrns.csv, vte_arpi_mrns.csv, icd_or_vte_mrns.csv,
+icd_or_vte_arpi_mrns.csv.
 
 Author: J. Patrick Connor
 Date: 2026-07-18
@@ -146,7 +158,21 @@ def mark_non_prostate_primary_icd(icds: pl.DataFrame) -> pl.DataFrame:
     return icds.with_columns(non_prostate_primary.alias("NON_PROSTATE_PRIMARY_ICD10"))
 
 
-def compute_prostate_cohort(icds: pl.DataFrame):
+def compute_non_prostate_primary_mrns(icds: pl.DataFrame) -> set:
+    """MRNs with ANY ICD row indicating a competing non-prostate primary
+    malignancy. Computed once from the full (cohort-independent) ICD history
+    so it can be applied uniformly to every cohort MRN set below -- not just
+    the ICD-derived one."""
+    marked = mark_non_prostate_primary_icd(icds)
+    non_prostate_ids = (
+        marked.filter(pl.col("NON_PROSTATE_PRIMARY_ICD10"))[ID_COL]
+        .cast(pl.Float64, strict=False)
+        .cast(pl.Int64, strict=False)
+    )
+    return set(non_prostate_ids.drop_nulls().to_list())
+
+
+def compute_prostate_cohort(icds: pl.DataFrame, non_prostate_primary_mrns: set):
     """Return (prostate_mrns, excluded_mrns) from an exploded ICD dataframe.
 
     prostate_mrns : patients with any C61 code, minus those with a
@@ -159,14 +185,6 @@ def compute_prostate_cohort(icds: pl.DataFrame):
     )
     c61_mrns = set(c61_ids.drop_nulls().to_list())
 
-    marked = mark_non_prostate_primary_icd(icds)
-    non_prostate_ids = (
-        marked.filter(pl.col("NON_PROSTATE_PRIMARY_ICD10"))[ID_COL]
-        .cast(pl.Float64, strict=False)
-        .cast(pl.Int64, strict=False)
-    )
-    non_prostate_primary_mrns = set(non_prostate_ids.drop_nulls().to_list())
-
     excluded = c61_mrns & non_prostate_primary_mrns
     prostate_mrns = c61_mrns - excluded
     print(
@@ -177,11 +195,12 @@ def compute_prostate_cohort(icds: pl.DataFrame):
     return prostate_mrns, excluded
 
 
-def load_vte_prostate_mrns(vte_cancer_types_path) -> set:
+def load_vte_prostate_mrns(vte_cancer_types_path, non_prostate_primary_mrns: set) -> set:
     """VTE-prediction-project MRNs tagged PROSTATE by
-    med_genomics_merged_cancer_group, used as-is (no ICD intersection). This
-    is the older, smaller MRN universe COMPASS's cohort used to be built
-    from -- see module docstring."""
+    med_genomics_merged_cancer_group, minus those with a competing
+    non-prostate primary ICD (same exclusion applied to the `icd` cohort --
+    see `compute_non_prostate_primary_mrns`). This is the older, smaller MRN
+    universe COMPASS's cohort used to be built from -- see module docstring."""
     cancer_types = pl.scan_csv(vte_cancer_types_path, infer_schema_length=0).select(
         [ID_COL, 'med_genomics_merged_cancer_group']
     ).collect()
@@ -190,8 +209,14 @@ def load_vte_prostate_mrns(vte_cancer_types_path) -> set:
         .cast(pl.Float64, strict=False)
         .cast(pl.Int64, strict=False)
     )
-    vte_mrns = set(mrns.drop_nulls().to_list())
-    print(f"VTE-project PROSTATE-tagged MRNs: {len(vte_mrns)}")
+    tagged_mrns = set(mrns.drop_nulls().to_list())
+    excluded = tagged_mrns & non_prostate_primary_mrns
+    vte_mrns = tagged_mrns - excluded
+    print(
+        f"VTE-project PROSTATE-tagged MRNs: {len(tagged_mrns)}; "
+        f"excluded {len(excluded)} with a non-prostate-primary ICD; "
+        f"retained {len(vte_mrns)}."
+    )
     return vte_mrns
 
 
@@ -495,12 +520,21 @@ def main():
         default=NEPC_PROJ_PATH,
         help="Directory to write all cohort CSVs.",
     )
+    parser.add_argument(
+        "--mrn-lists-dir",
+        type=str,
+        default=os.path.join(NEPC_PROJ_PATH, "mrn_lists"),
+        help="Directory to write the six bare DFCI_MRN-only cohort MRN list CSVs.",
+    )
     args = parser.parse_args()
 
-    # 1. The three cohort MRN sets.
+    # 1. The three cohort MRN sets. The non-prostate-primary exclusion is
+    #    computed once from the full ICD history and applied uniformly to
+    #    every cohort definition below (icd, vte, and therefore icd_or_vte).
     icds = load_and_explode_icd(args.icd_source)
-    icd_mrns, _ = compute_prostate_cohort(icds)
-    vte_mrns = load_vte_prostate_mrns(args.vte_cancer_types)
+    non_prostate_primary_mrns = compute_non_prostate_primary_mrns(icds)
+    icd_mrns, _ = compute_prostate_cohort(icds, non_prostate_primary_mrns)
+    vte_mrns = load_vte_prostate_mrns(args.vte_cancer_types, non_prostate_primary_mrns)
     icd_or_vte_mrns = icd_mrns | vte_mrns
     overlap = icd_mrns & vte_mrns
     print(
@@ -539,6 +573,8 @@ def main():
         "icd_or_vte": "prostate_arpi_survival_cohort_icd_or_vte.csv",
     }
 
+    os.makedirs(args.mrn_lists_dir, exist_ok=True)
+
     for cohort_key, cohort_mrns in cohorts.items():
         survival_cohort = build_survival_cohort(cohort_mrns, anchor_df, platinum_df, status_df)
         summarize_survival_cohort(survival_cohort, label=cohort_key)
@@ -547,12 +583,20 @@ def main():
         survival_cohort.write_csv(out_path)
         print(f"Saved {cohort_key} survival cohort to {out_path}")
 
+        mrn_list_path = os.path.join(args.mrn_lists_dir, f"{cohort_key}_mrns.csv")
+        survival_cohort.select(ID_COL).write_csv(mrn_list_path)
+        print(f"Saved {cohort_key} MRN list to {mrn_list_path}")
+
         arpi_cohort = survival_cohort.filter(pl.col('TREATMENT_ANCHOR_DATE').is_not_null())
         summarize_survival_cohort(arpi_cohort, label=f"{cohort_key}_arpi")
 
         arpi_out_path = os.path.join(args.out_dir, f"prostate_arpi_survival_cohort_{cohort_key}_arpi.csv")
         arpi_cohort.write_csv(arpi_out_path)
         print(f"Saved {cohort_key}_arpi survival cohort to {arpi_out_path}")
+
+        arpi_mrn_list_path = os.path.join(args.mrn_lists_dir, f"{cohort_key}_arpi_mrns.csv")
+        arpi_cohort.select(ID_COL).write_csv(arpi_mrn_list_path)
+        print(f"Saved {cohort_key}_arpi MRN list to {arpi_mrn_list_path}")
 
 
 if __name__ == "__main__":

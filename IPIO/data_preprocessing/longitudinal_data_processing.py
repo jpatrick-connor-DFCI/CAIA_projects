@@ -132,9 +132,9 @@ def resolve_cancer_type_columns(
 
     If every patient's (post-merge) CANCER_TYPE_* row sums to exactly 1 (a
     true mutually exclusive, exhaustive one-hot partition), the most
-    prevalent column is dropped as the implicit reference category -- mirrors
-    COMPASS's CANCER_STAGE_II/III/IV pattern (Stage I is never emitted, kept
-    implicit) and avoids perfect collinearity in the Cox design matrix. If the
+    prevalent column is dropped as the implicit reference category -- the
+    dropped level is never emitted, kept implicit, which avoids perfect
+    collinearity in the Cox design matrix. If the
     columns are NOT mutually exclusive/exhaustive (e.g. a patient can have 0
     or 2+ flags set), there's no natural reference category and no
     collinearity risk, so all columns are kept.

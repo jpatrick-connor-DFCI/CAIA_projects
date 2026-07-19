@@ -78,10 +78,10 @@ class CoxProjectConfig:
     add_cli_args: ParserHook = no_extra_args
     # --- XGBoost-arm hooks (used only by survival_common.xgboost_runners) ---
     # Whether the XGBoost baseline arm feeds config.baseline_feature_cols(...)
-    # through the *feature* path (tree splits + missing indicators; COMPASS's
-    # cancer-stage baseline) rather than the *static covariate* path (IPIO's
-    # GENDER/therapy/cancer-type baseline). When False the baseline arm uses
-    # feature_cols=[] and config.static_covariates(...) as static covariates.
+    # through the *feature* path (tree splits + missing indicators) rather than
+    # the *static covariate* path (IPIO's GENDER/therapy/cancer-type baseline).
+    # When False the baseline arm uses feature_cols=[] and
+    # config.static_covariates(...) as static covariates.
     xgb_baseline_as_features: bool = False
     # feature_stat label stamped on the baseline feature-selection frame.
     xgb_baseline_feature_stat: str = "static"

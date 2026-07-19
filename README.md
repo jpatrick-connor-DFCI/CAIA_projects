@@ -150,7 +150,7 @@ aggregated tables plus pre-treatment long labs and shared split / canonical-lab 
 
 - **Key CLI:** `--data`, `--landmark-days 0 90` (default from `cox_aggregated.DEFAULT_LANDMARK_DAYS`),
   `--seed`, `--test-frac`, `--val-frac`, `--time-unit-days 7`, `--min-patient-coverage`,
-  `--auc-quantiles`, `--id-col`, `--age-col`, `--anchor-col`, `--stage-file`,
+  `--auc-quantiles`, `--id-col`, `--age-col`, `--anchor-col`,
   `--restrict-to-mrns`, `--require-first-treatment` / `--no-require-first-treatment`,
   `--min-psa-count`, `--exclude-parpi` / `--include-parpi`.
 - **Default downstream cohort filters:** `FIRST_TREATMENT == 1`, ≥5 PSA rows, and PARPi exclusion

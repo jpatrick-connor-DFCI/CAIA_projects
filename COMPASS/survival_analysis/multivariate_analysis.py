@@ -77,8 +77,6 @@ from cox_aggregated import (  # noqa: E402
     normalize_endpoints,
     normalize_landmark_days,
     select_feature_columns,
-    stage_available_mask,
-    stage_feature_columns,
 )
 from survival_common.cox_runners import run_multivariable  # noqa: E402
 from survival_common.helper import (  # noqa: E402
@@ -395,7 +393,6 @@ def run_one_endpoint(
     landmark_day: int,
     args: argparse.Namespace,
     baseline: bool = False,
-    stage_cols: list[str] | None = None,
 ) -> tuple[
     pd.DataFrame,
     pd.DataFrame,
@@ -443,13 +440,12 @@ def run_one_endpoint(
         )
 
     if baseline:
-        # Age(+stage)-only baseline: no lab features, no per-fold selection.
-        # Empty `stage_cols` leaves an age-only model (age is added by
-        # fit_preprocessor regardless of the feature set).
-        selected_features = list(stage_cols or [])
+        # Age-only baseline: no lab features, no per-fold selection. Age is
+        # added by fit_preprocessor regardless of the feature set.
+        selected_features = []
         feature_meta = pd.DataFrame(
             {"feature": selected_features, "lab_name": selected_features,
-             "feature_stat": "stage", "selected": True}
+             "feature_stat": "age", "selected": True}
         )
     else:
         # Final selection on full train_val with the canonical labs already in scope.
@@ -655,24 +651,6 @@ def run_xgboost(args: argparse.Namespace) -> None:
         )
         # Admin censoring removed (DeepHit silenced) — train/test use full follow-up.
 
-        if args.restrict_to_stage:
-            stage_cols_avail = stage_feature_columns(merged)
-            if not stage_cols_avail:
-                raise SystemExit(
-                    "--restrict-to-stage requires CANCER_STAGE_* columns in the aggregated "
-                    "inputs (build with --stage-file; PROFILE only)."
-                )
-            keep = merged.index[stage_available_mask(merged, stage_cols_avail)]
-            n_before = len(merged)
-            merged = merged.loc[merged.index.intersection(keep)]
-            train_val = train_val.loc[train_val.index.intersection(keep)]
-            test = test.loc[test.index.intersection(keep)]
-            print(
-                f"  [restrict-to-stage] complete-case (stage-available) cohort: "
-                f"{len(merged)}/{n_before} patients "
-                f"(train_val={len(train_val)}, test={len(test)})"
-            )
-
         assert_no_test_leakage(
             test_mrns=test.index,
             train_mrns=train_val.index,
@@ -682,16 +660,12 @@ def run_xgboost(args: argparse.Namespace) -> None:
         raw_feature_cols = [
             col for col in merged.columns if col not in _ca.outcome_columns()
         ]
-        stage_cols = stage_feature_columns(merged) if args.baseline else []
         print(
             f"\nLandmark +{landmark_day}d: train_val={len(train_val)} test={len(test)} "
             f"raw_features={len(raw_feature_cols)}"
         )
         if args.baseline:
-            print(
-                "  baseline mode: age"
-                + (f" + {', '.join(stage_cols)}" if stage_cols else " (no stage source)")
-            )
+            print("  baseline mode: age-only")
         canonical_labs = select_canonical_labs(
             pre_treatment_lab_df,
             mrns=train_val.index,
@@ -733,7 +707,6 @@ def run_xgboost(args: argparse.Namespace) -> None:
                 landmark_day=landmark_day,
                 args=args,
                 baseline=args.baseline,
-                stage_cols=stage_cols,
             )
             all_metrics.append(metrics)
             all_auc.append(auc_t)
@@ -825,19 +798,9 @@ if __name__ == "__main__":
         "--baseline",
         action="store_true",
         help=(
-            "Fit an age(+cancer-stage)-only baseline: skip lab feature selection "
-            "and CV; covariates = CANCER_STAGE_* (if present) + age. Writes "
-            "landmark_xgboost_baseline_*.csv on the same horizon grid."
-        ),
-    )
-    parser.add_argument(
-        "--restrict-to-stage",
-        action="store_true",
-        help=(
-            "Restrict the cohort to stage-available patients (non-missing "
-            "CANCER_STAGE_*) before fitting/evaluating, for a complete-case "
-            "comparison on a matched population. Errors if no stage columns "
-            "are present (PROFILE only)."
+            "Fit an age-only baseline: skip lab feature selection and CV; "
+            "covariates = age. Writes landmark_xgboost_baseline_*.csv on the "
+            "same horizon grid."
         ),
     )
     parser.add_argument(

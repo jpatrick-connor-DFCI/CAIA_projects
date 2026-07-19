@@ -77,12 +77,6 @@ from survival_common.helper import (  # noqa: E402
     compute_horizon_grid,
     select_canonical_labs,
 )
-from survival_common.plotting import (  # noqa: E402
-    DROP as VITALS_DROP,
-    VITALS,
-    canonicalize_lab_name,
-)
-
 from ipio_cohort import make_irae_outcome_df  # noqa: E402
 
 # Single source of truth for these constants is cox_aggregated.py (matches
@@ -114,21 +108,6 @@ LANDMARK_AVAILABILITY_FILENAME = "landmark_mrn_availability.csv"
 LANDMARK_ATTRITION_FILENAME = "landmark_attrition.json"
 CANONICAL_LABS_FILENAME = "canonical_labs_train_val.csv"
 BUILD_MANIFEST_FILENAME = "build_manifest.json"
-
-
-EXCLUDED_LAB_NAMES = VITALS | VITALS_DROP
-
-
-def drop_vitals_rows(labs_df: pd.DataFrame) -> pd.DataFrame:
-    """Drop vitals LAB_NAME rows so vitals never enter the feature set."""
-    if "LAB_NAME" not in labs_df.columns:
-        return labs_df
-    canonical = labs_df["LAB_NAME"].astype(str).str.strip().map(canonicalize_lab_name)
-    is_vital = canonical.isin(EXCLUDED_LAB_NAMES)
-    n_dropped = int(is_vital.sum())
-    if n_dropped:
-        print(f"  Vitals exclusion: dropped {n_dropped} rows ({sorted(canonical[is_vital].unique())})")
-    return labs_df.loc[~is_vital].copy()
 
 
 def aggregated_filename(landmark_day: int) -> str:
@@ -189,7 +168,6 @@ def load_ipio_longitudinal(path: Path, *, id_col: str = "DFCI_MRN") -> tuple[pd.
     lab_col_candidates = [id_col, "LAB_NAME", "LAB_VALUE", "LAB_UNIT", "LAB_DATE", "t_lab"]
     lab_cols = [c for c in lab_col_candidates if c in df.columns]
     labs_df = df.loc[df["LAB_NAME"].notna(), lab_cols].reset_index(drop=True)
-    labs_df = drop_vitals_rows(labs_df)
     return patient_df, labs_df
 
 
