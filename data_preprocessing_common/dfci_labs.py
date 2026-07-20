@@ -938,10 +938,11 @@ def convert_measurement_value(
     return standardized_value, factor, "mapped_no_change"
 
 
-def consolidate_dfci_labs(
+def _consolidate_dfci_labs_rowwise(
     labs_df: pd.DataFrame,
     mapping_df: pd.DataFrame,
 ) -> pd.DataFrame:
+    """Reference implementation retained for vectorized-path parity tests."""
     exact_lookup, prefix_lookup = build_mapping_lookup(mapping_df)
     measurement_lookup = build_measurement_lookup(mapping_df)
 
@@ -1096,6 +1097,250 @@ def consolidate_dfci_labs(
         output_rows.append(base_row)
 
     return pd.DataFrame(output_rows)
+
+
+def _normalized_unit_series(series: pd.Series) -> pd.Series:
+    """Vectorized equivalent of ``normalize_unit``."""
+    return (
+        series.fillna("")
+        .astype(str)
+        .str.strip()
+        .str.replace("μ", "u", regex=False)
+        .str.replace("µ", "u", regex=False)
+        .str.replace(r"[\[\]() ]", "", regex=True)
+        .str.lower()
+    )
+
+
+def _metadata_attribute_maps(lookup: dict[str, dict], attribute: str) -> dict:
+    return {key: metadata.get(attribute) for key, metadata in lookup.items()}
+
+
+def _attach_vectorized_mapping(
+    frame: pd.DataFrame,
+    exact_lookup: dict[str, dict],
+    prefix_lookup: dict[str, dict],
+) -> pd.DataFrame:
+    """Attach exact-first, prefix-fallback mapping metadata without row iteration."""
+    out = frame.copy()
+    exact_hit = out["TEST_NAME"].isin(exact_lookup)
+    prefix_hit = out["TEST_NAME_PREFIX"].isin(prefix_lookup)
+    mapped = exact_hit | prefix_hit
+    out["mapping_source"] = "unmapped"
+    out.loc[prefix_hit, "mapping_source"] = "prefix"
+    out.loc[exact_hit, "mapping_source"] = "exact"
+
+    for attribute, output_column in (
+        ("measurement_concept_id", "measurement_concept_id"),
+        ("omop_measurement_name", "omop_measurement_name"),
+        ("collapsed_measurement", "collapsed_measurement"),
+        ("canonical_unit", "canonical_result_uom_nm"),
+    ):
+        exact_values = out["TEST_NAME"].map(
+            _metadata_attribute_maps(exact_lookup, attribute)
+        )
+        prefix_values = out["TEST_NAME_PREFIX"].map(
+            _metadata_attribute_maps(prefix_lookup, attribute)
+        )
+        out[output_column] = exact_values.where(exact_hit, prefix_values)
+
+    out["_mapped"] = mapped
+    return out
+
+
+def _unit_factor_table() -> pd.DataFrame:
+    rows = [
+        {
+            "collapsed_measurement": measurement,
+            "normalized_result_uom_nm": normalized_unit,
+            "conversion_factor": factor,
+        }
+        for measurement, rule in RULES_BY_MEASUREMENT.items()
+        for normalized_unit, factor in rule["unit_factors"].items()
+    ]
+    return pd.DataFrame(rows).drop_duplicates(
+        ["collapsed_measurement", "normalized_result_uom_nm"], keep="last"
+    )
+
+
+def _finalize_vectorized_standardization(frame: pd.DataFrame) -> pd.DataFrame:
+    """Apply unit conversion, statuses, sentinels, and physiologic bounds."""
+    out = frame.merge(
+        _unit_factor_table(),
+        on=["collapsed_measurement", "normalized_result_uom_nm"],
+        how="left",
+        sort=False,
+        validate="many_to_one",
+    )
+
+    mapped = out["_mapped"]
+    numeric = out["numeric_result_as_float"].notna()
+    supported = out["conversion_factor"].notna()
+    out["numeric_result_standardized"] = (
+        out["numeric_result_as_float"] * out["conversion_factor"]
+    )
+
+    # Temperature is affine rather than multiplicative for Fahrenheit inputs.
+    fahrenheit = (
+        out["collapsed_measurement"].eq("Body temperature")
+        & out["normalized_result_uom_nm"].isin(
+            {"degreefahrenheit", "fahrenheit", "degf"}
+        )
+        & numeric
+    )
+    out.loc[fahrenheit, "numeric_result_standardized"] = (
+        out.loc[fahrenheit, "numeric_result_as_float"] - 32.0
+    ) * (5.0 / 9.0)
+    out.loc[fahrenheit, "conversion_factor"] = pd.NA
+
+    canonical_normalized = _normalized_unit_series(out["canonical_result_uom_nm"])
+    out["conversion_status"] = "unmapped_test_name"
+    out.loc[mapped & ~numeric, "conversion_status"] = "non_numeric_result"
+    out.loc[mapped & numeric & ~supported, "conversion_status"] = "unsupported_unit"
+
+    successful = mapped & numeric & supported
+    no_change = successful & out["conversion_factor"].eq(1.0) & (
+        out["normalized_result_uom_nm"] == canonical_normalized
+    )
+    unit_normalized = successful & out["conversion_factor"].eq(1.0) & ~no_change
+    value_converted = successful & ~out["conversion_factor"].eq(1.0)
+    out.loc[no_change, "conversion_status"] = "mapped_no_change"
+    out.loc[unit_normalized, "conversion_status"] = "mapped_unit_normalized"
+    out.loc[value_converted | fahrenheit, "conversion_status"] = "mapped_value_converted"
+
+    lower = out["collapsed_measurement"].map(
+        {name: bounds[0] for name, bounds in PHYSIOLOGIC_RANGES.items()}
+    )
+    upper = out["collapsed_measurement"].map(
+        {name: bounds[1] for name, bounds in PHYSIOLOGIC_RANGES.items()}
+    )
+    standardized = pd.to_numeric(out["numeric_result_standardized"], errors="coerce")
+    finite_standardized = standardized.notna() & standardized.abs().ne(float("inf"))
+    out_of_range = successful & finite_standardized & lower.notna() & (
+        standardized.lt(lower) | standardized.gt(upper)
+    )
+    out.loc[out_of_range, "numeric_result_standardized"] = pd.NA
+    out.loc[out_of_range, "conversion_status"] = "out_of_physiologic_range"
+
+    out.loc[mapped & ~numeric, "conversion_factor"] = pd.NA
+    out.loc[~mapped, "conversion_factor"] = pd.NA
+    out.loc[~mapped, "numeric_result_standardized"] = pd.NA
+    out = out.drop(columns="_mapped")
+    return out
+
+
+def _split_combined_bp_rows(
+    bp_rows: pd.DataFrame,
+    measurement_lookup: dict[str, dict],
+) -> pd.DataFrame:
+    """Expand successfully parsed combined BP rows to systolic/diastolic rows."""
+    if bp_rows.empty:
+        return bp_rows
+
+    pieces = []
+    for component, measurement, value_column in (
+        ("systolic", "Systolic blood pressure", "_bp_systolic"),
+        ("diastolic", "Diastolic blood pressure", "_bp_diastolic"),
+    ):
+        piece = bp_rows.copy()
+        metadata = measurement_lookup.get(measurement)
+        piece["bp_component"] = component
+        piece["split_from_combined_bp"] = True
+        piece["mapping_source"] = "special_case"
+        piece["collapsed_measurement"] = measurement
+        piece["numeric_result_standardized"] = piece[value_column].astype(float)
+        piece["conversion_status"] = "bp_split_mapped"
+        if metadata is None:
+            piece["measurement_concept_id"] = pd.NA
+            piece["omop_measurement_name"] = pd.NA
+            piece["canonical_result_uom_nm"] = "mmHg"
+            piece["conversion_factor"] = pd.NA
+        else:
+            piece["measurement_concept_id"] = metadata["measurement_concept_id"]
+            piece["omop_measurement_name"] = metadata["omop_measurement_name"]
+            piece["collapsed_measurement"] = metadata["collapsed_measurement"]
+            piece["canonical_result_uom_nm"] = metadata["canonical_unit"]
+            piece["conversion_factor"] = 1.0
+        pieces.append(piece)
+    return pd.concat(pieces, ignore_index=True)
+
+
+def consolidate_dfci_labs(
+    labs_df: pd.DataFrame,
+    mapping_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Vectorized lab mapping/unit conversion with rowwise-reference parity."""
+    exact_lookup, prefix_lookup = build_mapping_lookup(mapping_df)
+    measurement_lookup = build_measurement_lookup(mapping_df)
+
+    working = prepare_longitudinal_labs_df(labs_df)
+    working["_source_order"] = range(len(working))
+    working["TEST_NAME_PREFIX"] = (
+        working["TEST_NAME"].fillna("").astype(str).str.replace(r" \(.*\)$", "", regex=True).str.strip()
+    )
+    working["normalized_result_uom_nm"] = _normalized_unit_series(
+        working["RESULT_UOM_NM"]
+    )
+    working["numeric_result_as_float"] = pd.to_numeric(
+        working["NUMERIC_RESULT"], errors="coerce"
+    )
+    sentinel_mask = working["numeric_result_as_float"].isin(SENTINEL_NUMERIC_VALUES)
+    if sentinel_mask.any():
+        print(
+            f"[consolidate_dfci_labs] dropped {int(sentinel_mask.sum())} rows whose "
+            "NUMERIC_RESULT matched a known sentinel value (e.g. 9999999.0)."
+        )
+        working.loc[sentinel_mask, "numeric_result_as_float"] = float("nan")
+
+    mapped = _attach_vectorized_mapping(working, exact_lookup, prefix_lookup)
+
+    combined_name = mapped["TEST_NAME"].fillna("").astype(str).str.lower().str.contains(
+        r"systolic/diastolic|blood pressure", regex=True
+    )
+    bp_values = mapped["NUMERIC_RESULT"].fillna("").astype(str).str.extract(
+        r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)"
+    )
+    valid_bp = combined_name & bp_values[0].notna() & bp_values[1].notna()
+
+    regular = mapped.loc[~valid_bp].copy()
+    regular["bp_component"] = pd.NA
+    regular["split_from_combined_bp"] = False
+    regular = _finalize_vectorized_standardization(regular)
+    requires_split = (
+        regular["TEST_NAME"].fillna("").astype(str).str.lower().str.contains(
+            r"systolic/diastolic|blood pressure", regex=True
+        )
+        & regular["mapping_source"].eq("unmapped")
+    )
+    regular.loc[requires_split, "conversion_status"] = "requires_bp_split"
+    regular.loc[requires_split, "mapping_source"] = "special_case"
+
+    bp_input = mapped.loc[valid_bp].copy()
+    bp_input["_bp_systolic"] = pd.to_numeric(bp_values.loc[valid_bp, 0])
+    bp_input["_bp_diastolic"] = pd.to_numeric(bp_values.loc[valid_bp, 1])
+    bp_split = _split_combined_bp_rows(bp_input, measurement_lookup)
+
+    internal = ["_mapped", "_bp_systolic", "_bp_diastolic"]
+    bp_split = bp_split.drop(columns=[c for c in internal if c in bp_split], errors="ignore")
+    output_columns = [c for c in regular.columns if c != "_source_order"]
+    if bp_split.empty:
+        return regular[output_columns].reset_index(drop=True)
+
+    # Match the reference output's column order and keep original row ordering:
+    # each valid combined BP row is replaced by systolic then diastolic rows.
+    all_columns = list(regular.columns)
+    for column in all_columns:
+        if column not in bp_split:
+            bp_split[column] = pd.NA
+    combined = pd.concat(
+        [regular.assign(_component_order=0),
+         bp_split.assign(
+             _component_order=bp_split["bp_component"].map({"systolic": 0, "diastolic": 1}),
+         )],
+        ignore_index=True,
+        sort=False,
+    ).sort_values(["_source_order", "_component_order"], kind="stable")
+    return combined[output_columns].reset_index(drop=True)
 
 
 def parse_args() -> argparse.Namespace:

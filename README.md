@@ -121,21 +121,25 @@ COMPASS PROFILE and IPIO live in `survival_common/`.
 
 Consolidates/standardizes labs (via `data_preprocessing_common/dfci_labs.py`), attaches the first
 prostate (`C61`) diagnosis date when available and outcomes, rebases all timing to
-`FIRST_RECORD_DATE = min(first lab, diagnosis, first treatment)`, and writes the broad row-level
-prostate lab frame. Patient-level cohort filters are deferred to `build_prediction_inputs.py` so
-different anchors can select their own cohorts.
+`FIRST_RECORD_DATE = min(first lab, diagnosis, first treatment)`, and writes the row-level
+prostate lab frame used by the current treatment-anchored analyses.
 
-- **Broad processing:** the widest `icd_or_vte_allow_other_primaries` union is processed once; a
-  C61 diagnosis date is attached when present but is not required. Narrower cohort selection is
-  applied with `build_prediction_inputs.py --restrict-to-mrns`. No PSA-count or PARPi filter is
-  applied to `longitudinal_prediction_data.csv`; `PARPI_EXPOSED` is carried downstream as a flag.
+- **Fast cohort scope:** by default, raw scans start from the widest anchored
+  `icd_or_vte_allow_other_primaries_arpi` union. PARPi-exposed patients and patients with fewer
+  than five broad PSA records are removed before expensive lab standardization. Use
+  `--prefilter-include-parpi`, `--prefilter-min-psa-count 0`, and/or a broader
+  `--survival-cohort-csv` to rebuild a less restricted source frame.
 - **Lab QC (`consolidate_dfci_labs`):** unit standardization to canonical units, sentinel nulling
   (e.g. `9999999`), physiologic-range nulling, combined-BP splitting. Out-of-range values are **nulled,
   not row-dropped** — downstream must filter on `conversion_status` (or pass `--successful-only`).
+- **Performance:** raw CSV scans project only required columns; lab consolidation is vectorized.
+  Standardized rows are cached in `consolidated_longitudinal_data.parquet` with a provenance
+  manifest. Use `--refresh-cache` to rebuild or `--no-cache` to bypass it. Large diagnostic CSVs
+  are opt-in via `--write-unique-labs`, `--write-uncondensed`, and `--write-consolidated`.
 - **Shared lab resources:** the canonical mapping lives at
   `data_preprocessing_common/resources/lab_mappings/OMOP_to_DFCI_lab_ids.csv`. The
-  `unique_lab_ids_w_units.csv` inventory is generated per project under the project data root for
-  diagnostics / optional mapping refreshes; it is not a repo source of truth.
+  `unique_lab_ids_w_units.csv` inventory can be generated per project with
+  `--write-unique-labs` for diagnostics or mapping refreshes; it is not a repo source of truth.
 - **Timing semantics:** `t_lab`, `t_diagnosis`, `t_first_treatment`, `t_treatment_anchor`,
   `t_platinum`, `t_last_contact`, `t_death`. `t_death` is a real death-date-derived duration when the
   survival cohort's `death_date` is available (falls back to the last-contact proxy for dead patients

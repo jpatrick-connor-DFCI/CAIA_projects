@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -40,16 +42,17 @@ SURV_PATH = EMBED_PROJ_PATH / "time-to-event_analysis"
 # straight from the raw OncDRS pull. It supplies the outcome/anchor columns
 # (age, treatment anchor, death, last-contact, platinum) that used to come from
 # death_met_surv_df.csv.gz. See load_death_df_from_survival_cohort. Defaults to
-# the widest icd_or_vte UNION cohort, which allows other primary malignancies.
+# the widest anchored icd_or_vte UNION cohort, which allows other primary
+# malignancies and contains every currently analyzed *_arpi arm.
 # main() loads this file
 # first and uses its MRN set both to scan-filter the raw HEALTH_HISTORY/
 # OUTPT_LAB_RESULTS_LABS/MEDICATIONS reads and to restrict the final output --
 # this is the one cohort-membership filter Stage 2 applies. Narrower cohort
-# variants (primary-excluded, icd-only, vte-only, or ARPI-restricted) remain a Stage 3
+# variants (primary-excluded, icd-only, or vte-only) remain a Stage 3
 # (build_prediction_inputs.py --restrict-to-mrns) concern.
 DEFAULT_SURVIVAL_COHORT_CSV = (
     NEPC_PROJ_PATH
-    / "prostate_arpi_survival_cohort_icd_or_vte_allow_other_primaries.csv"
+    / "prostate_arpi_survival_cohort_icd_or_vte_allow_other_primaries_arpi.csv"
 )
 
 # Cisplatin appears both as a single agent and coded within a combination
@@ -72,6 +75,25 @@ MIN_PSA_COUNT = 5
 # drives prediction features -- see RAW_TEST_CODE passthrough in
 # build_raw_longitudinal_data.
 BROAD_PSA_CODES = ["PSA", "PSAR", "PSATOTSCRN", "CPSA", "PSAMON", "PSAULT", "PSAT"]
+
+HEALTH_SCAN_COLUMNS = [
+    ID_COL,
+    "CODE_TYPE",
+    "START_DT",
+    "HEALTH_HISTORY_TYPE",
+    "RESULTS",
+    "UNITS_CD",
+]
+LAB_SCAN_COLUMNS = [
+    ID_COL,
+    "SPECIMEN_COLLECT_DT",
+    "TEST_TYPE_CD",
+    "TEST_TYPE_DESCR",
+    "NUMERIC_RESULT",
+    "RESULT_UOM_NM",
+]
+MEDICATION_SCAN_COLUMNS = [ID_COL, "NCI_PREFERRED_MED_NM", "MED_START_DT"]
+CONSOLIDATED_CACHE_VERSION = 1
 
 # Highlighted antineoplastic treatments used to anchor the "time to platinum"
 # prediction window. The treatment anchor (TREATMENT_ANCHOR_DATE) is the first
@@ -656,6 +678,117 @@ def summarize_default_cohort_filters(
     }
 
 
+def _file_signature(path: Path) -> dict:
+    resolved = path.expanduser().resolve()
+    stat = resolved.stat()
+    return {
+        "path": str(resolved),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _mrn_digest(mrns: set[int]) -> str:
+    payload = ",".join(str(mrn) for mrn in sorted(mrns)).encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def build_cache_provenance(args: argparse.Namespace) -> dict:
+    """Inputs/settings whose changes invalidate standardized-lab cache reuse."""
+    return {
+        "cache_version": CONSOLIDATED_CACHE_VERSION,
+        "sources": {
+            "pipeline_code": _file_signature(Path(__file__)),
+            "consolidation_code": _file_signature(
+                Path(consolidate_dfci_labs.__code__.co_filename)
+            ),
+            "health_csv": _file_signature(args.health_csv),
+            "labs_csv": _file_signature(args.labs_csv),
+            "medications_csv": _file_signature(args.medications_csv),
+            "survival_cohort_csv": _file_signature(args.survival_cohort_csv),
+            "mapping_csv": _file_signature(args.mapping_csv),
+        },
+        "prefilter_min_psa_count": int(args.prefilter_min_psa_count),
+        "prefilter_exclude_parpi": bool(args.prefilter_exclude_parpi),
+    }
+
+
+def load_consolidated_cache(
+    cache_path: Path,
+    provenance: dict,
+) -> tuple[pd.DataFrame, dict] | None:
+    manifest_path = cache_path.with_suffix(cache_path.suffix + ".manifest.json")
+    if not cache_path.exists() or not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if manifest.get("provenance") != provenance:
+        return None
+    print(f"[cache] loading standardized longitudinal rows from {cache_path}")
+    return pd.read_parquet(cache_path), manifest
+
+
+def write_consolidated_cache(
+    cache_path: Path,
+    consolidated_df: pd.DataFrame,
+    *,
+    provenance: dict,
+    prefilter_attrition: dict,
+    eligible_mrns: set[int],
+) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    consolidated_df.to_parquet(cache_path, index=False)
+    manifest = {
+        "provenance": provenance,
+        "prefilter_attrition": prefilter_attrition,
+        "eligible_mrn_count": len(eligible_mrns),
+        "eligible_mrn_sha256": _mrn_digest(eligible_mrns),
+    }
+    manifest_path = cache_path.with_suffix(cache_path.suffix + ".manifest.json")
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    print(f"[cache] wrote {cache_path} and {manifest_path}")
+
+
+def prefilter_lab_cohort(
+    labs_df: pl.DataFrame,
+    candidate_mrns: set[int],
+    *,
+    min_psa_count: int,
+) -> tuple[pl.DataFrame, set[int], dict]:
+    """Apply the broad PSA eligibility gate before expensive standardization."""
+    if min_psa_count < 0:
+        raise ValueError(
+            f"--prefilter-min-psa-count must be >= 0, got {min_psa_count}."
+        )
+    if min_psa_count == 0:
+        eligible = set(candidate_mrns)
+        return labs_df, eligible, {
+            "prefilter_min_psa_count": 0,
+            "n_before_psa_prefilter": len(candidate_mrns),
+            "n_after_psa_prefilter": len(eligible),
+        }
+
+    counts = (
+        labs_df.filter(pl.col("TEST_TYPE_CD").is_in(BROAD_PSA_CODES))
+        .group_by(ID_COL)
+        .agg(pl.len().alias("_broad_psa_count"))
+        .filter(pl.col("_broad_psa_count") >= min_psa_count)
+    )
+    eligible = set(int(m) for m in counts[ID_COL].drop_nulls().to_list())
+    filtered = labs_df.filter(pl.col(ID_COL).is_in(sorted(eligible)))
+    print(
+        f"[prefilter] broad PSA >= {min_psa_count}: "
+        f"{len(eligible)}/{len(candidate_mrns)} patients retained before consolidation."
+    )
+    return filtered, eligible, {
+        "prefilter_min_psa_count": int(min_psa_count),
+        "n_before_psa_prefilter": len(candidate_mrns),
+        "n_after_psa_prefilter": len(eligible),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build row-level longitudinal survival input from the COMPASS/Profile exports.",
@@ -700,8 +833,8 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SURVIVAL_COHORT_CSV,
         help=(
             "Per-patient survival cohort from compile_COMPASS_cohort_data.py "
-            "(defaults to the widest icd_or_vte UNION cohort, including patients "
-            "with other primary malignancies). Supplies the treatment "
+            "(defaults to the widest anchored icd_or_vte UNION cohort, including "
+            "patients with other primary malignancies). Supplies the treatment "
             "anchor, age, death, and last-contact outcome columns via a LEFT "
             "join, and ALSO defines the output cohort: main() restricts the "
             "final longitudinal_prediction_df to this file's MRN set after the "
@@ -720,14 +853,64 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_UNIQUE_LABS_CSV,
     )
     parser.add_argument(
+        "--write-unique-labs",
+        action="store_true",
+        help="Write the TEST_NAME/unit frequency inventory (off by default).",
+    )
+    parser.add_argument(
         "--uncondensed-output-csv",
         type=Path,
         default=NEPC_PROJ_PATH / "uncondensed_longitudinal_data.csv",
     )
     parser.add_argument(
+        "--write-uncondensed",
+        action="store_true",
+        help="Write the large pre-standardization audit CSV (off by default).",
+    )
+    parser.add_argument(
         "--consolidated-output-csv",
         type=Path,
         default=NEPC_PROJ_PATH / "consolidated_longitudinal_data.csv",
+    )
+    parser.add_argument(
+        "--write-consolidated",
+        action="store_true",
+        help="Write the large standardized audit CSV (off by default).",
+    )
+    parser.add_argument(
+        "--consolidated-cache-parquet",
+        type=Path,
+        default=NEPC_PROJ_PATH / "consolidated_longitudinal_data.parquet",
+        help="Provenance-validated standardized-lab cache used across repeat runs.",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Do not read or write the standardized-lab Parquet cache.",
+    )
+    parser.add_argument(
+        "--refresh-cache",
+        action="store_true",
+        help="Ignore an existing cache and rebuild it from raw exports.",
+    )
+    parser.add_argument(
+        "--prefilter-min-psa-count",
+        type=int,
+        default=MIN_PSA_COUNT,
+        help="Broad PSA minimum applied before lab standardization (default: 5; 0 disables).",
+    )
+    parser.add_argument(
+        "--prefilter-exclude-parpi",
+        dest="prefilter_exclude_parpi",
+        action="store_true",
+        default=True,
+        help="Exclude PARPi-exposed patients before raw lab scanning (default).",
+    )
+    parser.add_argument(
+        "--prefilter-include-parpi",
+        dest="prefilter_exclude_parpi",
+        action="store_false",
+        help="Keep PARPi-exposed patients in the standardized longitudinal frame.",
     )
     parser.add_argument(
         "--output-csv",
@@ -739,13 +922,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    pipeline_started = time.perf_counter()
+    stage_seconds: dict[str, float] = {}
 
-    for output_path in [
-        args.unique_labs_csv,
-        args.uncondensed_output_csv,
-        args.consolidated_output_csv,
-        args.output_csv,
-    ]:
+    output_paths = [args.output_csv, args.consolidated_cache_parquet]
+    if args.write_unique_labs:
+        output_paths.append(args.unique_labs_csv)
+    if args.write_uncondensed:
+        output_paths.append(args.uncondensed_output_csv)
+    if args.write_consolidated:
+        output_paths.append(args.consolidated_output_csv)
+    for output_path in output_paths:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # ICD-C61 records, kept for compute_first_prostate_diagnosis below. Small
@@ -753,53 +940,27 @@ def main() -> None:
     # gated on union_cohort_mrns.
     icds = pd.read_csv(args.icd_csv)
 
-    # Output cohort = the widest icd_or_vte union (every MRN in
-    # args.survival_cohort_csv, which defaults to the allow-other-primaries
-    # union). Loaded
-    # first so HEALTH_HISTORY/OUTPT_LAB_RESULTS_LABS/MEDICATIONS -- each tens of
+    # Output cohort = the widest analyzed anchored union. It contains every MRN
+    # in all six *_arpi analysis arms while avoiding raw scans for patients who
+    # cannot enter any treatment-anchor-relative model. It is loaded first so
+    # HEALTH_HISTORY/OUTPT_LAB_RESULTS_LABS/MEDICATIONS -- each tens of
     # millions of rows across the full raw OncDRS universe -- can be filtered to
     # this MRN set during the lazy scan itself, rather than read in full and
-    # filtered afterward. Narrower cohort variants (icd-only, vte-only,
-    # ARPI-restricted) remain a Stage 3 concern via build_prediction_inputs.py's
+    # filtered afterward. Narrower cohort variants (primary-excluded, icd-only,
+    # or vte-only) remain a Stage 3 concern via build_prediction_inputs.py's
     # --restrict-to-mrns.
     death_df = load_death_df_from_survival_cohort(args.survival_cohort_csv)
     union_cohort_mrns = set(int(m) for m in death_df[ID_COL].unique())
-    print(f"[main] broad union cohort: {len(union_cohort_mrns)} patients.")
+    print(f"[main] broad anchored union cohort: {len(union_cohort_mrns)} patients.")
 
-    # --- Polars reshape (scope boundary: everything up to consolidate_dfci_labs) ---
-    health_df_pl = fast_io.scan_filter(args.health_csv, union_cohort_mrns).collect()
-    labs_df_pl = fast_io.scan_filter(args.labs_csv, union_cohort_mrns).collect()
-    raw_longitudinal_df_pl = build_raw_longitudinal_data(health_df_pl, labs_df_pl)
-
-    unique_labs_df_pl = (
-        raw_longitudinal_df_pl.group_by(["LAB_NAME", "LAB_UNIT"])
-        .agg(pl.len().alias("count"))
-        .sort("count", descending=True)
-    )
-    unique_labs_df_pl.write_csv(args.unique_labs_csv)
-    raw_longitudinal_df_pl.write_csv(args.uncondensed_output_csv)
-
-    # Conversion boundary: consolidate_dfci_labs (data_preprocessing_common/dfci_labs.py)
-    # takes and returns pandas DataFrames and is explicitly out of scope for this
-    # port (1192 lines of per-row unit math + BP splitting). Convert polars->pandas
-    # here; everything from this point on in main() stays pandas, unchanged.
-    raw_longitudinal_df = raw_longitudinal_df_pl.to_pandas()
-
-    mapping_df = pd.read_csv(args.mapping_csv)
-    consolidated_df = consolidate_dfci_labs(raw_longitudinal_df, mapping_df)
-    consolidated_df.to_csv(args.consolidated_output_csv, index=False)
-
-    first_prostate_diagnosis = compute_first_prostate_diagnosis(icds)
-
-    # Loaded once and reused for the treatment anchor, in-memory platinum
-    # computation, and the downstream PARPi-exposure flag. Filtered to
-    # union_cohort_mrns during the lazy scan for the same reason as
-    # health/labs above.
+    # Load the narrow medication projection first. Besides supplying outcomes,
+    # this lets the default PARPi gate reduce the much larger lab/health scans.
+    stage_started = time.perf_counter()
     medications_df = (
         fast_io.scan_filter(
             args.medications_csv,
             union_cohort_mrns,
-            cols=[ID_COL, "NCI_PREFERRED_MED_NM", "MED_START_DT"],
+            cols=MEDICATION_SCAN_COLUMNS,
         )
         .collect()
         .to_pandas()
@@ -807,6 +968,116 @@ def main() -> None:
     medications_df[ID_COL] = pd.to_numeric(medications_df[ID_COL], errors="coerce")
     medications_df = medications_df.dropna(subset=[ID_COL]).copy()
     medications_df[ID_COL] = medications_df[ID_COL].astype(int)
+    stage_seconds["medication_scan"] = time.perf_counter() - stage_started
+
+    parpi_mrns = set(
+        medications_df.loc[
+            medications_df["NCI_PREFERRED_MED_NM"]
+            .astype(str)
+            .str.upper()
+            .str.strip()
+            .isin(PARPI_MEDS),
+            ID_COL,
+        ].unique()
+    )
+    candidate_mrns = set(union_cohort_mrns)
+    if args.prefilter_exclude_parpi:
+        candidate_mrns -= parpi_mrns
+        print(
+            f"[prefilter] PARPi exclusion: {len(candidate_mrns)}/{len(union_cohort_mrns)} "
+            "patients retained before raw lab scanning."
+        )
+
+    provenance = build_cache_provenance(args)
+    cache_usable = not args.no_cache and not (
+        args.write_unique_labs or args.write_uncondensed
+    )
+    cached = None
+    if cache_usable and not args.refresh_cache:
+        stage_started = time.perf_counter()
+        cached = load_consolidated_cache(args.consolidated_cache_parquet, provenance)
+        stage_seconds["cache_lookup"] = time.perf_counter() - stage_started
+
+    if cached is not None:
+        consolidated_df, cache_manifest = cached
+        prefilter_attrition = cache_manifest.get("prefilter_attrition", {})
+        eligible_mrns = set(
+            pd.to_numeric(consolidated_df[ID_COL], errors="coerce")
+            .dropna()
+            .astype(int)
+            .unique()
+        )
+    else:
+        # Projection is pushed into the lazy CSV scan, so unused raw columns are
+        # never materialized. Labs are collected first to apply the cheap broad
+        # PSA gate before health/vital scanning and lab standardization.
+        stage_started = time.perf_counter()
+        labs_df_pl = fast_io.scan_filter(
+            args.labs_csv,
+            candidate_mrns,
+            cols=LAB_SCAN_COLUMNS,
+        ).collect()
+        labs_df_pl = labs_df_pl.with_columns(
+            pl.col(ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
+        )
+        labs_df_pl, eligible_mrns, psa_attrition = prefilter_lab_cohort(
+            labs_df_pl,
+            candidate_mrns,
+            min_psa_count=args.prefilter_min_psa_count,
+        )
+        if not eligible_mrns:
+            raise ValueError("No patients remain after pre-consolidation cohort filters.")
+        stage_seconds["lab_scan_and_psa_gate"] = time.perf_counter() - stage_started
+
+        stage_started = time.perf_counter()
+        health_df_pl = fast_io.scan_filter(
+            args.health_csv,
+            eligible_mrns,
+            cols=HEALTH_SCAN_COLUMNS,
+        ).collect()
+        raw_longitudinal_df_pl = build_raw_longitudinal_data(
+            health_df_pl,
+            labs_df_pl,
+        )
+        stage_seconds["health_scan_and_reshape"] = time.perf_counter() - stage_started
+
+        if args.write_unique_labs:
+            unique_labs_df_pl = (
+                raw_longitudinal_df_pl.group_by(["LAB_NAME", "LAB_UNIT"])
+                .agg(pl.len().alias("count"))
+                .sort("count", descending=True)
+            )
+            unique_labs_df_pl.write_csv(args.unique_labs_csv)
+            print(f"Wrote unique lab inventory to {args.unique_labs_csv}")
+        if args.write_uncondensed:
+            raw_longitudinal_df_pl.write_csv(args.uncondensed_output_csv)
+            print(f"Wrote raw longitudinal rows to {args.uncondensed_output_csv}")
+
+        stage_started = time.perf_counter()
+        raw_longitudinal_df = raw_longitudinal_df_pl.to_pandas()
+        mapping_df = pd.read_csv(args.mapping_csv)
+        consolidated_df = consolidate_dfci_labs(raw_longitudinal_df, mapping_df)
+        stage_seconds["lab_standardization"] = time.perf_counter() - stage_started
+        prefilter_attrition = {
+            "n_before_early_prefilters": len(union_cohort_mrns),
+            "prefilter_exclude_parpi": bool(args.prefilter_exclude_parpi),
+            "n_after_parpi_prefilter": len(candidate_mrns),
+            **psa_attrition,
+        }
+        if not args.no_cache:
+            write_consolidated_cache(
+                args.consolidated_cache_parquet,
+                consolidated_df,
+                provenance=provenance,
+                prefilter_attrition=prefilter_attrition,
+                eligible_mrns=eligible_mrns,
+            )
+
+    if args.write_consolidated:
+        consolidated_df.to_csv(args.consolidated_output_csv, index=False)
+        print(f"Wrote consolidated longitudinal rows to {args.consolidated_output_csv}")
+
+    first_prostate_diagnosis = compute_first_prostate_diagnosis(icds)
 
     treatment_anchor_df = compute_treatment_anchor(medications_df)
     n_anchor = len(treatment_anchor_df)
@@ -854,6 +1125,7 @@ def main() -> None:
     # exactly the counts already printed above, just persisted alongside the
     # other outputs instead of only living in the run log.
     cohort_attrition = {
+        "pre_consolidation_filters": prefilter_attrition,
         **build_attrition,
         "n_before_icd_or_vte_union_filter": int(n_before_union_filter),
         "n_after_icd_or_vte_union_filter": int(n_after_union_filter),
@@ -864,11 +1136,13 @@ def main() -> None:
     attrition_path = args.output_csv.parent / "cohort_attrition.json"
     attrition_path.write_text(json.dumps(cohort_attrition, indent=2))
 
-    print(f"Wrote unique lab inventory to {args.unique_labs_csv}")
-    print(f"Wrote raw longitudinal rows to {args.uncondensed_output_csv}")
-    print(f"Wrote consolidated longitudinal rows to {args.consolidated_output_csv}")
     print(f"Wrote survival-ready longitudinal rows to {args.output_csv}")
     print(f"Wrote cohort attrition counts to {attrition_path}")
+    stage_seconds["total"] = time.perf_counter() - pipeline_started
+    print(
+        "Stage timings (seconds): "
+        + ", ".join(f"{name}={seconds:.1f}" for name, seconds in stage_seconds.items())
+    )
 
 
 if __name__ == "__main__":
