@@ -53,15 +53,11 @@ DEFAULT_SURVIVAL_COHORT_CSV = NEPC_PROJ_PATH / "prostate_arpi_survival_cohort_ic
 # excluded (not a relevant platinum agent for this cohort). Kept in sync with
 # PLATINUM_MEDS in compile_COMPASS_cohort_data.py.
 PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN", "CISPLATIN/CYCLOPHOSPHAMIDE/ETOPOSIDE"}
-# PARPi names include salt forms as coded in OncDRS (RUCAPARIB CAMSYLATE,
-# TALAZOPARIB TOSYLATE), which do not match the base names above.
 PARPI_MEDS = {
     "OLAPARIB",
     "RUCAPARIB",
-    "RUCAPARIB CAMSYLATE",
     "NIRAPARIB",
     "TALAZOPARIB",
-    "TALAZOPARIB TOSYLATE",
     "VELIPARIB",
 }
 MIN_PSA_COUNT = 5

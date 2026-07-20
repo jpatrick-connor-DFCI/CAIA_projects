@@ -97,6 +97,7 @@ def make_outcome_df(
     anchor_col: str | None = "t_first_treatment",
     extra_anchor_cols: tuple[str, ...] = (),
     require_first_treatment: bool = True,
+    max_followup_days: float | None = 3650.0,
 ) -> pd.DataFrame:
     """Build the per-patient outcome table rebased to a landmark.
 
@@ -114,6 +115,15 @@ def make_outcome_df(
         require_first_treatment: whether the cohort filter requires
             ``FIRST_TREATMENT == 1``. Off for the genomic arm where treatment
             timing is irrelevant to the outcome window.
+        max_followup_days: administrative-censoring horizon on the
+            landmark-relative clock (days from time 0). Patients whose platinum
+            or death event lands beyond this horizon are censored at the horizon
+            (event flag -> 0, duration -> horizon); censored follow-up
+            (``t_last_contact``) is clipped to the horizon too. Defaults to
+            3650 (10 years): platinum >10y after the treatment anchor is very
+            unlikely to reflect the modeled aggressive-transformation process,
+            and the sparse tail destabilizes the Cox/Fine-Gray fits. Pass
+            ``None`` to disable and use full follow-up.
     """
     patient_level_cols = [
         ID_COL,
@@ -213,6 +223,22 @@ def make_outcome_df(
     for duration_col in ["t_last_contact", "t_death", "t_platinum"]:
         pat[f"{duration_col}_from_first_record"] = pat[duration_col]
         pat[duration_col] = pat[duration_col].astype(float) - landmark_time
+
+    # Administrative censoring at max_followup_days (on the landmark-relative
+    # clock). An event whose time exceeds the horizon becomes a censored
+    # observation AT the horizon; censored follow-up is clipped to the horizon
+    # too. Done before the event_type / first_event_time derivations below so
+    # PLATINUM/DEATH/EITHER/event_type all stay consistent with the clipped
+    # durations. The *_from_first_record columns are left uncapped (they record
+    # the raw timing for diagnostics, not the modeled outcome).
+    if max_followup_days is not None:
+        horizon = float(max_followup_days)
+        platinum_past = pat["PLATINUM"].eq(1) & pat["t_platinum"].gt(horizon)
+        death_past = pat["DEATH"].eq(1) & pat["t_death"].gt(horizon)
+        pat.loc[platinum_past, "PLATINUM"] = 0
+        pat.loc[death_past, "DEATH"] = 0
+        for duration_col in ["t_last_contact", "t_death", "t_platinum"]:
+            pat[duration_col] = pat[duration_col].clip(upper=horizon)
 
     platinum_event_time = np.where(pat["PLATINUM"].eq(1), pat["t_platinum"], np.inf)
     death_event_time = np.where(pat["DEATH"].eq(1), pat["t_death"], np.inf)
