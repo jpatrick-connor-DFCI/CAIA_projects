@@ -92,6 +92,8 @@ supplies the shared cohort-filtering (`scan_filter`) and dirty-numeric
 recovery (`recover_numeric`) helpers used to read MEDICATIONS.csv in memory.
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import sys
