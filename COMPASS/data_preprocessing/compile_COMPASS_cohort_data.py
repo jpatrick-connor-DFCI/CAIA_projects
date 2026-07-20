@@ -22,9 +22,10 @@ separate scripts:
                                     of a separate script).
 
 Cohort definitions:
-Three MRN sets are built, each driving its own full outcomes cohort plus an
+Six MRN sets are built, each driving its own full outcomes cohort plus an
 ARPI/chemo-exposure-restricted subset (non-null TREATMENT_ANCHOR_DATE) --
-six outputs total:
+twelve outputs total.  The original three definitions retain the shared
+non-prostate-primary exclusion:
 
   * icd        -- ICD-10 code C61 (prostate primary), minus patients whose
                    ICD history shows a competing non-prostate primary
@@ -39,10 +40,16 @@ six outputs total:
                    built from.
   * icd_or_vte  -- union of the two (already-excluded) sets above.
 
+Three parallel ``*_allow_other_primaries`` definitions preserve patients with
+a documented non-prostate primary malignancy:
+
+  * icd_allow_other_primaries       -- every ICD-10 C61 patient.
+  * vte_allow_other_primaries       -- every VTE-project PROSTATE-tagged patient.
+  * icd_or_vte_allow_other_primaries -- union of those two unexcluded sets.
+
 The non-prostate-primary exclusion is computed once from the full ICD
-history and applied identically to all three cohort definitions, so no
-cohort arm can retain a patient with a documented competing primary
-malignancy that another arm excludes.
+history. It is applied identically to the original three cohort definitions
+and deliberately omitted from the three ``*_allow_other_primaries`` variants.
 
 Raw date handling:
 All dates use the raw calendar columns directly (MED_START_DT, BIRTH_DT,
@@ -68,11 +75,13 @@ Outputs (in NEPC_PROJ_PATH):
   * prostate_arpi_survival_cohort_vte_arpi.csv    (vte, ARPI-restricted)
   * prostate_arpi_survival_cohort_icd_or_vte.csv       (icd_or_vte, full)
   * prostate_arpi_survival_cohort_icd_or_vte_arpi.csv  (icd_or_vte, ARPI-restricted)
+  * prostate_arpi_survival_cohort_{icd,vte,icd_or_vte}_allow_other_primaries.csv
+                                                    (unexcluded, full variants)
+  * prostate_arpi_survival_cohort_{icd,vte,icd_or_vte}_allow_other_primaries_arpi.csv
+                                                    (unexcluded, ARPI-restricted variants)
 
-Also writes six bare DFCI_MRN-only CSVs (one per cohort arm above) to
-mrn_lists_dir (default NEPC_PROJ_PATH/mrn_lists/): icd_mrns.csv,
-icd_arpi_mrns.csv, vte_mrns.csv, vte_arpi_mrns.csv, icd_or_vte_mrns.csv,
-icd_or_vte_arpi_mrns.csv.
+Also writes twelve bare DFCI_MRN-only CSVs (one per cohort arm above) to
+mrn_lists_dir (default NEPC_PROJ_PATH/mrn_lists/).
 
 Author: J. Patrick Connor
 Date: 2026-07-18
@@ -195,7 +204,10 @@ def compute_prostate_cohort(icds: pl.DataFrame, non_prostate_primary_mrns: set):
     return prostate_mrns, excluded
 
 
-def load_vte_prostate_mrns(vte_cancer_types_path, non_prostate_primary_mrns: set) -> set:
+def load_vte_prostate_mrn_sets(
+    vte_cancer_types_path,
+    non_prostate_primary_mrns: set,
+) -> tuple[set, set, set]:
     """VTE-prediction-project MRNs tagged PROSTATE by
     med_genomics_merged_cancer_group, minus those with a competing
     non-prostate primary ICD (same exclusion applied to the `icd` cohort --
@@ -217,7 +229,43 @@ def load_vte_prostate_mrns(vte_cancer_types_path, non_prostate_primary_mrns: set
         f"excluded {len(excluded)} with a non-prostate-primary ICD; "
         f"retained {len(vte_mrns)}."
     )
+    return vte_mrns, tagged_mrns, excluded
+
+
+def load_vte_prostate_mrns(vte_cancer_types_path, non_prostate_primary_mrns: set) -> set:
+    """Backward-compatible filtered VTE cohort loader."""
+    vte_mrns, _, _ = load_vte_prostate_mrn_sets(
+        vte_cancer_types_path,
+        non_prostate_primary_mrns,
+    )
     return vte_mrns
+
+
+def assert_cohort_set_invariants(cohorts: dict[str, set]) -> None:
+    """Fail early if filtered/unfiltered cohort relationships are violated."""
+    pairs = (
+        ("icd", "icd_allow_other_primaries"),
+        ("vte", "vte_allow_other_primaries"),
+        ("icd_or_vte", "icd_or_vte_allow_other_primaries"),
+    )
+    for filtered_key, unfiltered_key in pairs:
+        if not cohorts[filtered_key] <= cohorts[unfiltered_key]:
+            raise AssertionError(
+                f"{filtered_key} must be a subset of {unfiltered_key}."
+            )
+
+    expected_filtered_union = cohorts["icd"] | cohorts["vte"]
+    if cohorts["icd_or_vte"] != expected_filtered_union:
+        raise AssertionError("icd_or_vte is not exactly icd UNION vte.")
+
+    expected_unfiltered_union = (
+        cohorts["icd_allow_other_primaries"]
+        | cohorts["vte_allow_other_primaries"]
+    )
+    if cohorts["icd_or_vte_allow_other_primaries"] != expected_unfiltered_union:
+        raise AssertionError(
+            "icd_or_vte_allow_other_primaries is not exactly the union of its arms."
+        )
 
 
 def load_and_explode_icd(icd_path) -> pl.DataFrame:
@@ -312,10 +360,10 @@ def filter_cohort(filename, cohort_mrns, cols=None) -> pl.DataFrame:
 
 
 def compile_cohort_tables(icd_mrns, all_cohort_mrns, icds: pl.DataFrame):
-    """Write the ICD inclusion/exclusion record (scoped to the icd cohort
-    only) and return a medications table in memory (not persisted), scoped to
-    the union of every cohort (`all_cohort_mrns`) so it can feed the outcomes
-    cohort builder for all three cohort definitions below. No other
+    """Write the ICD record (scoped to the widest C61 cohort) and return a
+    medications table in memory (not persisted), scoped to the union of every
+    cohort (`all_cohort_mrns`) so it can feed the outcomes
+    cohort builder for all six cohort definitions below. No other
     cohort-filtered raw-table dumps are written here -- longitudinal_data_processing.py
     now reads+scopes the raw OncDRS health/labs tables itself, and the
     somatic table is read directly by compile_MRNs_for_manual_review.py when
@@ -492,7 +540,8 @@ def main():
         description="Compile the COMPASS prostate cohort's ICD inclusion/"
         "exclusion record and ARPI/chemo-anchored survival (outcomes) cohorts "
         "from the raw OncDRS pull, for the icd, vte, and icd_or_vte cohort "
-        "definitions (each with a full and an ARPI-exposure-restricted variant).",
+        "definitions, both with and without the non-prostate-primary exclusion "
+        "(each with a full and an ARPI-exposure-restricted variant).",
     )
     parser.add_argument(
         "--icd-source",
@@ -533,27 +582,57 @@ def main():
     #    every cohort definition below (icd, vte, and therefore icd_or_vte).
     icds = load_and_explode_icd(args.icd_source)
     non_prostate_primary_mrns = compute_non_prostate_primary_mrns(icds)
-    icd_mrns, _ = compute_prostate_cohort(icds, non_prostate_primary_mrns)
-    vte_mrns = load_vte_prostate_mrns(args.vte_cancer_types, non_prostate_primary_mrns)
+    icd_mrns, icd_excluded_mrns = compute_prostate_cohort(
+        icds,
+        non_prostate_primary_mrns,
+    )
+    icd_allow_other_primaries_mrns = icd_mrns | icd_excluded_mrns
+
+    vte_mrns, vte_allow_other_primaries_mrns, _ = load_vte_prostate_mrn_sets(
+        args.vte_cancer_types,
+        non_prostate_primary_mrns,
+    )
     icd_or_vte_mrns = icd_mrns | vte_mrns
+    icd_or_vte_allow_other_primaries_mrns = (
+        icd_allow_other_primaries_mrns | vte_allow_other_primaries_mrns
+    )
     overlap = icd_mrns & vte_mrns
     print(
         f"icd_or_vte union: {len(icd_or_vte_mrns)} patients "
         f"(icd={len(icd_mrns)}, vte={len(vte_mrns)}, overlap={len(overlap)})."
+    )
+    unfiltered_overlap = (
+        icd_allow_other_primaries_mrns & vte_allow_other_primaries_mrns
+    )
+    print(
+        "icd_or_vte_allow_other_primaries union: "
+        f"{len(icd_or_vte_allow_other_primaries_mrns)} patients "
+        f"(icd={len(icd_allow_other_primaries_mrns)}, "
+        f"vte={len(vte_allow_other_primaries_mrns)}, "
+        f"overlap={len(unfiltered_overlap)})."
     )
 
     cohorts = {
         "icd": icd_mrns,
         "vte": vte_mrns,
         "icd_or_vte": icd_or_vte_mrns,
+        "icd_allow_other_primaries": icd_allow_other_primaries_mrns,
+        "vte_allow_other_primaries": vte_allow_other_primaries_mrns,
+        "icd_or_vte_allow_other_primaries": icd_or_vte_allow_other_primaries_mrns,
     }
+    assert_cohort_set_invariants(cohorts)
 
-    # 2. ICD inclusion/exclusion output (icd cohort only) + in-memory
-    #    medications scoped to the union of every cohort.
-    meds = compile_cohort_tables(icd_mrns, icd_or_vte_mrns, icds)
+    # 2. ICD output (widest C61 cohort) + in-memory medications scoped to the
+    #    widest union, ensuring the allow-other-primary arms remain available
+    #    to longitudinal preprocessing.
+    meds = compile_cohort_tables(
+        icd_allow_other_primaries_mrns,
+        icd_or_vte_allow_other_primaries_mrns,
+        icds,
+    )
 
     # 3. ARPI/chemo-anchored survival cohort, reusing the meds already
-    #    scoped to every cohort above -- shared across all three cohort
+    #    scoped to every cohort above -- shared across all six cohort
     #    definitions since anchor/platinum dates don't depend on cohort.
     meds_for_survival = load_medications_for_survival(meds)
     anchor_df = compute_treatment_anchor(meds_for_survival)
@@ -571,6 +650,15 @@ def main():
         "icd": "prostate_arpi_survival_cohort.csv",
         "vte": "prostate_arpi_survival_cohort_vte.csv",
         "icd_or_vte": "prostate_arpi_survival_cohort_icd_or_vte.csv",
+        "icd_allow_other_primaries": (
+            "prostate_arpi_survival_cohort_icd_allow_other_primaries.csv"
+        ),
+        "vte_allow_other_primaries": (
+            "prostate_arpi_survival_cohort_vte_allow_other_primaries.csv"
+        ),
+        "icd_or_vte_allow_other_primaries": (
+            "prostate_arpi_survival_cohort_icd_or_vte_allow_other_primaries.csv"
+        ),
     }
 
     os.makedirs(args.mrn_lists_dir, exist_ok=True)
@@ -584,7 +672,7 @@ def main():
         print(f"Saved {cohort_key} survival cohort to {out_path}")
 
         mrn_list_path = os.path.join(args.mrn_lists_dir, f"{cohort_key}_mrns.csv")
-        survival_cohort.select(ID_COL).write_csv(mrn_list_path)
+        survival_cohort.select(ID_COL).unique().sort(ID_COL).write_csv(mrn_list_path)
         print(f"Saved {cohort_key} MRN list to {mrn_list_path}")
 
         arpi_cohort = survival_cohort.filter(pl.col('TREATMENT_ANCHOR_DATE').is_not_null())
@@ -595,7 +683,7 @@ def main():
         print(f"Saved {cohort_key}_arpi survival cohort to {arpi_out_path}")
 
         arpi_mrn_list_path = os.path.join(args.mrn_lists_dir, f"{cohort_key}_arpi_mrns.csv")
-        arpi_cohort.select(ID_COL).write_csv(arpi_mrn_list_path)
+        arpi_cohort.select(ID_COL).unique().sort(ID_COL).write_csv(arpi_mrn_list_path)
         print(f"Saved {cohort_key}_arpi MRN list to {arpi_mrn_list_path}")
 
 

@@ -87,21 +87,20 @@ COMPASS/
 ## Stage 1 — Compile prostate cohort source data
 
 `data_preprocessing/compile_COMPASS_cohort_data.py` (module-level script, argparse CLI for path
-overrides). Derives the prostate cohort directly from ICD-10 code C61, removes patients with a clear
-non-prostate-primary ICD, then filters the raw ICD / health-history / medication / lab / somatic
-exports down to that ICD-C61 cohort and derives `total_psa_records.csv` and
-`platinum_chemo_records.csv`. The same script also builds the ARPI/chemo-anchored survival cohort
-(age, treatment anchor, death, time-to-platinum) directly from the raw OncDRS pull, sharing the
-medications table already filtered above.
+overrides). Derives ICD-C61 and VTE-project prostate cohorts, their union, and parallel variants
+that retain patients with other primary malignancies. Each definition has a full and a
+treatment-anchor-restricted output. The same script builds the ARPI/chemo-anchored survival data
+(age, treatment anchor, death, time-to-platinum) directly from the raw OncDRS pull.
 
 - **Inputs (hard-coded under `DATA_PATH = /data/gusev/USERS/jpconnor/data/`, plus the raw OncDRS pull
   at `ONCDRS_PATH`):** `EHR_DIAGNOSIS.csv`, `HEALTH_HISTORY.csv`, `MEDICATIONS.csv`,
   `OUTPT_LAB_RESULTS_LABS.csv`, `complete_somatic_data_df.csv.gz`, `PT_INFO_STATUS_REGISTRATION.csv`.
-- **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** the seven `prostate_*` /
-  `*_records.csv` tables plus `prostate_arpi_survival_cohort.csv`, listed in the data-flow diagram.
-- **Cohort definition:** ICD-10 C61 patients after ICD-based non-prostate-primary exclusion — one
-  shared cohort definition drives every output, including the survival cohort (previously the
-  cohort-filtered tables used a separate inferred-cancer cohort; that source is no longer read).
+- **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** twelve survival-cohort CSVs
+  (six full definitions and six treatment-anchor-restricted variants), twelve corresponding
+  bare-MRN lists, and `prostate_icd_data.csv`.
+- **Cohort definitions:** `icd`, `vte`, and `icd_or_vte` apply the ICD-based
+  non-prostate-primary exclusion. The corresponding `*_allow_other_primaries` variants omit that
+  exclusion. Every definition also emits an `_arpi` treatment-anchor-restricted subset.
 
 `compile_MRNs_for_manual_review.py` builds an auxiliary manual-review MRN sheet from the
 stage-1 outputs (platinum records, non-prostate-primary ICDs, PARPi exposure, BRCA2 status).
@@ -126,10 +125,10 @@ prostate (`C61`) diagnosis date when available and outcomes, rebases all timing 
 prostate lab frame. Patient-level cohort filters are deferred to `build_prediction_inputs.py` so
 different anchors can select their own cohorts.
 
-- **Broad processing:** ICD-C61 prostate cohort required and non-prostate-primary ICDs excluded at
-  stage 1; a C61 diagnosis date is attached when present but is not required. No first-treatment,
-  PSA-count, or PARPi filter is applied to `longitudinal_prediction_data.csv`. `PARPI_EXPOSED` is
-  carried as a patient-level flag for downstream filtering.
+- **Broad processing:** the widest `icd_or_vte_allow_other_primaries` union is processed once; a
+  C61 diagnosis date is attached when present but is not required. Narrower cohort selection is
+  applied with `build_prediction_inputs.py --restrict-to-mrns`. No PSA-count or PARPi filter is
+  applied to `longitudinal_prediction_data.csv`; `PARPI_EXPOSED` is carried downstream as a flag.
 - **Lab QC (`consolidate_dfci_labs`):** unit standardization to canonical units, sentinel nulling
   (e.g. `9999999`), physiologic-range nulling, combined-BP splitting. Out-of-range values are **nulled,
   not row-dropped** — downstream must filter on `conversion_status` (or pass `--successful-only`).

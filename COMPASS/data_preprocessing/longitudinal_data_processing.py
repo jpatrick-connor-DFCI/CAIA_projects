@@ -40,13 +40,17 @@ SURV_PATH = EMBED_PROJ_PATH / "time-to-event_analysis"
 # straight from the raw OncDRS pull. It supplies the outcome/anchor columns
 # (age, treatment anchor, death, last-contact, platinum) that used to come from
 # death_met_surv_df.csv.gz. See load_death_df_from_survival_cohort. Defaults to
-# the icd_or_vte UNION cohort (not the icd-only file). main() loads this file
+# the widest icd_or_vte UNION cohort, which allows other primary malignancies.
+# main() loads this file
 # first and uses its MRN set both to scan-filter the raw HEALTH_HISTORY/
 # OUTPT_LAB_RESULTS_LABS/MEDICATIONS reads and to restrict the final output --
 # this is the one cohort-membership filter Stage 2 applies. Narrower cohort
-# variants (icd-only, vte-only, either ARPI-restricted) remain a Stage 3
+# variants (primary-excluded, icd-only, vte-only, or ARPI-restricted) remain a Stage 3
 # (build_prediction_inputs.py --restrict-to-mrns) concern.
-DEFAULT_SURVIVAL_COHORT_CSV = NEPC_PROJ_PATH / "prostate_arpi_survival_cohort_icd_or_vte.csv"
+DEFAULT_SURVIVAL_COHORT_CSV = (
+    NEPC_PROJ_PATH
+    / "prostate_arpi_survival_cohort_icd_or_vte_allow_other_primaries.csv"
+)
 
 # Cisplatin appears both as a single agent and coded within a combination
 # regimen name; both count as platinum exposure. Oxaliplatin is intentionally
@@ -696,7 +700,8 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SURVIVAL_COHORT_CSV,
         help=(
             "Per-patient survival cohort from compile_COMPASS_cohort_data.py "
-            "(defaults to the icd_or_vte UNION cohort). Supplies the treatment "
+            "(defaults to the widest icd_or_vte UNION cohort, including patients "
+            "with other primary malignancies). Supplies the treatment "
             "anchor, age, death, and last-contact outcome columns via a LEFT "
             "join, and ALSO defines the output cohort: main() restricts the "
             "final longitudinal_prediction_df to this file's MRN set after the "
@@ -748,8 +753,9 @@ def main() -> None:
     # gated on union_cohort_mrns.
     icds = pd.read_csv(args.icd_csv)
 
-    # Output cohort = the icd_or_vte union (every MRN in args.survival_cohort_csv,
-    # which defaults to prostate_arpi_survival_cohort_icd_or_vte.csv). Loaded
+    # Output cohort = the widest icd_or_vte union (every MRN in
+    # args.survival_cohort_csv, which defaults to the allow-other-primaries
+    # union). Loaded
     # first so HEALTH_HISTORY/OUTPT_LAB_RESULTS_LABS/MEDICATIONS -- each tens of
     # millions of rows across the full raw OncDRS universe -- can be filtered to
     # this MRN set during the lazy scan itself, rather than read in full and
@@ -758,7 +764,7 @@ def main() -> None:
     # --restrict-to-mrns.
     death_df = load_death_df_from_survival_cohort(args.survival_cohort_csv)
     union_cohort_mrns = set(int(m) for m in death_df[ID_COL].unique())
-    print(f"[main] icd_or_vte union cohort: {len(union_cohort_mrns)} patients.")
+    print(f"[main] broad union cohort: {len(union_cohort_mrns)} patients.")
 
     # --- Polars reshape (scope boundary: everything up to consolidate_dfci_labs) ---
     health_df_pl = fast_io.scan_filter(args.health_csv, union_cohort_mrns).collect()
