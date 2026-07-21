@@ -134,9 +134,9 @@ format_label <- function(lab_name, feature_stat) {
 parse_feature <- function(name) {
   if (grepl("__", name, fixed = TRUE)) {
     parts <- strsplit(name, "__", fixed = TRUE)[[1]]
-    list(lab_name = parts[1], feature_stat = paste(parts[-1], collapse = "__"))
+    c(lab_name = parts[1], feature_stat = paste(parts[-1], collapse = "__"))
   } else {
-    list(lab_name = name, feature_stat = "")
+    c(lab_name = name, feature_stat = "")
   }
 }
 
@@ -155,6 +155,15 @@ COHORTS <- c(
 # so the notebook can call this once per cohort in the same R session instead
 # of re-executing itself via Rscript.
 generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS, show = FALSE) {
+  # Rscript opens `Rplots.pdf` when any plot is drawn without an explicit device.
+  # All intended outputs below use ggsave(), so route any incidental drawing to a
+  # temporary null PDF device during non-interactive runs.
+  if (!show) {
+    previous_device_option <- getOption("device")
+    options(device = function(...) grDevices::pdf(file = NULL, ...))
+    on.exit(options(device = previous_device_option), add = TRUE)
+  }
+
   NEPC_PROJ_PATH <- nepc_proj_path
   COHORT <- cohort
   if (!COHORT %in% cohorts)
@@ -175,9 +184,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     if (startsWith(plot_stem, "figure2")) return("figure2")
     if (startsWith(plot_stem, "figure3")) return("figure3")
     if (startsWith(plot_stem, "figure4")) return("figure4")
-    if (startsWith(plot_stem, "km_")) return("figure5")
-    if (startsWith(plot_stem, "androgen_dist_")) return("figure6")
-    if (startsWith(plot_stem, "androgen_longitudinal_")) return("figure7")
+    if (startsWith(plot_stem, "km_")) return("KM_curves")
+    if (startsWith(plot_stem, "androgen_dist_")) return("androgen_distributions")
+    if (startsWith(plot_stem, "androgen_longitudinal_")) return("androgen_trajectories")
     stop(sprintf("Unmapped figure output stem: %s", plot_stem))
   }
   # Compatibility value passed by existing save_fig call sites; actual output
@@ -199,18 +208,19 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   platinum_set <- unique(platinum_mrns$DFCI_MRN)
   nepc_annotations <- nepc_annotations %>%
     mutate(is_platinum = DFCI_MRN %in% platinum_set)
+  nepc_annotations_all <- nepc_annotations
   cat(sprintf("nepc_annotations: %s rows (%s platinum+, %s platinum-)\n",
               format(nrow(nepc_annotations), big.mark = ","),
               format(sum(nepc_annotations$is_platinum), big.mark = ","),
               format(sum(!nepc_annotations$is_platinum), big.mark = ",")))
 
   # save_fig: write one high-resolution PNG to the figure/panel directory.
-  save_fig <- function(plot, out_dir, stem, width, height) {
+  save_fig <- function(plot, out_dir, stem, width, height, prefix = COHORT) {
     # `out_dir` is retained for call-site compatibility. Outputs are grouped by
     # exact plot stem so every cohort version of a panel sits in one directory.
     panel_dir <- file.path(FIG_ROOT, figure_group(stem), stem, FIG_LANG)
     dir.create(panel_dir, recursive = TRUE, showWarnings = FALSE)
-    output_stem <- paste0(COHORT, "_", stem)
+    output_stem <- paste0(prefix, "_", stem)
 
     png_out <- file.path(panel_dir, paste0(output_stem, ".png"))
     if (HAS_RAGG) {
@@ -469,6 +479,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
   ## Panel A -- LLM validation (NEPC-vs-rest classifier)
   OUT_DIR <- fig_dir("figure2_llm")
+  SAVE_ORIGINAL_LLM <- identical(COHORT, cohorts[[1]])
 
   drop_cols <- function(df, cols) df %>% select(-any_of(cols))
 
@@ -544,12 +555,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
   pA1 <- render_confusion_panel(metrics) +
     labs(caption = caption_a) + theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
-  save_fig(pA1, OUT_DIR, "figure2a1_confusion_matrix", width = 4.2, height = 4.2)
+  if (SAVE_ORIGINAL_LLM)
+    save_fig(pA1, OUT_DIR, "figure2a1_confusion_matrix", width = 4.2, height = 4.2,
+             prefix = "original")
   if (show) print(pA1)
 
   pA2 <- render_metric_bar_panel(metrics) +
     labs(caption = caption_a) + theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
-  save_fig(pA2, OUT_DIR, "figure2a2_metric_bar", width = 5.0, height = 4.2)
+  if (SAVE_ORIGINAL_LLM)
+    save_fig(pA2, OUT_DIR, "figure2a2_metric_bar", width = 5.0, height = 4.2,
+             prefix = "original")
   if (show) print(pA2)
 
   ## Panel B -- subtype landscape (descriptive, 4-class)
@@ -621,7 +636,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   pB <- render_landscape_panel() +
     labs(caption = caption_b) +
     theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-  save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", width = 7.5, height = 5)
+  if (SAVE_ORIGINAL_LLM)
+    save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", width = 7.5, height = 5,
+             prefix = "original")
   if (show) print(pB)
 
   df <- nepc_annotations
@@ -707,7 +724,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   pC <- render_enrichment_panel() +
     labs(caption = caption_c) +
     theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-  save_fig(pC, OUT_DIR, "figure2c_enrichment", width = 6, height = 5.5)
+  if (SAVE_ORIGINAL_LLM)
+    save_fig(pC, OUT_DIR, "figure2c_enrichment", width = 6, height = 5.5,
+             prefix = "original")
   if (show) print(pC)
 
   # Layout mirrors the Python subplot_mosaic [[A1, A2, B],[C, C, B]]:
@@ -732,7 +751,94 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
       caption = str_wrap(full_caption, 130),
       theme = theme(plot.title = element_text(face = "bold", size = 13),
                     plot.caption = element_text(size = 8.5, color = COLOR_NEUTRAL_INK)))
-  save_fig(fig2, OUT_DIR, "figure2_llm_subtype_platinum", width = 15, height = 9)
+  if (SAVE_ORIGINAL_LLM)
+    save_fig(fig2, OUT_DIR, "figure2_llm_subtype_platinum", width = 15, height = 9,
+             prefix = "original")
+  if (show) print(fig2)
+
+  # Cohort-specific Figure 2 variant: retain only LLM calls whose MRN belongs to
+  # this analysis cohort's base-landmark population. The original full-label set
+  # above is written once with an `original_` prefix.
+  cohort_mrns <- unique(as.character(patient_df[[ID_COL]]))
+  nepc_annotations <- nepc_annotations_all %>%
+    filter(as.character(DFCI_MRN) %in% cohort_mrns)
+  message(sprintf("Figure 2 cohort subset (%s): %s / %s LLM-labeled MRNs",
+                  COHORT, format(nrow(nepc_annotations), big.mark = ","),
+                  format(nrow(nepc_annotations_all), big.mark = ",")))
+
+  merged_results <- manual_annotations %>%
+    drop_cols(c("pathology_details", "manual_platinum_reason")) %>%
+    inner_join(
+      nepc_annotations %>% drop_cols(c("has_nepc","has_avpc","has_molecular_avpc",
+                                       "avpc_criteria","visceral_met_pattern","num_snippets")),
+      by = "DFCI_MRN"
+    ) %>%
+    mutate(
+      manual_NEPC = simplified_manual_platinum_reason %in% c("nepc","squamous_transformation"),
+      LLM_NEPC    = primary_label == "nepc"
+    )
+  metrics <- binary_metrics(merged_results$manual_NEPC, merged_results$LLM_NEPC)
+  n_total <- nrow(merged_results)
+  n_nepc_manual <- sum(merged_results$manual_NEPC)
+  caption_a <- sprintf("%s MRN subset; N = %s chart-reviewed patients; %s manual-NEPC positive.",
+                       COHORT, format(n_total, big.mark = ","),
+                       format(n_nepc_manual, big.mark = ","))
+  pA1 <- render_confusion_panel(metrics) + labs(caption = caption_a) +
+    theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
+  pA2 <- render_metric_bar_panel(metrics) + labs(caption = caption_a) +
+    theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
+  save_fig(pA1, OUT_DIR, "figure2a1_confusion_matrix", 4.2, 4.2)
+  save_fig(pA2, OUT_DIR, "figure2a2_metric_bar", 5.0, 4.2)
+
+  platinum_positive_labels <- nepc_annotations %>% filter(is_platinum) %>% count_labels() %>%
+    mutate(platinum_status = "positive")
+  platinum_negative_labels <- nepc_annotations %>% filter(!is_platinum) %>% count_labels() %>%
+    mutate(platinum_status = "negative")
+  label_distributions <- bind_rows(platinum_positive_labels, platinum_negative_labels)
+  n_pos <- sum(platinum_positive_labels$count)
+  n_neg <- sum(platinum_negative_labels$count)
+  caption_b <- sprintf("LLM labels restricted to the %s base-landmark MRN set; fractions are computed within each platinum group.",
+                       COHORT)
+  pB <- render_landscape_panel() + labs(caption = caption_b) +
+    theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
+  save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", 7.5, 5)
+
+  df <- nepc_annotations %>% filter(primary_label %in% c("conventional","avpc","nepc")) %>%
+    mutate(aggressive = primary_label %in% c("avpc","nepc"))
+  n_excluded <- nrow(nepc_annotations) - nrow(df)
+  ct <- matrix(
+    c(sum(df$aggressive & df$is_platinum), sum(df$aggressive & !df$is_platinum),
+      sum(!df$aggressive & df$is_platinum), sum(!df$aggressive & !df$is_platinum)),
+    nrow = 2, byrow = TRUE,
+    dimnames = list(c("aggressive","conventional"), c("platinum+","platinum-")))
+  ft <- fisher.test(ct, alternative = "greater")
+  OR <- unname(ft$estimate); p_value <- ft$p.value
+  n_aggressive <- sum(ct["aggressive", ]); n_conventional <- sum(ct["conventional", ])
+  platinum_given_aggressive <- ct["aggressive", "platinum+"]
+  platinum_given_conventional <- ct["conventional", "platinum+"]
+  w_agg <- wilson_ci(platinum_given_aggressive, n_aggressive)
+  w_conv <- wilson_ci(platinum_given_conventional, n_conventional)
+  p_agg <- w_agg[1]; lo_agg <- w_agg[2]; hi_agg <- w_agg[3]
+  p_conv <- w_conv[1]; lo_conv <- w_conv[2]; hi_conv <- w_conv[3]
+  caption_c <- sprintf("%s MRN subset; excludes 'biomarker' labels (%s rows). Error bars are 95%% Wilson intervals.",
+                       COHORT, format(n_excluded, big.mark = ","))
+  pC <- render_enrichment_panel() + labs(caption = caption_c) +
+    theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
+  save_fig(pC, OUT_DIR, "figure2c_enrichment", 6, 5.5)
+
+  left <- (render_confusion_panel(metrics) + render_metric_bar_panel(metrics)) /
+          render_enrichment_panel()
+  right <- render_landscape_panel("Panel B — subtype landscape (cohort MRN subset)")
+  full_caption <- sprintf("LLM calls restricted to the %s base-landmark MRN set (n=%s labels; platinum+ n=%s, platinum- n=%s).",
+                          COHORT, format(nrow(nepc_annotations), big.mark = ","),
+                          format(n_pos, big.mark = ","), format(n_neg, big.mark = ","))
+  fig2 <- (left | right) + plot_layout(widths = c(2, 1.3)) +
+    plot_annotation(
+      title = sprintf("Figure 2 — LLM-extracted prostate subtypes (%s MRN subset)", COHORT),
+      caption = str_wrap(full_caption, 130),
+      theme = theme(plot.title = element_text(face = "bold", size = 13),
+                    plot.caption = element_text(size = 8.5, color = COLOR_NEUTRAL_INK)))
+  save_fig(fig2, OUT_DIR, "figure2_llm_subtype_platinum", 15, 9)
   if (show) print(fig2)
 
   # ----------------------------- labeling knobs ---------------------------
@@ -765,6 +871,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     sub <- sub %>%
       filter(!lab_name %in% DROP) %>%
       mutate(
+        .point_id  = row_number(),
         category  = vapply(lab_name, assign_category, character(1)),
         neglog10p = -log10(pmax(p_value, 1e-300)),
         sig       = q_value < 0.05,
@@ -779,6 +886,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     y_max <- if (nrow(sub)) max(sub$y) else 5
     q_y <- q_threshold_neglog10p(sub)
     lab_df <- labels_for_panel(sub, TOP_K_PER_PANEL, ALWAYS_LABEL)
+    # Keep every point in the repel calculation, including unlabeled points, so
+    # text cannot settle on top of a nearby observation.
+    sub <- sub %>% mutate(repel_label = ifelse(.point_id %in% lab_df$.point_id, label, ""))
 
     n_tested <- nrow(sub); n_sig <- sum(sub$sig)
     breakdown <- sub %>% filter(sig) %>% count(category)
@@ -806,9 +916,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                  aes(coef_feature, y, fill = category), shape = 24,
                  size = 3.4, color = "white", stroke = 0.6, alpha = 0.92) +
       ggrepel::geom_text_repel(
-        data = lab_df, aes(coef_feature, pmin(neglog10p, Y_MAX_CAP), label = label, color = category),
+        data = sub,
+        aes(coef_feature, pmin(neglog10p, Y_MAX_CAP), label = repel_label, color = category),
         size = 3, fontface = "bold", segment.color = "#95a5a6", segment.size = 0.3,
-        max.overlaps = Inf, min.segment.length = 0, show.legend = FALSE) +
+        max.overlaps = Inf, min.segment.length = 0, box.padding = 0.55,
+        point.padding = 0.45, force = 1.5, max.time = 2, seed = 0,
+        show.legend = FALSE) +
       scale_color_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL) +
       scale_fill_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL) +
       scale_size_manual(values = c(`TRUE` = 3.2, `FALSE` = 2.1), guide = "none") +
@@ -825,9 +938,15 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   OUT_DIR <- fig_dir("figure3_univariate")
 
   load_uni <- function(landmark) {
-    p <- file.path(BASE, "cox", sprintf("landmark_%s", landmark), "both",
-                   "cox_agg_univariate_nobs_adjusted.csv")
-    read_csv(p, show_col_types = FALSE) %>% mutate(landmark_days = landmark)
+    shared <- file.path(BASE, "cox", "landmark_shared",
+                        "cox_agg_univariate_nobs_adjusted.csv")
+    if (file.exists(shared)) {
+      return(read_csv(shared, show_col_types = FALSE) %>%
+               filter(landmark_days == landmark))
+    }
+    legacy <- file.path(BASE, "cox", sprintf("landmark_%s", landmark), "both",
+                        "cox_agg_univariate_nobs_adjusted.csv")
+    read_csv(legacy, show_col_types = FALSE) %>% mutate(landmark_days = landmark)
   }
 
   uni <- map_dfr(LANDMARKS, load_uni) %>%
@@ -1051,15 +1170,15 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     list(Testosterone = find_mean_col(columns, "Testosterone"), PSA = psa)
   }
 
-  # 3-way tertile split into Low (T1) / Mid (T2) / High (T3); NA where undefined.
-  tertile_split <- function(df, col) {
+  # 4-way quartile split; Figure 5 contrasts the lowest and highest quartiles.
+  quartile_split <- function(df, col) {
     vals <- suppressWarnings(as.numeric(df[[col]]))
     out <- rep(NA_character_, length(vals))
-    qs <- tryCatch(quantile(vals, c(1/3, 2/3), na.rm = TRUE, names = FALSE),
+    qs <- tryCatch(quantile(vals, c(0.25, 0.5, 0.75), na.rm = TRUE, names = FALSE),
                    error = function(e) NULL)
-    if (is.null(qs) || qs[1] == qs[2]) return(out)
-    lvl <- cut(vals, breaks = c(-Inf, qs[1], qs[2], Inf),
-               labels = c("Low (T1)", "Mid (T2)", "High (T3)"))
+    if (is.null(qs) || any(diff(qs) <= 0)) return(out)
+    lvl <- cut(vals, breaks = c(-Inf, qs, Inf),
+               labels = c("Low (Q1)", "Q2", "Q3", "High (Q4)"))
     out[!is.na(vals)] <- as.character(lvl)[!is.na(vals)]
     out
   }
@@ -1098,30 +1217,30 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
   FIG5_LANDMARKS <- c(0, 90)
 
-  plot_km_androgen_tertile <- function(agg, lab, mean_col, landmark) {
-    ttl <- sprintf("%s tertile -- landmark %s%dd", lab, ifelse(landmark > 0, "+", ""), landmark)
+  plot_km_androgen_quartile <- function(agg, lab, mean_col, landmark) {
+    ttl <- sprintf("%s quartile -- landmark %s%dd", lab, ifelse(landmark > 0, "+", ""), landmark)
     blank <- function(msg) ggplot() + annotate("text", x = 0, y = 0, label = msg, color = "#7f8c8d") +
       theme_void() + labs(title = ttl) + theme(plot.title = element_text(face = "bold", size = 10))
     if (is.na(mean_col) || !all(c("t_platinum","PLATINUM") %in% names(agg))) return(blank("(no data)"))
 
     d <- agg
-    d$stratum <- tertile_split(d, mean_col)
+    d$stratum <- quartile_split(d, mean_col)
     d <- d %>% filter(!is.na(stratum), !is.na(t_platinum), !is.na(PLATINUM),
-                      stratum %in% c("Low (T1)","High (T3)"))
+                      stratum %in% c("Low (Q1)","High (Q4)"))
     if (nrow(d) == 0 || length(unique(d$stratum)) < 2)
-      return(blank("(insufficient data after tertile split)"))
+      return(blank("(insufficient data after quartile split)"))
 
     km <- platinum_km_inputs(d)
     d <- d[km$row_id, , drop = FALSE]
     d$km_time <- km$time; d$km_event <- km$event
     survival_by_label <- split(d %>% transmute(time = km_time, event = km_event), d$stratum)
-    ttl2 <- sprintf("%s tertile (%s) -- landmark %s%dd", lab, mean_col,
+    ttl2 <- sprintf("%s quartile (%s) -- landmark %s%dd", lab, mean_col,
                     ifelse(landmark > 0, "+", ""), landmark)
     p <- overlay_km(survival_by_label, "Days from landmark", "Platinum-free probability", ttl2)
 
-    n_low <- sum(d$stratum == "Low (T1)"); n_high <- sum(d$stratum == "High (T3)")
-    ev_low <- sum(d$km_event[d$stratum == "Low (T1)"])
-    ev_high <- sum(d$km_event[d$stratum == "High (T3)"])
+    n_low <- sum(d$stratum == "Low (Q1)"); n_high <- sum(d$stratum == "High (Q4)")
+    ev_low <- sum(d$km_event[d$stratum == "Low (Q1)"])
+    ev_high <- sum(d$km_event[d$stratum == "High (Q4)"])
     ann <- sprintf("Low: n=%d, events=%d\nHigh: n=%d, events=%d", n_low, ev_low, n_high, ev_high)
     sd <- survdiff(Surv(km_time, km_event) ~ stratum, data = d)
     pval <- 1 - pchisq(sd$chisq, length(sd$n) - 1)
@@ -1136,12 +1255,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
       if (is.null(agg)) {
         p <- ggplot() + annotate("text", x = 0, y = 0, label = "(aggregated CSV not found)",
                                  color = "#7f8c8d") + theme_void() +
-          labs(title = sprintf("%s tertile -- landmark %dd", lab, landmark))
+          labs(title = sprintf("%s quartile -- landmark %dd", lab, landmark))
       } else {
         mean_cols <- resolve_androgen_columns(names(agg))
-        p <- plot_km_androgen_tertile(agg, lab, mean_cols[[lab]], landmark)
+        p <- plot_km_androgen_quartile(agg, lab, mean_cols[[lab]], landmark)
       }
-      save_fig(p, OUT_DIR, sprintf("km_%s_tertile_platinum_landmark%d", tolower(lab), landmark),
+      save_fig(p, OUT_DIR, sprintf("km_%s_quartile_platinum_landmark%d", tolower(lab), landmark),
                width = 6.5, height = 5.5)
       if (show) print(p)
     }
@@ -1345,13 +1464,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     if (is.null(binned) || nrow(binned) == 0)
       return(ggplot() + annotate("text", x = 0, y = 0, label = "(no data)", color = "#7f8c8d") +
                theme_void() + labs(title = title))
-    tot <- binned %>% group_by(plat_group) %>%
-      summarise(n_min = min(n), n_max = max(n), .groups = "drop")
-    leg <- setNames(sprintf("%s (n patients/bin=%s–%s)",
-                            PLAT_LABELS[as.character(tot$plat_group)],
-                            format(tot$n_min, big.mark = ","),
-                            format(tot$n_max, big.mark = ",")),
-                    as.character(tot$plat_group))
+    leg <- c(`0` = "Non-platinum", `1` = "Platinum")
     binned <- binned %>% mutate(plat_group = factor(plat_group)) %>% arrange(t_mid)
     ggplot(binned, aes(t_mid, mean, color = plat_group, fill = plat_group)) +
       geom_vline(xintercept = 0, color = "#2c3e50", linetype = "dotted", linewidth = 1, alpha = 0.6) +

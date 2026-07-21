@@ -97,7 +97,7 @@ def make_outcome_df(
     anchor_col: str | None = "t_first_treatment",
     extra_anchor_cols: tuple[str, ...] = (),
     require_first_treatment: bool = True,
-    max_followup_days: float | None = 3650.0,
+    max_followup_days: float | None = None,
 ) -> pd.DataFrame:
     """Build the per-patient outcome table rebased to a landmark.
 
@@ -120,10 +120,9 @@ def make_outcome_df(
             or death event lands beyond this horizon are censored at the horizon
             (event flag -> 0, duration -> horizon); censored follow-up
             (``t_last_contact``) is clipped to the horizon too. Defaults to
-            3650 (10 years): platinum >10y after the treatment anchor is very
-            unlikely to reflect the modeled aggressive-transformation process,
-            and the sparse tail destabilizes the Cox/Fine-Gray fits. Pass
-            ``None`` to disable and use full follow-up.
+            ``None`` (no cap, full follow-up used). Previously defaulted to
+            3650 (10 years) to guard against a sparse tail destabilizing the
+            Cox/Fine-Gray fits; pass an explicit value to restore that horizon.
     """
     patient_level_cols = [
         ID_COL,

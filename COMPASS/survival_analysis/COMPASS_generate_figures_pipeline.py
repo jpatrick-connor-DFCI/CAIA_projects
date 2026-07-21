@@ -208,11 +208,11 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
         if plot_stem.startswith("figure4"):
             return "figure4"
         if plot_stem.startswith("km_"):
-            return "figure5"
+            return "KM_curves"
         if plot_stem.startswith("androgen_dist_"):
-            return "figure6"
+            return "androgen_distributions"
         if plot_stem.startswith("androgen_longitudinal_"):
-            return "figure7"
+            return "androgen_trajectories"
         raise ValueError(f"Unmapped figure output stem: {plot_stem}")
 
 
@@ -221,12 +221,12 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
         return FIG_ROOT / figure_group(plot_stem) / plot_stem / FIG_LANG
 
 
-    def figure_path(filename):
+    def figure_path(filename, *, prefix=None):
         """Return a cohort-prefixed path grouped with the same panel from every cohort."""
         filename = Path(filename)
         d = fig_dir(filename.stem)
         d.mkdir(parents=True, exist_ok=True)
-        return d / f"{COHORT}_{filename.name}"
+        return d / f"{prefix or COHORT}_{filename.name}"
 
 
     def table_path(stem):
@@ -249,6 +249,7 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
     # `mrn in ...unique()` dict comprehension).
     platinum_set = set(platinum_mrns["DFCI_MRN"].unique())
     nepc_annotations["is_platinum"] = nepc_annotations["DFCI_MRN"].isin(platinum_set)
+    nepc_annotations_all = nepc_annotations.copy()
     print(f"nepc_annotations: {len(nepc_annotations):,} rows "
           f"({nepc_annotations['is_platinum'].sum():,} platinum+, "
           f"{(~nepc_annotations['is_platinum']).sum():,} platinum-)")
@@ -564,6 +565,7 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
         plt.show()
     plt.close("all")
 
+    SAVE_ORIGINAL_LLM = COHORT == cohorts[0]
     merged_results = (manual_annotations.drop(columns=['pathology_details', 'manual_platinum_reason'])
                       .merge(nepc_annotations.drop(columns=['has_nepc', 'has_avpc', 'has_molecular_avpc',
                                                             'avpc_criteria', 'visceral_met_pattern', 'num_snippets']),
@@ -636,10 +638,11 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
     render_confusion_panel(ax_a1, metrics)
     fig_a1.suptitle(caption_a, fontsize=8.5, color=COLOR_NEUTRAL_INK, y=0.01)
     fig_a1.tight_layout()
-    for ext in ("png",):
-        out = figure_path(f"figure2a1_confusion_matrix.{ext}")
-        fig_a1.savefig(out)
-        print(f"wrote {out}")
+    if SAVE_ORIGINAL_LLM:
+        for ext in ("png",):
+            out = figure_path(f"figure2a1_confusion_matrix.{ext}", prefix="original")
+            fig_a1.savefig(out)
+            print(f"wrote {out}")
     if show:
         plt.show()
     plt.close("all")
@@ -648,10 +651,11 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
     render_metric_bar_panel(ax_a2, metrics)
     fig_a2.suptitle(caption_a, fontsize=8.5, color=COLOR_NEUTRAL_INK, y=0.01)
     fig_a2.tight_layout()
-    for ext in ("png",):
-        out = figure_path(f"figure2a2_metric_bar.{ext}")
-        fig_a2.savefig(out)
-        print(f"wrote {out}")
+    if SAVE_ORIGINAL_LLM:
+        for ext in ("png",):
+            out = figure_path(f"figure2a2_metric_bar.{ext}", prefix="original")
+            fig_a2.savefig(out)
+            print(f"wrote {out}")
     if show:
         plt.show()
     plt.close("all")
@@ -718,10 +722,11 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
     fig_b.text(0.5, -0.02, caption_b, ha="center", va="top", fontsize=8.5,
                 color=COLOR_NEUTRAL_INK, wrap=True)
     fig_b.tight_layout()
-    for ext in ("png",):
-        out = figure_path(f"figure2b_subtype_landscape.{ext}")
-        fig_b.savefig(out)
-        print(f"wrote {out}")
+    if SAVE_ORIGINAL_LLM:
+        for ext in ("png",):
+            out = figure_path(f"figure2b_subtype_landscape.{ext}", prefix="original")
+            fig_b.savefig(out)
+            print(f"wrote {out}")
     if show:
         plt.show()
     plt.close("all")
@@ -813,10 +818,11 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
     fig_c.text(0.5, -0.05, caption_c, ha="center", va="top", fontsize=8.5,
                 color=COLOR_NEUTRAL_INK, wrap=True)
     fig_c.tight_layout()
-    for ext in ("png",):
-        out = figure_path(f"figure2c_enrichment.{ext}")
-        fig_c.savefig(out)
-        print(f"wrote {out}")
+    if SAVE_ORIGINAL_LLM:
+        for ext in ("png",):
+            out = figure_path(f"figure2c_enrichment.{ext}", prefix="original")
+            fig_c.savefig(out)
+            print(f"wrote {out}")
     if show:
         plt.show()
     plt.close("all")
@@ -866,13 +872,136 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
               color=COLOR_NEUTRAL_INK, wrap=True)
 
     fig.tight_layout()
-    for ext in ("png",):
-        out = figure_path(f"figure2_llm_subtype_platinum.{ext}")
-        fig.savefig(out, bbox_inches="tight")
-        print(f"wrote {out}")
+    if SAVE_ORIGINAL_LLM:
+        for ext in ("png",):
+            out = figure_path(f"figure2_llm_subtype_platinum.{ext}", prefix="original")
+            fig.savefig(out, bbox_inches="tight")
+            print(f"wrote {out}")
     if show:
         plt.show()
     plt.close("all")
+
+    # Cohort-specific Figure 2 variant. The full, unfiltered LLM calls above are
+    # emitted once with an `original_` prefix; each regular cohort gets the same
+    # panel set after restricting labels to its base-landmark MRNs.
+    cohort_mrns = set(patient_df[ID_COL].dropna().astype(str))
+    nepc_annotations = nepc_annotations_all.loc[
+        nepc_annotations_all["DFCI_MRN"].astype(str).isin(cohort_mrns)
+    ].copy()
+    print(f"Figure 2 cohort subset ({COHORT}): {len(nepc_annotations):,} / "
+          f"{len(nepc_annotations_all):,} LLM-labeled MRNs")
+
+    merged_results = (manual_annotations.drop(columns=['pathology_details', 'manual_platinum_reason'])
+                      .merge(nepc_annotations.drop(columns=['has_nepc', 'has_avpc', 'has_molecular_avpc',
+                                                            'avpc_criteria', 'visceral_met_pattern', 'num_snippets']),
+                             on='DFCI_MRN', validate='one_to_one'))
+    merged_results['manual_NEPC'] = merged_results['simplified_manual_platinum_reason'].isin(
+        ['nepc', 'squamous_transformation'])
+    merged_results['LLM_NEPC'] = merged_results['primary_label'] == 'nepc'
+    metrics = binary_metrics(merged_results['manual_NEPC'], merged_results['LLM_NEPC'])
+    n_total = len(merged_results)
+    n_nepc_manual = int(merged_results['manual_NEPC'].sum())
+    caption_a = (f"{COHORT} MRN subset; N={n_total:,} chart-reviewed patients; "
+                 f"{n_nepc_manual:,} manual-NEPC positive.")
+
+    fig_a1, ax_a1 = plt.subplots(figsize=(4.2, 4.2))
+    render_confusion_panel(ax_a1, metrics)
+    fig_a1.suptitle(caption_a, fontsize=8.5, color=COLOR_NEUTRAL_INK, y=0.01)
+    fig_a1.tight_layout()
+    out = figure_path("figure2a1_confusion_matrix.png")
+    fig_a1.savefig(out); print(f"wrote {out}")
+    plt.close(fig_a1)
+
+    fig_a2, ax_a2 = plt.subplots(figsize=(5.0, 4.2))
+    render_metric_bar_panel(ax_a2, metrics)
+    fig_a2.suptitle(caption_a, fontsize=8.5, color=COLOR_NEUTRAL_INK, y=0.01)
+    fig_a2.tight_layout()
+    out = figure_path("figure2a2_metric_bar.png")
+    fig_a2.savefig(out); print(f"wrote {out}")
+    plt.close(fig_a2)
+
+    platinum_positive_labels = (nepc_annotations.loc[nepc_annotations['is_platinum'], 'primary_label']
+                                .value_counts().rename_axis('primary_label').reset_index(name='count'))
+    platinum_negative_labels = (nepc_annotations.loc[~nepc_annotations['is_platinum'], 'primary_label']
+                                .value_counts().rename_axis('primary_label').reset_index(name='count'))
+    platinum_positive_labels['frac'] = (platinum_positive_labels['count'] /
+                                        platinum_positive_labels['count'].sum())
+    platinum_positive_labels['platinum_status'] = 'positive'
+    platinum_negative_labels['frac'] = (platinum_negative_labels['count'] /
+                                        platinum_negative_labels['count'].sum())
+    platinum_negative_labels['platinum_status'] = 'negative'
+    label_distributions = pd.concat([platinum_positive_labels, platinum_negative_labels], ignore_index=True)
+    n_pos = int(platinum_positive_labels['count'].sum())
+    n_neg = int(platinum_negative_labels['count'].sum())
+
+    fig_b, ax_b = plt.subplots(figsize=(7.5, 5))
+    sns.barplot(data=label_distributions, x='primary_label', y='frac', hue='platinum_status',
+                order=CLASS_ORDER, hue_order=['positive', 'negative'],
+                palette={'positive': COLOR_PLATINUM_POS, 'negative': COLOR_PLATINUM_NEG}, ax=ax_b)
+    ax_b.set(xlabel="LLM primary label", ylabel="Fraction within platinum group", ylim=(0, 1.0))
+    ax_b.set_title("Panel B — subtype landscape by platinum status (cohort MRN subset)",
+                   fontsize=11, weight="bold")
+    handles, _ = ax_b.get_legend_handles_labels()
+    ax_b.legend(handles, [f"Platinum+ (n={n_pos:,})", f"Platinum- (n={n_neg:,})"],
+                title=None, loc="upper right")
+    fig_b.text(0.5, -0.02, f"LLM labels restricted to the {COHORT} base-landmark MRN set.",
+               ha="center", va="top", fontsize=8.5, color=COLOR_NEUTRAL_INK)
+    fig_b.tight_layout()
+    out = figure_path("figure2b_subtype_landscape.png")
+    fig_b.savefig(out); print(f"wrote {out}")
+    plt.close(fig_b)
+
+    df = nepc_annotations.loc[
+        nepc_annotations['primary_label'].isin(['conventional', 'avpc', 'nepc'])
+    ].copy()
+    n_excluded = len(nepc_annotations) - len(df)
+    df['aggressive'] = df['primary_label'].isin(['avpc', 'nepc'])
+    ct = pd.crosstab(df['aggressive'], df['is_platinum']).reindex(
+        index=[True, False], columns=[True, False], fill_value=0)
+    ct.index = ['aggressive', 'conventional']; ct.columns = ['platinum+', 'platinum-']
+    OR, p_value = fisher_exact(ct.values, alternative='greater')
+    n_aggressive = int(ct.loc['aggressive'].sum())
+    n_conventional = int(ct.loc['conventional'].sum())
+    platinum_given_aggressive = int(ct.loc['aggressive', 'platinum+'])
+    platinum_given_conventional = int(ct.loc['conventional', 'platinum+'])
+    p_agg, lo_agg, hi_agg = wilson_ci(platinum_given_aggressive, n_aggressive)
+    p_conv, lo_conv, hi_conv = wilson_ci(platinum_given_conventional, n_conventional)
+
+    fig_c, ax_c = plt.subplots(figsize=(6, 5.5))
+    render_enrichment_panel(ax_c)
+    fig_c.text(0.5, -0.05, f"{COHORT} MRN subset; excludes biomarker labels ({n_excluded:,} rows).",
+               ha="center", va="top", fontsize=8.5, color=COLOR_NEUTRAL_INK)
+    fig_c.tight_layout()
+    out = figure_path("figure2c_enrichment.png")
+    fig_c.savefig(out); print(f"wrote {out}")
+    plt.close(fig_c)
+
+    fig, axd = plt.subplot_mosaic(
+        [["A1", "A2", "B"], ["C", "C", "B"]], figsize=(15, 9),
+        width_ratios=[1, 1.1, 1.3], height_ratios=[1, 1])
+    render_confusion_panel(axd["A1"], metrics)
+    render_metric_bar_panel(axd["A2"], metrics)
+    sns.barplot(data=label_distributions, x='primary_label', y='frac', hue='platinum_status',
+                order=CLASS_ORDER, hue_order=['positive', 'negative'],
+                palette={'positive': COLOR_PLATINUM_POS, 'negative': COLOR_PLATINUM_NEG}, ax=axd["B"])
+    axd["B"].set(xlabel="LLM primary label", ylabel="Fraction within platinum group", ylim=(0, 1.0))
+    axd["B"].set_title("Panel B — subtype landscape (cohort MRN subset)", fontsize=11, weight="bold")
+    handles, _ = axd["B"].get_legend_handles_labels()
+    axd["B"].legend(handles, [f"Platinum+ (n={n_pos:,})", f"Platinum- (n={n_neg:,})"],
+                    title=None, loc="upper right", fontsize=9)
+    render_enrichment_panel(axd["C"])
+    fig.suptitle(f"Figure 2 — LLM-extracted prostate subtypes ({COHORT} MRN subset)",
+                 fontsize=13, weight="bold", y=1.02)
+    fig.text(0.5, -0.03,
+             f"LLM calls restricted to the {COHORT} base-landmark MRN set "
+             f"(n={len(nepc_annotations):,} labels; platinum+ n={n_pos:,}, platinum- n={n_neg:,}).",
+             ha="center", va="top", fontsize=9, color=COLOR_NEUTRAL_INK, wrap=True)
+    fig.tight_layout()
+    out = figure_path("figure2_llm_subtype_platinum.png")
+    fig.savefig(out, bbox_inches="tight"); print(f"wrote {out}")
+    if show:
+        plt.show()
+    plt.close(fig)
 
     # ----------------------------- labeling knobs ---------------------------
     TOP_K_PER_PANEL = 4
@@ -1356,15 +1485,15 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
         return resolved
 
 
-    def tertile_split(df, col):
-        """3-way categorical split of a continuous column into tertiles (Low/Mid/High).
+    def quartile_split(df, col):
+        """4-way categorical split of a continuous column into quartiles.
 
         Adapted from `IPIO/survival_analysis/IPIO_generate_figures.ipynb` cell 19.
         """
         vals = pd.to_numeric(df[col], errors="coerce")
         out = pd.Series(pd.NA, index=df.index, dtype=object)
         try:
-            labels = pd.qcut(vals, 3, labels=["Low (T1)", "Mid (T2)", "High (T3)"])
+            labels = pd.qcut(vals, 4, labels=["Low (Q1)", "Q2", "Q3", "High (Q4)"])
         except ValueError:
             return out, None
         out[vals.notna()] = labels.astype(str)[vals.notna()]
@@ -1373,12 +1502,12 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
 
     ANDROGEN_LABS = ["Testosterone", "PSA"]
 
-    ## ---- Figure 5: KM by testosterone/PSA tertile, time-to-platinum ----
+    ## ---- KM curves: testosterone/PSA quartiles, time-to-platinum ----
     # Competing-risk note: death competes with platinum. This cause-specific KM
     # censors death at its observed time, so the y-axis reads
-    # "platinum-free probability", not "survival probability". Strata are tertiles
-    # of the baseline (__mean) lab value at each landmark; only the Low (T1) and
-    # High (T3) arms are plotted (the middle tertile is dropped for a clean
+    # "platinum-free probability", not "survival probability". Strata are quartiles
+    # of the baseline (__mean) lab value at each landmark; only the Low (Q1) and
+    # High (Q4) arms are plotted (the middle quartiles are dropped for a clean
     # two-group contrast).
 
     FIG5_LANDMARKS = [0, 90]
@@ -1392,35 +1521,35 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
         return pd.read_csv(path, low_memory=False)
 
 
-    def plot_km_androgen_tertile(ax, agg, lab, mean_col, landmark):
-        """Overlay High (T3) vs Low (T1) KM curves for `mean_col` at `landmark`."""
+    def plot_km_androgen_quartile(ax, agg, lab, mean_col, landmark):
+        """Overlay High (Q4) vs Low (Q1) KM curves for `mean_col` at `landmark`."""
         if not LIFELINES_OK:
             ax.text(0.5, 0.5, "(lifelines unavailable)", ha="center", va="center",
                     transform=ax.transAxes, color="#7f8c8d")
-            ax.set_title(f"{lab} tertile -- landmark {landmark}d", fontsize=10, weight="bold")
+            ax.set_title(f"{lab} quartile -- landmark {landmark}d", fontsize=10, weight="bold")
             ax.set_axis_off()
             return
         if mean_col is None or "t_platinum" not in agg.columns or "PLATINUM" not in agg.columns:
             ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
                     transform=ax.transAxes, color="#7f8c8d")
-            ax.set_title(f"{lab} tertile -- landmark {landmark}d", fontsize=10, weight="bold")
+            ax.set_title(f"{lab} quartile -- landmark {landmark}d", fontsize=10, weight="bold")
             ax.set_axis_off()
             return
 
-        strata_col = f"_{lab}_tertile"
+        strata_col = f"_{lab}_quartile"
         d = agg.copy()
-        d[strata_col], _ = tertile_split(d, mean_col)
+        d[strata_col], _ = quartile_split(d, mean_col)
         d = d.dropna(subset=[strata_col, "t_platinum", "PLATINUM"])
-        d = d.loc[d[strata_col].isin(["Low (T1)", "High (T3)"])]
+        d = d.loc[d[strata_col].isin(["Low (Q1)", "High (Q4)"])]
         km_duration, km_event = platinum_km_inputs(d)
         d = d.loc[km_duration.index].copy()
         d["_km_duration"] = km_duration
         d["_km_event"] = km_event
 
         if d.empty or d[strata_col].nunique() < 2:
-            ax.text(0.5, 0.5, "(insufficient data after tertile split)",
+            ax.text(0.5, 0.5, "(insufficient data after quartile split)",
                     ha="center", va="center", transform=ax.transAxes, color="#7f8c8d")
-            ax.set_title(f"{lab} tertile -- landmark {landmark}d", fontsize=10, weight="bold")
+            ax.set_title(f"{lab} quartile -- landmark {landmark}d", fontsize=10, weight="bold")
             ax.set_axis_off()
             return
 
@@ -1428,14 +1557,14 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
             str(level): (grp["_km_duration"], grp["_km_event"])
             for level, grp in d.groupby(strata_col)
         }
-        title = f"{lab} tertile ({mean_col}) -- landmark {'+' if landmark > 0 else ''}{landmark}d"
+        title = f"{lab} quartile ({mean_col}) -- landmark {'+' if landmark > 0 else ''}{landmark}d"
         overlay_km(ax, survival_by_label, xlabel="Days from landmark",
                    ylabel="Platinum-free probability", title=title)
 
-        n_low = int((d[strata_col] == "Low (T1)").sum())
-        n_high = int((d[strata_col] == "High (T3)").sum())
-        ev_low = int(d.loc[d[strata_col] == "Low (T1)", "_km_event"].sum())
-        ev_high = int(d.loc[d[strata_col] == "High (T3)", "_km_event"].sum())
+        n_low = int((d[strata_col] == "Low (Q1)").sum())
+        n_high = int((d[strata_col] == "High (Q4)").sum())
+        ev_low = int(d.loc[d[strata_col] == "Low (Q1)", "_km_event"].sum())
+        ev_high = int(d.loc[d[strata_col] == "High (Q4)", "_km_event"].sum())
         annotation = f"Low: n={n_low}, events={ev_low}\nHigh: n={n_high}, events={ev_high}"
 
         if LIFELINES_OK and d[strata_col].nunique() >= 2:
@@ -1455,14 +1584,14 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
             if agg is None:
                 ax.text(0.5, 0.5, "(aggregated CSV not found)", ha="center", va="center",
                         transform=ax.transAxes, color="#7f8c8d")
-                ax.set_title(f"{lab} tertile -- landmark {landmark}d", fontsize=10, weight="bold")
+                ax.set_title(f"{lab} quartile -- landmark {landmark}d", fontsize=10, weight="bold")
                 ax.set_axis_off()
             else:
                 mean_cols = resolve_androgen_columns(agg.columns)
-                plot_km_androgen_tertile(ax, agg, lab, mean_cols[lab], landmark)
+                plot_km_androgen_quartile(ax, agg, lab, mean_cols[lab], landmark)
             fig.tight_layout()
             for ext in ("png",):
-                out = figure_path(f"km_{lab.lower()}_tertile_platinum_landmark{landmark}.{ext}")
+                out = figure_path(f"km_{lab.lower()}_quartile_platinum_landmark{landmark}.{ext}")
                 fig.savefig(out)
                 print(f"wrote {out}")
             if show:
@@ -1763,13 +1892,12 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
             return
 
         colors = {0: "#1f3a93", 1: "#8e1c2b"}
-        labels = {0: "PLATINUM=0", 1: "PLATINUM=1"}
+        labels = {0: "Non-platinum", 1: "Platinum"}
         for plat_group, grp in binned.groupby("plat_group"):
             grp = grp.sort_values("t_mid")
-            n_min, n_max = int(grp["n"].min()), int(grp["n"].max())
             ax.plot(grp["t_mid"], grp["mean"], marker="o", markersize=3.5, linewidth=1.5,
                     color=colors.get(plat_group, "#7f8c8d"),
-                    label=f"{labels.get(plat_group, plat_group)} (n patients/bin={n_min:,}–{n_max:,})")
+                    label=labels.get(plat_group, plat_group))
             ax.fill_between(grp["t_mid"], grp["ci_lo"], grp["ci_hi"],
                              color=colors.get(plat_group, "#7f8c8d"), alpha=0.2)
 
