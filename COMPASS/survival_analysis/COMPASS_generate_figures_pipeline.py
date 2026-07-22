@@ -1287,7 +1287,10 @@ def generate_figures(cohort, *, nepc_proj_path, fig_root, cohorts=COHORTS, show=
         ax.set_axisbelow(True)
         ax.yaxis.grid(True, linestyle="--", alpha=0.3)
         if show_legend:
-            ax.legend(loc="upper right", fontsize=8, ncol=1)
+            # Reserve the top-right area above the axes for the legend so it
+            # cannot cover the numeric labels drawn above the bars.
+            ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.01),
+                      fontsize=8, ncol=2, borderaxespad=0)
 
 
     # One solo panel per discrimination metric (legend on each).

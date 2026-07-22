@@ -1051,8 +1051,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
       coord_cartesian(ylim = c(0.45, ymax)) +
       labs(x = NULL, y = ylabel) +
       theme_fig() +
-      theme(legend.position = if (show_legend) c(0.99, 0.99) else "none",
-            legend.justification = c(1, 1),
+      guides(fill = guide_legend(ncol = 2, byrow = TRUE)) +
+      theme(legend.position = if (show_legend) "top" else "none",
+            legend.justification = "right",
+            legend.box.just = "right",
+            legend.direction = "horizontal",
             panel.grid.major.x = element_blank())
   }
 
@@ -1493,7 +1496,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                      lab_group, format(n_pat, big.mark = ","))
       p <- plot_group_ci_panel(group_df, lab_group, ttl)
       save_fig(p, OUT_DIR, sprintf("androgen_longitudinal_group_ci_%s", tolower(lab_group)),
-               width = 7.0, height = 5.5)
+               width = 9.5, height = 5.5)
       if (show) print(p)
     }
   }
