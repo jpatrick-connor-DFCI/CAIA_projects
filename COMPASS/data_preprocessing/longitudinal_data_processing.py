@@ -940,15 +940,15 @@ def main() -> None:
     # gated on union_cohort_mrns.
     icds = pd.read_csv(args.icd_csv)
 
-    # Output cohort = the widest analyzed anchored union. It contains every MRN
-    # in all six *_arpi analysis arms while avoiding raw scans for patients who
-    # cannot enter any treatment-anchor-relative model. It is loaded first so
+    # Output cohort = the wider of the two selected anchored analysis arms. It
+    # contains every MRN in both icd_arpi and
+    # icd_or_vte_allow_other_primaries_arpi while avoiding raw scans for patients
+    # who cannot enter either treatment-anchor-relative model. It is loaded first so
     # HEALTH_HISTORY/OUTPT_LAB_RESULTS_LABS/MEDICATIONS -- each tens of
     # millions of rows across the full raw OncDRS universe -- can be filtered to
     # this MRN set during the lazy scan itself, rather than read in full and
-    # filtered afterward. Narrower cohort variants (primary-excluded, icd-only,
-    # or vte-only) remain a Stage 3 concern via build_prediction_inputs.py's
-    # --restrict-to-mrns.
+    # filtered afterward. The narrower icd_arpi cohort remains a Stage 3 concern
+    # via build_prediction_inputs.py's --restrict-to-mrns.
     death_df = load_death_df_from_survival_cohort(args.survival_cohort_csv)
     union_cohort_mrns = set(int(m) for m in death_df[ID_COL].unique())
     print(f"[main] broad anchored union cohort: {len(union_cohort_mrns)} patients.")

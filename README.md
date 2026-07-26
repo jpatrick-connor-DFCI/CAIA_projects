@@ -3,10 +3,11 @@
 Research workflow for assembling a prostate-cancer cohort from local DFCI / Profile / OncDRS
 exports and running landmark survival analysis (Cox / XGBoost) on the resulting cohort.
 
-The code is pandas-based. Entry points are command-line scripts orchestrated from notebooks.
-COMPASS uses one `COMPASS_run_locally.ipynb` notebook with separate sections for the first-treatment
-(`t_first_treatment`) and treatment-anchored (`t_treatment_anchor`) analyses; figures are produced
-by the paired `COMPASS_generate_figures.ipynb` notebook.
+The preprocessing and modeling code is pandas-based; publication figures are generated only in R.
+Entry points are command-line scripts orchestrated from notebooks.
+COMPASS uses one `COMPASS_run_locally.ipynb` notebook for two treatment-anchored cohorts:
+`icd_arpi` and `icd_or_vte_allow_other_primaries_arpi`. Figures are produced by the paired,
+R-only `COMPASS_generate_figures.ipynb` notebook for those same two cohorts.
 
 > This README is the canonical reference for editing the pipeline. It documents the directory
 > layout, the data flow, every script's inputs/outputs, the **conventions and invariants that
@@ -54,7 +55,8 @@ COMPASS/
     ├── cox_aggregated.py                 # PROFILE adapter/config for shared survival code
     ├── univariate_analysis.py            # ENTRY: univariate Cox associations
     ├── multivariate_analysis.py          # ENTRY: elastic-net Cox or XGBoost survival:cox
-    └── COMPASS_run_locally.ipynb / COMPASS_generate_figures.ipynb
+    ├── COMPASS_generate_figures_pipeline.R # sole figure-generation implementation
+    └── COMPASS_run_locally.ipynb / COMPASS_generate_figures.ipynb # Python models / R figures
 ```
 
 ---
@@ -78,7 +80,7 @@ COMPASS/
         ▼  survival_analysis/univariate_analysis.py
            survival_analysis/multivariate_analysis.py
         │
-        ▼  COMPASS_generate_figures.ipynb (first-treatment and treatment-anchor sections)
+        ▼  COMPASS_generate_figures.ipynb (R; two selected treatment-anchor cohorts)
  figures/
 ```
 
@@ -97,7 +99,10 @@ treatment-anchor-restricted output. The same script builds the ARPI/chemo-anchor
   `OUTPT_LAB_RESULTS_LABS.csv`, `complete_somatic_data_df.csv.gz`, `PT_INFO_STATUS_REGISTRATION.csv`.
 - **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** twelve survival-cohort CSVs
   (six full definitions and six treatment-anchor-restricted variants), twelve corresponding
-  bare-MRN lists, and `prostate_icd_data.csv`.
+  bare-MRN lists, `prostate_icd_data.csv`, and
+  `mrn_lists/icd_prostate_mrn_flags.csv`. The latter contains every ICD-C61 MRN plus binary
+  indicators for a non-prostate primary, PARPi exposure, ARPI/docetaxel exposure, and at least
+  five broad PSA tests.
 - **Cohort definitions:** `icd`, `vte`, and `icd_or_vte` apply the ICD-based
   non-prostate-primary exclusion. The corresponding `*_allow_other_primaries` variants omit that
   exclusion. Every definition also emits an `_arpi` treatment-anchor-restricted subset.
@@ -193,13 +198,15 @@ low-level XGBoost mechanics live in `survival_common/xgboost_engine.py`.
 
 COMPASS PROFILE has one run notebook and one figure notebook:
 
-- `COMPASS_run_locally.ipynb` — drives preprocessing, then has one section for the default
-  first-treatment arm (`t_first_treatment`) and one section for the treatment-anchored arm
-  (`t_treatment_anchor`). Each section builds its own prediction inputs and runs univariate,
+- `COMPASS_run_locally.ipynb` — drives preprocessing and runs only `icd_arpi` (ICD-C61,
+  excluding other primaries) and `icd_or_vte_allow_other_primaries_arpi` (ICD-C61 + VTE,
+  allowing other primaries). Each cohort gets independent prediction inputs and univariate,
   elastic-net, and XGBoost models at landmarks 0/90.
-- `COMPASS_generate_figures.ipynb` — has separate sections for the first-treatment and
-  treatment-anchored arms. Each section builds Figure 1 (cohort overview), Figure 3 (paired
-  univariate volcano), and Figure 4a/4b/compiled (discrimination + importance grid).
+- `COMPASS_generate_figures.ipynb` — the sole COMPASS figure notebook, using the R kernel and
+  `COMPASS_generate_figures_pipeline.R`. It renders the original LLM-label figure set plus the two
+  selected treatment-anchor cohort MRN subsets, cohort overview, univariate, multivariate, KM, androgen
+  distribution, and androgen trajectory figures. Outputs are grouped as
+  `FIG_ROOT/<figure>/<plot-stem>/<cohort>_<plot-stem>.png` with no language subdirectory.
 
 IPIO has a paired run/figure notebook as well:
 

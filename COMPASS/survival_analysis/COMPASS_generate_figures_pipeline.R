@@ -1,5 +1,5 @@
-# Per-cohort figure-generation pipeline for the COMPASS R notebook, extracted
-# from COMPASS_generate_figures_R.ipynb so the notebook can call it once per
+# Per-cohort figure-generation pipeline for the COMPASS figure notebook, extracted
+# from COMPASS_generate_figures.ipynb so the notebook can call it once per
 # cohort in the same R session instead of re-executing itself via Rscript per
 # cohort.
 #
@@ -143,15 +143,11 @@ parse_feature <- function(name) {
 
 COHORTS <- c(
   "icd_arpi",
-  "vte_arpi",
-  "icd_or_vte_arpi",
-  "icd_allow_other_primaries_arpi",
-  "vte_allow_other_primaries_arpi",
   "icd_or_vte_allow_other_primaries_arpi"
 )
 
 # Render the full COMPASS figure set for one cohort arm. Mirrors the body of
-# COMPASS_generate_figures_R.ipynb's per-cohort cells (Figures 1-7 + Table 1)
+# COMPASS_generate_figures.ipynb's per-cohort cells (Figures 1-7 + Table 1)
 # so the notebook can call this once per cohort in the same R session instead
 # of re-executing itself via Rscript.
 generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS, show = FALSE) {
@@ -177,8 +173,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
   FIG_ROOT <- fig_root
   # Figure-first, panel-second layout:
-  # FIG_ROOT/<figure>/<plot-stem>/R/<cohort>_<plot-stem>.png
-  FIG_LANG <- "R"
+  # FIG_ROOT/<figure>/<plot-stem>/<cohort>_<plot-stem>.png
   figure_group <- function(plot_stem) {
     if (startsWith(plot_stem, "figure1") || startsWith(plot_stem, "table1")) return("figure1")
     if (startsWith(plot_stem, "figure2")) return("figure2")
@@ -192,7 +187,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   # Compatibility value passed by existing save_fig call sites; actual output
   # routing is determined from each exact `stem` inside save_fig/write_table1.
   fig_dir <- function(plot_stem) {
-    file.path(FIG_ROOT, plot_stem, FIG_LANG)
+    file.path(FIG_ROOT, plot_stem)
   }
 
   LANDMARKS <- c(0, 90)
@@ -218,7 +213,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   save_fig <- function(plot, out_dir, stem, width, height, prefix = COHORT) {
     # `out_dir` is retained for call-site compatibility. Outputs are grouped by
     # exact plot stem so every cohort version of a panel sits in one directory.
-    panel_dir <- file.path(FIG_ROOT, figure_group(stem), stem, FIG_LANG)
+    panel_dir <- file.path(FIG_ROOT, figure_group(stem), stem)
     dir.create(panel_dir, recursive = TRUE, showWarnings = FALSE)
     output_stem <- paste0(prefix, "_", stem)
 
@@ -361,16 +356,30 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
       annotate("text", x = Inf, y = Inf, label = lab, hjust = 1.05, vjust = 1.5, size = 3)
   }
 
-  overlay_hist <- function(series, xlab, title, bins = 50) {
+  overlay_hist <- function(series, xlab, title, bins = 50, xlim_max = NULL,
+                           use_count = FALSE, axis_text_size = NULL) {
     v <- suppressWarnings(as.numeric(series)); v <- v[is.finite(v)]
+    if (!is.null(xlim_max)) v <- v[v <= xlim_max]
     if (!length(v)) return(ggplot() + annotate("text", x = 0, y = 0, label = "(no data)") +
                              theme_void() + labs(title = title))
     lab <- sprintf("%s (n=%s)", COHORT_LABEL, format(length(v), big.mark = ","))
-    ggplot(tibble(v = v), aes(v)) +
-      geom_histogram(aes(y = after_stat(density)), bins = bins,
-                     fill = "#1f3a93", color = "white", linewidth = 0.15, alpha = 0.75) +
-      labs(x = xlab, y = "Density", title = title) +
+    ylab <- if (use_count) "Count" else "Density"
+    p <- ggplot(tibble(v = v), aes(v))
+    if (use_count) {
+      p <- p + geom_histogram(bins = bins, fill = "#1f3a93", color = "white",
+                              linewidth = 0.15, alpha = 0.75)
+    } else {
+      p <- p + geom_histogram(aes(y = after_stat(density)), bins = bins,
+                              fill = "#1f3a93", color = "white", linewidth = 0.15, alpha = 0.75)
+    }
+    p <- p +
+      labs(x = xlab, y = ylab, title = title) +
       annotate("text", x = Inf, y = Inf, label = lab, hjust = 1.05, vjust = 1.5, size = 3)
+    if (!is.null(xlim_max)) p <- p + coord_cartesian(xlim = c(0, xlim_max))
+    if (!is.null(axis_text_size))
+      p <- p + theme(axis.title = element_text(size = axis_text_size + 1.5),
+                     axis.text  = element_text(size = axis_text_size))
+    p
   }
 
   # --- Table 1 helpers (baseline characteristics) ---
@@ -417,7 +426,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
   write_table1 <- function(table1, out_base) {
     stem <- basename(out_base)
-    panel_dir <- file.path(FIG_ROOT, figure_group(stem), stem, FIG_LANG)
+    panel_dir <- file.path(FIG_ROOT, figure_group(stem), stem)
     dir.create(panel_dir, recursive = TRUE, showWarnings = FALSE)
     out_base <- file.path(panel_dir, paste0(COHORT, "_", stem))
     csv <- paste0(out_base, ".csv"); md_p <- paste0(out_base, ".md")
@@ -457,7 +466,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                  "Diagnosis → treatment anchor", 50),
     overlay_hist(patient_df$t_platinum[event_rows],
                  "Days from treatment anchor to platinum (events only)",
-                 "Time to platinum (event patients only)", 40)
+                 "Time to platinum (event patients only)", 40,
+                 xlim_max = 6 * 365.25, use_count = TRUE, axis_text_size = 11.5)
   )
   timing_stems <- c("figure1c_span", "figure1c_dx_to_tx", "figure1c_time_to_platinum")
   for (i in seq_along(timing_panels)) {
@@ -609,12 +619,15 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
   # Fixed class order groups the two aggressive classes together for readability.
   CLASS_ORDER <- c("conventional", "avpc", "nepc", "biomarker")
+  CLASS_LABELS <- c(conventional = "Conventional", avpc = "AVPC", nepc = "NEPC",
+                    biomarker = "Biomarker")
   n_pos <- sum(platinum_positive_labels$count)
   n_neg <- sum(platinum_negative_labels$count)
 
   render_landscape_panel <- function(title = "Panel B \u2014 subtype landscape by platinum status (descriptive)") {
     d <- label_distributions %>%
-      mutate(primary_label   = factor(primary_label, levels = CLASS_ORDER),
+      mutate(primary_label   = factor(primary_label, levels = CLASS_ORDER,
+                                      labels = CLASS_LABELS[CLASS_ORDER]),
              platinum_status = factor(platinum_status, levels = c("positive","negative")))
     ggplot(d, aes(primary_label, frac, fill = platinum_status)) +
       geom_col(position = position_dodge(width = 0.8), width = 0.72) +
@@ -627,6 +640,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
       labs(x = "LLM primary label", y = "Fraction within platinum group", title = title) +
       theme_fig() +
       theme(plot.title = element_text(face = "bold", size = 11),
+            axis.title = element_text(size = 13),
+            axis.text  = element_text(size = 11.5),
             legend.position = c(0.98, 0.98), legend.justification = c(1, 1))
   }
 
@@ -637,7 +652,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     labs(caption = caption_b) +
     theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
   if (SAVE_ORIGINAL_LLM)
-    save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", width = 7.5, height = 5,
+    save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", width = 6.5, height = 5,
              prefix = "original")
   if (show) print(pB)
 
@@ -703,9 +718,6 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
       geom_col(width = 0.55) +
       geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.18,
                     color = COLOR_NEUTRAL_INK, linewidth = 0.7) +
-      geom_text(aes(y = hi + ymax * 0.04,
-                    label = sprintf("%.1f%%\n(%d/%d)", 100*prop, k, n)),
-                size = 3.3, lineheight = 0.9) +
       scale_fill_manual(values = c(COLOR_PLATINUM_POS, "#9a9890"), guide = "none") +
       annotate("text", x = 1.5, y = ymax * 0.97,
                label = sprintf("OR = %.1f, Fisher's exact p = %.1e", OR, p_value),
@@ -725,7 +737,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     labs(caption = caption_c) +
     theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
   if (SAVE_ORIGINAL_LLM)
-    save_fig(pC, OUT_DIR, "figure2c_enrichment", width = 6, height = 5.5,
+    save_fig(pC, OUT_DIR, "figure2c_enrichment", width = 4.5, height = 5.5,
              prefix = "original")
   if (show) print(pC)
 
@@ -801,7 +813,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                        COHORT)
   pB <- render_landscape_panel() + labs(caption = caption_b) +
     theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-  save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", 7.5, 5)
+  save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", 6.5, 5)
 
   df <- nepc_annotations %>% filter(primary_label %in% c("conventional","avpc","nepc")) %>%
     mutate(aggressive = primary_label %in% c("avpc","nepc"))
@@ -824,7 +836,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                        COHORT, format(n_excluded, big.mark = ","))
   pC <- render_enrichment_panel() + labs(caption = caption_c) +
     theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-  save_fig(pC, OUT_DIR, "figure2c_enrichment", 6, 5.5)
+  save_fig(pC, OUT_DIR, "figure2c_enrichment", 4.5, 5.5)
 
   left <- (render_confusion_panel(metrics) + render_metric_bar_panel(metrics)) /
           render_enrichment_panel()
@@ -935,6 +947,85 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     p
   }
 
+  # Significance-only coloring for the univariate volcano: no lab-category
+  # color, just significant (q<0.05) vs not, with optional caller-supplied
+  # labs picked out via a distinct highlight color/outline. `highlight_labs`
+  # matches on `lab_name` (e.g. "Hemoglobin"), independent of feature_stat.
+  SIG_COLOR   <- COLOR_PLATINUM_POS   # blue, reused from the platinum-status palette
+  HIGHLIGHT_COLOR <- "#8e1c2b"        # reused from CATEGORY_COLORS' "Androgen axis" red
+
+  plot_volcano_panel_by_significance <- function(sub, title, highlight_labs = character(0)) {
+    sub <- sub %>%
+      filter(!lab_name %in% DROP) %>%
+      mutate(
+        .point_id  = row_number(),
+        neglog10p = -log10(pmax(p_value, 1e-300)),
+        sig       = q_value < 0.05,
+        capped    = neglog10p > Y_MAX_CAP,
+        y         = pmin(neglog10p, Y_MAX_CAP),
+        label     = sprintf("%s (%s)", lab_name, feature_stat),
+        highlighted = lab_name %in% highlight_labs,
+        point_group = factor(
+          ifelse(highlighted, "Highlighted",
+                 ifelse(sig, "Significant (q<0.05)", "Not significant")),
+          levels = c("Not significant", "Significant (q<0.05)", "Highlighted"))
+      )
+    ns   <- sub %>% filter(point_group == "Not significant")
+    sigd <- sub %>% filter(point_group == "Significant (q<0.05)")
+    hid  <- sub %>% filter(point_group == "Highlighted")
+    y_max <- if (nrow(sub)) max(sub$y) else 5
+    q_y <- q_threshold_neglog10p(sub)
+    lab_df <- labels_for_panel(sub %>% mutate(category = "Other"), TOP_K_PER_PANEL, ALWAYS_LABEL)
+    # Always label highlighted points in addition to the usual auto-selection.
+    lab_df <- bind_rows(lab_df, sub %>% filter(highlighted)) %>%
+      distinct(lab_name, feature_stat, .keep_all = TRUE)
+    sub <- sub %>% mutate(repel_label = ifelse(.point_id %in% lab_df$.point_id, label, ""))
+
+    n_tested <- nrow(sub); n_sig <- sum(sub$sig)
+    footer <- sprintf("%d / %d q<0.05", n_sig, n_tested)
+    if (length(highlight_labs)) footer <- sprintf("%s   ·   %d highlighted", footer, sum(sub$highlighted))
+
+    point_colors <- c(`Not significant` = NS_COLOR, `Significant (q<0.05)` = SIG_COLOR,
+                      `Highlighted` = HIGHLIGHT_COLOR)
+
+    p <- ggplot() +
+      geom_vline(xintercept = 0, color = "grey", linewidth = 0.7) +
+      geom_vline(xintercept = c(-0.5, 0.5), color = "grey", linetype = "dashed",
+                 linewidth = 0.6, alpha = 0.7) +
+      { if (!is.na(q_y)) geom_hline(yintercept = q_y, color = "black",
+                                    linetype = "dotted", linewidth = 0.9) } +
+      geom_point(data = ns, aes(coef_feature, y), size = 1.6, color = NS_COLOR, alpha = 0.45) +
+      geom_point(data = sigd %>% filter(!capped),
+                 aes(coef_feature, y), shape = 21, fill = SIG_COLOR, color = "white",
+                 size = 2.1, stroke = 0.6, alpha = 0.92) +
+      geom_point(data = sigd %>% filter(capped),
+                 aes(coef_feature, y), shape = 24, fill = SIG_COLOR, color = "white",
+                 size = 3.4, stroke = 0.6, alpha = 0.92) +
+      geom_point(data = hid %>% filter(!capped),
+                 aes(coef_feature, y), shape = 21, fill = HIGHLIGHT_COLOR, color = "white",
+                 size = 3.2, stroke = 0.9, alpha = 0.98) +
+      geom_point(data = hid %>% filter(capped),
+                 aes(coef_feature, y), shape = 24, fill = HIGHLIGHT_COLOR, color = "white",
+                 size = 4.2, stroke = 0.9, alpha = 0.98) +
+      ggrepel::geom_text_repel(
+        data = sub,
+        aes(coef_feature, pmin(neglog10p, Y_MAX_CAP), label = repel_label, color = point_group),
+        size = 3, fontface = "bold", segment.color = "#95a5a6", segment.size = 0.3,
+        max.overlaps = Inf, min.segment.length = 0, box.padding = 0.55,
+        point.padding = 0.45, force = 1.5, max.time = 2, seed = 0,
+        show.legend = FALSE) +
+      scale_color_manual(values = point_colors, breaks = names(point_colors), name = NULL,
+                         guide = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+      coord_cartesian(xlim = PANEL_XLIM, ylim = c(-0.2, max(y_max * 1.10, 5))) +
+      labs(x = "Cox log HR per SD", y = expression(-log[10](p)), title = title) +
+      annotate("text", x = PANEL_XLIM[2], y = 0, label = footer, hjust = 1, vjust = 0,
+               size = 2.9, color = "#5d6d7e", family = "mono") +
+      theme_fig() +
+      theme(plot.title = element_text(face = "bold", size = 12.5),
+            legend.position = c(0.02, 0.98), legend.justification = c(0, 1))
+    p
+  }
+
   OUT_DIR <- fig_dir("figure3_univariate")
 
   load_uni <- function(landmark) {
@@ -976,6 +1067,25 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
       p <- plot_volcano_panel(sub, title)
     }
     save_fig(p, OUT_DIR, sprintf("figure3_univariate_platinum_landmark%d", lm),
+             width = 7.5, height = 6)
+    if (show) print(p)
+  }
+
+  # Significance-only-colored variant (no lab-category coloring). Populate
+  # HIGHLIGHT_LABS with lab_name values (e.g. c("Hemoglobin", "Albumin")) to
+  # pick out specific labs; empty means no highlighting is applied yet.
+  HIGHLIGHT_LABS <- character(0)
+  for (pn in panels) {
+    lm <- pn[[1]]; title <- pn[[2]]
+    sub <- uni %>% filter(landmark_days == lm)
+    if (nrow(sub) == 0) {
+      p <- ggplot() + annotate("text", x = 0, y = 0,
+                               label = sprintf("(no data for landmark = %dd)", lm),
+                               color = "#7f8c8d") + theme_void()
+    } else {
+      p <- plot_volcano_panel_by_significance(sub, title, highlight_labs = HIGHLIGHT_LABS)
+    }
+    save_fig(p, OUT_DIR, sprintf("figure3_univariate_platinum_significance_landmark%d", lm),
              width = 7.5, height = 6)
     if (show) print(p)
   }
@@ -1359,7 +1469,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   # Union of patient IDs across the aggregated landmark CSVs, so Figure 7 traces
   # describe exactly the modeled population. Returns NULL if none are found (caller
   # then skips the figure). Mirrors _aggregated_landmark_mrns() in
-  # the Python figures notebook.
+  # the earlier figure implementation.
   aggregated_landmark_mrns <- function(id_col = "DFCI_MRN") {
     mrns <- character(0); found <- character(0)
     for (lm in LANDMARKS) {

@@ -83,6 +83,12 @@ Outputs (in NEPC_PROJ_PATH):
 Also writes twelve bare DFCI_MRN-only CSVs (one per cohort arm above) to
 mrn_lists_dir (default NEPC_PROJ_PATH/mrn_lists/).
 
+Finally, writes ``icd_prostate_mrn_flags.csv`` to ``mrn_lists_dir``. This
+patient-level audit table includes every MRN with an ICD-10 C61 diagnosis
+(before the non-prostate-primary exclusion) and binary indicators for a
+competing non-prostate primary, PARPi exposure, ARPI/docetaxel exposure, and
+at least five broad PSA tests.
+
 Author: J. Patrick Connor
 Date: 2026-07-18
 
@@ -124,6 +130,37 @@ TREATMENT_ANCHOR_MEDS = {
     "CABAZITAXEL",
     "RADIUM RA 223 DICHLORIDE",
 }
+
+# The MRN audit table requested below distinguishes ARPI/docetaxel exposure
+# from the pipeline's broader treatment anchor, which additionally includes
+# cabazitaxel and radium-223.
+ARPI_DOCETAXEL_MEDS = {
+    "ABIRATERONE ACETATE",
+    "ENZALUTAMIDE",
+    "APALUTAMIDE",
+    "DAROLUTAMIDE",
+    "DOCETAXEL",
+}
+
+PARPI_MEDS = {
+    "OLAPARIB",
+    "RUCAPARIB",
+    "NIRAPARIB",
+    "TALAZOPARIB",
+    "VELIPARIB",
+}
+
+# Broad PSA assay definition used by the longitudinal preprocessing gate.
+BROAD_PSA_CODES = {
+    "PSA",
+    "PSAR",
+    "PSATOTSCRN",
+    "CPSA",
+    "PSAMON",
+    "PSAULT",
+    "PSAT",
+}
+MIN_PSA_COUNT = 5
 
 # Cisplatin appears both as a single agent and coded within a combination
 # regimen name; both count as platinum exposure. Oxaliplatin is intentionally
@@ -381,6 +418,81 @@ def compile_cohort_tables(icd_mrns, all_cohort_mrns, icds: pl.DataFrame):
     return meds
 
 
+def build_icd_prostate_mrn_flags(
+    c61_mrns: set,
+    non_prostate_primary_mrns: set,
+    meds: pl.DataFrame,
+    labs_path: str,
+) -> pl.DataFrame:
+    """Build one audit row for every ICD-C61 patient.
+
+    Medication exposure is based on any matching medication row. PSA
+    eligibility counts rows from the same broad raw TEST_TYPE_CD set used by
+    longitudinal preprocessing.
+    """
+    c61_mrns = set(int(m) for m in c61_mrns)
+    cohort = pl.DataFrame({ID_COL: sorted(c61_mrns)}, schema={ID_COL: pl.Int64})
+
+    normalized_meds = meds.with_columns(
+        pl.col("NCI_PREFERRED_MED_NM")
+        .cast(pl.Utf8)
+        .str.to_uppercase()
+        .str.strip_chars()
+        .alias("_MED_NAME")
+    )
+    parpi_mrns = set(
+        normalized_meds.filter(pl.col("_MED_NAME").is_in(sorted(PARPI_MEDS)))[ID_COL]
+        .drop_nulls()
+        .to_list()
+    )
+    arpi_docetaxel_mrns = set(
+        normalized_meds.filter(
+            pl.col("_MED_NAME").is_in(sorted(ARPI_DOCETAXEL_MEDS))
+        )[ID_COL]
+        .drop_nulls()
+        .to_list()
+    )
+
+    labs = filter_cohort(
+        labs_path,
+        c61_mrns,
+        cols=[ID_COL, "TEST_TYPE_CD"],
+    ).with_columns(
+        pl.col("TEST_TYPE_CD")
+        .cast(pl.Utf8)
+        .str.to_uppercase()
+        .str.strip_chars()
+        .alias("TEST_TYPE_CD")
+    )
+    psa_eligible_mrns = set(
+        labs.filter(pl.col("TEST_TYPE_CD").is_in(sorted(BROAD_PSA_CODES)))
+        .group_by(ID_COL)
+        .agg(pl.len().alias("_PSA_COUNT"))
+        .filter(pl.col("_PSA_COUNT") >= MIN_PSA_COUNT)[ID_COL]
+        .drop_nulls()
+        .to_list()
+    )
+
+    return cohort.with_columns(
+        pl.col(ID_COL)
+        .is_in(sorted(c61_mrns & non_prostate_primary_mrns))
+        .cast(pl.Int8)
+        .alias("HAS_NON_PROSTATE_PRIMARY"),
+        pl.col(ID_COL)
+        .is_in(sorted(parpi_mrns))
+        .cast(pl.Int8)
+        .alias("PARPI_EXPOSED"),
+        pl.col(ID_COL)
+        .is_in(sorted(arpi_docetaxel_mrns))
+        .cast(pl.Int8)
+        .alias("ARPI_DOCETAXEL_EXPOSED"),
+        pl.col(ID_COL)
+        .is_in(sorted(psa_eligible_mrns))
+        .cast(pl.Int8)
+        .alias("HAS_5_OR_MORE_PSA_TESTS"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # ARPI/chemo-anchored survival cohort (prostate_arpi_survival_preprocessing.py)
 # ---------------------------------------------------------------------------
@@ -566,6 +678,12 @@ def main():
         help="OncDRS raw data pull directory (for PT_INFO_STATUS_REGISTRATION.csv).",
     )
     parser.add_argument(
+        "--labs-csv",
+        type=str,
+        default=os.path.join(ONCDRS_PATH, "OUTPT_LAB_RESULTS_LABS.csv"),
+        help="Raw OncDRS outpatient labs file used for the broad PSA-count flag.",
+    )
+    parser.add_argument(
         "--out-dir",
         type=str,
         default=NEPC_PROJ_PATH,
@@ -575,7 +693,7 @@ def main():
         "--mrn-lists-dir",
         type=str,
         default=os.path.join(NEPC_PROJ_PATH, "mrn_lists"),
-        help="Directory to write the six bare DFCI_MRN-only cohort MRN list CSVs.",
+        help="Directory for cohort MRN lists and icd_prostate_mrn_flags.csv.",
     )
     args = parser.parse_args()
 
@@ -664,6 +782,22 @@ def main():
     }
 
     os.makedirs(args.mrn_lists_dir, exist_ok=True)
+
+    icd_prostate_flags = build_icd_prostate_mrn_flags(
+        icd_allow_other_primaries_mrns,
+        non_prostate_primary_mrns,
+        meds,
+        args.labs_csv,
+    )
+    icd_prostate_flags_path = os.path.join(
+        args.mrn_lists_dir,
+        "icd_prostate_mrn_flags.csv",
+    )
+    icd_prostate_flags.write_csv(icd_prostate_flags_path)
+    print(
+        f"Saved ICD-C61 MRN flags ({len(icd_prostate_flags)} patients) to "
+        f"{icd_prostate_flags_path}"
+    )
 
     for cohort_key, cohort_mrns in cohorts.items():
         survival_cohort = build_survival_cohort(cohort_mrns, anchor_df, platinum_df, status_df)
