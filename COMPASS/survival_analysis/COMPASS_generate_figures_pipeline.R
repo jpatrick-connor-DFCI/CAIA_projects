@@ -503,7 +503,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     overlay_hist(patient_df$t_platinum[event_rows],
                  "Days from treatment anchor to platinum (events only)",
                  "Time to platinum (event patients only)", 40,
-                 xlim_max = 6 * 365.25, use_count = TRUE, axis_text_size = 11.5)
+                 xlim_max = 6 * 365.25, use_count = TRUE, axis_text_size = 16) +
+      theme(plot.title = element_text(size = 15))
   )
   timing_stems <- c("figure1c_span", "figure1c_dx_to_tx", "figure1c_time_to_platinum")
   for (i in seq_along(timing_panels)) {
@@ -675,11 +676,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                    sprintf("Platinum- (n=%s)", format(n_neg, big.mark = ","))),
         name = NULL) +
       coord_cartesian(ylim = c(0, 1.0)) +
-      labs(x = "LLM primary label", y = "Fraction within platinum group", title = title) +
+      labs(x = NULL, y = "Fraction within platinum group", title = title) +
       theme_fig() +
       theme(plot.title = element_text(face = "bold", size = 11),
-            axis.title = element_text(size = 13),
-            axis.text  = element_text(size = 11.5),
+            axis.title.x = element_blank(),
+            axis.title.y = element_text(size = 16),
+            axis.text  = element_text(size = 14),
             legend.position = c(0.98, 0.98), legend.justification = c(1, 1))
   }
 
@@ -851,7 +853,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                        COHORT_DISPLAY)
   pB <- render_landscape_panel() + labs(caption = caption_b) +
     theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-  save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", 6.5, 8)
+  save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", 6.5 * 0.8, 8)
 
   df <- nepc_annotations %>% filter(primary_label %in% c("conventional","avpc","nepc")) %>%
     mutate(aggressive = primary_label %in% c("avpc","nepc"))
@@ -956,7 +958,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                  linewidth = 0.6, alpha = 0.7) +
       { if (!is.na(q_y)) geom_hline(yintercept = q_y, color = "black",
                                     linetype = "dotted", linewidth = 0.9) } +
-      geom_point(data = ns, aes(coef_feature, y), size = 1.6, color = NS_COLOR, alpha = 0.45) +
+      geom_point(data = ns, aes(coef_feature, y), size = 1.6 * 1.5, color = NS_COLOR, alpha = 0.45) +
       geom_point(data = sigd %>% filter(!capped),
                  aes(coef_feature, y, color = category, size = is_hero),
                  shape = 21, fill = NA, stroke = 0.9) +
@@ -965,23 +967,26 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                  shape = 21, color = "white", stroke = 0.6, alpha = 0.92) +
       geom_point(data = sigd %>% filter(capped),
                  aes(coef_feature, y, fill = category), shape = 24,
-                 size = 3.4, color = "white", stroke = 0.6, alpha = 0.92) +
+                 size = 3.4 * 1.5, color = "white", stroke = 0.6, alpha = 0.92) +
       ggrepel::geom_text_repel(
         data = sub,
         aes(coef_feature, pmin(neglog10p, Y_MAX_CAP), label = repel_label, color = category),
-        size = 3, fontface = "bold", segment.color = "#95a5a6", segment.size = 0.3,
+        size = 4.5, fontface = "bold", segment.color = "#95a5a6", segment.size = 0.3,
         max.overlaps = Inf, min.segment.length = 0, box.padding = 0.55,
         point.padding = 0.45, force = 1.5, max.time = 2, seed = 0,
         show.legend = FALSE) +
       scale_color_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL) +
       scale_fill_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL) +
-      scale_size_manual(values = c(`TRUE` = 3.2, `FALSE` = 2.1), guide = "none") +
+      scale_size_manual(values = c(`TRUE` = 3.2 * 1.5, `FALSE` = 2.1 * 1.5), guide = "none") +
       coord_cartesian(xlim = PANEL_XLIM, ylim = c(-0.2, max(y_max * 1.10, 5))) +
       labs(x = "Cox log HR per SD", y = expression(-log[10](p)), title = title) +
       annotate("text", x = PANEL_XLIM[2], y = 0, label = footer, hjust = 1, vjust = 0,
-               size = 2.9, color = "#5d6d7e", family = "mono") +
+               size = 4.4, color = "#5d6d7e", family = "mono") +
       theme_fig() +
-      theme(plot.title = element_text(face = "bold", size = 12.5),
+      theme(plot.title = element_text(face = "bold", size = 18.75),
+            axis.title = element_text(size = 16.5),
+            axis.text  = element_text(size = 14.25),
+            legend.text = element_text(size = 13.5),
             legend.position = c(0.02, 0.98), legend.justification = c(0, 1))
     p
   }
@@ -1033,34 +1038,37 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                  linewidth = 0.6, alpha = 0.7) +
       { if (!is.na(q_y)) geom_hline(yintercept = q_y, color = "black",
                                     linetype = "dotted", linewidth = 0.9) } +
-      geom_point(data = ns, aes(coef_feature, y), size = 1.6, color = NS_COLOR, alpha = 0.45) +
+      geom_point(data = ns, aes(coef_feature, y), size = 1.6 * 1.5, color = NS_COLOR, alpha = 0.45) +
       geom_point(data = sigd %>% filter(!capped),
                  aes(coef_feature, y), shape = 21, fill = SIG_COLOR, color = "white",
-                 size = 2.1, stroke = 0.6, alpha = 0.92) +
+                 size = 2.1 * 1.5, stroke = 0.6, alpha = 0.92) +
       geom_point(data = sigd %>% filter(capped),
                  aes(coef_feature, y), shape = 24, fill = SIG_COLOR, color = "white",
-                 size = 3.4, stroke = 0.6, alpha = 0.92) +
+                 size = 3.4 * 1.5, stroke = 0.6, alpha = 0.92) +
       geom_point(data = hid %>% filter(!capped),
                  aes(coef_feature, y), shape = 21, fill = HIGHLIGHT_COLOR, color = "white",
-                 size = 3.2, stroke = 0.9, alpha = 0.98) +
+                 size = 3.2 * 1.5, stroke = 0.9, alpha = 0.98) +
       geom_point(data = hid %>% filter(capped),
                  aes(coef_feature, y), shape = 24, fill = HIGHLIGHT_COLOR, color = "white",
-                 size = 4.2, stroke = 0.9, alpha = 0.98) +
+                 size = 4.2 * 1.5, stroke = 0.9, alpha = 0.98) +
       ggrepel::geom_text_repel(
         data = sub,
         aes(coef_feature, pmin(neglog10p, Y_MAX_CAP), label = repel_label, color = point_group),
-        size = 3, fontface = "bold", segment.color = "#95a5a6", segment.size = 0.3,
+        size = 4.5, fontface = "bold", segment.color = "#95a5a6", segment.size = 0.3,
         max.overlaps = Inf, min.segment.length = 0, box.padding = 0.55,
         point.padding = 0.45, force = 1.5, max.time = 2, seed = 0,
         show.legend = FALSE) +
       scale_color_manual(values = point_colors, breaks = names(point_colors), name = NULL,
-                         guide = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+                         guide = guide_legend(override.aes = list(size = 4.5, alpha = 1))) +
       coord_cartesian(xlim = PANEL_XLIM, ylim = c(-0.2, max(y_max * 1.10, 5))) +
       labs(x = "Cox log HR per SD", y = expression(-log[10](p)), title = title) +
       annotate("text", x = PANEL_XLIM[2], y = 0, label = footer, hjust = 1, vjust = 0,
-               size = 2.9, color = "#5d6d7e", family = "mono") +
+               size = 4.4, color = "#5d6d7e", family = "mono") +
       theme_fig() +
-      theme(plot.title = element_text(face = "bold", size = 12.5),
+      theme(plot.title = element_text(face = "bold", size = 18.75),
+            axis.title = element_text(size = 16.5),
+            axis.text  = element_text(size = 14.25),
+            legend.text = element_text(size = 13.5),
             legend.position = c(0.02, 0.98), legend.justification = c(0, 1))
     p
   }
