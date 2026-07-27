@@ -141,10 +141,7 @@ parse_feature <- function(name) {
 }
 
 
-COHORTS <- c(
-  "icd_arpi",
-  "icd_or_vte_allow_other_primaries_arpi"
-)
+COHORTS <- "icd_or_vte_allow_other_primaries_arpi"
 
 # Render the full COMPASS figure set for one cohort arm. Mirrors the body of
 # COMPASS_generate_figures.ipynb's per-cohort cells (Figures 1-7 + Table 1)
@@ -170,6 +167,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   BASE <- file.path(NEPC_PROJ_PATH, "survival_analysis", paste0("local_runs_", COHORT))
   LONGITUDINAL_CSV <- file.path(NEPC_PROJ_PATH, "longitudinal_prediction_data.csv")
   INPUTS_DIR <- file.path(NEPC_PROJ_PATH, "survival_analysis", paste0("prediction_inputs_", COHORT))
+  ICD_PROSTATE_MRN_FLAGS_CSV <- file.path(
+    NEPC_PROJ_PATH, "mrn_lists", "icd_prostate_mrn_flags.csv"
+  )
 
   FIG_ROOT <- fig_root
   # Figure-first, panel-second layout:
@@ -286,22 +286,52 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     fromJSON(landmark_path, simplifyVector = FALSE)
   }
 
-  render_consort_panel <- function(attrition) {
-    downstream <- attrition[["downstream_cohort_filters"]]
-    steps <- list(
-      c("Selected MRN arm", downstream[["n_before_downstream_cohort_filters"]]),
-      c(sprintf("+ >=%s PSA records", downstream[["min_psa_count"]]),
-        downstream[["n_after_psa_count_filter"]]),
-      c("- PARPi-exposed excluded", downstream[["n_after_parpi_exclusion"]])
+  load_icd_prostate_mrn_flags <- function(path) {
+    if (!file.exists(path))
+      stop(path, " not found -- re-run compile_COMPASS_cohort_data.py")
+    required <- c(
+      ID_COL,
+      "HAS_NON_PROSTATE_PRIMARY",
+      "PARPI_EXPOSED",
+      "ARPI_DOCETAXEL_EXPOSED",
+      "HAS_5_OR_MORE_PSA_TESTS"
     )
-    elig <- attrition[["eligible_by_landmark"]]
-    for (k in sort(as.integer(names(elig)))) {
-      sign <- if (k > 0) "+" else ""
-      steps[[length(steps) + 1]] <- c(sprintf("Eligible at landmark %s%sd", sign, k),
-                                      elig[[as.character(k)]])
-    }
-    steps[[length(steps) + 1]] <- c("Common cohort (all landmarks)",
-                                     attrition[["n_common_across_landmarks"]])
+    flags <- read_csv(path, show_col_types = FALSE)
+    missing <- setdiff(required, names(flags))
+    if (length(missing) > 0)
+      stop(sprintf("%s is missing required columns: %s",
+                   path, paste(missing, collapse = ", ")))
+    if (any(is.na(flags[[ID_COL]])))
+      stop(path, " contains missing DFCI_MRN values")
+    if (anyDuplicated(flags[[ID_COL]]) > 0)
+      stop(path, " must contain exactly one row per DFCI_MRN")
+    flags <- flags %>%
+      select(all_of(required)) %>%
+      mutate(across(-all_of(ID_COL), ~ suppressWarnings(as.numeric(.x))))
+    flag_cols <- setdiff(required, ID_COL)
+    invalid <- flag_cols[
+      vapply(flags[flag_cols], function(x) any(is.na(x) | !x %in% c(0, 1)), logical(1))
+    ]
+    if (length(invalid) > 0)
+      stop(sprintf("%s has non-binary or missing values in: %s",
+                   path, paste(invalid, collapse = ", ")))
+    flags
+  }
+
+  render_consort_panel <- function(mrn_flags) {
+    keep <- rep(TRUE, nrow(mrn_flags))
+    steps <- list(
+      c("ICD-defined prostate cancer", sum(keep))
+    )
+    keep <- keep & mrn_flags$HAS_NON_PROSTATE_PRIMARY == 0
+    steps[[length(steps) + 1]] <- c("No non-prostate primary", sum(keep))
+    keep <- keep & mrn_flags$PARPI_EXPOSED == 0
+    steps[[length(steps) + 1]] <- c("No PARPi exposure", sum(keep))
+    keep <- keep & mrn_flags$ARPI_DOCETAXEL_EXPOSED == 1
+    steps[[length(steps) + 1]] <- c("ARPI/docetaxel exposure", sum(keep))
+    keep <- keep & mrn_flags$HAS_5_OR_MORE_PSA_TESTS == 1
+    steps[[length(steps) + 1]] <- c("\u22655 PSA tests", sum(keep))
+
     n_steps <- length(steps)
     df <- tibble(i = seq_len(n_steps) - 1,
                  label = vapply(steps, `[`, character(1), 1),
@@ -311,10 +341,6 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
              xmin = 0.07, xmax = 0.93, ymin = ycen - 0.31, ymax = ycen + 0.31)
     arrows <- df %>% filter(i < n_steps - 1) %>%
       mutate(y = ymin, yend = df$ymax[match(i + 1, df$i)], x = 0.5, xend = 0.5)
-    split_sizes <- attrition[["split_sizes"]]
-    footer <- paste(sprintf("%s: n=%s", names(split_sizes),
-                            format(as.numeric(unlist(split_sizes)), big.mark = ",")),
-                    collapse = "  ·  ")
     ggplot(df) +
       geom_rect(aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
                 fill = "#eef1f5", color = "#5d6d7e", linewidth = 0.4) +
@@ -322,10 +348,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
       geom_segment(data = arrows, aes(x = x, xend = xend, y = y, yend = yend),
                    arrow = arrow(length = unit(0.12, "cm"), type = "closed"),
                    color = "#5d6d7e", linewidth = 0.45) +
-      annotate("text", x = 0.5, y = n_steps + 0.25,
-               label = paste0("Train/valid/test split — ", footer),
-               size = 2.9, fontface = "italic", color = "#5d6d7e") +
-      labs(title = "Cohort attrition (CONSORT)") + xlim(0, 1) + ylim(0, n_steps + 0.6) +
+      labs(title = "ICD prostate cohort workflow") +
+      xlim(0, 1) + ylim(0, n_steps + 0.25) +
       theme_void() + theme(plot.title = element_text(face = "bold", size = 12.5, hjust = 0.5))
   }
 
@@ -440,6 +464,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
   message(sprintf("Loading cohort-specific attrition counts from %s ...", INPUTS_DIR))
   attrition <- load_attrition(INPUTS_DIR)
+  message(sprintf("Loading ICD prostate MRN workflow flags from %s ...",
+                  ICD_PROSTATE_MRN_FLAGS_CSV))
+  icd_prostate_mrn_flags <- load_icd_prostate_mrn_flags(ICD_PROSTATE_MRN_FLAGS_CSV)
   message(sprintf("Loading %s ...", LONGITUDINAL_CSV))
   split <- load_profile_patient_and_labs(LONGITUDINAL_CSV, id_col = ID_COL)
   base_landmark <- min(as.integer(names(attrition[["eligible_by_landmark"]])))
@@ -451,9 +478,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   message(sprintf("  selected base-landmark cohort: patients=%s  labs=%s",
                   format(nrow(patient_df), big.mark = ","), format(nrow(labs_df), big.mark = ",")))
 
-  n_landmarks <- length(attrition[["eligible_by_landmark"]])
-  pA <- render_consort_panel(attrition)
-  save_fig(pA, OUT_DIR, "figure1a_consort", 7.5, 0.62 * (n_landmarks + 8) + 1)
+  pA <- render_consort_panel(icd_prostate_mrn_flags)
+  save_fig(pA, OUT_DIR, "figure1a_consort", 7.5, 5.8)
   pB <- render_km_panel(patient_df)
   save_fig(pB, OUT_DIR, "figure1b_km", 6.5, 4.8)
 
@@ -489,7 +515,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
   ## Panel A -- LLM validation (NEPC-vs-rest classifier)
   OUT_DIR <- fig_dir("figure2_llm")
-  SAVE_ORIGINAL_LLM <- identical(COHORT, cohorts[[1]])
+  # Only cohort-specific manuscript figures are emitted. The older
+  # full-label `original_*` Figure 2 variants are intentionally suppressed.
+  SAVE_ORIGINAL_LLM <- FALSE
 
   drop_cols <- function(df, cols) df %>% select(-any_of(cols))
 
@@ -652,7 +680,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     labs(caption = caption_b) +
     theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
   if (SAVE_ORIGINAL_LLM)
-    save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", width = 6.5, height = 5,
+    save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", width = 6.5, height = 8,
              prefix = "original")
   if (show) print(pB)
 
@@ -813,7 +841,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                        COHORT)
   pB <- render_landscape_panel() + labs(caption = caption_b) +
     theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-  save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", 6.5, 5)
+  save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", 6.5, 8)
 
   df <- nepc_annotations %>% filter(primary_label %in% c("conventional","avpc","nepc")) %>%
     mutate(aggressive = primary_label %in% c("avpc","nepc"))

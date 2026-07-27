@@ -6,8 +6,9 @@ exports and running landmark survival analysis (Cox / XGBoost) on the resulting 
 The preprocessing and modeling code is pandas-based; publication figures are generated only in R.
 Entry points are command-line scripts orchestrated from notebooks.
 COMPASS uses one `COMPASS_run_locally.ipynb` notebook for two treatment-anchored cohorts:
-`icd_arpi` and `icd_or_vte_allow_other_primaries_arpi`. Figures are produced by the paired,
-R-only `COMPASS_generate_figures.ipynb` notebook for those same two cohorts.
+`icd_arpi` and `icd_or_vte_allow_other_primaries_arpi`. The paired, R-only
+`COMPASS_generate_figures.ipynb` emits manuscript figures only for
+`icd_or_vte_allow_other_primaries_arpi`.
 
 > This README is the canonical reference for editing the pipeline. It documents the directory
 > layout, the data flow, every script's inputs/outputs, the **conventions and invariants that
@@ -56,6 +57,7 @@ COMPASS/
     ├── univariate_analysis.py            # ENTRY: univariate Cox associations
     ├── multivariate_analysis.py          # ENTRY: elastic-net Cox or XGBoost survival:cox
     ├── COMPASS_generate_figures_pipeline.R # sole figure-generation implementation
+    ├── COMPASS_nominally_significant_univariate.ipynb # review nominal univariate hits
     └── COMPASS_run_locally.ipynb / COMPASS_generate_figures.ipynb # Python models / R figures
 ```
 
@@ -80,7 +82,7 @@ COMPASS/
         ▼  survival_analysis/univariate_analysis.py
            survival_analysis/multivariate_analysis.py
         │
-        ▼  COMPASS_generate_figures.ipynb (R; two selected treatment-anchor cohorts)
+        ▼  COMPASS_generate_figures.ipynb (R; ICD-or-VTE allow-other-primaries cohort)
  figures/
 ```
 
@@ -196,17 +198,27 @@ low-level XGBoost mechanics live in `survival_common/xgboost_engine.py`.
 
 ### 2.4 — Notebooks
 
-COMPASS PROFILE has one run notebook and one figure notebook:
+COMPASS PROFILE has one run notebook, one figure notebook, and a focused
+univariate-results review notebook:
 
 - `COMPASS_run_locally.ipynb` — drives preprocessing and runs only `icd_arpi` (ICD-C61,
   excluding other primaries) and `icd_or_vte_allow_other_primaries_arpi` (ICD-C61 + VTE,
   allowing other primaries). Each cohort gets independent prediction inputs and univariate,
   elastic-net, and XGBoost models at landmarks 0/90.
 - `COMPASS_generate_figures.ipynb` — the sole COMPASS figure notebook, using the R kernel and
-  `COMPASS_generate_figures_pipeline.R`. It renders the original LLM-label figure set plus the two
-  selected treatment-anchor cohort MRN subsets, cohort overview, univariate, multivariate, KM, androgen
-  distribution, and androgen trajectory figures. Outputs are grouped as
-  `FIG_ROOT/<figure>/<plot-stem>/<cohort>_<plot-stem>.png` with no language subdirectory.
+  `COMPASS_generate_figures_pipeline.R`. It renders only the
+  `icd_or_vte_allow_other_primaries_arpi` cohort's overview, LLM-label, univariate,
+  multivariate, KM, androgen-distribution, and androgen-trajectory figures. Outputs are grouped as
+  `FIG_ROOT/<figure>/<plot-stem>/<cohort>_<plot-stem>.png` with no `R/` language subdirectory.
+  Figure 1A reads `mrn_lists/icd_prostate_mrn_flags.csv` and displays cumulative ICD-C61 cohort
+  selection through the non-prostate-primary, PARPi, ARPI/docetaxel, and ≥5-PSA-test criteria.
+- `COMPASS_nominally_significant_univariate.ipynb` loads all shared-landmark univariate results
+  for `icd_or_vte_allow_other_primaries_arpi`, filters to nominal `p_value < 0.05`, displays every
+  hit, and exports the filtered table beside the Cox outputs.
+- `COMPASS_review_nominal_univariate_hits.ipynb` — loads all landmark results from the
+  shared-canonical-lab univariate output (with legacy per-landmark fallback) for
+  `icd_or_vte_allow_other_primaries_arpi` and displays every result with nominal
+  `p_value < 0.05`; optional CSV export is disabled by default.
 
 IPIO has a paired run/figure notebook as well:
 
