@@ -501,10 +501,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     overlay_hist(patient_df$t_dx_to_anchor, "Days: diagnosis → treatment anchor",
                  "Diagnosis → treatment anchor", 50),
     overlay_hist(patient_df$t_platinum[event_rows],
-                 "Days from treatment anchor to platinum (events only)",
-                 "Time to platinum (event patients only)", 40,
-                 xlim_max = 6 * 365.25, use_count = TRUE, axis_text_size = 16) +
-      theme(plot.title = element_text(size = 15))
+                 "Days from treatment anchor to platinum",
+                 "Time to platinum", 40,
+                 xlim_max = 6 * 365.25, use_count = TRUE, axis_text_size = 14) +
+      theme(plot.title = element_text(size = 14))
   )
   timing_stems <- c("figure1c_span", "figure1c_dx_to_tx", "figure1c_time_to_platinum")
   for (i in seq_along(timing_panels)) {
