@@ -6,9 +6,8 @@ exports and running landmark survival analysis (Cox / XGBoost) on the resulting 
 The preprocessing and modeling code is pandas-based; publication figures are generated only in R.
 Entry points are command-line scripts orchestrated from notebooks.
 COMPASS uses one `COMPASS_run_locally.ipynb` notebook for two treatment-anchored cohorts:
-`icd_arpi` and `icd_or_vte_allow_other_primaries_arpi`. The paired, R-only
-`COMPASS_generate_figures.ipynb` emits manuscript figures only for
-`icd_or_vte_allow_other_primaries_arpi`.
+`without_other_primaries` and `with_other_primaries`. The paired, R-only
+`COMPASS_generate_figures.ipynb` emits manuscript figures for both.
 
 > This README is the canonical reference for editing the pipeline. It documents the directory
 > layout, the data flow, every script's inputs/outputs, the **conventions and invariants that
@@ -69,9 +68,9 @@ COMPASS/
  raw DFCI / OncDRS / Profile exports  (/data/gusev/USERS/jpconnor/data/...)
         │
         ▼  data_preprocessing/compile_COMPASS_cohort_data.py
- prostate_icd_data.csv, prostate_health_history_data.csv,
- prostate_medications_data.csv, prostate_labs_data.csv, prostate_somatic_data.csv,
- total_psa_records.csv, platinum_chemo_records.csv, prostate_arpi_survival_cohort.csv
+ prostate_icd_data.csv,
+ prostate_arpi_survival_cohort_{without,with}_other_primaries.csv,
+ prostate_arpi_survival_cohort_{without,with}_other_primaries_arpi.csv
         │
         ▼  data_preprocessing/longitudinal_data_processing.py
  longitudinal_prediction_data.csv
@@ -82,7 +81,7 @@ COMPASS/
         ▼  survival_analysis/univariate_analysis.py
            survival_analysis/multivariate_analysis.py
         │
-        ▼  COMPASS_generate_figures.ipynb (R; ICD-or-VTE allow-other-primaries cohort)
+        ▼  COMPASS_generate_figures.ipynb (R; with/without-other-primaries cohorts)
  figures/
 ```
 
@@ -91,23 +90,23 @@ COMPASS/
 ## Stage 1 — Compile prostate cohort source data
 
 `data_preprocessing/compile_COMPASS_cohort_data.py` (module-level script, argparse CLI for path
-overrides). Derives ICD-C61 and VTE-project prostate cohorts, their union, and parallel variants
-that retain patients with other primary malignancies. Each definition has a full and a
-treatment-anchor-restricted output. The same script builds the ARPI/chemo-anchored survival data
-(age, treatment anchor, death, time-to-platinum) directly from the raw OncDRS pull.
+overrides). Derives two ICD-C61 cohorts, with and without patients who have another primary
+malignancy. Each definition has a full and treatment-anchor-restricted output. The same script
+builds the ARPI/chemo-anchored survival data (age, treatment anchor, death, time-to-platinum)
+directly from the raw OncDRS pull.
 
 - **Inputs (hard-coded under `DATA_PATH = /data/gusev/USERS/jpconnor/data/`, plus the raw OncDRS pull
   at `ONCDRS_PATH`):** `EHR_DIAGNOSIS.csv`, `HEALTH_HISTORY.csv`, `MEDICATIONS.csv`,
   `OUTPT_LAB_RESULTS_LABS.csv`, `complete_somatic_data_df.csv.gz`, `PT_INFO_STATUS_REGISTRATION.csv`.
-- **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** twelve survival-cohort CSVs
-  (six full definitions and six treatment-anchor-restricted variants), twelve corresponding
+- **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** four survival-cohort CSVs
+  (with/without other primaries, each full and treatment-anchor-restricted), four corresponding
   bare-MRN lists, `prostate_icd_data.csv`, and
   `mrn_lists/icd_prostate_mrn_flags.csv`. The latter contains every ICD-C61 MRN plus binary
   indicators for a non-prostate primary, PARPi exposure, ARPI/docetaxel exposure, and at least
   five broad PSA tests.
-- **Cohort definitions:** `icd`, `vte`, and `icd_or_vte` apply the ICD-based
-  non-prostate-primary exclusion. The corresponding `*_allow_other_primaries` variants omit that
-  exclusion. Every definition also emits an `_arpi` treatment-anchor-restricted subset.
+- **Cohort definitions:** `without_other_primaries` applies the ICD-based non-prostate-primary
+  exclusion; `with_other_primaries` retains every ICD-C61 patient. Each also emits an `_arpi`
+  treatment-anchor-restricted subset.
 
 `compile_MRNs_for_manual_review.py` builds an auxiliary manual-review MRN sheet from the
 stage-1 outputs (platinum records, non-prostate-primary ICDs, PARPi exposure, BRCA2 status).
@@ -132,7 +131,7 @@ prostate (`C61`) diagnosis date when available and outcomes, rebases all timing 
 prostate lab frame used by the current treatment-anchored analyses.
 
 - **Fast cohort scope:** by default, raw scans start from the widest anchored
-  `icd_or_vte_allow_other_primaries_arpi` union. PARPi-exposed patients and patients with fewer
+  `with_other_primaries` cohort. PARPi-exposed patients and patients with fewer
   than five broad PSA records are removed before expensive lab standardization. Use
   `--prefilter-include-parpi`, `--prefilter-min-psa-count 0`, and/or a broader
   `--survival-cohort-csv` to rebuild a less restricted source frame.
@@ -201,24 +200,18 @@ low-level XGBoost mechanics live in `survival_common/xgboost_engine.py`.
 COMPASS PROFILE has one run notebook, one figure notebook, and a focused
 univariate-results review notebook:
 
-- `COMPASS_run_locally.ipynb` — drives preprocessing and runs only `icd_arpi` (ICD-C61,
-  excluding other primaries) and `icd_or_vte_allow_other_primaries_arpi` (ICD-C61 + VTE,
-  allowing other primaries). Each cohort gets independent prediction inputs and univariate,
+- `COMPASS_run_locally.ipynb` — drives preprocessing and runs only `without_other_primaries`
+  and `with_other_primaries`. Each cohort gets independent prediction inputs and univariate,
   elastic-net, and XGBoost models at landmarks 0/90.
 - `COMPASS_generate_figures.ipynb` — the sole COMPASS figure notebook, using the R kernel and
-  `COMPASS_generate_figures_pipeline.R`. It renders only the
-  `icd_or_vte_allow_other_primaries_arpi` cohort's overview, LLM-label, univariate,
-  multivariate, KM, androgen-distribution, and androgen-trajectory figures. Outputs are grouped as
+  `COMPASS_generate_figures_pipeline.R`. It renders both ICD-C61 cohorts' overview, LLM-label,
+  univariate, multivariate, KM, androgen-distribution, and androgen-trajectory figures. Outputs are grouped as
   `FIG_ROOT/<figure>/<plot-stem>/<cohort>_<plot-stem>.png` with no `R/` language subdirectory.
   Figure 1A reads `mrn_lists/icd_prostate_mrn_flags.csv` and displays cumulative ICD-C61 cohort
   selection through the non-prostate-primary, PARPi, ARPI/docetaxel, and ≥5-PSA-test criteria.
 - `COMPASS_nominally_significant_univariate.ipynb` loads all shared-landmark univariate results
-  for `icd_or_vte_allow_other_primaries_arpi`, filters to nominal `p_value < 0.05`, displays every
+  for `with_other_primaries`, filters to nominal `p_value < 0.05`, displays every
   hit, and exports the filtered table beside the Cox outputs.
-- `COMPASS_review_nominal_univariate_hits.ipynb` — loads all landmark results from the
-  shared-canonical-lab univariate output (with legacy per-landmark fallback) for
-  `icd_or_vte_allow_other_primaries_arpi` and displays every result with nominal
-  `p_value < 0.05`; optional CSV export is disabled by default.
 
 IPIO has a paired run/figure notebook as well:
 

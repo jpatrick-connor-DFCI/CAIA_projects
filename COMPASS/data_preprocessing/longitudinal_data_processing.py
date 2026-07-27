@@ -42,17 +42,17 @@ SURV_PATH = EMBED_PROJ_PATH / "time-to-event_analysis"
 # straight from the raw OncDRS pull. It supplies the outcome/anchor columns
 # (age, treatment anchor, death, last-contact, platinum) that used to come from
 # death_met_surv_df.csv.gz. See load_death_df_from_survival_cohort. Defaults to
-# the widest anchored icd_or_vte UNION cohort, which allows other primary
-# malignancies and contains every currently analyzed *_arpi arm.
+# the widest anchored ICD-C61 cohort, which allows other primary malignancies
+# and contains both currently analyzed arms.
 # main() loads this file
 # first and uses its MRN set both to scan-filter the raw HEALTH_HISTORY/
 # OUTPT_LAB_RESULTS_LABS/MEDICATIONS reads and to restrict the final output --
 # this is the one cohort-membership filter Stage 2 applies. Narrower cohort
-# variants (primary-excluded, icd-only, or vte-only) remain a Stage 3
+# variants without other primaries remain a Stage 3
 # (build_prediction_inputs.py --restrict-to-mrns) concern.
 DEFAULT_SURVIVAL_COHORT_CSV = (
     NEPC_PROJ_PATH
-    / "prostate_arpi_survival_cohort_icd_or_vte_allow_other_primaries_arpi.csv"
+    / "prostate_arpi_survival_cohort_with_other_primaries_arpi.csv"
 )
 
 # Cisplatin appears both as a single agent and coded within a combination
@@ -209,11 +209,10 @@ def build_raw_longitudinal_data(
 
     This function itself applies no MRN restriction -- it reshapes whatever
     `health_df`/`labs_df` it is given. main() passes frames already
-    scan-filtered to the icd_or_vte union cohort (see union_cohort_mrns), but
-    that filtering happens at the call site, not here. Narrower cohort
-    selection (icd / vte / icd_or_vte, each full or ARPI-restricted) is
-    applied downstream in build_prediction_inputs.py via --restrict-to-mrns,
-    so every narrower cohort variant can be compared from the same
+    scan-filtered to the broad ICD-C61 cohort (see broad_cohort_mrns), but
+    that filtering happens at the call site, not here. Selection of the
+    narrower cohort without other primaries is applied downstream in
+    build_prediction_inputs.py via --restrict-to-mrns, so both variants use the same
     longitudinal_prediction_data.csv output.
     """
     # Both inputs are scanned all-String (infer_schema_length=0), so DFCI_MRN
@@ -396,10 +395,10 @@ def build_longitudinal_prediction_data(
 
     No MRN restriction is applied here: this function reshapes whatever
     `consolidated_df` it is given (main() passes data already scan-filtered
-    to the icd_or_vte union), and `death_df` is left-joined (not
+    to the broad ICD-C61 cohort), and `death_df` is left-joined (not
     inner-joined) so any patient without a death_df row is kept with
     all-null outcome columns rather than silently dropped. The caller
-    (main()) applies a belt-and-suspenders union-cohort filter to the
+    (main()) applies a belt-and-suspenders broad-cohort filter to the
     returned frame afterward; narrower cohort variants remain a
     build_prediction_inputs.py --restrict-to-mrns concern.
     """
@@ -833,8 +832,8 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SURVIVAL_COHORT_CSV,
         help=(
             "Per-patient survival cohort from compile_COMPASS_cohort_data.py "
-            "(defaults to the widest anchored icd_or_vte UNION cohort, including "
-            "patients with other primary malignancies). Supplies the treatment "
+            "(defaults to the widest anchored ICD-C61 cohort, with other "
+            "primaries allowed). Supplies the treatment "
             "anchor, age, death, and last-contact outcome columns via a LEFT "
             "join, and ALSO defines the output cohort: main() restricts the "
             "final longitudinal_prediction_df to this file's MRN set after the "
@@ -937,21 +936,21 @@ def main() -> None:
 
     # ICD-C61 records, kept for compute_first_prostate_diagnosis below. Small
     # and left-joined later, so it is read in full (unfiltered) rather than
-    # gated on union_cohort_mrns.
+    # gated on broad_cohort_mrns.
     icds = pd.read_csv(args.icd_csv)
 
-    # Output cohort = the wider of the two selected anchored analysis arms. It
-    # contains every MRN in both icd_arpi and
-    # icd_or_vte_allow_other_primaries_arpi while avoiding raw scans for patients
+    # Output cohort = the wider of the two selected anchored ICD-C61 arms. It
+    # contains every MRN in both with/without-other-primary cohorts while
+    # avoiding raw scans for patients
     # who cannot enter either treatment-anchor-relative model. It is loaded first so
     # HEALTH_HISTORY/OUTPT_LAB_RESULTS_LABS/MEDICATIONS -- each tens of
     # millions of rows across the full raw OncDRS universe -- can be filtered to
     # this MRN set during the lazy scan itself, rather than read in full and
-    # filtered afterward. The narrower icd_arpi cohort remains a Stage 3 concern
-    # via build_prediction_inputs.py's --restrict-to-mrns.
+    # filtered afterward. The narrower without-other-primaries cohort remains a
+    # Stage 3 concern via build_prediction_inputs.py's --restrict-to-mrns.
     death_df = load_death_df_from_survival_cohort(args.survival_cohort_csv)
-    union_cohort_mrns = set(int(m) for m in death_df[ID_COL].unique())
-    print(f"[main] broad anchored union cohort: {len(union_cohort_mrns)} patients.")
+    broad_cohort_mrns = set(int(m) for m in death_df[ID_COL].unique())
+    print(f"[main] broad anchored ICD cohort: {len(broad_cohort_mrns)} patients.")
 
     # Load the narrow medication projection first. Besides supplying outcomes,
     # this lets the default PARPi gate reduce the much larger lab/health scans.
@@ -959,7 +958,7 @@ def main() -> None:
     medications_df = (
         fast_io.scan_filter(
             args.medications_csv,
-            union_cohort_mrns,
+            broad_cohort_mrns,
             cols=MEDICATION_SCAN_COLUMNS,
         )
         .collect()
@@ -980,11 +979,11 @@ def main() -> None:
             ID_COL,
         ].unique()
     )
-    candidate_mrns = set(union_cohort_mrns)
+    candidate_mrns = set(broad_cohort_mrns)
     if args.prefilter_exclude_parpi:
         candidate_mrns -= parpi_mrns
         print(
-            f"[prefilter] PARPi exclusion: {len(candidate_mrns)}/{len(union_cohort_mrns)} "
+            f"[prefilter] PARPi exclusion: {len(candidate_mrns)}/{len(broad_cohort_mrns)} "
             "patients retained before raw lab scanning."
         )
 
@@ -1059,7 +1058,7 @@ def main() -> None:
         consolidated_df = consolidate_dfci_labs(raw_longitudinal_df, mapping_df)
         stage_seconds["lab_standardization"] = time.perf_counter() - stage_started
         prefilter_attrition = {
-            "n_before_early_prefilters": len(union_cohort_mrns),
+            "n_before_early_prefilters": len(broad_cohort_mrns),
             "prefilter_exclude_parpi": bool(args.prefilter_exclude_parpi),
             "n_after_parpi_prefilter": len(candidate_mrns),
             **psa_attrition,
@@ -1097,19 +1096,19 @@ def main() -> None:
         treatment_anchor_df,
     )
 
-    # health/labs/medications were already scan-filtered to union_cohort_mrns
+    # health/labs/medications were already scan-filtered to broad_cohort_mrns
     # above, so this should be a no-op; kept as a cheap belt-and-suspenders
     # check (e.g. against icds/first_prostate_diagnosis, which are read
     # unfiltered) and to record the attrition count explicitly.
-    n_before_union_filter = longitudinal_prediction_df[ID_COL].nunique()
+    n_before_broad_filter = longitudinal_prediction_df[ID_COL].nunique()
     longitudinal_prediction_df = longitudinal_prediction_df.loc[
-        longitudinal_prediction_df[ID_COL].isin(union_cohort_mrns)
+        longitudinal_prediction_df[ID_COL].isin(broad_cohort_mrns)
     ].copy()
-    n_after_union_filter = longitudinal_prediction_df[ID_COL].nunique()
+    n_after_broad_filter = longitudinal_prediction_df[ID_COL].nunique()
     print(
-        f"[main] icd_or_vte union cohort restriction: {n_after_union_filter}/"
-        f"{n_before_union_filter} patients retained "
-        f"(dropped {n_before_union_filter - n_after_union_filter} not in "
+        f"[main] broad ICD cohort restriction: {n_after_broad_filter}/"
+        f"{n_before_broad_filter} patients retained "
+        f"(dropped {n_before_broad_filter - n_after_broad_filter} not in "
         f"{args.survival_cohort_csv.name})."
     )
 
@@ -1127,8 +1126,8 @@ def main() -> None:
     cohort_attrition = {
         "pre_consolidation_filters": prefilter_attrition,
         **build_attrition,
-        "n_before_icd_or_vte_union_filter": int(n_before_union_filter),
-        "n_after_icd_or_vte_union_filter": int(n_after_union_filter),
+        "n_before_broad_icd_filter": int(n_before_broad_filter),
+        "n_after_broad_icd_filter": int(n_after_broad_filter),
         **filter_attrition,
         "n_with_highlighted_treatment_anchor": int(n_anchor),
         "n_output_patients": int(longitudinal_prediction_df[ID_COL].nunique()),

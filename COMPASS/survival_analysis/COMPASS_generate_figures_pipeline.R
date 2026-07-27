@@ -141,7 +141,11 @@ parse_feature <- function(name) {
 }
 
 
-COHORTS <- "icd_or_vte_allow_other_primaries_arpi"
+COHORTS <- c("without_other_primaries", "with_other_primaries")
+COHORT_LABELS <- c(
+  without_other_primaries = "Without other primaries",
+  with_other_primaries = "With other primaries"
+)
 
 # Render the full COMPASS figure set for one cohort arm. Mirrors the body of
 # COMPASS_generate_figures.ipynb's per-cohort cells (Figures 1-7 + Table 1)
@@ -162,7 +166,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   if (!COHORT %in% cohorts)
     stop(sprintf("Unknown cohort=%s; expected one of %s",
                  COHORT, paste(cohorts, collapse = ", ")))
-  message(sprintf("Generating figures for cohort: %s", COHORT))
+  COHORT_DISPLAY <- unname(COHORT_LABELS[[COHORT]])
+  message(sprintf("Generating figures for cohort: %s", COHORT_DISPLAY))
 
   BASE <- file.path(NEPC_PROJ_PATH, "survival_analysis", paste0("local_runs_", COHORT))
   LONGITUDINAL_CSV <- file.path(NEPC_PROJ_PATH, "longitudinal_prediction_data.csv")
@@ -323,8 +328,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     steps <- list(
       c("ICD-defined prostate cancer", sum(keep))
     )
-    keep <- keep & mrn_flags$HAS_NON_PROSTATE_PRIMARY == 0
-    steps[[length(steps) + 1]] <- c("No non-prostate primary", sum(keep))
+    if (identical(COHORT, "without_other_primaries")) {
+      keep <- keep & mrn_flags$HAS_NON_PROSTATE_PRIMARY == 0
+      steps[[length(steps) + 1]] <- c("No non-prostate primary", sum(keep))
+    } else {
+      steps[[length(steps) + 1]] <- c("Other primaries allowed", sum(keep))
+    }
     keep <- keep & mrn_flags$PARPI_EXPOSED == 0
     steps[[length(steps) + 1]] <- c("No PARPi exposure", sum(keep))
     keep <- keep & mrn_flags$ARPI_DOCETAXEL_EXPOSED == 1
@@ -370,7 +379,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   render_km_panel <- function(patient_df) {
     d <- platinum_km_inputs(patient_df)
     fit <- survfit(Surv(time, event) ~ 1, data = d)
-    lab <- sprintf("%s %s (n=%s)", COHORT_LABEL, COHORT, format(nrow(d), big.mark = ","))
+    lab <- sprintf("%s — %s (n=%s)", COHORT_LABEL, COHORT_DISPLAY,
+                   format(nrow(d), big.mark = ","))
     gg <- ggsurvplot(fit, data = d, conf.int = TRUE, censor = FALSE,
                      palette = "#1f3a93", legend = "none",
                      xlab = "Days from treatment anchor",
@@ -508,7 +518,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
   fig1 <- (pA | pB) / wrap_plots(timing_panels, nrow = 1) +
     plot_layout(heights = c(1.25, 1)) +
-    plot_annotation(title = sprintf("Figure 1 — COMPASS cohort overview (%s)", COHORT),
+    plot_annotation(title = sprintf("Figure 1 — COMPASS cohort overview (%s)", COHORT_DISPLAY),
                     tag_levels = "A")
   save_fig(fig1, OUT_DIR, "figure1_cohort_overview", 16, 10)
   if (show) print(fig1)
@@ -803,7 +813,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   nepc_annotations <- nepc_annotations_all %>%
     filter(as.character(DFCI_MRN) %in% cohort_mrns)
   message(sprintf("Figure 2 cohort subset (%s): %s / %s LLM-labeled MRNs",
-                  COHORT, format(nrow(nepc_annotations), big.mark = ","),
+                  COHORT_DISPLAY, format(nrow(nepc_annotations), big.mark = ","),
                   format(nrow(nepc_annotations_all), big.mark = ",")))
 
   merged_results <- manual_annotations %>%
@@ -821,7 +831,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   n_total <- nrow(merged_results)
   n_nepc_manual <- sum(merged_results$manual_NEPC)
   caption_a <- sprintf("%s MRN subset; N = %s chart-reviewed patients; %s manual-NEPC positive.",
-                       COHORT, format(n_total, big.mark = ","),
+                       COHORT_DISPLAY, format(n_total, big.mark = ","),
                        format(n_nepc_manual, big.mark = ","))
   pA1 <- render_confusion_panel(metrics) + labs(caption = caption_a) +
     theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
@@ -838,7 +848,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   n_pos <- sum(platinum_positive_labels$count)
   n_neg <- sum(platinum_negative_labels$count)
   caption_b <- sprintf("LLM labels restricted to the %s base-landmark MRN set; fractions are computed within each platinum group.",
-                       COHORT)
+                       COHORT_DISPLAY)
   pB <- render_landscape_panel() + labs(caption = caption_b) +
     theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
   save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", 6.5, 8)
@@ -861,7 +871,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   p_agg <- w_agg[1]; lo_agg <- w_agg[2]; hi_agg <- w_agg[3]
   p_conv <- w_conv[1]; lo_conv <- w_conv[2]; hi_conv <- w_conv[3]
   caption_c <- sprintf("%s MRN subset; excludes 'biomarker' labels (%s rows). Error bars are 95%% Wilson intervals.",
-                       COHORT, format(n_excluded, big.mark = ","))
+                       COHORT_DISPLAY, format(n_excluded, big.mark = ","))
   pC <- render_enrichment_panel() + labs(caption = caption_c) +
     theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
   save_fig(pC, OUT_DIR, "figure2c_enrichment", 4.5, 5.5)
@@ -870,11 +880,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
           render_enrichment_panel()
   right <- render_landscape_panel("Panel B — subtype landscape (cohort MRN subset)")
   full_caption <- sprintf("LLM calls restricted to the %s base-landmark MRN set (n=%s labels; platinum+ n=%s, platinum- n=%s).",
-                          COHORT, format(nrow(nepc_annotations), big.mark = ","),
+                          COHORT_DISPLAY, format(nrow(nepc_annotations), big.mark = ","),
                           format(n_pos, big.mark = ","), format(n_neg, big.mark = ","))
   fig2 <- (left | right) + plot_layout(widths = c(2, 1.3)) +
     plot_annotation(
-      title = sprintf("Figure 2 — LLM-extracted prostate subtypes (%s MRN subset)", COHORT),
+      title = sprintf("Figure 2 — LLM-extracted prostate subtypes (%s MRN subset)",
+                      COHORT_DISPLAY),
       caption = str_wrap(full_caption, 130),
       theme = theme(plot.title = element_text(face = "bold", size = 13),
                     plot.caption = element_text(size = 8.5, color = COLOR_NEUTRAL_INK)))
@@ -1572,7 +1583,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   if (!is.null(androgen_long_df))
     message(sprintf("Figure 7: %s androgen-axis rows across %s %s patients",
                     format(nrow(androgen_long_df), big.mark=","),
-                    format(length(unique(androgen_long_df$DFCI_MRN)), big.mark=","), COHORT))
+                    format(length(unique(androgen_long_df$DFCI_MRN)), big.mark=","), COHORT_DISPLAY))
 
   ## ---- Figure 7b: group mean +/- 95% CI, binned by time from treatment anchor ----
   BIN_WIDTH_DAYS <- 60
