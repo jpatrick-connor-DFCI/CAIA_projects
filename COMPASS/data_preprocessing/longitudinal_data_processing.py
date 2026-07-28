@@ -101,7 +101,7 @@ CONSOLIDATED_CACHE_VERSION = 1
 # medications table, across all treatment lines) and defines time 0 for every
 # duration in the output. Mirrors `drugs_to_filter_for` in
 # analyze_prostate_metadata.py: ARPIs/androgen-axis, taxanes, and radium-223.
-TREATMENT_ANCHOR_MEDS = {
+ARPI_ANCHOR_MEDS = {
     "ABIRATERONE ACETATE",
     "ENZALUTAMIDE",
     "APALUTAMIDE",
@@ -110,6 +110,33 @@ TREATMENT_ANCHOR_MEDS = {
     "CABAZITAXEL",
     "RADIUM RA 223 DICHLORIDE",
 }
+TREATMENT_ANCHOR_MEDS = ARPI_ANCHOR_MEDS
+
+# ADT anchor drugs: GnRH agonists, GnRH antagonists, and first-generation
+# antiandrogens. Mirrors ADT_ANCHOR_MEDS in compile_COMPASS_cohort_data.py.
+ADT_ANCHOR_MEDS = {
+    "LEUPROLIDE ACETATE",
+    "GOSERELIN ACETATE",
+    "TRIPTORELIN",
+    "TRIPTORELIN PAMOATE",
+    "HISTRELIN ACETATE",
+    "DEGARELIX",
+    "RELUGOLIX",
+    "BICALUTAMIDE",
+    "FLUTAMIDE",
+    "NILUTAMIDE",
+}
+
+ANCHOR_MED_SETS = {"arpi": ARPI_ANCHOR_MEDS, "adt": ADT_ANCHOR_MEDS}
+
+DEFAULT_ADT_SURVIVAL_COHORT_CSV = (
+    NEPC_PROJ_PATH
+    / "prostate_adt_survival_cohort_with_other_primaries_adt.csv"
+)
+DEFAULT_ADT_OUTPUT_CSV = NEPC_PROJ_PATH / "longitudinal_prediction_data_adt.csv"
+DEFAULT_ADT_CONSOLIDATED_CACHE_PARQUET = (
+    NEPC_PROJ_PATH / "consolidated_longitudinal_data_adt.parquet"
+)
 
 
 def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFrame:
@@ -337,11 +364,11 @@ def compute_first_prostate_diagnosis(icds: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def compute_treatment_anchor(medications_df: pd.DataFrame) -> pd.DataFrame:
+def compute_treatment_anchor(medications_df: pd.DataFrame, meds_set: set = ARPI_ANCHOR_MEDS) -> pd.DataFrame:
     """Earliest highlighted-treatment start date per patient.
 
     Filters the medications table to rows whose NCI_PREFERRED_MED_NM is one of
-    ``TREATMENT_ANCHOR_MEDS`` and returns one row per patient with the earliest
+    ``meds_set`` and returns one row per patient with the earliest
     ``MED_START_DT`` (across all treatment lines). Patients who never received a
     highlighted drug are simply absent, so the downstream left-join leaves their
     ``TREATMENT_ANCHOR_DATE`` NaN and the anchor's landmark filter drops them when
@@ -349,7 +376,7 @@ def compute_treatment_anchor(medications_df: pd.DataFrame) -> pd.DataFrame:
     """
     meds = medications_df.copy()
     meds["NCI_PREFERRED_MED_NM"] = meds["NCI_PREFERRED_MED_NM"].astype(str).str.upper().str.strip()
-    meds = meds.loc[meds["NCI_PREFERRED_MED_NM"].isin(TREATMENT_ANCHOR_MEDS)].copy()
+    meds = meds.loc[meds["NCI_PREFERRED_MED_NM"].isin(meds_set)].copy()
     meds["TREATMENT_ANCHOR_DATE"] = pd.to_datetime(meds["MED_START_DT"], errors="coerce")
     meds = meds.dropna(subset=["TREATMENT_ANCHOR_DATE"])
     return (
@@ -709,6 +736,7 @@ def build_cache_provenance(args: argparse.Namespace) -> dict:
         },
         "prefilter_min_psa_count": int(args.prefilter_min_psa_count),
         "prefilter_exclude_parpi": bool(args.prefilter_exclude_parpi),
+        "anchor_med_set": args.anchor_med_set,
     }
 
 
@@ -829,16 +857,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--survival-cohort-csv",
         type=Path,
-        default=DEFAULT_SURVIVAL_COHORT_CSV,
+        default=None,
         help=(
             "Per-patient survival cohort from compile_COMPASS_cohort_data.py "
-            "(defaults to the widest anchored ICD-C61 cohort, with other "
-            "primaries allowed). Supplies the treatment "
-            "anchor, age, death, and last-contact outcome columns via a LEFT "
-            "join, and ALSO defines the output cohort: main() restricts the "
-            "final longitudinal_prediction_df to this file's MRN set after the "
-            "join. Point this at a narrower/wider cohort file to change which "
-            "patients Stage 2 outputs."
+            "(defaults to the widest anchored ICD-C61 cohort for the selected "
+            "--anchor-med-set, with other primaries allowed). Supplies the "
+            "treatment anchor, age, death, and last-contact outcome columns "
+            "via a LEFT join, and ALSO defines the output cohort: main() "
+            "restricts the final longitudinal_prediction_df to this file's "
+            "MRN set after the join. Point this at a narrower/wider cohort "
+            "file to change which patients Stage 2 outputs."
+        ),
+    )
+    parser.add_argument(
+        "--anchor-med-set",
+        choices=sorted(ANCHOR_MED_SETS),
+        default="arpi",
+        help=(
+            "Which treatment-anchor drug set defines TREATMENT_ANCHOR_DATE "
+            "(and time 0 for every duration in the output): 'arpi' (default; "
+            "ARPIs/taxanes/radium-223) or 'adt' (GnRH agonists/antagonists + "
+            "first-gen antiandrogens). Also selects the default "
+            "--survival-cohort-csv, --output-csv, and "
+            "--consolidated-cache-parquet paths when those are not passed "
+            "explicitly."
         ),
     )
     parser.add_argument(
@@ -879,8 +921,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--consolidated-cache-parquet",
         type=Path,
-        default=NEPC_PROJ_PATH / "consolidated_longitudinal_data.parquet",
-        help="Provenance-validated standardized-lab cache used across repeat runs.",
+        default=None,
+        help=(
+            "Provenance-validated standardized-lab cache used across repeat "
+            "runs (defaults to a path selected by --anchor-med-set, so the "
+            "ARPI and ADT runs never thrash the same cache file)."
+        ),
     )
     parser.add_argument(
         "--no-cache",
@@ -914,9 +960,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-csv",
         type=Path,
-        default=NEPC_PROJ_PATH / "longitudinal_prediction_data.csv",
+        default=None,
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # Anchor-dependent defaults: 'arpi' keeps the original, pre-existing
+    # paths so ARPI runs are byte-for-byte unaffected; 'adt' points at the
+    # ADT-anchored Stage 1 cohort and gets its own output CSV and cache path
+    # so the two anchors never overwrite or silently reuse each other's data.
+    if args.survival_cohort_csv is None:
+        args.survival_cohort_csv = (
+            DEFAULT_SURVIVAL_COHORT_CSV
+            if args.anchor_med_set == "arpi"
+            else DEFAULT_ADT_SURVIVAL_COHORT_CSV
+        )
+    if args.output_csv is None:
+        args.output_csv = (
+            NEPC_PROJ_PATH / "longitudinal_prediction_data.csv"
+            if args.anchor_med_set == "arpi"
+            else DEFAULT_ADT_OUTPUT_CSV
+        )
+    if args.consolidated_cache_parquet is None:
+        args.consolidated_cache_parquet = (
+            NEPC_PROJ_PATH / "consolidated_longitudinal_data.parquet"
+            if args.anchor_med_set == "arpi"
+            else DEFAULT_ADT_CONSOLIDATED_CACHE_PARQUET
+        )
+    return args
 
 
 def main() -> None:
@@ -1078,11 +1148,12 @@ def main() -> None:
 
     first_prostate_diagnosis = compute_first_prostate_diagnosis(icds)
 
-    treatment_anchor_df = compute_treatment_anchor(medications_df)
+    anchor_meds = ANCHOR_MED_SETS[args.anchor_med_set]
+    treatment_anchor_df = compute_treatment_anchor(medications_df, meds_set=anchor_meds)
     n_anchor = len(treatment_anchor_df)
     print(
-        f"Treatment anchor: {n_anchor} patients received a highlighted treatment "
-        f"({', '.join(sorted(TREATMENT_ANCHOR_MEDS))})"
+        f"Treatment anchor ({args.anchor_med_set}): {n_anchor} patients received a "
+        f"highlighted treatment ({', '.join(sorted(anchor_meds))})"
     )
 
     platinum_df = compute_first_platinum(medications_df)

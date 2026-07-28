@@ -86,7 +86,7 @@ ONCDRS_PATH = os.path.join(PROFILE_PATH, 'OncDRS/ALL_2025_03/')
 
 # ARPI / defined-chemo anchor drugs (matches TREATMENT_ANCHOR_MEDS in
 # longitudinal_data_processing.py: ARPIs/androgen-axis, taxanes, radium-223).
-TREATMENT_ANCHOR_MEDS = {
+ARPI_ANCHOR_MEDS = {
     "ABIRATERONE ACETATE",
     "ENZALUTAMIDE",
     "APALUTAMIDE",
@@ -95,6 +95,27 @@ TREATMENT_ANCHOR_MEDS = {
     "CABAZITAXEL",
     "RADIUM RA 223 DICHLORIDE",
 }
+TREATMENT_ANCHOR_MEDS = ARPI_ANCHOR_MEDS
+
+# ADT anchor drugs: GnRH agonists, GnRH antagonists, and first-generation
+# antiandrogens (matches ADT_ANCHOR_MEDS in longitudinal_data_processing.py).
+ADT_ANCHOR_MEDS = {
+    # GnRH agonists
+    "LEUPROLIDE ACETATE",
+    "GOSERELIN ACETATE",
+    "TRIPTORELIN",
+    "TRIPTORELIN PAMOATE",
+    "HISTRELIN ACETATE",
+    # GnRH antagonists
+    "DEGARELIX",
+    "RELUGOLIX",
+    # First-generation antiandrogens
+    "BICALUTAMIDE",
+    "FLUTAMIDE",
+    "NILUTAMIDE",
+}
+
+ANCHOR_MED_SETS = {"arpi": ARPI_ANCHOR_MEDS, "adt": ADT_ANCHOR_MEDS}
 
 # The MRN audit table requested below distinguishes ARPI/docetaxel exposure
 # from the pipeline's broader treatment anchor, which additionally includes
@@ -364,6 +385,11 @@ def build_icd_prostate_mrn_flags(
         .drop_nulls()
         .to_list()
     )
+    adt_mrns = set(
+        normalized_meds.filter(pl.col("_MED_NAME").is_in(sorted(ADT_ANCHOR_MEDS)))[ID_COL]
+        .drop_nulls()
+        .to_list()
+    )
 
     labs = filter_cohort(
         labs_path,
@@ -399,6 +425,10 @@ def build_icd_prostate_mrn_flags(
         .cast(pl.Int8)
         .alias("ARPI_DOCETAXEL_EXPOSED"),
         pl.col(ID_COL)
+        .is_in(sorted(adt_mrns))
+        .cast(pl.Int8)
+        .alias("ADT_EXPOSED"),
+        pl.col(ID_COL)
         .is_in(sorted(psa_eligible_mrns))
         .cast(pl.Int8)
         .alias("HAS_5_OR_MORE_PSA_TESTS"),
@@ -415,7 +445,7 @@ def load_medications_for_survival(meds: pl.DataFrame) -> pl.DataFrame:
     original date column directly (NOT the de-identified D_MED_START_DT offset),
     matching how longitudinal_data_processing.py reads MED_START_DT downstream.
     """
-    keep_meds = {m.upper() for m in TREATMENT_ANCHOR_MEDS | PLATINUM_MEDS}
+    keep_meds = {m.upper() for m in ARPI_ANCHOR_MEDS | ADT_ANCHOR_MEDS | PLATINUM_MEDS}
     out = meds.with_columns(
         pl.col('NCI_PREFERRED_MED_NM').cast(pl.Utf8).str.to_uppercase().str.strip_chars().alias('NCI_PREFERRED_MED_NM')
     )
@@ -427,9 +457,9 @@ def load_medications_for_survival(meds: pl.DataFrame) -> pl.DataFrame:
     return out
 
 
-def compute_treatment_anchor(meds: pl.DataFrame) -> pl.DataFrame:
+def compute_treatment_anchor(meds: pl.DataFrame, meds_set: set = ARPI_ANCHOR_MEDS) -> pl.DataFrame:
     """Earliest anchor-drug MED_START_DT per patient -> TREATMENT_ANCHOR_DATE."""
-    anchor = meds.filter(pl.col('NCI_PREFERRED_MED_NM').is_in(list(TREATMENT_ANCHOR_MEDS)))
+    anchor = meds.filter(pl.col('NCI_PREFERRED_MED_NM').is_in(list(meds_set)))
     anchor = anchor.filter(pl.col('MED_START_DT').is_not_null())
     return (
         anchor.group_by(ID_COL)
@@ -634,10 +664,12 @@ def main():
     #    scoped to every cohort above -- shared across both cohort
     #    definitions since anchor/platinum dates don't depend on cohort.
     meds_for_survival = load_medications_for_survival(meds)
-    anchor_df = compute_treatment_anchor(meds_for_survival)
+    anchor_df = compute_treatment_anchor(meds_for_survival, meds_set=ARPI_ANCHOR_MEDS)
+    adt_anchor_df = compute_treatment_anchor(meds_for_survival, meds_set=ADT_ANCHOR_MEDS)
     platinum_df = compute_first_platinum(meds_for_survival)
     print(
-        f"Anchor drug recipients: {len(anchor_df)}; "
+        f"ARPI anchor drug recipients: {len(anchor_df)}; "
+        f"ADT anchor drug recipients: {len(adt_anchor_df)}; "
         f"platinum recipients: {len(platinum_df)} (across all cohorts)."
     )
 
@@ -693,6 +725,21 @@ def main():
         arpi_mrn_list_path = os.path.join(args.mrn_lists_dir, f"{cohort_key}_arpi_mrns.csv")
         arpi_cohort.select(ID_COL).unique().sort(ID_COL).write_csv(arpi_mrn_list_path)
         print(f"Saved {cohort_key}_arpi MRN list to {arpi_mrn_list_path}")
+
+        # ADT-anchored variant of this same cohort, additive alongside the
+        # ARPI arm above -- reuses the same unanchored survival_cohort rows,
+        # just re-derived against adt_anchor_df instead of anchor_df.
+        adt_survival_cohort = build_survival_cohort(cohort_mrns, adt_anchor_df, platinum_df, status_df)
+        adt_cohort = adt_survival_cohort.filter(pl.col('TREATMENT_ANCHOR_DATE').is_not_null())
+        summarize_survival_cohort(adt_cohort, label=f"{cohort_key}_adt")
+
+        adt_out_path = os.path.join(args.out_dir, f"prostate_adt_survival_cohort_{cohort_key}_adt.csv")
+        adt_cohort.write_csv(adt_out_path)
+        print(f"Saved {cohort_key}_adt survival cohort to {adt_out_path}")
+
+        adt_mrn_list_path = os.path.join(args.mrn_lists_dir, f"{cohort_key}_adt_mrns.csv")
+        adt_cohort.select(ID_COL).unique().sort(ID_COL).write_csv(adt_mrn_list_path)
+        print(f"Saved {cohort_key}_adt MRN list to {adt_mrn_list_path}")
 
 
 if __name__ == "__main__":

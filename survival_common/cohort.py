@@ -122,7 +122,7 @@ def make_outcome_df(
             (``t_last_contact``) is clipped to the horizon too. Defaults to
             ``None`` (no cap, full follow-up used). Previously defaulted to
             3650 (10 years) to guard against a sparse tail destabilizing the
-            Cox/Fine-Gray fits; pass an explicit value to restore that horizon.
+            Cox fits; pass an explicit value to restore that horizon.
     """
     patient_level_cols = [
         ID_COL,
@@ -226,8 +226,8 @@ def make_outcome_df(
     # Administrative censoring at max_followup_days (on the landmark-relative
     # clock). An event whose time exceeds the horizon becomes a censored
     # observation AT the horizon; censored follow-up is clipped to the horizon
-    # too. Done before the event_type / first_event_time derivations below so
-    # PLATINUM/DEATH/EITHER/event_type all stay consistent with the clipped
+    # too. Done before the first_event_time derivation below so
+    # PLATINUM/DEATH/EITHER all stay consistent with the clipped
     # durations. The *_from_first_record columns are left uncapped (they record
     # the raw timing for diagnostics, not the modeled outcome).
     if max_followup_days is not None:
@@ -245,14 +245,6 @@ def make_outcome_df(
 
     pat["EITHER"] = np.isfinite(first_event_time).astype(int)
     pat["t_either"] = np.where(pat["EITHER"].eq(1), first_event_time, pat["t_death"])
-
-    # 3-level event type for Fine-Gray competing-risks fitting (survival_common.finegray):
-    # 1 = event of interest (platinum), 2 = competing event (death), 0 = censored.
-    # Platinum takes precedence when both are flagged -- t_platinum is already the
-    # correct subdistribution time (time to platinum, regardless of later death).
-    pat["event_type"] = np.where(
-        pat["PLATINUM"].eq(1), 1, np.where(pat["DEATH"].eq(1), 2, 0)
-    ).astype(int)
 
     # Individual validity conditions, kept separate so the attrition each one
     # causes can be reported below. Durations here are already landmark-rebased

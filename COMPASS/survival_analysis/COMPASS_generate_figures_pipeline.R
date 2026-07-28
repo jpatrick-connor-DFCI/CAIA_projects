@@ -141,10 +141,24 @@ parse_feature <- function(name) {
 }
 
 
-COHORTS <- c("without_other_primaries", "with_other_primaries")
+COHORTS <- c(
+  "without_other_primaries", "with_other_primaries",
+  "adt_without_other_primaries", "adt_with_other_primaries"
+)
 COHORT_LABELS <- c(
-  without_other_primaries = "Without other primaries",
-  with_other_primaries = "With other primaries"
+  without_other_primaries = "ARPI -- without other primaries",
+  with_other_primaries = "ARPI -- with other primaries",
+  adt_without_other_primaries = "ADT -- without other primaries",
+  adt_with_other_primaries = "ADT -- with other primaries"
+)
+# ARPI arms keep the original [0, 90] landmark list unchanged; ADT arms add a
+# +365d landmark since ADT initiation is earlier in the treatment sequence
+# than ARPI initiation, giving a longer observable runway to platinum.
+COHORT_LANDMARKS <- list(
+  without_other_primaries = c(0, 90),
+  with_other_primaries = c(0, 90),
+  adt_without_other_primaries = c(0, 90, 365),
+  adt_with_other_primaries = c(0, 90, 365)
 )
 
 # Render the full COMPASS figure set for one cohort arm. Mirrors the body of
@@ -169,8 +183,18 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   COHORT_DISPLAY <- unname(COHORT_LABELS[[COHORT]])
   message(sprintf("Generating figures for cohort: %s", COHORT_DISPLAY))
 
+  # Two independent axes derived from the cohort key: which primaries
+  # exclusion applies, and which treatment anchor was used. ADT arms are
+  # named with an "adt_" prefix (see COHORTS above).
+  IS_ADT <- startsWith(COHORT, "adt_")
+  IS_WITHOUT_OTHER_PRIMARIES <- grepl("without_other_primaries", COHORT)
+  ANCHOR_LABEL <- if (IS_ADT) "ADT initiation" else "ARPI/chemo initiation"
+
   BASE <- file.path(NEPC_PROJ_PATH, "survival_analysis", paste0("local_runs_", COHORT))
-  LONGITUDINAL_CSV <- file.path(NEPC_PROJ_PATH, "longitudinal_prediction_data.csv")
+  LONGITUDINAL_CSV <- file.path(
+    NEPC_PROJ_PATH,
+    if (IS_ADT) "longitudinal_prediction_data_adt.csv" else "longitudinal_prediction_data.csv"
+  )
   INPUTS_DIR <- file.path(NEPC_PROJ_PATH, "survival_analysis", paste0("prediction_inputs_", COHORT))
   ICD_PROSTATE_MRN_FLAGS_CSV <- file.path(
     NEPC_PROJ_PATH, "mrn_lists", "icd_prostate_mrn_flags.csv"
@@ -195,7 +219,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     file.path(FIG_ROOT, plot_stem)
   }
 
-  LANDMARKS <- c(0, 90)
+  LANDMARKS <- COHORT_LANDMARKS[[COHORT]]
   TOP_N <- 15
 
   LLM_LABEL_PATH <- file.path(NEPC_PROJ_PATH, "LLM_NEPC_labels")
@@ -299,6 +323,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
       "HAS_NON_PROSTATE_PRIMARY",
       "PARPI_EXPOSED",
       "ARPI_DOCETAXEL_EXPOSED",
+      "ADT_EXPOSED",
       "HAS_5_OR_MORE_PSA_TESTS"
     )
     flags <- read_csv(path, show_col_types = FALSE)
@@ -328,7 +353,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     steps <- list(
       c("ICD-defined prostate cancer", sum(keep))
     )
-    if (identical(COHORT, "without_other_primaries")) {
+    if (IS_WITHOUT_OTHER_PRIMARIES) {
       keep <- keep & mrn_flags$HAS_NON_PROSTATE_PRIMARY == 0
       steps[[length(steps) + 1]] <- c("No non-prostate primary", sum(keep))
     } else {
@@ -336,8 +361,13 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     }
     keep <- keep & mrn_flags$PARPI_EXPOSED == 0
     steps[[length(steps) + 1]] <- c("No PARPi exposure", sum(keep))
-    keep <- keep & mrn_flags$ARPI_DOCETAXEL_EXPOSED == 1
-    steps[[length(steps) + 1]] <- c("ARPI/docetaxel exposure", sum(keep))
+    if (IS_ADT) {
+      keep <- keep & mrn_flags$ADT_EXPOSED == 1
+      steps[[length(steps) + 1]] <- c("ADT exposure", sum(keep))
+    } else {
+      keep <- keep & mrn_flags$ARPI_DOCETAXEL_EXPOSED == 1
+      steps[[length(steps) + 1]] <- c("ARPI/docetaxel exposure", sum(keep))
+    }
     keep <- keep & mrn_flags$HAS_5_OR_MORE_PSA_TESTS == 1
     steps[[length(steps) + 1]] <- c("\u22655 PSA tests", sum(keep))
 
@@ -383,7 +413,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                    format(nrow(d), big.mark = ","))
     gg <- ggsurvplot(fit, data = d, conf.int = TRUE, censor = FALSE,
                      palette = "#1f3a93", legend = "none",
-                     xlab = "Days from treatment anchor",
+                     xlab = sprintf("Days from %s", ANCHOR_LABEL),
                      ylab = "Platinum-free probability", title = "Platinum-free survival",
                      ggtheme = theme_fig())
     gg$plot + coord_cartesian(ylim = c(0, 1.02)) +
@@ -444,7 +474,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     add("Age at first treatment, median (IQR)",    median_iqr(age))
     plat <- suppressWarnings(as.numeric(patient_df[["PLATINUM"]])); plat[is.na(plat)] <- 0
     add("Platinum exposure, n (%)", count_pct(plat > 0, n))
-    add("Median follow-up from treatment anchor, days (IQR)",
+    add(sprintf("Median follow-up from %s, days (IQR)", ANCHOR_LABEL),
         median_iqr(patient_df[["t_last_contact"]]))
 
     tibble(Characteristic = vapply(rows, `[`, character(1), 1),
@@ -498,10 +528,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   event_rows <- km_inputs$row_id[km_inputs$event == 1]
   timing_panels <- list(
     overlay_hist(span_series, "Record span (days)", "Per-patient lab record span", 50),
-    overlay_hist(patient_df$t_dx_to_anchor, "Days: diagnosis → treatment anchor",
-                 "Diagnosis → treatment anchor", 50),
+    overlay_hist(patient_df$t_dx_to_anchor, sprintf("Days: diagnosis → %s", ANCHOR_LABEL),
+                 sprintf("Diagnosis → %s", ANCHOR_LABEL), 50),
     overlay_hist(patient_df$t_platinum[event_rows],
-                 "Days from treatment anchor to platinum",
+                 sprintf("Days from %s to platinum", ANCHOR_LABEL),
                  "Time to platinum", 40,
                  xlim_max = 6 * 365.25, use_count = TRUE, axis_text_size = 14) +
       theme(plot.title = element_text(size = 14))
@@ -1101,8 +1131,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   uni <- uni[mask, ]
   cat(sprintf("%d rows remaining\n", nrow(uni)))
 
-  # One solo volcano panel per landmark.
-  panels <- list(list(0, "0 days"), list(90, "+90 days"))
+  # One solo volcano panel per landmark in this cohort's LANDMARKS.
+  panels <- lapply(LANDMARKS, function(lm) {
+    list(lm, ifelse(lm > 0, sprintf("+%d days", lm), sprintf("%d days", lm)))
+  })
   for (pn in panels) {
     lm <- pn[[1]]; title <- pn[[2]]
     sub <- uni %>% filter(landmark_days == lm)
@@ -1375,7 +1407,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     read_csv(path, show_col_types = FALSE, guess_max = 100000)
   }
 
-  FIG5_LANDMARKS <- c(0, 90)
+  FIG5_LANDMARKS <- LANDMARKS
 
   plot_km_androgen_quartile <- function(agg, lab, mean_col, landmark) {
     ttl <- sprintf("%s quartile -- landmark %s%dd", lab, ifelse(landmark > 0, "+", ""), landmark)
@@ -1426,7 +1458,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     }
   }
 
-  FIG6_LANDMARKS <- c(0, 90)
+  FIG6_LANDMARKS <- LANDMARKS
   PLAT_COLORS <- c(`0` = "#1f3a93", `1` = "#8e1c2b")
   PLAT_LABELS <- c(`0` = "PLATINUM=0", `1` = "PLATINUM=1")
 
@@ -1632,7 +1664,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
       geom_line(linewidth = 0.8) + geom_point(size = 1.6) +
       scale_color_manual(values = setNames(PLAT_COLORS, c("0","1")), labels = leg, name = NULL) +
       scale_fill_manual(values = setNames(PLAT_COLORS, c("0","1")), guide = "none") +
-      labs(x = "Days from treatment anchor (binned, 60d windows)",
+      labs(x = sprintf("Days from %s (binned, 60d windows)", ANCHOR_LABEL),
            y = sprintf("%s (mean +/- 95%% CI)", lab_group), title = title) +
       theme_fig() +
       theme(plot.title = element_text(face = "bold", size = 11))
@@ -1649,8 +1681,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     group_df <- androgen_long_df %>% filter(DFCI_MRN %in% patients)
     for (lab_group in c("PSA", "Testosterone")) {
       n_pat <- group_df %>% filter(LAB_GROUP == lab_group) %>% summarise(n = n_distinct(DFCI_MRN)) %>% pull(n)
-      ttl <- sprintf("%s -- group mean +/- 95%% CI vs. days from treatment anchor (n=%s patients)",
-                     lab_group, format(n_pat, big.mark = ","))
+      ttl <- sprintf("%s -- group mean +/- 95%% CI vs. days from %s (n=%s patients)",
+                     lab_group, ANCHOR_LABEL, format(n_pat, big.mark = ","))
       p <- plot_group_ci_panel(group_df, lab_group, ttl)
       save_fig(p, OUT_DIR, sprintf("androgen_longitudinal_group_ci_%s", tolower(lab_group)),
                width = 9.5, height = 5.5)

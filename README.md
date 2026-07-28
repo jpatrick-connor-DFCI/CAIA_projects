@@ -5,9 +5,11 @@ exports and running landmark survival analysis (Cox / XGBoost) on the resulting 
 
 The preprocessing and modeling code is pandas-based; publication figures are generated only in R.
 Entry points are command-line scripts orchestrated from notebooks.
-COMPASS uses one `COMPASS_run_locally.ipynb` notebook for two treatment-anchored cohorts:
-`without_other_primaries` and `with_other_primaries`. The paired, R-only
-`COMPASS_generate_figures.ipynb` emits manuscript figures for both.
+COMPASS uses one `COMPASS_run_locally.ipynb` notebook for four treatment-anchored cohorts:
+`without_other_primaries` and `with_other_primaries` (anchored at first ARPI/chemo exposure), plus
+`adt_without_other_primaries` and `adt_with_other_primaries` (anchored at first ADT exposure,
+years earlier in the treatment sequence). The paired, R-only `COMPASS_generate_figures.ipynb`
+emits manuscript figures for all four.
 
 > This README is the canonical reference for editing the pipeline. It documents the directory
 > layout, the data flow, every script's inputs/outputs, the **conventions and invariants that
@@ -70,10 +72,11 @@ COMPASS/
         ▼  data_preprocessing/compile_COMPASS_cohort_data.py
  prostate_icd_data.csv,
  prostate_arpi_survival_cohort_{without,with}_other_primaries.csv,
- prostate_arpi_survival_cohort_{without,with}_other_primaries_arpi.csv
+ prostate_arpi_survival_cohort_{without,with}_other_primaries_arpi.csv,
+ prostate_adt_survival_cohort_{without,with}_other_primaries_adt.csv
         │
-        ▼  data_preprocessing/longitudinal_data_processing.py
- longitudinal_prediction_data.csv
+        ▼  data_preprocessing/longitudinal_data_processing.py  (--anchor-med-set {arpi,adt})
+ longitudinal_prediction_data.csv, longitudinal_prediction_data_adt.csv
         │
         ▼  data_preprocessing/build_prediction_inputs.py     (+ build_genomic_inputs.py)
  prediction_inputs/  (aggregated + pre-treatment long labs + split + horizons)
@@ -81,7 +84,7 @@ COMPASS/
         ▼  survival_analysis/univariate_analysis.py
            survival_analysis/multivariate_analysis.py
         │
-        ▼  COMPASS_generate_figures.ipynb (R; with/without-other-primaries cohorts)
+        ▼  COMPASS_generate_figures.ipynb (R; 4 cohorts: ARPI/ADT × with/without other primaries)
  figures/
 ```
 
@@ -91,22 +94,29 @@ COMPASS/
 
 `data_preprocessing/compile_COMPASS_cohort_data.py` (module-level script, argparse CLI for path
 overrides). Derives two ICD-C61 cohorts, with and without patients who have another primary
-malignancy. Each definition has a full and treatment-anchor-restricted output. The same script
-builds the ARPI/chemo-anchored survival data (age, treatment anchor, death, time-to-platinum)
-directly from the raw OncDRS pull.
+malignancy. Each definition has a full and treatment-anchor-restricted output, restricted
+separately per anchor. The same script builds both the ARPI/chemo-anchored and the
+ADT-anchored survival data (age, treatment anchor, death, time-to-platinum) directly from the raw
+OncDRS pull, computing `anchor_df`/`adt_anchor_df` from the same medications scan.
 
 - **Inputs (hard-coded under `DATA_PATH = /data/gusev/USERS/jpconnor/data/`, plus the raw OncDRS pull
   at `ONCDRS_PATH`):** `EHR_DIAGNOSIS.csv`, `HEALTH_HISTORY.csv`, `MEDICATIONS.csv`,
   `OUTPT_LAB_RESULTS_LABS.csv`, `complete_somatic_data_df.csv.gz`, `PT_INFO_STATUS_REGISTRATION.csv`.
-- **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** four survival-cohort CSVs
-  (with/without other primaries, each full and treatment-anchor-restricted), four corresponding
-  bare-MRN lists, `prostate_icd_data.csv`, and
+- **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** four bare (anchor-independent)
+  survival-cohort CSVs (with/without other primaries, full and unrestricted), four
+  ARPI-treatment-anchor-restricted CSVs (`..._arpi.csv`), four ADT-treatment-anchor-restricted CSVs
+  (`prostate_adt_survival_cohort_{cohort_key}_adt.csv`), corresponding bare-MRN lists for each
+  (including `mrn_lists/{cohort_key}_adt_mrns.csv`), `prostate_icd_data.csv`, and
   `mrn_lists/icd_prostate_mrn_flags.csv`. The latter contains every ICD-C61 MRN plus binary
-  indicators for a non-prostate primary, PARPi exposure, ARPI/docetaxel exposure, and at least
-  five broad PSA tests.
+  indicators for a non-prostate primary, PARPi exposure, ARPI/docetaxel exposure, ADT exposure
+  (`ADT_EXPOSED`), and at least five broad PSA tests.
 - **Cohort definitions:** `without_other_primaries` applies the ICD-based non-prostate-primary
   exclusion; `with_other_primaries` retains every ICD-C61 patient. Each also emits an `_arpi`
-  treatment-anchor-restricted subset.
+  ARPI-treatment-anchor-restricted subset and an `_adt` ADT-treatment-anchor-restricted subset.
+- **Anchor sets:** `ARPI_ANCHOR_MEDS` (7 drugs: ARPIs, taxanes, radium-223 — unchanged,
+  `TREATMENT_ANCHOR_MEDS` alias retained) and `ADT_ANCHOR_MEDS` (10 drugs: GnRH agonists/antagonists
+  + first-generation antiandrogens). `compute_treatment_anchor(meds, meds_set=...)` takes either set;
+  `ANCHOR_MED_SETS = {"arpi": ..., "adt": ...}` maps the CLI-facing key to the drug set.
 
 `compile_MRNs_for_manual_review.py` builds an auxiliary manual-review MRN sheet from the
 stage-1 outputs (platinum records, non-prostate-primary ICDs, PARPi exposure, BRCA2 status).
@@ -118,8 +128,9 @@ stage-1 outputs (platinum records, non-prostate-primary ICDs, PARPi exposure, BR
 COMPASS survival analysis is PROFILE-only. Shared implementation details that are reused by
 COMPASS PROFILE and IPIO live in `survival_common/`.
 
-- **COMPASS PROFILE** — reads `longitudinal_prediction_data.csv` and runs the prostate-cancer
-  landmark analyses.
+- **COMPASS PROFILE** — reads `longitudinal_prediction_data.csv` (ARPI anchor) or
+  `longitudinal_prediction_data_adt.csv` (ADT anchor, via `--anchor-med-set adt`) and runs the
+  prostate-cancer landmark analyses.
 - **IPIO** — has its own cohort/outcome assembly but reuses the generic survival mechanics in
   `survival_common/`.
 
@@ -130,18 +141,25 @@ prostate (`C61`) diagnosis date when available and outcomes, rebases all timing 
 `FIRST_RECORD_DATE = min(first lab, diagnosis, first treatment)`, and writes the row-level
 prostate lab frame used by the current treatment-anchored analyses.
 
+- **Anchor selection:** `--anchor-med-set {arpi,adt}` (default `arpi`) selects `ARPI_ANCHOR_MEDS` or
+  `ADT_ANCHOR_MEDS` (mirrored from Stage 1) and switches the defaults for `--survival-cohort-csv`,
+  `--output-csv`, and `--consolidated-cache-parquet` to the ADT-suffixed files/cache when set to
+  `adt`. Both anchors reuse the same lab-standardization code; only the anchor date and the derived
+  timing columns differ.
 - **Fast cohort scope:** by default, raw scans start from the widest anchored
-  `with_other_primaries` cohort. PARPi-exposed patients and patients with fewer
-  than five broad PSA records are removed before expensive lab standardization. Use
-  `--prefilter-include-parpi`, `--prefilter-min-psa-count 0`, and/or a broader
+  `with_other_primaries` cohort (or its ADT counterpart, under `--anchor-med-set adt`). PARPi-exposed
+  patients and patients with fewer than five broad PSA records are removed before expensive lab
+  standardization. Use `--prefilter-include-parpi`, `--prefilter-min-psa-count 0`, and/or a broader
   `--survival-cohort-csv` to rebuild a less restricted source frame.
 - **Lab QC (`consolidate_dfci_labs`):** unit standardization to canonical units, sentinel nulling
   (e.g. `9999999`), physiologic-range nulling, combined-BP splitting. Out-of-range values are **nulled,
   not row-dropped** — downstream must filter on `conversion_status` (or pass `--successful-only`).
 - **Performance:** raw CSV scans project only required columns; lab consolidation is vectorized.
-  Standardized rows are cached in `consolidated_longitudinal_data.parquet` with a provenance
-  manifest. Use `--refresh-cache` to rebuild or `--no-cache` to bypass it. Large diagnostic CSVs
-  are opt-in via `--write-unique-labs`, `--write-uncondensed`, and `--write-consolidated`.
+  Standardized rows are cached in `consolidated_longitudinal_data.parquet` (ARPI) or
+  `consolidated_longitudinal_data_adt.parquet` (ADT) with a provenance manifest that includes
+  `anchor_med_set`, so switching `--anchor-med-set` cannot silently serve a stale cache built under
+  the other anchor. Use `--refresh-cache` to rebuild or `--no-cache` to bypass it. Large diagnostic
+  CSVs are opt-in via `--write-unique-labs`, `--write-uncondensed`, and `--write-consolidated`.
 - **Shared lab resources:** the canonical mapping lives at
   `data_preprocessing_common/resources/lab_mappings/OMOP_to_DFCI_lab_ids.csv`. The
   `unique_lab_ids_w_units.csv` inventory can be generated per project with
@@ -178,9 +196,11 @@ aggregated tables plus pre-treatment long labs and shared split / canonical-lab 
 ### 2.3 — Models
 
 All read prebuilt inputs and the `split` column; none re-derive the split. COMPASS models use the
-`platinum` endpoint only (time to first platinum). Landmarks default `[0, 90]`. Metrics: Harrell
-C-index, IPCW mean AUC(t), integrated IPCW Brier — horizons come from `build_manifest.json` so all
-models share a grid.
+`platinum` endpoint only (time to first platinum). Landmarks default `[0, 90]` for the ARPI-anchored
+arms; the ADT-anchored arms use `[0, 90, 365]` (the longer pre-platinum runway from anchoring at ADT
+initiation instead of ARPI initiation justifies a third landmark). Metrics: Harrell C-index, IPCW
+mean AUC(t), integrated IPCW Brier — horizons come from `build_manifest.json` so all models share a
+grid.
 
 | Script | Model | CLI notes |
 |---|---|---|
@@ -200,15 +220,23 @@ low-level XGBoost mechanics live in `survival_common/xgboost_engine.py`.
 COMPASS PROFILE has one run notebook, one figure notebook, and a focused
 univariate-results review notebook:
 
-- `COMPASS_run_locally.ipynb` — drives preprocessing and runs only `without_other_primaries`
-  and `with_other_primaries`. Each cohort gets independent prediction inputs and univariate,
-  elastic-net, and XGBoost models at landmarks 0/90.
+- `COMPASS_run_locally.ipynb` — drives preprocessing and runs all four `COHORT_SPECS` arms:
+  `without_other_primaries`, `with_other_primaries` (ARPI anchor, landmarks 0/90), and
+  `adt_without_other_primaries`, `adt_with_other_primaries` (ADT anchor, landmarks 0/90/365). Each
+  cohort gets independent prediction inputs and univariate, elastic-net, and XGBoost models at its
+  own landmark list (`tasks_for_run(run)` builds the per-run task grid from `run["landmarks"]`), and
+  the Stage 2 cell runs `longitudinal_data_processing.py` once per anchor
+  (`--anchor-med-set {arpi,adt}`).
 - `COMPASS_generate_figures.ipynb` — the sole COMPASS figure notebook, using the R kernel and
-  `COMPASS_generate_figures_pipeline.R`. It renders both ICD-C61 cohorts' overview, LLM-label,
-  univariate, multivariate, KM, androgen-distribution, and androgen-trajectory figures. Outputs are grouped as
-  `FIG_ROOT/<figure>/<plot-stem>/<cohort>_<plot-stem>.png` with no `R/` language subdirectory.
-  Figure 1A reads `mrn_lists/icd_prostate_mrn_flags.csv` and displays cumulative ICD-C61 cohort
-  selection through the non-prostate-primary, PARPi, ARPI/docetaxel, and ≥5-PSA-test criteria.
+  `COMPASS_generate_figures_pipeline.R`. It renders all four cohorts' overview, LLM-label,
+  univariate, multivariate, KM, androgen-distribution, and androgen-trajectory figures — ADT arms
+  get a third volcano/importance/KM/androgen panel (landmark 365) that ARPI arms don't. Outputs are
+  grouped as `FIG_ROOT/<figure>/<plot-stem>/<cohort>_<plot-stem>.png` with no `R/` language
+  subdirectory. Figure 1A reads `mrn_lists/icd_prostate_mrn_flags.csv` and displays cumulative
+  ICD-C61 cohort selection through the non-prostate-primary, PARPi, and ≥5-PSA-test criteria, plus
+  either the ARPI/docetaxel or the ADT exposure criterion depending on the cohort's anchor. Axis and
+  table labels throughout name the cohort's anchor ("ARPI/chemo initiation" vs. "ADT initiation") via
+  `ANCHOR_LABEL`.
 - `COMPASS_nominally_significant_univariate.ipynb` loads all shared-landmark univariate results
   for `with_other_primaries`, filters to nominal `p_value < 0.05`, displays every
   hit, and exports the filtered table beside the Cox outputs.
@@ -265,8 +293,10 @@ IPIO has a paired run/figure notebook as well:
 # Stage 1 (cluster paths hard-coded, override via CLI flags if needed)
 python COMPASS/data_preprocessing/compile_COMPASS_cohort_data.py
 
-# Stage 2 — or just run COMPASS/survival_analysis/COMPASS_run_locally.ipynb top to bottom
-python COMPASS/data_preprocessing/longitudinal_data_processing.py
+# Stage 2 — or just run COMPASS/survival_analysis/COMPASS_run_locally.ipynb top to bottom.
+# Run once per anchor; --anchor-med-set switches the default survival-cohort/output/cache paths.
+python COMPASS/data_preprocessing/longitudinal_data_processing.py --anchor-med-set arpi
+python COMPASS/data_preprocessing/longitudinal_data_processing.py --anchor-med-set adt
 python COMPASS/data_preprocessing/build_prediction_inputs.py --landmark-days 0 90 --time-unit-days 7
 python COMPASS/survival_analysis/univariate_analysis.py --inputs-dir <...>/prediction_inputs --landmark-days 0
 python COMPASS/survival_analysis/multivariate_analysis.py --model elastic-net --inputs-dir <...>/prediction_inputs --landmark-days 0

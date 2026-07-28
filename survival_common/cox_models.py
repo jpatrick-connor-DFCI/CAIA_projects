@@ -35,10 +35,6 @@ from survival_common.cox_engine import (
     score_coxnet_model,
     summarize_fold_failures as _summarize_fold_failures,
 )
-from survival_common.finegray import (
-    estimate_censoring_km,
-    fit_finegray_univariate_with_fallback,
-)
 from survival_common.helper import (
     assert_disjoint_folds,
     assert_no_test_leakage,
@@ -102,25 +98,6 @@ def normalize_endpoints(raw_endpoints: list[str], endpoint_map: EndpointMap) -> 
 def _endpoint_columns(endpoint_map: EndpointMap, endpoint: str) -> tuple[str, str]:
     spec = endpoint_map[endpoint]
     return spec["duration_col"], spec["event_col"]
-
-
-def endpoint_competing(
-    endpoint_map: EndpointMap, endpoint: str
-) -> tuple[str, int, int] | None:
-    """Return (event_type_col, event_of_interest, competing_event) if the
-    endpoint declares a competing-risks spec (all three of event_type_col /
-    event_of_interest / competing_event present), else None.
-
-    Absent keys are the default (no competing-event spec) so existing
-    endpoints without these keys are unaffected -- see CoxProjectConfig docs.
-    """
-    spec = endpoint_map[endpoint]
-    event_type_col = spec.get("event_type_col")
-    if event_type_col is None:
-        return None
-    event_of_interest = int(spec.get("event_of_interest", 1))
-    competing_event = int(spec.get("competing_event", 2))
-    return event_type_col, event_of_interest, competing_event
 
 
 def select_feature_columns(
@@ -290,10 +267,6 @@ def _binary_genomic_association_row(
     age_col: str,
     baseline_covariate_cols: tuple[str, ...] = (),
     model_type: str = "cox",
-    event_type_col: str | None = None,
-    event_of_interest: int = 1,
-    competing_event: int = 2,
-    censoring_km=None,
 ) -> dict:
     """Test a static binary genomic indicator (feature_z + age + baseline covariates, no n_obs).
 
@@ -338,23 +311,16 @@ def _binary_genomic_association_row(
         result["note"] = "genomic_missing_column"
         return result
 
-    is_finegray = model_type == "finegray"
-    outcome_col = event_type_col if is_finegray else event_col
     baseline_cols = [c for c in baseline_covariate_cols if c in data.columns]
 
-    feature_df = data[[feature, duration_col, outcome_col, age_col, *baseline_cols]].copy()
+    feature_df = data[[feature, duration_col, event_col, age_col, *baseline_cols]].copy()
     result["coverage"] = float(feature_df[feature].notna().mean())
     feature_df = feature_df.dropna(
-        subset=[feature, duration_col, outcome_col, age_col, *baseline_cols]
+        subset=[feature, duration_col, event_col, age_col, *baseline_cols]
     )
     result["n_patients_used"] = len(feature_df)
     result["n_patients_observed"] = len(feature_df)
-    if is_finegray:
-        result["n_events_used"] = (
-            int((feature_df[outcome_col] == event_of_interest).sum()) if len(feature_df) else 0
-        )
-    else:
-        result["n_events_used"] = int(feature_df[event_col].sum()) if len(feature_df) else 0
+    result["n_events_used"] = int(feature_df[event_col].sum()) if len(feature_df) else 0
     if len(feature_df) == 0:
         result["note"] = "no_rows_with_outcomes"
         return result
@@ -378,25 +344,13 @@ def _binary_genomic_association_row(
 
     model_cols = ["feature_z", "age", *baseline_cols]
 
-    if is_finegray:
-        model, used_penalizer, note = fit_finegray_univariate_with_fallback(
-            feature_df[model_cols + [duration_col, outcome_col]],
-            duration_col=duration_col,
-            event_type_col=outcome_col,
-            covariate_cols=model_cols,
-            penalizers=[0.0, fallback_penalizer],
-            event_of_interest=event_of_interest,
-            competing_event=competing_event,
-            censoring_km=censoring_km,
-        )
-    else:
-        model, used_penalizer, note = fit_cox_with_fallback(
-            feature_df[model_cols + [duration_col, event_col]],
-            duration_col=duration_col,
-            event_col=event_col,
-            penalizers=[0.0, fallback_penalizer],
-            l1_ratio=0.0,
-        )
+    model, used_penalizer, note = fit_cox_with_fallback(
+        feature_df[model_cols + [duration_col, event_col]],
+        duration_col=duration_col,
+        event_col=event_col,
+        penalizers=[0.0, fallback_penalizer],
+        l1_ratio=0.0,
+    )
     result["fit_penalizer"] = used_penalizer
     result["note"] = f"genomic_binary;{note}" if note else "genomic_binary"
     if model is None:
@@ -426,19 +380,8 @@ def run_univariate_nobs_adjusted_associations(
     genomic_feature_cols: list[str] | tuple[str, ...] | None = None,
     age_col: str = DEFAULT_AGE_COL,
     model_type: str = "cox",
-    event_type_col: str | None = None,
-    event_of_interest: int = 1,
-    competing_event: int = 2,
 ) -> pd.DataFrame:
-    """Fit Cox (or Fine-Gray) models on age + baseline covariates + n-observation count + one feature at a time.
-
-    model_type="finegray" fits the subdistribution hazard (Fine & Gray 1999) for
-    the event of interest with `competing_event` (default: death, code 2) as a
-    competing risk, via survival_common.finegray's IPCW-weighted Cox
-    reformulation. `event_type_col` must be a 3-level column on `data`
-    (0=censored, event_of_interest=event, competing_event=competing) -- see
-    endpoint_competing(). model_type="cox" (default) is the original plain
-    cause-specific behavior and is unaffected by these new parameters.
+    """Fit Cox models on age + baseline covariates + n-observation count + one feature at a time.
 
     `baseline_covariate_cols` (e.g. gender, cancer type, treatment) are
     always-included adjustment terms in every per-feature fit, alongside age.
@@ -450,18 +393,8 @@ def run_univariate_nobs_adjusted_associations(
     """
     genomic_feature_set = set(genomic_feature_cols) if genomic_feature_cols else set()
     duration_col, event_col = _endpoint_columns(endpoint_map, endpoint)
-    is_finegray = model_type == "finegray"
-    outcome_col = event_type_col if is_finegray else event_col
     total_patients = len(data)
     rows = []
-
-    censoring_km = None
-    if is_finegray:
-        km_df = data[[duration_col, outcome_col]].dropna()
-        censoring_km = estimate_censoring_km(
-            km_df[duration_col].to_numpy(dtype=float),
-            km_df[outcome_col].to_numpy(),
-        )
 
     for feature in tqdm(feature_cols, desc=f"univariate[{endpoint}]", dynamic_ncols=True):
         if feature in genomic_feature_set:
@@ -477,10 +410,6 @@ def run_univariate_nobs_adjusted_associations(
                     age_col=age_col,
                     baseline_covariate_cols=baseline_covariate_cols,
                     model_type=model_type,
-                    event_type_col=event_type_col,
-                    event_of_interest=event_of_interest,
-                    competing_event=competing_event,
-                    censoring_km=censoring_km,
                 )
             )
             continue
@@ -533,12 +462,12 @@ def run_univariate_nobs_adjusted_associations(
 
         baseline_cols = [c for c in baseline_covariate_cols if c in data.columns]
         feature_df = data[
-            [feature, n_obs_feature, duration_col, outcome_col, age_col, *baseline_cols]
+            [feature, n_obs_feature, duration_col, event_col, age_col, *baseline_cols]
         ].copy()
         result["coverage"] = float(feature_df[feature].notna().mean())
         result["n_obs_coverage"] = float(feature_df[n_obs_feature].notna().mean())
 
-        feature_df = feature_df.dropna(subset=[duration_col, outcome_col, age_col, *baseline_cols])
+        feature_df = feature_df.dropna(subset=[duration_col, event_col, age_col, *baseline_cols])
         observed_non_missing = int(feature_df[feature].notna().sum())
         observed_n_obs = int(feature_df[n_obs_feature].notna().sum())
         result["n_patients_used"] = len(feature_df)
@@ -546,10 +475,7 @@ def run_univariate_nobs_adjusted_associations(
         result["n_patients_imputed"] = int(len(feature_df) - observed_non_missing)
         result["n_patients_n_obs_observed"] = observed_n_obs
         result["n_patients_n_obs_imputed"] = int(len(feature_df) - observed_n_obs)
-        if is_finegray:
-            result["n_events_used"] = int((feature_df[outcome_col] == event_of_interest).sum())
-        else:
-            result["n_events_used"] = int(feature_df[event_col].sum())
+        result["n_events_used"] = int(feature_df[event_col].sum())
 
         if len(feature_df) == 0:
             result["note"] = "no_rows_with_outcomes"
@@ -608,25 +534,13 @@ def run_univariate_nobs_adjusted_associations(
             feature_df["feature_missing"] = missing_indicator
             model_cols.insert(1, "feature_missing")
 
-        if is_finegray:
-            model, used_penalizer, note = fit_finegray_univariate_with_fallback(
-                feature_df[model_cols + [duration_col, outcome_col]],
-                duration_col=duration_col,
-                event_type_col=outcome_col,
-                covariate_cols=model_cols,
-                penalizers=[0.0, fallback_penalizer],
-                event_of_interest=event_of_interest,
-                competing_event=competing_event,
-                censoring_km=censoring_km,
-            )
-        else:
-            model, used_penalizer, note = fit_cox_with_fallback(
-                feature_df[model_cols + [duration_col, event_col]],
-                duration_col=duration_col,
-                event_col=event_col,
-                penalizers=[0.0, fallback_penalizer],
-                l1_ratio=0.0,
-            )
+        model, used_penalizer, note = fit_cox_with_fallback(
+            feature_df[model_cols + [duration_col, event_col]],
+            duration_col=duration_col,
+            event_col=event_col,
+            penalizers=[0.0, fallback_penalizer],
+            l1_ratio=0.0,
+        )
         result["fit_penalizer"] = used_penalizer
         result["note"] = note
 

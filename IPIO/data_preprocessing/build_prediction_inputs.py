@@ -4,12 +4,8 @@ prediction inputs. Adapted from COMPASS's PROFILE/build_prediction_inputs.py.
 
 Unlike COMPASS, the outcome (death vs. censor vs. irAE) is already clean in
 the source `longitudinal_prediction_data.csv` -- there is no raw ICD/med-table
-date inference. For the cause-specific (plain Cox) arm, `event == "irAE"` is
-the event of interest and death and censoring are both right-censoring. The
-aggregated table also carries DEATH/event_type so univariate runs can
-additionally fit a Fine-Gray subdistribution-hazard arm where death is a
-competing event for irAE (survival_common.finegray). See
-`ipio_cohort.make_irae_outcome_df`.
+date inference. `event == "irAE"` is the event of interest and death and
+censoring are both right-censoring. See `ipio_cohort.make_irae_outcome_df`.
 
 For each requested landmark, this script:
   1. Loads the IPIO longitudinal lab CSV (long format; patient-level columns

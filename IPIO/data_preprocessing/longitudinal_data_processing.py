@@ -253,9 +253,7 @@ def main() -> None:
     # (values irAE / death / censor). IPIO has no separate death-date column --
     # LAST_DATE IS the death date when event=='death' (same source as
     # LAST_CONTACT_DATE), matching how t_irae already uses LAST_CONTACT_DATE
-    # for every patient regardless of event type. Used downstream by
-    # ipio_cohort.make_irae_outcome_df to build event_type for Fine-Gray
-    # competing-risks univariate fitting (survival_common.finegray).
+    # for every patient regardless of event type.
     cohort_df["DEATH"] = cohort_df["event"].astype(str).str.lower().eq("death").astype(int)
 
     static_cols = (

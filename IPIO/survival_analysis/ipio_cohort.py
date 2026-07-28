@@ -2,14 +2,10 @@
 
 Mirrors the landmark-rebasing pattern of survival_common.cohort.make_outcome_df.
 The cause-specific duration/event pair (t_irae/IRAE) treats death and censor
-both as right-censoring, unchanged from the original design. Additionally
-builds a 3-level `event_type` (0=censored, 1=irAE, 2=death) consumed by
-survival_common.finegray for the Fine-Gray competing-risks univariate arm,
-where death competes with irAE instead of being treated as plain censoring.
+both as right-censoring, unchanged from the original design.
 """
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from survival_common import cohort
@@ -48,21 +44,10 @@ def make_irae_outcome_df(
 
     Returns a frame indexed by DFCI_MRN, keeping all baseline covariate columns +
     AGE_AT_TREATMENTSTART + IRAE + DEATH + t_irae + t_irae_from_first_record +
-    event_type + extra_anchor_cols + the anchor column + FIRST_RECORD_DATE /
+    extra_anchor_cols + the anchor column + FIRST_RECORD_DATE /
     LAST_CONTACT_DATE (the latter two are debug-only duration duplicates;
     downstream callers may drop them before persisting the final aggregated
     table).
-
-    `event_type` is a 3-level column (0=censored, 1=irAE, 2=death) for the
-    Fine-Gray competing-risks univariate arm (survival_common.finegray). irAE
-    takes precedence when both are flagged, matching survival_common.cohort.
-    make_outcome_df's platinum-over-death precedence. t_irae is reused as the
-    shared subdistribution duration for death subjects too: IPIO has no
-    separate death-date column, and LAST_CONTACT_DATE already equals the death
-    date when a patient's raw `event` was 'death' (see
-    longitudinal_data_processing.py's DEATH derivation), so t_irae (time to
-    LAST_CONTACT_DATE, landmark-rebased) is already the correct competing-event
-    time.
     """
     # Read the id column at call time from the shared cohort config so a runtime
     # configure_id_columns() (non-default --id-col) is honored; falls back to the
@@ -123,10 +108,6 @@ def make_irae_outcome_df(
     ).dt.days.astype(float)
     pat["t_irae_from_first_record"] = t_irae_from_first_record
     pat["t_irae"] = t_irae_from_first_record - landmark_time
-
-    pat["event_type"] = np.where(
-        pat["IRAE"].eq(1), 1, np.where(pat["DEATH"].eq(1), 2, 0)
-    ).astype(int)
 
     valid = (
         pat["FIRST_RECORD_DATE"].notna()
