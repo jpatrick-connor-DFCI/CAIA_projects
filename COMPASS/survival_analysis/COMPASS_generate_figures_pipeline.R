@@ -556,9 +556,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
   ## Panel A -- LLM validation (NEPC-vs-rest classifier)
   OUT_DIR <- fig_dir("figure2_llm")
-  # Only cohort-specific manuscript figures are emitted. The older
-  # full-label `original_*` Figure 2 variants are intentionally suppressed.
-  SAVE_ORIGINAL_LLM <- FALSE
+  # The full-label (unfiltered-to-any-cohort) `original_*` Figure 2 variant is
+  # identical across every cohort call, so it is written once, on the first
+  # cohort processed, rather than re-rendered per cohort.
+  SAVE_ORIGINAL_LLM <- identical(COHORT, COHORTS[1])
 
   drop_cols <- function(df, cols) df %>% select(-any_of(cols))
 
