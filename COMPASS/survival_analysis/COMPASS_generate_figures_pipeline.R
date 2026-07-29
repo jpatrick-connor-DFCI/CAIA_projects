@@ -52,6 +52,57 @@ COLOR_PLATINUM_POS <- "#2a78d6"   # blue
 COLOR_PLATINUM_NEG <- "#eb6834"   # orange
 COLOR_NEUTRAL_INK  <- "#52514e"   # secondary ink, for annotations/text only
 
+# Root for the newer classifier-derived LLM NEPC labels (LLM_NEPC_classifier_labels.tsv).
+# Deliberately a different root than NEPC_PROJ_PATH: this file lives under the
+# user's data/LLM_annotations/ tree, not the CAIA/COMPASS project tree, and is
+# loaded alongside (not instead of) the original LLM_v3_labels.tsv used by
+# Figure 2. Overridable per-call by generate_figures(); this default matches
+# the path used everywhere else in the pipeline invocation.
+DEFAULT_LLM_ANNOTATIONS_PATH <- "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_NEPC_labels"
+
+# Three stratification schemes shared by the all-lab longitudinal/KM code
+# (Sections 4-5) and reused verbatim for each stratified plot.
+LLM_STRATA <- list(
+  primary_label = list(
+    col = "primary_label",
+    levels = c("conventional", "avpc", "nepc", "biomarker")
+  ),
+  has_nepc = list(
+    col = "has_nepc",
+    levels = c(0, 1),
+    labels = c("has_nepc=0", "has_nepc=1")
+  ),
+  has_avpc = list(
+    col = "has_avpc",
+    levels = c(0, 1),
+    labels = c("has_avpc=0", "has_avpc=1")
+  )
+)
+
+# load_llm_strata: read LLM_NEPC_classifier_labels.tsv (DFCI_MRN, primary_label,
+# has_nepc, has_avpc). Returns NULL with a message if the file is absent, so
+# every downstream stratified-plot loop can skip cleanly rather than erroring.
+load_llm_strata <- function(llm_annotations_path) {
+  path <- file.path(llm_annotations_path, "LLM_NEPC_classifier_labels.tsv")
+  if (!file.exists(path)) {
+    message(sprintf("load_llm_strata: %s not found -- skipping LLM-strata plots", path))
+    return(NULL)
+  }
+  strata <- read_tsv(path, show_col_types = FALSE)
+  required <- c("DFCI_MRN", "primary_label", "has_nepc", "has_avpc")
+  missing <- setdiff(required, names(strata))
+  if (length(missing) > 0) {
+    stop(sprintf("%s is missing required columns: %s", path, paste(missing, collapse = ", ")))
+  }
+  strata %>%
+    select(all_of(required)) %>%
+    mutate(
+      primary_label = factor(primary_label, levels = LLM_STRATA$primary_label$levels),
+      has_nepc = suppressWarnings(as.numeric(has_nepc)),
+      has_avpc = suppressWarnings(as.numeric(has_avpc))
+    )
+}
+
 # ---- helpers ported from the Python notebook ----
 
 # binary_metrics: confusion-matrix-derived classification metrics for a 0/1
@@ -141,31 +192,25 @@ parse_feature <- function(name) {
 }
 
 
-COHORTS <- c(
-  "without_other_primaries", "with_other_primaries",
-  "adt_without_other_primaries", "adt_with_other_primaries"
-)
+COHORTS <- c("arpi", "adt")
 COHORT_LABELS <- c(
-  without_other_primaries = "ARPI -- without other primaries",
-  with_other_primaries = "ARPI -- with other primaries",
-  adt_without_other_primaries = "ADT -- without other primaries",
-  adt_with_other_primaries = "ADT -- with other primaries"
+  arpi = "ARPI",
+  adt = "ADT"
 )
-# ARPI arms keep the original [0, 90] landmark list unchanged; ADT arms add a
-# +365d landmark since ADT initiation is earlier in the treatment sequence
-# than ARPI initiation, giving a longer observable runway to platinum.
+# ARPI keeps the original [0, 90] landmark list unchanged; ADT adds a +365d
+# landmark since ADT initiation is earlier in the treatment sequence than
+# ARPI initiation, giving a longer observable runway to platinum.
 COHORT_LANDMARKS <- list(
-  without_other_primaries = c(0, 90),
-  with_other_primaries = c(0, 90),
-  adt_without_other_primaries = c(0, 90, 365),
-  adt_with_other_primaries = c(0, 90, 365)
+  arpi = c(0, 90),
+  adt = c(0, 90, 365)
 )
 
 # Render the full COMPASS figure set for one cohort arm. Mirrors the body of
 # COMPASS_generate_figures.ipynb's per-cohort cells (Figures 1-7 + Table 1)
 # so the notebook can call this once per cohort in the same R session instead
 # of re-executing itself via Rscript.
-generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS, show = FALSE) {
+generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS, show = FALSE,
+                             llm_annotations_path = DEFAULT_LLM_ANNOTATIONS_PATH) {
   # Rscript opens `Rplots.pdf` when any plot is drawn without an explicit device.
   # All intended outputs below use ggsave(), so route any incidental drawing to a
   # temporary null PDF device during non-interactive runs.
@@ -183,11 +228,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   COHORT_DISPLAY <- unname(COHORT_LABELS[[COHORT]])
   message(sprintf("Generating figures for cohort: %s", COHORT_DISPLAY))
 
-  # Two independent axes derived from the cohort key: which primaries
-  # exclusion applies, and which treatment anchor was used. ADT arms are
-  # named with an "adt_" prefix (see COHORTS above).
-  IS_ADT <- startsWith(COHORT, "adt_")
-  IS_WITHOUT_OTHER_PRIMARIES <- grepl("without_other_primaries", COHORT)
+  IS_ADT <- identical(COHORT, "adt")
   ANCHOR_LABEL <- if (IS_ADT) "ADT initiation" else "ARPI/chemo initiation"
 
   BASE <- file.path(NEPC_PROJ_PATH, "survival_analysis", paste0("local_runs_", COHORT))
@@ -201,16 +242,50 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   )
 
   FIG_ROOT <- fig_root
-  # Figure-first, panel-second layout:
-  # FIG_ROOT/<figure>/<plot-stem>/<cohort>_<plot-stem>.png
+  # Canonical-lab names sorted longest-first so e.g. "Direct bilirubin" is
+  # matched before "Total bilirubin" would ever partially collide, and so a
+  # lab-specific stem is never mis-routed to a shorter substring match.
+  CATEGORY_MAP_LABS <- names(CATEGORY_MAP)[order(-nchar(names(CATEGORY_MAP)))]
+  lab_stem_slug <- function(lab_name) {
+    tolower(gsub("[^A-Za-z0-9]+", "_", lab_name))
+  }
+  LAB_SLUG_TO_NAME <- setNames(CATEGORY_MAP_LABS, lab_stem_slug(CATEGORY_MAP_LABS))
+  # Identify which canonical lab (if any) a plot stem is about, by matching
+  # against every registered lab's slug as a token within the stem.
+  match_lab_in_stem <- function(plot_stem) {
+    for (slug in names(LAB_SLUG_TO_NAME)) {
+      if (grepl(paste0("(^|_)", slug, "(_|$)"), plot_stem)) return(LAB_SLUG_TO_NAME[[slug]])
+    }
+    NA_character_
+  }
+  # Figure-first, panel-second layout for non-lab-specific figures:
+  #   FIG_ROOT/<figure>/<plot-stem>/<cohort>_<plot-stem>.png
+  # Per-lab panels (all-lab longitudinal/KM-quartile/distribution plots) are
+  # nested one level deeper by CATEGORY_MAP category so ~40 labs x 4 strata
+  # stay navigable instead of dumping ~160+ files into one flat directory:
+  #   FIG_ROOT/labs/<category>/<lab>/{longitudinal,km_quartile,distribution}/<cohort>_<stem>.png
   figure_group <- function(plot_stem) {
     if (startsWith(plot_stem, "figure1") || startsWith(plot_stem, "table1")) return("figure1")
+    if (startsWith(plot_stem, "figure2v2")) return("figure2v2_llm")
     if (startsWith(plot_stem, "figure2")) return("figure2")
     if (startsWith(plot_stem, "figure3")) return("figure3")
     if (startsWith(plot_stem, "figure4")) return("figure4")
+    if (startsWith(plot_stem, "km_llm_")) return("km_llm")
+    if (startsWith(plot_stem, "km_quartile_")) {
+      lab <- match_lab_in_stem(plot_stem)
+      if (!is.na(lab)) return(file.path("labs", assign_category(lab), lab, "km_quartile"))
+    }
     if (startsWith(plot_stem, "km_")) return("KM_curves")
-    if (startsWith(plot_stem, "androgen_dist_")) return("androgen_distributions")
-    if (startsWith(plot_stem, "androgen_longitudinal_")) return("androgen_trajectories")
+    if (startsWith(plot_stem, "androgen_dist_") || startsWith(plot_stem, "dist_")) {
+      lab <- match_lab_in_stem(plot_stem)
+      if (!is.na(lab)) return(file.path("labs", assign_category(lab), lab, "distribution"))
+      return("androgen_distributions")
+    }
+    if (startsWith(plot_stem, "androgen_longitudinal_") || startsWith(plot_stem, "longitudinal_")) {
+      lab <- match_lab_in_stem(plot_stem)
+      if (!is.na(lab)) return(file.path("labs", assign_category(lab), lab, "longitudinal"))
+      return("androgen_trajectories")
+    }
     stop(sprintf("Unmapped figure output stem: %s", plot_stem))
   }
   # Compatibility value passed by existing save_fig call sites; actual output
@@ -237,6 +312,19 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
               format(nrow(nepc_annotations), big.mark = ","),
               format(sum(nepc_annotations$is_platinum), big.mark = ","),
               format(sum(!nepc_annotations$is_platinum), big.mark = ",")))
+
+  # Newer classifier-derived labels (primary_label/has_nepc/has_avpc), loaded
+  # alongside the LLM_v3_labels.tsv above -- drives Figure 2 v2 and the
+  # all-lab longitudinal/KM stratification in Sections 4-5. NULL if absent.
+  llm_classifier_labels <- load_llm_strata(llm_annotations_path)
+  if (!is.null(llm_classifier_labels)) {
+    llm_classifier_labels <- llm_classifier_labels %>%
+      mutate(is_platinum = DFCI_MRN %in% platinum_set)
+    cat(sprintf("llm_classifier_labels: %s rows (%s platinum+, %s platinum-)\n",
+                format(nrow(llm_classifier_labels), big.mark = ","),
+                format(sum(llm_classifier_labels$is_platinum), big.mark = ","),
+                format(sum(!llm_classifier_labels$is_platinum), big.mark = ",")))
+  }
 
   # save_fig: write one high-resolution PNG to the figure/panel directory.
   save_fig <- function(plot, out_dir, stem, width, height, prefix = COHORT) {
@@ -351,14 +439,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   render_consort_panel <- function(mrn_flags) {
     keep <- rep(TRUE, nrow(mrn_flags))
     steps <- list(
-      c("ICD-defined prostate cancer", sum(keep))
+      c("ICD-defined prostate cancer", sum(keep)),
+      c("Other primaries allowed", sum(keep))
     )
-    if (IS_WITHOUT_OTHER_PRIMARIES) {
-      keep <- keep & mrn_flags$HAS_NON_PROSTATE_PRIMARY == 0
-      steps[[length(steps) + 1]] <- c("No non-prostate primary", sum(keep))
-    } else {
-      steps[[length(steps) + 1]] <- c("Other primaries allowed", sum(keep))
-    }
     keep <- keep & mrn_flags$PARPI_EXPOSED == 0
     steps[[length(steps) + 1]] <- c("No PARPi exposure", sum(keep))
     if (IS_ADT) {
@@ -925,6 +1008,144 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   save_fig(fig2, OUT_DIR, "figure2_llm_subtype_platinum", 15, 9)
   if (show) print(fig2)
 
+  ## ---- Figure 2 v2 -- same panel set, driven by LLM_NEPC_classifier_labels.tsv ----
+  # Reuses render_confusion_panel/render_metric_bar_panel/render_landscape_panel/
+  # render_enrichment_panel unchanged -- only the input frame differs. This new
+  # label file has a different patient population/counts than LLM_v3_labels.tsv,
+  # so (per the plan) NO stopifnot count tripwires are added here; captions carry
+  # computed counts instead.
+  if (is.null(llm_classifier_labels)) {
+    message("Figure 2 v2: llm_classifier_labels unavailable -- skipping.")
+  } else {
+    OUT_DIR_V2 <- fig_dir("figure2v2_llm")
+
+    v2_labels_all <- llm_classifier_labels
+
+    render_confusion_panel_v2 <- function(metrics, truth_label, pred_label, title) {
+      cm <- tibble(
+        truth = factor(c(paste0("Non-", truth_label), truth_label,
+                         paste0("Non-", truth_label), truth_label),
+                       levels = c(paste0("Non-", truth_label), truth_label)),
+        pred  = factor(c(paste0("Non-", pred_label), paste0("Non-", pred_label),
+                         pred_label, pred_label),
+                       levels = c(pred_label, paste0("Non-", pred_label))),
+        n     = c(metrics$TN, metrics$FP, metrics$FN, metrics$TP)
+      )
+      thresh <- max(cm$n) / 2
+      ggplot(cm, aes(truth, pred, fill = n)) +
+        geom_tile(color = "white", linewidth = 1) +
+        geom_text(aes(label = format(n, big.mark = ","),
+                      color = n > thresh), size = 5, fontface = "bold") +
+        scale_fill_gradient(low = "#eaf1fb", high = COLOR_PLATINUM_POS, guide = "none") +
+        scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "#0b0b0b"), guide = "none") +
+        labs(x = "Manual annotation (truth)", y = "LLM label (prediction)", title = title) +
+        theme_fig() +
+        theme(panel.grid = element_blank(), plot.title = element_text(face = "bold", size = 11))
+    }
+
+    ## Panel A -- LLM validation (NEPC-vs-rest classifier, primary_label == "nepc")
+    merged_v2 <- manual_annotations %>%
+      drop_cols(c("pathology_details", "manual_platinum_reason")) %>%
+      inner_join(v2_labels_all, by = "DFCI_MRN") %>%
+      mutate(
+        manual_NEPC = simplified_manual_platinum_reason %in% c("nepc", "squamous_transformation"),
+        LLM_NEPC    = primary_label == "nepc"
+      )
+    cat(sprintf("figure2v2 merged_results: %s rows, %s manual-NEPC positive\n",
+                format(nrow(merged_v2), big.mark = ","),
+                format(sum(merged_v2$manual_NEPC), big.mark = ",")))
+    metrics_v2 <- binary_metrics(merged_v2$manual_NEPC, merged_v2$LLM_NEPC)
+    n_total_v2 <- nrow(merged_v2)
+    n_nepc_manual_v2 <- sum(merged_v2$manual_NEPC)
+    caption_a_v2 <- sprintf("N = %s chart-reviewed patients; %s manual-NEPC positive (LLM_NEPC_classifier_labels.tsv).",
+                            format(n_total_v2, big.mark = ","), format(n_nepc_manual_v2, big.mark = ","))
+    pA1_v2 <- render_confusion_panel(metrics_v2) + labs(caption = caption_a_v2) +
+      theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
+    pA2_v2 <- render_metric_bar_panel(metrics_v2) + labs(caption = caption_a_v2) +
+      theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
+    save_fig(pA1_v2, OUT_DIR_V2, "figure2v2_confusion_matrix", 4.2, 4.2)
+    save_fig(pA2_v2, OUT_DIR_V2, "figure2v2_metric_bar", 5.0, 4.2)
+
+    ## has_nepc / has_avpc binary confusion panels against manual truth.
+    merged_bin_v2 <- manual_annotations %>%
+      drop_cols(c("pathology_details", "manual_platinum_reason")) %>%
+      inner_join(v2_labels_all, by = "DFCI_MRN") %>%
+      mutate(manual_NEPC = simplified_manual_platinum_reason %in% c("nepc", "squamous_transformation"))
+
+    metrics_has_nepc <- binary_metrics(merged_bin_v2$manual_NEPC, merged_bin_v2$has_nepc)
+    p_has_nepc <- render_confusion_panel_v2(metrics_has_nepc, "NEPC", "has_nepc=1",
+                                            "Panel A — has_nepc confusion matrix") +
+      labs(caption = caption_a_v2) + theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
+    save_fig(p_has_nepc, OUT_DIR_V2, "figure2v2_confusion_has_nepc", 4.2, 4.2)
+
+    metrics_has_avpc <- binary_metrics(merged_bin_v2$manual_NEPC, merged_bin_v2$has_avpc)
+    p_has_avpc <- render_confusion_panel_v2(metrics_has_avpc, "NEPC", "has_avpc=1",
+                                            "Panel A — has_avpc confusion matrix") +
+      labs(caption = caption_a_v2) + theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
+    save_fig(p_has_avpc, OUT_DIR_V2, "figure2v2_confusion_has_avpc", 4.2, 4.2)
+
+    ## Panel B -- subtype landscape by platinum status (4-class primary_label).
+    platinum_positive_v2 <- v2_labels_all %>% filter(is_platinum) %>% count_labels() %>%
+      mutate(platinum_status = "positive")
+    platinum_negative_v2 <- v2_labels_all %>% filter(!is_platinum) %>% count_labels() %>%
+      mutate(platinum_status = "negative")
+    label_distributions <- bind_rows(platinum_positive_v2, platinum_negative_v2)
+    n_pos <- sum(platinum_positive_v2$count)
+    n_neg <- sum(platinum_negative_v2$count)
+    caption_b_v2 <- sprintf("LLM_NEPC_classifier_labels.tsv; platinum+ n=%s, platinum- n=%s.",
+                            format(n_pos, big.mark = ","), format(n_neg, big.mark = ","))
+    pB_v2 <- render_landscape_panel("Panel B — subtype landscape by platinum status (classifier labels)") +
+      labs(caption = caption_b_v2) +
+      theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
+    save_fig(pB_v2, OUT_DIR_V2, "figure2v2_subtype_landscape", 6.5, 8)
+
+    ## Panel C -- aggressive (avpc+nepc) vs conventional platinum enrichment.
+    df_v2 <- v2_labels_all %>% filter(primary_label %in% c("conventional", "avpc", "nepc")) %>%
+      mutate(aggressive = primary_label %in% c("avpc", "nepc"))
+    n_excluded_v2 <- nrow(v2_labels_all) - nrow(df_v2)
+    ct_v2 <- matrix(
+      c(sum(df_v2$aggressive & df_v2$is_platinum), sum(df_v2$aggressive & !df_v2$is_platinum),
+        sum(!df_v2$aggressive & df_v2$is_platinum), sum(!df_v2$aggressive & !df_v2$is_platinum)),
+      nrow = 2, byrow = TRUE,
+      dimnames = list(c("aggressive", "conventional"), c("platinum+", "platinum-")))
+    print(ct_v2)
+    ft_v2 <- fisher.test(ct_v2, alternative = "greater")
+    OR <- unname(ft_v2$estimate); p_value <- ft_v2$p.value
+    cat(sprintf("figure2v2 enrichment: OR = %.2f, Fisher p = %.3g\n", OR, p_value))
+    n_aggressive <- sum(ct_v2["aggressive", ]); n_conventional <- sum(ct_v2["conventional", ])
+    platinum_given_aggressive <- ct_v2["aggressive", "platinum+"]
+    platinum_given_conventional <- ct_v2["conventional", "platinum+"]
+    w_agg <- wilson_ci(platinum_given_aggressive, n_aggressive)
+    w_conv <- wilson_ci(platinum_given_conventional, n_conventional)
+    p_agg <- w_agg[1]; lo_agg <- w_agg[2]; hi_agg <- w_agg[3]
+    p_conv <- w_conv[1]; lo_conv <- w_conv[2]; hi_conv <- w_conv[3]
+    caption_c_v2 <- sprintf("Excludes 'biomarker' labels (%s rows). Error bars are 95%% Wilson intervals. OR=%.1f, Fisher p=%.1e.",
+                            format(n_excluded_v2, big.mark = ","), OR, p_value)
+    pC_v2 <- render_enrichment_panel() + labs(caption = caption_c_v2) +
+      theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
+    save_fig(pC_v2, OUT_DIR_V2, "figure2v2_enrichment", 4.5, 5.5)
+
+    left_v2  <- (render_confusion_panel(metrics_v2) + render_metric_bar_panel(metrics_v2)) /
+               render_enrichment_panel()
+    right_v2 <- render_landscape_panel("Panel B — subtype landscape (classifier labels)")
+    full_caption_v2 <- sprintf(paste0(
+      "(A) NEPC-vs-rest classifier (LLM_NEPC_classifier_labels.tsv) vs Baca-lab manual ",
+      "annotation (N=%s, %s manual-NEPC+). (B) Subtype landscape, platinum+ (n=%s) vs ",
+      "platinum- (n=%s). (C) Platinum+ rate among aggressive (AVPC+NEPC) vs conventional ",
+      "patients (OR=%.1f, Fisher p=%.1e)."),
+      format(n_total_v2, big.mark = ","), format(n_nepc_manual_v2, big.mark = ","),
+      format(n_pos, big.mark = ","), format(n_neg, big.mark = ","), OR, p_value)
+    fig2v2 <- (left_v2 | right_v2) +
+      plot_layout(widths = c(2, 1.3)) +
+      plot_annotation(
+        title = "Figure 2 v2 — LLM classifier-derived prostate subtypes",
+        caption = str_wrap(full_caption_v2, 130),
+        theme = theme(plot.title = element_text(face = "bold", size = 13),
+                      plot.caption = element_text(size = 8.5, color = COLOR_NEUTRAL_INK)))
+    save_fig(fig2v2, OUT_DIR_V2, "figure2v2_llm_subtype_platinum", 15, 9)
+    if (show) print(fig2v2)
+  }
+
   # ----------------------------- labeling knobs ---------------------------
   TOP_K_PER_PANEL <- 4
   ALWAYS_LABEL    <- c("Hemoglobin", "Albumin", "Alkaline phosphatase")
@@ -1348,7 +1569,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   if (show) print(fig4)
 
   OUT_DIR <- fig_dir("androgen_supplements")
-  ANDROGEN_LABS <- c("Testosterone", "PSA")
+  # All canonical labs in CATEGORY_MAP (CBC/CMP/LFT/Vitals/Androgen axis/Other),
+  # generalizing what used to be the PSA/Testosterone-only ANDROGEN_LABS list.
+  ALL_LABS <- names(CATEGORY_MAP)
 
   # Case-insensitive match for a `<lab>__mean` column (mirrors find_col in the
   # Python COMPASS diagnostics).
@@ -1357,10 +1580,13 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                    endsWith(columns, "__mean")]
     if (length(hit)) hit[1] else NA_character_
   }
-  resolve_androgen_columns <- function(columns) {
-    psa <- find_mean_col(columns, "PSA")
-    if (is.na(psa)) psa <- find_mean_col(columns, "Prostate specific Ag")
-    list(Testosterone = find_mean_col(columns, "Testosterone"), PSA = psa)
+  # resolve_mean_col: generic replacement for resolve_androgen_columns, over
+  # any CATEGORY_MAP lab name. PSA additionally falls back to the raw OMOP
+  # "Prostate specific Ag" name, mirroring the original PSA-specific handling.
+  resolve_mean_col <- function(columns, lab_name) {
+    hit <- find_mean_col(columns, lab_name)
+    if (is.na(hit) && identical(lab_name, "PSA")) hit <- find_mean_col(columns, "Prostate specific Ag")
+    hit
   }
 
   # 4-way quartile split; Figure 5 contrasts the lowest and highest quartiles.
@@ -1442,7 +1668,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                  size = 2.6, color = "#5d6d7e", family = "mono")
   }
 
-  for (lab in ANDROGEN_LABS) {
+  for (lab in ALL_LABS) {
     for (landmark in FIG5_LANDMARKS) {
       agg <- load_aggregated_landmark(landmark)
       if (is.null(agg)) {
@@ -1450,12 +1676,83 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                                  color = "#7f8c8d") + theme_void() +
           labs(title = sprintf("%s quartile -- landmark %dd", lab, landmark))
       } else {
-        mean_cols <- resolve_androgen_columns(names(agg))
-        p <- plot_km_androgen_quartile(agg, lab, mean_cols[[lab]], landmark)
+        mean_col <- resolve_mean_col(names(agg), lab)
+        if (is.na(mean_col)) {
+          message(sprintf("km_quartile_%s: no %s__mean column at landmark %d -- skipping",
+                          lab_stem_slug(lab), lab, landmark))
+          next
+        }
+        p <- plot_km_androgen_quartile(agg, lab, mean_col, landmark)
       }
-      save_fig(p, OUT_DIR, sprintf("km_%s_quartile_platinum_landmark%d", tolower(lab), landmark),
+      save_fig(p, OUT_DIR, sprintf("km_quartile_%s_landmark%d", lab_stem_slug(lab), landmark),
                width = 6.5, height = 5.5)
       if (show) print(p)
+    }
+  }
+
+  ## ---- New LLM-stratified KM curves (sanity check): time-to-platinum by ----
+  ## ---- has_nepc, has_avpc, and primary_label -- same survival construction ----
+  ## ---- (platinum_km_inputs) + overlay_km as the quartile curves above.    ----
+  if (is.null(llm_classifier_labels)) {
+    message("km_llm_*: llm_classifier_labels unavailable -- skipping.")
+  } else {
+    cohort_mrns_km <- unique(as.character(patient_df[[ID_COL]]))
+    strata_cohort <- llm_classifier_labels %>%
+      filter(as.character(DFCI_MRN) %in% cohort_mrns_km)
+    message(sprintf("km_llm_*: %s / %s LLM-labeled MRNs in %s cohort",
+                    format(nrow(strata_cohort), big.mark = ","),
+                    format(nrow(llm_classifier_labels), big.mark = ","), COHORT_DISPLAY))
+
+    plot_km_llm_stratum <- function(scheme_name, landmark) {
+      scheme <- LLM_STRATA[[scheme_name]]
+      ttl <- sprintf("time-to-platinum by %s -- landmark %s%dd", scheme_name,
+                     ifelse(landmark > 0, "+", ""), landmark)
+      blank <- function(msg) ggplot() + annotate("text", x = 0, y = 0, label = msg, color = "#7f8c8d") +
+        theme_void() + labs(title = ttl) + theme(plot.title = element_text(face = "bold", size = 10))
+
+      agg <- load_aggregated_landmark(landmark)
+      if (is.null(agg) || !all(c("t_platinum", "PLATINUM", "DFCI_MRN") %in% names(agg)))
+        return(blank("(no data)"))
+
+      d <- agg %>%
+        mutate(DFCI_MRN = as.character(DFCI_MRN)) %>%
+        inner_join(strata_cohort %>% mutate(DFCI_MRN = as.character(DFCI_MRN)), by = "DFCI_MRN")
+      d$stratum <- as.character(d[[scheme$col]])
+      if (!is.null(scheme$labels)) {
+        d$stratum <- scheme$labels[match(d$stratum, as.character(scheme$levels))]
+      }
+      d <- d %>% filter(!is.na(stratum), !is.na(t_platinum), !is.na(PLATINUM))
+      if (nrow(d) == 0 || length(unique(d$stratum)) < 2)
+        return(blank("(insufficient labeled data)"))
+
+      km <- platinum_km_inputs(d)
+      d <- d[km$row_id, , drop = FALSE]
+      d$km_time <- km$time; d$km_event <- km$event
+      survival_by_label <- split(d %>% transmute(time = km_time, event = km_event), d$stratum)
+      p <- overlay_km(survival_by_label, "Days from landmark", "Platinum-free probability", ttl)
+
+      n_by_stratum <- table(d$stratum)
+      ev_by_stratum <- tapply(d$km_event, d$stratum, sum)
+      ann <- paste(sprintf("%s: n=%d, events=%d", names(n_by_stratum), n_by_stratum,
+                           ev_by_stratum[names(n_by_stratum)]), collapse = "\n")
+      if (length(unique(d$stratum)) >= 2) {
+        sd <- tryCatch(survdiff(Surv(km_time, km_event) ~ stratum, data = d), error = function(e) NULL)
+        if (!is.null(sd)) {
+          pval <- 1 - pchisq(sd$chisq, length(sd$n) - 1)
+          ann <- sprintf("%s\nlog-rank p = %.3g", ann, pval)
+        }
+      }
+      p + annotate("text", x = Inf, y = 0, label = ann, hjust = 1.05, vjust = 0,
+                   size = 2.6, color = "#5d6d7e", family = "mono")
+    }
+
+    for (scheme_name in names(LLM_STRATA)) {
+      for (landmark in FIG5_LANDMARKS) {
+        p <- plot_km_llm_stratum(scheme_name, landmark)
+        save_fig(p, fig_dir("km_llm"), sprintf("km_llm_%s_landmark%d", scheme_name, landmark),
+                 width = 6.5, height = 5.5)
+        if (show) print(p)
+      }
     }
   }
 
@@ -1512,11 +1809,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
             legend.position = c(0.98, 0.72), legend.justification = c(1, 1))
   }
 
-  FIG6_SCALE_VARIANTS <- list(list(TRUE, "androgen_dist_by_platinum_log"),
-                              list(FALSE, "androgen_dist_by_platinum_raw"))
+  FIG6_SCALE_VARIANTS <- list(list(TRUE, "dist_by_platinum_log"),
+                              list(FALSE, "dist_by_platinum_raw"))
   for (variant in FIG6_SCALE_VARIANTS) {
     use_log <- variant[[1]]; out_stem <- variant[[2]]
-    for (lab in ANDROGEN_LABS) {
+    for (lab in ALL_LABS) {
       for (landmark in FIG6_LANDMARKS) {
         agg <- load_aggregated_landmark(landmark)
         if (is.null(agg)) {
@@ -1524,10 +1821,15 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                                    color = "#7f8c8d") + theme_void() +
             labs(title = sprintf("%s -- landmark %dd", lab, landmark))
         } else {
-          mean_cols <- resolve_androgen_columns(names(agg))
-          p <- plot_androgen_dist_by_platinum(agg, lab, mean_cols[[lab]], landmark, use_log)
+          mean_col <- resolve_mean_col(names(agg), lab)
+          if (is.na(mean_col)) {
+            message(sprintf("%s_%s: no %s__mean column at landmark %d -- skipping",
+                            out_stem, lab_stem_slug(lab), lab, landmark))
+            next
+          }
+          p <- plot_androgen_dist_by_platinum(agg, lab, mean_col, landmark, use_log)
         }
-        save_fig(p, OUT_DIR, sprintf("%s_%s_landmark%d", out_stem, tolower(lab), landmark),
+        save_fig(p, OUT_DIR, sprintf("%s_%s_landmark%d", out_stem, lab_stem_slug(lab), landmark),
                  width = 6.5, height = 5.0)
         if (show) print(p)
       }
@@ -1541,10 +1843,17 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   # cap (the random subsample below only triggers when length(patients) > N_GROUP).
   N_GROUP <- Inf
 
-  is_androgen_lab <- function(name) {
+  # is_canonical_lab: CATEGORY_MAP-driven replacement for the old PSA/
+  # Testosterone-only is_androgen_lab regex. Keeps the "Prostate specific Ag"
+  # raw-OMOP alias mapping to PSA. match_canonical_lab_name returns the
+  # canonical CATEGORY_MAP name (or NA) so LAB_GROUP can carry it directly.
+  match_canonical_lab_name <- function(name) {
     n <- tolower(name)
-    grepl("testosterone", n) | grepl("psa", n) | grepl("prostate specific ag", n)
+    if (grepl("prostate specific ag", n)) return("PSA")
+    hit <- ALL_LABS[tolower(ALL_LABS) == n]
+    if (length(hit)) hit[1] else NA_character_
   }
+  is_canonical_lab <- function(name) !is.na(vapply(name, match_canonical_lab_name, character(1)))
 
   # Union of patient IDs across the aggregated landmark CSVs, so Figure 7 traces
   # describe exactly the modeled population. Returns NULL if none are found (caller
@@ -1571,7 +1880,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     mrns
   }
 
-  load_androgen_longitudinal <- function() {
+  load_canonical_longitudinal <- function() {
     if (!file.exists(LONGITUDINAL_CSV)) {
       message(sprintf("Figure 7: skipped -- %s not found", LONGITUDINAL_CSV)); return(NULL)
     }
@@ -1585,8 +1894,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     message(sprintf("Figure 7 loader: %s rows / %s patients in CSV",
                     format(nrow(df), big.mark=","),
                     format(length(unique(df$DFCI_MRN)), big.mark=",")))
-    df <- df %>% filter(is_androgen_lab(LAB_NAME))
-    if (nrow(df) == 0) { message("Figure 7: skipped -- no Testosterone/PSA rows"); return(NULL) }
+    df <- df %>% filter(is_canonical_lab(LAB_NAME))
+    if (nrow(df) == 0) { message("Figure 7: skipped -- no canonical-lab rows"); return(NULL) }
 
     # Restrict to patients present in the aggregated landmark CSVs so the trajectory
     # panels describe exactly the modeled (aggregated-landmark) population. If no
@@ -1616,15 +1925,17 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
     df$t_platinum_rel <- if (all(c("t_platinum","PLATINUM") %in% names(df)))
       suppressWarnings(as.numeric(df$t_platinum)) else NA_real_
-    df$LAB_GROUP <- ifelse(grepl("testosterone", tolower(df$LAB_NAME)), "Testosterone", "PSA")
+    df$LAB_GROUP <- vapply(df$LAB_NAME, match_canonical_lab_name, character(1))
+    df <- df %>% filter(!is.na(LAB_GROUP))
     df
   }
 
-  androgen_long_df <- load_androgen_longitudinal()
-  if (!is.null(androgen_long_df))
-    message(sprintf("Figure 7: %s androgen-axis rows across %s %s patients",
-                    format(nrow(androgen_long_df), big.mark=","),
-                    format(length(unique(androgen_long_df$DFCI_MRN)), big.mark=","), COHORT_DISPLAY))
+  canonical_long_df <- load_canonical_longitudinal()
+  if (!is.null(canonical_long_df))
+    message(sprintf("Figure 7: %s canonical-lab rows across %s %s patients, %s distinct labs",
+                    format(nrow(canonical_long_df), big.mark=","),
+                    format(length(unique(canonical_long_df$DFCI_MRN)), big.mark=","), COHORT_DISPLAY,
+                    length(unique(canonical_long_df$LAB_GROUP))))
 
   ## ---- Figure 7b: group mean +/- 95% CI, binned by time from treatment anchor ----
   BIN_WIDTH_DAYS <- 60
@@ -1632,62 +1943,118 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   PRE_DAYS  <- 365   # days BEFORE the treatment anchor
   POST_DAYS <- 730   # days AFTER the treatment anchor
 
-  bin_group_ci <- function(df, lab_group) {
+  # bin_group_ci: bins a lab-group's rows into 60-day windows and computes a
+  # per-bin group mean +/- 95% CI, grouped by an arbitrary `stratum_col`
+  # (platinum status by default; also primary_label/has_nepc/has_avpc when
+  # driven by the LLM strata below). `stratum_values` supplies the DFCI_MRN ->
+  # stratum lookup when stratum_col isn't already a column on df (i.e. every
+  # LLM scheme; PLATINUM is already a df column so it's looked up in-place).
+  bin_group_ci <- function(df, lab_group, stratum_col = "plat_group", stratum_values = NULL) {
     sub <- df %>% filter(LAB_GROUP == lab_group, t_rel >= -PRE_DAYS, t_rel <= POST_DAYS)
+    if (!is.null(stratum_values)) {
+      sub <- sub %>%
+        mutate(DFCI_MRN = as.character(DFCI_MRN)) %>%
+        inner_join(stratum_values, by = "DFCI_MRN")
+    }
     if (nrow(sub) == 0) return(NULL)
     edges <- seq(-PRE_DAYS, POST_DAYS, by = BIN_WIDTH_DAYS)
     sub <- sub %>% mutate(
       t_bin = cut(t_rel, breaks = edges, include.lowest = TRUE),
-      plat_group = if ("PLATINUM" %in% names(sub))
-        as.integer(coalesce(suppressWarnings(as.numeric(PLATINUM)), 0)) else 0L)
+      stratum = if (identical(stratum_col, "plat_group"))
+        as.integer(coalesce(suppressWarnings(as.numeric(PLATINUM)), 0))
+      else as.character(.data[[stratum_col]]))
+    sub <- sub %>% filter(!is.na(stratum))
+    if (nrow(sub) == 0) return(NULL)
     mids <- (head(edges, -1) + tail(edges, -1)) / 2
     names(mids) <- levels(sub$t_bin)
     patient_bin <- sub %>% drop_na(LAB_VALUE, t_bin) %>%
-      group_by(DFCI_MRN, t_bin, plat_group) %>%
+      group_by(DFCI_MRN, t_bin, stratum) %>%
       summarise(LAB_VALUE = mean(LAB_VALUE), .groups = "drop")
-    patient_bin %>% group_by(t_bin, plat_group) %>%
+    patient_bin %>% group_by(t_bin, stratum) %>%
       summarise(n = n_distinct(DFCI_MRN), mean = mean(LAB_VALUE),
                 sem = if (n() > 1) sd(LAB_VALUE) / sqrt(n()) else 0, .groups = "drop") %>%
       mutate(t_mid = mids[as.character(t_bin)],
              ci_lo = mean - 1.96 * sem, ci_hi = mean + 1.96 * sem)
   }
 
-  plot_group_ci_panel <- function(df, lab_group, title) {
-    binned <- bin_group_ci(df, lab_group)
+  plot_group_ci_panel <- function(df, lab_group, title, stratum_col = "plat_group",
+                                  stratum_values = NULL, stratum_legend = NULL,
+                                  stratum_colors = NULL) {
+    binned <- bin_group_ci(df, lab_group, stratum_col, stratum_values)
     if (is.null(binned) || nrow(binned) == 0)
       return(ggplot() + annotate("text", x = 0, y = 0, label = "(no data)", color = "#7f8c8d") +
                theme_void() + labs(title = title))
-    leg <- c(`0` = "Non-platinum", `1` = "Platinum")
-    binned <- binned %>% mutate(plat_group = factor(plat_group)) %>% arrange(t_mid)
-    ggplot(binned, aes(t_mid, mean, color = plat_group, fill = plat_group)) +
+    if (is.null(stratum_legend)) stratum_legend <- c(`0` = "Non-platinum", `1` = "Platinum")
+    if (is.null(stratum_colors)) stratum_colors <- setNames(PLAT_COLORS, c("0","1"))
+    binned <- binned %>% mutate(stratum = factor(stratum)) %>% arrange(t_mid)
+    ggplot(binned, aes(t_mid, mean, color = stratum, fill = stratum)) +
       geom_vline(xintercept = 0, color = "#2c3e50", linetype = "dotted", linewidth = 1, alpha = 0.6) +
       geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi), alpha = 0.2, color = NA) +
       geom_line(linewidth = 0.8) + geom_point(size = 1.6) +
-      scale_color_manual(values = setNames(PLAT_COLORS, c("0","1")), labels = leg, name = NULL) +
-      scale_fill_manual(values = setNames(PLAT_COLORS, c("0","1")), guide = "none") +
+      scale_color_manual(values = stratum_colors, labels = stratum_legend, name = NULL) +
+      scale_fill_manual(values = stratum_colors, guide = "none") +
       labs(x = sprintf("Days from %s (binned, 60d windows)", ANCHOR_LABEL),
            y = sprintf("%s (mean +/- 95%% CI)", lab_group), title = title) +
       theme_fig() +
       theme(plot.title = element_text(face = "bold", size = 11))
   }
 
-  if (is.null(androgen_long_df)) {
-    message("Figure 7b: skipped -- no androgen longitudinal data available")
+  if (is.null(canonical_long_df)) {
+    message("Figure 7b: skipped -- no canonical longitudinal data available")
   } else {
-    patients <- unique(na.omit(androgen_long_df$DFCI_MRN))
+    patients <- unique(na.omit(canonical_long_df$DFCI_MRN))
     if (length(patients) > N_GROUP) {
       set.seed(RANDOM_SEED)
       patients <- sample(patients, N_GROUP)
     }
-    group_df <- androgen_long_df %>% filter(DFCI_MRN %in% patients)
-    for (lab_group in c("PSA", "Testosterone")) {
+    group_df <- canonical_long_df %>% filter(DFCI_MRN %in% patients)
+    labs_present <- intersect(ALL_LABS, unique(group_df$LAB_GROUP))
+
+    # LLM-strata lookups (DFCI_MRN -> stratum value), restricted to this
+    # cohort's labeled MRNs; each scheme reports labeled/total when used below.
+    llm_lookup <- NULL
+    if (!is.null(llm_classifier_labels)) {
+      cohort_mrns_long <- unique(as.character(patient_df[[ID_COL]]))
+      llm_lookup <- llm_classifier_labels %>%
+        filter(as.character(DFCI_MRN) %in% cohort_mrns_long) %>%
+        mutate(DFCI_MRN = as.character(DFCI_MRN))
+    }
+
+    for (lab_group in labs_present) {
       n_pat <- group_df %>% filter(LAB_GROUP == lab_group) %>% summarise(n = n_distinct(DFCI_MRN)) %>% pull(n)
+      slug <- lab_stem_slug(lab_group)
+
+      # Platinum-status stratum (existing behavior, now over every lab).
       ttl <- sprintf("%s -- group mean +/- 95%% CI vs. days from %s (n=%s patients)",
                      lab_group, ANCHOR_LABEL, format(n_pat, big.mark = ","))
       p <- plot_group_ci_panel(group_df, lab_group, ttl)
-      save_fig(p, OUT_DIR, sprintf("androgen_longitudinal_group_ci_%s", tolower(lab_group)),
-               width = 9.5, height = 5.5)
+      save_fig(p, OUT_DIR, sprintf("longitudinal_platinum_%s", slug), width = 9.5, height = 5.5)
       if (show) print(p)
+
+      if (is.null(llm_lookup)) next
+      for (scheme_name in names(LLM_STRATA)) {
+        scheme <- LLM_STRATA[[scheme_name]]
+        stratum_values <- llm_lookup %>%
+          transmute(DFCI_MRN, stratum = as.character(.data[[scheme$col]]))
+        if (!is.null(scheme$labels))
+          stratum_values$stratum <- scheme$labels[match(stratum_values$stratum, as.character(scheme$levels))]
+        stratum_values <- stratum_values %>% filter(!is.na(stratum))
+        n_labeled <- length(intersect(unique(stratum_values$DFCI_MRN),
+                                      group_df$DFCI_MRN[group_df$LAB_GROUP == lab_group]))
+        message(sprintf("longitudinal_%s_%s: %d / %d cohort patients labeled",
+                        scheme_name, slug, n_labeled, n_pat))
+        stratum_legend <- if (!is.null(scheme$labels)) setNames(scheme$labels, scheme$labels) else NULL
+        stratum_colors <- setNames(KM_PALETTE[seq_along(scheme$levels)],
+                                   if (!is.null(scheme$labels)) scheme$labels else as.character(scheme$levels))
+        ttl_s <- sprintf("%s by %s -- days from %s (n labeled=%d/%d)",
+                         lab_group, scheme_name, ANCHOR_LABEL, n_labeled, n_pat)
+        p_s <- plot_group_ci_panel(group_df, lab_group, ttl_s, stratum_col = scheme$col,
+                                   stratum_values = stratum_values, stratum_legend = stratum_legend,
+                                   stratum_colors = stratum_colors)
+        save_fig(p_s, OUT_DIR, sprintf("longitudinal_%s_%s", scheme_name, slug),
+                 width = 9.5, height = 5.5)
+        if (show) print(p_s)
+      }
     }
   }
 }

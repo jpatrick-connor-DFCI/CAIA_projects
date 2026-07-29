@@ -42,17 +42,15 @@ SURV_PATH = EMBED_PROJ_PATH / "time-to-event_analysis"
 # straight from the raw OncDRS pull. It supplies the outcome/anchor columns
 # (age, treatment anchor, death, last-contact, platinum) that used to come from
 # death_met_surv_df.csv.gz. See load_death_df_from_survival_cohort. Defaults to
-# the widest anchored ICD-C61 cohort, which allows other primary malignancies
-# and contains both currently analyzed arms.
+# the ARPI-anchored ICD-C61 cohort (every ICD-C61 patient, including those
+# with a competing non-prostate primary).
 # main() loads this file
 # first and uses its MRN set both to scan-filter the raw HEALTH_HISTORY/
 # OUTPT_LAB_RESULTS_LABS/MEDICATIONS reads and to restrict the final output --
-# this is the one cohort-membership filter Stage 2 applies. Narrower cohort
-# variants without other primaries remain a Stage 3
-# (build_prediction_inputs.py --restrict-to-mrns) concern.
+# this is the one cohort-membership filter Stage 2 applies.
 DEFAULT_SURVIVAL_COHORT_CSV = (
     NEPC_PROJ_PATH
-    / "prostate_arpi_survival_cohort_with_other_primaries_arpi.csv"
+    / "prostate_arpi_survival_cohort_arpi.csv"
 )
 
 # Cisplatin appears both as a single agent and coded within a combination
@@ -131,7 +129,7 @@ ANCHOR_MED_SETS = {"arpi": ARPI_ANCHOR_MEDS, "adt": ADT_ANCHOR_MEDS}
 
 DEFAULT_ADT_SURVIVAL_COHORT_CSV = (
     NEPC_PROJ_PATH
-    / "prostate_adt_survival_cohort_with_other_primaries_adt.csv"
+    / "prostate_adt_survival_cohort_adt.csv"
 )
 DEFAULT_ADT_OUTPUT_CSV = NEPC_PROJ_PATH / "longitudinal_prediction_data_adt.csv"
 DEFAULT_ADT_CONSOLIDATED_CACHE_PARQUET = (

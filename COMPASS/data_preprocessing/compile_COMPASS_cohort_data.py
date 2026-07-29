@@ -16,13 +16,17 @@ cohorts directly from the raw OncDRS 2025-03 pull.
                                     survival cohort (age, treatment anchor,
                                     death, platinum time-to-event).
 Cohort definitions:
-Two ICD-C61 MRN sets are built, each driving a full outcomes cohort plus an
-ARPI/chemo-exposure-restricted subset (non-null TREATMENT_ANCHOR_DATE):
+A single ICD-C61 MRN set -- every ICD-10 C61 patient, including those with a
+competing non-prostate primary -- drives two anchor-exposure-restricted
+survival cohorts (non-null TREATMENT_ANCHOR_DATE):
 
-  * without_other_primaries -- ICD-10 C61 patients minus patients whose ICD
-                              history shows a competing non-prostate primary.
-  * with_other_primaries    -- every ICD-10 C61 patient, retaining patients
-                              with a competing non-prostate primary.
+  * arpi -- ICD-C61 patients anchored on first ARPI/chemo exposure.
+  * adt  -- ICD-C61 patients anchored on first ADT (GnRH agonist/antagonist
+            or 1st-gen antiandrogen) exposure.
+
+Patients with a competing non-prostate primary are no longer excluded from
+cohort membership; ``HAS_NON_PROSTATE_PRIMARY`` is retained in
+icd_prostate_mrn_flags.csv purely as a descriptive flag.
 
 The former VTE-derived arms are omitted because the VTE prostate MRNs are
 fully contained within the ICD-C61 universe.
@@ -41,13 +45,11 @@ Inputs:
 
 Outputs (in NEPC_PROJ_PATH):
   * prostate_icd_data.csv                        (ICD inclusion/exclusion record)
-  * prostate_arpi_survival_cohort_without_other_primaries.csv
-  * prostate_arpi_survival_cohort_without_other_primaries_arpi.csv
-  * prostate_arpi_survival_cohort_with_other_primaries.csv
-  * prostate_arpi_survival_cohort_with_other_primaries_arpi.csv
+  * prostate_arpi_survival_cohort_arpi.csv
+  * prostate_adt_survival_cohort_adt.csv
 
-Also writes four matching bare DFCI_MRN-only CSVs to ``mrn_lists_dir``
-(default ``NEPC_PROJ_PATH/mrn_lists/``).
+Also writes two matching bare DFCI_MRN-only CSVs to ``mrn_lists_dir``
+(default ``NEPC_PROJ_PATH/mrn_lists/``): ``arpi_mrns.csv``, ``adt_mrns.csv``.
 
 Finally, writes ``icd_prostate_mrn_flags.csv`` to ``mrn_lists_dir``. This
 patient-level audit table includes every MRN with an ICD-10 C61 diagnosis
@@ -227,17 +229,6 @@ def compute_prostate_cohort(icds: pl.DataFrame, non_prostate_primary_mrns: set):
         f"retained {len(prostate_mrns)}."
     )
     return prostate_mrns, excluded
-
-
-def assert_cohort_set_invariants(cohorts: dict[str, set]) -> None:
-    """Fail early unless the excluded ICD cohort is a subset of the full one."""
-    if not (
-        cohorts["without_other_primaries"]
-        <= cohorts["with_other_primaries"]
-    ):
-        raise AssertionError(
-            "without_other_primaries must be a subset of with_other_primaries."
-        )
 
 
 def load_and_explode_icd(icd_path) -> pl.DataFrame:
@@ -594,8 +585,8 @@ def summarize_survival_cohort(cohort: pl.DataFrame, label="cohort"):
 def main():
     parser = argparse.ArgumentParser(
         description="Compile the COMPASS prostate cohort's ICD inclusion/"
-        "exclusion record and ARPI/chemo-anchored survival cohorts from the "
-        "raw OncDRS pull, with and without the non-prostate-primary exclusion.",
+        "exclusion record and the ARPI- and ADT-anchored survival cohorts "
+        "from the raw OncDRS pull, over every ICD-C61 patient.",
     )
     parser.add_argument(
         "--icd-source",
@@ -630,39 +621,32 @@ def main():
     )
     args = parser.parse_args()
 
-    # 1. The two ICD-C61 cohort MRN sets. The non-prostate-primary exclusion
-    #    is computed once from the full ICD history.
+    # 1. The single ICD-C61 cohort MRN set (every ICD-C61 patient, including
+    #    those with a competing non-prostate primary). The non-prostate-
+    #    primary exclusion is still computed, but only feeds the descriptive
+    #    HAS_NON_PROSTATE_PRIMARY flag below -- it no longer gates cohort
+    #    membership.
     icds = load_and_explode_icd(args.icd_source)
     non_prostate_primary_mrns = compute_non_prostate_primary_mrns(icds)
-    without_other_primaries_mrns, icd_excluded_mrns = compute_prostate_cohort(
+    prostate_excl_mrns, icd_excluded_mrns = compute_prostate_cohort(
         icds,
         non_prostate_primary_mrns,
     )
-    with_other_primaries_mrns = (
-        without_other_primaries_mrns | icd_excluded_mrns
-    )
+    all_cohort_mrns = prostate_excl_mrns | icd_excluded_mrns
     print(
-        f"ICD-C61 cohorts: {len(without_other_primaries_mrns)} without other "
-        f"primaries; {len(with_other_primaries_mrns)} with other primaries "
-        f"allowed ({len(icd_excluded_mrns)} additional patients)."
+        f"ICD-C61 cohort: {len(all_cohort_mrns)} patients "
+        f"({len(icd_excluded_mrns)} with a competing non-prostate primary)."
     )
-
-    cohorts = {
-        "without_other_primaries": without_other_primaries_mrns,
-        "with_other_primaries": with_other_primaries_mrns,
-    }
-    assert_cohort_set_invariants(cohorts)
 
     # 2. ICD output + in-memory medications scoped to every ICD-C61 patient.
     meds = compile_cohort_tables(
-        with_other_primaries_mrns,
-        with_other_primaries_mrns,
+        all_cohort_mrns,
+        all_cohort_mrns,
         icds,
     )
 
-    # 3. ARPI/chemo-anchored survival cohort, reusing the meds already
-    #    scoped to every cohort above -- shared across both cohort
-    #    definitions since anchor/platinum dates don't depend on cohort.
+    # 3. ARPI- and ADT-anchored survival cohorts, both over the same
+    #    all_cohort_mrns set.
     meds_for_survival = load_medications_for_survival(meds)
     anchor_df = compute_treatment_anchor(meds_for_survival, meds_set=ARPI_ANCHOR_MEDS)
     adt_anchor_df = compute_treatment_anchor(meds_for_survival, meds_set=ADT_ANCHOR_MEDS)
@@ -670,25 +654,15 @@ def main():
     print(
         f"ARPI anchor drug recipients: {len(anchor_df)}; "
         f"ADT anchor drug recipients: {len(adt_anchor_df)}; "
-        f"platinum recipients: {len(platinum_df)} (across all cohorts)."
+        f"platinum recipients: {len(platinum_df)}."
     )
 
     status_df = load_patient_status(args.oncdrs_path)
 
-    # Stable, explicit filenames mirror the two public cohort labels.
-    out_names = {
-        "without_other_primaries": (
-            "prostate_arpi_survival_cohort_without_other_primaries.csv"
-        ),
-        "with_other_primaries": (
-            "prostate_arpi_survival_cohort_with_other_primaries.csv"
-        ),
-    }
-
     os.makedirs(args.mrn_lists_dir, exist_ok=True)
 
     icd_prostate_flags = build_icd_prostate_mrn_flags(
-        with_other_primaries_mrns,
+        all_cohort_mrns,
         non_prostate_primary_mrns,
         meds,
         args.labs_csv,
@@ -703,43 +677,29 @@ def main():
         f"{icd_prostate_flags_path}"
     )
 
-    for cohort_key, cohort_mrns in cohorts.items():
-        survival_cohort = build_survival_cohort(cohort_mrns, anchor_df, platinum_df, status_df)
-        summarize_survival_cohort(survival_cohort, label=cohort_key)
+    survival_cohort = build_survival_cohort(all_cohort_mrns, anchor_df, platinum_df, status_df)
+    arpi_cohort = survival_cohort.filter(pl.col('TREATMENT_ANCHOR_DATE').is_not_null())
+    summarize_survival_cohort(arpi_cohort, label="arpi")
 
-        out_path = os.path.join(args.out_dir, out_names[cohort_key])
-        survival_cohort.write_csv(out_path)
-        print(f"Saved {cohort_key} survival cohort to {out_path}")
+    arpi_out_path = os.path.join(args.out_dir, "prostate_arpi_survival_cohort_arpi.csv")
+    arpi_cohort.write_csv(arpi_out_path)
+    print(f"Saved arpi survival cohort to {arpi_out_path}")
 
-        mrn_list_path = os.path.join(args.mrn_lists_dir, f"{cohort_key}_mrns.csv")
-        survival_cohort.select(ID_COL).unique().sort(ID_COL).write_csv(mrn_list_path)
-        print(f"Saved {cohort_key} MRN list to {mrn_list_path}")
+    arpi_mrn_list_path = os.path.join(args.mrn_lists_dir, "arpi_mrns.csv")
+    arpi_cohort.select(ID_COL).unique().sort(ID_COL).write_csv(arpi_mrn_list_path)
+    print(f"Saved arpi MRN list to {arpi_mrn_list_path}")
 
-        arpi_cohort = survival_cohort.filter(pl.col('TREATMENT_ANCHOR_DATE').is_not_null())
-        summarize_survival_cohort(arpi_cohort, label=f"{cohort_key}_arpi")
+    adt_survival_cohort = build_survival_cohort(all_cohort_mrns, adt_anchor_df, platinum_df, status_df)
+    adt_cohort = adt_survival_cohort.filter(pl.col('TREATMENT_ANCHOR_DATE').is_not_null())
+    summarize_survival_cohort(adt_cohort, label="adt")
 
-        arpi_out_path = os.path.join(args.out_dir, f"prostate_arpi_survival_cohort_{cohort_key}_arpi.csv")
-        arpi_cohort.write_csv(arpi_out_path)
-        print(f"Saved {cohort_key}_arpi survival cohort to {arpi_out_path}")
+    adt_out_path = os.path.join(args.out_dir, "prostate_adt_survival_cohort_adt.csv")
+    adt_cohort.write_csv(adt_out_path)
+    print(f"Saved adt survival cohort to {adt_out_path}")
 
-        arpi_mrn_list_path = os.path.join(args.mrn_lists_dir, f"{cohort_key}_arpi_mrns.csv")
-        arpi_cohort.select(ID_COL).unique().sort(ID_COL).write_csv(arpi_mrn_list_path)
-        print(f"Saved {cohort_key}_arpi MRN list to {arpi_mrn_list_path}")
-
-        # ADT-anchored variant of this same cohort, additive alongside the
-        # ARPI arm above -- reuses the same unanchored survival_cohort rows,
-        # just re-derived against adt_anchor_df instead of anchor_df.
-        adt_survival_cohort = build_survival_cohort(cohort_mrns, adt_anchor_df, platinum_df, status_df)
-        adt_cohort = adt_survival_cohort.filter(pl.col('TREATMENT_ANCHOR_DATE').is_not_null())
-        summarize_survival_cohort(adt_cohort, label=f"{cohort_key}_adt")
-
-        adt_out_path = os.path.join(args.out_dir, f"prostate_adt_survival_cohort_{cohort_key}_adt.csv")
-        adt_cohort.write_csv(adt_out_path)
-        print(f"Saved {cohort_key}_adt survival cohort to {adt_out_path}")
-
-        adt_mrn_list_path = os.path.join(args.mrn_lists_dir, f"{cohort_key}_adt_mrns.csv")
-        adt_cohort.select(ID_COL).unique().sort(ID_COL).write_csv(adt_mrn_list_path)
-        print(f"Saved {cohort_key}_adt MRN list to {adt_mrn_list_path}")
+    adt_mrn_list_path = os.path.join(args.mrn_lists_dir, "adt_mrns.csv")
+    adt_cohort.select(ID_COL).unique().sort(ID_COL).write_csv(adt_mrn_list_path)
+    print(f"Saved adt MRN list to {adt_mrn_list_path}")
 
 
 if __name__ == "__main__":
