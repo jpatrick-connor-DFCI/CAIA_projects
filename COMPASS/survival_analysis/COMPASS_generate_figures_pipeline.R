@@ -771,8 +771,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   if (show) print(pA2)
 
   ## Panel B -- subtype landscape (descriptive, 4-class)
-  # platinum_positive_labels := is_platinum == TRUE  (n=200);  status "positive"
-  # platinum_negative_labels := is_platinum == FALSE (n=1682); status "negative"
+  # Split labels by current platinum-list membership. Counts are intentionally
+  # derived from the inputs because both source files can be refreshed.
   count_labels <- function(df) {
     df %>% count(primary_label, name = "count") %>%
       mutate(frac = count / sum(count))
@@ -784,29 +784,28 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
   label_distributions <- bind_rows(platinum_positive_labels, platinum_negative_labels)
 
-  # --- Sanity check: guards against the swap regressing silently. ---
-  expected_pos_counts <- c(avpc = 118, nepc = 36, conventional = 30, biomarker = 16)
-  expected_neg_counts <- c(conventional = 1090, avpc = 456, biomarker = 72, nepc = 64)
+  # Sanity checks guard against a status swap or silently dropped labels without
+  # pinning the figure to counts from an older snapshot of the input files.
+  expected_primary_labels <- c("avpc", "nepc", "conventional", "biomarker")
+  observed_primary_labels <- unique(as.character(nepc_annotations$primary_label))
+  invalid_primary_labels <- setdiff(observed_primary_labels, expected_primary_labels)
+  if (anyNA(nepc_annotations$primary_label) || length(invalid_primary_labels) > 0) {
+    stop(sprintf(
+      "Figure 2 requires non-missing primary_label values in {%s}; found invalid value(s): %s",
+      paste(expected_primary_labels, collapse = ", "),
+      paste(c(if (anyNA(nepc_annotations$primary_label)) "NA", invalid_primary_labels),
+            collapse = ", ")
+    ), call. = FALSE)
+  }
   named_counts <- function(df) { v <- df$count; names(v) <- df$primary_label; v }
   pos_counts <- named_counts(platinum_positive_labels)
   neg_counts <- named_counts(platinum_negative_labels)
-
-  validate_expected_counts <- function(observed, expected, label) {
-    aligned <- observed[names(expected)]
-    matches <- !anyNA(aligned) &&
-      identical(names(aligned), names(expected)) &&
-      all(as.numeric(aligned) == as.numeric(expected))
-    if (!matches) {
-      fmt <- function(x) paste(sprintf("%s=%s", names(x), as.numeric(x)), collapse = ", ")
-      stop(sprintf("%s counts do not match expected {%s}; got {%s}",
-                   label, fmt(expected), fmt(observed)), call. = FALSE)
-    }
-    invisible(TRUE)
-  }
-  validate_expected_counts(pos_counts, expected_pos_counts, "platinum-positive")
-  validate_expected_counts(neg_counts, expected_neg_counts, "platinum-negative")
-  stopifnot(sum(platinum_positive_labels$count) == 200)
-  stopifnot(sum(platinum_negative_labels$count) == 1682)
+  stopifnot(
+    !anyNA(nepc_annotations$is_platinum),
+    sum(platinum_positive_labels$count) == sum(nepc_annotations$is_platinum),
+    sum(platinum_negative_labels$count) == sum(!nepc_annotations$is_platinum),
+    sum(label_distributions$count) == nrow(nepc_annotations)
+  )
 
   if (show) print(label_distributions)
 
@@ -870,11 +869,21 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   )
   print(ct)
 
-  # Sanity check against the plan's known margins.
-  stopifnot(ct["aggressive","platinum+"]   == 154)
-  stopifnot(ct["conventional","platinum+"] == 30)
-  stopifnot(ct["aggressive","platinum-"]   == 520)
-  stopifnot(ct["conventional","platinum-"] == 1090)
+  # Cross-check the enrichment table against the four-class distributions.
+  count_or_zero <- function(counts, labels) {
+    values <- counts[intersect(labels, names(counts))]
+    if (length(values) == 0) 0 else sum(values)
+  }
+  stopifnot(
+    ct["aggressive","platinum+"] ==
+      count_or_zero(pos_counts, c("avpc", "nepc")),
+    ct["conventional","platinum+"] ==
+      count_or_zero(pos_counts, "conventional"),
+    ct["aggressive","platinum-"] ==
+      count_or_zero(neg_counts, c("avpc", "nepc")),
+    ct["conventional","platinum-"] ==
+      count_or_zero(neg_counts, "conventional")
+  )
 
   ft <- fisher.test(ct, alternative = "greater")
   OR <- unname(ft$estimate); p_value <- ft$p.value
