@@ -94,13 +94,32 @@ load_llm_strata <- function(llm_annotations_path) {
   if (length(missing) > 0) {
     stop(sprintf("%s is missing required columns: %s", path, paste(missing, collapse = ", ")))
   }
-  strata %>%
+  strata <- strata %>%
     select(all_of(required)) %>%
     mutate(
-      primary_label = factor(primary_label, levels = LLM_STRATA$primary_label$levels),
+      primary_label = str_to_lower(str_trim(as.character(primary_label))),
       has_nepc = suppressWarnings(as.numeric(has_nepc)),
       has_avpc = suppressWarnings(as.numeric(has_avpc))
     )
+  invalid_primary <- setdiff(unique(na.omit(strata$primary_label)),
+                             LLM_STRATA$primary_label$levels)
+  if (length(invalid_primary) > 0) {
+    warning(sprintf(
+      "load_llm_strata: unrecognized primary_label value(s) converted to NA: %s",
+      paste(invalid_primary, collapse = ", ")
+    ))
+  }
+  for (col in c("has_nepc", "has_avpc")) {
+    invalid_binary <- setdiff(unique(na.omit(strata[[col]])), c(0, 1))
+    if (length(invalid_binary) > 0) {
+      warning(sprintf(
+        "load_llm_strata: non-binary %s value(s) will be excluded from binary metrics: %s",
+        col, paste(invalid_binary, collapse = ", ")
+      ))
+    }
+  }
+  strata %>%
+    mutate(primary_label = factor(primary_label, levels = LLM_STRATA$primary_label$levels))
 }
 
 # ---- helpers ported from the Python notebook ----
@@ -108,21 +127,42 @@ load_llm_strata <- function(llm_annotations_path) {
 # binary_metrics: confusion-matrix-derived classification metrics for a 0/1
 # (or logical) truth/pred pair. Returns a named list (mirrors the pd.Series).
 binary_metrics <- function(y_true, y_pred) {
-  y_true <- as.integer(y_true); y_pred <- as.integer(y_pred)
+  if (length(y_true) != length(y_pred)) {
+    stop("binary_metrics: y_true and y_pred must have the same length")
+  }
+  as_binary_integer <- function(x) {
+    if (is.logical(x)) return(as.integer(x))
+    if (is.factor(x)) x <- as.character(x)
+    suppressWarnings(as.integer(x))
+  }
+  y_true <- as_binary_integer(y_true)
+  y_pred <- as_binary_integer(y_pred)
+  valid <- !is.na(y_true) & !is.na(y_pred) &
+    y_true %in% c(0L, 1L) & y_pred %in% c(0L, 1L)
+  excluded <- sum(!valid)
+  if (excluded > 0) {
+    warning(sprintf(
+      "binary_metrics: excluded %s row(s) with missing or non-binary truth/prediction",
+      format(excluded, big.mark = ",")
+    ))
+  }
+  y_true <- y_true[valid]
+  y_pred <- y_pred[valid]
   tp <- sum(y_true == 1 & y_pred == 1)
   tn <- sum(y_true == 0 & y_pred == 0)
   fp <- sum(y_true == 0 & y_pred == 1)
   fn <- sum(y_true == 1 & y_pred == 0)
   safe <- function(num, den) if (den > 0) num / den else 0
   list(
-    Accuracy  = (tp + tn) / (tp + tn + fp + fn),
+    Accuracy  = safe(tp + tn, tp + tn + fp + fn),
     Precision = safe(tp, tp + fp),
     Recall    = safe(tp, tp + fn),
     TPR       = safe(tp, tp + fn),
     FPR       = safe(fp, fp + tn),
     TNR       = safe(tn, tn + fp),
     FNR       = safe(fn, fn + tp),
-    TP = tp, FP = fp, TN = tn, FN = fn
+    TP = tp, FP = fp, TN = tn, FN = fn,
+    N = length(y_true), Excluded = excluded
   )
 }
 
@@ -1055,8 +1095,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                 format(nrow(merged_v2), big.mark = ","),
                 format(sum(merged_v2$manual_NEPC), big.mark = ",")))
     metrics_v2 <- binary_metrics(merged_v2$manual_NEPC, merged_v2$LLM_NEPC)
-    n_total_v2 <- nrow(merged_v2)
-    n_nepc_manual_v2 <- sum(merged_v2$manual_NEPC)
+    n_total_v2 <- metrics_v2$N
+    n_nepc_manual_v2 <- metrics_v2$TP + metrics_v2$FN
     caption_a_v2 <- sprintf("N = %s chart-reviewed patients; %s manual-NEPC positive (LLM_NEPC_classifier_labels.tsv).",
                             format(n_total_v2, big.mark = ","), format(n_nepc_manual_v2, big.mark = ","))
     pA1_v2 <- render_confusion_panel(metrics_v2) + labs(caption = caption_a_v2) +
@@ -1073,15 +1113,25 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
       mutate(manual_NEPC = simplified_manual_platinum_reason %in% c("nepc", "squamous_transformation"))
 
     metrics_has_nepc <- binary_metrics(merged_bin_v2$manual_NEPC, merged_bin_v2$has_nepc)
+    caption_has_nepc <- sprintf(
+      "N = %s patients with evaluable manual and has_nepc calls; %s manual-NEPC positive.",
+      format(metrics_has_nepc$N, big.mark = ","),
+      format(metrics_has_nepc$TP + metrics_has_nepc$FN, big.mark = ",")
+    )
     p_has_nepc <- render_confusion_panel_v2(metrics_has_nepc, "NEPC", "has_nepc=1",
                                             "Panel A — has_nepc confusion matrix") +
-      labs(caption = caption_a_v2) + theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
+      labs(caption = caption_has_nepc) + theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
     save_fig(p_has_nepc, OUT_DIR_V2, "figure2v2_confusion_has_nepc", 4.2, 4.2)
 
     metrics_has_avpc <- binary_metrics(merged_bin_v2$manual_NEPC, merged_bin_v2$has_avpc)
+    caption_has_avpc <- sprintf(
+      "N = %s patients with evaluable manual and has_avpc calls; %s manual-NEPC positive.",
+      format(metrics_has_avpc$N, big.mark = ","),
+      format(metrics_has_avpc$TP + metrics_has_avpc$FN, big.mark = ",")
+    )
     p_has_avpc <- render_confusion_panel_v2(metrics_has_avpc, "NEPC", "has_avpc=1",
                                             "Panel A — has_avpc confusion matrix") +
-      labs(caption = caption_a_v2) + theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
+      labs(caption = caption_has_avpc) + theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
     save_fig(p_has_avpc, OUT_DIR_V2, "figure2v2_confusion_has_avpc", 4.2, 4.2)
 
     ## Panel B -- subtype landscape by platinum status (4-class primary_label).
