@@ -281,7 +281,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     NEPC_PROJ_PATH, "mrn_lists", "icd_prostate_mrn_flags.csv"
   )
 
-  FIG_ROOT <- fig_root
+  # Keep the two requested deliverables physically separate:
+  #   .../CAIA/COMPASS/ARPI/
+  #   .../CAIA/COMPASS/ADT/
+  FIG_ROOT <- file.path(fig_root, toupper(COHORT))
   # Canonical-lab names sorted longest-first so e.g. "Direct bilirubin" is
   # matched before "Total bilirubin" would ever partially collide, and so a
   # lab-specific stem is never mis-routed to a shorter substring match.
@@ -299,7 +302,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     NA_character_
   }
   # Figure-first, panel-second layout for non-lab-specific figures:
-  #   FIG_ROOT/<figure>/<plot-stem>/<cohort>_<plot-stem>.png
+  #   <fig_root>/<ARPI|ADT>/<figure>/<plot-stem>/<cohort>_<plot-stem>.png
   # Per-lab panels (all-lab longitudinal/KM-quartile/distribution plots) are
   # nested one level deeper by CATEGORY_MAP category so ~40 labs x 4 strata
   # stay navigable instead of dumping ~160+ files into one flat directory:
@@ -449,6 +452,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     required <- c(
       ID_COL,
       "HAS_NON_PROSTATE_PRIMARY",
+      "HAS_POST_ADT_EXCLUSION_CANCER",
       "PARPI_EXPOSED",
       "ARPI_DOCETAXEL_EXPOSED",
       "ADT_EXPOSED",
@@ -479,15 +483,18 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   render_consort_panel <- function(mrn_flags) {
     keep <- rep(TRUE, nrow(mrn_flags))
     steps <- list(
-      c("ICD-defined prostate cancer", sum(keep)),
-      c("Other primaries allowed", sum(keep))
+      c("ICD-defined prostate cancer", sum(keep))
+    )
+    keep <- keep & mrn_flags$ADT_EXPOSED == 1
+    steps[[length(steps) + 1]] <- c("ADT entry requirement", sum(keep))
+    keep <- keep & mrn_flags$HAS_POST_ADT_EXCLUSION_CANCER == 0
+    steps[[length(steps) + 1]] <- c(
+      "No bladder, lung, head and neck,\nor testicular cancer after ADT",
+      sum(keep)
     )
     keep <- keep & mrn_flags$PARPI_EXPOSED == 0
     steps[[length(steps) + 1]] <- c("No PARPi exposure", sum(keep))
-    if (IS_ADT) {
-      keep <- keep & mrn_flags$ADT_EXPOSED == 1
-      steps[[length(steps) + 1]] <- c("ADT exposure", sum(keep))
-    } else {
+    if (!IS_ADT) {
       keep <- keep & mrn_flags$ARPI_DOCETAXEL_EXPOSED == 1
       steps[[length(steps) + 1]] <- c("ARPI/docetaxel exposure", sum(keep))
     }

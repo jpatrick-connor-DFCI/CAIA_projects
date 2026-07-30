@@ -2,8 +2,8 @@
 Script Name: compile_COMPASS_cohort_data.py
 
 Description:
-Single entry point that builds the COMPASS prostate-cancer cohort's ICD
-inclusion/exclusion record and ARPI/chemo-anchored survival (outcomes)
+Single entry point that builds the ADT-entry COMPASS prostate-cancer cohort's
+ICD inclusion/exclusion record and ARPI/chemo-anchored survival (outcomes)
 cohorts directly from the raw OncDRS 2025-03 pull.
 
   * compile_prostate_data.py    -- ICD cohort definition (the rest of that
@@ -16,17 +16,17 @@ cohorts directly from the raw OncDRS 2025-03 pull.
                                     survival cohort (age, treatment anchor,
                                     death, platinum time-to-event).
 Cohort definitions:
-A single ICD-C61 MRN set -- every ICD-10 C61 patient, including those with a
-competing non-prostate primary -- drives two anchor-exposure-restricted
-survival cohorts (non-null TREATMENT_ANCHOR_DATE):
+The primary entry requirement is a dated ADT exposure among ICD-10 C61
+patients. Patients are then excluded if bladder, lung, head-and-neck, or
+testicular cancer is diagnosed strictly after ADT start. This common eligible
+MRN set drives two survival cohorts:
 
-  * arpi -- ICD-C61 patients anchored on first ARPI/chemo exposure.
-  * adt  -- ICD-C61 patients anchored on first ADT (GnRH agonist/antagonist
-            or 1st-gen antiandrogen) exposure.
+  * arpi -- eligible ADT-entry patients anchored on first ARPI/chemo exposure.
+  * adt  -- eligible ADT-entry patients anchored on first ADT (GnRH
+            agonist/antagonist or 1st-gen antiandrogen) exposure.
 
-Patients with a competing non-prostate primary are no longer excluded from
-cohort membership; ``HAS_NON_PROSTATE_PRIMARY`` is retained in
-icd_prostate_mrn_flags.csv purely as a descriptive flag.
+Other competing non-prostate primaries, and the four specified cancers when
+diagnosed on or before ADT start, do not trigger this exclusion.
 
 The former VTE-derived arms are omitted because the VTE prostate MRNs are
 fully contained within the ICD-C61 universe.
@@ -55,10 +55,10 @@ patient with a dated platinum exposure, independent of treatment-anchor
 eligibility.
 
 Finally, writes ``icd_prostate_mrn_flags.csv`` to ``mrn_lists_dir``. This
-patient-level audit table includes every MRN with an ICD-10 C61 diagnosis
-(before the non-prostate-primary exclusion) and binary indicators for a
-competing non-prostate primary, PARPi exposure, ARPI/docetaxel exposure, and
-at least five broad PSA tests.
+patient-level audit table includes every MRN with an ICD-10 C61 diagnosis and
+binary indicators for a competing non-prostate primary, a specified
+post-ADT exclusion cancer, PARPi exposure, ARPI/docetaxel exposure, ADT
+exposure, and at least five broad PSA tests.
 
 Author: J. Patrick Connor
 Date: 2026-07-18
@@ -162,6 +162,24 @@ PLATINUM_MEDS = {
     "CISPLATIN/CYCLOPHOSPHAMIDE/ETOPOSIDE",
 }
 
+# ICD-10-CM primary malignancies requested for exclusion when their diagnosis
+# date is strictly after first ADT. Head and neck follows the standard
+# topographic groupings C00-C14 and C30-C32.
+POST_ADT_EXCLUSION_CANCER_GROUPS = {
+    "bladder": {"C67"},
+    "lung": {"C34"},
+    "head_and_neck": {
+        *(f"C{i:02d}" for i in range(0, 15)),
+        "C30",
+        "C31",
+        "C32",
+    },
+    "testicular": {"C62"},
+}
+POST_ADT_EXCLUSION_CANCER_PREFIXES = set().union(
+    *POST_ADT_EXCLUSION_CANCER_GROUPS.values()
+)
+
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +227,43 @@ def compute_non_prostate_primary_mrns(icds: pl.DataFrame) -> set:
         .cast(pl.Int64, strict=False)
     )
     return set(non_prostate_ids.drop_nulls().to_list())
+
+
+def compute_post_adt_exclusion_cancer_mrns(
+    icds: pl.DataFrame,
+    adt_anchor_df: pl.DataFrame,
+) -> set:
+    """Return MRNs with a requested exclusion cancer diagnosed after ADT.
+
+    Diagnosis on the ADT start date is retained: "post ADT start" is
+    implemented as the strict comparison START_DT > TREATMENT_ANCHOR_DATE.
+    Rows without a parseable diagnosis date cannot establish a post-ADT
+    diagnosis and therefore do not trigger exclusion.
+    """
+    diagnosis = icds.select(
+        pl.col(ID_COL)
+        .cast(pl.Float64, strict=False)
+        .cast(pl.Int64, strict=False)
+        .alias(ID_COL),
+        pl.col("DIAGNOSIS_ICD10_CD")
+        .cast(pl.Utf8)
+        .str.to_uppercase()
+        .str.strip_chars()
+        .str.extract(r"^(C\d{2})", 1)
+        .alias("_ICD_PREFIX"),
+        pl.col("START_DT")
+        .cast(pl.Utf8)
+        .str.to_datetime(strict=False)
+        .alias("_DIAGNOSIS_DATE"),
+    )
+    post_adt = (
+        diagnosis.filter(
+            pl.col("_ICD_PREFIX").is_in(sorted(POST_ADT_EXCLUSION_CANCER_PREFIXES))
+        )
+        .join(adt_anchor_df, on=ID_COL, how="inner")
+        .filter(pl.col("_DIAGNOSIS_DATE") > pl.col("TREATMENT_ANCHOR_DATE"))
+    )
+    return set(post_adt[ID_COL].drop_nulls().to_list())
 
 
 def compute_prostate_cohort(icds: pl.DataFrame, non_prostate_primary_mrns: set):
@@ -348,6 +403,7 @@ def compile_cohort_tables(icd_mrns, all_cohort_mrns, icds: pl.DataFrame):
 def build_icd_prostate_mrn_flags(
     c61_mrns: set,
     non_prostate_primary_mrns: set,
+    post_adt_exclusion_cancer_mrns: set,
     meds: pl.DataFrame,
     labs_path: str,
 ) -> pl.DataFrame:
@@ -410,6 +466,10 @@ def build_icd_prostate_mrn_flags(
         .is_in(sorted(c61_mrns & non_prostate_primary_mrns))
         .cast(pl.Int8)
         .alias("HAS_NON_PROSTATE_PRIMARY"),
+        pl.col(ID_COL)
+        .is_in(sorted(c61_mrns & post_adt_exclusion_cancer_mrns))
+        .cast(pl.Int8)
+        .alias("HAS_POST_ADT_EXCLUSION_CANCER"),
         pl.col(ID_COL)
         .is_in(sorted(parpi_mrns))
         .cast(pl.Int8)
@@ -567,8 +627,8 @@ def summarize_survival_cohort(cohort: pl.DataFrame, label="cohort"):
     n = len(cohort)
     n_anchor = cohort['TREATMENT_ANCHOR_DATE'].is_not_null().sum()
     print(f"\n=== Survival cohort summary ({label}) ===")
-    print(f"Total patients (post-exclusion): {n}")
-    print(f"With an ARPI/chemo anchor drug: {n_anchor}")
+    print(f"Total eligible patients: {n}")
+    print(f"With the {label.upper()} analysis anchor: {n_anchor}")
     print(f"Deaths: {int(cohort['DEATH'].sum())}")
     print(f"Received platinum: {int(cohort['PLATINUM'].sum())}")
     with_times = cohort.filter(pl.col('TT_DEATH').is_not_null())
@@ -587,9 +647,8 @@ def summarize_survival_cohort(cohort: pl.DataFrame, label="cohort"):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compile the COMPASS prostate cohort's ICD inclusion/"
-        "exclusion record and the ARPI- and ADT-anchored survival cohorts "
-        "from the raw OncDRS pull, over every ICD-C61 patient.",
+        description="Compile the COMPASS ADT-entry prostate cohort and its "
+        "ARPI- and ADT-anchored survival outputs from the raw OncDRS pull.",
     )
     parser.add_argument(
         "--icd-source",
@@ -648,15 +707,26 @@ def main():
         icds,
     )
 
-    # 3. ARPI- and ADT-anchored survival cohorts, both over the same
-    #    all_cohort_mrns set.
+    # 3. Establish first ADT (the primary entry requirement), then exclude
+    #    the requested cancers only when diagnosed strictly after ADT start.
     meds_for_survival = load_medications_for_survival(meds)
     anchor_df = compute_treatment_anchor(meds_for_survival, meds_set=ARPI_ANCHOR_MEDS)
     adt_anchor_df = compute_treatment_anchor(meds_for_survival, meds_set=ADT_ANCHOR_MEDS)
     platinum_df = compute_first_platinum(meds_for_survival)
+    post_adt_exclusion_cancer_mrns = compute_post_adt_exclusion_cancer_mrns(
+        icds,
+        adt_anchor_df,
+    )
+    adt_entry_mrns = set(adt_anchor_df[ID_COL].drop_nulls().to_list())
+    eligible_mrns = (
+        all_cohort_mrns & adt_entry_mrns
+    ) - post_adt_exclusion_cancer_mrns
     print(
         f"ARPI anchor drug recipients: {len(anchor_df)}; "
         f"ADT anchor drug recipients: {len(adt_anchor_df)}; "
+        f"post-ADT specified-cancer exclusions: "
+        f"{len(all_cohort_mrns & post_adt_exclusion_cancer_mrns)}; "
+        f"eligible after ADT entry/exclusion: {len(eligible_mrns)}; "
         f"platinum recipients: {len(platinum_df)}."
     )
 
@@ -679,6 +749,7 @@ def main():
     icd_prostate_flags = build_icd_prostate_mrn_flags(
         all_cohort_mrns,
         non_prostate_primary_mrns,
+        post_adt_exclusion_cancer_mrns,
         meds,
         args.labs_csv,
     )
@@ -692,7 +763,9 @@ def main():
         f"{icd_prostate_flags_path}"
     )
 
-    survival_cohort = build_survival_cohort(all_cohort_mrns, anchor_df, platinum_df, status_df)
+    # Both arms inherit the same ADT-entry eligibility universe. The ARPI arm
+    # additionally requires its own non-null analysis anchor.
+    survival_cohort = build_survival_cohort(eligible_mrns, anchor_df, platinum_df, status_df)
     arpi_cohort = survival_cohort.filter(pl.col('TREATMENT_ANCHOR_DATE').is_not_null())
     summarize_survival_cohort(arpi_cohort, label="arpi")
 
@@ -704,7 +777,7 @@ def main():
     arpi_cohort.select(ID_COL).unique().sort(ID_COL).write_csv(arpi_mrn_list_path)
     print(f"Saved arpi MRN list to {arpi_mrn_list_path}")
 
-    adt_survival_cohort = build_survival_cohort(all_cohort_mrns, adt_anchor_df, platinum_df, status_df)
+    adt_survival_cohort = build_survival_cohort(eligible_mrns, adt_anchor_df, platinum_df, status_df)
     adt_cohort = adt_survival_cohort.filter(pl.col('TREATMENT_ANCHOR_DATE').is_not_null())
     summarize_survival_cohort(adt_cohort, label="adt")
 

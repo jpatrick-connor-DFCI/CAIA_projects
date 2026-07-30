@@ -6,10 +6,11 @@ exports and running landmark survival analysis (Cox / XGBoost) on the resulting 
 The preprocessing and modeling code is pandas-based; publication figures are generated only in R.
 Entry points are command-line scripts orchestrated from notebooks.
 COMPASS uses one `COMPASS_run_locally.ipynb` notebook for two treatment-anchored cohort arms,
-both over all ICD-C61 patients: `arpi` (anchored at first ARPI/chemo exposure) and `adt`
-(anchored at first ADT exposure, years earlier in the treatment sequence). The paired, R-only
-`COMPASS_generate_figures.ipynb` emits manuscript figures for both. `HAS_NON_PROSTATE_PRIMARY` is
-still computed and carried as a descriptive flag but no longer gates cohort membership.
+both drawn from an ADT-entry ICD-C61 cohort: `arpi` (anchored at first ARPI/chemo exposure) and
+`adt` (anchored at first ADT exposure, years earlier in the treatment sequence). Patients with
+bladder (C67), lung (C34), head-and-neck (C00-C14/C30-C32), or testicular (C62) cancer diagnosed
+strictly after ADT start are excluded. The paired, R-only `COMPASS_generate_figures.ipynb` emits
+manuscript figures for both.
 
 > This README is the canonical reference for editing the pipeline. It documents the directory
 > layout, the data flow, every script's inputs/outputs, the **conventions and invariants that
@@ -92,13 +93,12 @@ COMPASS/
 ## Stage 1 — Compile prostate cohort source data
 
 `data_preprocessing/compile_COMPASS_cohort_data.py` (module-level script, argparse CLI for path
-overrides). Derives a single ICD-C61 cohort over **all** patients with prostate cancer — the old
-with/without-other-primaries split is gone; `HAS_NON_PROSTATE_PRIMARY` is still computed and
-written to `icd_prostate_mrn_flags.csv` as a descriptive flag but no longer excludes anyone. The
-cohort is restricted separately per treatment anchor into the two output arms. The same script
-builds both the ARPI/chemo-anchored and the ADT-anchored survival data (age, treatment anchor,
-death, time-to-platinum) directly from the raw OncDRS pull, computing `anchor_df`/`adt_anchor_df`
-from the same medications scan.
+overrides). Derives the ICD-C61 universe, requires a dated ADT exposure as the primary entry
+criterion, and excludes bladder (C67), lung (C34), head-and-neck (C00-C14/C30-C32), and
+testicular (C62) cancer diagnosed strictly after first ADT. Other non-prostate primaries remain
+descriptive only. The same eligible base cohort feeds the ARPI/chemo-anchored and ADT-anchored
+survival data (age, treatment anchor, death, time-to-platinum), with `anchor_df`/`adt_anchor_df`
+computed from the same medication scan.
 
 - **Inputs (hard-coded under `DATA_PATH = /data/gusev/USERS/jpconnor/data/`, plus the raw OncDRS pull
   at `ONCDRS_PATH`):** `EHR_DIAGNOSIS.csv`, `HEALTH_HISTORY.csv`, `MEDICATIONS.csv`,
@@ -109,11 +109,12 @@ from the same medications scan.
   (`mrn_lists/arpi_mrns.csv`, `mrn_lists/adt_mrns.csv`), the regenerated all-ICD-C61
   platinum-recipient list (`mrn_lists/platinum_MRN_list.csv`), `prostate_icd_data.csv`, and
   `mrn_lists/icd_prostate_mrn_flags.csv`. The latter contains every ICD-C61 MRN plus binary
-  indicators for a non-prostate primary (`HAS_NON_PROSTATE_PRIMARY`, descriptive only), PARPi
-  exposure, ARPI/docetaxel exposure, ADT exposure (`ADT_EXPOSED`), and at least five broad PSA
-  tests.
-- **Cohort definition:** every ICD-C61 patient. Each of the `arpi`/`adt` anchor arms restricts that
-  same base cohort to patients with the corresponding treatment-anchor exposure.
+  indicators for a non-prostate primary (`HAS_NON_PROSTATE_PRIMARY`, descriptive only), a
+  requested post-ADT cancer exclusion (`HAS_POST_ADT_EXCLUSION_CANCER`), PARPi exposure,
+  ARPI/docetaxel exposure, ADT exposure (`ADT_EXPOSED`), and at least five broad PSA tests.
+- **Cohort definition:** ICD-C61 plus dated ADT exposure, excluding the four specified cancer
+  groups only when diagnosis is strictly after ADT start. The `adt` arm uses this cohort directly;
+  the `arpi` arm additionally requires an ARPI/chemo anchor.
 - **Anchor sets:** `ARPI_ANCHOR_MEDS` (7 drugs: ARPIs, taxanes, radium-223 — unchanged,
   `TREATMENT_ANCHOR_MEDS` alias retained) and `ADT_ANCHOR_MEDS` (10 drugs: GnRH agonists/antagonists
   + first-generation antiandrogens). `compute_treatment_anchor(meds, meds_set=...)` takes either set;
@@ -222,7 +223,8 @@ COMPASS PROFILE has one run notebook, one figure notebook, and a focused
 univariate-results review notebook:
 
 - `COMPASS_run_locally.ipynb` — drives preprocessing and runs both `COHORT_SPECS` arms: `arpi`
-  (landmarks 0/90) and `adt` (landmarks 0/90/365), both over the full ICD-C61 cohort. Each arm gets
+  (landmarks 0/90) and `adt` (landmarks 0/90/365), both over the common ADT-entry eligible cohort.
+  Each arm gets
   independent prediction inputs and univariate, elastic-net, and XGBoost models at its own landmark
   list (`tasks_for_run(run)` builds the per-run task grid from `run["landmarks"]`), and the Stage 2
   cell runs `longitudinal_data_processing.py` once per anchor (`--anchor-med-set {arpi,adt}`).
@@ -231,10 +233,9 @@ univariate-results review notebook:
   multivariate, KM, and per-lab distribution/trajectory figures — the ADT arm gets a third
   volcano/importance/KM/lab panel (landmark 365) that the ARPI arm doesn't. Figure 1A reads
   `mrn_lists/icd_prostate_mrn_flags.csv` and displays cumulative ICD-C61 cohort selection through
-  the PARPi and ≥5-PSA-test criteria, plus either the ARPI/docetaxel or the ADT exposure criterion
-  depending on the arm's anchor (`HAS_NON_PROSTATE_PRIMARY` is reported descriptively, not as a
-  selection step). Axis and table labels throughout name the arm's anchor ("ARPI/chemo initiation"
-  vs. "ADT initiation") via `ANCHOR_LABEL`.
+  ADT entry, the requested post-ADT cancer exclusion, PARPi, and ≥5-PSA-test criteria; the ARPI
+  arm additionally displays its ARPI/docetaxel exposure criterion. Axis and table labels throughout
+  name the arm's anchor ("ARPI/chemo initiation" vs. "ADT initiation") via `ANCHOR_LABEL`.
   - **LLM label strata:** alongside the existing `LLM_v3_labels.tsv`-driven Figure 2, the pipeline
     loads `LLM_NEPC_classifier_labels.tsv` from
     `/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_NEPC_labels/` (`DFCI_MRN`, `primary_label`
@@ -260,11 +261,12 @@ univariate-results review notebook:
     - **LLM-stratified KM sanity check** — new time-to-platinum KM curves stratified by
       `primary_label`/`has_nepc`/`has_avpc`, using the same `platinum_km_inputs()` +
       `overlay_km()` path as the quartile curves. Stems: `km_llm_<scheme>_landmark<D>`.
-  - **Output layout:** non-lab figures stay `FIG_ROOT/<figure>/<plot-stem>/<cohort>_<plot-stem>.png`
-    with no `R/` language subdirectory; all per-lab panels (longitudinal, km_quartile, distribution)
-    are grouped under `FIG_ROOT/labs/<lab_category>/<lab_name>/<panel_type>/<cohort>_<stem>.png` via
-    a lab-aware branch in `figure_group()` (`assign_category()` decides CBC/CMP/LFT/Vitals/Androgen
-    axis/Other). Any plot stem `figure_group()` can't route still raises
+  - **Output layout:** each arm has its own `FIG_ROOT/ARPI/` or `FIG_ROOT/ADT/` subtree. Non-lab
+    figures use `<arm>/<figure>/<plot-stem>/<cohort>_<plot-stem>.png`; per-lab panels
+    (longitudinal, km_quartile, distribution) use
+    `<arm>/labs/<lab_category>/<lab_name>/<panel_type>/<cohort>_<stem>.png`. A lab-aware branch in
+    `figure_group()` uses `assign_category()` for CBC/CMP/LFT/Vitals/Androgen axis/Other. Any
+    plot stem `figure_group()` can't route still raises
     `stop("Unmapped figure output stem")`.
 - `COMPASS_nominally_significant_univariate.ipynb` loads all shared-landmark univariate results
   for the `arpi` arm, filters to nominal `p_value < 0.05`, displays every hit, and exports the

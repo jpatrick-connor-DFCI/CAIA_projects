@@ -42,8 +42,8 @@ SURV_PATH = EMBED_PROJ_PATH / "time-to-event_analysis"
 # straight from the raw OncDRS pull. It supplies the outcome/anchor columns
 # (age, treatment anchor, death, last-contact, platinum) that used to come from
 # death_met_surv_df.csv.gz. See load_death_df_from_survival_cohort. Defaults to
-# the ARPI-anchored ICD-C61 cohort (every ICD-C61 patient, including those
-# with a competing non-prostate primary).
+# the ARPI-anchored arm of the ADT-entry ICD-C61 cohort (after the requested
+# post-ADT cancer exclusions).
 # main() loads this file
 # first and uses its MRN set both to scan-filter the raw HEALTH_HISTORY/
 # OUTPT_LAB_RESULTS_LABS/MEDICATIONS reads and to restrict the final output --
@@ -143,9 +143,10 @@ def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFram
     ``build_longitudinal_prediction_data`` expects a per-patient frame with
     columns ``treatment_anchor_date``, ``last_contact_date``, ``death`` and
     ``AGE_AT_TREATMENTSTART``. The cohort file (built by
-    compile_COMPASS_cohort_data.py) is ARPI/chemo-anchored: its
-    ``TREATMENT_ANCHOR_DATE`` (first ARPI/taxane/radium-223 exposure) is the sole
-    treatment index date for this pipeline.
+    compile_COMPASS_cohort_data.py) is anchored according to the selected
+    survival-cohort file: first ARPI/taxane/radium-223 exposure for the ARPI
+    arm, or first ADT exposure for the ADT arm. ``TREATMENT_ANCHOR_DATE`` is
+    the sole treatment index date for that run.
 
     Unlike the old death_met_surv_df.csv.gz, this file carries a TRUE death date
     (``DEATH_DATE``). It is passed through as ``death_date`` so downstream code can
