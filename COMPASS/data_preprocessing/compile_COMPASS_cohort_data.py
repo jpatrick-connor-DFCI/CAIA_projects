@@ -48,8 +48,11 @@ Outputs (in NEPC_PROJ_PATH):
   * prostate_arpi_survival_cohort_arpi.csv
   * prostate_adt_survival_cohort_adt.csv
 
-Also writes two matching bare DFCI_MRN-only CSVs to ``mrn_lists_dir``
-(default ``NEPC_PROJ_PATH/mrn_lists/``): ``arpi_mrns.csv``, ``adt_mrns.csv``.
+Also writes matching bare DFCI_MRN-only CSVs to ``mrn_lists_dir``
+(default ``NEPC_PROJ_PATH/mrn_lists/``): ``arpi_mrns.csv``, ``adt_mrns.csv``,
+and ``platinum_MRN_list.csv``. The platinum list contains every ICD-C61
+patient with a dated platinum exposure, independent of treatment-anchor
+eligibility.
 
 Finally, writes ``icd_prostate_mrn_flags.csv`` to ``mrn_lists_dir``. This
 patient-level audit table includes every MRN with an ICD-10 C61 diagnosis
@@ -660,6 +663,18 @@ def main():
     status_df = load_patient_status(args.oncdrs_path)
 
     os.makedirs(args.mrn_lists_dir, exist_ok=True)
+
+    platinum_mrn_list_path = os.path.join(
+        args.mrn_lists_dir,
+        "platinum_MRN_list.csv",
+    )
+    platinum_df.select(ID_COL).unique().sort(ID_COL).write_csv(
+        platinum_mrn_list_path
+    )
+    print(
+        f"Saved platinum MRN list ({len(platinum_df)} patients) to "
+        f"{platinum_mrn_list_path}"
+    )
 
     icd_prostate_flags = build_icd_prostate_mrn_flags(
         all_cohort_mrns,
