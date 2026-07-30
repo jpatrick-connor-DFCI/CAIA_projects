@@ -2002,17 +2002,32 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   bin_group_ci <- function(df, lab_group, stratum_col = "plat_group", stratum_values = NULL) {
     sub <- df %>% filter(LAB_GROUP == lab_group, t_rel >= -PRE_DAYS, t_rel <= POST_DAYS)
     if (!is.null(stratum_values)) {
+      required_lookup_cols <- c("DFCI_MRN", "stratum")
+      missing_lookup_cols <- setdiff(required_lookup_cols, names(stratum_values))
+      if (length(missing_lookup_cols) > 0) {
+        stop(sprintf(
+          "bin_group_ci: stratum_values is missing required column(s): %s",
+          paste(missing_lookup_cols, collapse = ", ")
+        ))
+      }
       sub <- sub %>%
         mutate(DFCI_MRN = as.character(DFCI_MRN)) %>%
-        inner_join(stratum_values, by = "DFCI_MRN")
+        select(-any_of("stratum")) %>%
+        inner_join(stratum_values %>% select(all_of(required_lookup_cols)),
+                   by = "DFCI_MRN")
+    } else {
+      sub <- sub %>% mutate(
+        stratum = if (identical(stratum_col, "plat_group"))
+          as.integer(coalesce(suppressWarnings(as.numeric(PLATINUM)), 0))
+        else as.character(.data[[stratum_col]])
+      )
     }
     if (nrow(sub) == 0) return(NULL)
     edges <- seq(-PRE_DAYS, POST_DAYS, by = BIN_WIDTH_DAYS)
     sub <- sub %>% mutate(
       t_bin = cut(t_rel, breaks = edges, include.lowest = TRUE),
-      stratum = if (identical(stratum_col, "plat_group"))
-        as.integer(coalesce(suppressWarnings(as.numeric(PLATINUM)), 0))
-      else as.character(.data[[stratum_col]]))
+      stratum = as.character(stratum)
+    )
     sub <- sub %>% filter(!is.na(stratum))
     if (nrow(sub) == 0) return(NULL)
     mids <- (head(edges, -1) + tail(edges, -1)) / 2
