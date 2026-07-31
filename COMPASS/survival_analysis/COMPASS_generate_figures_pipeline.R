@@ -237,12 +237,10 @@ COHORT_LABELS <- c(
   arpi = "ARPI",
   adt = "ADT"
 )
-# ARPI keeps the original [0, 90] landmark list unchanged; ADT adds a +365d
-# landmark since ADT initiation is earlier in the treatment sequence than
-# ARPI initiation, giving a longer observable runway to platinum.
+# Both cohort arms use the same 0- and 90-day landmarks.
 COHORT_LANDMARKS <- list(
   arpi = c(0, 90),
-  adt = c(0, 90, 365)
+  adt = c(0, 90)
 )
 
 # Render the full COMPASS figure set for one cohort arm. Mirrors the body of

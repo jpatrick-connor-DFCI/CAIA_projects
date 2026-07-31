@@ -198,9 +198,8 @@ aggregated tables plus pre-treatment long labs and shared split / canonical-lab 
 ### 2.3 — Models
 
 All read prebuilt inputs and the `split` column; none re-derive the split. COMPASS models use the
-`platinum` endpoint only (time to first platinum). Landmarks default `[0, 90]` for the ARPI-anchored
-arms; the ADT-anchored arms use `[0, 90, 365]` (the longer pre-platinum runway from anchoring at ADT
-initiation instead of ARPI initiation justifies a third landmark). Metrics: Harrell C-index, IPCW
+`platinum` endpoint only (time to first platinum). Both ARPI- and ADT-anchored arms use landmarks
+`[0, 90]`. Metrics: Harrell C-index, IPCW
 mean AUC(t), integrated IPCW Brier — horizons come from `build_manifest.json` so all models share a
 grid.
 
@@ -223,15 +222,14 @@ COMPASS PROFILE has one run notebook, one figure notebook, and a focused
 univariate-results review notebook:
 
 - `COMPASS_run_locally.ipynb` — drives preprocessing and runs both `COHORT_SPECS` arms: `arpi`
-  (landmarks 0/90) and `adt` (landmarks 0/90/365), both over the common ADT-entry eligible cohort.
+  and `adt` (both landmarks 0/90), over the common ADT-entry eligible cohort.
   Each arm gets
   independent prediction inputs and univariate, elastic-net, and XGBoost models at its own landmark
   list (`tasks_for_run(run)` builds the per-run task grid from `run["landmarks"]`), and the Stage 2
   cell runs `longitudinal_data_processing.py` once per anchor (`--anchor-med-set {arpi,adt}`).
 - `COMPASS_generate_figures.ipynb` — the sole COMPASS figure notebook, using the R kernel and
   `COMPASS_generate_figures_pipeline.R`. It renders both arms' overview, LLM-label, univariate,
-  multivariate, KM, and per-lab distribution/trajectory figures — the ADT arm gets a third
-  volcano/importance/KM/lab panel (landmark 365) that the ARPI arm doesn't. Figure 1A reads
+  multivariate, KM, and per-lab distribution/trajectory figures at landmarks 0 and 90. Figure 1A reads
   `mrn_lists/icd_prostate_mrn_flags.csv` and displays cumulative ICD-C61 cohort selection through
   ADT entry, the requested post-ADT cancer exclusion, PARPi, and ≥5-PSA-test criteria; the ARPI
   arm additionally displays its ARPI/docetaxel exposure criterion. Axis and table labels throughout
