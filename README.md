@@ -101,7 +101,7 @@ survival data (age, treatment anchor, death, time-to-platinum), with `anchor_df`
 computed from the same medication scan.
 
 - **Inputs (hard-coded under `DATA_PATH = /data/gusev/USERS/jpconnor/data/`, plus the raw OncDRS pull
-  at `ONCDRS_PATH`):** `EHR_DIAGNOSIS.csv`, `MEDICATIONS.csv`,
+  at `ONCDRS_PATH`):** `EHR_DIAGNOSIS.csv`, `HEALTH_HISTORY.csv`, `MEDICATIONS.csv`,
   `OUTPT_LAB_RESULTS_LABS.csv`, `complete_somatic_data_df.csv.gz`, `PT_INFO_STATUS_REGISTRATION.csv`.
 - **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** `prostate_arpi_survival_cohort_arpi.csv`
   and `prostate_adt_survival_cohort_adt.csv` (ARPI-treatment-anchor-restricted and
@@ -138,7 +138,7 @@ COMPASS PROFILE and IPIO live in `survival_common/`.
 
 ### 2.1 — `data_preprocessing/longitudinal_data_processing.py` → `longitudinal_prediction_data.csv`
 
-Consolidates/standardizes labs (via `data_preprocessing_common/dfci_labs.py`), attaches the first
+Consolidates/standardizes labs and vital signs (via `data_preprocessing_common/dfci_labs.py`), attaches the first
 prostate (`C61`) diagnosis date when available and outcomes, rebases all timing to
 `FIRST_RECORD_DATE = min(first lab, diagnosis, first treatment)`, and writes the row-level
 prostate lab frame used by the current treatment-anchored analyses.
@@ -156,9 +156,10 @@ prostate lab frame used by the current treatment-anchored analyses.
 - **Lab QC (`consolidate_dfci_labs`):** unit standardization to canonical units, sentinel nulling
   (e.g. `9999999`), physiologic-range nulling, combined-BP splitting. Out-of-range values are **nulled,
   not row-dropped** — downstream must filter on `conversion_status` (or pass `--successful-only`).
-- **Vitals excluded:** COMPASS does not scan HEALTH_HISTORY vital signs, removes any vital-like
-  canonical rows originating from the outpatient labs source before caching/output, and applies
-  the same exclusion defensively in `build_prediction_inputs.py` for stale longitudinal files.
+- **Vital signs included:** COMPASS scans `HEALTH_HISTORY.csv` for `CODE_TYPE = "Vital Signs"`,
+  combines those records with outpatient labs before standardization, and retains the canonical
+  vital measurements in model inputs and figures. Cache version 3 forces older no-vitals caches
+  to rebuild.
 - **Performance:** raw CSV scans project only required columns; lab consolidation is vectorized.
   Standardized rows are cached in `consolidated_longitudinal_data.parquet` (ARPI) or
   `consolidated_longitudinal_data_adt.parquet` (ADT) with a provenance manifest that includes
@@ -258,10 +259,12 @@ univariate-results review notebook:
       `figure2v2_subtype_landscape`, `figure2v2_enrichment`, `figure2v2_llm_subtype_platinum`),
       reusing the original Figure 2's render helpers. Unlike the original Figure 2, it has **no
       hardcoded `stopifnot` count assertions** — captions are computed dynamically after classifier
-      labels are intersected with the ADT base-landmark MRN set. The ARPI figure pass skips Figure 2v2.
+      labels are intersected with the complete ADT time-0 MRN set. Both Figure 2 and Figure 2v2 are
+      ADT/day-0-only; the ARPI figure pass skips them, and captions report labeled/evaluable coverage
+      against the total ADT day-0 cohort.
     - **All-lab longitudinal dynamics** — Figure 7's group-mean-CI trajectory machinery
       (`bin_group_ci()`/`plot_group_ci_panel()`) generalized from PSA/Testosterone-only to every
-      canonical non-vital lab in `CATEGORY_MAP` (CBC/CMP/LFT/Androgen/Other), stratified
+      canonical lab in `CATEGORY_MAP` (CBC/CMP/LFT/Vitals/Androgen/Other), stratified
       by platinum status plus `primary_label`/`has_nepc`/`has_avpc`. Stems:
       `longitudinal_<stratum>_<lab>`.
     - **All-lab KM-by-quartile** — Figure 5's Q1-vs-Q4 platinum-free KM curves, generalized the same
@@ -270,12 +273,9 @@ univariate-results review notebook:
       generalized the same way. Stems: `dist_by_platinum_{log,raw}_<lab>_landmark<D>`.
       `PLOT_NON_ANDROGEN_DISTRIBUTIONS` controls whether distributions extend beyond PSA and
       Testosterone.
-    - **Lab-panel toggles** — the figure notebook currently sets both
-      `PLOT_NON_ANDROGEN_DISTRIBUTIONS <- FALSE` and
-      `PLOT_NON_ANDROGEN_LAB_FIGURES <- FALSE`, so distribution, KM-quartile, and longitudinal
-      lab panels are limited to the androgen axis (PSA and Testosterone). Set the first toggle
-      to restore non-androgen distributions and the second to restore non-androgen KM/longitudinal
-      panels.
+    - **Lab-panel toggles** — the figure notebook sets both
+      `PLOT_NON_ANDROGEN_DISTRIBUTIONS <- TRUE` and
+      `PLOT_NON_ANDROGEN_LAB_FIGURES <- TRUE`, enabling all canonical categories including vitals.
     - **LLM-stratified KM sanity check** — new time-to-platinum KM curves stratified by
       `primary_label`/`has_nepc`/`has_avpc`, using the same `platinum_km_inputs()` +
       `overlay_km()` path as the quartile curves. Stems: `km_llm_<scheme>_landmark<D>`.
@@ -283,8 +283,7 @@ univariate-results review notebook:
     figures use `<arm>/<figure>/<plot-stem>/<cohort>_<plot-stem>.png`; per-lab panels
     (longitudinal, km_quartile, distribution) use
     `<arm>/labs/<lab_category>/<lab_name>/<panel_type>/<cohort>_<stem>.png`. A lab-aware branch in
-    `figure_group()` uses `assign_category()` for CBC/CMP/LFT/Androgen axis/Other. Vital signs are
-    excluded from all figure panels even when non-androgen toggles are enabled. Any
+    `figure_group()` uses `assign_category()` for CBC/CMP/LFT/Vitals/Androgen axis/Other. Any
     plot stem `figure_group()` can't route still raises
     `stop("Unmapped figure output stem")`.
 - `COMPASS_nominally_significant_univariate.ipynb` loads all shared-landmark univariate results

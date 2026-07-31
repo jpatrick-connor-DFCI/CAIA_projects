@@ -275,26 +275,26 @@ VITALS <- c("Body weight","Body temperature","Heart rate","Respiratory rate",
             "Systolic blood pressure","Diastolic blood pressure")
 ANDROGEN <- c("PSA","Testosterone")
 OTHER <- c("TSH")
-# Vitals remain identifiable so they can be removed from every figure even
-# though they may remain present in previously fitted model outputs.
-DROP <- c("Body height", VITALS)
+DROP <- c("Body height")
 
 CATEGORY_MAP <- c(
   setNames(rep("CBC", length(CBC)), CBC),
   setNames(rep("CMP", length(CMP)), CMP),
   setNames(rep("LFT", length(LFT)), LFT),
+  setNames(rep("Vitals", length(VITALS)), VITALS),
   setNames(rep("Androgen axis", length(ANDROGEN)), ANDROGEN),
   setNames(rep("Other", length(OTHER)), OTHER)
 )
 
-DRAW_ORDER   <- c("Other","CMP","LFT","CBC","Androgen axis")
-LEGEND_ORDER <- c("Androgen axis","CBC","LFT","CMP","Other")
+DRAW_ORDER   <- c("Other","Vitals","CMP","LFT","CBC","Androgen axis")
+LEGEND_ORDER <- c("Androgen axis","CBC","LFT","CMP","Vitals","Other")
 
 CATEGORY_COLORS <- c(
   "Androgen axis" = "#8e1c2b",
   "CBC"           = "#16a085",
   "LFT"           = "#e67e22",
   "CMP"           = "#7d3c98",
+  "Vitals"        = "#5d6d7e",
   "Other"         = "#95a5a6"
 )
 NS_COLOR <- "#d5d8dc"
@@ -736,6 +736,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   message(sprintf("Loading %s ...", LONGITUDINAL_CSV))
   split <- load_profile_patient_and_labs(LONGITUDINAL_CSV, id_col = ID_COL)
   base_landmark <- min(as.integer(names(attrition[["eligible_by_landmark"]])))
+  if (IS_ADT && base_landmark != 0L)
+    stop("Figure 2/2v2 require the ADT time-0 cohort, but the earliest available landmark is ",
+         base_landmark)
   split <- restrict_to_base_landmark_cohort(split$patient_df, split$labs_df, INPUTS_DIR,
                                             ID_COL, base_landmark)
   patient_df <- split$patient_df; labs_df <- split$labs_df
@@ -780,12 +783,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   save_fig(fig1, OUT_DIR, "figure1_cohort_overview", 16, 10)
   if (show) print(fig1)
 
+  if (!IS_ADT)
+    message("Figure 2 and Figure 2 v2: ADT time-0 cohort only -- skipping ARPI figure pass.")
+
+  if (IS_ADT) {
   ## Panel A -- LLM validation (NEPC-vs-rest classifier)
   OUT_DIR <- fig_dir("figure2_llm")
-  # The full-label (unfiltered-to-any-cohort) `original_*` Figure 2 variant is
-  # identical across every cohort call, so it is written once, on the first
-  # cohort processed, rather than re-rendered per cohort.
-  SAVE_ORIGINAL_LLM <- identical(COHORT, COHORTS[1])
+  # Only the ADT time-0 cohort-specific Figure 2 is reported. Keep the legacy
+  # full-label calculations below for shared plotting setup, but do not emit
+  # unfiltered `original_*` panels.
+  SAVE_ORIGINAL_LLM <- FALSE
 
   drop_cols <- function(df, cols) df %>% select(-any_of(cols))
 
@@ -1074,15 +1081,18 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
              prefix = "original")
   if (show) print(fig2)
 
-  # Cohort-specific Figure 2 variant: retain only LLM calls whose MRN belongs to
-  # this analysis cohort's base-landmark population. The original full-label set
-  # above is written once with an `original_` prefix.
+  # Figure 2 uses the complete ADT time-0 cohort as its patient universe, then
+  # retains the patients with available LLM labels for label-based panels.
   cohort_mrns <- unique(as.character(patient_df[[ID_COL]]))
+  stopifnot(base_landmark == 0L, length(cohort_mrns) == nrow(patient_df))
   nepc_annotations <- nepc_annotations_all %>%
     filter(as.character(DFCI_MRN) %in% cohort_mrns)
-  message(sprintf("Figure 2 cohort subset (%s): %s / %s LLM-labeled MRNs",
-                  COHORT_DISPLAY, format(nrow(nepc_annotations), big.mark = ","),
-                  format(nrow(nepc_annotations_all), big.mark = ",")))
+  message(sprintf(
+    "Figure 2 ADT time-0 cohort: %s total patients; %s labeled/evaluable (%s source labels total)",
+    format(length(cohort_mrns), big.mark = ","),
+    format(nrow(nepc_annotations), big.mark = ","),
+    format(nrow(nepc_annotations_all), big.mark = ",")
+  ))
 
   merged_results <- manual_annotations %>%
     drop_cols(c("pathology_details", "manual_platinum_reason")) %>%
@@ -1098,8 +1108,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   metrics <- binary_metrics(merged_results$manual_NEPC, merged_results$LLM_NEPC)
   n_total <- nrow(merged_results)
   n_nepc_manual <- sum(merged_results$manual_NEPC)
-  caption_a <- sprintf("%s MRN subset; N = %s chart-reviewed patients; %s manual-NEPC positive.",
-                       COHORT_DISPLAY, format(n_total, big.mark = ","),
+  caption_a <- sprintf("ADT time-0 cohort (N=%s total); %s chart-reviewed/labeled patients; %s manual-NEPC positive.",
+                       format(length(cohort_mrns), big.mark = ","),
+                       format(n_total, big.mark = ","),
                        format(n_nepc_manual, big.mark = ","))
   pA1 <- render_confusion_panel(metrics) + labs(caption = caption_a) +
     theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
@@ -1115,8 +1126,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   label_distributions <- bind_rows(platinum_positive_labels, platinum_negative_labels)
   n_pos <- sum(platinum_positive_labels$count)
   n_neg <- sum(platinum_negative_labels$count)
-  caption_b <- sprintf("LLM labels restricted to the %s base-landmark MRN set; fractions are computed within each platinum group.",
-                       COHORT_DISPLAY)
+  caption_b <- sprintf(paste0(
+    "LLM labels restricted to the ADT time-0 cohort: %s labeled of %s total patients; ",
+    "fractions are computed within each platinum group."),
+    format(nrow(nepc_annotations), big.mark = ","),
+    format(length(cohort_mrns), big.mark = ","))
   pB <- render_landscape_panel() + labs(caption = caption_b) +
     theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
   save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", 6.5 * 0.8, 8)
@@ -1147,13 +1161,13 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   left <- (render_confusion_panel(metrics) + render_metric_bar_panel(metrics)) /
           render_enrichment_panel()
   right <- render_landscape_panel("Panel B — subtype landscape (cohort MRN subset)")
-  full_caption <- sprintf("LLM calls restricted to the %s base-landmark MRN set (n=%s labels; platinum+ n=%s, platinum- n=%s).",
-                          COHORT_DISPLAY, format(nrow(nepc_annotations), big.mark = ","),
+  full_caption <- sprintf("LLM calls restricted to the ADT time-0 cohort (n=%s labels among %s total patients; platinum+ n=%s, platinum- n=%s).",
+                          format(nrow(nepc_annotations), big.mark = ","),
+                          format(length(cohort_mrns), big.mark = ","),
                           format(n_pos, big.mark = ","), format(n_neg, big.mark = ","))
   fig2 <- (left | right) + plot_layout(widths = c(2, 1.3)) +
     plot_annotation(
-      title = sprintf("Figure 2 — LLM-extracted prostate subtypes (%s MRN subset)",
-                      COHORT_DISPLAY),
+      title = "Figure 2 — LLM-extracted prostate subtypes (ADT time-0 cohort)",
       caption = str_wrap(full_caption, 130),
       theme = theme(plot.title = element_text(face = "bold", size = 13),
                     plot.caption = element_text(size = 8.5, color = COLOR_NEUTRAL_INK)))
@@ -1166,20 +1180,19 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   # label file has a different patient population/counts than LLM_v3_labels.tsv,
   # so (per the plan) NO stopifnot count tripwires are added here; captions carry
   # computed counts instead.
-  if (!IS_ADT) {
-    message("Figure 2 v2: ADT cohort only -- skipping ARPI figure pass.")
-  } else if (is.null(llm_classifier_labels)) {
+  if (is.null(llm_classifier_labels)) {
     message("Figure 2 v2: llm_classifier_labels unavailable -- skipping.")
   } else {
     OUT_DIR_V2 <- fig_dir("figure2v2_llm")
 
-    # Figure 2 v2 is restricted to the ADT arm's base-landmark population,
-    # matching the cohort scope used by the other cohort-specific figures.
+    # Figure 2 v2 uses the same complete ADT time-0 patient universe as Figure 2.
     adt_cohort_mrns_v2 <- unique(as.character(patient_df[[ID_COL]]))
+    stopifnot(base_landmark == 0L, setequal(adt_cohort_mrns_v2, cohort_mrns))
     v2_labels_all <- llm_classifier_labels %>%
       filter(as.character(DFCI_MRN) %in% adt_cohort_mrns_v2)
     message(sprintf(
-      "Figure 2 v2 ADT subset: %s / %s classifier-labeled MRNs",
+      "Figure 2 v2 ADT time-0 cohort: %s total patients; %s labeled/evaluable (%s source labels total)",
+      format(length(adt_cohort_mrns_v2), big.mark = ","),
       format(nrow(v2_labels_all), big.mark = ","),
       format(nrow(llm_classifier_labels), big.mark = ",")
     ))
@@ -1220,7 +1233,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     metrics_v2 <- binary_metrics(merged_v2$manual_NEPC, merged_v2$LLM_NEPC)
     n_total_v2 <- metrics_v2$N
     n_nepc_manual_v2 <- metrics_v2$TP + metrics_v2$FN
-    caption_a_v2 <- sprintf("ADT cohort; N = %s chart-reviewed patients; %s manual-NEPC positive (LLM_NEPC_classifier_labels.tsv).",
+    caption_a_v2 <- sprintf("ADT time-0 cohort (N=%s total); %s chart-reviewed/labeled patients; %s manual-NEPC positive (LLM_NEPC_classifier_labels.tsv).",
+                            format(length(adt_cohort_mrns_v2), big.mark = ","),
                             format(n_total_v2, big.mark = ","), format(n_nepc_manual_v2, big.mark = ","))
     pA1_v2 <- render_confusion_panel(metrics_v2) + labs(caption = caption_a_v2) +
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
@@ -1265,7 +1279,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     label_distributions <- bind_rows(platinum_positive_v2, platinum_negative_v2)
     n_pos <- sum(platinum_positive_v2$count)
     n_neg <- sum(platinum_negative_v2$count)
-    caption_b_v2 <- sprintf("ADT cohort; LLM_NEPC_classifier_labels.tsv; platinum+ n=%s, platinum- n=%s.",
+    caption_b_v2 <- sprintf("ADT time-0 cohort; %s labeled of %s total patients; platinum+ n=%s, platinum- n=%s.",
+                            format(nrow(v2_labels_all), big.mark = ","),
+                            format(length(adt_cohort_mrns_v2), big.mark = ","),
                             format(n_pos, big.mark = ","), format(n_neg, big.mark = ","))
     pB_v2 <- render_landscape_panel("Panel B — subtype landscape by platinum status (classifier labels)") +
       labs(caption = caption_b_v2) +
@@ -1303,10 +1319,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     right_v2 <- render_landscape_panel("Panel B — subtype landscape (classifier labels)")
     full_caption_v2 <- sprintf(paste0(
       "(A) NEPC-vs-rest classifier (LLM_NEPC_classifier_labels.tsv) vs Baca-lab manual ",
-      "annotation (N=%s, %s manual-NEPC+). (B) Subtype landscape, platinum+ (n=%s) vs ",
+      "annotation (N=%s evaluable among %s ADT time-0 patients, %s manual-NEPC+). (B) Subtype landscape, platinum+ (n=%s) vs ",
       "platinum- (n=%s). (C) Platinum+ rate among aggressive (AVPC+NEPC) vs conventional ",
       "patients (OR=%.1f, Fisher p=%.1e)."),
-      format(n_total_v2, big.mark = ","), format(n_nepc_manual_v2, big.mark = ","),
+      format(n_total_v2, big.mark = ","), format(length(adt_cohort_mrns_v2), big.mark = ","),
+      format(n_nepc_manual_v2, big.mark = ","),
       format(n_pos, big.mark = ","), format(n_neg, big.mark = ","), OR, p_value)
     fig2v2 <- (left_v2 | right_v2) +
       plot_layout(widths = c(2, 1.3)) +
@@ -1317,6 +1334,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                       plot.caption = element_text(size = 8.5, color = COLOR_NEUTRAL_INK)))
     save_fig(fig2v2, OUT_DIR_V2, "figure2v2_llm_subtype_platinum", 15, 9)
     if (show) print(fig2v2)
+  }
   }
 
   # ----------------------------- labeling knobs ---------------------------
@@ -1370,7 +1388,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
     n_tested <- nrow(sub); n_sig <- sum(sub$sig)
     breakdown <- sub %>% filter(sig) %>% count(category)
-    short <- c("Androgen axis"="Androgen","CBC"="CBC","LFT"="LFT","CMP"="CMP")
+    short <- c("Androgen axis"="Androgen","CBC"="CBC","LFT"="LFT","CMP"="CMP",
+               "Vitals"="Vitals")
     bd_str <- paste(vapply(setdiff(LEGEND_ORDER, "Other"), function(c) {
       n <- breakdown$n[match(c, breakdown$category)]; if (is.na(n)) n <- 0
       sprintf("%s %d", short[[c]], n)
@@ -1749,7 +1768,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   if (show) print(fig4)
 
   OUT_DIR <- fig_dir("androgen_supplements")
-  # All canonical non-vital labs in CATEGORY_MAP (CBC/CMP/LFT/Androgen axis/Other),
+  # All canonical labs in CATEGORY_MAP (CBC/CMP/LFT/Vitals/Androgen axis/Other),
   # generalizing what used to be the PSA/Testosterone-only ANDROGEN_LABS list.
   ALL_LABS <- names(CATEGORY_MAP)
   LAB_FIGURE_LABS <- if (plot_non_androgen_lab_figures) {

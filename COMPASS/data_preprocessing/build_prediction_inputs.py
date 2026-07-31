@@ -65,9 +65,6 @@ from survival_common.helper import (  # noqa: E402
     compute_horizon_grid,
     select_canonical_labs,
 )
-from data_preprocessing_common.projects.compass_profile import (  # noqa: E402
-    EXCLUDED_MEASUREMENTS,
-)
 DEFAULT_OUTPUT_SUBDIR = "prediction_inputs"
 DEFAULT_VAL_FRAC = 0.20
 DEFAULT_TIME_UNIT_DAYS = 7
@@ -339,16 +336,6 @@ def main(args: argparse.Namespace) -> None:
     data_path = Path(args.data)
     print(f"Loading PROFILE data from {data_path} ...")
     df = pd.read_csv(data_path, low_memory=False)
-    if "LAB_NAME" not in df.columns:
-        raise ValueError(f"{data_path} has no LAB_NAME column.")
-    vital_mask = df["LAB_NAME"].isin(EXCLUDED_MEASUREMENTS)
-    n_vital_rows = int(vital_mask.sum())
-    if n_vital_rows:
-        print(
-            f"Removing {n_vital_rows:,} vital-sign rows from model inputs "
-            "(stale/pre-existing longitudinal file)."
-        )
-        df = df.loc[~vital_mask].copy()
 
     df[ID_COL] = pd.to_numeric(df[ID_COL], errors="coerce")
     df = df.loc[df[ID_COL].notna()].copy()
@@ -596,7 +583,6 @@ def main(args: argparse.Namespace) -> None:
         "test_frac": float(args.test_frac),
         "val_frac": float(args.val_frac),
         "min_patient_coverage": float(args.min_patient_coverage),
-        "excluded_measurements": sorted(EXCLUDED_MEASUREMENTS),
         "restrict_to_mrns": str(args.restrict_to_mrns) if args.restrict_to_mrns else None,
         "time_unit_days": int(args.time_unit_days),
         "cohort_mode": "independent_by_landmark",
