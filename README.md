@@ -256,6 +256,9 @@ univariate-results review notebook:
       way via `resolve_mean_col()`. Stems: `km_quartile_<lab>_landmark<D>`.
     - **All-lab distribution panels** — Figure 6's log/raw platinum-split distribution plots,
       generalized the same way. Stems: `dist_by_platinum_{log,raw}_<lab>_landmark<D>`.
+      Set `PLOT_NON_ANDROGEN_DISTRIBUTIONS <- FALSE` in the figure notebook (passed as
+      `plot_non_androgen_distributions = FALSE` to `generate_figures()`) to emit only the
+      PSA and Testosterone distributions; the default `TRUE` preserves all canonical labs.
     - **LLM-stratified KM sanity check** — new time-to-platinum KM curves stratified by
       `primary_label`/`has_nepc`/`has_avpc`, using the same `platinum_km_inputs()` +
       `overlay_km()` path as the quartile curves. Stems: `km_llm_<scheme>_landmark<D>`.

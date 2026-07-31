@@ -248,7 +248,8 @@ COHORT_LANDMARKS <- list(
 # so the notebook can call this once per cohort in the same R session instead
 # of re-executing itself via Rscript.
 generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS, show = FALSE,
-                             llm_annotations_path = DEFAULT_LLM_ANNOTATIONS_PATH) {
+                             llm_annotations_path = DEFAULT_LLM_ANNOTATIONS_PATH,
+                             plot_non_androgen_distributions = TRUE) {
   # Rscript opens `Rplots.pdf` when any plot is drawn without an explicit device.
   # All intended outputs below use ggsave(), so route any incidental drawing to a
   # temporary null PDF device during non-interactive runs.
@@ -263,6 +264,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   if (!COHORT %in% cohorts)
     stop(sprintf("Unknown cohort=%s; expected one of %s",
                  COHORT, paste(cohorts, collapse = ", ")))
+  if (!is.logical(plot_non_androgen_distributions) ||
+      length(plot_non_androgen_distributions) != 1 ||
+      is.na(plot_non_androgen_distributions))
+    stop("plot_non_androgen_distributions must be one non-missing logical value")
   COHORT_DISPLAY <- unname(COHORT_LABELS[[COHORT]])
   message(sprintf("Generating figures for cohort: %s", COHORT_DISPLAY))
 
@@ -1886,9 +1891,19 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
   FIG6_SCALE_VARIANTS <- list(list(TRUE, "dist_by_platinum_log"),
                               list(FALSE, "dist_by_platinum_raw"))
+  FIG6_LABS <- if (plot_non_androgen_distributions) {
+    ALL_LABS
+  } else {
+    intersect(ALL_LABS, ANDROGEN)
+  }
+  message(sprintf(
+    "Figure 6 distributions: %s (%s labs)",
+    if (plot_non_androgen_distributions) "androgen + non-androgen" else "androgen only",
+    length(FIG6_LABS)
+  ))
   for (variant in FIG6_SCALE_VARIANTS) {
     use_log <- variant[[1]]; out_stem <- variant[[2]]
-    for (lab in ALL_LABS) {
+    for (lab in FIG6_LABS) {
       for (landmark in FIG6_LANDMARKS) {
         agg <- load_aggregated_landmark(landmark)
         if (is.null(agg)) {
