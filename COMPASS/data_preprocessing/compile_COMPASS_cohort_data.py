@@ -50,9 +50,8 @@ Outputs (in NEPC_PROJ_PATH):
 
 Also writes matching bare DFCI_MRN-only CSVs to ``mrn_lists_dir``
 (default ``NEPC_PROJ_PATH/mrn_lists/``): ``arpi_mrns.csv``, ``adt_mrns.csv``,
-and ``platinum_MRN_list.csv``. The platinum list contains every ICD-C61
-patient with a dated platinum exposure, independent of treatment-anchor
-eligibility.
+and ``platinum_MRN_list.csv``. The platinum list contains dated platinum
+recipients from the eligible ADT-entry cohort only.
 
 Finally, writes ``icd_prostate_mrn_flags.csv`` to ``mrn_lists_dir``. This
 patient-level audit table includes every MRN with an ICD-10 C61 diagnosis and
@@ -721,13 +720,17 @@ def main():
     eligible_mrns = (
         all_cohort_mrns & adt_entry_mrns
     ) - post_adt_exclusion_cancer_mrns
+    eligible_platinum_df = platinum_df.filter(
+        pl.col(ID_COL).is_in(sorted(eligible_mrns))
+    )
     print(
         f"ARPI anchor drug recipients: {len(anchor_df)}; "
         f"ADT anchor drug recipients: {len(adt_anchor_df)}; "
         f"post-ADT specified-cancer exclusions: "
         f"{len(all_cohort_mrns & post_adt_exclusion_cancer_mrns)}; "
         f"eligible after ADT entry/exclusion: {len(eligible_mrns)}; "
-        f"platinum recipients: {len(platinum_df)}."
+        f"eligible platinum recipients: {len(eligible_platinum_df)} "
+        f"(of {len(platinum_df)} across ICD-C61)."
     )
 
     status_df = load_patient_status(args.oncdrs_path)
@@ -738,11 +741,12 @@ def main():
         args.mrn_lists_dir,
         "platinum_MRN_list.csv",
     )
-    platinum_df.select(ID_COL).unique().sort(ID_COL).write_csv(
+    eligible_platinum_df.select(ID_COL).unique().sort(ID_COL).write_csv(
         platinum_mrn_list_path
     )
     print(
-        f"Saved platinum MRN list ({len(platinum_df)} patients) to "
+        f"Saved ADT-cohort platinum MRN list "
+        f"({len(eligible_platinum_df)} patients) to "
         f"{platinum_mrn_list_path}"
     )
 

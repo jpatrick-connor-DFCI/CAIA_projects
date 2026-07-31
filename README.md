@@ -106,7 +106,7 @@ computed from the same medication scan.
 - **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** `prostate_arpi_survival_cohort_arpi.csv`
   and `prostate_adt_survival_cohort_adt.csv` (ARPI-treatment-anchor-restricted and
   ADT-treatment-anchor-restricted respectively), corresponding bare-MRN lists
-  (`mrn_lists/arpi_mrns.csv`, `mrn_lists/adt_mrns.csv`), the regenerated all-ICD-C61
+  (`mrn_lists/arpi_mrns.csv`, `mrn_lists/adt_mrns.csv`), the ADT-entry-cohort
   platinum-recipient list (`mrn_lists/platinum_MRN_list.csv`), `prostate_icd_data.csv`, and
   `mrn_lists/icd_prostate_mrn_flags.csv`. The latter contains every ICD-C61 MRN plus binary
   indicators for a non-prostate primary (`HAS_NON_PROSTATE_PRIMARY`, descriptive only), a
