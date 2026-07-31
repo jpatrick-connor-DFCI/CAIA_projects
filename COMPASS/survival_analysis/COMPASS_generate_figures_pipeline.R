@@ -1068,12 +1068,23 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   # label file has a different patient population/counts than LLM_v3_labels.tsv,
   # so (per the plan) NO stopifnot count tripwires are added here; captions carry
   # computed counts instead.
-  if (is.null(llm_classifier_labels)) {
+  if (!IS_ADT) {
+    message("Figure 2 v2: ADT cohort only -- skipping ARPI figure pass.")
+  } else if (is.null(llm_classifier_labels)) {
     message("Figure 2 v2: llm_classifier_labels unavailable -- skipping.")
   } else {
     OUT_DIR_V2 <- fig_dir("figure2v2_llm")
 
-    v2_labels_all <- llm_classifier_labels
+    # Figure 2 v2 is restricted to the ADT arm's base-landmark population,
+    # matching the cohort scope used by the other cohort-specific figures.
+    adt_cohort_mrns_v2 <- unique(as.character(patient_df[[ID_COL]]))
+    v2_labels_all <- llm_classifier_labels %>%
+      filter(as.character(DFCI_MRN) %in% adt_cohort_mrns_v2)
+    message(sprintf(
+      "Figure 2 v2 ADT subset: %s / %s classifier-labeled MRNs",
+      format(nrow(v2_labels_all), big.mark = ","),
+      format(nrow(llm_classifier_labels), big.mark = ",")
+    ))
 
     render_confusion_panel_v2 <- function(metrics, truth_label, pred_label, title) {
       cm <- tibble(
@@ -1111,7 +1122,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     metrics_v2 <- binary_metrics(merged_v2$manual_NEPC, merged_v2$LLM_NEPC)
     n_total_v2 <- metrics_v2$N
     n_nepc_manual_v2 <- metrics_v2$TP + metrics_v2$FN
-    caption_a_v2 <- sprintf("N = %s chart-reviewed patients; %s manual-NEPC positive (LLM_NEPC_classifier_labels.tsv).",
+    caption_a_v2 <- sprintf("ADT cohort; N = %s chart-reviewed patients; %s manual-NEPC positive (LLM_NEPC_classifier_labels.tsv).",
                             format(n_total_v2, big.mark = ","), format(n_nepc_manual_v2, big.mark = ","))
     pA1_v2 <- render_confusion_panel(metrics_v2) + labs(caption = caption_a_v2) +
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
@@ -1156,7 +1167,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     label_distributions <- bind_rows(platinum_positive_v2, platinum_negative_v2)
     n_pos <- sum(platinum_positive_v2$count)
     n_neg <- sum(platinum_negative_v2$count)
-    caption_b_v2 <- sprintf("LLM_NEPC_classifier_labels.tsv; platinum+ n=%s, platinum- n=%s.",
+    caption_b_v2 <- sprintf("ADT cohort; LLM_NEPC_classifier_labels.tsv; platinum+ n=%s, platinum- n=%s.",
                             format(n_pos, big.mark = ","), format(n_neg, big.mark = ","))
     pB_v2 <- render_landscape_panel("Panel B — subtype landscape by platinum status (classifier labels)") +
       labs(caption = caption_b_v2) +
@@ -1183,7 +1194,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     w_conv <- wilson_ci(platinum_given_conventional, n_conventional)
     p_agg <- w_agg[1]; lo_agg <- w_agg[2]; hi_agg <- w_agg[3]
     p_conv <- w_conv[1]; lo_conv <- w_conv[2]; hi_conv <- w_conv[3]
-    caption_c_v2 <- sprintf("Excludes 'biomarker' labels (%s rows). Error bars are 95%% Wilson intervals. OR=%.1f, Fisher p=%.1e.",
+    caption_c_v2 <- sprintf("ADT cohort; excludes 'biomarker' labels (%s rows). Error bars are 95%% Wilson intervals. OR=%.1f, Fisher p=%.1e.",
                             format(n_excluded_v2, big.mark = ","), OR, p_value)
     pC_v2 <- render_enrichment_panel() + labs(caption = caption_c_v2) +
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
@@ -1202,7 +1213,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     fig2v2 <- (left_v2 | right_v2) +
       plot_layout(widths = c(2, 1.3)) +
       plot_annotation(
-        title = "Figure 2 v2 — LLM classifier-derived prostate subtypes",
+        title = "Figure 2 v2 — LLM classifier-derived prostate subtypes (ADT cohort)",
         caption = str_wrap(full_caption_v2, 130),
         theme = theme(plot.title = element_text(face = "bold", size = 13),
                       plot.caption = element_text(size = 8.5, color = COLOR_NEUTRAL_INK)))

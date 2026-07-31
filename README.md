@@ -240,13 +240,13 @@ univariate-results review notebook:
     [conventional/avpc/nepc/biomarker], `has_nepc`, `has_avpc`) via `load_llm_strata()`, re-deriving
     `is_platinum` from `mrn_lists/platinum_MRN_list.csv`. If the file is absent, all LLM-strata plots
     are skipped with a `message()` rather than failing. This file drives:
-    - **Figure 2 v2** (`figure2v2_llm/`) — a parallel confusion matrix / metric bar / subtype
+    - **Figure 2 v2** (`ADT/figure2v2_llm/`, ADT cohort only) — a parallel confusion matrix / metric bar / subtype
       landscape / platinum-enrichment panel set (`figure2v2_confusion_matrix`,
       `figure2v2_metric_bar`, `figure2v2_confusion_has_nepc`, `figure2v2_confusion_has_avpc`,
       `figure2v2_subtype_landscape`, `figure2v2_enrichment`, `figure2v2_llm_subtype_platinum`),
       reusing the original Figure 2's render helpers. Unlike the original Figure 2, it has **no
-      hardcoded `stopifnot` count assertions** — captions are computed dynamically from the loaded
-      labels, since the new file's counts differ from `LLM_v3_labels.tsv`.
+      hardcoded `stopifnot` count assertions** — captions are computed dynamically after classifier
+      labels are intersected with the ADT base-landmark MRN set. The ARPI figure pass skips Figure 2v2.
     - **All-lab longitudinal dynamics** — Figure 7's group-mean-CI trajectory machinery
       (`bin_group_ci()`/`plot_group_ci_panel()`) generalized from PSA/Testosterone-only to every
       canonical lab in `CATEGORY_MAP` (~40 labs across CBC/CMP/LFT/Vitals/Androgen/Other), stratified
