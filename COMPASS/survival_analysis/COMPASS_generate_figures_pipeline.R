@@ -120,6 +120,7 @@ load_llm_strata <- function(llm_annotations_path) {
     stop(sprintf("%s is missing required columns: %s", path, paste(missing, collapse = ", ")))
   }
   biomarker_candidates <- c(
+    "biomarker_genes",
     "reported_biomarkers",
     "biomarkers_reported",
     "reported_biomarker",
