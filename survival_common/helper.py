@@ -38,6 +38,16 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local env
 
 DEFAULT_AUC_QUANTILES: tuple[float, ...] = (0.25, 0.375, 0.50, 0.625, 0.75)
 DEFAULT_AUC_TIME_UNIT_DAYS: int = 7
+DEFAULT_AUC_MAX_GRID_POINTS: int = 25
+# Administrative censoring horizon for IPCW metrics (~5 years in weeks). The
+# builders clamp the horizon grid to this so every requested horizon stays
+# inside the window the runners later evaluate over.
+DEFAULT_AUC_MAX_TIME_UNITS: int = 260
+# v3 adds the required `auc_max_time_units` key and clamps the grid to it, so
+# v2 manifests (grid built without the cap) must be rebuilt, not reused.
+AUC_TIMELINE_SCHEMA_VERSION: int = 3
+MIN_IPCW_VALID_HORIZONS: int = 2
+MIN_IPCW_TIMELINE_COVERAGE: float = 0.50
 DEFAULT_MIN_DISTINCT_LAB_VALUES: int = 2
 
 
@@ -187,6 +197,27 @@ def select_canonical_labs(
 # Fixed AUC / Brier horizon grid (derived from train_val event times only).
 # ---------------------------------------------------------------------------
 
+def resolve_auc_max_time_units(build_manifest: dict, requested: int | None) -> int:
+    """Resolve the IPCW evaluation cap, preferring the cap the grid was built under.
+
+    The builders clamp the horizon grid to their own ``--auc-max-time-units``
+    and record it in the manifest. Evaluating with a different cap would mark
+    otherwise-estimable horizons inestimable, so the manifest value is the
+    default; an explicit request still wins but is called out.
+    """
+    manifest_cap = int(build_manifest["auc_max_time_units"])
+    if requested is None:
+        return manifest_cap
+    requested = int(requested)
+    if requested != manifest_cap:
+        print(
+            f"WARNING: --auc-max-time-units={requested} differs from the build "
+            f"manifest's {manifest_cap}, which the horizon grid was clamped to. "
+            "Horizons at or beyond the requested cap will be reported inestimable."
+        )
+    return requested
+
+
 def compute_horizon_grid(
     train_val_df: pd.DataFrame,
     *,
@@ -195,15 +226,30 @@ def compute_horizon_grid(
     quantiles: tuple[float, ...] = DEFAULT_AUC_QUANTILES,
     time_unit_days: int = DEFAULT_AUC_TIME_UNIT_DAYS,
     admin_censor_days: int | float | None = None,
+    max_grid_points: int = DEFAULT_AUC_MAX_GRID_POINTS,
 ) -> np.ndarray:
-    """AUC(t) / Brier horizon grid in time-units, derived from train_val ONLY.
+    """Build a bounded AUC(t) / Brier timeline from train_val only.
 
-    Quantiles are taken over observed event durations (event==1) on the
-    train_val block, after applying optional finite-window administrative
-    censoring. The grid is fixed once and reused across all CV folds and the
-    held-out test evaluation, eliminating any test-driven horizon choice.
-    Returns a strictly-positive, sorted, deduplicated array of horizons.
+    The outer quantiles define a robust event-time interval after optional
+    administrative censoring. Rather than evaluating only at the handful of
+    quantile values (which often collapse at sparse late landmarks), the
+    function fills that interval with evenly spaced integer time units, capped
+    at ``max_grid_points``. The requested timeline is fixed once and reused
+    across CV folds and held-out evaluation, eliminating test-driven horizon
+    selection. Returns a strictly positive, sorted, deduplicated array.
     """
+    if time_unit_days <= 0:
+        raise ValueError("time_unit_days must be positive.")
+    if max_grid_points < 2:
+        raise ValueError("max_grid_points must be at least 2.")
+    quantile_values = np.asarray(quantiles, dtype=float)
+    if (
+        quantile_values.size == 0
+        or not np.isfinite(quantile_values).all()
+        or (quantile_values < 0).any()
+        or (quantile_values > 1).any()
+    ):
+        raise ValueError("quantiles must contain finite values between 0 and 1.")
     duration = pd.to_numeric(train_val_df[duration_col], errors="coerce").to_numpy(dtype=float)
     event = pd.to_numeric(train_val_df[event_col], errors="coerce").fillna(0).astype(int).to_numpy()
     if admin_censor_days is not None:
@@ -220,17 +266,54 @@ def compute_horizon_grid(
             f"No observed events for {event_col!r} on train_val; cannot derive horizon grid."
         )
     event_times_units = np.ceil(event_times / float(time_unit_days))
-    raw = np.asarray(
-        [int(v) for v in np.quantile(event_times_units, list(quantiles))],
-        dtype=float,
-    )
-    horizons = np.unique(raw)
+    bounds = np.quantile(event_times_units, [quantile_values.min(), quantile_values.max()])
+    lower = max(1, int(np.ceil(bounds[0])))
+    upper = max(1, int(np.floor(bounds[1])))
+    cap_units: float | None = None
+    if admin_censor_days is not None:
+        # compute_brier / compute_ipcw_auc_t treat h >= cap as inestimable, so
+        # the requested timeline has to stay strictly inside the cap or those
+        # horizons would only ever dilute the coverage denominator.
+        cap_units = float(np.ceil(cap / float(time_unit_days)))
+        upper = min(upper, int(cap_units) - 1)
+        if upper < 1:
+            raise ValueError(
+                "admin_censor_days is smaller than one time unit; no horizon fits "
+                "strictly inside the administrative censoring window."
+            )
+        lower = min(lower, upper)
+    if upper < lower:
+        midpoint = max(1, int(np.rint(np.mean(bounds))))
+        lower = upper = midpoint
+    if upper == lower:
+        # Quantiles can coincide when late-landmark events are sparse or tied.
+        # If the training block nevertheless contains distinct event weeks,
+        # expand to the two observed weeks nearest the quantile center. This
+        # preserves a train-only, data-supported interval without reaching for
+        # held-out outcomes merely to manufacture a multi-time mean.
+        unique_event_units = np.unique(event_times_units[event_times_units > 0])
+        if len(unique_event_units) >= 2:
+            center = float(np.mean(bounds))
+            nearest = unique_event_units[
+                np.argsort(np.abs(unique_event_units - center), kind="stable")[:2]
+            ]
+            lower = int(np.min(nearest))
+            upper = int(np.max(nearest))
+
+    available = np.arange(lower, upper + 1, dtype=float)
+    if len(available) <= max_grid_points:
+        horizons = available
+    else:
+        positions = np.linspace(0, len(available) - 1, num=max_grid_points)
+        horizons = available[np.unique(np.rint(positions).astype(int))]
     horizons = horizons[horizons > 0]
-    if len(horizons) == 0:
-        raise ValueError(
-            f"All horizon quantiles collapsed to non-positive values for {event_col!r}."
-        )
-    return horizons
+    if cap_units is not None:
+        # The tie-expansion branch above can reach back to observed event weeks,
+        # so re-apply the cap here rather than trusting `upper` alone.
+        horizons = horizons[horizons < cap_units]
+    # `lower` is clamped to >= 1 and below the cap above, so the grid is
+    # always non-empty here.
+    return np.unique(horizons)
 
 
 def horizon_grid_frame(
@@ -287,9 +370,17 @@ def breslow_survival_at_horizons(
     with suppress_sksurv_warnings():
         estimator.fit(train_lp, train_event, train_duration)
         surv_funcs = estimator.get_survival_function(eval_lp)
-    out = np.empty((len(eval_lp), len(horizons)), dtype=float)
+    out = np.full((len(eval_lp), len(horizons)), np.nan, dtype=float)
+    # StepFunction raises outside its fitted domain. Preserve requested-column
+    # alignment but evaluate only supported points; compute_brier records why
+    # every remaining NaN horizon was excluded.
+    train_min = float(np.nanmin(train_duration))
+    train_max = float(np.nanmax(train_duration))
+    supported = np.isfinite(horizons) & (horizons > train_min) & (horizons < train_max)
+    if not supported.any():
+        return out
     for i, sf in enumerate(surv_funcs):
-        out[i, :] = sf(horizons)
+        out[i, supported] = sf(horizons[supported])
     return out
 
 
@@ -306,6 +397,7 @@ def compute_brier(
     surv_at_horizons: np.ndarray,
     horizons: np.ndarray,
     time_unit_days: int = DEFAULT_AUC_TIME_UNIT_DAYS,
+    max_time_unit: int | None = None,
 ) -> tuple[pd.DataFrame, float]:
     """Per-horizon IPCW Brier + integrated Brier.
 
@@ -317,20 +409,48 @@ def compute_brier(
     `surv_at_horizons[i, j]` = predicted S(t=horizons[j] | x_i) for eval
     sample i. Returns (per_horizon_df, integrated_brier_scalar).
 
-    sksurv requires horizons strictly inside (min(train_time), max(train_time)).
-    Out-of-range horizons are dropped from both per-horizon and integrated
-    outputs and recorded with note='out_of_train_range'.
+    The optional administrative cap is applied identically to the reference
+    and evaluation outcomes. Requested horizons are never discarded: points
+    outside the cap/follow-up support remain in the returned table with a
+    reason. Integrated Brier is reported only with at least two valid points
+    and at least 50% requested-timeline coverage.
     """
     require_sksurv()
 
     horizons = np.asarray(horizons, dtype=float).reshape(-1)
-    horizons = horizons[horizons > 0]
     surv_at_horizons = np.asarray(surv_at_horizons, dtype=float)
+    if surv_at_horizons.ndim != 2:
+        raise ValueError("surv_at_horizons must be a 2D array.")
+    if surv_at_horizons.shape[1] != len(horizons):
+        raise ValueError(
+            "surv_at_horizons columns must align one-to-one with horizons "
+            f"({surv_at_horizons.shape[1]} != {len(horizons)})."
+        )
+    positive = np.isfinite(horizons) & (horizons > 0)
+    horizons = horizons[positive]
+    surv_at_horizons = surv_at_horizons[:, positive]
+    # sksurv's brier_score applies np.unique() to the requested times but returns
+    # scores in that sorted order, so an unsorted or duplicated grid would pair
+    # each score with the wrong survival column. Sort and dedupe up front, moving
+    # the survival columns with their horizons, so the two can never diverge.
+    horizons, first_idx = np.unique(horizons, return_index=True)
+    surv_at_horizons = surv_at_horizons[:, first_idx]
 
     train_event_arr = np.asarray(train_event).astype(bool)
-    train_duration_arr = np.asarray(train_duration, dtype=float)
+    train_duration_arr = np.asarray(train_duration, dtype=float).reshape(-1)
     eval_event_arr = np.asarray(eval_event).astype(bool)
-    eval_duration_arr = np.asarray(eval_duration, dtype=float)
+    eval_duration_arr = np.asarray(eval_duration, dtype=float).reshape(-1)
+    train_event_arr = train_event_arr.reshape(-1)
+    eval_event_arr = eval_event_arr.reshape(-1)
+    if len(train_event_arr) != len(train_duration_arr):
+        raise ValueError("train_event and train_duration must have equal length.")
+    if len(eval_event_arr) != len(eval_duration_arr):
+        raise ValueError("eval_event and eval_duration must have equal length.")
+    if surv_at_horizons.shape[0] != len(eval_duration_arr):
+        raise ValueError(
+            "surv_at_horizons rows must align one-to-one with evaluation outcomes "
+            f"({surv_at_horizons.shape[0]} != {len(eval_duration_arr)})."
+        )
 
     empty_cols = [
         "horizon_time_unit",
@@ -338,6 +458,12 @@ def compute_brier(
         "brier",
         "n_eval",
         "n_eval_events",
+        "reference_min_time_unit",
+        "reference_max_time_unit",
+        "evaluation_min_time_unit",
+        "evaluation_max_time_unit",
+        "eligible_by_support",
+        "admin_censor_time_unit",
         "note",
     ]
     if (
@@ -348,14 +474,82 @@ def compute_brier(
     ):
         return pd.DataFrame(columns=empty_cols), float("nan")
 
+    if max_time_unit is not None:
+        cap = float(max_time_unit)
+        if cap <= 0:
+            raise ValueError("max_time_unit must be positive when provided.")
+        train_late = train_duration_arr > cap
+        eval_late = eval_duration_arr > cap
+        train_event_arr = train_event_arr & ~train_late
+        eval_event_arr = eval_event_arr & ~eval_late
+        train_duration_arr = np.minimum(train_duration_arr, cap)
+        eval_duration_arr = np.minimum(eval_duration_arr, cap)
+
+    train_valid = np.isfinite(train_duration_arr) & (train_duration_arr > 0)
+    eval_valid = np.isfinite(eval_duration_arr) & (eval_duration_arr > 0)
+    if not train_valid.any() or not eval_valid.any():
+        rows = []
+        reason = "no_valid_reference_rows" if not train_valid.any() else "no_valid_evaluation_rows"
+        for h in horizons:
+            rows.append({
+                "horizon_time_unit": float(h),
+                "horizon_days": float(h) * float(time_unit_days),
+                "brier": np.nan,
+                "n_eval": int(eval_valid.sum()),
+                "n_eval_events": int(eval_event_arr[eval_valid].sum()),
+                "reference_min_time_unit": np.nan,
+                "reference_max_time_unit": np.nan,
+                "evaluation_min_time_unit": np.nan,
+                "evaluation_max_time_unit": np.nan,
+                "eligible_by_support": False,
+                "admin_censor_time_unit": max_time_unit,
+                "note": reason,
+            })
+        return pd.DataFrame(rows, columns=empty_cols), float("nan")
+
+    train_event_arr = train_event_arr[train_valid]
+    train_duration_arr = train_duration_arr[train_valid]
+    eval_event_arr = eval_event_arr[eval_valid]
+    eval_duration_arr = eval_duration_arr[eval_valid]
+    surv_at_horizons = surv_at_horizons[eval_valid, :]
+
     train_min = float(train_duration_arr.min())
     train_max = float(train_duration_arr.max())
-    in_range = (horizons > train_min) & (horizons < train_max)
+    eval_min = float(eval_duration_arr.min())
+    eval_max = float(eval_duration_arr.max())
+
+    ineligible_reasons: list[str] = []
+    for h in horizons:
+        reasons = []
+        if max_time_unit is not None and h >= float(max_time_unit):
+            reasons.append("at_or_beyond_admin_censor")
+        if not (train_min < h < train_max):
+            reasons.append("out_of_train_range")
+        if h < eval_min or h >= eval_max:
+            reasons.append("outside_evaluation_followup")
+        ineligible_reasons.append(";".join(reasons))
+    in_range = np.array([not reason for reason in ineligible_reasons], dtype=bool)
 
     train_surv = _make_survival_array(train_event_arr, train_duration_arr)
     eval_surv = _make_survival_array(eval_event_arr, eval_duration_arr)
 
-    rows = []
+    rows_by_horizon: dict[float, dict] = {}
+    for h, reason in zip(horizons, ineligible_reasons):
+        rows_by_horizon[float(h)] = {
+            "horizon_time_unit": float(h),
+            "horizon_days": float(h) * float(time_unit_days),
+            "brier": np.nan,
+            "n_eval": int(len(eval_event_arr)),
+            "n_eval_events": int(eval_event_arr.sum()),
+            "reference_min_time_unit": train_min,
+            "reference_max_time_unit": train_max,
+            "evaluation_min_time_unit": eval_min,
+            "evaluation_max_time_unit": eval_max,
+            "eligible_by_support": not bool(reason),
+            "admin_censor_time_unit": max_time_unit,
+            "note": str(reason),
+        }
+
     integrated = float("nan")
     if in_range.any():
         h_in = horizons[in_range]
@@ -367,51 +561,84 @@ def compute_brier(
                 times, brier_vals = brier_score(train_surv, eval_surv, surv_in, h_in)
         except ValueError as exc:
             for h in h_in:
-                rows.append(
-                    {
-                        "horizon_time_unit": float(h),
-                        "horizon_days": float(h) * float(time_unit_days),
-                        "brier": float("nan"),
-                        "n_eval": int(len(eval_event_arr)),
-                        "n_eval_events": int(eval_event_arr.sum()),
-                        "note": f"brier_failed: {exc}",
-                    }
-                )
+                rows_by_horizon[float(h)]["note"] = f"brier_failed: {exc}"
         else:
             for t, b in zip(times, brier_vals):
-                rows.append(
-                    {
-                        "horizon_time_unit": float(t),
-                        "horizon_days": float(t) * float(time_unit_days),
-                        "brier": float(b),
-                        "n_eval": int(len(eval_event_arr)),
-                        "n_eval_events": int(eval_event_arr.sum()),
-                        "note": "",
-                    }
-                )
-            if len(times) >= 2:
+                rows_by_horizon[float(t)]["brier"] = float(b)
+
+            n_requested = len(horizons)
+            valid_count = int(np.isfinite(brier_vals).sum())
+            coverage = valid_count / n_requested if n_requested else 0.0
+            adequate = (
+                valid_count >= MIN_IPCW_VALID_HORIZONS
+                and coverage >= MIN_IPCW_TIMELINE_COVERAGE
+            )
+            if adequate:
+                # `horizons` is sorted and unique, so `h_in` / `surv_in` are too and
+                # `brier_vals` (sorted by sksurv) lines up with them positionally.
+                valid_brier_mask = np.isfinite(brier_vals)
+                h_integrate = h_in[valid_brier_mask]
+                surv_integrate = surv_in[:, valid_brier_mask]
                 try:
                     with suppress_sksurv_warnings():
                         integrated = float(
-                            integrated_brier_score(train_surv, eval_surv, surv_in, h_in)
+                            integrated_brier_score(
+                                train_surv, eval_surv, surv_integrate, h_integrate
+                            )
                         )
-                except ValueError:
+                except ValueError as exc:
                     integrated = float("nan")
+                    for h in h_integrate:
+                        current = rows_by_horizon[float(h)]["note"]
+                        rows_by_horizon[float(h)]["note"] = (
+                            f"{current};integrated_brier_failed: {exc}"
+                            if current else f"integrated_brier_failed: {exc}"
+                        )
+            else:
+                for h in h_in[np.isfinite(brier_vals)]:
+                    rows_by_horizon[float(h)]["note"] = "insufficient_timeline_coverage_for_ibs"
 
-    for h in horizons[~in_range]:
-        rows.append(
-            {
-                "horizon_time_unit": float(h),
-                "horizon_days": float(h) * float(time_unit_days),
-                "brier": float("nan"),
-                "n_eval": int(len(eval_event_arr)),
-                "n_eval_events": int(eval_event_arr.sum()),
-                "note": "out_of_train_range",
-            }
-        )
-
-    df = pd.DataFrame(rows, columns=empty_cols).sort_values("horizon_time_unit").reset_index(drop=True)
+    df = (
+        pd.DataFrame(list(rows_by_horizon.values()), columns=empty_cols)
+        .sort_values("horizon_time_unit")
+        .reset_index(drop=True)
+    )
     return df, integrated
+
+
+def summarize_brier_timeline(brier_df: pd.DataFrame) -> dict[str, float | int | str]:
+    """Return requested/eligible/valid Brier timeline diagnostics for metrics."""
+    if brier_df.empty:
+        return {
+            "n_requested_brier_horizons": 0,
+            "n_support_eligible_brier_horizons": 0,
+            "n_valid_brier_horizons": 0,
+            "brier_timeline_coverage": 0.0,
+            "brier_valid_min_time_unit": np.nan,
+            "brier_valid_max_time_unit": np.nan,
+            "brier_timeline_status": "no_evaluable_timeline",
+        }
+    requested = int(brier_df["horizon_time_unit"].nunique())
+    eligible = brier_df["eligible_by_support"].fillna(False).to_numpy(dtype=bool)
+    support_eligible = int(brier_df.loc[eligible, "horizon_time_unit"].nunique())
+    valid = brier_df.loc[np.isfinite(brier_df["brier"]), "horizon_time_unit"].drop_duplicates()
+    n_valid = int(len(valid))
+    coverage = n_valid / requested if requested else 0.0
+    if n_valid < MIN_IPCW_VALID_HORIZONS:
+        status = "insufficient_valid_horizons"
+    elif coverage < MIN_IPCW_TIMELINE_COVERAGE:
+        status = "insufficient_timeline_coverage"
+    else:
+        status = "ok"
+    return {
+        "n_requested_brier_horizons": requested,
+        "n_support_eligible_brier_horizons": support_eligible,
+        "n_valid_brier_horizons": n_valid,
+        "brier_timeline_coverage": float(coverage),
+        "brier_valid_min_time_unit": float(valid.min()) if n_valid else np.nan,
+        "brier_valid_max_time_unit": float(valid.max()) if n_valid else np.nan,
+        "brier_timeline_status": status,
+    }
 
 
 # ---------------------------------------------------------------------------

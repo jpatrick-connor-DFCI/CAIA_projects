@@ -59,6 +59,9 @@ from survival_common.cohort import (  # noqa: E402
     normalize_landmark_days,
 )
 from survival_common.helper import (  # noqa: E402
+    AUC_TIMELINE_SCHEMA_VERSION,
+    DEFAULT_AUC_MAX_GRID_POINTS,
+    DEFAULT_AUC_MAX_TIME_UNITS,
     DEFAULT_AUC_QUANTILES,
     assert_no_test_leakage,
     choose_stratification_labels,
@@ -545,8 +548,10 @@ def main(args: argparse.Namespace) -> None:
         print(f"  canonical labs (train+valid): {len(canonical_labs)}")
 
         # Per-endpoint AUC horizon grid, derived ONCE from train+valid event
-        # times (full follow-up; no admin censoring). All downstream models
-        # read these from the manifest so mean AUC(t) is on the same horizon set.
+        # times under the same administrative cap the runners evaluate with,
+        # so every requested horizon is estimable rather than dead weight in
+        # the coverage denominator. All downstream models read these from the
+        # manifest so mean AUC(t) is on the same horizon set.
         train_val_block = aggregated.loc[aggregated["split"].isin(["train", "valid"])]
         landmark_horizons: dict[str, list[int]] = {}
         for endpoint, cfg in ENDPOINTS.items():
@@ -556,6 +561,7 @@ def main(args: argparse.Namespace) -> None:
                 event_col=cfg["event_col"],
                 quantiles=auc_quantiles,
                 time_unit_days=args.time_unit_days,
+                admin_censor_days=args.auc_max_time_units * args.time_unit_days,
             )
             landmark_horizons[endpoint] = [int(h) for h in grid]
             print(
@@ -592,6 +598,14 @@ def main(args: argparse.Namespace) -> None:
         },
         "n_patients_common_across_landmarks_descriptive_only": int(len(common_mrns)),
         "auc_quantiles": list(auc_quantiles),
+        # Only the outer two quantiles bound the timeline; the interior ones
+        # are recorded above for provenance but do not become horizons.
+        "auc_timeline_bounding_quantiles": [float(min(auc_quantiles)), float(max(auc_quantiles))],
+        "auc_max_grid_points": int(DEFAULT_AUC_MAX_GRID_POINTS),
+        # Runners read this back so the evaluation cap matches the cap the grid
+        # was built under; they must not fall back to their own default.
+        "auc_max_time_units": int(args.auc_max_time_units),
+        "auc_timeline_schema_version": AUC_TIMELINE_SCHEMA_VERSION,
         "auc_time_unit_days": int(args.time_unit_days),
         "auc_horizons_by_landmark": auc_horizons_by_landmark,
         "auc_max_horizon": int(max_horizon),
@@ -693,5 +707,15 @@ if __name__ == "__main__":
         type=float,
         default=list(DEFAULT_AUC_QUANTILES),
         help="Quantiles of train+valid event times used to derive the shared AUC(t) horizon grid.",
+    )
+    parser.add_argument(
+        "--auc-max-time-units",
+        type=int,
+        default=DEFAULT_AUC_MAX_TIME_UNITS,
+        help=(
+            "Administrative censoring horizon (in time units) for the AUC(t)/Brier "
+            f"timeline; default {DEFAULT_AUC_MAX_TIME_UNITS}. The grid stays strictly "
+            "inside it and runners reuse it from the manifest."
+        ),
     )
     main(parser.parse_args())

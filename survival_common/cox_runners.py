@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 
 from survival_common.config import CoxProjectConfig
+from survival_common.helper import resolve_auc_max_time_units
 
 
 UNIVARIATE_KEEP_COLS = [
@@ -129,7 +130,8 @@ def build_multivariable_parser(config: CoxProjectConfig, cox: Any) -> argparse.A
         default=None,
         help=(
             "Cap (in time-units) for the IPCW AUC(t)/Brier evaluation horizons. "
-            f"Defaults to {cox.DEFAULT_AUC_MAX_TIME_UNITS} if unset. Caps evaluation only, not fitting."
+            "Defaults to the build manifest's auc_max_time_units, which the horizon "
+            "grid was clamped to. Caps evaluation only, not fitting."
         ),
     )
     parser.add_argument(
@@ -431,11 +433,7 @@ def run_multivariable(config: CoxProjectConfig, cox: Any, args: Namespace) -> No
     min_patient_coverage = float(build_manifest["min_patient_coverage"])
     auc_time_unit_days = int(build_manifest["auc_time_unit_days"])
     auc_quantiles = tuple(build_manifest["auc_quantiles"])
-    auc_max_time_units = (
-        args.auc_max_time_units
-        if args.auc_max_time_units is not None
-        else cox.DEFAULT_AUC_MAX_TIME_UNITS
-    )
+    auc_max_time_units = resolve_auc_max_time_units(build_manifest, args.auc_max_time_units)
     auc_horizons_by_landmark = build_manifest["auc_horizons_by_landmark"]
     print(
         f"Loading prebuilt prediction inputs from {inputs_dir} "

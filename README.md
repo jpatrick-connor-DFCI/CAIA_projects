@@ -208,7 +208,22 @@ All read prebuilt inputs and the `split` column; none re-derive the split. COMPA
 `platinum` endpoint only (time to first platinum). Both ARPI- and ADT-anchored arms use landmarks
 `[0, 90, 180, 365]`. Metrics: Harrell C-index, IPCW
 mean AUC(t), integrated IPCW Brier — horizons come from `build_manifest.json` so all models share a
-grid.
+grid. The outer train+valid event-time quantiles define a bounded interval that is filled with up to
+25 evenly spaced time points (interior quantiles are provenance only, not horizons). The builders clamp
+that interval to stay strictly inside `--auc-max-time-units` and record the cap in the manifest, and the
+runners evaluate with the manifest's cap by default, so no requested horizon is inestimable by
+construction. Each evaluation
+split records which requested points have cases, controls, and adequate follow-up; **AUC(t) and Brier
+both pre-screen the timeline for their method-specific support requirements and use the same
+administrative censoring cap**, since one horizon past a fold's follow-up can otherwise blank that
+fold's entire metric. Mean AUC(t) and integrated Brier each require at least two valid points and 50%
+timeline coverage; mean AUC(t) is always sksurv's censoring-weighted integral over the valid horizons,
+never a substitute average. AUC first scores the eligible timeline in one batch and retries individual
+horizons only if that batch fails. Metrics carry `train_val_*` / `test_*` prefixed AUC and Brier
+requested/eligible/valid horizon counts, coverage, valid bounds, and status, in the same schema for Cox
+and XGBoost.
+Timeline schema version 3 is stored in the build manifest; model runners reject older manifests so
+the input builder must be rerun after this change.
 
 | Script | Model | CLI notes |
 |---|---|---|
@@ -273,9 +288,11 @@ univariate-results review notebook:
       generalized the same way. Stems: `dist_by_platinum_{log,raw}_<lab>_landmark<D>`.
       `PLOT_NON_ANDROGEN_DISTRIBUTIONS` controls whether distributions extend beyond PSA and
       Testosterone.
-    - **Lab-panel toggles** — the figure notebook sets both
-      `PLOT_NON_ANDROGEN_DISTRIBUTIONS <- TRUE` and
-      `PLOT_NON_ANDROGEN_LAB_FIGURES <- TRUE`, enabling all canonical categories including vitals.
+    - **Lab-panel toggles** — the figure notebook and pipeline defaults set both
+      `PLOT_NON_ANDROGEN_DISTRIBUTIONS <- FALSE` and
+      `PLOT_NON_ANDROGEN_LAB_FIGURES <- FALSE`. Lab-specific distribution, KM, and longitudinal
+      panels are therefore limited to PSA and Testosterone. Non-androgen labs, including vitals,
+      remain available to models and aggregate feature plots.
     - **LLM-stratified KM sanity check** — new time-to-platinum KM curves stratified by
       `primary_label`/`has_nepc`/`has_avpc`, using the same `platinum_km_inputs()` +
       `overlay_km()` path as the quartile curves. Stems: `km_llm_<scheme>_landmark<D>`.
@@ -312,7 +329,8 @@ IPIO has a paired run/figure notebook as well:
    `assert_no_test_leakage` / `assert_disjoint_folds` live in `survival_common/helper.py`.
 3. **Canonical labs and horizon grids are training-block artifacts.** The main canonical lab set and
    AUC/Brier horizons are derived on **train+valid**; CV recomputes canonical labs on each fold-train.
-   Do not derive these from held-out test patients.
+   Evaluation data may only mask requested horizons that are not estimable—it never supplies
+   replacement times. Do not derive the requested timeline from held-out test patients.
 4. **Endpoint and duration:** COMPASS uses `(t_platinum, PLATINUM)` only. For non-platinum patients,
    the anchor time is filled with `t_last_contact` (censoring). After landmark rebasing, the validity
    filter requires duration `> 0`, which silently drops patients with platinum before/at the landmark —
@@ -368,8 +386,10 @@ surprised by them.
 
 ### Medium impact
 
-- **`auc_max_time_units = 260` is the default** in `cox_aggregated.py` and `multivariate_analysis.py` and
-  admin-censors AUC/Brier unless `--auc-max-time-units` is overridden.
+- **`auc_max_time_units = 260` is the default** (`DEFAULT_AUC_MAX_TIME_UNITS` in `survival_common/helper.py`)
+  and admin-censors AUC/Brier unless `--auc-max-time-units` is overridden. The builders clamp the horizon
+  grid to it and runners read it back from the manifest; overriding it at run time only (not at build
+  time) makes the two diverge, which the runner warns about.
 - **Silent patient drops** at several inner-joins and `valid`-mask filters (diagnosis/death inner joins,
   duration `> 0` filter). Downstream cohort filters now log attrition in `build_prediction_inputs.py`;
   keep that pattern for any new cohort-selection rule.

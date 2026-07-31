@@ -65,7 +65,6 @@ for _p in (str(REPO_ROOT), str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
 import cox_aggregated as _ca  # noqa: E402
 from cox_aggregated import (  # noqa: E402
     AGE_COL,
-    DEFAULT_AUC_MAX_TIME_UNITS,
     DEFAULT_LANDMARK_DAYS,
     DEFAULT_SEED,
     ENDPOINTS,
@@ -79,12 +78,15 @@ from cox_aggregated import (  # noqa: E402
     select_feature_columns,
 )
 from survival_common.cox_runners import run_multivariable  # noqa: E402
+from survival_common.cox_engine import summarize_auc_timeline  # noqa: E402
 from survival_common.helper import (  # noqa: E402
     assert_disjoint_folds,
     assert_no_test_leakage,
     compute_brier,
     iter_stratified_folds,
+    resolve_auc_max_time_units,
     select_canonical_labs,
+    summarize_brier_timeline,
 )
 from survival_common.xgboost_engine import (  # noqa: E402
     best_iteration,
@@ -218,8 +220,12 @@ def cv_one_endpoint(
                 "c_index_val": np.nan,
                 "mean_auc_t_val": np.nan,
                 "n_valid_auc_horizons_val": 0,
+                "auc_timeline_coverage_val": np.nan,
+                "auc_timeline_status_val": "not_evaluated",
                 "integrated_brier_val": np.nan,
                 "n_valid_brier_horizons_val": 0,
+                "brier_timeline_coverage_val": np.nan,
+                "brier_timeline_status_val": "not_evaluated",
                 "note": "",
             }
             try:
@@ -260,11 +266,10 @@ def cv_one_endpoint(
                     fixed_horizons=horizon_grid,
                 )
                 row["mean_auc_t_val"] = mean_auc_val
-                row["n_valid_auc_horizons_val"] = (
-                    int(auc_df_val["auc_t"].notna().sum())
-                    if not auc_df_val.empty
-                    else 0
-                )
+                auc_diag = summarize_auc_timeline(auc_df_val)
+                row["n_valid_auc_horizons_val"] = auc_diag["n_valid_auc_horizons"]
+                row["auc_timeline_coverage_val"] = auc_diag["auc_timeline_coverage"]
+                row["auc_timeline_status_val"] = auc_diag["auc_timeline_status"]
 
                 val_surv = xgb_survival_at_horizons(
                     model,
@@ -296,11 +301,13 @@ def cv_one_endpoint(
                     surv_at_horizons=val_surv,
                     horizons=horizon_grid,
                     time_unit_days=args.auc_time_unit_days,
+                    max_time_unit=args.auc_max_time_units,
                 )
                 row["integrated_brier_val"] = ibs
-                row["n_valid_brier_horizons_val"] = (
-                    int(brier_df["brier"].notna().sum()) if not brier_df.empty else 0
-                )
+                brier_diag = summarize_brier_timeline(brier_df)
+                row["n_valid_brier_horizons_val"] = brier_diag["n_valid_brier_horizons"]
+                row["brier_timeline_coverage_val"] = brier_diag["brier_timeline_coverage"]
+                row["brier_timeline_status_val"] = brier_diag["brier_timeline_status"]
             except Exception as exc:  # pragma: no cover - defensive
                 row["note"] = f"fold_failed: {exc}"
             fold_rows.append(row)
@@ -337,9 +344,17 @@ def cv_one_endpoint(
             mean_auc_t_cv_mean=("mean_auc_t_val", "mean"),
             mean_auc_t_cv_std=("mean_auc_t_val", "std"),
             n_valid_auc_t_folds=("mean_auc_t_val", lambda s: int(s.notna().sum())),
+            auc_timeline_coverage_cv_mean=("auc_timeline_coverage_val", "mean"),
+            n_adequate_auc_timeline_folds=(
+                "auc_timeline_status_val", lambda s: int(s.eq("ok").sum())
+            ),
             integrated_brier_cv_mean=("integrated_brier_val", "mean"),
             integrated_brier_cv_std=("integrated_brier_val", "std"),
             n_valid_brier_folds=("integrated_brier_val", lambda s: int(s.notna().sum())),
+            brier_timeline_coverage_cv_mean=("brier_timeline_coverage_val", "mean"),
+            n_adequate_brier_timeline_folds=(
+                "brier_timeline_status_val", lambda s: int(s.eq("ok").sum())
+            ),
             best_iteration_mean=("best_iteration", "mean"),
             cv_stratification=("cv_stratification", "first"),
         )
@@ -533,7 +548,9 @@ def run_one_endpoint(
         surv_at_horizons=test_surv,
         horizons=horizon_grid,
         time_unit_days=args.auc_time_unit_days,
+        max_time_unit=args.auc_max_time_units,
     )
+    brier_diag = summarize_brier_timeline(brier_t)
     if not brier_t.empty:
         brier_t = brier_t.copy()
         brier_t.insert(0, "endpoint", endpoint)
@@ -559,6 +576,12 @@ def run_one_endpoint(
             f"{float(h):g}" for h in np.asarray(horizon_grid, dtype=float).reshape(-1)
         ),
     }
+    # Prefixed to match the elastic-net metrics schema (cox_models emits
+    # train_val_* / test_* for the same diagnostics).
+    metrics_row.update(
+        {f"test_{key}": value for key, value in summarize_auc_timeline(auc_t).items()}
+    )
+    metrics_row.update({f"test_{key}": value for key, value in brier_diag.items()})
     if chosen is not None:
         metrics_row.update(
             {
@@ -626,8 +649,9 @@ def run_xgboost(args: argparse.Namespace) -> None:
     args.min_patient_coverage = float(build_manifest["min_patient_coverage"])
     args.auc_time_unit_days = int(build_manifest["auc_time_unit_days"])
     args.auc_quantiles = tuple(build_manifest["auc_quantiles"])
-    if getattr(args, "auc_max_time_units", None) is None:
-        args.auc_max_time_units = DEFAULT_AUC_MAX_TIME_UNITS
+    args.auc_max_time_units = resolve_auc_max_time_units(
+        build_manifest, getattr(args, "auc_max_time_units", None)
+    )
     auc_horizons_by_landmark = build_manifest["auc_horizons_by_landmark"]
     print(
         f"Loading prebuilt prediction inputs from {inputs_dir} "
@@ -808,8 +832,9 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help=(
-            f"Cap (in time-units) for the IPCW AUC(t)/Brier evaluation horizons "
-            f"(default {DEFAULT_AUC_MAX_TIME_UNITS}). Caps evaluation only, not fitting."
+            "Cap (in time-units) for the IPCW AUC(t)/Brier evaluation horizons. "
+            "Defaults to the build manifest's auc_max_time_units, which the horizon "
+            "grid was clamped to. Caps evaluation only, not fitting."
         ),
     )
     parser.add_argument("--num-boost-round", type=int, default=1000)

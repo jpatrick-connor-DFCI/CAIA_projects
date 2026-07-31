@@ -9,6 +9,8 @@ import pandas as pd
 from sklearn.model_selection import KFold, StratifiedKFold
 
 from survival_common.helper import (
+    MIN_IPCW_TIMELINE_COVERAGE,
+    MIN_IPCW_VALID_HORIZONS,
     _make_survival_array,
     breslow_survival_at_horizons,
     choose_stratification_labels,
@@ -189,7 +191,20 @@ def compute_ipcw_auc_t(
     max_time_unit: int | None = None,
     fixed_horizons: np.ndarray | None = None,
 ) -> tuple[float, pd.DataFrame]:
-    """Compute IPCW cumulative/dynamic AUC(t)."""
+    """Compute IPCW cumulative/dynamic AUC(t) on an estimability-filtered timeline.
+
+    ``fixed_horizons`` is the train/validation-derived requested timeline. The
+    evaluation split is used only to decide which requested points are
+    estimable, never to create replacement horizons. A mean is reported only
+    when at least two unique horizons and at least half of the requested
+    timeline are valid, and it is always sksurv's censoring-weighted integral
+    over the valid horizons — never a substitute summary. Per-horizon output
+    records the support diagnostics.
+
+    The eligible timeline is scored in one ``cumulative_dynamic_auc`` call.
+    If that batch fails, each horizon is retried independently so a single
+    problematic boundary point cannot erase otherwise valid estimates.
+    """
     require_sksurv()
 
     empty_cols = [
@@ -199,6 +214,13 @@ def compute_ipcw_auc_t(
         "auc_t",
         "n_eval",
         "n_eval_events",
+        "n_cases_by_horizon",
+        "n_controls_by_horizon",
+        "reference_min_time_unit",
+        "reference_max_time_unit",
+        "evaluation_min_time_unit",
+        "evaluation_max_time_unit",
+        "eligible_by_support",
         "admin_censor_time_unit",
         "note",
     ]
@@ -228,22 +250,14 @@ def compute_ipcw_auc_t(
 
     train_valid = np.isfinite(train_duration) & (train_duration > 0)
     eval_valid = np.isfinite(eval_duration) & (eval_duration > 0) & np.isfinite(risk_score)
-    if train_valid.sum() == 0 or eval_valid.sum() == 0:
-        return np.nan, pd.DataFrame(columns=empty_cols)
-
-    train_surv = _make_survival_array(train_event[train_valid], train_duration[train_valid])
-    eval_surv = _make_survival_array(eval_event[eval_valid], eval_duration[eval_valid])
-    eval_risk = risk_score[eval_valid]
 
     if fixed_horizons is not None:
         horizon_times = np.asarray(fixed_horizons, dtype=float).reshape(-1)
-        horizon_times = np.unique(horizon_times[horizon_times > 0])
-        if max_time_unit is not None:
-            horizon_times = horizon_times[horizon_times <= float(max_time_unit)]
-        if len(horizon_times) == 0:
-            return np.nan, pd.DataFrame(columns=empty_cols)
+        horizon_times = np.unique(horizon_times[np.isfinite(horizon_times) & (horizon_times > 0)])
         horizon_quantiles: tuple[float, ...] = tuple([np.nan] * len(horizon_times))
     else:
+        if eval_valid.sum() == 0:
+            return np.nan, pd.DataFrame(columns=empty_cols)
         event_times = eval_duration[eval_valid & (eval_event == 1)]
         event_times = event_times[np.isfinite(event_times) & (event_times > 0)]
         if len(event_times) == 0:
@@ -254,57 +268,196 @@ def compute_ipcw_auc_t(
         )
         horizon_quantiles = tuple(quantiles)
 
+    if len(horizon_times) == 0:
+        return np.nan, pd.DataFrame(columns=empty_cols)
+
+    if train_valid.sum() == 0 or eval_valid.sum() == 0:
+        reason = "no_valid_reference_rows" if train_valid.sum() == 0 else "no_valid_evaluation_rows"
+        rows = []
+        for quantile, horizon in zip(horizon_quantiles, horizon_times):
+            rows.append({
+                "horizon_quantile": quantile,
+                "horizon_time_unit": horizon,
+                "horizon_days": horizon * float(time_unit_days),
+                "auc_t": np.nan,
+                "n_eval": int(eval_valid.sum()),
+                "n_eval_events": int(eval_event[eval_valid].sum()),
+                "n_cases_by_horizon": 0,
+                "n_controls_by_horizon": 0,
+                "reference_min_time_unit": np.nan,
+                "reference_max_time_unit": np.nan,
+                "evaluation_min_time_unit": np.nan,
+                "evaluation_max_time_unit": np.nan,
+                "eligible_by_support": False,
+                "admin_censor_time_unit": max_time_unit,
+                "note": reason,
+            })
+        return np.nan, pd.DataFrame(rows, columns=empty_cols)
+
+    train_surv = _make_survival_array(train_event[train_valid], train_duration[train_valid])
+    eval_surv = _make_survival_array(eval_event[eval_valid], eval_duration[eval_valid])
+    eval_risk = risk_score[eval_valid]
+    train_duration_valid = train_duration[train_valid]
+    eval_duration_valid = eval_duration[eval_valid]
+    eval_event_valid = eval_event[eval_valid]
+    train_min = float(np.min(train_duration_valid))
+    train_max = float(np.max(train_duration_valid))
+    eval_min = float(np.min(eval_duration_valid))
+    eval_max = float(np.max(eval_duration_valid))
+
     rows = []
     for quantile, horizon in zip(horizon_quantiles, horizon_times):
-        auc_t = np.nan
-        note = ""
-        if horizon <= 0:
-            note = "non_positive_horizon"
-        else:
-            try:
-                with suppress_sksurv_warnings():
-                    auc_values, _ = cumulative_dynamic_auc(
-                        train_surv,
-                        eval_surv,
-                        eval_risk,
-                        np.asarray([horizon], dtype=float),
-                    )
-                auc_t = float(auc_values[0])
-            except ValueError as exc:
-                note = f"auc_failed: {exc}"
+        n_cases = int(((eval_event_valid == 1) & (eval_duration_valid <= horizon)).sum())
+        n_controls = int((eval_duration_valid > horizon).sum())
+        support_failures = []
+        if max_time_unit is not None and horizon >= float(max_time_unit):
+            support_failures.append("at_or_beyond_admin_censor")
+        if horizon < eval_min or horizon >= eval_max:
+            support_failures.append("outside_evaluation_followup")
+        if horizon >= train_max:
+            support_failures.append("outside_reference_followup")
+        if n_cases == 0:
+            support_failures.append("no_cases_by_horizon")
+        if n_controls == 0:
+            support_failures.append("no_controls_beyond_horizon")
         rows.append(
             {
                 "horizon_quantile": quantile,
                 "horizon_time_unit": horizon,
                 "horizon_days": horizon * float(time_unit_days),
-                "auc_t": auc_t,
+                "auc_t": np.nan,
                 "n_eval": int(eval_valid.sum()),
-                "n_eval_events": int((eval_event[eval_valid] == 1).sum()),
+                "n_eval_events": int((eval_event_valid == 1).sum()),
+                "n_cases_by_horizon": n_cases,
+                "n_controls_by_horizon": n_controls,
+                "reference_min_time_unit": train_min,
+                "reference_max_time_unit": train_max,
+                "evaluation_min_time_unit": eval_min,
+                "evaluation_max_time_unit": eval_max,
+                "eligible_by_support": len(support_failures) == 0,
                 "admin_censor_time_unit": max_time_unit,
-                "note": note,
+                "note": ";".join(support_failures),
             }
         )
 
     auc_df = pd.DataFrame(rows)
-    if len(horizon_times) < 2 or horizon_times[-1] <= horizon_times[0]:
+    eligible_mask = auc_df["eligible_by_support"].to_numpy(dtype=bool)
+    if not eligible_mask.any():
         return np.nan, auc_df
 
-    mean_auc_times = np.arange(horizon_times[0], horizon_times[-1] + 1, dtype=float)
-    mean_auc_times = mean_auc_times[mean_auc_times > 0]
-    if len(mean_auc_times) == 0:
-        return np.nan, auc_df
-
+    eligible_times = np.unique(
+        auc_df.loc[eligible_mask, "horizon_time_unit"].to_numpy(dtype=float)
+    )
+    mean_auc = np.nan
     try:
         with suppress_sksurv_warnings():
-            _, mean_auc = cumulative_dynamic_auc(
+            auc_values, mean_auc = cumulative_dynamic_auc(
                 train_surv,
                 eval_surv,
                 eval_risk,
-                mean_auc_times,
+                eligible_times,
             )
     except ValueError:
-        mean_auc = np.nan
-    return float(mean_auc) if np.isfinite(mean_auc) else np.nan, auc_df
+        # A batched failure can be caused by one boundary horizon. Retry each
+        # requested point so an isolated failure does not erase earlier valid
+        # AUC estimates and their diagnostics.
+        auc_by_time = {}
+        for horizon in eligible_times:
+            try:
+                with suppress_sksurv_warnings():
+                    values, _ = cumulative_dynamic_auc(
+                        train_surv,
+                        eval_surv,
+                        eval_risk,
+                        np.asarray([horizon], dtype=float),
+                    )
+                auc_by_time[float(horizon)] = float(np.asarray(values).reshape(-1)[0])
+            except ValueError as exc:
+                horizon_mask = auc_df["horizon_time_unit"].eq(horizon).to_numpy()
+                auc_df.loc[horizon_mask, "note"] = f"auc_failed: {exc}"
+    else:
+        auc_by_time = dict(zip(eligible_times, np.asarray(auc_values, dtype=float).reshape(-1)))
+
+    auc_df["auc_t"] = auc_df["horizon_time_unit"].map(auc_by_time).astype(float)
+    valid_mask = np.isfinite(auc_df["auc_t"].to_numpy(dtype=float))
+    # sksurv can return NaN without raising when every case at a horizon carries
+    # zero IPCW weight; say so rather than leaving an unexplained blank.
+    unexplained_nan = eligible_mask & ~valid_mask & auc_df["note"].eq("").to_numpy()
+    auc_df.loc[unexplained_nan, "note"] = "auc_nan_despite_support"
+
+    valid_times = np.unique(
+        auc_df.loc[valid_mask, "horizon_time_unit"].to_numpy(dtype=float)
+    )
+    n_requested = int(pd.Series(horizon_times).nunique())
+    coverage = len(valid_times) / n_requested if n_requested else 0.0
+    if (
+        len(valid_times) < MIN_IPCW_VALID_HORIZONS
+        or coverage < MIN_IPCW_TIMELINE_COVERAGE
+    ):
+        return np.nan, _append_note(auc_df, valid_mask, "insufficient_timeline_coverage_for_mean")
+
+    if len(valid_times) < len(eligible_times) or not np.isfinite(mean_auc):
+        # A failed/NaN horizon poisons sksurv's integral; re-integrate over the
+        # finite points so the mean remains the censoring-weighted estimand.
+        try:
+            with suppress_sksurv_warnings():
+                _, mean_auc = cumulative_dynamic_auc(
+                    train_surv,
+                    eval_surv,
+                    eval_risk,
+                    valid_times,
+                )
+        except ValueError:
+            mean_auc = np.nan
+
+    if not np.isfinite(mean_auc):
+        return np.nan, _append_note(auc_df, valid_mask, "mean_auc_not_finite")
+    return float(mean_auc), auc_df
+
+
+def _append_note(auc_df: pd.DataFrame, mask: np.ndarray, suffix: str) -> pd.DataFrame:
+    """Append ``suffix`` to the note of the masked rows, preserving any existing text."""
+    auc_df.loc[mask, "note"] = auc_df.loc[mask, "note"].map(
+        lambda value: suffix if not value else f"{value};{suffix}"
+    )
+    return auc_df
+
+
+def summarize_auc_timeline(auc_df: pd.DataFrame) -> dict[str, float | int | str]:
+    """Return compact requested/eligible/valid timeline diagnostics for metrics."""
+    if auc_df.empty:
+        return {
+            "n_requested_auc_horizons": 0,
+            "n_support_eligible_auc_horizons": 0,
+            "n_valid_auc_horizons": 0,
+            "auc_timeline_coverage": 0.0,
+            "auc_valid_min_time_unit": np.nan,
+            "auc_valid_max_time_unit": np.nan,
+            # Covers both "nothing requested" and "the split had no evaluable
+            # rows at all"; compute_ipcw_auc_t returns an empty frame for each.
+            "auc_timeline_status": "no_evaluable_timeline",
+        }
+    requested = int(auc_df["horizon_time_unit"].nunique())
+    eligible = auc_df["eligible_by_support"].fillna(False).to_numpy(dtype=bool)
+    support_eligible = int(auc_df.loc[eligible, "horizon_time_unit"].nunique())
+    valid = auc_df.loc[np.isfinite(auc_df["auc_t"]), "horizon_time_unit"].drop_duplicates()
+    n_valid = int(len(valid))
+    coverage = n_valid / requested if requested else 0.0
+    if n_valid < MIN_IPCW_VALID_HORIZONS:
+        status = "insufficient_valid_horizons"
+    elif coverage < MIN_IPCW_TIMELINE_COVERAGE:
+        status = "insufficient_timeline_coverage"
+    else:
+        status = "ok"
+    return {
+        "n_requested_auc_horizons": requested,
+        "n_support_eligible_auc_horizons": support_eligible,
+        "n_valid_auc_horizons": n_valid,
+        "auc_timeline_coverage": float(coverage),
+        "auc_valid_min_time_unit": float(valid.min()) if n_valid else np.nan,
+        "auc_valid_max_time_unit": float(valid.max()) if n_valid else np.nan,
+        "auc_timeline_status": status,
+    }
 
 
 def build_coxnet_xy(

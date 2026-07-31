@@ -337,8 +337,8 @@ COHORT_LANDMARKS <- list(
 # of re-executing itself via Rscript.
 generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS, show = FALSE,
                              llm_annotations_path = DEFAULT_LLM_ANNOTATIONS_PATH,
-                             plot_non_androgen_distributions = TRUE,
-                             plot_non_androgen_lab_figures = TRUE) {
+                             plot_non_androgen_distributions = FALSE,
+                             plot_non_androgen_lab_figures = FALSE) {
   # Rscript opens `Rplots.pdf` when any plot is drawn without an explicit device.
   # All intended outputs below use ggsave(), so route any incidental drawing to a
   # temporary null PDF device during non-interactive runs.

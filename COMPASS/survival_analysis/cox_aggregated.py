@@ -65,6 +65,7 @@ from survival_common.cox_models import (  # noqa: E402
     tune_multivariable_model as _shared_tune_multivariable_model,
 )
 from survival_common.helper import (  # noqa: E402,F401
+    DEFAULT_AUC_MAX_TIME_UNITS,
     assert_disjoint_folds,
     assert_no_test_leakage,
     compute_brier,
@@ -83,7 +84,8 @@ DEFAULT_N_FOLDS = 5
 DEFAULT_LANDMARK_DAYS = [0, 90, 180, 365]
 DEFAULT_MIN_PATIENT_COVERAGE = 0.20
 DEFAULT_MIN_EVENTS_PER_FEATURE = 10
-DEFAULT_AUC_MAX_TIME_UNITS = 260
+# DEFAULT_AUC_MAX_TIME_UNITS is re-exported from survival_common.helper so the
+# builders' horizon grid and the runners' evaluation cap cannot drift apart.
 DEFAULT_CV_PENALIZERS = [0.001, 0.01, 0.05, 0.20, 0.80, 3.20]
 DEFAULT_CV_L1_RATIOS = [0.01, 0.5, 1.0]
 DEFAULT_AUC_QUANTILES = (0.25, 0.375, 0.50, 0.625, 0.75)

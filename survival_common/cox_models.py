@@ -33,14 +33,17 @@ from survival_common.cox_engine import (
     parse_feature_name,
     require_sksurv,
     score_coxnet_model,
+    summarize_auc_timeline,
     summarize_fold_failures as _summarize_fold_failures,
 )
 from survival_common.helper import (
+    AUC_TIMELINE_SCHEMA_VERSION,
     assert_disjoint_folds,
     assert_no_test_leakage,
     compute_brier,
     horizon_grid_frame,
     select_canonical_labs,
+    summarize_brier_timeline,
 )
 
 try:  # pragma: no cover - depends on local environment
@@ -670,8 +673,12 @@ def tune_multivariable_model(
                 "c_index_val": np.nan,
                 "mean_auc_t_val": np.nan,
                 "n_valid_auc_horizons_val": 0,
+                "auc_timeline_coverage_val": np.nan,
+                "auc_timeline_status_val": "not_evaluated",
                 "integrated_brier_val": np.nan,
                 "n_valid_brier_horizons_val": 0,
+                "brier_timeline_coverage_val": np.nan,
+                "brier_timeline_status_val": "not_evaluated",
                 "n_covariates": np.nan,
                 "note": "",
             }
@@ -717,9 +724,10 @@ def tune_multivariable_model(
                         fixed_horizons=horizon_grid,
                     )
                     row["mean_auc_t_val"] = mean_auc_val
-                    row["n_valid_auc_horizons_val"] = (
-                        int(auc_df_val["auc_t"].notna().sum()) if not auc_df_val.empty else 0
-                    )
+                    auc_diag = summarize_auc_timeline(auc_df_val)
+                    row["n_valid_auc_horizons_val"] = auc_diag["n_valid_auc_horizons"]
+                    row["auc_timeline_coverage_val"] = auc_diag["auc_timeline_coverage"]
+                    row["auc_timeline_status_val"] = auc_diag["auc_timeline_status"]
 
                     val_surv = coxnet_survival_at_horizons(
                         model,
@@ -747,11 +755,13 @@ def tune_multivariable_model(
                         surv_at_horizons=val_surv,
                         horizons=horizon_grid,
                         time_unit_days=auc_time_unit_days,
+                        max_time_unit=auc_max_time_units,
                     )
                     row["integrated_brier_val"] = ibs
-                    row["n_valid_brier_horizons_val"] = (
-                        int(brier_df["brier"].notna().sum()) if not brier_df.empty else 0
-                    )
+                    brier_diag = summarize_brier_timeline(brier_df)
+                    row["n_valid_brier_horizons_val"] = brier_diag["n_valid_brier_horizons"]
+                    row["brier_timeline_coverage_val"] = brier_diag["brier_timeline_coverage"]
+                    row["brier_timeline_status_val"] = brier_diag["brier_timeline_status"]
             except _FOLD_FIT_ERRORS as exc:  # expected numerical/convergence failures only
                 row["note"] = f"fold_failed: {exc}"
 
@@ -769,9 +779,17 @@ def tune_multivariable_model(
             mean_auc_t_cv_mean=("mean_auc_t_val", "mean"),
             mean_auc_t_cv_std=("mean_auc_t_val", "std"),
             n_valid_auc_t_folds=("mean_auc_t_val", lambda s: int(s.notna().sum())),
+            auc_timeline_coverage_cv_mean=("auc_timeline_coverage_val", "mean"),
+            n_adequate_auc_timeline_folds=(
+                "auc_timeline_status_val", lambda s: int(s.eq("ok").sum())
+            ),
             integrated_brier_cv_mean=("integrated_brier_val", "mean"),
             integrated_brier_cv_std=("integrated_brier_val", "std"),
             n_valid_brier_folds=("integrated_brier_val", lambda s: int(s.notna().sum())),
+            brier_timeline_coverage_cv_mean=("brier_timeline_coverage_val", "mean"),
+            n_adequate_brier_timeline_folds=(
+                "brier_timeline_status_val", lambda s: int(s.eq("ok").sum())
+            ),
             n_covariates_mean=("n_covariates", "mean"),
             cv_stratification=("cv_stratification", "first"),
         )
@@ -893,6 +911,8 @@ def fit_final_multivariable_model(
         max_time_unit=auc_max_time_units,
         fixed_horizons=horizon_grid,
     )
+    train_auc_diag = summarize_auc_timeline(train_auc_df)
+    test_auc_diag = summarize_auc_timeline(test_auc_df)
 
     test_surv = coxnet_survival_at_horizons(
         model,
@@ -920,7 +940,9 @@ def fit_final_multivariable_model(
         surv_at_horizons=test_surv,
         horizons=horizon_grid,
         time_unit_days=auc_time_unit_days,
+        max_time_unit=auc_max_time_units,
     )
+    test_brier_diag = summarize_brier_timeline(test_brier_df)
     test_brier_df = test_brier_df.copy()
     if not test_brier_df.empty:
         test_brier_df.insert(0, "endpoint", endpoint)
@@ -945,13 +967,13 @@ def fit_final_multivariable_model(
         "auc_time_unit_days": auc_time_unit_days,
         "auc_admin_censor_time_unit": auc_max_time_units,
         "horizon_grid": ",".join(f"{float(h):g}" for h in np.asarray(horizon_grid, dtype=float).reshape(-1)),
-        "train_val_n_valid_auc_horizons": int(train_auc_df["auc_t"].notna().sum()) if not train_auc_df.empty else 0,
-        "test_n_valid_auc_horizons": int(test_auc_df["auc_t"].notna().sum()) if not test_auc_df.empty else 0,
-        "test_n_valid_brier_horizons": int(test_brier_df["brier"].notna().sum()) if not test_brier_df.empty else 0,
         "split_stratification": split_stratification,
         "cv_stratification": cv_stratification,
         "note": note,
     }
+    metrics_row.update({f"train_val_{key}": value for key, value in train_auc_diag.items()})
+    metrics_row.update({f"test_{key}": value for key, value in test_auc_diag.items()})
+    metrics_row.update({f"test_{key}": value for key, value in test_brier_diag.items()})
     for label, auc_df in [("train_val", train_auc_df), ("test", test_auc_df)]:
         if auc_df.empty:
             continue
@@ -1046,7 +1068,15 @@ def load_build_manifest(inputs_dir: Path, *, manifest_filename: str) -> dict:
         raise FileNotFoundError(
             f"Missing build manifest at {manifest_path}. Run build_prediction_inputs.py first."
         )
-    return json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text())
+    version = manifest.get("auc_timeline_schema_version")
+    if version != AUC_TIMELINE_SCHEMA_VERSION:
+        raise ValueError(
+            f"{manifest_path} has AUC timeline schema version {version!r}; expected "
+            f"{AUC_TIMELINE_SCHEMA_VERSION}. Re-run the applicable prediction/genomic "
+            "input builder to construct the robust evaluation timeline."
+        )
+    return manifest
 
 
 def load_prebuilt_landmark(
