@@ -4,10 +4,11 @@ Single source of truth for survival-analysis prediction inputs.
 For each requested landmark, this script:
   1. Loads the broad row-level longitudinal prostate lab CSV and applies the
      requested downstream cohort filters.
-  2. Builds the landmarked patient cohort and intersects MRNs across all
-     requested landmarks so every downstream model sees the same patients.
-  3. Derives a 3-way train/valid/test split ONCE on the intersection cohort
-     at the base (smallest) landmark, then reuses it for every landmark.
+  2. Builds a separate eligible risk set for each requested landmark. Patients
+     do not have to survive/event-free to a later landmark to enter an earlier
+     one, avoiding an immortal-time restriction on the day-0 cohort.
+  3. Derives an independent 3-way train/valid/test split within each landmark
+     cohort.
      Cox / XGBoost union train+valid into their train_val block; DeepHit
      uses train and valid directly for early stopping.
   4. Writes per-landmark:
@@ -15,8 +16,9 @@ For each requested landmark, this script:
        pre_treatment_lab_long_landmark{D}.csv     (long-format pre-landmark labs
                                                    for per-fold canonical-lab selection)
   5. Writes shared:
-       split_assignments.csv                      DFCI_MRN, split (train/valid/test)
-       landmark_mrn_availability.csv              per-landmark eligibility + split
+       split_assignments_landmark{D}.csv           DFCI_MRN, split (per landmark)
+       split_assignments.csv                       base-landmark compatibility copy
+       landmark_mrn_availability.csv               per-landmark eligibility + splits
        canonical_labs_train_val.csv               landmark_days, lab_name (train+valid)
 """
 
@@ -95,6 +97,10 @@ def aggregated_filename(landmark_day: int) -> str:
 
 def pre_treatment_lab_filename(landmark_day: int) -> str:
     return f"pre_treatment_lab_long_landmark{int(landmark_day)}.csv"
+
+
+def split_assignments_filename(landmark_day: int) -> str:
+    return f"split_assignments_landmark{int(landmark_day)}.csv"
 
 
 def load_mrn_subset(mrn_file: Path, id_col: str) -> set[int]:
@@ -420,10 +426,13 @@ def main(args: argparse.Namespace) -> None:
         merged_by_landmark[landmark_day] = merged
 
     availability, common_mrns = build_landmark_availability_table(merged_by_landmark)
-    common_mrns = merged_by_landmark[landmark_days[0]].index.intersection(common_mrns)
-    if len(common_mrns) == 0:
-        raise ValueError("No MRNs were eligible at every requested landmark.")
-    print(f"\nCommon MRN cohort across landmarks {landmark_days}: {len(common_mrns)} patients")
+    print("\nIndependent landmark cohorts:")
+    for landmark_day in landmark_days:
+        print(f"  +{landmark_day}d: {len(merged_by_landmark[landmark_day])} patients")
+    print(
+        f"  descriptive overlap eligible at every landmark: {len(common_mrns)} patients "
+        "(not used to restrict any cohort)"
+    )
 
     if len(landmark_days) >= 2:
         for earlier, later in zip(landmark_days, landmark_days[1:]):
@@ -439,28 +448,46 @@ def main(args: argparse.Namespace) -> None:
             if len(only_earlier):
                 print(f"[debug]   +{earlier}d-only MRNs (first 20): {list(only_earlier)[:20]}")
 
-
     base_landmark_day = landmark_days[0]
-    base_merged = merged_by_landmark[base_landmark_day].loc[common_mrns].copy()
-    split, test_stratification, val_stratification = derive_three_way_split(
-        base_merged,
-        test_frac=args.test_frac,
-        val_frac=args.val_frac,
-        seed=args.seed,
-    )
-    print(
-        f"3-way split derived once on landmark +{base_landmark_day}d "
-        f"(test stratification={test_stratification}, valid stratification={val_stratification})"
-    )
-    counts = split.value_counts().to_dict()
-    print(f"Split sizes: train={counts.get('train', 0)} valid={counts.get('valid', 0)} test={counts.get('test', 0)}")
+    splits_by_landmark: dict[int, pd.Series] = {}
+    stratification_by_landmark: dict[str, dict[str, str]] = {}
+    split_sizes_by_landmark: dict[str, dict[str, int]] = {}
+    for landmark_day in landmark_days:
+        split, test_stratification, val_stratification = derive_three_way_split(
+            merged_by_landmark[landmark_day],
+            test_frac=args.test_frac,
+            val_frac=args.val_frac,
+            seed=args.seed,
+        )
+        splits_by_landmark[landmark_day] = split
+        counts = split.value_counts().to_dict()
+        split_sizes_by_landmark[str(landmark_day)] = {
+            key: int(counts.get(key, 0)) for key in ("train", "valid", "test")
+        }
+        stratification_by_landmark[str(landmark_day)] = {
+            "test": test_stratification,
+            "validation": val_stratification,
+        }
+        print(
+            f"Landmark +{landmark_day}d split "
+            f"(test={test_stratification}, validation={val_stratification}): "
+            f"train={counts.get('train', 0)} valid={counts.get('valid', 0)} "
+            f"test={counts.get('test', 0)}"
+        )
+        landmark_split_path = output_dir / split_assignments_filename(landmark_day)
+        split.rename_axis(ID_COL).reset_index().to_csv(landmark_split_path, index=False)
+        print(f"Wrote {landmark_split_path}")
+        availability[f"split_landmark_{landmark_day}"] = availability[ID_COL].map(split)
 
+    # Preserve the historical filename as a base-landmark copy for the optional
+    # genomic arm and any external consumers that expect one split file.
+    base_split = splits_by_landmark[base_landmark_day]
     split_path = output_dir / SPLIT_ASSIGNMENTS_FILENAME
-    split.rename_axis(ID_COL).reset_index().to_csv(split_path, index=False)
-    print(f"Wrote {split_path}")
+    base_split.rename_axis(ID_COL).reset_index().to_csv(split_path, index=False)
+    print(f"Wrote base-landmark compatibility split to {split_path}")
 
     availability["included_all_landmarks"] = availability[ID_COL].isin(common_mrns)
-    availability["split"] = availability[ID_COL].map(split)
+    availability["split"] = availability[ID_COL].map(base_split)
     availability_path = output_dir / LANDMARK_AVAILABILITY_FILENAME
     availability.to_csv(availability_path, index=False)
     print(f"Wrote {availability_path}")
@@ -474,23 +501,12 @@ def main(args: argparse.Namespace) -> None:
             str(lm): int(availability[f"eligible_landmark_{lm}"].sum())
             for lm in landmark_days
         },
-        "n_common_across_landmarks": int(len(common_mrns)),
-        "split_sizes": {k: int(v) for k, v in counts.items()},
+        "n_common_across_landmarks_descriptive_only": int(len(common_mrns)),
+        "split_sizes_by_landmark": split_sizes_by_landmark,
     }
     attrition_path = output_dir / LANDMARK_ATTRITION_FILENAME
     attrition_path.write_text(json.dumps(landmark_attrition, indent=2))
     print(f"Wrote {attrition_path}")
-
-    train_mrns = set(split.index[split.eq("train")])
-    train_val_mrns = set(split.index[split.isin(["train", "valid"])])
-    test_mrns = set(split.index[split.eq("test")])
-    # Guard: the test set must be disjoint from train+valid before any downstream
-    # canonical-lab selection / horizon fitting uses train_val_mrns.
-    assert_no_test_leakage(
-        test_mrns=test_mrns,
-        train_mrns=train_val_mrns,
-        context="build_prediction_inputs: test vs train+valid",
-    )
 
     canonical_labs_rows: list[dict] = []
     auc_horizons_by_landmark: dict[str, dict[str, list[int]]] = {}
@@ -498,7 +514,15 @@ def main(args: argparse.Namespace) -> None:
 
     for landmark_day in landmark_days:
         print(f"\n##### LANDMARK +{landmark_day}d: BUILD INPUTS #####")
-        merged = merged_by_landmark[landmark_day].loc[common_mrns].copy()
+        merged = merged_by_landmark[landmark_day].copy()
+        split = splits_by_landmark[landmark_day]
+        train_val_mrns = set(split.index[split.isin(["train", "valid"])])
+        test_mrns = set(split.index[split.eq("test")])
+        assert_no_test_leakage(
+            test_mrns=test_mrns,
+            train_mrns=train_val_mrns,
+            context=f"build_prediction_inputs landmark +{landmark_day}d: test vs train+valid",
+        )
         aggregated = build_aggregated_table(merged, split=split)
 
         agg_path = output_dir / aggregated_filename(landmark_day)
@@ -575,9 +599,12 @@ def main(args: argparse.Namespace) -> None:
         "excluded_measurements": sorted(EXCLUDED_MEASUREMENTS),
         "restrict_to_mrns": str(args.restrict_to_mrns) if args.restrict_to_mrns else None,
         "time_unit_days": int(args.time_unit_days),
-        "test_stratification": test_stratification,
-        "val_stratification": val_stratification,
-        "n_patients_common_cohort": int(len(common_mrns)),
+        "cohort_mode": "independent_by_landmark",
+        "stratification_by_landmark": stratification_by_landmark,
+        "n_patients_by_landmark": {
+            str(lm): int(len(merged_by_landmark[lm])) for lm in landmark_days
+        },
+        "n_patients_common_across_landmarks_descriptive_only": int(len(common_mrns)),
         "auc_quantiles": list(auc_quantiles),
         "auc_time_unit_days": int(args.time_unit_days),
         "auc_horizons_by_landmark": auc_horizons_by_landmark,

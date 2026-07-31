@@ -324,10 +324,10 @@ COHORT_LABELS <- c(
   arpi = "ARPI",
   adt = "ADT"
 )
-# Both cohort arms use the same 0- and 90-day landmarks.
+# Both cohort arms use the same 0-, 90-, 180-, and 365-day landmarks.
 COHORT_LANDMARKS <- list(
-  arpi = c(0, 90),
-  adt = c(0, 90)
+  arpi = c(0, 90, 180, 365),
+  adt = c(0, 90, 180, 365)
 )
 
 # Render the full COMPASS figure set for one cohort arm. Mirrors the body of

@@ -176,11 +176,13 @@ prostate lab frame used by the current treatment-anchored analyses.
 
 ### 2.2 — `data_preprocessing/build_prediction_inputs.py` → `prediction_inputs/`
 
-The **single source of truth for model inputs**. For each landmark it cohort-filters, intersects MRNs
-across landmarks, derives the train/valid/test split **once on the base landmark**, and writes per-landmark
-aggregated tables plus pre-treatment long labs and shared split / canonical-lab / horizon artifacts.
+The **single source of truth for model inputs**. It builds an independent eligible risk set at each
+landmark and derives a separate train/valid/test split within each risk set. Day-0 membership therefore
+does not require surviving event-free to day 90, avoiding an immortal-time restriction on the earlier
+cohort.
 
-- **Key CLI:** `--data`, `--landmark-days 0 90` (default from `cox_aggregated.DEFAULT_LANDMARK_DAYS`),
+- **Key CLI:** `--data`, `--landmark-days 0 90 180 365` (default from
+  `cox_aggregated.DEFAULT_LANDMARK_DAYS`),
   `--seed`, `--test-frac`, `--val-frac`, `--time-unit-days 7`, `--min-patient-coverage`,
   `--auc-quantiles`, `--id-col`, `--age-col`, `--anchor-col`,
   `--restrict-to-mrns`, `--require-first-treatment` / `--no-require-first-treatment`,
@@ -189,8 +191,9 @@ aggregated tables plus pre-treatment long labs and shared split / canonical-lab 
   (when `PARPI_EXPOSED` is present). These defaults preserve the original first-treatment cohort, but
   alternate anchors can relax them explicitly.
 - **Outputs:** `aggregated_landmark{D}.csv`, `pre_treatment_lab_long_landmark{D}.csv`,
+  `split_assignments_landmark{D}.csv`, the base-landmark compatibility copy
   `split_assignments.csv`, `landmark_mrn_availability.csv`, `canonical_labs_train_val.csv`,
-  `landmark_attrition.json`, `build_manifest.json`.
+  `landmark_attrition.json`, and `build_manifest.json`.
 - `IPIO/data_preprocessing/build_genomic_inputs.py` builds the parallel
   `prediction_inputs/genomic/` landmark-0 arm anchored at IO start (`t_first_treatment`), restricts
   to patients with an actual somatic sample, attaches dynamic binary `<GENE>_<SV|SNV|AMP|DEL>`
@@ -202,7 +205,7 @@ aggregated tables plus pre-treatment long labs and shared split / canonical-lab 
 
 All read prebuilt inputs and the `split` column; none re-derive the split. COMPASS models use the
 `platinum` endpoint only (time to first platinum). Both ARPI- and ADT-anchored arms use landmarks
-`[0, 90]`. Metrics: Harrell C-index, IPCW
+`[0, 90, 180, 365]`. Metrics: Harrell C-index, IPCW
 mean AUC(t), integrated IPCW Brier — horizons come from `build_manifest.json` so all models share a
 grid.
 
@@ -300,9 +303,10 @@ IPIO has a paired run/figure notebook as well:
 
 ## Conventions & invariants (preserve these when editing)
 
-1. **The split is derived once, in `build_prediction_inputs.py`, on the base landmark.** The base landmark
-   is `--landmark-days[0]` — **order matters**. Every model reads `split_assignments.csv`; never re-split
-   inside a model script. `build_genomic_inputs.py` reuses the same file.
+1. **Each landmark has its own risk set and split.** `build_prediction_inputs.py` writes the applicable
+   split directly into each `aggregated_landmark{D}.csv` and also writes
+   `split_assignments_landmark{D}.csv`. Models use the aggregated table's split and never re-split.
+   `split_assignments.csv` remains a base-landmark compatibility copy for `build_genomic_inputs.py`.
 2. **Fit on the training block; never touch test for fitting.** Imputers, `StandardScaler`,
    canonical-lab selection, and Breslow baselines are all fit on train+valid (or fold-train inside CV) and
    applied to eval. Per-fold canonical labs are recomputed inside CV. The leakage guards
@@ -344,7 +348,7 @@ python COMPASS/data_preprocessing/compile_COMPASS_cohort_data.py
 # Run once per anchor; --anchor-med-set switches the default survival-cohort/output/cache paths.
 python COMPASS/data_preprocessing/longitudinal_data_processing.py --anchor-med-set arpi
 python COMPASS/data_preprocessing/longitudinal_data_processing.py --anchor-med-set adt
-python COMPASS/data_preprocessing/build_prediction_inputs.py --landmark-days 0 90 --time-unit-days 7
+python COMPASS/data_preprocessing/build_prediction_inputs.py --landmark-days 0 90 180 365 --time-unit-days 7
 python COMPASS/survival_analysis/univariate_analysis.py --inputs-dir <...>/prediction_inputs --landmark-days 0
 python COMPASS/survival_analysis/multivariate_analysis.py --model elastic-net --inputs-dir <...>/prediction_inputs --landmark-days 0
 python COMPASS/survival_analysis/multivariate_analysis.py --model xgboost --inputs-dir <...>/prediction_inputs --landmark-days 0
