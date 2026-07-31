@@ -25,6 +25,7 @@ from data_preprocessing_common.dfci_labs import (  # noqa: E402
     consolidate_dfci_labs,
 )
 from data_preprocessing_common.projects.compass_profile import (  # noqa: E402
+    EXCLUDED_MEASUREMENTS,
     UNIQUE_LABS_CSV as DEFAULT_UNIQUE_LABS_CSV,
 )
 
@@ -45,7 +46,7 @@ SURV_PATH = EMBED_PROJ_PATH / "time-to-event_analysis"
 # the ARPI-anchored arm of the ADT-entry ICD-C61 cohort (after the requested
 # post-ADT cancer exclusions).
 # main() loads this file
-# first and uses its MRN set both to scan-filter the raw HEALTH_HISTORY/
+# first and uses its MRN set both to scan-filter the raw
 # OUTPT_LAB_RESULTS_LABS/MEDICATIONS reads and to restrict the final output --
 # this is the one cohort-membership filter Stage 2 applies.
 DEFAULT_SURVIVAL_COHORT_CSV = (
@@ -74,14 +75,6 @@ MIN_PSA_COUNT = 5
 # build_raw_longitudinal_data.
 BROAD_PSA_CODES = ["PSA", "PSAR", "PSATOTSCRN", "CPSA", "PSAMON", "PSAULT", "PSAT"]
 
-HEALTH_SCAN_COLUMNS = [
-    ID_COL,
-    "CODE_TYPE",
-    "START_DT",
-    "HEALTH_HISTORY_TYPE",
-    "RESULTS",
-    "UNITS_CD",
-]
 LAB_SCAN_COLUMNS = [
     ID_COL,
     "SPECIMEN_COLLECT_DT",
@@ -91,7 +84,7 @@ LAB_SCAN_COLUMNS = [
     "RESULT_UOM_NM",
 ]
 MEDICATION_SCAN_COLUMNS = [ID_COL, "NCI_PREFERRED_MED_NM", "MED_START_DT"]
-CONSOLIDATED_CACHE_VERSION = 1
+CONSOLIDATED_CACHE_VERSION = 2
 
 # Highlighted antineoplastic treatments used to anchor the "time to platinum"
 # prediction window. The treatment anchor (TREATMENT_ANCHOR_DATE) is the first
@@ -227,19 +220,14 @@ def generate_new_test_name_expr(code_col: str, descr_col: str) -> pl.Expr:
 
 
 def build_raw_longitudinal_data(
-    health_df: pl.DataFrame,
     labs_df: pl.DataFrame,
 ) -> pl.DataFrame:
-    """Reshape raw OncDRS HEALTH_HISTORY/OUTPT_LAB_RESULTS_LABS into one long
-    vitals+labs table.
+    """Reshape raw OncDRS outpatient labs into one long lab table.
 
     This function itself applies no MRN restriction -- it reshapes whatever
-    `health_df`/`labs_df` it is given. main() passes frames already
-    scan-filtered to the broad ICD-C61 cohort (see broad_cohort_mrns), but
-    that filtering happens at the call site, not here. Selection of the
-    narrower cohort without other primaries is applied downstream in
-    build_prediction_inputs.py via --restrict-to-mrns, so both variants use the same
-    longitudinal_prediction_data.csv output.
+    `labs_df` it is given. main() passes a frame already scan-filtered to the
+    selected cohort. HEALTH_HISTORY is intentionally not an input: COMPASS
+    excludes vital signs from preprocessing and model features.
     """
     # Both inputs are scanned all-String (infer_schema_length=0), so DFCI_MRN
     # arrives as Utf8 here. Cast it back to Int64 before it flows into
@@ -247,15 +235,8 @@ def build_raw_longitudinal_data(
     # stays `object` in pandas and fails to merge against the int64 DFCI_MRN
     # read from icd/platinum/medications CSVs (pandas raises "trying to merge
     # on object and int64 columns").
-    health_df = health_df.with_columns(
-        pl.col(ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
-    )
     labs_df = labs_df.with_columns(
         pl.col(ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
-    )
-
-    vital_signs_df = health_df.filter(pl.col("CODE_TYPE") == "Vital Signs").select(
-        [ID_COL, "START_DT", "HEALTH_HISTORY_TYPE", "RESULTS", "UNITS_CD"]
     )
 
     labs_df_col_sub = labs_df.select(
@@ -275,23 +256,10 @@ def build_raw_longitudinal_data(
 
     # Carry the raw, un-synthesized TEST_TYPE_CD through as RAW_TEST_CODE so the
     # broad-vs-narrow PSA distinction survives past TEST_NAME synthesis (above)
-    # and consolidate_dfci_labs' further canonicalization of LAB_NAME. Vitals
-    # have no TEST_TYPE_CD equivalent, so RAW_TEST_CODE is null for those rows.
-    vital_signs_df = vital_signs_df.with_columns(
-        pl.lit(None, dtype=pl.Utf8).alias("RAW_TEST_CODE")
-    )
+    # and consolidate_dfci_labs' further canonicalization of LAB_NAME.
     labs_df_col_sub = labs_df_col_sub.with_columns(
         pl.col("TEST_TYPE_CD").alias("RAW_TEST_CODE")
     )
-
-    vital_signs_df = vital_signs_df.rename(
-        {
-            "START_DT": "DATE",
-            "RESULTS": "LAB_VALUE",
-            "HEALTH_HISTORY_TYPE": "LAB_NAME",
-            "UNITS_CD": "LAB_UNIT",
-        }
-    ).select([ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE", "RAW_TEST_CODE"])
 
     labs_df_col_sub = labs_df_col_sub.rename(
         {
@@ -302,19 +270,28 @@ def build_raw_longitudinal_data(
         }
     ).select([ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE", "RAW_TEST_CODE"])
 
-    # Both inputs are scanned all-String (infer_schema_length=0), so LAB_VALUE
-    # is already Utf8 on both halves here. This explicit cast is defensive --
-    # it guarantees a common Utf8 LAB_VALUE dtype (HEALTH_HISTORY.RESULTS is
-    # inherently free-text; labs' NUMERIC_RESULT is numeric-as-string) so
-    # `pl.concat` never has to reconcile a numeric vs. string LAB_VALUE column
-    # if either input is ever read with real schema inference upstream.
+    # The input is scanned all-String (infer_schema_length=0), so LAB_VALUE is
+    # already Utf8. This explicit cast is defensive.
     # consolidate_dfci_labs() re-parses NUMERIC_RESULT via pd.to_numeric
     # regardless, so keeping it as a string here loses nothing -- this mirrors
     # the mixed-type `object` column pandas' `pd.concat` produced originally.
-    vital_signs_df = vital_signs_df.with_columns(pl.col("LAB_VALUE").cast(pl.Utf8, strict=False))
     labs_df_col_sub = labs_df_col_sub.with_columns(pl.col("LAB_VALUE").cast(pl.Utf8, strict=False))
 
-    return pl.concat([vital_signs_df, labs_df_col_sub], how="vertical_relaxed")
+    return labs_df_col_sub
+
+
+def exclude_vital_labs(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove canonical vital-sign rows before caching or model-input output."""
+    if "collapsed_measurement" not in df.columns:
+        raise ValueError(
+            "Cannot exclude vital signs: consolidated data has no "
+            "'collapsed_measurement' column."
+        )
+    vital_mask = df["collapsed_measurement"].isin(EXCLUDED_MEASUREMENTS)
+    n_rows = int(vital_mask.sum())
+    if n_rows:
+        print(f"Excluded {n_rows:,} vital-sign rows from COMPASS preprocessing.")
+    return df.loc[~vital_mask].copy()
 
 
 def mark_non_prostate_primary_icd(icds: pd.DataFrame) -> pd.DataFrame:
@@ -727,7 +704,6 @@ def build_cache_provenance(args: argparse.Namespace) -> dict:
             "consolidation_code": _file_signature(
                 Path(consolidate_dfci_labs.__code__.co_filename)
             ),
-            "health_csv": _file_signature(args.health_csv),
             "labs_csv": _file_signature(args.labs_csv),
             "medications_csv": _file_signature(args.medications_csv),
             "survival_cohort_csv": _file_signature(args.survival_cohort_csv),
@@ -823,9 +799,8 @@ def parse_args() -> argparse.Namespace:
         "--health-csv",
         type=Path,
         default=ONCDRS_PATH / "HEALTH_HISTORY.csv",
-        help="Raw OncDRS HEALTH_HISTORY.csv. Lazily scan-filtered to the "
-             "--survival-cohort-csv MRN set (see that flag) before it is "
-             "ever fully materialized.",
+        help="Deprecated compatibility option; HEALTH_HISTORY is not read "
+             "because COMPASS excludes vital signs.",
     )
     parser.add_argument(
         "--labs-csv",
@@ -1012,7 +987,7 @@ def main() -> None:
     # contains every MRN in both with/without-other-primary cohorts while
     # avoiding raw scans for patients
     # who cannot enter either treatment-anchor-relative model. It is loaded first so
-    # HEALTH_HISTORY/OUTPT_LAB_RESULTS_LABS/MEDICATIONS -- each tens of
+    # OUTPT_LAB_RESULTS_LABS/MEDICATIONS -- each tens of
     # millions of rows across the full raw OncDRS universe -- can be filtered to
     # this MRN set during the lazy scan itself, rather than read in full and
     # filtered afterward. The narrower without-other-primaries cohort remains a
@@ -1078,7 +1053,7 @@ def main() -> None:
     else:
         # Projection is pushed into the lazy CSV scan, so unused raw columns are
         # never materialized. Labs are collected first to apply the cheap broad
-        # PSA gate before health/vital scanning and lab standardization.
+        # PSA gate before lab standardization.
         stage_started = time.perf_counter()
         labs_df_pl = fast_io.scan_filter(
             args.labs_csv,
@@ -1098,16 +1073,10 @@ def main() -> None:
         stage_seconds["lab_scan_and_psa_gate"] = time.perf_counter() - stage_started
 
         stage_started = time.perf_counter()
-        health_df_pl = fast_io.scan_filter(
-            args.health_csv,
-            eligible_mrns,
-            cols=HEALTH_SCAN_COLUMNS,
-        ).collect()
         raw_longitudinal_df_pl = build_raw_longitudinal_data(
-            health_df_pl,
             labs_df_pl,
         )
-        stage_seconds["health_scan_and_reshape"] = time.perf_counter() - stage_started
+        stage_seconds["lab_reshape"] = time.perf_counter() - stage_started
 
         if args.write_unique_labs:
             unique_labs_df_pl = (
@@ -1132,14 +1101,17 @@ def main() -> None:
             "n_after_parpi_prefilter": len(candidate_mrns),
             **psa_attrition,
         }
-        if not args.no_cache:
-            write_consolidated_cache(
-                args.consolidated_cache_parquet,
-                consolidated_df,
-                provenance=provenance,
-                prefilter_attrition=prefilter_attrition,
-                eligible_mrns=eligible_mrns,
-            )
+    # Apply after cache loading as well as fresh standardization so legacy
+    # caches cannot reintroduce vitals into model inputs.
+    consolidated_df = exclude_vital_labs(consolidated_df)
+    if cached is None and not args.no_cache:
+        write_consolidated_cache(
+            args.consolidated_cache_parquet,
+            consolidated_df,
+            provenance=provenance,
+            prefilter_attrition=prefilter_attrition,
+            eligible_mrns=eligible_mrns,
+        )
 
     if args.write_consolidated:
         consolidated_df.to_csv(args.consolidated_output_csv, index=False)
@@ -1166,7 +1138,7 @@ def main() -> None:
         treatment_anchor_df,
     )
 
-    # health/labs/medications were already scan-filtered to broad_cohort_mrns
+    # labs/medications were already scan-filtered to broad_cohort_mrns
     # above, so this should be a no-op; kept as a cheap belt-and-suspenders
     # check (e.g. against icds/first_prostate_diagnosis, which are read
     # unfiltered) and to record the attrition count explicitly.

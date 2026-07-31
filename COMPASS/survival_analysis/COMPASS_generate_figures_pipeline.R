@@ -79,9 +79,34 @@ LLM_STRATA <- list(
   )
 )
 
-# load_llm_strata: read LLM_NEPC_classifier_labels.tsv (DFCI_MRN, primary_label,
-# has_nepc, has_avpc). Returns NULL with a message if the file is absent, so
-# every downstream stratified-plot loop can skip cleanly rather than erroring.
+# A biomarker primary label is reserved for these prostate-relevant genes.
+# Token boundaries prevent partial matches inside unrelated gene/text strings.
+BIOMARKER_PRIMARY_GENES <- c("BRCA1", "BRCA2", "PTEN", "TP53", "RB1")
+BIOMARKER_PRIMARY_PATTERN <- paste0(
+  "(^|[^A-Z0-9])(",
+  paste(BIOMARKER_PRIMARY_GENES, collapse = "|"),
+  ")([^A-Z0-9]|$)"
+)
+
+normalize_classifier_primary_labels <- function(primary_label, reported_biomarkers,
+                                                has_nepc, has_avpc) {
+  labels <- str_to_lower(str_trim(as.character(primary_label)))
+  biomarker_text <- toupper(ifelse(is.na(reported_biomarkers), "",
+                                   as.character(reported_biomarkers)))
+  qualifying_biomarker <- grepl(BIOMARKER_PRIMARY_PATTERN, biomarker_text, perl = TRUE)
+  needs_fallback <- !is.na(labels) & labels == "biomarker" & !qualifying_biomarker
+
+  labels[needs_fallback & !is.na(has_nepc) & has_nepc == 1] <- "nepc"
+  labels[needs_fallback & labels == "biomarker" &
+           !is.na(has_avpc) & has_avpc == 1] <- "avpc"
+  labels[needs_fallback & labels == "biomarker"] <- "conventional"
+  labels
+}
+
+# load_llm_strata: read LLM_NEPC_classifier_labels.tsv and normalize biomarker
+# primary labels using the reported biomarker field. Returns NULL with a
+# message if the file is absent, so every downstream stratified-plot loop can
+# skip cleanly rather than erroring.
 load_llm_strata <- function(llm_annotations_path) {
   path <- file.path(llm_annotations_path, "LLM_NEPC_classifier_labels.tsv")
   if (!file.exists(path)) {
@@ -94,13 +119,75 @@ load_llm_strata <- function(llm_annotations_path) {
   if (length(missing) > 0) {
     stop(sprintf("%s is missing required columns: %s", path, paste(missing, collapse = ", ")))
   }
+  biomarker_candidates <- c(
+    "reported_biomarkers",
+    "biomarkers_reported",
+    "reported_biomarker",
+    "biomarkers",
+    "biomarker"
+  )
+  candidate_index <- match(tolower(biomarker_candidates), tolower(names(strata)))
+  candidate_index <- candidate_index[!is.na(candidate_index)]
+  biomarker_col <- if (length(candidate_index) > 0) names(strata)[candidate_index[1]] else NULL
+
+  raw_primary <- str_to_lower(str_trim(as.character(strata$primary_label)))
+  if (is.null(biomarker_col) && any(raw_primary == "biomarker", na.rm = TRUE)) {
+    stop(sprintf(
+      paste0(
+        "%s contains primary_label='biomarker' but no reported-biomarker column. ",
+        "Expected one of: %s"
+      ),
+      path,
+      paste(biomarker_candidates, collapse = ", ")
+    ))
+  }
+  strata$reported_biomarkers <- if (is.null(biomarker_col)) {
+    NA_character_
+  } else {
+    as.character(strata[[biomarker_col]])
+  }
   strata <- strata %>%
-    select(all_of(required)) %>%
+    select(all_of(required), reported_biomarkers) %>%
     mutate(
       primary_label = str_to_lower(str_trim(as.character(primary_label))),
+      primary_label = if_else(
+        is.na(primary_label) |
+          primary_label %in% c("", "nan", "na", "null", "none"),
+        NA_character_,
+        primary_label
+      ),
       has_nepc = suppressWarnings(as.numeric(has_nepc)),
       has_avpc = suppressWarnings(as.numeric(has_avpc))
     )
+  original_primary <- strata$primary_label
+  strata$primary_label <- normalize_classifier_primary_labels(
+    strata$primary_label,
+    strata$reported_biomarkers,
+    strata$has_nepc,
+    strata$has_avpc
+  )
+  n_reclassified <- sum(
+    !is.na(original_primary) &
+      original_primary == "biomarker" &
+      strata$primary_label != "biomarker",
+    na.rm = TRUE
+  )
+  message(sprintf(
+    paste0(
+      "load_llm_strata: retained biomarker only for %s; ",
+      "reclassified %s non-qualifying biomarker-primary row(s)"
+    ),
+    paste(BIOMARKER_PRIMARY_GENES, collapse = "/"),
+    format(n_reclassified, big.mark = ",")
+  ))
+  n_missing_category <- sum(is.na(strata$primary_label))
+  if (n_missing_category > 0) {
+    message(sprintf(
+      "load_llm_strata: removed %s row(s) with a missing/NaN primary-label category",
+      format(n_missing_category, big.mark = ",")
+    ))
+    strata <- strata %>% filter(!is.na(primary_label))
+  }
   invalid_primary <- setdiff(unique(na.omit(strata$primary_label)),
                              LLM_STRATA$primary_label$levels)
   if (length(invalid_primary) > 0) {
@@ -187,26 +274,26 @@ VITALS <- c("Body weight","Body temperature","Heart rate","Respiratory rate",
             "Systolic blood pressure","Diastolic blood pressure")
 ANDROGEN <- c("PSA","Testosterone")
 OTHER <- c("TSH")
-DROP <- c("Body height")
+# Vitals remain identifiable so they can be removed from every figure even
+# though they may remain present in previously fitted model outputs.
+DROP <- c("Body height", VITALS)
 
 CATEGORY_MAP <- c(
   setNames(rep("CBC", length(CBC)), CBC),
   setNames(rep("CMP", length(CMP)), CMP),
   setNames(rep("LFT", length(LFT)), LFT),
-  setNames(rep("Vitals", length(VITALS)), VITALS),
   setNames(rep("Androgen axis", length(ANDROGEN)), ANDROGEN),
   setNames(rep("Other", length(OTHER)), OTHER)
 )
 
-DRAW_ORDER   <- c("Other","Vitals","CMP","LFT","CBC","Androgen axis")
-LEGEND_ORDER <- c("Androgen axis","CBC","LFT","CMP","Vitals","Other")
+DRAW_ORDER   <- c("Other","CMP","LFT","CBC","Androgen axis")
+LEGEND_ORDER <- c("Androgen axis","CBC","LFT","CMP","Other")
 
 CATEGORY_COLORS <- c(
   "Androgen axis" = "#8e1c2b",
   "CBC"           = "#16a085",
   "LFT"           = "#e67e22",
   "CMP"           = "#7d3c98",
-  "Vitals"        = "#5d6d7e",
   "Other"         = "#95a5a6"
 )
 NS_COLOR <- "#d5d8dc"
@@ -249,7 +336,8 @@ COHORT_LANDMARKS <- list(
 # of re-executing itself via Rscript.
 generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS, show = FALSE,
                              llm_annotations_path = DEFAULT_LLM_ANNOTATIONS_PATH,
-                             plot_non_androgen_distributions = TRUE) {
+                             plot_non_androgen_distributions = TRUE,
+                             plot_non_androgen_lab_figures = TRUE) {
   # Rscript opens `Rplots.pdf` when any plot is drawn without an explicit device.
   # All intended outputs below use ggsave(), so route any incidental drawing to a
   # temporary null PDF device during non-interactive runs.
@@ -268,6 +356,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
       length(plot_non_androgen_distributions) != 1 ||
       is.na(plot_non_androgen_distributions))
     stop("plot_non_androgen_distributions must be one non-missing logical value")
+  if (!is.logical(plot_non_androgen_lab_figures) ||
+      length(plot_non_androgen_lab_figures) != 1 ||
+      is.na(plot_non_androgen_lab_figures))
+    stop("plot_non_androgen_lab_figures must be one non-missing logical value")
   COHORT_DISPLAY <- unname(COHORT_LABELS[[COHORT]])
   message(sprintf("Generating figures for cohort: %s", COHORT_DISPLAY))
 
@@ -1277,7 +1369,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
     n_tested <- nrow(sub); n_sig <- sum(sub$sig)
     breakdown <- sub %>% filter(sig) %>% count(category)
-    short <- c("Androgen axis"="Androgen","CBC"="CBC","LFT"="LFT","CMP"="CMP","Vitals"="Vitals")
+    short <- c("Androgen axis"="Androgen","CBC"="CBC","LFT"="LFT","CMP"="CMP")
     bd_str <- paste(vapply(setdiff(LEGEND_ORDER, "Other"), function(c) {
       n <- breakdown$n[match(c, breakdown$category)]; if (is.na(n)) n <- 0
       sprintf("%s %d", short[[c]], n)
@@ -1589,7 +1681,14 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                                  color = "#7f8c8d") + theme_void() +
                labs(title = title) + theme(plot.title = element_text(face = "bold", size = 11)))
     }
-    df <- df %>% mutate(category = vapply(lab_name, assign_category, character(1)))
+    df <- df %>%
+      filter(!lab_name %in% DROP) %>%
+      mutate(category = vapply(lab_name, assign_category, character(1)))
+    if (nrow(df) == 0) {
+      return(ggplot() + annotate("text", x = 0, y = 0, label = "(no features to display)",
+                                 color = "#7f8c8d") + theme_void() +
+               labs(title = title) + theme(plot.title = element_text(face = "bold", size = 11)))
+    }
     if (kind == "cox") {
       df <- df %>% arrange(desc(abs(coef))) %>% head(TOP_N)
       df$value <- df$coef; xlabel <- "log HR coefficient"
@@ -1649,9 +1748,19 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
   if (show) print(fig4)
 
   OUT_DIR <- fig_dir("androgen_supplements")
-  # All canonical labs in CATEGORY_MAP (CBC/CMP/LFT/Vitals/Androgen axis/Other),
+  # All canonical non-vital labs in CATEGORY_MAP (CBC/CMP/LFT/Androgen axis/Other),
   # generalizing what used to be the PSA/Testosterone-only ANDROGEN_LABS list.
   ALL_LABS <- names(CATEGORY_MAP)
+  LAB_FIGURE_LABS <- if (plot_non_androgen_lab_figures) {
+    ALL_LABS
+  } else {
+    intersect(ALL_LABS, ANDROGEN)
+  }
+  message(sprintf(
+    "Per-lab KM/longitudinal figures: %s (%s labs)",
+    if (plot_non_androgen_lab_figures) "all canonical labs" else "androgen axis only",
+    length(LAB_FIGURE_LABS)
+  ))
 
   # Case-insensitive match for a `<lab>__mean` column (mirrors find_col in the
   # Python COMPASS diagnostics).
@@ -1748,7 +1857,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                  size = 2.6, color = "#5d6d7e", family = "mono")
   }
 
-  for (lab in ALL_LABS) {
+  for (lab in LAB_FIGURE_LABS) {
     for (landmark in FIG5_LANDMARKS) {
       agg <- load_aggregated_landmark(landmark)
       if (is.null(agg)) {
@@ -2113,7 +2222,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
       patients <- sample(patients, N_GROUP)
     }
     group_df <- canonical_long_df %>% filter(DFCI_MRN %in% patients)
-    labs_present <- intersect(ALL_LABS, unique(group_df$LAB_GROUP))
+    labs_present <- intersect(LAB_FIGURE_LABS, unique(group_df$LAB_GROUP))
 
     # LLM-strata lookups (DFCI_MRN -> stratum value), restricted to this
     # cohort's labeled MRNs; each scheme reports labeled/total when used below.

@@ -101,7 +101,7 @@ survival data (age, treatment anchor, death, time-to-platinum), with `anchor_df`
 computed from the same medication scan.
 
 - **Inputs (hard-coded under `DATA_PATH = /data/gusev/USERS/jpconnor/data/`, plus the raw OncDRS pull
-  at `ONCDRS_PATH`):** `EHR_DIAGNOSIS.csv`, `HEALTH_HISTORY.csv`, `MEDICATIONS.csv`,
+  at `ONCDRS_PATH`):** `EHR_DIAGNOSIS.csv`, `MEDICATIONS.csv`,
   `OUTPT_LAB_RESULTS_LABS.csv`, `complete_somatic_data_df.csv.gz`, `PT_INFO_STATUS_REGISTRATION.csv`.
 - **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** `prostate_arpi_survival_cohort_arpi.csv`
   and `prostate_adt_survival_cohort_adt.csv` (ARPI-treatment-anchor-restricted and
@@ -156,6 +156,9 @@ prostate lab frame used by the current treatment-anchored analyses.
 - **Lab QC (`consolidate_dfci_labs`):** unit standardization to canonical units, sentinel nulling
   (e.g. `9999999`), physiologic-range nulling, combined-BP splitting. Out-of-range values are **nulled,
   not row-dropped** — downstream must filter on `conversion_status` (or pass `--successful-only`).
+- **Vitals excluded:** COMPASS does not scan HEALTH_HISTORY vital signs, removes any vital-like
+  canonical rows originating from the outpatient labs source before caching/output, and applies
+  the same exclusion defensively in `build_prediction_inputs.py` for stale longitudinal files.
 - **Performance:** raw CSV scans project only required columns; lab consolidation is vectorized.
   Standardized rows are cached in `consolidated_longitudinal_data.parquet` (ARPI) or
   `consolidated_longitudinal_data_adt.parquet` (ADT) with a provenance manifest that includes
@@ -237,9 +240,15 @@ univariate-results review notebook:
   - **LLM label strata:** alongside the existing `LLM_v3_labels.tsv`-driven Figure 2, the pipeline
     loads `LLM_NEPC_classifier_labels.tsv` from
     `/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_NEPC_labels/` (`DFCI_MRN`, `primary_label`
-    [conventional/avpc/nepc/biomarker], `has_nepc`, `has_avpc`) via `load_llm_strata()`, re-deriving
+    [conventional/avpc/nepc/biomarker], `has_nepc`, `has_avpc`, and a reported-biomarker field) via
+    `load_llm_strata()`, re-deriving
     `is_platinum` from `mrn_lists/platinum_MRN_list.csv`. If the file is absent, all LLM-strata plots
-    are skipped with a `message()` rather than failing. This file drives:
+    are skipped with a `message()` rather than failing. **Primary-label normalization:**
+    `primary_label = biomarker` is retained only when the reported biomarkers contain a
+    token-matched BRCA1, BRCA2, PTEN, TP53, or RB1. Otherwise the label falls back in order to
+    NEPC when `has_nepc = 1`, AVPC when `has_avpc = 1`, and conventional. Rows whose category is
+    missing, blank, `NaN`, `NA`, `null`, or `none` are removed from all classifier-derived LLM
+    plots. This file drives:
     - **Figure 2 v2** (`ADT/figure2v2_llm/`, ADT cohort only) — a parallel confusion matrix / metric bar / subtype
       landscape / platinum-enrichment panel set (`figure2v2_confusion_matrix`,
       `figure2v2_metric_bar`, `figure2v2_confusion_has_nepc`, `figure2v2_confusion_has_avpc`,
@@ -249,16 +258,21 @@ univariate-results review notebook:
       labels are intersected with the ADT base-landmark MRN set. The ARPI figure pass skips Figure 2v2.
     - **All-lab longitudinal dynamics** — Figure 7's group-mean-CI trajectory machinery
       (`bin_group_ci()`/`plot_group_ci_panel()`) generalized from PSA/Testosterone-only to every
-      canonical lab in `CATEGORY_MAP` (~40 labs across CBC/CMP/LFT/Vitals/Androgen/Other), stratified
+      canonical non-vital lab in `CATEGORY_MAP` (CBC/CMP/LFT/Androgen/Other), stratified
       by platinum status plus `primary_label`/`has_nepc`/`has_avpc`. Stems:
       `longitudinal_<stratum>_<lab>`.
     - **All-lab KM-by-quartile** — Figure 5's Q1-vs-Q4 platinum-free KM curves, generalized the same
       way via `resolve_mean_col()`. Stems: `km_quartile_<lab>_landmark<D>`.
     - **All-lab distribution panels** — Figure 6's log/raw platinum-split distribution plots,
       generalized the same way. Stems: `dist_by_platinum_{log,raw}_<lab>_landmark<D>`.
-      Set `PLOT_NON_ANDROGEN_DISTRIBUTIONS <- FALSE` in the figure notebook (passed as
-      `plot_non_androgen_distributions = FALSE` to `generate_figures()`) to emit only the
-      PSA and Testosterone distributions; the default `TRUE` preserves all canonical labs.
+      `PLOT_NON_ANDROGEN_DISTRIBUTIONS` controls whether distributions extend beyond PSA and
+      Testosterone.
+    - **Lab-panel toggles** — the figure notebook currently sets both
+      `PLOT_NON_ANDROGEN_DISTRIBUTIONS <- FALSE` and
+      `PLOT_NON_ANDROGEN_LAB_FIGURES <- FALSE`, so distribution, KM-quartile, and longitudinal
+      lab panels are limited to the androgen axis (PSA and Testosterone). Set the first toggle
+      to restore non-androgen distributions and the second to restore non-androgen KM/longitudinal
+      panels.
     - **LLM-stratified KM sanity check** — new time-to-platinum KM curves stratified by
       `primary_label`/`has_nepc`/`has_avpc`, using the same `platinum_km_inputs()` +
       `overlay_km()` path as the quartile curves. Stems: `km_llm_<scheme>_landmark<D>`.
@@ -266,12 +280,13 @@ univariate-results review notebook:
     figures use `<arm>/<figure>/<plot-stem>/<cohort>_<plot-stem>.png`; per-lab panels
     (longitudinal, km_quartile, distribution) use
     `<arm>/labs/<lab_category>/<lab_name>/<panel_type>/<cohort>_<stem>.png`. A lab-aware branch in
-    `figure_group()` uses `assign_category()` for CBC/CMP/LFT/Vitals/Androgen axis/Other. Any
+    `figure_group()` uses `assign_category()` for CBC/CMP/LFT/Androgen axis/Other. Vital signs are
+    excluded from all figure panels even when non-androgen toggles are enabled. Any
     plot stem `figure_group()` can't route still raises
     `stop("Unmapped figure output stem")`.
 - `COMPASS_nominally_significant_univariate.ipynb` loads all shared-landmark univariate results
-  for the `arpi` arm, filters to nominal `p_value < 0.05`, displays every hit, and exports the
-  filtered table beside the Cox outputs.
+  for both `arpi` and `adt`, filters each to nominal `p_value < 0.05`, displays every hit, and exports
+  a separate `cox/nominally_significant_univariate_results.csv` beneath each arm's run directory.
 
 IPIO has a paired run/figure notebook as well:
 
