@@ -277,6 +277,15 @@ univariate-results review notebook:
       labels are intersected with the complete ADT time-0 MRN set. Both Figure 2 and Figure 2v2 are
       ADT/day-0-only; the ARPI figure pass skips them, and captions report labeled/evaluable coverage
       against the total ADT day-0 cohort.
+    - **Figure 2 v3** (`ADT/figure2v3_llm/`) — the same label source and panel set as v2
+      (`figure2v3_confusion_matrix`, `figure2v3_metric_bar`, `figure2v3_confusion_has_nepc`,
+      `figure2v3_confusion_has_avpc`, `figure2v3_subtype_landscape`, `figure2v3_enrichment`,
+      `figure2v3_llm_subtype_platinum`) over a **wider patient universe**: every MRN with
+      `ADT_EXPOSED = 1` in `mrn_lists/icd_prostate_mrn_flags.csv` — the "ADT entry requirement"
+      step of the Figure 1 CONSORT — rather than only the landmark-0 prediction cohort
+      (`eligible_landmark_0` in `landmark_mrn_availability.csv`) that v2 uses. So v3 includes
+      patients later dropped by the post-ADT exclusion-cancer, PARPi, and ≥5-PSA-test criteria.
+      Like v2 it carries no `stopifnot` count assertions; it is emitted from the ADT pass only.
     - **All-lab longitudinal dynamics** — Figure 7's group-mean-CI trajectory machinery
       (`bin_group_ci()`/`plot_group_ci_panel()`) generalized from PSA/Testosterone-only to every
       canonical lab in `CATEGORY_MAP` (CBC/CMP/LFT/Vitals/Androgen/Other), stratified
