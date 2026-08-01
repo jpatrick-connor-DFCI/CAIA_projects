@@ -182,7 +182,7 @@ landmark and derives a separate train/valid/test split within each risk set. Day
 does not require surviving event-free to day 90, avoiding an immortal-time restriction on the earlier
 cohort.
 
-- **Key CLI:** `--data`, `--landmark-days 0 90 180 365` (default from
+- **Key CLI:** `--data`, `--landmark-days 0 90 180` (default from
   `cox_aggregated.DEFAULT_LANDMARK_DAYS`),
   `--seed`, `--test-frac`, `--val-frac`, `--time-unit-days 7`, `--min-patient-coverage`,
   `--auc-quantiles`, `--id-col`, `--age-col`, `--anchor-col`,
@@ -206,7 +206,7 @@ cohort.
 
 All read prebuilt inputs and the `split` column; none re-derive the split. COMPASS models use the
 `platinum` endpoint only (time to first platinum). Both ARPI- and ADT-anchored arms use landmarks
-`[0, 90, 180, 365]`. Metrics: Harrell C-index, IPCW
+`[0, 90, 180]`. Metrics: Harrell C-index, IPCW
 mean AUC(t), integrated IPCW Brier — horizons come from `build_manifest.json` so all models share a
 grid. The outer train+valid event-time quantiles define a bounded interval that is filled with up to
 25 evenly spaced time points (interior quantiles are provenance only, not horizons). The builders clamp
@@ -365,7 +365,7 @@ python COMPASS/data_preprocessing/compile_COMPASS_cohort_data.py
 # Run once per anchor; --anchor-med-set switches the default survival-cohort/output/cache paths.
 python COMPASS/data_preprocessing/longitudinal_data_processing.py --anchor-med-set arpi
 python COMPASS/data_preprocessing/longitudinal_data_processing.py --anchor-med-set adt
-python COMPASS/data_preprocessing/build_prediction_inputs.py --landmark-days 0 90 180 365 --time-unit-days 7
+python COMPASS/data_preprocessing/build_prediction_inputs.py --landmark-days 0 90 180 --time-unit-days 7
 python COMPASS/survival_analysis/univariate_analysis.py --inputs-dir <...>/prediction_inputs --landmark-days 0
 python COMPASS/survival_analysis/multivariate_analysis.py --model elastic-net --inputs-dir <...>/prediction_inputs --landmark-days 0
 python COMPASS/survival_analysis/multivariate_analysis.py --model xgboost --inputs-dir <...>/prediction_inputs --landmark-days 0
