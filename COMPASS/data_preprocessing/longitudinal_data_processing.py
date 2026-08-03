@@ -88,10 +88,11 @@ LAB_SCAN_COLUMNS = [
     "TEST_TYPE_CD",
     "TEST_TYPE_DESCR",
     "NUMERIC_RESULT",
+    "TEXT_RESULT",
     "RESULT_UOM_NM",
 ]
 MEDICATION_SCAN_COLUMNS = [ID_COL, "NCI_PREFERRED_MED_NM", "MED_START_DT"]
-CONSOLIDATED_CACHE_VERSION = 3
+CONSOLIDATED_CACHE_VERSION = 4
 
 # Highlighted antineoplastic treatments used to anchor the "time to platinum"
 # prediction window. The treatment anchor (TREATMENT_ANCHOR_DATE) is the first
@@ -261,6 +262,7 @@ def build_raw_longitudinal_data(
             "TEST_TYPE_CD",
             "TEST_TYPE_DESCR",
             "NUMERIC_RESULT",
+            "TEXT_RESULT",
             "RESULT_UOM_NM",
         ]
     )
@@ -274,7 +276,8 @@ def build_raw_longitudinal_data(
     # and consolidate_dfci_labs' further canonicalization of LAB_NAME. Vitals
     # have no TEST_TYPE_CD equivalent, so RAW_TEST_CODE is null for those rows.
     vital_signs_df = vital_signs_df.with_columns(
-        pl.lit(None, dtype=pl.Utf8).alias("RAW_TEST_CODE")
+        pl.lit(None, dtype=pl.Utf8).alias("RAW_TEST_CODE"),
+        pl.lit(None, dtype=pl.Utf8).alias("TEXT_RESULT"),
     )
     labs_df_col_sub = labs_df_col_sub.with_columns(
         pl.col("TEST_TYPE_CD").alias("RAW_TEST_CODE")
@@ -287,7 +290,9 @@ def build_raw_longitudinal_data(
             "HEALTH_HISTORY_TYPE": "LAB_NAME",
             "UNITS_CD": "LAB_UNIT",
         }
-    ).select([ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE", "RAW_TEST_CODE"])
+    ).select(
+        [ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE", "RAW_TEST_CODE", "TEXT_RESULT"]
+    )
 
     labs_df_col_sub = labs_df_col_sub.rename(
         {
@@ -296,7 +301,9 @@ def build_raw_longitudinal_data(
             "RESULT_UOM_NM": "LAB_UNIT",
             "TEST_NAME": "LAB_NAME",
         }
-    ).select([ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE", "RAW_TEST_CODE"])
+    ).select(
+        [ID_COL, "DATE", "LAB_NAME", "LAB_UNIT", "LAB_VALUE", "RAW_TEST_CODE", "TEXT_RESULT"]
+    )
 
     # Both inputs are scanned all-String (infer_schema_length=0), so LAB_VALUE
     # is already Utf8 on both halves here. This explicit cast is defensive.

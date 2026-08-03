@@ -520,6 +520,16 @@ SENTINEL_NUMERIC_VALUES: frozenset[float] = frozenset({
     -999999.0,
 })
 
+# For these two measurements only, DFCI sometimes pairs the 999999 numeric
+# sentinel with a TEXT_RESULT such as "<0.1".  In that combination the result
+# represents a value below the assay's detection limit rather than a missing
+# result, and downstream modeling treats it as zero.
+BELOW_DETECTION_IMPUTABLE_MEASUREMENTS: frozenset[str] = frozenset({
+    "PSA",
+    "Testosterone",
+})
+BELOW_DETECTION_SENTINEL = 999999.0
+
 
 def is_sentinel_value(value: object) -> bool:
     """True iff `value` is a known DFCI missing/error sentinel."""
@@ -530,6 +540,29 @@ def is_sentinel_value(value: object) -> bool:
     if not math.isfinite(v):
         return False
     return v in SENTINEL_NUMERIC_VALUES
+
+
+def _below_detection_imputation_mask(
+    frame: pd.DataFrame,
+    exact_lookup: dict[str, dict],
+    prefix_lookup: dict[str, dict],
+) -> pd.Series:
+    """Identify PSA/Testosterone 999999 rows whose raw text contains ``<``."""
+    if "TEXT_RESULT" not in frame.columns:
+        return pd.Series(False, index=frame.index, dtype=bool)
+
+    exact_measurement = frame["TEST_NAME"].map(
+        _metadata_attribute_maps(exact_lookup, "collapsed_measurement")
+    )
+    prefix_measurement = frame["TEST_NAME_PREFIX"].map(
+        _metadata_attribute_maps(prefix_lookup, "collapsed_measurement")
+    )
+    collapsed_measurement = exact_measurement.fillna(prefix_measurement)
+    return (
+        frame["numeric_result_as_float"].eq(BELOW_DETECTION_SENTINEL)
+        & collapsed_measurement.isin(BELOW_DETECTION_IMPUTABLE_MEASUREMENTS)
+        & frame["TEXT_RESULT"].astype("string").str.contains("<", regex=False, na=False)
+    )
 
 
 def is_within_physiologic_range(
@@ -950,6 +983,16 @@ def _consolidate_dfci_labs_rowwise(
     output_df["TEST_NAME_PREFIX"] = output_df["TEST_NAME"].map(extract_prefix)
     output_df["normalized_result_uom_nm"] = output_df["RESULT_UOM_NM"].map(normalize_unit)
     output_df["numeric_result_as_float"] = pd.to_numeric(output_df["NUMERIC_RESULT"], errors="coerce")
+    below_detection_mask = _below_detection_imputation_mask(
+        output_df, exact_lookup, prefix_lookup
+    )
+    n_imputed = int(below_detection_mask.sum())
+    if n_imputed:
+        print(
+            f"[consolidate_dfci_labs] imputed {n_imputed} PSA/Testosterone rows "
+            "from the 999999 sentinel to 0 because TEXT_RESULT contained '<'."
+        )
+        output_df.loc[below_detection_mask, "numeric_result_as_float"] = 0.0
     # Drop known DFCI sentinel values (e.g. 9999999.0) before any unit math so
     # they never reach a per-measurement physiologic check. Mirrors the existing
     # PSA-specific filter in compile_prostate_data.py but applied across every
@@ -1284,6 +1327,16 @@ def consolidate_dfci_labs(
     working["numeric_result_as_float"] = pd.to_numeric(
         working["NUMERIC_RESULT"], errors="coerce"
     )
+    below_detection_mask = _below_detection_imputation_mask(
+        working, exact_lookup, prefix_lookup
+    )
+    if below_detection_mask.any():
+        print(
+            f"[consolidate_dfci_labs] imputed {int(below_detection_mask.sum())} "
+            "PSA/Testosterone rows from the 999999 sentinel to 0 because "
+            "TEXT_RESULT contained '<'."
+        )
+        working.loc[below_detection_mask, "numeric_result_as_float"] = 0.0
     sentinel_mask = working["numeric_result_as_float"].isin(SENTINEL_NUMERIC_VALUES)
     if sentinel_mask.any():
         print(
