@@ -60,9 +60,9 @@ COMPASS/
     ├── cox_aggregated.py                 # PROFILE adapter/config for shared survival code
     ├── univariate_analysis.py            # ENTRY: univariate Cox associations
     ├── multivariate_analysis.py          # ENTRY: elastic-net Cox or XGBoost survival:cox
-    ├── gam_runner.py                     # notebook-facing wrappers for the R GAM stages
     ├── gam_trajectory_features.R         # hierarchical longitudinal GAM features
     ├── gam_cox_nonlinearity.R            # smooth-vs-linear Cox GAM tests
+    ├── COMPASS_run_GAMs.ipynb            # R-kernel GAM runner for either COMPASS data root
     ├── COMPASS_generate_figures_pipeline.R # sole figure-generation implementation
     ├── COMPASS_nominally_significant_univariate.ipynb # review nominal univariate hits
     ├── COMPASS_run_locally.ipynb / COMPASS_generate_figures.ipynb # Python models / R figures
@@ -294,10 +294,13 @@ is a no-op if the file is absent). `gam_cox_nonlinearity.R` runs **after** `univ
 since it depends on the feature list in `cox_agg_feature_selection.csv`; it fits on the full merged
 table (train+valid+test), mirroring the same row-fitting asymmetry as
 `run_univariate_nobs_adjusted_associations`, and writes `gam_cox_nonlinearity_landmark{D}.csv`.
-Both COMPASS run notebooks call these stages directly through `gam_runner.py`: trajectory GAMs run
-immediately after input construction, and nonlinear Cox GAMs run after the Python models have written
-each landmark's exact `cox_agg_feature_selection.csv`. `RUN_GAM = True` enables this integrated path;
-set it to `False` to run the pre-GAM workflow.
+The R stages are isolated in the R-kernel `COMPASS_run_GAMs.ipynb` so the Python run notebooks and
+the `mgcv` conda environment do not need to coexist. The enforced handoff is: build inputs in Python,
+run trajectory GAMs in R, set `REBUILD_PREDICTION_INPUTS = False` and rerun Python Stage 3 so its
+models consume the trajectory features, then return to R for nonlinear Cox GAMs. Stage B rejects a
+feature-selection file older than its trajectory-feature file, preventing a stale pre-GAM selection
+from being tested accidentally. `DATA_VARIANT` switches the R notebook between the baseline and
+merged-PROFILE roots.
 
 ### 2.4 — Notebooks
 
