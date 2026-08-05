@@ -759,6 +759,14 @@ def main():
         default=os.path.join(NEPC_PROJ_PATH, "mrn_lists"),
         help="Directory for cohort MRN lists and icd_prostate_mrn_flags.csv.",
     )
+    parser.add_argument(
+        "--survival-arms",
+        nargs="+",
+        choices=sorted(ANCHOR_MED_SETS),
+        default=["arpi", "adt"],
+        help="Survival cohorts to build (default: arpi adt). Local-run notebooks "
+             "pass 'adt' so no ARPI cohort is generated.",
+    )
     args = parser.parse_args()
 
     # Table defaults are derived from --oncdrs-path so the historical
@@ -801,7 +809,12 @@ def main():
     # 3. Establish first ADT (the primary entry requirement), then exclude
     #    the requested cancers only when diagnosed strictly after ADT start.
     meds_for_survival = load_medications_for_survival(meds)
-    anchor_df = compute_treatment_anchor(meds_for_survival, meds_set=ARPI_ANCHOR_MEDS)
+    selected_arms = set(args.survival_arms)
+    anchor_df = (
+        compute_treatment_anchor(meds_for_survival, meds_set=ARPI_ANCHOR_MEDS)
+        if "arpi" in selected_arms
+        else None
+    )
     adt_anchor_df = compute_treatment_anchor(meds_for_survival, meds_set=ADT_ANCHOR_MEDS)
     platinum_df = compute_first_platinum(meds_for_survival)
     post_adt_exclusion_cancer_mrns = compute_post_adt_exclusion_cancer_mrns(
@@ -816,7 +829,8 @@ def main():
         pl.col(ID_COL).is_in(sorted(eligible_mrns))
     )
     print(
-        f"ARPI anchor drug recipients: {len(anchor_df)}; "
+        f"ARPI anchor drug recipients: "
+        f"{len(anchor_df) if anchor_df is not None else 'not requested'}; "
         f"ADT anchor drug recipients: {len(adt_anchor_df)}; "
         f"post-ADT specified-cancer exclusions: "
         f"{len(all_cohort_mrns & post_adt_exclusion_cancer_mrns)}; "
@@ -859,31 +873,45 @@ def main():
         f"{icd_prostate_flags_path}"
     )
 
-    # Both arms inherit the same ADT-entry eligibility universe. The ARPI arm
-    # additionally requires its own non-null analysis anchor.
-    survival_cohort = build_survival_cohort(eligible_mrns, anchor_df, platinum_df, status_df)
-    arpi_cohort = survival_cohort.filter(pl.col('TREATMENT_ANCHOR_DATE').is_not_null())
-    summarize_survival_cohort(arpi_cohort, label="arpi")
+    # Selected arms inherit the same ADT-entry eligibility universe. The ARPI
+    # arm additionally requires its own non-null analysis anchor.
+    if "arpi" in selected_arms:
+        survival_cohort = build_survival_cohort(
+            eligible_mrns, anchor_df, platinum_df, status_df
+        )
+        arpi_cohort = survival_cohort.filter(
+            pl.col('TREATMENT_ANCHOR_DATE').is_not_null()
+        )
+        summarize_survival_cohort(arpi_cohort, label="arpi")
 
-    arpi_out_path = os.path.join(args.out_dir, "prostate_arpi_survival_cohort_arpi.csv")
-    arpi_cohort.write_csv(arpi_out_path)
-    print(f"Saved arpi survival cohort to {arpi_out_path}")
+        arpi_out_path = os.path.join(
+            args.out_dir, "prostate_arpi_survival_cohort_arpi.csv"
+        )
+        arpi_cohort.write_csv(arpi_out_path)
+        print(f"Saved arpi survival cohort to {arpi_out_path}")
 
-    arpi_mrn_list_path = os.path.join(args.mrn_lists_dir, "arpi_mrns.csv")
-    arpi_cohort.select(ID_COL).unique().sort(ID_COL).write_csv(arpi_mrn_list_path)
-    print(f"Saved arpi MRN list to {arpi_mrn_list_path}")
+        arpi_mrn_list_path = os.path.join(args.mrn_lists_dir, "arpi_mrns.csv")
+        arpi_cohort.select(ID_COL).unique().sort(ID_COL).write_csv(arpi_mrn_list_path)
+        print(f"Saved arpi MRN list to {arpi_mrn_list_path}")
 
-    adt_survival_cohort = build_survival_cohort(eligible_mrns, adt_anchor_df, platinum_df, status_df)
-    adt_cohort = adt_survival_cohort.filter(pl.col('TREATMENT_ANCHOR_DATE').is_not_null())
-    summarize_survival_cohort(adt_cohort, label="adt")
+    if "adt" in selected_arms:
+        adt_survival_cohort = build_survival_cohort(
+            eligible_mrns, adt_anchor_df, platinum_df, status_df
+        )
+        adt_cohort = adt_survival_cohort.filter(
+            pl.col('TREATMENT_ANCHOR_DATE').is_not_null()
+        )
+        summarize_survival_cohort(adt_cohort, label="adt")
 
-    adt_out_path = os.path.join(args.out_dir, "prostate_adt_survival_cohort_adt.csv")
-    adt_cohort.write_csv(adt_out_path)
-    print(f"Saved adt survival cohort to {adt_out_path}")
+        adt_out_path = os.path.join(
+            args.out_dir, "prostate_adt_survival_cohort_adt.csv"
+        )
+        adt_cohort.write_csv(adt_out_path)
+        print(f"Saved adt survival cohort to {adt_out_path}")
 
-    adt_mrn_list_path = os.path.join(args.mrn_lists_dir, "adt_mrns.csv")
-    adt_cohort.select(ID_COL).unique().sort(ID_COL).write_csv(adt_mrn_list_path)
-    print(f"Saved adt MRN list to {adt_mrn_list_path}")
+        adt_mrn_list_path = os.path.join(args.mrn_lists_dir, "adt_mrns.csv")
+        adt_cohort.select(ID_COL).unique().sort(ID_COL).write_csv(adt_mrn_list_path)
+        print(f"Saved adt MRN list to {adt_mrn_list_path}")
 
 
 if __name__ == "__main__":

@@ -397,8 +397,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
     }
     NA_character_
   }
-  # Figure-first, panel-second layout for non-lab-specific figures:
-  #   <fig_root>/<ARPI|ADT>/<figure>/<plot-stem>/<cohort>_<plot-stem>.png
+  # Flat layout within each numbered figure directory:
+  #   <fig_root>/<ARPI|ADT>/<figure>/<cohort>_<plot-stem>.png
   # Per-lab panels (all-lab longitudinal/KM-quartile/distribution plots) are
   # nested one level deeper by CATEGORY_MAP category so ~40 labs x 4 strata
   # stay navigable instead of dumping ~160+ files into one flat directory:
@@ -428,6 +428,33 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
       return("androgen_trajectories")
     }
     stop(sprintf("Unmapped figure output stem: %s", plot_stem))
+  }
+  output_dir_for_stem <- function(plot_stem) {
+    group <- figure_group(plot_stem)
+    # Numbered figure groups are flat. Preserve the existing extra stem level
+    # for supplemental lab/KM groups, which can contain hundreds of outputs.
+    if (grepl("^figure[0-9]", group)) return(file.path(FIG_ROOT, group))
+    file.path(FIG_ROOT, group, plot_stem)
+  }
+  # Remove only the legacy per-panel directories under numbered figure groups.
+  # Flat files already in those groups are retained and overwritten normally.
+  numbered_figure_groups <- c(
+    "figure1", "figure2", "figure2v0_llm", "figure2v2_llm",
+    "figure2v3_llm", "figure3", "figure4"
+  )
+  for (group in numbered_figure_groups) {
+    group_dir <- file.path(FIG_ROOT, group)
+    if (!dir.exists(group_dir)) next
+    legacy_subdirs <- list.dirs(group_dir, recursive = FALSE, full.names = TRUE)
+    if (length(legacy_subdirs) > 0) {
+      unlink(legacy_subdirs, recursive = TRUE, force = TRUE)
+      message(sprintf(
+        "removed %d legacy panel subdirector%s from %s",
+        length(legacy_subdirs),
+        ifelse(length(legacy_subdirs) == 1, "y", "ies"),
+        group_dir
+      ))
+    }
   }
   # Compatibility value passed by existing save_fig call sites; actual output
   # routing is determined from each exact `stem` inside save_fig/write_table1.
@@ -467,15 +494,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
                 format(sum(!llm_classifier_labels$is_platinum), big.mark = ",")))
   }
 
-  # save_fig: write one high-resolution PNG to the figure/panel directory.
+  # save_fig: write one high-resolution PNG directly to its figure group.
   save_fig <- function(plot, out_dir, stem, width, height, prefix = COHORT) {
-    # `out_dir` is retained for call-site compatibility. Outputs are grouped by
-    # exact plot stem so every cohort version of a panel sits in one directory.
-    panel_dir <- file.path(FIG_ROOT, figure_group(stem), stem)
-    dir.create(panel_dir, recursive = TRUE, showWarnings = FALSE)
+    # `out_dir` is retained for call-site compatibility. The filename already
+    # contains the cohort and exact stem, so an extra per-panel directory adds
+    # nesting without adding disambiguation.
+    output_dir <- output_dir_for_stem(stem)
+    dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
     output_stem <- paste0(prefix, "_", stem)
 
-    png_out <- file.path(panel_dir, paste0(output_stem, ".png"))
+    png_out <- file.path(output_dir, paste0(output_stem, ".png"))
     if (HAS_RAGG) {
       ggsave(png_out, plot = plot, width = width, height = height, units = "in",
              dpi = SAVE_DPI, bg = "white", device = ragg::agg_png)
@@ -718,9 +746,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS
 
   write_table1 <- function(table1, out_base) {
     stem <- basename(out_base)
-    panel_dir <- file.path(FIG_ROOT, figure_group(stem), stem)
-    dir.create(panel_dir, recursive = TRUE, showWarnings = FALSE)
-    out_base <- file.path(panel_dir, paste0(COHORT, "_", stem))
+    output_dir <- output_dir_for_stem(stem)
+    dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+    out_base <- file.path(output_dir, paste0(COHORT, "_", stem))
     csv <- paste0(out_base, ".csv"); md_p <- paste0(out_base, ".md")
     write_csv(table1, csv)
     writeLines(to_markdown_table(table1), md_p)
