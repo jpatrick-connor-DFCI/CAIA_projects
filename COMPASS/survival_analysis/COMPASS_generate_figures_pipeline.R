@@ -320,7 +320,10 @@ parse_feature <- function(name) {
 }
 
 
-COHORTS <- c("arpi", "adt")
+SUPPORTED_COHORTS <- c("arpi", "adt")
+# Notebook default: render ADT only. Call generate_figures("arpi", ...) directly
+# to opt into the supported ARPI figure set.
+COHORTS <- c("adt")
 COHORT_LABELS <- c(
   arpi = "ARPI",
   adt = "ADT"
@@ -335,7 +338,8 @@ COHORT_LANDMARKS <- list(
 # COMPASS_generate_figures.ipynb's per-cohort cells (Figures 1-7 + Table 1)
 # so the notebook can call this once per cohort in the same R session instead
 # of re-executing itself via Rscript.
-generate_figures <- function(cohort, nepc_proj_path, fig_root, cohorts = COHORTS, show = FALSE,
+generate_figures <- function(cohort, nepc_proj_path, fig_root,
+                             cohorts = SUPPORTED_COHORTS, show = FALSE,
                              llm_annotations_path = DEFAULT_LLM_ANNOTATIONS_PATH,
                              plot_non_androgen_distributions = FALSE,
                              plot_non_androgen_lab_figures = FALSE) {
