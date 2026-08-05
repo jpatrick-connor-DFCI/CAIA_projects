@@ -5,7 +5,7 @@ The pipeline historically read one raw OncDRS release straight from CSV
 ``PROFILE_data_processing`` repo now also publishes a single deduplicated
 Parquet per table, merged across every release pull, at::
 
-    /data/gusev/USERS/jpconnor/data/PROFILE_DATA/FINAL/<TABLE>.parquet
+    /data/gusev/USERS/jpconnor/data/PROFILE_DATA/<TABLE>.parquet
 
 Both are valid inputs, so every raw read goes through :func:`scan_source`,
 which dispatches on the file suffix. Callers pass whichever path they want;
@@ -25,12 +25,10 @@ Parquet columns are typed, so a bare ``pl.scan_parquet`` would break every
 ``.str.*`` call. :func:`scan_source` therefore casts the whole Parquet frame to
 Utf8, reproducing ``infer_schema_length=0`` exactly.
 
-The only genuinely numeric column on the COMPASS path is ``LABS.NUMERIC_RESULT``
-(Float64 upstream). It stringifies to ``"1.0"``-style text and ``recover_numeric``
-parses it straight back to Float64, so the round trip is lossless. Every column
-COMPASS parses as a string -- ``DFCI_MRN``, all ``*_DT`` dates,
-``NCI_PREFERRED_MED_NM``, ``TEST_TYPE_CD``, the ICD-10 codes -- is already
-``pl.String`` in the upstream ``COLUMN_MAP``, so it passes through untouched.
+The genuinely typed upstream columns on the COMPASS path include
+``LABS.NUMERIC_RESULT`` (Float64), ``DFCI_MRN`` (Int64), and normalized calendar
+dates (Date). They stringify losslessly; ``recover_numeric`` and the downstream
+date parsers restore the types expected by the existing pipeline.
 """
 
 from __future__ import annotations
@@ -39,11 +37,14 @@ from pathlib import Path
 
 import polars as pl
 
-# Merged, deduplicated Parquet published by PROFILE_data_processing's
-# compile_OncDRS_data.ipynb (its OUTPUT_PATH / "FINAL").
-DEFAULT_PROFILE_DATA_FINAL = Path(
-    "/data/gusev/USERS/jpconnor/data/PROFILE_DATA/FINAL"
+# Merged, deduplicated Parquets published directly in PROFILE_data_processing's
+# compile_OncDRS_data.ipynb OUTPUT_PATH.
+DEFAULT_PROFILE_DATA_ROOT = Path(
+    "/data/gusev/USERS/jpconnor/data/PROFILE_DATA"
 )
+# Compatibility alias for callers written before final Parquets moved out of
+# the now-retired PROFILE_DATA/FINAL directory.
+DEFAULT_PROFILE_DATA_FINAL = DEFAULT_PROFILE_DATA_ROOT
 
 # Single raw OncDRS release, the pipeline's original source.
 DEFAULT_ONCDRS_RELEASE = Path(
@@ -96,11 +97,11 @@ def resolve(table: str, root=None) -> Path:
             f"Known tables: {sorted(TABLE_FILES)}"
         )
 
-    root = Path(root) if root is not None else DEFAULT_PROFILE_DATA_FINAL
+    root = Path(root) if root is not None else DEFAULT_PROFILE_DATA_ROOT
     parquet_name, csv_name = TABLE_FILES[table]
 
-    # A directory named FINAL (or any directory already holding the Parquet)
-    # gets the Parquet name; anything else is treated as a raw release dir.
+    # A directory already holding the compiled Parquet gets the Parquet name;
+    # anything else is treated as a raw release directory.
     if (root / parquet_name).exists():
         return root / parquet_name
     return root / csv_name

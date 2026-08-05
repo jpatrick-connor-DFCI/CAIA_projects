@@ -394,7 +394,7 @@ differ only in which OncDRS extract they read and where they write.
 
 | | Baseline | PROFILE_data_processing |
 |---|---|---|
-| Source | `/data/gusev/PROFILE/CLINICAL/OncDRS/ALL_2025_03/*.csv` (one release) | `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/FINAL/*.parquet` (7 releases merged + deduplicated) |
+| Source | `/data/gusev/PROFILE/CLINICAL/OncDRS/ALL_2025_03/*.csv` (one release) | `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/*.parquet` (7 releases merged + deduplicated) |
 | Run notebook | `COMPASS_run_locally.ipynb` | `COMPASS_run_locally_profile_data.ipynb` |
 | Figure notebook | `COMPASS_generate_figures.ipynb` | `COMPASS_generate_figures_profile_data.ipynb` |
 | Data root | `data/CAIA/COMPASS/` | `data/CAIA/COMPASS_PROFILE_DATA/` |
@@ -487,9 +487,9 @@ anchor ran last — it is labelled as such in the cell.
   - Figures: `/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS/`
 - **Raw OncDRS roots** — `ALL_2025_03` release CSVs at
   `/data/gusev/PROFILE/CLINICAL/OncDRS/ALL_2025_03/`, or merged parquets at
-  `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/FINAL/`. Both defaults live in
+  `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/`. Both defaults live in
   `data_preprocessing_common/oncdrs_sources.py` (`DEFAULT_ONCDRS_RELEASE`,
-  `DEFAULT_PROFILE_DATA_FINAL`) alongside the `TABLE_FILES` basename map. The parquet run writes to
+  `DEFAULT_PROFILE_DATA_ROOT`) alongside the `TABLE_FILES` basename map. The parquet run writes to
   the `COMPASS_PROFILE_DATA` data/figure roots — see
   [Two OncDRS source roots](#two-oncdrs-source-roots).
 - `data_preprocessing_common/dfci_labs.py` uses the checked-in shared
@@ -514,7 +514,7 @@ python COMPASS/survival_analysis/multivariate_analysis.py --model xgboost --inpu
 
 To run against the merged PROFILE_data_processing parquets instead, use
 `COMPASS_run_locally_profile_data.ipynb` → `COMPASS_generate_figures_profile_data.ipynb` (both
-top to bottom). They pass the `FINAL/*.parquet` paths and the `COMPASS_PROFILE_DATA` roots to the
+top to bottom). They pass the `PROFILE_DATA/*.parquet` paths and the `COMPASS_PROFILE_DATA` roots to the
 same scripts; nothing under `data/CAIA/COMPASS/` or `figures/CAIA/COMPASS/` is written. The figure
 notebook symlinks `LLM_NEPC_labels/` from the baseline root, since those hand-curated annotations
 are an input to `generate_figures()` rather than something the pipeline produces.
