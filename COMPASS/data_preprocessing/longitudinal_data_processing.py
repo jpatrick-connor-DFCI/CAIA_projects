@@ -139,6 +139,25 @@ DEFAULT_ADT_CONSOLIDATED_CACHE_PARQUET = (
 )
 
 
+def coerce_mixed_datetime(values: pd.Series) -> pd.Series:
+    """Parse calendar dates that may use different formats across releases.
+
+    PROFILE_DATA merges several OncDRS releases, whose date strings are not
+    guaranteed to share one representation. Use the same permissive Polars
+    parser as Stage 1 so a date cannot be accepted while compiling the cohort
+    and then rejected while constructing its longitudinal rows.
+    """
+    parsed = (
+        pl.from_pandas(values.rename("_date"))
+        .cast(pl.Utf8, strict=False)
+        .str.to_datetime(strict=False)
+    )
+    result = parsed.to_pandas()
+    result.index = values.index
+    result.name = values.name
+    return result
+
+
 def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFrame:
     """Load the per-patient survival cohort into the ``death_df`` schema.
 
@@ -373,7 +392,7 @@ def compute_first_prostate_diagnosis(icds: pd.DataFrame) -> pd.DataFrame:
         codes.str.startswith("C61"),
         [ID_COL, "START_DT"],
     ].copy()
-    prostate["START_DT"] = pd.to_datetime(prostate["START_DT"], errors="coerce")
+    prostate["START_DT"] = coerce_mixed_datetime(prostate["START_DT"])
     prostate = prostate.dropna(subset=["START_DT"])
 
     return (
@@ -396,7 +415,7 @@ def compute_treatment_anchor(medications_df: pd.DataFrame, meds_set: set = ARPI_
     meds = medications_df.copy()
     meds["NCI_PREFERRED_MED_NM"] = meds["NCI_PREFERRED_MED_NM"].astype(str).str.upper().str.strip()
     meds = meds.loc[meds["NCI_PREFERRED_MED_NM"].isin(meds_set)].copy()
-    meds["TREATMENT_ANCHOR_DATE"] = pd.to_datetime(meds["MED_START_DT"], errors="coerce")
+    meds["TREATMENT_ANCHOR_DATE"] = coerce_mixed_datetime(meds["MED_START_DT"])
     meds = meds.dropna(subset=["TREATMENT_ANCHOR_DATE"])
     return (
         meds.groupby(ID_COL, as_index=False)["TREATMENT_ANCHOR_DATE"]
@@ -415,7 +434,7 @@ def compute_first_platinum(medications_df: pd.DataFrame) -> pd.DataFrame:
     meds = medications_df.copy()
     meds["NCI_PREFERRED_MED_NM"] = meds["NCI_PREFERRED_MED_NM"].astype(str).str.upper().str.strip()
     meds = meds.loc[meds["NCI_PREFERRED_MED_NM"].isin(PLATINUM_MEDS)].copy()
-    meds["_med_start_dt_parsed"] = pd.to_datetime(meds["MED_START_DT"], errors="coerce")
+    meds["_med_start_dt_parsed"] = coerce_mixed_datetime(meds["MED_START_DT"])
     meds = meds.dropna(subset=["_med_start_dt_parsed"])
     meds = (
         meds.sort_values("_med_start_dt_parsed")
@@ -459,8 +478,8 @@ def build_longitudinal_prediction_data(
     # Without this, the left-join below fans out every lab row by the number of
     # platinum medication records the patient has.
     platinum_first = platinum_df[[ID_COL, "medication", "medication_start_time"]].copy()
-    platinum_first["_plat_dt"] = pd.to_datetime(
-        platinum_first["medication_start_time"], errors="coerce"
+    platinum_first["_plat_dt"] = coerce_mixed_datetime(
+        platinum_first["medication_start_time"]
     )
     platinum_first = (
         platinum_first.sort_values("_plat_dt")
@@ -523,7 +542,7 @@ def build_longitudinal_prediction_data(
     if "death_date" in pred_df.columns:
         date_cols.append("death_date")
     for col in date_cols:
-        pred_df[col] = pd.to_datetime(pred_df[col], errors="coerce").dt.floor("D")
+        pred_df[col] = coerce_mixed_datetime(pred_df[col]).dt.floor("D")
 
     pred_df["DEATH"] = pd.to_numeric(pred_df["DEATH"], errors="coerce").fillna(0).astype(int)
     pred_df["AGE_AT_TREATMENTSTART"] = pd.to_numeric(
