@@ -285,12 +285,16 @@ only (no `tidyverse`/`survminer`/`broom`, unlike `COMPASS_generate_figures_pipel
 `build_prediction_inputs.py` and before `univariate_analysis.py`: it reads
 `pre_treatment_lab_long_landmark{D}.csv` and `canonical_labs_train_val.csv` and writes
 `gam_trajectory_features_landmark{D}.csv` (one row per `DFCI_MRN`) plus a
-`gam_fit_diagnostics_landmark{D}.csv` sidecar recording which basis (`fs` vs. the random
-intercept+slope fallback) was used per lab, EDF, fit seconds, and convergence. It also writes
+`gam_fit_diagnostics_landmark{D}.csv` sidecar recording which basis (`fs`, the random
+intercept+slope fallback, or the scalable two-stage ridge path) was used per lab, EDF, fit seconds,
+and convergence. It also writes
 `gam_trajectory_curves_landmark{D}.csv`, a long patient×lab×time grid of fitted values. The figure
 pipeline uses that grid for paired GAM-smoothed trajectory panels stratified by platinum exposure
 and classifier `has_nepc`; ribbons are 95% confidence intervals across patient-specific fitted
-curves, not `mgcv` coefficient intervals. The per-patient
+curves, not `mgcv` coefficient intervals. To prevent out-of-memory kills from an all-patient
+factor-smooth design, labs with more than 500 patients automatically use a scalable decomposition:
+one population GAM plus independently ridge-shrunk patient intercept/slope deviations. Adjust the
+switch with `--max-fs-patients` and the shrinkage with `--patient-ridge-lambda`. The per-patient
 smooth is unsupervised — it never sees `t_platinum`/`PLATINUM` — and by default is fit on **all**
 cohort patients, not just train_val; pass `--fit-split train_val` to refit population smooths on
 train+valid only as a leakage sensitivity check. `univariate_analysis.py` then automatically tests

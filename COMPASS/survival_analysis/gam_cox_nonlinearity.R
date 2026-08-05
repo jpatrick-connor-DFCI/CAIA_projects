@@ -64,6 +64,7 @@ suppressWarnings({
 suppressPackageStartupMessages({
   library(mgcv)
   library(data.table)
+  library(parallel)
 })
 
 DEFAULT_INPUTS_DIR <- "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis/prediction_inputs"
@@ -77,6 +78,7 @@ DEFAULT_ID_COL <- "DFCI_MRN"
 DEFAULT_MIN_EVENTS_PER_FEATURE <- 10L
 DEFAULT_K_SMOOTH <- 10
 DEFAULT_FEATURE_SELECTION_CSV <- ""
+DEFAULT_N_WORKERS <- 1L
 
 parse_cli_args <- function(args, defaults) {
   out <- defaults
@@ -108,7 +110,8 @@ args_list <- parse_cli_args(
     id_col = DEFAULT_ID_COL,
     min_events_per_feature = DEFAULT_MIN_EVENTS_PER_FEATURE,
     k_smooth = DEFAULT_K_SMOOTH,
-    feature_selection_csv = DEFAULT_FEATURE_SELECTION_CSV
+    feature_selection_csv = DEFAULT_FEATURE_SELECTION_CSV,
+    n_workers = DEFAULT_N_WORKERS
   )
 )
 
@@ -123,6 +126,15 @@ id_col <- args_list$id_col
 min_events_per_feature <- as.integer(args_list$min_events_per_feature)
 k_smooth <- as.integer(args_list$k_smooth)
 feature_selection_csv <- as.character(args_list$feature_selection_csv)
+n_workers <- as.integer(args_list$n_workers)
+
+if (n_workers < 1L) stop("--n-workers must be at least 1")
+if (n_workers > parallel::detectCores()) {
+  warning(sprintf(
+    "--n-workers %d exceeds %d detected cores (oversubscription risk)",
+    n_workers, parallel::detectCores()
+  ))
+}
 
 parse_feature_name <- function(feature) {
   # Mirrors survival_common/cox_engine.py's rsplit("__", 1): split on the
@@ -224,6 +236,67 @@ fit_one_feature <- function(d, feature, n_obs_feature, duration_col, event_col, 
        p_linear = p_linear, note = "ok")
 }
 
+# ---------------------------------------------------------------------------
+# Per-feature worker body. Returns a single data.table row instead of
+# appending to a shared `rows` list, so it can be dispatched via mclapply().
+# mclapply preserves input order, so `q_lrt`'s BH adjustment (order-dependent)
+# stays bit-identical regardless of --n-workers. `log_lines` is buffered and
+# printed by the parent after collection so progress lines from concurrent
+# workers don't interleave.
+# ---------------------------------------------------------------------------
+process_one_feature <- function(feature, aggregated, landmark_day, endpoint, duration_col,
+                                 event_col, age_col, min_events_per_feature, k_smooth) {
+  log_lines <- character(0)
+  log <- function(...) log_lines[[length(log_lines) + 1]] <<- sprintf(...)
+
+  parsed <- parse_feature_name(feature)
+  lab_name <- parsed[1]
+  feature_stat <- parsed[2]
+
+  if (identical(feature_stat, "n_observations")) {
+    row <- data.table(
+      landmark_days = landmark_day, endpoint = endpoint, feature = feature,
+      lab_name = lab_name, feature_stat = feature_stat, n_used = NA_integer_,
+      n_events = NA_integer_, edf = NA_real_, p_smooth = NA_real_, p_lrt = NA_real_,
+      delta_aic = NA_real_, coef_linear = NA_real_, p_linear = NA_real_,
+      note = "target_is_n_observations"
+    )
+    return(list(row = row, log_lines = log_lines))
+  }
+
+  n_obs_feature <- paste0(lab_name, "__n_observations")
+  if (!n_obs_feature %in% names(aggregated)) {
+    row <- data.table(
+      landmark_days = landmark_day, endpoint = endpoint, feature = feature,
+      lab_name = lab_name, feature_stat = feature_stat, n_used = NA_integer_,
+      n_events = NA_integer_, edf = NA_real_, p_smooth = NA_real_, p_lrt = NA_real_,
+      delta_aic = NA_real_, coef_linear = NA_real_, p_linear = NA_real_,
+      note = "missing_matching_n_obs_feature"
+    )
+    return(list(row = row, log_lines = log_lines))
+  }
+
+  result <- fit_one_feature(
+    aggregated, feature, n_obs_feature, duration_col, event_col, age_col,
+    min_events_per_feature, k_smooth
+  )
+  log(
+    "  [%s] n_used=%s n_events=%s edf=%s p_lrt=%s note=%s",
+    feature, result$n_used, result$n_events,
+    if (is.na(result$edf)) "NA" else sprintf("%.2f", result$edf),
+    if (is.na(result$p_lrt)) "NA" else sprintf("%.3g", result$p_lrt),
+    result$note
+  )
+  row <- data.table(
+    landmark_days = landmark_day, endpoint = endpoint, feature = feature,
+    lab_name = lab_name, feature_stat = feature_stat, n_used = result$n_used,
+    n_events = result$n_events, edf = result$edf, p_smooth = result$p_smooth,
+    p_lrt = result$p_lrt, delta_aic = result$delta_aic,
+    coef_linear = result$coef_linear, p_linear = result$p_linear, note = result$note
+  )
+  list(row = row, log_lines = log_lines)
+}
+
 for (landmark_day in landmark_days) {
   cat(sprintf("\n##### GAM COX NONLINEARITY: LANDMARK +%dD #####\n", landmark_day))
 
@@ -262,55 +335,30 @@ for (landmark_day in landmark_days) {
   features_to_test <- selection[landmark_days == landmark_day]$feature
   cat(sprintf("Selected features to test at this landmark: %d\n", length(features_to_test)))
 
-  rows <- list()
-  for (feature in features_to_test) {
-    parsed <- parse_feature_name(feature)
-    lab_name <- parsed[1]
-    feature_stat <- parsed[2]
+  per_feature <- parallel::mclapply(
+    features_to_test,
+    process_one_feature,
+    aggregated = aggregated, landmark_day = landmark_day, endpoint = endpoint,
+    duration_col = duration_col, event_col = event_col, age_col = age_col,
+    min_events_per_feature = min_events_per_feature, k_smooth = k_smooth,
+    mc.cores = n_workers, mc.preschedule = FALSE
+  )
 
-    if (identical(feature_stat, "n_observations")) {
-      rows[[length(rows) + 1]] <- data.table(
-        landmark_days = landmark_day, endpoint = endpoint, feature = feature,
-        lab_name = lab_name, feature_stat = feature_stat, n_used = NA_integer_,
-        n_events = NA_integer_, edf = NA_real_, p_smooth = NA_real_, p_lrt = NA_real_,
-        delta_aic = NA_real_, coef_linear = NA_real_, p_linear = NA_real_,
-        note = "target_is_n_observations"
-      )
-      next
-    }
-
-    n_obs_feature <- paste0(lab_name, "__n_observations")
-    if (!n_obs_feature %in% names(aggregated)) {
-      rows[[length(rows) + 1]] <- data.table(
-        landmark_days = landmark_day, endpoint = endpoint, feature = feature,
-        lab_name = lab_name, feature_stat = feature_stat, n_used = NA_integer_,
-        n_events = NA_integer_, edf = NA_real_, p_smooth = NA_real_, p_lrt = NA_real_,
-        delta_aic = NA_real_, coef_linear = NA_real_, p_linear = NA_real_,
-        note = "missing_matching_n_obs_feature"
-      )
-      next
-    }
-
-    result <- fit_one_feature(
-      aggregated, feature, n_obs_feature, duration_col, event_col, age_col,
-      min_events_per_feature, k_smooth
-    )
-    cat(sprintf(
-      "  [%s] n_used=%s n_events=%s edf=%s p_lrt=%s note=%s\n",
-      feature, result$n_used, result$n_events,
-      if (is.na(result$edf)) "NA" else sprintf("%.2f", result$edf),
-      if (is.na(result$p_lrt)) "NA" else sprintf("%.3g", result$p_lrt),
-      result$note
+  failed <- vapply(per_feature, function(x) inherits(x, "try-error"), logical(1))
+  if (any(failed)) {
+    stop(sprintf(
+      "Feature fit(s) failed under mclapply: %s\n%s",
+      paste(features_to_test[failed], collapse = ", "),
+      paste(vapply(per_feature[failed], as.character, character(1)), collapse = "\n")
     ))
-    rows[[length(rows) + 1]] <- data.table(
-      landmark_days = landmark_day, endpoint = endpoint, feature = feature,
-      lab_name = lab_name, feature_stat = feature_stat, n_used = result$n_used,
-      n_events = result$n_events, edf = result$edf, p_smooth = result$p_smooth,
-      p_lrt = result$p_lrt, delta_aic = result$delta_aic,
-      coef_linear = result$coef_linear, p_linear = result$p_linear, note = result$note
-    )
   }
 
+  for (res in per_feature) {
+    if (length(res$log_lines) > 0) cat(paste(res$log_lines, collapse = "\n"), "\n")
+  }
+  flush.console()
+
+  rows <- lapply(per_feature, `[[`, "row")
   out <- rbindlist(rows)
   out[, q_lrt := stats::p.adjust(p_lrt, method = "BH")]
   setcolorder(out, c(

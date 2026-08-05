@@ -40,6 +40,7 @@ TRUE_SLOPES <- c(LabDown = -0.08, LabUp = 0.05, LabNoise = 0.0)
 TRUE_INTERCEPTS <- c(LabDown = 50, LabUp = 20, LabNoise = 30)
 PATIENT_INTERCEPT_SD <- 2
 RESIDUAL_SD <- 1.5
+EXPECTED_CURVE_POINTS <- 9L
 
 patients <- sprintf("SIM%04d", seq_len(N_PATIENTS))
 
@@ -74,7 +75,13 @@ cat(sprintf("Synthetic inputs written to %s (%d rows across %d patients x %d lab
 
 result <- system2(
   "Rscript",
-  args = c(shQuote(script_path), "--inputs-dir", shQuote(inputs_dir), "--landmark-days", as.character(LANDMARK_DAY)),
+  args = c(
+    shQuote(script_path), "--inputs-dir", shQuote(inputs_dir),
+    "--landmark-days", as.character(LANDMARK_DAY),
+    "--max-fs-patients", "100",
+    "--curve-grid-points", as.character(EXPECTED_CURVE_POINTS),
+    "--auc-grid-points", as.character(EXPECTED_CURVE_POINTS)
+  ),
   stdout = TRUE, stderr = TRUE
 )
 cat(paste(result, collapse = "\n"), "\n")
@@ -103,20 +110,21 @@ check(nrow(features) == N_PATIENTS,
 
 check(nrow(diagnostics) == length(TRUE_SLOPES),
       sprintf("expected %d diagnostic rows, got %d", length(TRUE_SLOPES), nrow(diagnostics)))
-check(all(diagnostics$basis_used %in% c("fs", "re_fallback")),
+check(all(diagnostics$basis_used == "two_stage_ridge"),
       sprintf("unexpected basis_used values: %s", paste(unique(diagnostics$basis_used), collapse = ", ")))
 
 expected_curve_columns <- c("DFCI_MRN", "LAB_NAME", "t_lab", "GAM_FITTED")
 check(identical(names(curves), expected_curve_columns),
       sprintf("unexpected curve columns: %s", paste(names(curves), collapse = ", ")))
-check(nrow(curves) == N_PATIENTS * length(TRUE_SLOPES) * 25L,
+check(nrow(curves) == N_PATIENTS * length(TRUE_SLOPES) * EXPECTED_CURVE_POINTS,
       sprintf("expected %d curve rows, got %d",
-              N_PATIENTS * length(TRUE_SLOPES) * 25L, nrow(curves)))
+              N_PATIENTS * length(TRUE_SLOPES) * EXPECTED_CURVE_POINTS, nrow(curves)))
 check(setequal(unique(curves$LAB_NAME), names(TRUE_SLOPES)),
       sprintf("unexpected curve labs: %s", paste(unique(curves$LAB_NAME), collapse = ", ")))
 check(!anyNA(curves$GAM_FITTED), "curve output contains missing GAM_FITTED values")
 curve_grid_counts <- curves[, .N, by = .(DFCI_MRN, LAB_NAME)]$N
-check(all(curve_grid_counts == 25L), "not every patient/lab curve has the expected 25 grid points")
+check(all(curve_grid_counts == EXPECTED_CURVE_POINTS),
+      sprintf("not every patient/lab curve has the expected %d grid points", EXPECTED_CURVE_POINTS))
 
 for (lab in names(TRUE_SLOPES)) {
   slope_col <- paste0(lab, "__gam_slope")
@@ -140,6 +148,90 @@ for (lab in names(TRUE_SLOPES)) {
 
 cat("\nFit timing per lab:\n")
 print(diagnostics[, .(lab_name, n_patients, n_obs, basis_used, fit_seconds, converged)])
+
+# --- fs-path coverage: 200 planted patients > 100 forces two_stage_ridge
+# above, so nothing exercises the hierarchical bs="fs" branch unless we also
+# run with a higher --max-fs-patients ceiling. ---
+fs_inputs_dir <- tempfile("gam_smoke_fs_inputs_")
+dir.create(fs_inputs_dir)
+fwrite(lab_long, file.path(fs_inputs_dir, sprintf("pre_treatment_lab_long_landmark%d.csv", LANDMARK_DAY)))
+fwrite(canonical_labs, file.path(fs_inputs_dir, "canonical_labs_train_val.csv"))
+
+fs_result <- system2(
+  "Rscript",
+  args = c(
+    shQuote(script_path), "--inputs-dir", shQuote(fs_inputs_dir),
+    "--landmark-days", as.character(LANDMARK_DAY),
+    "--max-fs-patients", "1000",
+    "--curve-grid-points", as.character(EXPECTED_CURVE_POINTS),
+    "--auc-grid-points", as.character(EXPECTED_CURVE_POINTS)
+  ),
+  stdout = TRUE, stderr = TRUE
+)
+cat(paste(fs_result, collapse = "\n"), "\n")
+fs_status <- attr(fs_result, "status")
+if (!is.null(fs_status) && fs_status != 0) {
+  cat(sprintf("FAIL: gam_trajectory_features.R (fs path) exited with status %s\n", fs_status))
+  quit(status = 1)
+}
+fs_diag_path <- file.path(fs_inputs_dir, sprintf("gam_fit_diagnostics_landmark%d.csv", LANDMARK_DAY))
+fs_diagnostics <- fread(fs_diag_path)
+check(all(fs_diagnostics$basis_used %in% c("fs", "re_fallback")),
+      sprintf("--max-fs-patients 1000: expected fs/re_fallback basis, got %s",
+              paste(unique(fs_diagnostics$basis_used), collapse = ", ")))
+cat(sprintf("  fs-path basis_used: %s\n", paste(unique(fs_diagnostics$basis_used), collapse = ", ")))
+unlink(fs_inputs_dir, recursive = TRUE)
+
+# --- Worker-identity check: --n-workers 2 must produce byte-identical
+# feature/diagnostics/curve output to --n-workers 1. This is the assertion
+# that catches ordering/accumulator bugs in the mclapply refactor. ---
+worker_dirs <- list(w1 = tempfile("gam_smoke_w1_"), w2 = tempfile("gam_smoke_w2_"))
+for (d in worker_dirs) {
+  dir.create(d)
+  fwrite(lab_long, file.path(d, sprintf("pre_treatment_lab_long_landmark%d.csv", LANDMARK_DAY)))
+  fwrite(canonical_labs, file.path(d, "canonical_labs_train_val.csv"))
+}
+
+run_with_workers <- function(dir, n_workers) {
+  res <- system2(
+    "Rscript",
+    args = c(
+      shQuote(script_path), "--inputs-dir", shQuote(dir),
+      "--landmark-days", as.character(LANDMARK_DAY),
+      "--max-fs-patients", "100",
+      "--curve-grid-points", as.character(EXPECTED_CURVE_POINTS),
+      "--auc-grid-points", as.character(EXPECTED_CURVE_POINTS),
+      "--n-workers", as.character(n_workers)
+    ),
+    stdout = TRUE, stderr = TRUE
+  )
+  st <- attr(res, "status")
+  if (!is.null(st) && st != 0) {
+    cat(paste(res, collapse = "\n"), "\n")
+    cat(sprintf("FAIL: gam_trajectory_features.R (--n-workers %d) exited with status %s\n", n_workers, st))
+    quit(status = 1)
+  }
+  res
+}
+
+run_with_workers(worker_dirs$w1, 1)
+run_with_workers(worker_dirs$w2, 2)
+
+for (fname_tpl in c("gam_trajectory_features_landmark%d.csv",
+                    "gam_fit_diagnostics_landmark%d.csv",
+                    "gam_trajectory_curves_landmark%d.csv")) {
+  fname <- sprintf(fname_tpl, LANDMARK_DAY)
+  a <- fread(file.path(worker_dirs$w1, fname))
+  b <- fread(file.path(worker_dirs$w2, fname))
+  setorderv(a, setdiff(names(a), "fit_seconds"))
+  setorderv(b, setdiff(names(b), "fit_seconds"))
+  cmp_cols <- setdiff(names(a), "fit_seconds")  # fit_seconds is wall-clock, expected to differ
+  eq <- isTRUE(all.equal(a[, ..cmp_cols], b[, ..cmp_cols]))
+  check(eq, sprintf("--n-workers 1 vs 2 output mismatch in %s", fname))
+  cat(sprintf("  worker-identity check (%s): %s\n", fname, if (eq) "identical" else "MISMATCH"))
+}
+unlink(worker_dirs$w1, recursive = TRUE)
+unlink(worker_dirs$w2, recursive = TRUE)
 
 if (length(failures) > 0) {
   cat("\nFAIL:\n")

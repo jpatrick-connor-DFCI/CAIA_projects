@@ -202,6 +202,47 @@ if (is.null(py_results)) {
   }
 }
 
+# --- Worker-identity check: --n-workers 2 must produce output identical to
+# --n-workers 1, including q_lrt (BH adjustment is order-dependent, so this
+# specifically validates that mclapply's order-preserving guarantee holds). ---
+output_dirs <- list(w1 = tempfile("gam_cox_smoke_out_w1_"), w2 = tempfile("gam_cox_smoke_out_w2_"))
+for (d in output_dirs) dir.create(d)
+
+run_with_workers <- function(out_dir, n_workers) {
+  res <- system2(
+    "Rscript",
+    args = c(
+      shQuote(script_path),
+      "--inputs-dir", shQuote(inputs_dir),
+      "--output-dir", shQuote(out_dir),
+      "--landmark-days", as.character(LANDMARK_DAY),
+      "--n-workers", as.character(n_workers)
+    ),
+    stdout = TRUE, stderr = TRUE
+  )
+  st <- attr(res, "status")
+  if (!is.null(st) && st != 0) {
+    cat(paste(res, collapse = "\n"), "\n")
+    cat(sprintf("FAIL: gam_cox_nonlinearity.R (--n-workers %d) exited with status %s\n", n_workers, st))
+    quit(status = 1)
+  }
+  res
+}
+
+run_with_workers(output_dirs$w1, 1)
+run_with_workers(output_dirs$w2, 2)
+
+w1_path <- file.path(output_dirs$w1, sprintf("gam_cox_nonlinearity_landmark%d.csv", LANDMARK_DAY))
+w2_path <- file.path(output_dirs$w2, sprintf("gam_cox_nonlinearity_landmark%d.csv", LANDMARK_DAY))
+w1_out <- fread(w1_path)
+w2_out <- fread(w2_path)
+eq <- isTRUE(all.equal(w1_out, w2_out))
+check(eq, "--n-workers 1 vs 2 output mismatch in gam_cox_nonlinearity_landmark0.csv")
+cat(sprintf("  worker-identity check (gam_cox_nonlinearity_landmark%d.csv): %s\n",
+            LANDMARK_DAY, if (eq) "identical" else "MISMATCH"))
+unlink(output_dirs$w1, recursive = TRUE)
+unlink(output_dirs$w2, recursive = TRUE)
+
 if (length(failures) > 0) {
   cat("\nFAIL:\n")
   cat(paste(" -", failures, collapse = "\n"), "\n")
