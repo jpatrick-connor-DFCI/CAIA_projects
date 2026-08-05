@@ -127,6 +127,7 @@ def make_outcome_df(
     patient_level_cols = [
         ID_COL,
         AGE_COL,
+        "GENDER",
         "FIRST_RECORD_DATE",
         "DIAGNOSIS_DATE",
         "FIRST_TREATMENT_DATE",
@@ -168,6 +169,8 @@ def make_outcome_df(
         pat[AGE_COL] = pd.to_numeric(pat[AGE_COL], errors="coerce")
     else:
         pat[AGE_COL] = np.nan
+    if "GENDER" in pat.columns:
+        pat["GENDER"] = pat["GENDER"].astype("string").str.strip()
     pat["DEATH"] = pd.to_numeric(pat.get("DEATH"), errors="coerce").fillna(0).astype(int)
     pat["PLATINUM"] = _coerce_platinum(pat.get("PLATINUM", pd.Series(0, index=pat.index)))
     pat["FIRST_TREATMENT"] = pd.to_numeric(

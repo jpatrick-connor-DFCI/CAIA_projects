@@ -566,6 +566,16 @@ def load_patient_status(path) -> pl.DataFrame:
         pl.col('BIRTH_DT').str.to_datetime(strict=False).alias('BIRTH_DATE'),
         pl.col('HYBRID_DEATH_DT').str.to_datetime(strict=False).alias('DEATH_DATE'),
         pl.col('DERIVED_LAST_ALIVE_DATE').str.to_datetime(strict=False).alias('LAST_CONTACT_DATE'),
+        pl.when(
+            pl.col('GENDER_NM')
+            .cast(pl.Utf8)
+            .str.strip_chars()
+            .str.to_uppercase()
+            .is_in(['', 'NAN', 'NONE', 'NULL'])
+        )
+        .then(None)
+        .otherwise(pl.col('GENDER_NM').cast(pl.Utf8).str.strip_chars())
+        .alias('GENDER'),
         # infer_schema_length=0 reads every column (including DFCI_MRN) as
         # Utf8; cast back to Int64 here so this frame's join key matches the
         # Int64 DFCI_MRN used everywhere else (e.g. build_survival_cohort's
@@ -573,9 +583,39 @@ def load_patient_status(path) -> pl.DataFrame:
         pl.col(ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False).alias(ID_COL),
     )
 
-    return pt.select(
-        [ID_COL, 'BIRTH_DATE', 'GENDER_NM', 'DEATH_DATE', 'LAST_CONTACT_DATE']
-    ).rename({'GENDER_NM': 'GENDER'})
+    # Merged PROFILE releases can contribute multiple status rows for one MRN,
+    # including sparse rows from a newer pull. Collapse field-by-field before
+    # joining to the cohort so an arbitrary null row cannot erase demographics.
+    # Birth date and gender are stable patient attributes; death and last-contact
+    # dates use the latest available date.
+    status = (
+        pt.filter(pl.col(ID_COL).is_not_null())
+        .group_by(ID_COL)
+        .agg(
+            pl.col('BIRTH_DATE').drop_nulls().first().alias('BIRTH_DATE'),
+            pl.col('GENDER').drop_nulls().first().alias('GENDER'),
+            pl.col('DEATH_DATE').max().alias('DEATH_DATE'),
+            pl.col('LAST_CONTACT_DATE').max().alias('LAST_CONTACT_DATE'),
+        )
+    )
+    n_birth = int(status['BIRTH_DATE'].is_not_null().sum())
+    n_gender = int(status['GENDER'].is_not_null().sum())
+    print(
+        "[patient-status] "
+        f"{len(pt):,} source rows -> {len(status):,} unique MRNs; "
+        f"birth date present={n_birth:,}; gender present={n_gender:,}"
+    )
+    if len(status) and (n_birth == 0 or n_gender == 0):
+        missing_fields = [
+            name
+            for name, count in (("parsed BIRTH_DT", n_birth), ("GENDER_NM", n_gender))
+            if count == 0
+        ]
+        raise ValueError(
+            "PT_INFO_STATUS_REGISTRATION has no usable values for "
+            f"{', '.join(missing_fields)} after parsing."
+        )
+    return status
 
 
 def build_survival_cohort(prostate_mrns, anchor_df: pl.DataFrame, platinum_df: pl.DataFrame, status_df: pl.DataFrame) -> pl.DataFrame:
@@ -644,6 +684,12 @@ def summarize_survival_cohort(cohort: pl.DataFrame, label="cohort"):
     print(f"\n=== Survival cohort summary ({label}) ===")
     print(f"Total eligible patients: {n}")
     print(f"With the {label.upper()} analysis anchor: {n_anchor}")
+    anchored = cohort.filter(pl.col('TREATMENT_ANCHOR_DATE').is_not_null())
+    print(
+        "Anchored demographics present: "
+        f"age={anchored['AGE'].is_not_null().sum():,}/{len(anchored):,}; "
+        f"gender={anchored['GENDER'].is_not_null().sum():,}/{len(anchored):,}"
+    )
     print(f"Deaths: {int(cohort['DEATH'].sum())}")
     print(f"Received platinum: {int(cohort['PLATINUM'].sum())}")
     with_times = cohort.filter(pl.col('TT_DEATH').is_not_null())

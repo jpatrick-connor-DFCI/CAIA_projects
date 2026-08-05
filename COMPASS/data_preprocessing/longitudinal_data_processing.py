@@ -164,12 +164,31 @@ def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFram
         "LAST_CONTACT_DATE",
         "DEATH",
         "AGE",
+        "GENDER",
     }
     missing = required - set(cohort.columns)
     if missing:
         raise ValueError(
             f"{survival_cohort_csv} is missing expected columns: {sorted(missing)}"
         )
+
+    duplicate_mrns = cohort[ID_COL].duplicated(keep=False)
+    if duplicate_mrns.any():
+        raise ValueError(
+            f"{survival_cohort_csv} contains {cohort.loc[duplicate_mrns, ID_COL].nunique()} "
+            "duplicated MRNs. Re-run compile_COMPASS_cohort_data.py so merged "
+            "PROFILE patient-status rows are collapsed before the cohort join."
+        )
+
+    age = pd.to_numeric(cohort["AGE"], errors="coerce")
+    gender = cohort["GENDER"].astype("string").str.strip()
+    gender = gender.mask(gender.str.upper().isin(["", "NAN", "NONE", "NULL"]))
+    print(
+        f"[survival-cohort demographics] rows={len(cohort):,}; "
+        f"age present={age.notna().sum():,}; gender present={gender.notna().sum():,}"
+    )
+    cohort["AGE"] = age
+    cohort["GENDER"] = gender
 
     death_df = cohort.rename(
         columns={
@@ -187,6 +206,7 @@ def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFram
         "last_contact_date",
         "death",
         "AGE_AT_TREATMENTSTART",
+        "GENDER",
     ]
     if "death_date" in death_df.columns:
         keep_cols.append("death_date")
@@ -510,6 +530,8 @@ def build_longitudinal_prediction_data(
         pred_df["AGE_AT_TREATMENTSTART"],
         errors="coerce",
     )
+    pred_df["GENDER"] = pred_df["GENDER"].astype("string").str.strip()
+    pred_df.loc[pred_df["GENDER"].str.upper().isin(["", "NAN", "NONE", "NULL"]), "GENDER"] = pd.NA
     pred_df["PLATINUM"] = (
         pred_df["PLATINUM_MEDICATION"]
         .astype(str)
@@ -576,6 +598,7 @@ def build_longitudinal_prediction_data(
     ordered_cols = [
         ID_COL,
         "AGE_AT_TREATMENTSTART",
+        "GENDER",
         "FIRST_RECORD_DATE",
         "DIAGNOSIS_DATE",
         "LAST_CONTACT_DATE",

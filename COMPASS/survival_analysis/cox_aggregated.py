@@ -107,6 +107,7 @@ ENDPOINTS = {
 # into this literal would freeze the import-time default and silently leak the
 # real age column into the feature set.
 OUTCOME_METADATA_COLUMNS = {
+    "GENDER",
     "FIRST_RECORD_DATE",
     "DIAGNOSIS_DATE",
     "TREATMENT_ANCHOR_DATE",
