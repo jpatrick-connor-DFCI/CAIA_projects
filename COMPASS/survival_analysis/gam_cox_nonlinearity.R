@@ -76,6 +76,7 @@ DEFAULT_AGE_COL <- "AGE_AT_TREATMENTSTART"
 DEFAULT_ID_COL <- "DFCI_MRN"
 DEFAULT_MIN_EVENTS_PER_FEATURE <- 10L
 DEFAULT_K_SMOOTH <- 10
+DEFAULT_FEATURE_SELECTION_CSV <- ""
 
 parse_cli_args <- function(args, defaults) {
   out <- defaults
@@ -106,7 +107,8 @@ args_list <- parse_cli_args(
     age_col = DEFAULT_AGE_COL,
     id_col = DEFAULT_ID_COL,
     min_events_per_feature = DEFAULT_MIN_EVENTS_PER_FEATURE,
-    k_smooth = DEFAULT_K_SMOOTH
+    k_smooth = DEFAULT_K_SMOOTH,
+    feature_selection_csv = DEFAULT_FEATURE_SELECTION_CSV
   )
 )
 
@@ -120,6 +122,7 @@ age_col <- args_list$age_col
 id_col <- args_list$id_col
 min_events_per_feature <- as.integer(args_list$min_events_per_feature)
 k_smooth <- as.integer(args_list$k_smooth)
+feature_selection_csv <- as.character(args_list$feature_selection_csv)
 
 parse_feature_name <- function(feature) {
   # Mirrors survival_common/cox_engine.py's rsplit("__", 1): split on the
@@ -244,7 +247,11 @@ for (landmark_day in landmark_days) {
     cat(sprintf("No GAM trajectory feature file at %s; skipping GAM merge.\n", gam_path))
   }
 
-  selection_path <- file.path(inputs_dir, "cox_agg_feature_selection.csv")
+  selection_path <- if (nzchar(feature_selection_csv)) {
+    feature_selection_csv
+  } else {
+    file.path(inputs_dir, "cox_agg_feature_selection.csv")
+  }
   if (!file.exists(selection_path)) {
     stop(sprintf(
       "Missing %s. Run univariate_analysis.py first -- this script depends on its feature selection, not its own gate.",

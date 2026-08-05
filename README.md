@@ -60,6 +60,9 @@ COMPASS/
     ├── cox_aggregated.py                 # PROFILE adapter/config for shared survival code
     ├── univariate_analysis.py            # ENTRY: univariate Cox associations
     ├── multivariate_analysis.py          # ENTRY: elastic-net Cox or XGBoost survival:cox
+    ├── gam_runner.py                     # notebook-facing wrappers for the R GAM stages
+    ├── gam_trajectory_features.R         # hierarchical longitudinal GAM features
+    ├── gam_cox_nonlinearity.R            # smooth-vs-linear Cox GAM tests
     ├── COMPASS_generate_figures_pipeline.R # sole figure-generation implementation
     ├── COMPASS_nominally_significant_univariate.ipynb # review nominal univariate hits
     ├── COMPASS_run_locally.ipynb / COMPASS_generate_figures.ipynb # Python models / R figures
@@ -264,7 +267,7 @@ the input builder must be rerun after this change.
 | `multivariate_analysis.py --model elastic-net` | Elastic-net Cox multivariable model (sksurv `CoxnetSurvivalAnalysis`, 5-fold CV, AGE unpenalized) | `--landmark-days`, `--endpoints`, `--n-folds`; IPIO also supports `--feature-subset {labs,genomics,all}` |
 | `multivariate_analysis.py --model xgboost` | XGBoost `survival:cox`, 5-fold CV grid (`max_depth × eta × min_child_weight`) | `--landmark-days`, `--endpoints`, `--max-features`; IPIO also supports `--feature-subset {labs,genomics,all}` |
 | `gam_trajectory_features.R` (COMPASS only) | Hierarchical GAM (`mgcv::bam`, `bs="fs"` factor-smooth per patient, shrinking sparse patients toward the population curve) per canonical lab, replacing the two-point `__delta` with `__gam_level` / `__gam_slope` / `__gam_curvature` / `__gam_auc` / `__gam_dev` evaluated at the landmark boundary | `--inputs-dir`, `--landmark-days`, `--k-pop`, `--k-pat`, `--trailing-window-days`, `--nthreads`, `--fit-split {all,train_val}` |
-| `gam_cox_nonlinearity.R` (COMPASS only) | Penalized-spline Cox (`mgcv::gam(family=cox.ph())`) per selected feature: fits a smooth and a linear model of the same feature and reports `edf`/`p_lrt`/`q_lrt`/`delta_aic` — flags features whose hazard association is not actually linear | `--inputs-dir`, `--output-dir`, `--landmark-days` |
+| `gam_cox_nonlinearity.R` (COMPASS only) | Penalized-spline Cox (`mgcv::gam(family=cox.ph())`) per selected feature: fits a smooth and a linear model of the same feature and reports `edf`/`p_lrt`/`q_lrt`/`delta_aic` — flags features whose hazard association is not actually linear | `--inputs-dir`, `--output-dir`, `--landmark-days`, `--feature-selection-csv` |
 
 `cox_aggregated.py` is now a project adapter: endpoint constants, cohort-specific covariates/restrictions,
 and per-landmark context. The univariate/elastic-net CLI orchestration lives in
@@ -291,6 +294,10 @@ is a no-op if the file is absent). `gam_cox_nonlinearity.R` runs **after** `univ
 since it depends on the feature list in `cox_agg_feature_selection.csv`; it fits on the full merged
 table (train+valid+test), mirroring the same row-fitting asymmetry as
 `run_univariate_nobs_adjusted_associations`, and writes `gam_cox_nonlinearity_landmark{D}.csv`.
+Both COMPASS run notebooks call these stages directly through `gam_runner.py`: trajectory GAMs run
+immediately after input construction, and nonlinear Cox GAMs run after the Python models have written
+each landmark's exact `cox_agg_feature_selection.csv`. `RUN_GAM = True` enables this integrated path;
+set it to `False` to run the pre-GAM workflow.
 
 ### 2.4 — Notebooks
 
