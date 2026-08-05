@@ -99,6 +99,18 @@ def pre_treatment_lab_filename(landmark_day: int) -> str:
     return f"pre_treatment_lab_long_landmark{int(landmark_day)}.csv"
 
 
+def gam_feature_filename(landmark_day: int) -> str:
+    """Name of the optional GAM trajectory-feature CSV for a landmark.
+
+    Written by ``gam_trajectory_features.R``, not by this script -- this
+    builder does not invoke R. Defined here so the naming convention lives
+    alongside the other per-landmark filename helpers and both sides (the R
+    writer and the Python loader in cox_aggregated._load_prebuilt_landmark)
+    stay in sync.
+    """
+    return f"gam_trajectory_features_landmark{int(landmark_day)}.csv"
+
+
 def split_assignments_filename(landmark_day: int) -> str:
     return f"split_assignments_landmark{int(landmark_day)}.csv"
 

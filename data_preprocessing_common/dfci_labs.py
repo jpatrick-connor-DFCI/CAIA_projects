@@ -546,11 +546,15 @@ def _below_detection_imputation_mask(
     frame: pd.DataFrame,
     exact_lookup: dict[str, dict],
     prefix_lookup: dict[str, dict],
-) -> pd.Series:
-    """Identify PSA/Testosterone 999999 rows whose raw text contains ``<``."""
-    if "TEXT_RESULT" not in frame.columns:
-        return pd.Series(False, index=frame.index, dtype=bool)
+) -> tuple[pd.Series, pd.Series]:
+    """Identify PSA/Testosterone 999999 rows whose raw text contains ``<``.
 
+    Returns ``(mask, collapsed_measurement)``. The measurement series comes back
+    alongside the mask so ``build_below_detection_report`` can break the counts
+    down per measurement without repeating the two metadata lookups. It is
+    resolved even when ``TEXT_RESULT`` is absent, so the report can still say how
+    many rows the rule *would* have considered.
+    """
     exact_measurement = frame["TEST_NAME"].map(
         _metadata_attribute_maps(exact_lookup, "collapsed_measurement")
     )
@@ -558,11 +562,135 @@ def _below_detection_imputation_mask(
         _metadata_attribute_maps(prefix_lookup, "collapsed_measurement")
     )
     collapsed_measurement = exact_measurement.fillna(prefix_measurement)
-    return (
+
+    if "TEXT_RESULT" not in frame.columns:
+        return pd.Series(False, index=frame.index, dtype=bool), collapsed_measurement
+
+    mask = (
         frame["numeric_result_as_float"].eq(BELOW_DETECTION_SENTINEL)
         & collapsed_measurement.isin(BELOW_DETECTION_IMPUTABLE_MEASUREMENTS)
         & frame["TEXT_RESULT"].astype("string").str.contains("<", regex=False, na=False)
     )
+    return mask, collapsed_measurement
+
+
+def build_below_detection_report(
+    frame: pd.DataFrame,
+    mask: pd.Series,
+    collapsed_measurement: pd.Series,
+    *,
+    id_col: str = "DFCI_MRN",
+) -> dict:
+    """Structured counts for the PSA/Testosterone below-detection imputation.
+
+    Per measurement:
+      * ``n_zeroed`` — rows the rule set to 0.0.
+      * ``n_patients_zeroed`` — distinct patients contributing those rows.
+        Omitted entirely when ``id_col`` is not on the frame.
+      * ``n_sentinel_without_lt`` — rows carrying the 999999 sentinel for this
+        measurement whose ``TEXT_RESULT`` has no ``<``. They stay NaN. Large
+        relative to ``n_zeroed`` means ``TEXT_RESULT`` is under-populated.
+      * ``n_lt_with_other_sentinel`` — rows whose ``TEXT_RESULT`` has a ``<``
+        but whose numeric is a *different* sentinel (e.g. 9999999). Also left
+        NaN; non-zero means a sentinel variant this rule does not cover.
+
+    The two near-miss counts are the point of the report. ``n_zeroed = 0`` on
+    its own cannot distinguish "no undetectable results in this cohort" from
+    "TEXT_RESULT never arrived", and the latter is silent — the mask simply
+    comes back all-False.
+    """
+    has_text = "TEXT_RESULT" in frame.columns
+    text = (
+        frame["TEXT_RESULT"].astype("string")
+        if has_text
+        else pd.Series(pd.NA, index=frame.index, dtype="string")
+    )
+    lt = text.str.contains("<", regex=False, na=False)
+    numeric = frame["numeric_result_as_float"]
+    at_sentinel = numeric.eq(BELOW_DETECTION_SENTINEL)
+    other_sentinel = numeric.isin(SENTINEL_NUMERIC_VALUES) & ~at_sentinel
+    track_patients = id_col in frame.columns
+
+    per_measurement: dict[str, dict] = {}
+    for measurement in sorted(BELOW_DETECTION_IMPUTABLE_MEASUREMENTS):
+        rows = collapsed_measurement.eq(measurement)
+        zeroed = mask & rows
+        entry = {
+            "n_zeroed": int(zeroed.sum()),
+            "n_sentinel_without_lt": int((rows & at_sentinel & ~lt).sum()),
+            "n_lt_with_other_sentinel": int((rows & lt & other_sentinel).sum()),
+        }
+        if track_patients:
+            entry["n_patients_zeroed"] = int(frame.loc[zeroed, id_col].nunique())
+        per_measurement[measurement] = entry
+
+    report = {
+        "rule": (
+            f"NUMERIC_RESULT == {BELOW_DETECTION_SENTINEL:.0f} AND TEXT_RESULT "
+            f"contains '<' AND measurement in "
+            f"{sorted(BELOW_DETECTION_IMPUTABLE_MEASUREMENTS)} -> 0.0"
+        ),
+        "n_rows_scanned": int(len(frame)),
+        "text_result_column_present": bool(has_text),
+        "n_text_result_non_null": int(text.notna().sum()),
+        "per_measurement": per_measurement,
+        "n_zeroed_total": int(mask.sum()),
+    }
+    if track_patients:
+        report["n_patients_zeroed_total"] = int(frame.loc[mask, id_col].nunique())
+    return report
+
+
+def print_below_detection_report(report: dict, *, prefix: str = "[below-detection]") -> None:
+    """Print ``build_below_detection_report`` output as a fixed-width table.
+
+    Always prints, including when nothing was imputed — a silent zero reads
+    exactly like the rule never having run, which is the failure mode this
+    report exists to make visible.
+    """
+    print(f"{prefix} rule: {report['rule']}")
+    print(
+        f"{prefix} scanned {report['n_rows_scanned']:,} rows; "
+        f"TEXT_RESULT non-null on {report['n_text_result_non_null']:,}"
+    )
+    if not report["text_result_column_present"]:
+        print(
+            f"{prefix} WARNING: TEXT_RESULT column is absent — the rule cannot fire, so "
+            "every below-detection PSA/Testosterone result is left NaN instead of 0."
+        )
+    elif report["n_text_result_non_null"] == 0:
+        print(
+            f"{prefix} WARNING: TEXT_RESULT is present but entirely null — the rule "
+            "cannot fire, so every below-detection result is left NaN instead of 0."
+        )
+
+    show_patients = "n_patients_zeroed_total" in report
+    header = f"{'measurement':<16}{'zeroed':>10}"
+    if show_patients:
+        header += f"{'patients':>10}"
+    header += f"{'999999 no <':>14}{'< other sent':>14}"
+    print(f"{prefix} {header}")
+    for measurement, entry in report["per_measurement"].items():
+        line = f"{measurement:<16}{entry['n_zeroed']:>10,}"
+        if show_patients:
+            line += f"{entry['n_patients_zeroed']:>10,}"
+        line += (
+            f"{entry['n_sentinel_without_lt']:>14,}"
+            f"{entry['n_lt_with_other_sentinel']:>14,}"
+        )
+        print(f"{prefix} {line}")
+    total = f"{'TOTAL':<16}{report['n_zeroed_total']:>10,}"
+    if show_patients:
+        total += f"{report['n_patients_zeroed_total']:>10,}"
+    print(f"{prefix} {total}")
+
+    for measurement, entry in report["per_measurement"].items():
+        if entry["n_lt_with_other_sentinel"]:
+            print(
+                f"{prefix} NOTE: {entry['n_lt_with_other_sentinel']:,} {measurement} rows carry "
+                "'<' in TEXT_RESULT alongside a sentinel other than "
+                f"{BELOW_DETECTION_SENTINEL:.0f} — left NaN. Check for a sentinel variant."
+            )
 
 
 def is_within_physiologic_range(
@@ -974,6 +1102,8 @@ def convert_measurement_value(
 def _consolidate_dfci_labs_rowwise(
     labs_df: pd.DataFrame,
     mapping_df: pd.DataFrame,
+    *,
+    report_out: dict | None = None,
 ) -> pd.DataFrame:
     """Reference implementation retained for vectorized-path parity tests."""
     exact_lookup, prefix_lookup = build_mapping_lookup(mapping_df)
@@ -983,15 +1113,16 @@ def _consolidate_dfci_labs_rowwise(
     output_df["TEST_NAME_PREFIX"] = output_df["TEST_NAME"].map(extract_prefix)
     output_df["normalized_result_uom_nm"] = output_df["RESULT_UOM_NM"].map(normalize_unit)
     output_df["numeric_result_as_float"] = pd.to_numeric(output_df["NUMERIC_RESULT"], errors="coerce")
-    below_detection_mask = _below_detection_imputation_mask(
+    below_detection_mask, collapsed_measurement = _below_detection_imputation_mask(
         output_df, exact_lookup, prefix_lookup
     )
-    n_imputed = int(below_detection_mask.sum())
-    if n_imputed:
-        print(
-            f"[consolidate_dfci_labs] imputed {n_imputed} PSA/Testosterone rows "
-            "from the 999999 sentinel to 0 because TEXT_RESULT contained '<'."
-        )
+    below_detection_report = build_below_detection_report(
+        output_df, below_detection_mask, collapsed_measurement
+    )
+    print_below_detection_report(below_detection_report)
+    if report_out is not None:
+        report_out.update(below_detection_report)
+    if below_detection_mask.any():
         output_df.loc[below_detection_mask, "numeric_result_as_float"] = 0.0
     # Drop known DFCI sentinel values (e.g. 9999999.0) before any unit math so
     # they never reach a per-measurement physiologic check. Mirrors the existing
@@ -1311,8 +1442,16 @@ def _split_combined_bp_rows(
 def consolidate_dfci_labs(
     labs_df: pd.DataFrame,
     mapping_df: pd.DataFrame,
+    *,
+    report_out: dict | None = None,
 ) -> pd.DataFrame:
-    """Vectorized lab mapping/unit conversion with rowwise-reference parity."""
+    """Vectorized lab mapping/unit conversion with rowwise-reference parity.
+
+    ``report_out``: optional dict, updated in place with
+    ``build_below_detection_report`` output so a caller can persist the
+    PSA/Testosterone below-detection counts (e.g. into a cache manifest or
+    cohort_attrition.json). The report is printed either way.
+    """
     exact_lookup, prefix_lookup = build_mapping_lookup(mapping_df)
     measurement_lookup = build_measurement_lookup(mapping_df)
 
@@ -1327,15 +1466,16 @@ def consolidate_dfci_labs(
     working["numeric_result_as_float"] = pd.to_numeric(
         working["NUMERIC_RESULT"], errors="coerce"
     )
-    below_detection_mask = _below_detection_imputation_mask(
+    below_detection_mask, collapsed_measurement = _below_detection_imputation_mask(
         working, exact_lookup, prefix_lookup
     )
+    below_detection_report = build_below_detection_report(
+        working, below_detection_mask, collapsed_measurement
+    )
+    print_below_detection_report(below_detection_report)
+    if report_out is not None:
+        report_out.update(below_detection_report)
     if below_detection_mask.any():
-        print(
-            f"[consolidate_dfci_labs] imputed {int(below_detection_mask.sum())} "
-            "PSA/Testosterone rows from the 999999 sentinel to 0 because "
-            "TEXT_RESULT contained '<'."
-        )
         working.loc[below_detection_mask, "numeric_result_as_float"] = 0.0
     sentinel_mask = working["numeric_result_as_float"].isin(SENTINEL_NUMERIC_VALUES)
     if sentinel_mask.any():

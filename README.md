@@ -42,6 +42,8 @@ survival_common/                         # shared survival-analysis library used
 
 data_preprocessing_common/               # shared data-preprocessing utilities/resources
 ├── dfci_labs.py                         # unit standardization + sentinel/physiologic filtering
+├── fast_io.py                           # lazy cohort-filtered scans (all raw reads funnel here)
+├── oncdrs_sources.py                    # source-agnostic scan: raw OncDRS CSV *or* merged Parquet
 ├── resources/lab_mappings/
 │   └── OMOP_to_DFCI_lab_ids.csv          # canonical lab-id -> OMOP mapping
 └── projects/                            # per-project preprocessing defaults
@@ -60,7 +62,9 @@ COMPASS/
     ├── multivariate_analysis.py          # ENTRY: elastic-net Cox or XGBoost survival:cox
     ├── COMPASS_generate_figures_pipeline.R # sole figure-generation implementation
     ├── COMPASS_nominally_significant_univariate.ipynb # review nominal univariate hits
-    └── COMPASS_run_locally.ipynb / COMPASS_generate_figures.ipynb # Python models / R figures
+    ├── COMPASS_run_locally.ipynb / COMPASS_generate_figures.ipynb # Python models / R figures
+    └── COMPASS_run_locally_profile_data.ipynb / COMPASS_generate_figures_profile_data.ipynb
+                                          # same pipeline, merged PROFILE_data_processing parquets
 ```
 
 ---
@@ -88,6 +92,11 @@ COMPASS/
  figures/
 ```
 
+Every raw OncDRS read in Stage 1 and Stage 2 goes through
+`data_preprocessing_common/oncdrs_sources.scan_source()`, which dispatches on file suffix, so
+every path flag below accepts either a raw release CSV or a merged Parquet. See
+[Two OncDRS source roots](#two-oncdrs-source-roots).
+
 ---
 
 ## Stage 1 — Compile prostate cohort source data
@@ -103,7 +112,13 @@ computed from the same medication scan.
 - **Inputs (hard-coded under `DATA_PATH = /data/gusev/USERS/jpconnor/data/`, plus the raw OncDRS pull
   at `ONCDRS_PATH`):** `EHR_DIAGNOSIS.csv`, `HEALTH_HISTORY.csv`, `MEDICATIONS.csv`,
   `OUTPT_LAB_RESULTS_LABS.csv`, `complete_somatic_data_df.csv.gz`, `PT_INFO_STATUS_REGISTRATION.csv`.
-- **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`):** `prostate_arpi_survival_cohort_arpi.csv`
+  Each of the four OncDRS tables has its own flag — `--icd-source`, `--medications-source`,
+  `--labs-csv`, `--patient-status-source` — and every one accepts a raw CSV or a merged Parquet.
+  The two `*-source` flags default to `<--oncdrs-path>/{MEDICATIONS,PT_INFO_STATUS_REGISTRATION}.csv`,
+  so existing invocations are unchanged. `load_patient_status()` takes a **file** path, not a
+  directory.
+- **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`, or `--out-dir`; all outputs including
+  `prostate_icd_data.csv` honour it):** `prostate_arpi_survival_cohort_arpi.csv`
   and `prostate_adt_survival_cohort_adt.csv` (ARPI-treatment-anchor-restricted and
   ADT-treatment-anchor-restricted respectively), corresponding bare-MRN lists
   (`mrn_lists/arpi_mrns.csv`, `mrn_lists/adt_mrns.csv`), the ADT-entry-cohort
@@ -156,6 +171,18 @@ prostate lab frame used by the current treatment-anchored analyses.
 - **Lab QC (`consolidate_dfci_labs`):** unit standardization to canonical units, sentinel nulling
   (e.g. `9999999`), physiologic-range nulling, combined-BP splitting. Out-of-range values are **nulled,
   not row-dropped** — downstream must filter on `conversion_status` (or pass `--successful-only`).
+- **Below-detection imputation:** PSA and Testosterone only, and only where the `999999` sentinel is
+  paired with a `TEXT_RESULT` containing `<` (e.g. `"<0.1"`). Those become an exact `0.0` rather than
+  being nulled with the other sentinels; every other sentinel/measurement combination is still nulled.
+  The rule runs before sentinel nulling and before unit conversion, and the PSA/Testosterone
+  physiologic ranges are inclusive at `0`, so the imputed zeros survive to the model inputs.
+  Every run prints a `[below-detection]` table — rows and patients zeroed per measurement, plus two
+  near-miss counts (`999999` without a `<`, and `<` alongside a *different* sentinel). The same
+  counts are written to `cohort_attrition.json` under `below_detection_imputation` and stored in the
+  consolidated-cache manifest, so cache-hit runs replay the report instead of showing nothing.
+  Read the near-miss columns, not just the zeroed count: if `TEXT_RESULT` is missing or unpopulated
+  the rule silently cannot fire, and a zeroed count of `0` looks identical to a cohort that genuinely
+  has no undetectable results.
 - **Vital signs included:** COMPASS scans `HEALTH_HISTORY.csv` for `CODE_TYPE = "Vital Signs"`,
   combines those records with outpatient labs before standardization, and retains the canonical
   vital measurements in model inputs and figures. Cache version 3 forces older no-vitals caches
@@ -195,6 +222,12 @@ cohort.
   `split_assignments_landmark{D}.csv`, the base-landmark compatibility copy
   `split_assignments.csv`, `landmark_mrn_availability.csv`, `canonical_labs_train_val.csv`,
   `landmark_attrition.json`, and `build_manifest.json`.
+- **Optional GAM trajectory features** (produced by `gam_trajectory_features.R`, not by this
+  script — see §2.3): `gam_trajectory_features_landmark{D}.csv` and
+  `gam_fit_diagnostics_landmark{D}.csv`. When present in `prediction_inputs/`,
+  `load_prebuilt_landmark` (`survival_common/cox_models.py`) left-joins the features onto
+  `aggregated_landmark{D}.csv` before the split partition; when absent, behavior is unchanged
+  (the merge is a no-op by construction, not by convention).
 - `IPIO/data_preprocessing/build_genomic_inputs.py` builds the parallel
   `prediction_inputs/genomic/` landmark-0 arm anchored at IO start (`t_first_treatment`), restricts
   to patients with an actual somatic sample, attaches dynamic binary `<GENE>_<SV|SNV|AMP|DEL>`
@@ -230,6 +263,8 @@ the input builder must be rerun after this change.
 | `univariate_analysis.py` | Cox: univariate n_obs-adjusted associations | `--landmark-days`, `--endpoints`; IPIO also supports `--feature-subset {labs,genomics,all}` |
 | `multivariate_analysis.py --model elastic-net` | Elastic-net Cox multivariable model (sksurv `CoxnetSurvivalAnalysis`, 5-fold CV, AGE unpenalized) | `--landmark-days`, `--endpoints`, `--n-folds`; IPIO also supports `--feature-subset {labs,genomics,all}` |
 | `multivariate_analysis.py --model xgboost` | XGBoost `survival:cox`, 5-fold CV grid (`max_depth × eta × min_child_weight`) | `--landmark-days`, `--endpoints`, `--max-features`; IPIO also supports `--feature-subset {labs,genomics,all}` |
+| `gam_trajectory_features.R` (COMPASS only) | Hierarchical GAM (`mgcv::bam`, `bs="fs"` factor-smooth per patient, shrinking sparse patients toward the population curve) per canonical lab, replacing the two-point `__delta` with `__gam_level` / `__gam_slope` / `__gam_curvature` / `__gam_auc` / `__gam_dev` evaluated at the landmark boundary | `--inputs-dir`, `--landmark-days`, `--k-pop`, `--k-pat`, `--trailing-window-days`, `--nthreads`, `--fit-split {all,train_val}` |
+| `gam_cox_nonlinearity.R` (COMPASS only) | Penalized-spline Cox (`mgcv::gam(family=cox.ph())`) per selected feature: fits a smooth and a linear model of the same feature and reports `edf`/`p_lrt`/`q_lrt`/`delta_aic` — flags features whose hazard association is not actually linear | `--inputs-dir`, `--output-dir`, `--landmark-days` |
 
 `cox_aggregated.py` is now a project adapter: endpoint constants, cohort-specific covariates/restrictions,
 and per-landmark context. The univariate/elastic-net CLI orchestration lives in
@@ -238,10 +273,30 @@ and per-landmark context. The univariate/elastic-net CLI orchestration lives in
 `survival_common/cox_engine.py`; XGBoost orchestration lives in `survival_common/xgboost_runners.py`;
 low-level XGBoost mechanics live in `survival_common/xgboost_engine.py`.
 
+**GAM stages — run order and leakage stance.** Both R scripts are base R + `mgcv` + `data.table`
+only (no `tidyverse`/`survminer`/`broom`, unlike `COMPASS_generate_figures_pipeline.R`) and live under
+`COMPASS/survival_analysis/`, with self-checking synthetic smoke tests in
+`COMPASS/survival_analysis/tests/`. `gam_trajectory_features.R` runs after
+`build_prediction_inputs.py` and before `univariate_analysis.py`: it reads
+`pre_treatment_lab_long_landmark{D}.csv` and `canonical_labs_train_val.csv` and writes
+`gam_trajectory_features_landmark{D}.csv` (one row per `DFCI_MRN`) plus a
+`gam_fit_diagnostics_landmark{D}.csv` sidecar recording which basis (`fs` vs. the random
+intercept+slope fallback) was used per lab, EDF, fit seconds, and convergence. The per-patient
+smooth is unsupervised — it never sees `t_platinum`/`PLATINUM` — and by default is fit on **all**
+cohort patients, not just train_val; pass `--fit-split train_val` to refit population smooths on
+train+valid only as a leakage sensitivity check. `univariate_analysis.py` then automatically tests
+the new `__gam_*` columns alongside the existing stats (`load_prebuilt_landmark` left-joins
+`gam_trajectory_features_landmark{D}.csv` onto `aggregated_landmark{D}.csv` when it exists; the merge
+is a no-op if the file is absent). `gam_cox_nonlinearity.R` runs **after** `univariate_analysis.py`,
+since it depends on the feature list in `cox_agg_feature_selection.csv`; it fits on the full merged
+table (train+valid+test), mirroring the same row-fitting asymmetry as
+`run_univariate_nobs_adjusted_associations`, and writes `gam_cox_nonlinearity_landmark{D}.csv`.
+
 ### 2.4 — Notebooks
 
-COMPASS PROFILE has one run notebook, one figure notebook, and a focused
-univariate-results review notebook:
+COMPASS PROFILE has one run notebook, one figure notebook, a focused
+univariate-results review notebook, and a parallel `*_profile_data` run/figure pair that executes
+the identical pipeline against the merged PROFILE_data_processing parquets:
 
 - `COMPASS_run_locally.ipynb` — drives preprocessing and runs both `COHORT_SPECS` arms: `arpi`
   and `adt` (both landmarks 0/90), over the common ADT-entry eligible cohort.
@@ -315,6 +370,11 @@ univariate-results review notebook:
 - `COMPASS_nominally_significant_univariate.ipynb` loads all shared-landmark univariate results
   for both `arpi` and `adt`, filters each to nominal `p_value < 0.05`, displays every hit, and exports
   a separate `cox/nominally_significant_univariate_results.csv` beneath each arm's run directory.
+- `COMPASS_run_locally_profile_data.ipynb` / `COMPASS_generate_figures_profile_data.ipynb` — the
+  same two notebooks pointed at the merged PROFILE_data_processing parquets and a separate output
+  root. Every shared run-helper cell is byte-identical to the baseline notebooks and
+  `COMPASS_generate_figures_pipeline.R` is unmodified, so only the data source differs. See
+  [Two OncDRS source roots](#two-oncdrs-source-roots).
 
 IPIO has a paired run/figure notebook as well:
 
@@ -324,6 +384,71 @@ IPIO has a paired run/figure notebook as well:
 - `IPIO_generate_figures.ipynb` — writes a labs-only paired volcano and a separate genomics-only
   volcano, plus the lab-arm discrimination, genomic-arm discrimination, and lab-arm importance
   figures.
+
+---
+
+## Two OncDRS source roots
+
+COMPASS can be run against either of two raw-data roots. Both produce the same file layout; they
+differ only in which OncDRS extract they read and where they write.
+
+| | Baseline | PROFILE_data_processing |
+|---|---|---|
+| Source | `/data/gusev/PROFILE/CLINICAL/OncDRS/ALL_2025_03/*.csv` (one release) | `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/FINAL/*.parquet` (7 releases merged + deduplicated) |
+| Run notebook | `COMPASS_run_locally.ipynb` | `COMPASS_run_locally_profile_data.ipynb` |
+| Figure notebook | `COMPASS_generate_figures.ipynb` | `COMPASS_generate_figures_profile_data.ipynb` |
+| Data root | `data/CAIA/COMPASS/` | `data/CAIA/COMPASS_PROFILE_DATA/` |
+| Figure root | `figures/CAIA/COMPASS/` | `figures/CAIA/COMPASS_PROFILE_DATA/` |
+
+The roots are disjoint, so the two runs can be compared side by side and neither clobbers the
+other. The parquets are built by the sibling repo `PROFILE_data_processing`
+(`compile_OncDRS_data.ipynb`), which folds releases `ALL_2021_11` … `ALL_2026_03` into one
+Parquet per table.
+
+**`oncdrs_sources.scan_source()`.** No entry point knows which root it is reading. Every raw scan
+goes through `data_preprocessing_common/oncdrs_sources.py`:
+
+```python
+scan_source(path)  # .parquet/.pq -> pl.scan_parquet(path).select(pl.all().cast(pl.Utf8))
+                   # anything else -> pl.scan_csv(path, infer_schema_length=0)
+```
+
+The `cast(pl.Utf8)` is not cosmetic — it reproduces `infer_schema_length=0`, which is what makes
+every column a string. The whole pipeline relies on that (`.str.to_datetime()`,
+`.str.to_uppercase()`, `fast_io.recover_numeric()`, then explicit casts back to `Int64`). Parquet
+columns are typed, so reading one without the cast breaks every `.str.*` call. The only genuinely
+numeric column on the COMPASS path is `LABS.NUMERIC_RESULT`, and `recover_numeric()` parses it
+back to `Float64` losslessly. `fast_io.scan_filter()` calls `scan_source`, so CSV callers — all of
+IPIO, and the baseline COMPASS notebooks — are byte-for-byte unaffected.
+
+**Upstream column-name requirement.** `compile_OncDRS_data.ipynb` inserts any requested-but-absent
+column as null with only a printed warning, so a rename between releases yields an **all-null
+column rather than an error**. The COMPASS pipeline requires these canonical spellings in the
+merged parquets:
+
+| Table | Required column | Consequence if null-filled |
+|---|---|---|
+| `MEDICATIONS` | `NCI_PREFERRED_MED_NM` (not `..._MED_NAME`) | every anchor / platinum / PARPi computation silently returns empty |
+| `PT_INFO_STATUS_REGISTRATION` | `DERIVED_LAST_ALIVE_DATE` (not `DERIVED_LAST_CONTACT_DT`) | `LAST_CONTACT_DATE` null → censoring and `TT_DEATH` broken |
+| `EHR_DIAGNOSES` | `DIAGNOSIS_ICD10_NM` / `_NM2` / `_NM3` | only affects `compile_MRNs_for_manual_review.py` |
+
+The upstream `COLUMN_MAP` requests both the old and new spellings and coalesces them via
+`ALIAS_MAP`, since release schemas differ across the seven pulls.
+
+The first code cell of `COMPASS_run_locally_profile_data.ipynb` is a **schema audit** that guards
+this. It scans all five tables and checks columns in three tiers — REQUIRED (absent *or* all-null
+raises), EXPECTED (absent raises, all-null warns — for legitimately sparse columns like
+`HYBRID_DEATH_DT` and `LABS.TEXT_RESULT`), OPTIONAL (warns either way) — and raises a single
+`RuntimeError` listing every problem. Run it before anything else; an all-null
+`NCI_PREFERRED_MED_NM` means going back to the upstream compile, not debugging COMPASS.
+
+The last cell of the same notebook prints a **cohort comparison** table: Stage 1 cohort/platinum
+counts and Stage 2 per-landmark attrition for both roots, side by side with deltas. Expect the
+merged run to be larger (more releases), but note that upstream full-row deduplication of `LABS`
+can push a few patients *below* the ≥5-broad-PSA gate, so attrition can move in both directions.
+Both arms write `cohort_attrition.json` to the same path, so that readout reflects whichever
+anchor ran last — it is labelled as such in the cell.
+
 ---
 
 ## Conventions & invariants (preserve these when editing)
@@ -360,6 +485,13 @@ IPIO has a paired run/figure notebook as well:
   - Data: `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/`
   - Survival results: `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis`
   - Figures: `/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS/`
+- **Raw OncDRS roots** — `ALL_2025_03` release CSVs at
+  `/data/gusev/PROFILE/CLINICAL/OncDRS/ALL_2025_03/`, or merged parquets at
+  `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/FINAL/`. Both defaults live in
+  `data_preprocessing_common/oncdrs_sources.py` (`DEFAULT_ONCDRS_RELEASE`,
+  `DEFAULT_PROFILE_DATA_FINAL`) alongside the `TABLE_FILES` basename map. The parquet run writes to
+  the `COMPASS_PROFILE_DATA` data/figure roots — see
+  [Two OncDRS source roots](#two-oncdrs-source-roots).
 - `data_preprocessing_common/dfci_labs.py` uses the checked-in shared
   `resources/lab_mappings/OMOP_to_DFCI_lab_ids.csv` by default. Per-project lab inventory outputs
   default to `/data/gusev/USERS/jpconnor/data/CAIA/<project>/unique_lab_ids_w_units.csv`.
@@ -379,6 +511,13 @@ python COMPASS/survival_analysis/univariate_analysis.py --inputs-dir <...>/predi
 python COMPASS/survival_analysis/multivariate_analysis.py --model elastic-net --inputs-dir <...>/prediction_inputs --landmark-days 0
 python COMPASS/survival_analysis/multivariate_analysis.py --model xgboost --inputs-dir <...>/prediction_inputs --landmark-days 0
 ```
+
+To run against the merged PROFILE_data_processing parquets instead, use
+`COMPASS_run_locally_profile_data.ipynb` → `COMPASS_generate_figures_profile_data.ipynb` (both
+top to bottom). They pass the `FINAL/*.parquet` paths and the `COMPASS_PROFILE_DATA` roots to the
+same scripts; nothing under `data/CAIA/COMPASS/` or `figures/CAIA/COMPASS/` is written. The figure
+notebook symlinks `LLM_NEPC_labels/` from the baseline root, since those hand-curated annotations
+are an input to `generate_figures()` rather than something the pipeline produces.
 
 ## Dependencies
 

@@ -15,6 +15,11 @@ mirrors the pyarrow `column_types={c: pa.string() for c in col_names}` trick
 the pandas-based `filter_and_save` implementations used. `.gz` inputs (the
 somatic file) are read transparently by polars' scan_csv, same as pyarrow.
 
+Scanning itself is delegated to `oncdrs_sources.scan_source`, so a caller may
+pass either a raw OncDRS CSV or one of the merged Parquet tables published by
+the PROFILE_data_processing repo. Parquet inputs are cast to the same all-Utf8
+schema, so everything below this line behaves identically either way.
+
 This module is intentionally polars-only (no pandas import) and does no
 writing itself -- each caller's own `filter_and_save` wrapper adds
 `.write_csv()` so output paths/signatures stay stable.
@@ -22,12 +27,16 @@ writing itself -- each caller's own `filter_and_save` wrapper adds
 
 import polars as pl
 
+from .oncdrs_sources import scan_source
+
 ID_COL = "DFCI_MRN"
 
 
 def scan_filter(path, cohort_mrns, cols=None) -> pl.LazyFrame:
     """Lazily scan `path` (all-String schema) and filter to `cohort_mrns`.
 
+    - `path` may be a raw OncDRS CSV/`.gz` or a merged Parquet table; see
+      `oncdrs_sources.scan_source`.
     - `cols`, if given, is applied as a `.select()` (DFCI_MRN is always
       included even if the caller forgot it).
     - Cohort filtering is done by casting DFCI_MRN to a numeric type and
@@ -35,7 +44,7 @@ def scan_filter(path, cohort_mrns, cols=None) -> pl.LazyFrame:
       the pandas `pd.to_numeric(..., errors='coerce').isin(cohort_mrns)` used
       by the original `filter_and_save` implementations.
     """
-    lf = pl.scan_csv(path, infer_schema_length=0)
+    lf = scan_source(path)
 
     if cols:
         select_cols = list(cols) if ID_COL in cols else [ID_COL] + list(cols)

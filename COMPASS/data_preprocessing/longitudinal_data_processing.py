@@ -23,6 +23,7 @@ from data_preprocessing_common import fast_io  # noqa: E402
 from data_preprocessing_common.dfci_labs import (  # noqa: E402
     DEFAULT_MAPPING_CSV,
     consolidate_dfci_labs,
+    print_below_detection_report,
 )
 from data_preprocessing_common.projects.compass_profile import (  # noqa: E402
     UNIQUE_LABS_CSV as DEFAULT_UNIQUE_LABS_CSV,
@@ -762,12 +763,18 @@ def write_consolidated_cache(
     provenance: dict,
     prefilter_attrition: dict,
     eligible_mrns: set[int],
+    below_detection_report: dict | None = None,
 ) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     consolidated_df.to_parquet(cache_path, index=False)
     manifest = {
         "provenance": provenance,
         "prefilter_attrition": prefilter_attrition,
+        # Cached alongside the frame because the imputation is baked into the
+        # cached values: a cache-hit run never calls consolidate_dfci_labs and
+        # so cannot regenerate these counts. Manifest-only addition, so existing
+        # caches stay valid (provenance is unchanged) and just lack the key.
+        "below_detection_report": below_detection_report or {},
         "eligible_mrn_count": len(eligible_mrns),
         "eligible_mrn_sha256": _mrn_digest(eligible_mrns),
     }
@@ -822,16 +829,17 @@ def parse_args() -> argparse.Namespace:
         "--health-csv",
         type=Path,
         default=ONCDRS_PATH / "HEALTH_HISTORY.csv",
-        help="Raw OncDRS HEALTH_HISTORY.csv. Lazily scan-filtered to the "
-             "--survival-cohort-csv MRN set before it is materialized.",
+        help="HEALTH_HISTORY table (raw OncDRS CSV or merged Parquet). Lazily "
+             "scan-filtered to the --survival-cohort-csv MRN set before it is "
+             "materialized.",
     )
     parser.add_argument(
         "--labs-csv",
         type=Path,
         default=ONCDRS_PATH / "OUTPT_LAB_RESULTS_LABS.csv",
-        help="Raw OncDRS OUTPT_LAB_RESULTS_LABS.csv. Lazily scan-filtered to "
-             "the --survival-cohort-csv MRN set (see that flag) before it is "
-             "ever fully materialized.",
+        help="Outpatient labs table (raw OncDRS CSV or merged Parquet). Lazily "
+             "scan-filtered to the --survival-cohort-csv MRN set (see that "
+             "flag) before it is ever fully materialized.",
     )
     parser.add_argument(
         "--icd-csv",
@@ -846,8 +854,9 @@ def parse_args() -> argparse.Namespace:
         "--medications-csv",
         type=Path,
         default=ONCDRS_PATH / "MEDICATIONS.csv",
-        help="Raw OncDRS MEDICATIONS.csv, used for treatment anchor, "
-             "in-memory platinum computation, and PARPi flag. Lazily "
+        help="MEDICATIONS table (raw OncDRS CSV or merged Parquet), used for "
+             "treatment anchor, in-memory platinum computation, and PARPi "
+             "flag. Lazily "
              "scan-filtered to the --survival-cohort-csv MRN set (see that "
              "flag) before it is ever fully materialized.",
     )
@@ -1067,6 +1076,19 @@ def main() -> None:
     if cached is not None:
         consolidated_df, cache_manifest = cached
         prefilter_attrition = cache_manifest.get("prefilter_attrition", {})
+        # The imputation itself already happened in the run that built this
+        # cache, so replay its report rather than recomputing (the pre-imputation
+        # numerics needed to rebuild it are not in the cached frame). Caches
+        # written before the report existed simply have no key.
+        below_detection_report = cache_manifest.get("below_detection_report") or {}
+        if below_detection_report:
+            print("[cache] below-detection imputation report from the cached run:")
+            print_below_detection_report(below_detection_report)
+        else:
+            print(
+                "[cache] no below-detection imputation report recorded — this cache "
+                "predates the report. Re-run with --refresh-cache to regenerate it."
+            )
         eligible_mrns = set(
             pd.to_numeric(consolidated_df[ID_COL], errors="coerce")
             .dropna()
@@ -1122,7 +1144,10 @@ def main() -> None:
         stage_started = time.perf_counter()
         raw_longitudinal_df = raw_longitudinal_df_pl.to_pandas()
         mapping_df = pd.read_csv(args.mapping_csv)
-        consolidated_df = consolidate_dfci_labs(raw_longitudinal_df, mapping_df)
+        below_detection_report: dict = {}
+        consolidated_df = consolidate_dfci_labs(
+            raw_longitudinal_df, mapping_df, report_out=below_detection_report
+        )
         stage_seconds["lab_standardization"] = time.perf_counter() - stage_started
         prefilter_attrition = {
             "n_before_early_prefilters": len(broad_cohort_mrns),
@@ -1137,6 +1162,7 @@ def main() -> None:
             provenance=provenance,
             prefilter_attrition=prefilter_attrition,
             eligible_mrns=eligible_mrns,
+            below_detection_report=below_detection_report,
         )
 
     if args.write_consolidated:
@@ -1193,6 +1219,11 @@ def main() -> None:
     # other outputs instead of only living in the run log.
     cohort_attrition = {
         "pre_consolidation_filters": prefilter_attrition,
+        # Not attrition -- a value-level imputation. Recorded here because it is
+        # the one place a reader of the outputs can see how many PSA/Testosterone
+        # values are exact zeros by rule rather than by measurement, and whether
+        # TEXT_RESULT was populated well enough for the rule to fire at all.
+        "below_detection_imputation": below_detection_report,
         **build_attrition,
         "n_before_broad_icd_filter": int(n_before_broad_filter),
         "n_after_broad_icd_filter": int(n_after_broad_filter),

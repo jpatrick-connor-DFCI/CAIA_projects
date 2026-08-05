@@ -37,13 +37,16 @@ HYBRID_DEATH_DT, DERIVED_LAST_ALIVE_DATE), parsed with polars
 str.to_datetime. The de-identified "days since reference" offset columns
 (D_MED_START_DT, D_BIRTH_DT, ...) are NOT used.
 
-Inputs:
-  * EHR_DIAGNOSIS.csv (OncDRS raw)            ICD-10 -> icd cohort + exclusion
-  * MEDICATIONS.csv (OncDRS raw)              anchor + platinum drugs, read
+Inputs (each overridable by flag; a raw OncDRS CSV or a merged Parquet from
+PROFILE_data_processing -- see data_preprocessing_common/oncdrs_sources.py):
+  * EHR_DIAGNOSIS.csv (--icd-source)          ICD-10 -> icd cohort + exclusion
+  * MEDICATIONS.csv (--medications-source)    anchor + platinum drugs, read
                                                in-memory only -- not persisted
-  * PT_INFO_STATUS_REGISTRATION.csv (OncDRS raw)  birth date, sex, death/last-alive
+  * PT_INFO_STATUS_REGISTRATION.csv (--patient-status-source)
+                                              birth date, sex, death/last-alive
+  * OUTPT_LAB_RESULTS_LABS.csv (--labs-csv)   broad PSA-count flag
 
-Outputs (in NEPC_PROJ_PATH):
+Outputs (in --out-dir, default NEPC_PROJ_PATH):
   * prostate_icd_data.csv                        (ICD inclusion/exclusion record)
   * prostate_arpi_survival_cohort_arpi.csv
   * prostate_adt_survival_cohort_adt.csv
@@ -78,6 +81,7 @@ import polars as pl
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from data_preprocessing_common import fast_io  # noqa: E402
+from data_preprocessing_common.oncdrs_sources import scan_source  # noqa: E402
 
 ID_COL = "DFCI_MRN"
 
@@ -303,7 +307,7 @@ def load_and_explode_icd(icd_path) -> pl.DataFrame:
     DIAGNOSIS_ICD10_CD, no _CD2/_CD3) is passed through unchanged so this
     remains compatible with timestamped_icd_info.csv.gz-style inputs.
     """
-    icds = pl.scan_csv(icd_path, infer_schema_length=0).collect()
+    icds = scan_source(icd_path).collect()
 
     pair_cols = [
         ('DIAGNOSIS_ICD10_CD', 'DIAGNOSIS_ICD10_NM'),
@@ -379,7 +383,13 @@ def filter_cohort(filename, cohort_mrns, cols=None) -> pl.DataFrame:
     return filtered
 
 
-def compile_cohort_tables(icd_mrns, all_cohort_mrns, icds: pl.DataFrame):
+def compile_cohort_tables(
+    icd_mrns,
+    all_cohort_mrns,
+    icds: pl.DataFrame,
+    medications_path,
+    out_dir,
+):
     """Write the ICD record (scoped to the widest C61 cohort) and return a
     medications table in memory (not persisted), scoped to the union of every
     cohort (`all_cohort_mrns`) so it can feed the outcomes
@@ -387,14 +397,19 @@ def compile_cohort_tables(icd_mrns, all_cohort_mrns, icds: pl.DataFrame):
     cohort-filtered raw-table dumps are written here -- longitudinal_data_processing.py
     now reads+scopes the raw OncDRS health/labs tables itself, and the
     somatic table is read directly by compile_MRNs_for_manual_review.py when
-    needed."""
+    needed.
+
+    `medications_path` and `out_dir` are passed in (rather than read from the
+    module-level constants) so a run against a different OncDRS source writes
+    to its own output root instead of clobbering the default one.
+    """
     icd_mrn_set = set(int(m) for m in icd_mrns)
 
     mrn_num = icds[ID_COL].cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
     icds_filtered = icds.filter(mrn_num.is_in(list(icd_mrn_set)))
-    icds_filtered.write_csv(os.path.join(NEPC_PROJ_PATH, 'prostate_icd_data.csv'))
+    icds_filtered.write_csv(os.path.join(out_dir, 'prostate_icd_data.csv'))
 
-    meds = filter_cohort(os.path.join(ONCDRS_PATH, 'MEDICATIONS.csv'), set(int(m) for m in all_cohort_mrns))
+    meds = filter_cohort(medications_path, set(int(m) for m in all_cohort_mrns))
 
     return meds
 
@@ -535,15 +550,16 @@ def compute_first_platinum(meds: pl.DataFrame) -> pl.DataFrame:
 
 
 def load_patient_status(path) -> pl.DataFrame:
-    """Load birth date, sex, and death / last-alive info from
-    PT_INFO_STATUS_REGISTRATION.csv. All dates use the raw calendar columns
+    """Load birth date, sex, and death / last-alive info from the
+    PT_INFO_STATUS_REGISTRATION table (`path` is the file itself -- raw
+    OncDRS CSV or merged Parquet). All dates use the raw calendar columns
     (BIRTH_DT, HYBRID_DEATH_DT, DERIVED_LAST_ALIVE_DATE) directly -- NOT the
     de-identified D_BIRTH_DT offset.
 
     Returns a dataframe with:
         DFCI_MRN, BIRTH_DATE, GENDER, DEATH_DATE, LAST_CONTACT_DATE
     """
-    pt = pl.scan_csv(os.path.join(path, 'PT_INFO_STATUS_REGISTRATION.csv'), infer_schema_length=0).collect()
+    pt = scan_source(path).collect()
 
     # All dates are raw calendar strings.
     pt = pt.with_columns(
@@ -653,20 +669,37 @@ def main():
         "--icd-source",
         type=str,
         default=os.path.join(ONCDRS_PATH, 'EHR_DIAGNOSIS.csv'),
-        help="Raw OncDRS ICD source (EHR_DIAGNOSIS.csv) used to define the C61 cohort "
-             "over the full patient universe.",
+        help="ICD source (CSV or Parquet, e.g. raw OncDRS EHR_DIAGNOSIS.csv) "
+             "used to define the C61 cohort over the full patient universe.",
     )
     parser.add_argument(
         "--oncdrs-path",
         type=str,
         default=ONCDRS_PATH,
-        help="OncDRS raw data pull directory (for PT_INFO_STATUS_REGISTRATION.csv).",
+        help="OncDRS raw data pull directory. Only used to build the defaults "
+             "for --medications-source and --patient-status-source.",
+    )
+    parser.add_argument(
+        "--medications-source",
+        type=str,
+        default=None,
+        help="Medications table (CSV or Parquet) supplying the anchor and "
+             "platinum drugs. Defaults to <--oncdrs-path>/MEDICATIONS.csv.",
+    )
+    parser.add_argument(
+        "--patient-status-source",
+        type=str,
+        default=None,
+        help="Patient status table (CSV or Parquet) supplying birth date, sex, "
+             "and death/last-alive dates. Defaults to "
+             "<--oncdrs-path>/PT_INFO_STATUS_REGISTRATION.csv.",
     )
     parser.add_argument(
         "--labs-csv",
         type=str,
         default=os.path.join(ONCDRS_PATH, "OUTPT_LAB_RESULTS_LABS.csv"),
-        help="Raw OncDRS outpatient labs file used for the broad PSA-count flag.",
+        help="Outpatient labs file (CSV or Parquet) used for the broad "
+             "PSA-count flag.",
     )
     parser.add_argument(
         "--out-dir",
@@ -681,6 +714,17 @@ def main():
         help="Directory for cohort MRN lists and icd_prostate_mrn_flags.csv.",
     )
     args = parser.parse_args()
+
+    # Table defaults are derived from --oncdrs-path so the historical
+    # single-release invocation keeps working with no new flags.
+    if args.medications_source is None:
+        args.medications_source = os.path.join(args.oncdrs_path, "MEDICATIONS.csv")
+    if args.patient_status_source is None:
+        args.patient_status_source = os.path.join(
+            args.oncdrs_path, "PT_INFO_STATUS_REGISTRATION.csv"
+        )
+
+    os.makedirs(args.out_dir, exist_ok=True)
 
     # 1. The single ICD-C61 cohort MRN set (every ICD-C61 patient, including
     #    those with a competing non-prostate primary). The non-prostate-
@@ -704,6 +748,8 @@ def main():
         all_cohort_mrns,
         all_cohort_mrns,
         icds,
+        args.medications_source,
+        args.out_dir,
     )
 
     # 3. Establish first ADT (the primary entry requirement), then exclude
@@ -733,7 +779,7 @@ def main():
         f"(of {len(platinum_df)} across ICD-C61)."
     )
 
-    status_df = load_patient_status(args.oncdrs_path)
+    status_df = load_patient_status(args.patient_status_source)
 
     os.makedirs(args.mrn_lists_dir, exist_ok=True)
 
