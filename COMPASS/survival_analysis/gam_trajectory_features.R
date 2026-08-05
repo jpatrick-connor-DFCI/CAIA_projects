@@ -18,6 +18,9 @@
 #                                              <LAB>__gam_{level,slope,curvature,auc,dev}
 #   gam_fit_diagnostics_landmark{D}.csv       one row per lab; basis used, EDF,
 #                                              fit seconds, convergence flag
+#   gam_trajectory_curves_landmark{D}.csv     fitted per-patient curves on the
+#                                              trailing-window grid, used only
+#                                              for GAM-specific figures
 #
 # Leakage stance: the smooth is unsupervised -- it never sees t_platinum or
 # PLATINUM. The default (--fit-split all) fits on every cohort patient in the
@@ -242,9 +245,10 @@ extract_lab_features <- function(fit_result, patients, landmark_day, deriv_step_
   auc_dt <- window_dt[, .(gam_auc = mean(fitted)), by = MRN_f]
   dev_dt <- window_dt[, .(gam_dev = sqrt(mean(dev^2))), by = MRN_f]
 
-  out <- Reduce(function(a, b) merge(a, b, by = "MRN_f", all = TRUE),
-                list(level_dt, slope_dt, curv_dt, auc_dt, dev_dt))
-  out
+  features <- Reduce(function(a, b) merge(a, b, by = "MRN_f", all = TRUE),
+                     list(level_dt, slope_dt, curv_dt, auc_dt, dev_dt))
+  curves <- window_dt[, .(MRN_f, t_lab, GAM_FITTED = fitted)]
+  list(features = features, curves = curves)
 }
 
 # ---------------------------------------------------------------------------
@@ -282,6 +286,7 @@ for (landmark_day in landmark_days) {
   cat(sprintf("Canonical labs at this landmark: %d\n", length(landmark_labs)))
 
   feature_frames <- list()
+  curve_frames <- list()
   diagnostic_rows <- list()
 
   for (lab in landmark_labs) {
@@ -314,11 +319,21 @@ for (landmark_day in landmark_days) {
     if (is.null(fit_result$fit)) next
 
     patients <- levels(dt_lab$MRN_f)
-    lab_features <- extract_lab_features(fit_result, patients, landmark_day, deriv_step_days, trailing_window_days)
+    extracted <- extract_lab_features(
+      fit_result, patients, landmark_day, deriv_step_days, trailing_window_days
+    )
+    lab_features <- data.table::copy(extracted$features)
     data.table::setnames(lab_features, GAM_STATS, paste0(lab, "__", GAM_STATS))
     data.table::setnames(lab_features, "MRN_f", id_col)
-    lab_features[[id_col]] <- as.character(lab_features[[id_col]])
+    data.table::set(lab_features, j = id_col, value = as.character(lab_features[[id_col]]))
     feature_frames[[lab]] <- lab_features
+
+    lab_curves <- data.table::copy(extracted$curves)
+    data.table::setnames(lab_curves, "MRN_f", id_col)
+    data.table::set(lab_curves, j = id_col, value = as.character(lab_curves[[id_col]]))
+    data.table::set(lab_curves, j = "LAB_NAME", value = lab)
+    data.table::setcolorder(lab_curves, c(id_col, "LAB_NAME", "t_lab", "GAM_FITTED"))
+    curve_frames[[lab]] <- lab_curves
   }
 
   if (length(feature_frames) > 0) {
@@ -334,4 +349,18 @@ for (landmark_day in landmark_days) {
   diag_path <- file.path(inputs_dir, sprintf("gam_fit_diagnostics_landmark%d.csv", landmark_day))
   fwrite(rbindlist(diagnostic_rows), diag_path)
   cat(sprintf("Wrote %s\n", diag_path))
+
+  combined_curves <- if (length(curve_frames) > 0) {
+    rbindlist(curve_frames, use.names = TRUE)
+  } else {
+    empty_curves <- data.table(
+      LAB_NAME = character(), t_lab = numeric(), GAM_FITTED = numeric()
+    )
+    empty_curves[[id_col]] <- character()
+    setcolorder(empty_curves, c(id_col, "LAB_NAME", "t_lab", "GAM_FITTED"))
+    empty_curves
+  }
+  curve_path <- file.path(inputs_dir, sprintf("gam_trajectory_curves_landmark%d.csv", landmark_day))
+  fwrite(combined_curves, curve_path)
+  cat(sprintf("Wrote %s (%d fitted curve points)\n", curve_path, nrow(combined_curves)))
 }

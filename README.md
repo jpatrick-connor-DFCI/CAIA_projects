@@ -227,7 +227,9 @@ cohort.
   `landmark_attrition.json`, and `build_manifest.json`.
 - **Optional GAM trajectory features** (produced by `gam_trajectory_features.R`, not by this
   script — see §2.3): `gam_trajectory_features_landmark{D}.csv` and
-  `gam_fit_diagnostics_landmark{D}.csv`. When present in `prediction_inputs/`,
+  `gam_fit_diagnostics_landmark{D}.csv`, plus
+  `gam_trajectory_curves_landmark{D}.csv` containing the per-patient fitted grid used for figures.
+  When present in `prediction_inputs/`,
   `load_prebuilt_landmark` (`survival_common/cox_models.py`) left-joins the features onto
   `aggregated_landmark{D}.csv` before the split partition; when absent, behavior is unchanged
   (the merge is a no-op by construction, not by convention).
@@ -284,7 +286,11 @@ only (no `tidyverse`/`survminer`/`broom`, unlike `COMPASS_generate_figures_pipel
 `pre_treatment_lab_long_landmark{D}.csv` and `canonical_labs_train_val.csv` and writes
 `gam_trajectory_features_landmark{D}.csv` (one row per `DFCI_MRN`) plus a
 `gam_fit_diagnostics_landmark{D}.csv` sidecar recording which basis (`fs` vs. the random
-intercept+slope fallback) was used per lab, EDF, fit seconds, and convergence. The per-patient
+intercept+slope fallback) was used per lab, EDF, fit seconds, and convergence. It also writes
+`gam_trajectory_curves_landmark{D}.csv`, a long patient×lab×time grid of fitted values. The figure
+pipeline uses that grid for paired GAM-smoothed trajectory panels stratified by platinum exposure
+and classifier `has_nepc`; ribbons are 95% confidence intervals across patient-specific fitted
+curves, not `mgcv` coefficient intervals. The per-patient
 smooth is unsupervised — it never sees `t_platinum`/`PLATINUM` — and by default is fit on **all**
 cohort patients, not just train_val; pass `--fit-split train_val` to refit population smooths on
 train+valid only as a leakage sensitivity check. `univariate_analysis.py` then automatically tests

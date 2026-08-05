@@ -426,6 +426,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       if (!is.na(lab)) return(file.path("labs", assign_category(lab), lab, "distribution"))
       return("androgen_distributions")
     }
+    if (startsWith(plot_stem, "gam_trajectory_")) {
+      lab <- match_lab_in_stem(plot_stem)
+      if (!is.na(lab)) return(file.path("labs", assign_category(lab), lab, "gam_trajectory"))
+      return("gam_trajectories")
+    }
     if (startsWith(plot_stem, "androgen_longitudinal_") || startsWith(plot_stem, "longitudinal_")) {
       lab <- match_lab_in_stem(plot_stem)
       if (!is.na(lab)) return(file.path("labs", assign_category(lab), lab, "longitudinal"))
@@ -2515,6 +2520,171 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                  width = 9.5, height = 5.5)
         if (show) print(p_s)
       }
+    }
+  }
+
+  # -----------------------------------------------------------------------
+  # GAM-smoothed trajectories by platinum exposure and classifier NEPC call.
+  # gam_trajectory_features.R writes one fitted value per patient x lab x
+  # trailing-window grid point. Bands below summarize between-patient
+  # variation in those fitted curves; they are not mgcv coefficient intervals.
+  # -----------------------------------------------------------------------
+  summarize_gam_curves <- function(curves, stratum_lookup) {
+    curves %>%
+      mutate(DFCI_MRN = as.character(DFCI_MRN)) %>%
+      inner_join(
+        stratum_lookup %>% mutate(DFCI_MRN = as.character(DFCI_MRN)),
+        by = "DFCI_MRN"
+      ) %>%
+      filter(is.finite(t_lab), is.finite(GAM_FITTED), !is.na(stratum)) %>%
+      group_by(t_lab, stratum) %>%
+      summarise(
+        n_patients = n_distinct(DFCI_MRN),
+        mean_fitted = mean(GAM_FITTED),
+        sem = if (n() > 1) sd(GAM_FITTED) / sqrt(n()) else 0,
+        .groups = "drop"
+      ) %>%
+      mutate(
+        ci_lo = mean_fitted - 1.96 * sem,
+        ci_hi = mean_fitted + 1.96 * sem
+      )
+  }
+
+  plot_gam_curve_panel <- function(summary_df, title, palette, landmark) {
+    if (is.null(summary_df) || nrow(summary_df) == 0) {
+      return(
+        ggplot() +
+          annotate("text", x = 0, y = 0, label = "(no labeled GAM curves)", color = "#7f8c8d") +
+          theme_void() + labs(title = title)
+      )
+    }
+    summary_df <- summary_df %>%
+      mutate(stratum = factor(as.character(stratum), levels = names(palette))) %>%
+      arrange(stratum, t_lab)
+    n_by_group <- summary_df %>%
+      group_by(stratum) %>%
+      summarise(n = max(n_patients), .groups = "drop")
+    subtitle <- paste(
+      sprintf("%s n=%s", n_by_group$stratum, format(n_by_group$n, big.mark = ",")),
+      collapse = "   |   "
+    )
+
+    ggplot(summary_df, aes(t_lab, mean_fitted, color = stratum, fill = stratum)) +
+      geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi), alpha = 0.18, color = NA) +
+      geom_line(linewidth = 1) +
+      geom_vline(xintercept = 0, color = "#2c3e50", linetype = "dashed", linewidth = 0.7) +
+      { if (landmark != 0) geom_vline(
+          xintercept = landmark, color = "#2c3e50", linetype = "dotted", linewidth = 0.7
+        ) } +
+      scale_color_manual(values = palette, drop = FALSE, name = NULL) +
+      scale_fill_manual(values = palette, drop = FALSE, guide = "none") +
+      labs(
+        x = sprintf("Days from %s", ANCHOR_LABEL),
+        y = "Mean GAM-fitted lab value",
+        title = title,
+        subtitle = subtitle,
+        caption = "Ribbon: 95% CI across patient-specific fitted trajectories"
+      ) +
+      theme_fig() +
+      theme(
+        plot.title = element_text(face = "bold", size = 11),
+        plot.subtitle = element_text(size = 8.5),
+        plot.caption = element_text(size = 7.5, color = COLOR_NEUTRAL_INK)
+      )
+  }
+
+  platinum_palette <- c(
+    "Non-platinum" = COLOR_PLATINUM_NEG,
+    "Platinum" = COLOR_PLATINUM_POS
+  )
+  nepc_palette <- c(
+    "NEPC-negative" = COLOR_NEUTRAL_INK,
+    "NEPC-positive" = "#8e1c2b"
+  )
+
+  for (landmark in LANDMARKS) {
+    curve_path <- file.path(
+      INPUTS_DIR, sprintf("gam_trajectory_curves_landmark%d.csv", landmark)
+    )
+    agg_path <- file.path(INPUTS_DIR, sprintf("aggregated_landmark%d.csv", landmark))
+    if (!file.exists(curve_path)) {
+      message(sprintf("GAM trajectories: %s absent -- skipping landmark %d", curve_path, landmark))
+      next
+    }
+    if (!file.exists(agg_path)) {
+      message(sprintf("GAM trajectories: %s absent -- skipping landmark %d", agg_path, landmark))
+      next
+    }
+
+    gam_curves <- read_csv(curve_path, show_col_types = FALSE) %>%
+      mutate(
+        DFCI_MRN = as.character(DFCI_MRN),
+        LAB_GROUP = vapply(LAB_NAME, match_canonical_lab_name, character(1)),
+        t_lab = suppressWarnings(as.numeric(t_lab)),
+        GAM_FITTED = suppressWarnings(as.numeric(GAM_FITTED))
+      ) %>%
+      filter(!is.na(LAB_GROUP))
+    aggregated_status <- read_csv(
+      agg_path,
+      col_select = any_of(c("DFCI_MRN", "PLATINUM")),
+      show_col_types = FALSE
+    ) %>%
+      transmute(
+        DFCI_MRN = as.character(DFCI_MRN),
+        stratum = if_else(
+          suppressWarnings(as.numeric(PLATINUM)) == 1,
+          "Platinum", "Non-platinum"
+        )
+      ) %>%
+      distinct(DFCI_MRN, .keep_all = TRUE)
+
+    nepc_status <- if (is.null(llm_classifier_labels)) {
+      NULL
+    } else {
+      llm_classifier_labels %>%
+        transmute(
+          DFCI_MRN = as.character(DFCI_MRN),
+          has_nepc = suppressWarnings(as.numeric(has_nepc)),
+          stratum = case_when(
+            has_nepc == 1 ~ "NEPC-positive",
+            has_nepc == 0 ~ "NEPC-negative",
+            TRUE ~ NA_character_
+          )
+        ) %>%
+        filter(!is.na(stratum)) %>%
+        distinct(DFCI_MRN, .keep_all = TRUE)
+    }
+
+    labs_present <- intersect(LAB_FIGURE_LABS, unique(gam_curves$LAB_GROUP))
+    for (lab_group in labs_present) {
+      lab_curves <- gam_curves %>% filter(LAB_GROUP == lab_group)
+      platinum_summary <- summarize_gam_curves(lab_curves, aggregated_status)
+      nepc_summary <- if (is.null(nepc_status)) NULL else {
+        summarize_gam_curves(lab_curves, nepc_status)
+      }
+      p_platinum <- plot_gam_curve_panel(
+        platinum_summary, "By platinum status", platinum_palette, landmark
+      )
+      p_nepc <- plot_gam_curve_panel(
+        nepc_summary, "By classifier NEPC status", nepc_palette, landmark
+      )
+      landmark_label <- if (landmark == 0) "0-day" else sprintf("+%d-day", landmark)
+      combined <- (p_platinum | p_nepc) +
+        plot_annotation(
+          title = sprintf(
+            "%s — GAM-smoothed trajectories through the %s landmark",
+            lab_group, landmark_label
+          ),
+          theme = theme(plot.title = element_text(face = "bold", size = 13))
+        )
+      save_fig(
+        combined,
+        fig_dir("gam_trajectories"),
+        sprintf("gam_trajectory_%s_landmark%d", lab_stem_slug(lab_group), landmark),
+        width = 13,
+        height = 5.5
+      )
+      if (show) print(combined)
     }
   }
 }

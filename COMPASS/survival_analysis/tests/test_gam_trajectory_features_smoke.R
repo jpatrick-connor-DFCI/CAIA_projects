@@ -86,10 +86,12 @@ if (!is.null(status) && status != 0) {
 
 out_path <- file.path(inputs_dir, sprintf("gam_trajectory_features_landmark%d.csv", LANDMARK_DAY))
 diag_path <- file.path(inputs_dir, sprintf("gam_fit_diagnostics_landmark%d.csv", LANDMARK_DAY))
-stopifnot(file.exists(out_path), file.exists(diag_path))
+curve_path <- file.path(inputs_dir, sprintf("gam_trajectory_curves_landmark%d.csv", LANDMARK_DAY))
+stopifnot(file.exists(out_path), file.exists(diag_path), file.exists(curve_path))
 
 features <- fread(out_path)
 diagnostics <- fread(diag_path)
+curves <- fread(curve_path)
 
 failures <- character(0)
 check <- function(cond, msg) {
@@ -103,6 +105,18 @@ check(nrow(diagnostics) == length(TRUE_SLOPES),
       sprintf("expected %d diagnostic rows, got %d", length(TRUE_SLOPES), nrow(diagnostics)))
 check(all(diagnostics$basis_used %in% c("fs", "re_fallback")),
       sprintf("unexpected basis_used values: %s", paste(unique(diagnostics$basis_used), collapse = ", ")))
+
+expected_curve_columns <- c("DFCI_MRN", "LAB_NAME", "t_lab", "GAM_FITTED")
+check(identical(names(curves), expected_curve_columns),
+      sprintf("unexpected curve columns: %s", paste(names(curves), collapse = ", ")))
+check(nrow(curves) == N_PATIENTS * length(TRUE_SLOPES) * 25L,
+      sprintf("expected %d curve rows, got %d",
+              N_PATIENTS * length(TRUE_SLOPES) * 25L, nrow(curves)))
+check(setequal(unique(curves$LAB_NAME), names(TRUE_SLOPES)),
+      sprintf("unexpected curve labs: %s", paste(unique(curves$LAB_NAME), collapse = ", ")))
+check(!anyNA(curves$GAM_FITTED), "curve output contains missing GAM_FITTED values")
+curve_grid_counts <- curves[, .N, by = .(DFCI_MRN, LAB_NAME)]$N
+check(all(curve_grid_counts == 25L), "not every patient/lab curve has the expected 25 grid points")
 
 for (lab in names(TRUE_SLOPES)) {
   slope_col <- paste0(lab, "__gam_slope")
