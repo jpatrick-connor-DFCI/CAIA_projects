@@ -171,13 +171,13 @@ prostate lab frame used by the current treatment-anchored analyses.
 - **Lab QC (`consolidate_dfci_labs`):** unit standardization to canonical units, sentinel nulling
   (e.g. `9999999`), physiologic-range nulling, combined-BP splitting. Out-of-range values are **nulled,
   not row-dropped** — downstream must filter on `conversion_status` (or pass `--successful-only`).
-- **Below-detection imputation:** PSA and Testosterone only, and only where the `999999` sentinel is
+- **Below-detection imputation:** PSA and Testosterone only, and only where the `9999999` sentinel is
   paired with a `TEXT_RESULT` containing `<` (e.g. `"<0.1"`). Those become an exact `0.0` rather than
   being nulled with the other sentinels; every other sentinel/measurement combination is still nulled.
   The rule runs before sentinel nulling and before unit conversion, and the PSA/Testosterone
   physiologic ranges are inclusive at `0`, so the imputed zeros survive to the model inputs.
   Every run prints a `[below-detection]` table — rows and patients zeroed per measurement, plus two
-  near-miss counts (`999999` without a `<`, and `<` alongside a *different* sentinel). The same
+  near-miss counts (`9999999` without a `<`, and `<` alongside a *different* sentinel). The same
   counts are written to `cohort_attrition.json` under `below_detection_imputation` and stored in the
   consolidated-cache manifest, so cache-hit runs replay the report instead of showing nothing.
   Read the near-miss columns, not just the zeroed count: if `TEXT_RESULT` is missing or unpopulated
@@ -185,8 +185,8 @@ prostate lab frame used by the current treatment-anchored analyses.
   has no undetectable results.
 - **Vital signs included:** COMPASS scans `HEALTH_HISTORY.csv` for `CODE_TYPE = "Vital Signs"`,
   combines those records with outpatient labs before standardization, and retains the canonical
-  vital measurements in model inputs and figures. Cache version 3 forces older no-vitals caches
-  to rebuild.
+  vital measurements in model inputs and figures. Cache version 5 forces older caches—including
+  those built with the incorrect `999999` below-detection sentinel—to rebuild.
 - **Performance:** raw CSV scans project only required columns; lab consolidation is vectorized.
   Standardized rows are cached in `consolidated_longitudinal_data.parquet` (ARPI) or
   `consolidated_longitudinal_data_adt.parquet` (ADT) with a provenance manifest that includes

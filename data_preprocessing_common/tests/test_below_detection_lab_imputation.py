@@ -35,13 +35,13 @@ def _mapping() -> pd.DataFrame:
 def _boundary_labs() -> pd.DataFrame:
     """Every side of the imputation rule, one row each.
 
-    row 0  PSA          999999   "<0.1"  -> imputed to 0
-    row 1  Testosterone "999999" " < 3"  -> imputed to 0 (numeric arrives as text)
-    row 2  PSA          999999   "0.1"   -> sentinel, no '<'
-    row 3  PSA          9999999  "<0.1"  -> '<', but a sentinel the rule skips
-    row 4  Creatinine   999999   "<0.1"  -> right shape, wrong measurement
-    row 5  PSA          -999999  "<0.1"  -> '<', negative sentinel variant
-    row 6  PSA          999999   None    -> sentinel, TEXT_RESULT missing
+    row 0  PSA          9999999   "<0.1"  -> imputed to 0
+    row 1  Testosterone "9999999" " < 3"  -> imputed to 0 (numeric arrives as text)
+    row 2  PSA          9999999   "0.1"   -> sentinel, no '<'
+    row 3  PSA          999999    "<0.1"  -> '<', but a sentinel the rule skips
+    row 4  Creatinine   9999999   "<0.1"  -> right shape, wrong measurement
+    row 5  PSA          -9999999  "<0.1"  -> '<', negative sentinel variant
+    row 6  PSA          9999999   None    -> sentinel, TEXT_RESULT missing
     row 7  PSA          2.5      "<3"    -> ordinary result, untouched
     """
     return pd.DataFrame(
@@ -68,13 +68,13 @@ def _boundary_labs() -> pd.DataFrame:
                 "ng/ml",
             ],
             "NUMERIC_RESULT": [
-                999999,
-                "999999",
-                999999,
+                9999999,
+                "9999999",
                 9999999,
                 999999,
-                -999999,
-                999999,
+                9999999,
+                -9999999,
+                9999999,
                 2.5,
             ],
             "TEXT_RESULT": ["<0.1", " < 3", "0.1", "<0.1", "<0.1", "<0.1", None, "<3"],
@@ -83,7 +83,7 @@ def _boundary_labs() -> pd.DataFrame:
 
 
 class BelowDetectionLabImputationTest(unittest.TestCase):
-    def test_only_psa_and_testosterone_999999_with_less_than_are_zero(self) -> None:
+    def test_only_psa_and_testosterone_9999999_with_less_than_are_zero(self) -> None:
         result = consolidate_dfci_labs(_boundary_labs(), _mapping()).set_index("row_id")
 
         self.assertEqual(result.loc[0, "numeric_result_standardized"], 0.0)
@@ -97,7 +97,7 @@ class BelowDetectionLabImputationTest(unittest.TestCase):
             {
                 "TEST_NAME": ["PSA", "TESTOSTERONE", "CREATININE"],
                 "RESULT_UOM_NM": ["ng/ml", "ng/dl", "mg/dl"],
-                "NUMERIC_RESULT": [999999, 999999, 999999],
+                "NUMERIC_RESULT": [9999999, 9999999, 9999999],
                 "TEXT_RESULT": ["<0.1", "<3", "<0.1"],
             }
         )
@@ -149,7 +149,7 @@ class BelowDetectionReportTest(unittest.TestCase):
                 "DFCI_MRN": [1, 1, 2, 3],
                 "TEST_NAME": ["PSA", "PSA", "PSA", "TESTOSTERONE"],
                 "RESULT_UOM_NM": ["ng/ml", "ng/ml", "ng/ml", "ng/dl"],
-                "NUMERIC_RESULT": [999999, 999999, 999999, 999999],
+                "NUMERIC_RESULT": [9999999, 9999999, 9999999, 9999999],
                 "TEXT_RESULT": ["<0.1", "<0.1", "<0.1", "<3"],
             }
         )

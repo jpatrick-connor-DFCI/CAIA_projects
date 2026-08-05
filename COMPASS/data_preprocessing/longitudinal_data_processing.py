@@ -93,7 +93,7 @@ LAB_SCAN_COLUMNS = [
     "RESULT_UOM_NM",
 ]
 MEDICATION_SCAN_COLUMNS = [ID_COL, "NCI_PREFERRED_MED_NM", "MED_START_DT"]
-CONSOLIDATED_CACHE_VERSION = 4
+CONSOLIDATED_CACHE_VERSION = 5
 
 # Highlighted antineoplastic treatments used to anchor the "time to platinum"
 # prediction window. The treatment anchor (TREATMENT_ANCHOR_DATE) is the first

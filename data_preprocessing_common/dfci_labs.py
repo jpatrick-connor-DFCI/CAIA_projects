@@ -520,7 +520,7 @@ SENTINEL_NUMERIC_VALUES: frozenset[float] = frozenset({
     -999999.0,
 })
 
-# For these two measurements only, DFCI sometimes pairs the 999999 numeric
+# For these two measurements only, DFCI sometimes pairs the 9999999 numeric
 # sentinel with a TEXT_RESULT such as "<0.1".  In that combination the result
 # represents a value below the assay's detection limit rather than a missing
 # result, and downstream modeling treats it as zero.
@@ -528,7 +528,7 @@ BELOW_DETECTION_IMPUTABLE_MEASUREMENTS: frozenset[str] = frozenset({
     "PSA",
     "Testosterone",
 })
-BELOW_DETECTION_SENTINEL = 999999.0
+BELOW_DETECTION_SENTINEL = 9999999.0
 
 
 def is_sentinel_value(value: object) -> bool:
@@ -547,7 +547,7 @@ def _below_detection_imputation_mask(
     exact_lookup: dict[str, dict],
     prefix_lookup: dict[str, dict],
 ) -> tuple[pd.Series, pd.Series]:
-    """Identify PSA/Testosterone 999999 rows whose raw text contains ``<``.
+    """Identify PSA/Testosterone 9999999 rows whose raw text contains ``<``.
 
     Returns ``(mask, collapsed_measurement)``. The measurement series comes back
     alongside the mask so ``build_below_detection_report`` can break the counts
@@ -587,11 +587,11 @@ def build_below_detection_report(
       * ``n_zeroed`` — rows the rule set to 0.0.
       * ``n_patients_zeroed`` — distinct patients contributing those rows.
         Omitted entirely when ``id_col`` is not on the frame.
-      * ``n_sentinel_without_lt`` — rows carrying the 999999 sentinel for this
+      * ``n_sentinel_without_lt`` — rows carrying the 9999999 sentinel for this
         measurement whose ``TEXT_RESULT`` has no ``<``. They stay NaN. Large
         relative to ``n_zeroed`` means ``TEXT_RESULT`` is under-populated.
       * ``n_lt_with_other_sentinel`` — rows whose ``TEXT_RESULT`` has a ``<``
-        but whose numeric is a *different* sentinel (e.g. 9999999). Also left
+        but whose numeric is a *different* sentinel (e.g. 999999). Also left
         NaN; non-zero means a sentinel variant this rule does not cover.
 
     The two near-miss counts are the point of the report. ``n_zeroed = 0`` on
@@ -668,7 +668,8 @@ def print_below_detection_report(report: dict, *, prefix: str = "[below-detectio
     header = f"{'measurement':<16}{'zeroed':>10}"
     if show_patients:
         header += f"{'patients':>10}"
-    header += f"{'999999 no <':>14}{'< other sent':>14}"
+    sentinel_label = f"{BELOW_DETECTION_SENTINEL:.0f} no <"
+    header += f"{sentinel_label:>14}{'< other sent':>14}"
     print(f"{prefix} {header}")
     for measurement, entry in report["per_measurement"].items():
         line = f"{measurement:<16}{entry['n_zeroed']:>10,}"
