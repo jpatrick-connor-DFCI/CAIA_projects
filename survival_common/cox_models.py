@@ -1085,18 +1085,9 @@ def load_prebuilt_landmark(
     *,
     aggregated_filename: Callable[[int], str],
     pre_treatment_lab_filename: Callable[[int], str],
-    gam_feature_filename: Callable[[int], str] | None = None,
     id_col: str = DEFAULT_ID_COL,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Load aggregated and pre-treatment lab data for one prebuilt landmark.
-
-    ``gam_feature_filename``, when provided, names an optional GAM-derived
-    trajectory-feature CSV (see ``gam_trajectory_features.R``) that is
-    left-joined onto the aggregated table -- before the train/valid/test
-    partition -- if it exists in ``inputs_dir``. Callers that omit it (the
-    default) or whose GAM file has not been built yet see byte-identical
-    behavior to before this feature existed.
-    """
+    """Load aggregate-statistic and pre-treatment lab data for one landmark."""
     agg_path = inputs_dir / aggregated_filename(landmark_day)
     if not agg_path.exists():
         raise FileNotFoundError(
@@ -1104,25 +1095,6 @@ def load_prebuilt_landmark(
             "Run build_prediction_inputs.py first."
         )
     aggregated = pd.read_csv(agg_path).set_index(id_col)
-
-    if gam_feature_filename is not None:
-        gam_path = inputs_dir / gam_feature_filename(landmark_day)
-        if gam_path.exists():
-            gam_features = pd.read_csv(gam_path).set_index(id_col)
-            overlap = sorted(set(gam_features.columns) & set(aggregated.columns))
-            if overlap:
-                raise ValueError(
-                    f"GAM feature file {gam_path} has columns overlapping the "
-                    f"aggregated table: {overlap}. Rerun gam_trajectory_features.R "
-                    "after clearing stale output, or resolve the naming collision."
-                )
-            aggregated = aggregated.join(gam_features, how="left")
-            print(
-                f"Merged {gam_features.shape[1]} GAM trajectory feature columns "
-                f"from {gam_path}"
-            )
-        else:
-            print(f"No GAM trajectory feature file at {gam_path}; skipping GAM merge.")
 
     if "split" not in aggregated.columns:
         raise ValueError(f"{agg_path} is missing the 'split' column.")

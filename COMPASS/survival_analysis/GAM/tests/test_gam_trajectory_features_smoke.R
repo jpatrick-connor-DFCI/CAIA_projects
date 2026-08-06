@@ -11,7 +11,7 @@
 #   (b) the recovered __gam_slope sign and rough magnitude match what was
 #       planted for each lab.
 #
-# Run with: Rscript COMPASS/survival_analysis/tests/test_gam_trajectory_features_smoke.R
+# Run with: Rscript COMPASS/survival_analysis/GAM/tests/test_gam_trajectory_features_smoke.R
 # Exits non-zero on any assertion failure.
 
 suppressPackageStartupMessages({
@@ -67,6 +67,8 @@ canonical_labs <- data.table(
 
 inputs_dir <- tempfile("gam_smoke_inputs_")
 dir.create(inputs_dir)
+output_dir <- tempfile("gam_smoke_outputs_")
+dir.create(output_dir)
 fwrite(lab_long, file.path(inputs_dir, sprintf("pre_treatment_lab_long_landmark%d.csv", LANDMARK_DAY)))
 fwrite(canonical_labs, file.path(inputs_dir, "canonical_labs_train_val.csv"))
 
@@ -77,6 +79,7 @@ result <- system2(
   "Rscript",
   args = c(
     shQuote(script_path), "--inputs-dir", shQuote(inputs_dir),
+    "--output-dir", shQuote(output_dir),
     "--landmark-days", as.character(LANDMARK_DAY),
     "--max-fs-patients", "100",
     "--curve-grid-points", as.character(EXPECTED_CURVE_POINTS),
@@ -91,9 +94,9 @@ if (!is.null(status) && status != 0) {
   quit(status = 1)
 }
 
-out_path <- file.path(inputs_dir, sprintf("gam_trajectory_features_landmark%d.csv", LANDMARK_DAY))
-diag_path <- file.path(inputs_dir, sprintf("gam_fit_diagnostics_landmark%d.csv", LANDMARK_DAY))
-curve_path <- file.path(inputs_dir, sprintf("gam_trajectory_curves_landmark%d.csv", LANDMARK_DAY))
+out_path <- file.path(output_dir, sprintf("gam_trajectory_features_landmark%d.csv", LANDMARK_DAY))
+diag_path <- file.path(output_dir, sprintf("gam_fit_diagnostics_landmark%d.csv", LANDMARK_DAY))
+curve_path <- file.path(output_dir, sprintf("gam_trajectory_curves_landmark%d.csv", LANDMARK_DAY))
 stopifnot(file.exists(out_path), file.exists(diag_path), file.exists(curve_path))
 
 features <- fread(out_path)
@@ -161,6 +164,7 @@ fs_result <- system2(
   "Rscript",
   args = c(
     shQuote(script_path), "--inputs-dir", shQuote(fs_inputs_dir),
+    "--output-dir", shQuote(fs_inputs_dir),
     "--landmark-days", as.character(LANDMARK_DAY),
     "--max-fs-patients", "1000",
     "--curve-grid-points", as.character(EXPECTED_CURVE_POINTS),
@@ -197,6 +201,7 @@ run_with_workers <- function(dir, n_workers) {
     "Rscript",
     args = c(
       shQuote(script_path), "--inputs-dir", shQuote(dir),
+      "--output-dir", shQuote(dir),
       "--landmark-days", as.character(LANDMARK_DAY),
       "--max-fs-patients", "100",
       "--curve-grid-points", as.character(EXPECTED_CURVE_POINTS),
@@ -241,3 +246,4 @@ if (length(failures) > 0) {
 
 cat("\nPASS: all smoke test assertions succeeded.\n")
 unlink(inputs_dir, recursive = TRUE)
+unlink(output_dir, recursive = TRUE)

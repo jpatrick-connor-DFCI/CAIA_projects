@@ -3,8 +3,8 @@
 # Self-checking synthetic smoke test for gam_cox_nonlinearity.R. Simulates a
 # Cox survival dataset where one feature ("LabLinear") has a genuinely linear
 # log-hazard effect and another ("LabCurve") has a planted quadratic
-# (U-shaped) log-hazard effect, writes the exact aggregated_landmark{D}.csv +
-# cox_agg_feature_selection.csv schema the real script expects, runs it as a
+# (U-shaped) log-hazard effect, writes separate main-cohort aggregate and GAM
+# feature files, runs the script as a
 # subprocess, and asserts:
 #   (a) LabCurve is flagged nonlinear: edf clearly > 1, small q_lrt
 #   (b) LabLinear is not: edf close to 1
@@ -16,7 +16,7 @@
 #       survival times mean ~zero ties, so mgcv's Peto correction and
 #       lifelines' Efron approximation should agree closely here.
 #
-# Run with: Rscript COMPASS/survival_analysis/tests/test_gam_cox_nonlinearity_smoke.R
+# Run with: Rscript COMPASS/survival_analysis/GAM/tests/test_gam_cox_nonlinearity_smoke.R
 # The cross-check needs a Python with pandas/sklearn/lifelines importable and
 # this repo's survival_common on its path (PYTHONPATH is set automatically
 # below). Defaults to `python3` on PATH; override via the GAM_SMOKE_PYTHON
@@ -40,7 +40,7 @@ get_script_dir <- function() {
 
 tests_dir <- get_script_dir()
 script_path <- normalizePath(file.path(tests_dir, "..", "gam_cox_nonlinearity.R"))
-repo_root <- normalizePath(file.path(tests_dir, "..", "..", ".."))
+repo_root <- normalizePath(file.path(tests_dir, "..", "..", "..", ".."))
 stopifnot(file.exists(script_path))
 
 set.seed(20250202)
@@ -69,28 +69,26 @@ cat(sprintf("Simulated %d patients, %d events (%.1f%%)\n", N, sum(event), 100 * 
 
 aggregated <- data.table(
   DFCI_MRN = patients,
+  split = rep(c("train", "valid", "test"), length.out = N),
   t_platinum = duration,
   PLATINUM = event,
   AGE_AT_TREATMENTSTART = age,
-  LabLinear__gam_slope = lab_linear_raw,
   LabLinear__n_observations = sample(1:10, N, replace = TRUE),
-  LabCurve__gam_slope = lab_curve_raw,
   LabCurve__n_observations = sample(1:10, N, replace = TRUE)
 )
 
-feature_selection <- data.table(
-  landmark_days = LANDMARK_DAY,
-  feature = c("LabLinear__gam_slope", "LabCurve__gam_slope"),
-  lab_name = c("LabLinear", "LabCurve"),
-  feature_stat = "gam_slope",
-  coverage = 1.0,
-  unique_non_missing = N
+gam_features <- data.table(
+  DFCI_MRN = patients,
+  LabLinear__gam_slope = lab_linear_raw,
+  LabCurve__gam_slope = lab_curve_raw
 )
 
 inputs_dir <- tempfile("gam_cox_smoke_inputs_")
 dir.create(inputs_dir)
 fwrite(aggregated, file.path(inputs_dir, sprintf("aggregated_landmark%d.csv", LANDMARK_DAY)))
-fwrite(feature_selection, file.path(inputs_dir, "cox_agg_feature_selection.csv"))
+features_dir <- tempfile("gam_cox_smoke_features_")
+dir.create(features_dir)
+fwrite(gam_features, file.path(features_dir, sprintf("gam_trajectory_features_landmark%d.csv", LANDMARK_DAY)))
 
 output_dir <- tempfile("gam_cox_smoke_output_")
 dir.create(output_dir)
@@ -100,6 +98,7 @@ result <- system2(
   args = c(
     shQuote(script_path),
     "--inputs-dir", shQuote(inputs_dir),
+    "--gam-features-dir", shQuote(features_dir),
     "--output-dir", shQuote(output_dir),
     "--landmark-days", as.character(LANDMARK_DAY)
   ),
@@ -113,14 +112,21 @@ if (!is.null(status) && status != 0) {
 }
 
 out_path <- file.path(output_dir, sprintf("gam_cox_nonlinearity_landmark%d.csv", LANDMARK_DAY))
-stopifnot(file.exists(out_path))
+selection_path <- file.path(output_dir, sprintf("gam_feature_selection_landmark%d.csv", LANDMARK_DAY))
+stopifnot(file.exists(out_path), file.exists(selection_path))
 r_results <- fread(out_path)
+selection_results <- fread(selection_path)
 print(r_results[, .(feature, n_used, n_events, edf, p_smooth, p_lrt, q_lrt, delta_aic, coef_linear, p_linear)])
 
 failures <- character(0)
 check <- function(cond, msg) {
   if (!isTRUE(cond)) failures[[length(failures) + 1]] <<- msg
 }
+
+check(setequal(selection_results$feature, names(gam_features)[-1]),
+      "independent feature-selection file does not contain exactly the GAM features")
+check(all(selection_results$selected), "full-coverage synthetic GAM features were not all selected")
+check("q_linear" %in% names(r_results), "GAM Cox output is missing q_linear")
 
 row_linear <- r_results[feature == "LabLinear__gam_slope"]
 row_curve <- r_results[feature == "LabCurve__gam_slope"]
@@ -147,6 +153,8 @@ writeLines(c(
   sprintf("inputs_dir = %s", shQuote(inputs_dir, type = "sh")),
   sprintf("landmark_day = %d", LANDMARK_DAY),
   "df = pd.read_csv(f'{inputs_dir}/aggregated_landmark{landmark_day}.csv')",
+  sprintf("gam_path = %s", shQuote(file.path(features_dir, sprintf("gam_trajectory_features_landmark%d.csv", LANDMARK_DAY)), type = "sh")),
+  "df = df.merge(pd.read_csv(gam_path), on='DFCI_MRN', how='left')",
   "endpoint_map = {'platinum': {'duration_col': 't_platinum', 'event_col': 'PLATINUM'}}",
   "result = run_univariate_nobs_adjusted_associations(",
   "    df,",
@@ -214,6 +222,7 @@ run_with_workers <- function(out_dir, n_workers) {
     args = c(
       shQuote(script_path),
       "--inputs-dir", shQuote(inputs_dir),
+      "--gam-features-dir", shQuote(features_dir),
       "--output-dir", shQuote(out_dir),
       "--landmark-days", as.character(LANDMARK_DAY),
       "--n-workers", as.character(n_workers)
@@ -251,4 +260,5 @@ if (length(failures) > 0) {
 
 cat("\nPASS: all smoke test assertions succeeded.\n")
 unlink(inputs_dir, recursive = TRUE)
+unlink(features_dir, recursive = TRUE)
 unlink(output_dir, recursive = TRUE)

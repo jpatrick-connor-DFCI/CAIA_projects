@@ -1,20 +1,18 @@
 # gam_cox_nonlinearity.R
 #
-# For each feature that survived Python's train_val coverage/variability
-# selection at a landmark, fits a penalized-spline Cox model and a linear
+# For each GAM feature that survives an independent train_val coverage/
+# variability gate at a landmark, fits a penalized-spline Cox model and a linear
 # Cox model on the SAME rows and asks whether the smooth is doing real work:
 # EDF meaningfully above 1 plus a small LRT p-value flags a feature whose
 # `hazard_ratio_per_sd` (from run_univariate_nobs_adjusted_associations) is
 # summarizing a relationship that is not actually linear -- a threshold or
 # U-shape the existing per-feature Cox model is blind to.
 #
-# This script deliberately mirrors survival_common/cox_models.py's
+# This script is independent of the main Python model run, but deliberately
+# mirrors survival_common/cox_models.py's
 # run_univariate_nobs_adjusted_associations() row-for-row:
-#   - fits on ALL splits (train+valid+test), not just train_val -- selection
-#     decides *which* features are tested, not which *rows* they're tested on
-#     (see cox_aggregated.py: raw_feature_cols/univariate_data = merged.copy()
-#     is the full cohort; select_feature_columns runs on train_val separately
-#     to pick the feature list)
+#   - fits on ALL splits (train+valid+test), not just train_val; the independent
+#     coverage/variability gate uses train+valid only
 #   - COMPASS has zero baseline covariates (compass_profile.py does not
 #     override static_covariates); the adjustment set here is exactly
 #     n_obs_z + age (+ x_missing when there is partial missingness), matching
@@ -24,19 +22,16 @@
 #     standardizes age using the same population statistics (ddof=0) as
 #     sklearn's SimpleImputer/the manual z-scoring in cox_models.py
 #
-# Inputs (all under <inputs-dir>, produced upstream in the pipeline):
+# Inputs:
 #   aggregated_landmark{D}.csv               base per-patient feature table
-#   gam_trajectory_features_landmark{D}.csv  optional; left-joined in exactly
-#                                             like load_prebuilt_landmark does
-#   cox_agg_feature_selection.csv            written by univariate_analysis.py;
-#                                             gives the exact selected feature
-#                                             list per landmark so this script
-#                                             never re-derives the coverage/
-#                                             variability gate itself
+#                                             under <inputs-dir>
+#   gam_trajectory_features_landmark{D}.csv  GAM-only features under
+#                                             <gam-features-dir>
 #
 # Output: gam_cox_nonlinearity_landmark{D}.csv with columns
 #   landmark_days, endpoint, feature, lab_name, feature_stat, n_used,
-#   n_events, edf, p_smooth, p_lrt, q_lrt, delta_aic, coef_linear, p_linear, note
+#   n_events, edf, p_smooth, p_lrt, q_lrt, delta_aic, coef_linear, p_linear,
+#   q_linear, note
 #
 # Correctness check: coef_linear here should match coef_feature in
 # cox_agg_univariate_nobs_adjusted.csv for the same feature/landmark, to
@@ -68,7 +63,8 @@ suppressPackageStartupMessages({
 })
 
 DEFAULT_INPUTS_DIR <- "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis/prediction_inputs"
-DEFAULT_OUTPUT_DIR <- "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis"
+DEFAULT_GAM_FEATURES_DIR <- "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis/GAM"
+DEFAULT_OUTPUT_DIR <- DEFAULT_GAM_FEATURES_DIR
 DEFAULT_LANDMARK_DAYS <- "0,90,180"
 DEFAULT_ENDPOINT <- "platinum"
 DEFAULT_DURATION_COL <- "t_platinum"
@@ -77,7 +73,7 @@ DEFAULT_AGE_COL <- "AGE_AT_TREATMENTSTART"
 DEFAULT_ID_COL <- "DFCI_MRN"
 DEFAULT_MIN_EVENTS_PER_FEATURE <- 10L
 DEFAULT_K_SMOOTH <- 10
-DEFAULT_FEATURE_SELECTION_CSV <- ""
+DEFAULT_MIN_PATIENT_COVERAGE <- 0.20
 DEFAULT_N_WORKERS <- 1L
 
 parse_cli_args <- function(args, defaults) {
@@ -101,6 +97,7 @@ args_list <- parse_cli_args(
   commandArgs(trailingOnly = TRUE),
   list(
     inputs_dir = DEFAULT_INPUTS_DIR,
+    gam_features_dir = DEFAULT_GAM_FEATURES_DIR,
     output_dir = DEFAULT_OUTPUT_DIR,
     landmark_days = DEFAULT_LANDMARK_DAYS,
     endpoint = DEFAULT_ENDPOINT,
@@ -110,13 +107,14 @@ args_list <- parse_cli_args(
     id_col = DEFAULT_ID_COL,
     min_events_per_feature = DEFAULT_MIN_EVENTS_PER_FEATURE,
     k_smooth = DEFAULT_K_SMOOTH,
-    feature_selection_csv = DEFAULT_FEATURE_SELECTION_CSV,
+    min_patient_coverage = DEFAULT_MIN_PATIENT_COVERAGE,
     n_workers = DEFAULT_N_WORKERS
   )
 )
 
 landmark_days <- as.integer(strsplit(as.character(args_list$landmark_days), ",")[[1]])
 inputs_dir <- args_list$inputs_dir
+gam_features_dir <- args_list$gam_features_dir
 output_dir <- args_list$output_dir
 endpoint <- args_list$endpoint
 duration_col <- args_list$duration_col
@@ -125,14 +123,18 @@ age_col <- args_list$age_col
 id_col <- args_list$id_col
 min_events_per_feature <- as.integer(args_list$min_events_per_feature)
 k_smooth <- as.integer(args_list$k_smooth)
-feature_selection_csv <- as.character(args_list$feature_selection_csv)
+min_patient_coverage <- as.numeric(args_list$min_patient_coverage)
 n_workers <- as.integer(args_list$n_workers)
 
 if (n_workers < 1L) stop("--n-workers must be at least 1")
-if (n_workers > parallel::detectCores()) {
+if (!is.finite(min_patient_coverage) || min_patient_coverage < 0 || min_patient_coverage > 1) {
+  stop("--min-patient-coverage must be between 0 and 1")
+}
+detected_cores <- parallel::detectCores()
+if (!is.na(detected_cores) && n_workers > detected_cores) {
   warning(sprintf(
     "--n-workers %d exceeds %d detected cores (oversubscription risk)",
-    n_workers, parallel::detectCores()
+    n_workers, detected_cores
   ))
 }
 
@@ -305,35 +307,49 @@ for (landmark_day in landmark_days) {
   aggregated <- fread(agg_path)
   aggregated[[id_col]] <- as.character(aggregated[[id_col]])
 
-  gam_path <- file.path(inputs_dir, sprintf("gam_trajectory_features_landmark%d.csv", landmark_day))
-  if (file.exists(gam_path)) {
-    gam_features <- fread(gam_path)
-    gam_features[[id_col]] <- as.character(gam_features[[id_col]])
-    overlap <- intersect(setdiff(names(gam_features), id_col), names(aggregated))
-    if (length(overlap) > 0) {
-      stop(sprintf("GAM feature file %s has columns overlapping aggregated_landmark%d.csv: %s",
-                    gam_path, landmark_day, paste(overlap, collapse = ", ")))
-    }
-    aggregated <- merge(aggregated, gam_features, by = id_col, all.x = TRUE)
-    cat(sprintf("Merged %d GAM trajectory feature columns from %s\n", ncol(gam_features) - 1, gam_path))
-  } else {
-    cat(sprintf("No GAM trajectory feature file at %s; skipping GAM merge.\n", gam_path))
+  gam_path <- file.path(gam_features_dir, sprintf("gam_trajectory_features_landmark%d.csv", landmark_day))
+  if (!file.exists(gam_path)) stop(sprintf("Missing %s. Run gam_trajectory_features.R first.", gam_path))
+  gam_features <- fread(gam_path)
+  gam_features[[id_col]] <- as.character(gam_features[[id_col]])
+  gam_cols <- setdiff(names(gam_features), id_col)
+  if (length(gam_cols) == 0) stop(sprintf("%s contains no GAM feature columns.", gam_path))
+  if (any(!grepl("__gam_", gam_cols, fixed = TRUE))) {
+    stop(sprintf("Non-GAM columns found in %s: %s", gam_path,
+                 paste(gam_cols[!grepl("__gam_", gam_cols, fixed = TRUE)], collapse = ", ")))
   }
+  overlap <- intersect(gam_cols, names(aggregated))
+  if (length(overlap) > 0) {
+    stop(sprintf("GAM feature columns unexpectedly overlap the main aggregate table: %s",
+                 paste(overlap, collapse = ", ")))
+  }
+  aggregated <- merge(aggregated, gam_features, by = id_col, all.x = TRUE)
+  cat(sprintf("Joined %d GAM-only feature columns from %s\n", length(gam_cols), gam_path))
 
-  selection_path <- if (nzchar(feature_selection_csv)) {
-    feature_selection_csv
-  } else {
-    file.path(inputs_dir, "cox_agg_feature_selection.csv")
+  if (!"split" %in% names(aggregated)) stop(sprintf("%s is missing the split column.", agg_path))
+  train_val <- aggregated[split %in% c("train", "valid")]
+  selection_rows <- lapply(gam_cols, function(feature) {
+    values <- train_val[[feature]]
+    parsed <- parse_feature_name(feature)
+    data.table(
+      landmark_days = landmark_day,
+      feature = feature,
+      lab_name = parsed[[1]],
+      feature_stat = parsed[[2]],
+      coverage = mean(!is.na(values)),
+      unique_non_missing = uniqueN(values[!is.na(values)])
+    )
+  })
+  selection <- rbindlist(selection_rows)
+  selection[, selected := coverage >= min_patient_coverage & unique_non_missing > 1]
+  features_to_test <- selection[selected == TRUE]$feature
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  selection_path <- file.path(output_dir, sprintf("gam_feature_selection_landmark%d.csv", landmark_day))
+  fwrite(selection, selection_path)
+  cat(sprintf("Selected %d/%d GAM features at coverage >= %.2f; wrote %s\n",
+              length(features_to_test), length(gam_cols), min_patient_coverage, selection_path))
+  if (length(features_to_test) == 0) {
+    stop(sprintf("No GAM features passed selection for landmark %d.", landmark_day))
   }
-  if (!file.exists(selection_path)) {
-    stop(sprintf(
-      "Missing %s. Run univariate_analysis.py first -- this script depends on its feature selection, not its own gate.",
-      selection_path
-    ))
-  }
-  selection <- fread(selection_path)
-  features_to_test <- selection[landmark_days == landmark_day]$feature
-  cat(sprintf("Selected features to test at this landmark: %d\n", length(features_to_test)))
 
   per_feature <- parallel::mclapply(
     features_to_test,
@@ -361,10 +377,11 @@ for (landmark_day in landmark_days) {
   rows <- lapply(per_feature, `[[`, "row")
   out <- rbindlist(rows)
   out[, q_lrt := stats::p.adjust(p_lrt, method = "BH")]
+  out[, q_linear := stats::p.adjust(p_linear, method = "BH")]
   setcolorder(out, c(
     "landmark_days", "endpoint", "feature", "lab_name", "feature_stat", "n_used",
     "n_events", "edf", "p_smooth", "p_lrt", "q_lrt", "delta_aic", "coef_linear",
-    "p_linear", "note"
+    "p_linear", "q_linear", "note"
   ))
 
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)

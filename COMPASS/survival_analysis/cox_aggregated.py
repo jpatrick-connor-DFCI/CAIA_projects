@@ -303,7 +303,6 @@ def _load_prebuilt_landmark(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     from build_prediction_inputs import (
         aggregated_filename,
-        gam_feature_filename,
         pre_treatment_lab_filename,
     )
 
@@ -312,7 +311,6 @@ def _load_prebuilt_landmark(
         landmark_day,
         aggregated_filename=aggregated_filename,
         pre_treatment_lab_filename=pre_treatment_lab_filename,
-        gam_feature_filename=gam_feature_filename,
         id_col=ID_COL,
     )
 

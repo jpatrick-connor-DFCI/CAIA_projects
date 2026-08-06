@@ -8,12 +8,12 @@
 # shrinkage toward the population curve, stays defined for patients with very
 # few labs.
 #
-# Inputs (all written by COMPASS/data_preprocessing/build_prediction_inputs.py):
+# Cohort inputs (all written by COMPASS/data_preprocessing/build_prediction_inputs.py):
 #   <inputs-dir>/pre_treatment_lab_long_landmark{D}.csv   DFCI_MRN, LAB_NAME, LAB_VALUE, t_lab
 #   <inputs-dir>/canonical_labs_train_val.csv             landmark_days, lab_name
 #   <inputs-dir>/split_assignments_landmark{D}.csv        DFCI_MRN, split   (only for --fit-split train_val)
 #
-# Outputs (written back into <inputs-dir>, one pair per requested landmark):
+# Outputs (written into <output-dir>, separate from the main pipeline):
 #   gam_trajectory_features_landmark{D}.csv   one row per DFCI_MRN; columns
 #                                              <LAB>__gam_{level,slope,curvature,auc,dev}
 #   gam_fit_diagnostics_landmark{D}.csv       one row per lab; basis used, EDF,
@@ -56,6 +56,7 @@ suppressPackageStartupMessages({
 # Python side of this pipeline, e.g. COMPASS/survival_analysis/cox_aggregated.py)
 # ---------------------------------------------------------------------------
 DEFAULT_INPUTS_DIR <- "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis/prediction_inputs"
+DEFAULT_OUTPUT_DIR <- "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis/GAM"
 DEFAULT_LANDMARK_DAYS <- "0,90,180"
 DEFAULT_K_POP <- 10
 DEFAULT_K_PAT <- 5
@@ -109,6 +110,7 @@ args_list <- parse_cli_args(
   commandArgs(trailingOnly = TRUE),
   list(
     inputs_dir = DEFAULT_INPUTS_DIR,
+    output_dir = DEFAULT_OUTPUT_DIR,
     landmark_days = DEFAULT_LANDMARK_DAYS,
     k_pop = DEFAULT_K_POP,
     k_pat = DEFAULT_K_PAT,
@@ -132,6 +134,7 @@ args_list <- parse_cli_args(
 
 landmark_days <- as.integer(strsplit(as.character(args_list$landmark_days), ",")[[1]])
 inputs_dir <- args_list$inputs_dir
+output_dir <- args_list$output_dir
 id_col <- args_list$id_col
 k_pop <- as.integer(args_list$k_pop)
 k_pat <- as.integer(args_list$k_pat)
@@ -173,10 +176,11 @@ curve_lab_filter <- if (nzchar(curve_labs)) {
 } else {
   NULL
 }
-if (n_workers * nthreads > parallel::detectCores()) {
+detected_cores <- parallel::detectCores()
+if (!is.na(detected_cores) && n_workers * nthreads > detected_cores) {
   warning(sprintf(
     "--n-workers %d x --nthreads %d = %d exceeds %d detected cores (oversubscription risk)",
-    n_workers, nthreads, n_workers * nthreads, parallel::detectCores()
+    n_workers, nthreads, n_workers * nthreads, detected_cores
   ))
 }
 
@@ -470,14 +474,15 @@ if (!file.exists(canonical_path)) {
   stop(sprintf("Missing %s. Run build_prediction_inputs.py first.", canonical_path))
 }
 canonical_labs_all <- fread(canonical_path, colClasses = list(character = "lab_name"))
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
 for (landmark_day in landmark_days) {
   cat(sprintf("\n##### GAM TRAJECTORY FEATURES: LANDMARK +%dD #####\n", landmark_day))
   flush.console()
 
-  out_path <- file.path(inputs_dir, sprintf("gam_trajectory_features_landmark%d.csv", landmark_day))
-  diag_path <- file.path(inputs_dir, sprintf("gam_fit_diagnostics_landmark%d.csv", landmark_day))
-  curve_path <- file.path(inputs_dir, sprintf("gam_trajectory_curves_landmark%d.csv", landmark_day))
+  out_path <- file.path(output_dir, sprintf("gam_trajectory_features_landmark%d.csv", landmark_day))
+  diag_path <- file.path(output_dir, sprintf("gam_fit_diagnostics_landmark%d.csv", landmark_day))
+  curve_path <- file.path(output_dir, sprintf("gam_trajectory_curves_landmark%d.csv", landmark_day))
   if (resume && file.exists(out_path)) {
     cat(sprintf("  [resume] %s already exists -- skipping landmark %d\n", out_path, landmark_day))
     next

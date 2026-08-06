@@ -5,12 +5,12 @@ exports and running landmark survival analysis (Cox / XGBoost) on the resulting 
 
 The preprocessing and modeling code is pandas-based; publication figures are generated only in R.
 Entry points are command-line scripts orchestrated from notebooks.
-COMPASS uses one `COMPASS_run_locally.ipynb` notebook for two treatment-anchored cohort arms,
-both drawn from an ADT-entry ICD-C61 cohort: `arpi` (anchored at first ARPI/chemo exposure) and
-`adt` (anchored at first ADT exposure, years earlier in the treatment sequence). Patients with
-bladder (C67), lung (C34), head-and-neck (C00-C14/C30-C32), or testicular (C62) cancer diagnosed
-strictly after ADT start are excluded. The paired, R-only `COMPASS_generate_figures.ipynb` emits
-manuscript figures for both.
+COMPASS uses numbered stage notebooks (`01_preprocessing.ipynb`, `02_univariate.ipynb`,
+`03_multivariate.ipynb`) for two treatment-anchored cohort arms, both drawn from an ADT-entry
+ICD-C61 cohort: `arpi` (anchored at first ARPI/chemo exposure) and `adt` (anchored at first ADT
+exposure, years earlier in the treatment sequence). Patients with bladder (C67), lung (C34),
+head-and-neck (C00-C14/C30-C32), or testicular (C62) cancer diagnosed strictly after ADT start are
+excluded. The paired, R-only `05_figures.ipynb` emits manuscript figures for both.
 
 > This README is the canonical reference for editing the pipeline. It documents the directory
 > layout, the data flow, every script's inputs/outputs, the **conventions and invariants that
@@ -57,18 +57,26 @@ COMPASS/
 │   └── build_genomic_inputs.py           # optional: genomic arm inputs
 │
 └── survival_analysis/
+    ├── compass_pipeline.py               # shared setup/helper logic behind the 3 Python notebooks
     ├── cox_aggregated.py                 # PROFILE adapter/config for shared survival code
     ├── univariate_analysis.py            # ENTRY: univariate Cox associations
     ├── multivariate_analysis.py          # ENTRY: elastic-net Cox or XGBoost survival:cox
-    ├── gam_trajectory_features.R         # hierarchical longitudinal GAM features
-    ├── gam_cox_nonlinearity.R            # smooth-vs-linear Cox GAM tests
-    ├── COMPASS_run_GAMs.ipynb            # R-kernel GAM runner for either COMPASS data root
     ├── COMPASS_generate_figures_pipeline.R # sole figure-generation implementation
-    ├── COMPASS_nominally_significant_univariate.ipynb # review nominal univariate hits
-    ├── COMPASS_run_locally.ipynb / COMPASS_generate_figures.ipynb # Python models / R figures
-    └── COMPASS_run_locally_profile_data.ipynb / COMPASS_generate_figures_profile_data.ipynb
-                                          # same pipeline, merged PROFILE_data_processing parquets
+    ├── 01_preprocessing.ipynb            # schema audit, cohort compile, preprocessing, diagnostics
+    ├── 02_univariate.ipynb               # univariate arms + nominal-significance filter
+    ├── 03_multivariate.ipynb             # elastic-net + XGBoost + summary tables
+    ├── 05_figures.ipynb                  # R figures; DATA_VARIANT switch (baseline / profile_data)
+    └── GAM/
+        ├── gam_trajectory_features.R     # hierarchical longitudinal GAM features
+        ├── gam_cox_nonlinearity.R        # smooth-vs-linear Cox GAM tests
+        └── 04_gam.ipynb                  # R-kernel GAM runner; DATA_VARIANT switch
 ```
+
+All five numbered notebooks are thin wrappers: the three Python ones share
+`compass_pipeline.py`, and both `01_preprocessing.ipynb`/`05_figures.ipynb`/`GAM/04_gam.ipynb`
+select their data root with a `DATA_VARIANT` switch (`"baseline"` for the single-release
+`ALL_2025_03` CSVs, `"profile_data"` for the merged PROFILE_data_processing parquets) instead of
+existing as separate notebooks per variant.
 
 ---
 
@@ -91,7 +99,7 @@ COMPASS/
         ▼  survival_analysis/univariate_analysis.py
            survival_analysis/multivariate_analysis.py
         │
-        ▼  COMPASS_generate_figures.ipynb (R; 2 cohort arms: arpi, adt)
+        ▼  05_figures.ipynb (R; 2 cohort arms: arpi, adt)
  figures/
 ```
 
@@ -304,7 +312,7 @@ is a no-op if the file is absent). `gam_cox_nonlinearity.R` runs **after** `univ
 since it depends on the feature list in `cox_agg_feature_selection.csv`; it fits on the full merged
 table (train+valid+test), mirroring the same row-fitting asymmetry as
 `run_univariate_nobs_adjusted_associations`, and writes `gam_cox_nonlinearity_landmark{D}.csv`.
-The R stages are isolated in the R-kernel `COMPASS_run_GAMs.ipynb` so the Python run notebooks and
+The R stages are isolated in the R-kernel `GAM/04_gam.ipynb` so the Python run notebooks and
 the `mgcv` conda environment do not need to coexist. The enforced handoff is: build inputs in Python,
 run trajectory GAMs in R, set `REBUILD_PREDICTION_INPUTS = False` and rerun Python Stage 3 so its
 models consume the trajectory features, then return to R for nonlinear Cox GAMs. Stage B rejects a
@@ -314,17 +322,20 @@ merged-PROFILE roots.
 
 ### 2.4 — Notebooks
 
-COMPASS PROFILE has one run notebook, one figure notebook, a focused
-univariate-results review notebook, and a parallel `*_profile_data` run/figure pair that executes
-the identical pipeline against the merged PROFILE_data_processing parquets:
+COMPASS PROFILE has three numbered Python stage notebooks sharing `compass_pipeline.py`, one R
+figure notebook, and a `DATA_VARIANT` switch (`"baseline"` vs. `"profile_data"`) instead of a
+parallel notebook pair per data source:
 
-- `COMPASS_run_locally.ipynb` — drives preprocessing and runs both `COHORT_SPECS` arms: `arpi`
-  and `adt` (both landmarks 0/90), over the common ADT-entry eligible cohort.
-  Each arm gets
-  independent prediction inputs and univariate, elastic-net, and XGBoost models at its own landmark
-  list (`tasks_for_run(run)` builds the per-run task grid from `run["landmarks"]`), and the Stage 2
-  cell runs `longitudinal_data_processing.py` once per anchor (`--anchor-med-set {arpi,adt}`).
-- `COMPASS_generate_figures.ipynb` — the sole COMPASS figure notebook, using the R kernel and
+- `01_preprocessing.ipynb` — drives preprocessing (schema audit, cohort compile, longitudinal
+  preprocessing, prediction-input build, diagnostics) for whichever arms are selected (`arpi`
+  and/or `adt`, both landmarks 0/90), over the common ADT-entry eligible cohort. Each arm gets
+  independent prediction inputs at its own landmark list, and Stage 2 runs
+  `longitudinal_data_processing.py` once per anchor (`--anchor-med-set {arpi,adt}`).
+- `02_univariate.ipynb` / `03_multivariate.ipynb` — read `01`'s prediction inputs and run
+  univariate, elastic-net, and XGBoost models independently of preprocessing
+  (`tasks_for_run(run)` builds the per-run task grid from `run["landmarks"]`); either can be
+  re-run alone without touching Stage 1-3 outputs.
+- `05_figures.ipynb` — the sole COMPASS figure notebook, using the R kernel and
   `COMPASS_generate_figures_pipeline.R`. It renders both arms' overview, LLM-label, univariate,
   multivariate, KM, and per-lab distribution/trajectory figures at landmarks 0 and 90. Figure 1A reads
   `mrn_lists/icd_prostate_mrn_flags.csv` and displays cumulative ICD-C61 cohort selection through
@@ -387,13 +398,13 @@ the identical pipeline against the merged PROFILE_data_processing parquets:
     `figure_group()` uses `assign_category()` for CBC/CMP/LFT/Vitals/Androgen axis/Other. Any
     plot stem `figure_group()` can't route still raises
     `stop("Unmapped figure output stem")`.
-- `COMPASS_nominally_significant_univariate.ipynb` loads all shared-landmark univariate results
-  for both `arpi` and `adt`, filters each to nominal `p_value < 0.05`, displays every hit, and exports
-  a separate `cox/nominally_significant_univariate_results.csv` beneath each arm's run directory.
-- `COMPASS_run_locally_profile_data.ipynb` / `COMPASS_generate_figures_profile_data.ipynb` — the
-  same two notebooks pointed at the merged PROFILE_data_processing parquets and a separate output
-  root. Every shared run-helper cell is byte-identical to the baseline notebooks and
-  `COMPASS_generate_figures_pipeline.R` is unmodified, so only the data source differs. See
+  `02_univariate.ipynb`'s final section loads all shared-landmark univariate results for both
+  `arpi` and `adt`, filters each to nominal `p_value < 0.05`, displays every hit, and exports a
+  separate `cox/nominally_significant_univariate_results.csv` beneath each arm's run directory.
+- Setting `DATA_VARIANT = "profile_data"` in any of the four notebooks points the same code at the
+  merged PROFILE_data_processing parquets and a separate output root instead of the baseline
+  `ALL_2025_03` CSVs. `compass_pipeline.py` and `COMPASS_generate_figures_pipeline.R` are shared
+  verbatim across both variants, so only the data source differs. See
   [Two OncDRS source roots](#two-oncdrs-source-roots).
 
 IPIO has a paired run/figure notebook as well:
@@ -415,10 +426,12 @@ differ only in which OncDRS extract they read and where they write.
 | | Baseline | PROFILE_data_processing |
 |---|---|---|
 | Source | `/data/gusev/PROFILE/CLINICAL/OncDRS/ALL_2025_03/*.csv` (one release) | `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/*.parquet` (7 releases merged + deduplicated) |
-| Run notebook | `COMPASS_run_locally.ipynb` | `COMPASS_run_locally_profile_data.ipynb` |
-| Figure notebook | `COMPASS_generate_figures.ipynb` | `COMPASS_generate_figures_profile_data.ipynb` |
+| `DATA_VARIANT` | `"baseline"` | `"profile_data"` |
 | Data root | `data/CAIA/COMPASS/` | `data/CAIA/COMPASS_PROFILE_DATA/` |
 | Figure root | `figures/CAIA/COMPASS/` | `figures/CAIA/COMPASS_PROFILE_DATA/` |
+
+Run/figure notebooks (`01_preprocessing.ipynb`, `05_figures.ipynb`, `GAM/04_gam.ipynb`) are shared
+across both roots via the `DATA_VARIANT` switch at the top of each notebook.
 
 The roots are disjoint, so the two runs can be compared side by side and neither clobbers the
 other. The parquets are built by the sibling repo `PROFILE_data_processing`
@@ -455,7 +468,8 @@ merged parquets:
 The upstream `COLUMN_MAP` requests both the old and new spellings and coalesces them via
 `ALIAS_MAP`, since release schemas differ across the seven pulls.
 
-The first code cell of `COMPASS_run_locally_profile_data.ipynb` is a **schema audit** that guards
+With `DATA_VARIANT = "profile_data"`, the second code cell of `01_preprocessing.ipynb` is a
+**schema audit** (`compass_pipeline.audit_schema`) that guards
 this. It scans all five tables and checks columns in three tiers — REQUIRED (absent *or* all-null
 raises), EXPECTED (absent raises, all-null warns — for legitimately sparse columns like
 `HYBRID_DEATH_DT` and `LABS.TEXT_RESULT`), OPTIONAL (warns either way) — and raises a single
@@ -522,7 +536,7 @@ anchor ran last — it is labelled as such in the cell.
 # Stage 1 (cluster paths hard-coded, override via CLI flags if needed)
 python COMPASS/data_preprocessing/compile_COMPASS_cohort_data.py
 
-# Stage 2 — or just run COMPASS/survival_analysis/COMPASS_run_locally.ipynb top to bottom.
+# Stage 2 — or just run COMPASS/survival_analysis/01_preprocessing.ipynb top to bottom.
 # Run once per anchor; --anchor-med-set switches the default survival-cohort/output/cache paths.
 python COMPASS/data_preprocessing/longitudinal_data_processing.py --anchor-med-set arpi
 python COMPASS/data_preprocessing/longitudinal_data_processing.py --anchor-med-set adt
@@ -532,12 +546,14 @@ python COMPASS/survival_analysis/multivariate_analysis.py --model elastic-net --
 python COMPASS/survival_analysis/multivariate_analysis.py --model xgboost --inputs-dir <...>/prediction_inputs --landmark-days 0
 ```
 
-To run against the merged PROFILE_data_processing parquets instead, use
-`COMPASS_run_locally_profile_data.ipynb` → `COMPASS_generate_figures_profile_data.ipynb` (both
-top to bottom). They pass the `PROFILE_DATA/*.parquet` paths and the `COMPASS_PROFILE_DATA` roots to the
-same scripts; nothing under `data/CAIA/COMPASS/` or `figures/CAIA/COMPASS/` is written. The figure
-notebook symlinks `LLM_NEPC_labels/` from the baseline root, since those hand-curated annotations
-are an input to `generate_figures()` rather than something the pipeline produces.
+To run against the merged PROFILE_data_processing parquets instead, set
+`DATA_VARIANT = "profile_data"` at the top of `01_preprocessing.ipynb` → `02_univariate.ipynb` →
+`03_multivariate.ipynb` → `05_figures.ipynb` (run each top to bottom). They pass the
+`PROFILE_DATA/*.parquet` paths and the `COMPASS_PROFILE_DATA` roots to the same scripts; nothing
+under `data/CAIA/COMPASS/` or `figures/CAIA/COMPASS/` is written. `05_figures.ipynb` symlinks
+`LLM_NEPC_labels/` from the baseline root when run with `DATA_VARIANT = "profile_data"`, since
+those hand-curated annotations are an input to `generate_figures()` rather than something the
+pipeline produces.
 
 ## Dependencies
 
