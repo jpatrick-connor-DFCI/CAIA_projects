@@ -1751,15 +1751,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   OUT_DIR <- fig_dir("figure3_univariate")
 
   load_uni <- function(landmark) {
-    shared <- file.path(BASE, "cox", "landmark_shared",
-                        "cox_agg_univariate_nobs_adjusted.csv")
-    if (file.exists(shared)) {
-      return(read_csv(shared, show_col_types = FALSE) %>%
-               filter(landmark_days == landmark))
-    }
-    legacy <- file.path(BASE, "cox", sprintf("landmark_%s", landmark), "both",
-                        "cox_agg_univariate_nobs_adjusted.csv")
-    read_csv(legacy, show_col_types = FALSE) %>% mutate(landmark_days = landmark)
+    path <- file.path(BASE, "cox", sprintf("landmark_%s", landmark), "both",
+                      "cox_agg_univariate_nobs_adjusted.csv")
+    read_csv(path, show_col_types = FALSE) %>% mutate(landmark_days = landmark)
   }
 
   uni <- map_dfr(LANDMARKS, load_uni) %>%

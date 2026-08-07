@@ -500,16 +500,6 @@ MULTIVARIATE_TASK_SPECS = [
     ("xgboost", "baseline", "landmark_xgboost_baseline_metrics.csv"),
 ]
 
-# Output subdir for the shared-canonical-labs univariate arm. This arm is a
-# SINGLE invocation over ALL landmarks (univariate_analysis.py --shared-canonical-labs
-# --landmark-days <all>): the runner intersects each landmark's canonical labs and
-# tests that one shared set at every landmark, so every selected landmark sees an
-# identical feature list and their per-lab HRs are directly comparable. Results
-# land in cox/landmark_shared/ with landmark_days as a column inside the CSV.
-SHARED_UNIVARIATE_DIR = "cox/landmark_shared"
-SHARED_UNIVARIATE_FILE = "cox_agg_univariate_nobs_adjusted.csv"
-
-
 def tasks_for_run(run: dict, specs=MULTIVARIATE_TASK_SPECS):
     """Cross a task-spec list with this run's own landmark list.
 
@@ -564,38 +554,6 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
     raise ValueError(f"Unknown model: {model}")
 
 
-def run_shared_univariate(run: dict, dry_run: bool = False):
-    """Univariate arm on ONE shared canonical lab set across all of this run's landmarks.
-
-    Single invocation over every landmark in run["landmarks"] with
-    --shared-canonical-labs, so the runner intersects each landmark's canonical
-    labs and tests that shared set at every landmark. The resulting CSV carries a
-    landmark_days column, so every selected landmark's rows are directly comparable.
-    """
-    row_output_dir = run["output_dir"] / SHARED_UNIVARIATE_DIR
-    row_output_dir.mkdir(parents=True, exist_ok=True)
-    metrics_path = row_output_dir / SHARED_UNIVARIATE_FILE
-    tag = f"{run['label']:28s} univariate  landmark_shared (labs={','.join(map(str, run['landmarks']))})"
-    if metrics_path.exists() and not FORCE_RERUN:
-        print(f"[skip] {tag} -> exists")
-        return (tag, "skipped", 0.0)
-    cmd = [
-        PYTHON, SURVIVAL_DIR / "univariate_analysis.py",
-        "--inputs-dir", run["inputs_dir"],
-        "--output-dir", row_output_dir,
-        "--landmark-days", *[str(lm) for lm in run["landmarks"]],
-        "--endpoints", "platinum",
-        "--shared-canonical-labs",
-    ]
-    print(f"[run ] {tag}")
-    t0 = time.time()
-    rc = _run(cmd, dry_run=dry_run)
-    elapsed = time.time() - t0
-    status = "ok" if rc == 0 else f"FAILED (rc={rc})"
-    print(f"[done] {tag} -> {status} ({elapsed/60:.1f} min)\n")
-    return (tag, status, elapsed)
-
-
 def _run_tasks(run: dict, specs, dry_run: bool = False):
     print(f"\n========== run models: {run['title']} ==========")
     tasks = tasks_for_run(run, specs)
@@ -622,9 +580,8 @@ def _run_tasks(run: dict, specs, dry_run: bool = False):
 
 
 def run_univariate(run: dict, dry_run: bool = False):
-    """Per-landmark univariate arm, plus the shared-canonical-labs arm."""
+    """Per-landmark univariate arm."""
     summary = _run_tasks(run, UNIVARIATE_TASK_SPECS, dry_run=dry_run)
-    summary.append(run_shared_univariate(run, dry_run=dry_run))
     print("\n=== run summary ===")
     for tag, status, elapsed in summary:
         print(f"  {tag} {status:>20s} {elapsed/60:6.1f} min")
@@ -679,26 +636,6 @@ def summarize_outputs(run: dict) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["run", "landmark", "model", "config"]).reset_index(drop=True)
 
 
-def summarize_univariate_shared(run: dict) -> pd.DataFrame:
-    """Per-lab platinum associations at every landmark for this run, on the SHARED lab set.
-
-    Reads the shared-arm univariate CSV (identical canonical lab set at every
-    landmark, landmark_days as a column) so PSA/testosterone HRs can be read
-    across landmarks side by side.
-    """
-    path = run["output_dir"] / SHARED_UNIVARIATE_DIR / SHARED_UNIVARIATE_FILE
-    if not path.exists():
-        print(f"  shared univariate output missing: {path}")
-        return pd.DataFrame()
-    df = pd.read_csv(path)
-    df = df.loc[df["endpoint"] == "platinum"].copy()
-    keep = ["landmark_days", "feature", "lab_name", "feature_stat",
-            "hazard_ratio_per_sd", "p_value", "q_value", "n_patients_used", "n_events_used"]
-    keep = [c for c in keep if c in df.columns]
-    sort_cols = [c for c in ("lab_name", "feature_stat", "landmark_days") if c in df.columns]
-    return df[keep].sort_values(sort_cols).reset_index(drop=True)
-
-
 def filter_nominal(results: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
     """Retain rows with nominal significance (p_value < alpha).
 
@@ -723,20 +660,11 @@ def filter_nominal(results: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
 
 
 def load_univariate_results(run: dict) -> pd.DataFrame:
-    """Load the shared-canonical univariate CSV (preferred) or legacy per-landmark files.
-
-    The shared-canonical result file is preferred because it contains every
-    reported landmark in one table and is the source used by Figure 3. Legacy
-    per-landmark files are loaded only when the shared file is unavailable.
-    """
+    """Load per-landmark univariate result CSVs for this run."""
     import re
 
     run_dir = run["output_dir"]
-    shared_path = run_dir / SHARED_UNIVARIATE_DIR / SHARED_UNIVARIATE_FILE
-    if shared_path.exists():
-        paths = [shared_path]
-    else:
-        paths = sorted((run_dir / "cox").glob(f"landmark_*/both/{SHARED_UNIVARIATE_FILE}"))
+    paths = sorted((run_dir / "cox").glob("landmark_*/both/cox_agg_univariate_nobs_adjusted.csv"))
 
     if not paths:
         raise FileNotFoundError(

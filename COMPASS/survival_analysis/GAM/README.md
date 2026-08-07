@@ -47,6 +47,12 @@ The Cox output includes both the linear GAM-feature association
 (`coef_linear`, `p_linear`, `q_linear`) and the smooth-versus-linear comparison
 (`edf`, `p_lrt`, `q_lrt`, `delta_aic`).
 
+The notebook's final section renders two figures to
+`<data-root>/survival_analysis/GAM/<arm>/figures/`: `gam_trajectory_curves.png`
+(per-patient fitted GAM curves with the population mean overlaid, one panel per
+lab per landmark) and `gam_cox_volcano.png` (a volcano plot of the Stage B
+linear associations, with nonlinear hits outlined).
+
 ## Smoke tests
 
 Run from the repository root:
