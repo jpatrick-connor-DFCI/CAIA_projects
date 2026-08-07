@@ -1078,6 +1078,7 @@ def main() -> None:
             args.medications_csv,
             broad_cohort_mrns,
             cols=MEDICATION_SCAN_COLUMNS,
+            table="MEDICATIONS",
         )
         .collect()
         .to_pandas()
@@ -1146,6 +1147,7 @@ def main() -> None:
             args.labs_csv,
             candidate_mrns,
             cols=LAB_SCAN_COLUMNS,
+            table="LABS",
         ).collect()
         labs_df_pl = labs_df_pl.with_columns(
             pl.col(ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
@@ -1164,6 +1166,7 @@ def main() -> None:
             args.health_csv,
             eligible_mrns,
             cols=HEALTH_SCAN_COLUMNS,
+            table="HEALTH_HISTORY",
         ).collect()
         raw_longitudinal_df_pl = build_raw_longitudinal_data(
             health_df_pl,

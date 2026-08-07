@@ -81,6 +81,7 @@ import polars as pl
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from data_preprocessing_common import fast_io  # noqa: E402
+from data_preprocessing_common.oncdrs_dedup import apply_dedup  # noqa: E402
 from data_preprocessing_common.oncdrs_sources import scan_source  # noqa: E402
 
 ID_COL = "DFCI_MRN"
@@ -307,18 +308,30 @@ def load_and_explode_icd(icd_path) -> pl.DataFrame:
     DIAGNOSIS_ICD10_CD, no _CD2/_CD3) is passed through unchanged so this
     remains compatible with timestamped_icd_info.csv.gz-style inputs.
     """
-    icds = scan_source(icd_path).collect()
+    icds_lf = scan_source(icd_path)
 
     pair_cols = [
         ('DIAGNOSIS_ICD10_CD', 'DIAGNOSIS_ICD10_NM'),
         ('DIAGNOSIS_ICD10_CD2', 'DIAGNOSIS_ICD10_NM2'),
         ('DIAGNOSIS_ICD10_CD3', 'DIAGNOSIS_ICD10_NM3'),
     ]
-    extra_pairs = [(c, n) for c, n in pair_cols[1:] if c in icds.columns]
+    schema_cols = icds_lf.collect_schema().names()
+    extra_pairs = [(c, n) for c, n in pair_cols[1:] if c in schema_cols]
 
     # Legacy / already-flat source: only the primary code column present.
+    # Not the raw EHR_DIAGNOSES shape, so it doesn't get deduped on the
+    # EHR_DIAGNOSES key here -- and there is nothing to melt below, so
+    # deduping before vs. after the (skipped) melt is moot anyway.
     if not extra_pairs:
-        return icds
+        return icds_lf.collect()
+
+    # Raw EHR_DIAGNOSIS source: dedup on the canonical EHR_DIAGNOSES key
+    # BEFORE the melt below. The melt fans DIAGNOSIS_ICD10_CD/_CD2/_CD3 out
+    # into separate rows and destroys the multi-code key the dedup needs, so
+    # deduping after the melt would be meaningless (each melted row only
+    # carries one code column, not the CD/CD2/CD3 triple the key is defined
+    # over).
+    icds = apply_dedup(icds_lf, "EHR_DIAGNOSES").collect()
 
     # Raw EHR_DIAGNOSIS: melt CD/CD2/CD3 (+ names) into one code per row,
     # carrying every other (non-code) column along on each melted row.
@@ -350,24 +363,28 @@ def load_and_explode_icd(icd_path) -> pl.DataFrame:
 # ICD inclusion/exclusion output + in-memory medications read
 # ---------------------------------------------------------------------------
 
-def filter_and_save(filename, outname, cohort_mrns, cols=None) -> pl.DataFrame:
+def filter_and_save(filename, outname, cohort_mrns, cols=None, table=None) -> pl.DataFrame:
     """Stream `filename` lazily via polars, keep only cohort_mrns rows
     (and `cols` columns, if given), recover dirty-numeric columns, and write
     the result to `outname`. See `data_preprocessing_common/fast_io.py` for
     the shared scan/filter/recover implementation; this wrapper only adds the
     column re-projection (to preserve the exact requested column order) and
     the `.write_csv()` so output paths/signatures stay stable.
+
+    `table`, if given, names the OncDRS table (see `oncdrs_sources.TABLE_FILES`)
+    so `scan_filter` can dedup intra-release duplicate rows before any `cols=`
+    projection; see `fast_io.scan_filter` and `data_preprocessing_common.oncdrs_dedup`.
     """
-    filtered = filter_cohort(filename, cohort_mrns, cols=cols)
+    filtered = filter_cohort(filename, cohort_mrns, cols=cols, table=table)
     filtered.write_csv(outname)
     return filtered
 
 
-def filter_cohort(filename, cohort_mrns, cols=None) -> pl.DataFrame:
+def filter_cohort(filename, cohort_mrns, cols=None, table=None) -> pl.DataFrame:
     """Same as `filter_and_save` but in-memory only -- no `.write_csv()`.
     Used for tables that feed the outcomes cohort but are not themselves
-    persisted (e.g. MEDICATIONS.csv)."""
-    lf = fast_io.scan_filter(filename, cohort_mrns, cols=cols)
+    persisted (e.g. MEDICATIONS.csv). See `filter_and_save` for `table=`."""
+    lf = fast_io.scan_filter(filename, cohort_mrns, cols=cols, table=table)
     filtered = lf.collect()
     # Exclude ID_COL from recover_numeric's generic Utf8->Float64 cast: MRNs
     # are all-digit, so they'd otherwise become Float64, which doesn't match
@@ -409,7 +426,9 @@ def compile_cohort_tables(
     icds_filtered = icds.filter(mrn_num.is_in(list(icd_mrn_set)))
     icds_filtered.write_csv(os.path.join(out_dir, 'prostate_icd_data.csv'))
 
-    meds = filter_cohort(medications_path, set(int(m) for m in all_cohort_mrns))
+    meds = filter_cohort(
+        medications_path, set(int(m) for m in all_cohort_mrns), table="MEDICATIONS"
+    )
 
     return meds
 
@@ -459,6 +478,12 @@ def build_icd_prostate_mrn_flags(
         labs_path,
         c61_mrns,
         cols=[ID_COL, "TEST_TYPE_CD"],
+        # This is exactly the case the plan's dedup-on-canonical-columns
+        # invariant exists for: deduping on this 2-column projection instead
+        # of the full LABS column set would collapse every patient to ~1 row
+        # per TEST_TYPE_CD and fail MIN_PSA_COUNT for everyone. table="LABS"
+        # makes scan_filter dedup BEFORE this projection is applied.
+        table="LABS",
     ).with_columns(
         pl.col("TEST_TYPE_CD")
         .cast(pl.Utf8)
@@ -559,7 +584,16 @@ def load_patient_status(path) -> pl.DataFrame:
     Returns a dataframe with:
         DFCI_MRN, BIRTH_DATE, GENDER, DEATH_DATE, LAST_CONTACT_DATE
     """
-    pt = scan_source(path).collect()
+    # apply_dedup here is for cross-variant symmetry with profile_data (whose
+    # merged parquet already went through the notebook's per-column coalesce)
+    # -- it operates on raw source column names (BIRTH_DT, GENDER_NM, ...), so
+    # it runs before the renamed/parsed columns built below. On the single
+    # ALL_2025_03 release this reduces to plain drop_nulls().first() per
+    # column (see oncdrs_dedup._apply_coalesce's docstring for why that's
+    # exactly equivalent here, not just an approximation), so N source rows
+    # should equal M unique MRNs below -- the "[patient-status] N -> M" print
+    # is a free check of that.
+    pt = apply_dedup(scan_source(path), "PT_INFO_STATUS_REGISTRATION").collect()
 
     # All dates are raw calendar strings.
     pt = pt.with_columns(
@@ -588,6 +622,22 @@ def load_patient_status(path) -> pl.DataFrame:
     # joining to the cohort so an arbitrary null row cannot erase demographics.
     # Birth date and gender are stable patient attributes; death and last-contact
     # dates use the latest available date.
+    #
+    # This now runs on top of a frame apply_dedup() already coalesced above
+    # (raw source column names), so it is NOT made redundant by that step --
+    # it is doing different work on different columns:
+    #   - it runs on RENAMED, PARSED columns (BIRTH_DATE, GENDER, DEATH_DATE,
+    #     LAST_CONTACT_DATE, derived just above), where apply_dedup ran on raw
+    #     source names (BIRTH_DT, GENDER_NM, ...);
+    #   - because it runs after date parsing, it also collapses rows that
+    #     differ only in date *formatting* (e.g. "2024-01-02" vs
+    #     "2024-01-02 00:00:00" parse to the same datetime but are distinct
+    #     Utf8 strings apply_dedup's exact/coalesce logic would treat as
+    #     different) -- exactly the Utf8-vs-parsed normalization gap
+    #     apply_dedup cannot close on its own;
+    #   - its DEATH_DATE.max() / LAST_CONTACT_DATE.max() are more conservative
+    #     than apply_dedup's generic drop_nulls().first() for those two
+    #     fields specifically.
     status = (
         pt.filter(pl.col(ID_COL).is_not_null())
         .group_by(ID_COL)

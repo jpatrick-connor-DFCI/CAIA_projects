@@ -20,12 +20,16 @@ DATA_PATH = Path('/data/gusev/USERS/jpconnor/data/CAIA/IPIO/')
 CANCER_TYPE_PREFIX = 'CANCER_TYPE_'
 
 
-def filter_and_save(filename, outname, cohort_mrns, cols=None) -> pl.DataFrame:
+def filter_and_save(filename, outname, cohort_mrns, cols=None, table=None) -> pl.DataFrame:
     """Cohort-filter `filename` (whole-file pandas read today = biggest single
     win) via the shared polars scan_filter/recover_numeric helpers, write the
     result to `outname`, and return it.
+
+    `table`, if given, names the OncDRS table (see `oncdrs_sources.TABLE_FILES`)
+    so `scan_filter` can dedup intra-release duplicate rows before any `cols=`
+    projection; see `fast_io.scan_filter` and `data_preprocessing_common.oncdrs_dedup`.
     """
-    lf = fast_io.scan_filter(filename, cohort_mrns, cols=cols)
+    lf = fast_io.scan_filter(filename, cohort_mrns, cols=cols, table=table)
     filtered = lf.collect()
     # Exclude ID_COL from recover_numeric's generic Utf8->Float64 cast: MRNs
     # are all-digit, so they'd otherwise become Float64, inconsistent with the
@@ -129,12 +133,21 @@ cohort_mrns = set(cohort_mrns_series.drop_nulls().unique().to_list())
 # so the other 7 previously-carried columns (D_SPECIMEN_COLLECT_DT, RESULT_NBR,
 # RESULT_TYPE_CD, RESULT_TYPE_DESCR, TEXT_RESULT, SPECIMEN_SRC_CD,
 # SPECIMEN_SRC_DESCR) are unused and dropped from scan + emitted CSV.
+#
+# table="LABS" matters here specifically because this projection omits
+# TEXT_RESULT -- one of the 7 canonical LABS dedup columns. Deduping on this
+# narrower 6-column projection instead of the canonical column set would
+# over-collapse: two rows that are genuinely distinct only in TEXT_RESULT
+# would look identical here and wrongly merge into one. table="LABS" makes
+# scan_filter dedup on the full canonical LABS columns before this cols=
+# projection is ever applied.
 labs = filter_and_save(
     ONCDRS_PATH / 'OUTPT_LAB_RESULTS_LABS.csv',
     DATA_PATH / 'irae_labs_data.csv',
     cohort_mrns,
     cols=['DFCI_MRN', 'SPECIMEN_COLLECT_DT', 'TEST_TYPE_CD', 'TEST_TYPE_DESCR',
-          'NUMERIC_RESULT', 'RESULT_UOM_NM']
+          'NUMERIC_RESULT', 'RESULT_UOM_NM'],
+    table='LABS',
 )
 
 # Write merged cohort+cancer-type table

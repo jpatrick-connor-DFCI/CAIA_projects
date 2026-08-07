@@ -425,7 +425,7 @@ differ only in which OncDRS extract they read and where they write.
 
 | | Baseline | PROFILE_data_processing |
 |---|---|---|
-| Source | `/data/gusev/PROFILE/CLINICAL/OncDRS/ALL_2025_03/*.csv` (one release) | `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/*.parquet` (7 releases merged + deduplicated) |
+| Source | `/data/gusev/PROFILE/CLINICAL/OncDRS/ALL_2025_03/*.csv` (one release, deduplicated at read time) | `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/*.parquet` (7 releases merged + deduplicated) |
 | `DATA_VARIANT` | `"baseline"` | `"profile_data"` |
 | Data root | `data/CAIA/COMPASS/` | `data/CAIA/COMPASS_PROFILE_DATA/` |
 | Figure root | `figures/CAIA/COMPASS/` | `figures/CAIA/COMPASS_PROFILE_DATA/` |
@@ -478,10 +478,19 @@ raises), EXPECTED (absent raises, all-null warns — for legitimately sparse col
 
 The last cell of the same notebook prints a **cohort comparison** table: Stage 1 cohort/platinum
 counts and Stage 2 per-landmark attrition for both roots, side by side with deltas. Expect the
-merged run to be larger (more releases), but note that upstream full-row deduplication of `LABS`
-can push a few patients *below* the ≥5-broad-PSA gate, so attrition can move in both directions.
-Both arms write `cohort_attrition.json` to the same path, so that readout reflects whichever
-anchor ran last — it is labelled as such in the cell.
+merged run to be larger (more releases) — that is now the *only* axis the two roots differ on.
+Both `baseline` and `profile_data` apply the same intra-release dedup rules (see
+[`data_preprocessing_common/oncdrs_dedup.py`](data_preprocessing_common/oncdrs_dedup.py), ported
+from `compile_OncDRS_data.ipynb`'s `DEDUP_COL_MAP`), so `baseline` is **not** simply
+"`profile_data` restricted to one release": each root's raw CSV(s) still get deduplicated
+independently, and `oncdrs_dedup` dedupes pre-cast Utf8 values (e.g. `NUMERIC_RESULT` `"1.50"` vs
+`"1.5"` are two rows here, one upstream after casting to `Float64`) where the upstream merge dedupes
+post-cast — a second-order gap, documented in `oncdrs_dedup.py`, that can still leave a few
+near-duplicate rows on `baseline` that `profile_data` collapsed. Because dedup only removes lab
+rows, it can push a few patients *below* the ≥5-broad-PSA gate on either root, so attrition can
+still move in both directions between the two roots — just for a narrower reason (release count,
+plus this residual Utf8-vs-typed gap) than before. Both arms write `cohort_attrition.json` to the
+same path, so that readout reflects whichever anchor ran last — it is labelled as such in the cell.
 
 ---
 

@@ -30,7 +30,9 @@ icd_c61_mrns = set(pd.to_numeric(prostate_icds['DFCI_MRN'], errors='coerce').dro
 
 meds = (
     fast_io.recover_numeric(
-        fast_io.scan_filter(os.path.join(ONCDRS_PATH, 'MEDICATIONS.csv'), icd_c61_mrns).collect(),
+        fast_io.scan_filter(
+            os.path.join(ONCDRS_PATH, 'MEDICATIONS.csv'), icd_c61_mrns, table='MEDICATIONS'
+        ).collect(),
         exclude=(fast_io.ID_COL,),
     )
     .with_columns(pl.col(fast_io.ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False))
@@ -88,6 +90,11 @@ parp_df = (meds.loc[meds['NCI_PREFERRED_MED_NM'].isin(['OLAPARIB', 'RUCAPARIB', 
            .rename(columns={'NCI_PREFERRED_MED_NM' : 'PARPi_NM',
                             'MED_START_DT' : 'PARPi_START_TIME'}))[['DFCI_MRN', 'PARPi_NM', 'PARPi_START_TIME']]
 
+# No table= here: complete_somatic_data_df.csv.gz is not a raw OncDRS table
+# (it isn't a key in oncdrs_sources.TABLE_FILES and has no COLUMN_MAP/dedup
+# rule in oncdrs_dedup), so it's left out of this port. scan_filter/apply_dedup
+# would pass an unrecognized table name through unchanged rather than erroring,
+# but there's no dedup rule to gain by passing one here anyway.
 prostate_somatic_df = (
     fast_io.recover_numeric(
         fast_io.scan_filter(

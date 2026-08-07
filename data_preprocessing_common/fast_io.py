@@ -27,24 +27,50 @@ writing itself -- each caller's own `filter_and_save` wrapper adds
 
 import polars as pl
 
-from .oncdrs_sources import scan_source
+from .oncdrs_dedup import apply_dedup
+from .oncdrs_sources import is_parquet, scan_source
 
 ID_COL = "DFCI_MRN"
 
 
-def scan_filter(path, cohort_mrns, cols=None) -> pl.LazyFrame:
+def scan_filter(path, cohort_mrns, cols=None, *, table=None) -> pl.LazyFrame:
     """Lazily scan `path` (all-String schema) and filter to `cohort_mrns`.
 
     - `path` may be a raw OncDRS CSV/`.gz` or a merged Parquet table; see
       `oncdrs_sources.scan_source`.
+    - `table`, if given, names the OncDRS table (an `oncdrs_sources.TABLE_FILES`
+      key, e.g. `"LABS"`) so intra-release duplicate rows can be collapsed via
+      `oncdrs_dedup.apply_dedup` before any column projection. This has to be
+      an explicit keyword rather than inferred from `path` -- inferring the
+      table from the filename is fragile (some callers pass filenames that
+      aren't in `TABLE_FILES` at all, e.g. a somatic-features CSV) -- and
+      every OncDRS call site already knows its own table name, so passing it
+      costs nothing. Non-OncDRS sources simply omit `table=` and get the old
+      behavior. Dedup is skipped for Parquet inputs: the merged `profile_data`
+      Parquets are already deduplicated by construction upstream (see
+      `oncdrs_dedup`'s module docstring), so re-running it here would only
+      cost a full hash-aggregate over millions of rows for no effect.
     - `cols`, if given, is applied as a `.select()` (DFCI_MRN is always
-      included even if the caller forgot it).
+      included even if the caller forgot it). Dedup runs BEFORE this
+      projection: deduping on a caller's narrower `cols=` instead of the full
+      canonical column set can catastrophically over-collapse a table (e.g.
+      projecting LABS to just [DFCI_MRN, TEST_TYPE_CD] before deduping would
+      leave ~1 row per test code per patient). See `oncdrs_dedup` for the
+      full explanation.
     - Cohort filtering is done by casting DFCI_MRN to a numeric type and
       testing membership in `cohort_mrns` (a set/iterable of ints), mirroring
       the pandas `pd.to_numeric(..., errors='coerce').isin(cohort_mrns)` used
-      by the original `filter_and_save` implementations.
+      by the original `filter_and_save` implementations. It stays last: it
+      doesn't need to run before dedup for correctness, and polars' predicate
+      pushdown sinks the MRN filter below the `.unique()`/`.group_by()` in
+      `apply_dedup` on its own (verified via `.explain()` in
+      `data_preprocessing_common/tests/test_fast_io_scan_filter.py`), so there
+      is no ordering cost either.
     """
     lf = scan_source(path)
+
+    if table is not None and not is_parquet(path):
+        lf = apply_dedup(lf, table)
 
     if cols:
         select_cols = list(cols) if ID_COL in cols else [ID_COL] + list(cols)
