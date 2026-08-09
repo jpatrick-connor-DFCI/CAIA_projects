@@ -3,11 +3,12 @@
 
 That notebook merges seven OncDRS releases into one deduplicated Parquet per
 table, folding releases newest-first with an anti-join keyed on
-`DEDUP_COL_MAP`. This repo's `baseline` DATA_VARIANT reads a single raw
-release straight off CSV, so it never got that dedup treatment -- duplicate
-rows (the same lab result re-pulled across an OncDRS extract, for instance)
-inflate downstream counts (`n_observations`, the PSA-count cohort gate) in a
-way the `profile_data` variant's merged parquets do not.
+`DEDUP_COL_MAP`. Standalone callers may still read a single raw release
+straight off CSV, which does not receive that upstream dedup treatment;
+duplicate rows (the same lab result re-pulled across an OncDRS extract, for
+instance) can inflate downstream counts (`n_observations`, the PSA-count
+cohort gate). The active COMPASS notebook workflow uses only the already
+deduplicated merged `profile_data` parquets.
 
 With a single release, the notebook's cross-release fold degenerates to just
 its intra-file step: the notebook's own `if not kept_files:` branch

@@ -65,18 +65,16 @@ COMPASS/
     ├── 01_preprocessing.ipynb            # schema audit, cohort compile, preprocessing, diagnostics
     ├── 02_univariate.ipynb               # univariate arms + nominal-significance filter
     ├── 03_multivariate.ipynb             # elastic-net + XGBoost + summary tables
-    ├── 05_figures.ipynb                  # R figures; DATA_VARIANT switch (baseline / profile_data)
+    ├── 05_figures.ipynb                  # R figures from merged profile_data outputs
     └── GAM/
         ├── gam_trajectory_features.R     # hierarchical longitudinal GAM features
         ├── gam_cox_nonlinearity.R        # smooth-vs-linear Cox GAM tests
-        └── 04_gam.ipynb                  # R-kernel GAM runner; DATA_VARIANT switch
+        └── 04_gam.ipynb                  # R-kernel GAM runner on merged profile_data
 ```
 
-All five numbered notebooks are thin wrappers: the three Python ones share
-`compass_pipeline.py`, and both `01_preprocessing.ipynb`/`05_figures.ipynb`/`GAM/04_gam.ipynb`
-select their data root with a `DATA_VARIANT` switch (`"baseline"` for the single-release
-`ALL_2025_03` CSVs, `"profile_data"` for the merged PROFILE_data_processing parquets) instead of
-existing as separate notebooks per variant.
+All five numbered notebooks use the merged PROFILE_data_processing parquets and the
+standard `COMPASS` data/figure roots. The three Python notebooks share
+`compass_pipeline.py`; no single-release baseline run is part of this workflow.
 
 ---
 
@@ -104,9 +102,8 @@ existing as separate notebooks per variant.
 ```
 
 Every raw OncDRS read in Stage 1 and Stage 2 goes through
-`data_preprocessing_common/oncdrs_sources.scan_source()`, which dispatches on file suffix, so
-every path flag below accepts either a raw release CSV or a merged Parquet. See
-[Two OncDRS source roots](#two-oncdrs-source-roots).
+`data_preprocessing_common/oncdrs_sources.scan_source()`. The COMPASS notebooks pass the merged
+`PROFILE_DATA/*.parquet` sources explicitly.
 
 ---
 
@@ -317,18 +314,16 @@ the `mgcv` conda environment do not need to coexist. The enforced handoff is: bu
 run trajectory GAMs in R, set `REBUILD_PREDICTION_INPUTS = False` and rerun Python Stage 3 so its
 models consume the trajectory features, then return to R for nonlinear Cox GAMs. Stage B rejects a
 feature-selection file older than its trajectory-feature file, preventing a stale pre-GAM selection
-from being tested accidentally. `DATA_VARIANT` switches the R notebook between the baseline and
-merged-PROFILE roots.
+from being tested accidentally. The R notebook uses the merged-profile root exclusively.
 
 ### 2.4 — Notebooks
 
 COMPASS PROFILE has three numbered Python stage notebooks sharing `compass_pipeline.py`, one R
-figure notebook, and a `DATA_VARIANT` switch (`"baseline"` vs. `"profile_data"`) instead of a
-parallel notebook pair per data source:
+figure notebook, and one R GAM notebook. All five operate on the merged `profile_data` run:
 
 - `01_preprocessing.ipynb` — drives preprocessing (schema audit, cohort compile, longitudinal
   preprocessing, prediction-input build, diagnostics) for whichever arms are selected (`arpi`
-  and/or `adt`, both landmarks 0/90), over the common ADT-entry eligible cohort. Each arm gets
+  and/or `adt`, with landmarks 0/90/180), over the common ADT-entry eligible cohort. Each arm gets
   independent prediction inputs at its own landmark list, and Stage 2 runs
   `longitudinal_data_processing.py` once per anchor (`--anchor-med-set {arpi,adt}`).
 - `02_univariate.ipynb` / `03_multivariate.ipynb` — read `01`'s prediction inputs and run
@@ -401,11 +396,8 @@ parallel notebook pair per data source:
   `02_univariate.ipynb`'s final section loads all shared-landmark univariate results for both
   `arpi` and `adt`, filters each to nominal `p_value < 0.05`, displays every hit, and exports a
   separate `cox/nominally_significant_univariate_results.csv` beneath each arm's run directory.
-- Setting `DATA_VARIANT = "profile_data"` in any of the four notebooks points the same code at the
-  merged PROFILE_data_processing parquets and a separate output root instead of the baseline
-  `ALL_2025_03` CSVs. `compass_pipeline.py` and `COMPASS_generate_figures_pipeline.R` are shared
-  verbatim across both variants, so only the data source differs. See
-  [Two OncDRS source roots](#two-oncdrs-source-roots).
+- `compass_pipeline.py`, the figure notebook, and the GAM notebook all point directly to the
+  `PROFILE_DATA` source and `COMPASS` output roots; there is no data-variant selector.
 
 IPIO has a paired run/figure notebook as well:
 
@@ -418,28 +410,19 @@ IPIO has a paired run/figure notebook as well:
 
 ---
 
-## Two OncDRS source roots
+## Merged OncDRS source
 
-COMPASS can be run against either of two raw-data roots. Both produce the same file layout; they
-differ only in which OncDRS extract they read and where they write.
+COMPASS uses only the merged, deduplicated parquets published by the sibling
+`PROFILE_data_processing` repository. `compile_OncDRS_data.ipynb` folds releases
+`ALL_2021_11` … `ALL_2026_03` into one Parquet per table.
 
-| | Baseline | PROFILE_data_processing |
-|---|---|---|
-| Source | `/data/gusev/PROFILE/CLINICAL/OncDRS/ALL_2025_03/*.csv` (one release, deduplicated at read time) | `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/*.parquet` (7 releases merged + deduplicated) |
-| `DATA_VARIANT` | `"baseline"` | `"profile_data"` |
-| Data root | `data/CAIA/COMPASS/` | `data/CAIA/COMPASS_PROFILE_DATA/` |
-| Figure root | `figures/CAIA/COMPASS/` | `figures/CAIA/COMPASS_PROFILE_DATA/` |
+| | Path |
+|---|---|
+| Source | `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/*.parquet` |
+| Data root | `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/` |
+| Figure root | `/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS/` |
 
-Run/figure notebooks (`01_preprocessing.ipynb`, `05_figures.ipynb`, `GAM/04_gam.ipynb`) are shared
-across both roots via the `DATA_VARIANT` switch at the top of each notebook.
-
-The roots are disjoint, so the two runs can be compared side by side and neither clobbers the
-other. The parquets are built by the sibling repo `PROFILE_data_processing`
-(`compile_OncDRS_data.ipynb`), which folds releases `ALL_2021_11` … `ALL_2026_03` into one
-Parquet per table.
-
-**`oncdrs_sources.scan_source()`.** No entry point knows which root it is reading. Every raw scan
-goes through `data_preprocessing_common/oncdrs_sources.py`:
+Every raw scan goes through `data_preprocessing_common/oncdrs_sources.py`:
 
 ```python
 scan_source(path)  # .parquet/.pq -> pl.scan_parquet(path).select(pl.all().cast(pl.Utf8))
@@ -451,8 +434,8 @@ every column a string. The whole pipeline relies on that (`.str.to_datetime()`,
 `.str.to_uppercase()`, `fast_io.recover_numeric()`, then explicit casts back to `Int64`). Parquet
 columns are typed, so reading one without the cast breaks every `.str.*` call. The only genuinely
 numeric column on the COMPASS path is `LABS.NUMERIC_RESULT`, and `recover_numeric()` parses it
-back to `Float64` losslessly. `fast_io.scan_filter()` calls `scan_source`, so CSV callers — all of
-IPIO, and the baseline COMPASS notebooks — are byte-for-byte unaffected.
+back to `Float64` losslessly. `fast_io.scan_filter()` calls `scan_source`, so other projects may
+continue to pass CSV sources even though the COMPASS notebooks always pass merged Parquets.
 
 **Upstream column-name requirement.** `compile_OncDRS_data.ipynb` inserts any requested-but-absent
 column as null with only a printed warning, so a rename between releases yields an **all-null
@@ -468,29 +451,12 @@ merged parquets:
 The upstream `COLUMN_MAP` requests both the old and new spellings and coalesces them via
 `ALIAS_MAP`, since release schemas differ across the seven pulls.
 
-With `DATA_VARIANT = "profile_data"`, the second code cell of `01_preprocessing.ipynb` is a
-**schema audit** (`compass_pipeline.audit_schema`) that guards
-this. It scans all five tables and checks columns in three tiers — REQUIRED (absent *or* all-null
-raises), EXPECTED (absent raises, all-null warns — for legitimately sparse columns like
+The second code cell of `01_preprocessing.ipynb` runs a **schema audit**
+(`compass_pipeline.audit_schema`) that guards this. It scans all five tables and checks columns in
+three tiers — REQUIRED (absent *or* all-null raises), EXPECTED (absent raises, all-null warns — for legitimately sparse columns like
 `HYBRID_DEATH_DT` and `LABS.TEXT_RESULT`), OPTIONAL (warns either way) — and raises a single
 `RuntimeError` listing every problem. Run it before anything else; an all-null
 `NCI_PREFERRED_MED_NM` means going back to the upstream compile, not debugging COMPASS.
-
-The last cell of the same notebook prints a **cohort comparison** table: Stage 1 cohort/platinum
-counts and Stage 2 per-landmark attrition for both roots, side by side with deltas. Expect the
-merged run to be larger (more releases) — that is now the *only* axis the two roots differ on.
-Both `baseline` and `profile_data` apply the same intra-release dedup rules (see
-[`data_preprocessing_common/oncdrs_dedup.py`](data_preprocessing_common/oncdrs_dedup.py), ported
-from `compile_OncDRS_data.ipynb`'s `DEDUP_COL_MAP`), so `baseline` is **not** simply
-"`profile_data` restricted to one release": each root's raw CSV(s) still get deduplicated
-independently, and `oncdrs_dedup` dedupes pre-cast Utf8 values (e.g. `NUMERIC_RESULT` `"1.50"` vs
-`"1.5"` are two rows here, one upstream after casting to `Float64`) where the upstream merge dedupes
-post-cast — a second-order gap, documented in `oncdrs_dedup.py`, that can still leave a few
-near-duplicate rows on `baseline` that `profile_data` collapsed. Because dedup only removes lab
-rows, it can push a few patients *below* the ≥5-broad-PSA gate on either root, so attrition can
-still move in both directions between the two roots — just for a narrower reason (release count,
-plus this residual Utf8-vs-typed gap) than before. Both arms write `cohort_attrition.json` to the
-same path, so that readout reflects whichever anchor ran last — it is labelled as such in the cell.
 
 ---
 
@@ -528,41 +494,25 @@ same path, so that readout reflects whichever anchor ran last — it is labelled
   - Data: `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/`
   - Survival results: `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis`
   - Figures: `/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS/`
-- **Raw OncDRS roots** — `ALL_2025_03` release CSVs at
-  `/data/gusev/PROFILE/CLINICAL/OncDRS/ALL_2025_03/`, or merged parquets at
-  `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/`. Both defaults live in
-  `data_preprocessing_common/oncdrs_sources.py` (`DEFAULT_ONCDRS_RELEASE`,
-  `DEFAULT_PROFILE_DATA_ROOT`) alongside the `TABLE_FILES` basename map. The parquet run writes to
-  the `COMPASS_PROFILE_DATA` data/figure roots — see
-  [Two OncDRS source roots](#two-oncdrs-source-roots).
+- **Raw OncDRS root** — merged Parquets at
+  `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/`. The source resolver lives in
+  `data_preprocessing_common/oncdrs_sources.py` alongside the `TABLE_FILES` basename map.
 - `data_preprocessing_common/dfci_labs.py` uses the checked-in shared
   `resources/lab_mappings/OMOP_to_DFCI_lab_ids.csv` by default. Per-project lab inventory outputs
   default to `/data/gusev/USERS/jpconnor/data/CAIA/<project>/unique_lab_ids_w_units.csv`.
 
 ## Recommended run order
 
-```bash
-# Stage 1 (cluster paths hard-coded, override via CLI flags if needed)
-python COMPASS/data_preprocessing/compile_COMPASS_cohort_data.py
+Run each notebook top to bottom; select ARPI/ADT with each Python notebook's `ARMS` setting:
 
-# Stage 2 — or just run COMPASS/survival_analysis/01_preprocessing.ipynb top to bottom.
-# Run once per anchor; --anchor-med-set switches the default survival-cohort/output/cache paths.
-python COMPASS/data_preprocessing/longitudinal_data_processing.py --anchor-med-set arpi
-python COMPASS/data_preprocessing/longitudinal_data_processing.py --anchor-med-set adt
-python COMPASS/data_preprocessing/build_prediction_inputs.py --landmark-days 0 90 180 --time-unit-days 7
-python COMPASS/survival_analysis/univariate_analysis.py --inputs-dir <...>/prediction_inputs --landmark-days 0
-python COMPASS/survival_analysis/multivariate_analysis.py --model elastic-net --inputs-dir <...>/prediction_inputs --landmark-days 0
-python COMPASS/survival_analysis/multivariate_analysis.py --model xgboost --inputs-dir <...>/prediction_inputs --landmark-days 0
-```
+1. `COMPASS/survival_analysis/01_preprocessing.ipynb`
+2. `COMPASS/survival_analysis/02_univariate.ipynb`
+3. `COMPASS/survival_analysis/03_multivariate.ipynb`
+4. `COMPASS/survival_analysis/GAM/04_gam.ipynb`
+5. `COMPASS/survival_analysis/05_figures.ipynb`
 
-To run against the merged PROFILE_data_processing parquets instead, set
-`DATA_VARIANT = "profile_data"` at the top of `01_preprocessing.ipynb` → `02_univariate.ipynb` →
-`03_multivariate.ipynb` → `05_figures.ipynb` (run each top to bottom). They pass the
-`PROFILE_DATA/*.parquet` paths and the `COMPASS_PROFILE_DATA` roots to the same scripts; nothing
-under `data/CAIA/COMPASS/` or `figures/CAIA/COMPASS/` is written. `05_figures.ipynb` symlinks
-`LLM_NEPC_labels/` from the baseline root when run with `DATA_VARIANT = "profile_data"`, since
-those hand-curated annotations are an input to `generate_figures()` rather than something the
-pipeline produces.
+The notebooks pass `PROFILE_DATA/*.parquet` paths explicitly to the lower-level scripts. Existing
+hand-curated `LLM_NEPC_labels/` inputs remain under the shared `COMPASS` data root.
 
 ## Dependencies
 

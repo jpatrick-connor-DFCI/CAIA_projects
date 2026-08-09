@@ -1,16 +1,14 @@
 """Shared driver logic for the COMPASS PROFILE survival pipeline notebooks.
 
-Both raw-data variants (`baseline`: one-release OncDRS CSVs; `profile_data`:
-merged PROFILE_data_processing parquets) and every pipeline stage (cohort
-compile, longitudinal preprocessing, prediction-input build, univariate,
-multivariate) go through this module, so the stage notebooks
+The pipeline uses the merged ``profile_data`` parquets for every stage (cohort
+compile, longitudinal preprocessing, prediction-input build, univariate, and
+multivariate), so the stage notebooks
 (`01_preprocessing.ipynb` .. `03_multivariate.ipynb`) are thin wrappers over
 it. See `REORGANIZATION_PLAN.md` for the motivation.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -28,30 +26,21 @@ for _p in (str(PROJECT_ROOT),):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from data_preprocessing_common.oncdrs_sources import resolve as resolve_source  # noqa: E402
+from data_preprocessing_common.oncdrs_sources import TABLE_FILES  # noqa: E402
 from data_preprocessing_common.oncdrs_sources import scan_source  # noqa: E402
 
 PYTHON = sys.executable
 
 # ---------------------------------------------------------------------------
-# Data variants
+# Data source
 # ---------------------------------------------------------------------------
 #
-# "baseline"     -- one release, /data/gusev/PROFILE/CLINICAL/OncDRS/ALL_2025_03/*.csv,
-#                    resolved by compile_COMPASS_cohort_data.py / longitudinal_data_processing.py's
-#                    own module-level ONCDRS_PATH / NEPC_PROJ_PATH defaults (no source flags passed).
-# "profile_data" -- seven merged releases, /data/gusev/USERS/jpconnor/data/PROFILE_DATA/*.parquet,
-#                    resolved here via oncdrs_sources.resolve() and passed explicitly.
-#
-# Both variants write to disjoint data roots so they can be compared side by side
-# (see compare_to_baseline below); the profile_data variant carries a baseline_root
-# pointer for that comparison, and the schema audit is a profile_data-only guard
+# All COMPASS runs read the merged PROFILE_data_processing parquets and write
+# beneath the standard COMPASS output root. The schema audit guards
 # against the upstream COLUMN_MAP silently null-filling a renamed column.
 
-_ONCDRS_BASELINE_ROOT = Path("/data/gusev/PROFILE/CLINICAL/OncDRS/ALL_2025_03")
-_BASELINE_DATA_ROOT = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/")
 _PROFILE_DATA_ROOT = Path("/data/gusev/USERS/jpconnor/data/PROFILE_DATA")
-_PROFILE_OUTPUT_ROOT = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS_PROFILE_DATA/")
+_PROFILE_OUTPUT_ROOT = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/")
 
 SOURCE_TABLES = [
     "EHR_DIAGNOSES",
@@ -61,39 +50,10 @@ SOURCE_TABLES = [
     "PT_INFO_STATUS_REGISTRATION",
 ]
 
-# Basenames the baseline (single-release) root uses for each logical source table.
-# These match compile_COMPASS_cohort_data.py / longitudinal_data_processing.py's own
-# ONCDRS_PATH-relative argparse defaults.
-_BASELINE_SOURCE_BASENAMES = {
-    "EHR_DIAGNOSES": "EHR_DIAGNOSIS.csv",
-    "MEDICATIONS": "MEDICATIONS.csv",
-    "LABS": "OUTPT_LAB_RESULTS_LABS.csv",
-    "HEALTH_HISTORY": "HEALTH_HISTORY.csv",
-    "PT_INFO_STATUS_REGISTRATION": "PT_INFO_STATUS_REGISTRATION.csv",
+PROFILE_SOURCES = {
+    table: _PROFILE_DATA_ROOT / TABLE_FILES[table][0]
+    for table in SOURCE_TABLES
 }
-
-
-def _make_data_variants():
-    baseline_sources = {
-        t: _ONCDRS_BASELINE_ROOT / basename
-        for t, basename in _BASELINE_SOURCE_BASENAMES.items()
-    }
-    profile_sources = {t: resolve_source(t, _PROFILE_DATA_ROOT) for t in SOURCE_TABLES}
-    return {
-        "baseline": dict(
-            data_root=_BASELINE_DATA_ROOT,
-            sources=baseline_sources,
-            baseline_root=None,
-        ),
-        "profile_data": dict(
-            data_root=_PROFILE_OUTPUT_ROOT,
-            sources=profile_sources,
-            baseline_root=_BASELINE_DATA_ROOT,
-        ),
-    }
-
-
-DATA_VARIANTS = _make_data_variants()
 
 # ---------------------------------------------------------------------------
 # Module-level knobs. Notebooks override by assigning cp.<NAME> = ... before
@@ -118,17 +78,14 @@ for v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR
     os.environ.setdefault(v, "1")
 
 
-def make_runs(variant: str, arms=("adt",)) -> list[dict]:
-    """Build the RUNS list for a data variant, restricted to `arms`.
+def make_runs(arms=("adt",)) -> list[dict]:
+    """Build the merged-profile RUNS list, restricted to ``arms``.
 
-    ARPI is disabled by default on profile_data: build_prediction_inputs.py
+    ARPI is disabled by default: build_prediction_inputs.py
     raised "No patients have both engineered features and valid outcomes" for
     that arm on the merged-parquet root. Re-enable once that is root-caused.
     """
-    if variant not in DATA_VARIANTS:
-        raise ValueError(f"Unknown DATA_VARIANT: {variant!r} (expected one of {sorted(DATA_VARIANTS)})")
-    spec = DATA_VARIANTS[variant]
-    data_root = spec["data_root"]
+    data_root = _PROFILE_OUTPUT_ROOT
     mrn_lists_dir = data_root / "mrn_lists"
     data_arpi = data_root / "longitudinal_prediction_data.csv"
     data_adt = data_root / "longitudinal_prediction_data_adt.csv"
@@ -142,7 +99,7 @@ def make_runs(variant: str, arms=("adt",)) -> list[dict]:
         runs.append({
             "label": label,
             "title": arm_spec["title"],
-            "variant": variant,
+            "variant": "profile_data",
             "anchor_col": "none",
             "anchor": arm_spec["anchor"],
             "landmarks": arm_spec["landmarks"],
@@ -165,8 +122,6 @@ def make_runs(variant: str, arms=("adt",)) -> list[dict]:
     print("survival_dir:      ", SURVIVAL_DIR)
     print("data_preprocessing:", DATA_PREPROCESSING_DIR)
     print("data root:         ", data_root)
-    if spec["baseline_root"] is not None:
-        print("baseline root:     ", spec["baseline_root"], "(read-only, comparison only)")
     for run in runs:
         print(
             f"{run['label']:30s}: anchor={run['anchor']:4s} landmarks={run['landmarks']} "
@@ -176,7 +131,7 @@ def make_runs(variant: str, arms=("adt",)) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Stage 0 -- schema audit (profile_data only; no-op for baseline)
+# Stage 0 -- schema audit
 # ---------------------------------------------------------------------------
 
 # Columns each pipeline stage actually reads. Sources:
@@ -248,19 +203,12 @@ def _nonempty_fraction_expr(name, dtype):
     return col.is_not_null().mean().alias(name)
 
 
-def audit_schema(variant: str) -> None:
-    """Fail fast if a required column is absent or all-null in the variant's sources.
-
-    No-op for "baseline": the single-release CSVs are the schema every script's
-    argparse default already assumes, so there is nothing to audit against.
-    """
-    if DATA_VARIANTS[variant]["sources"] is None or variant == "baseline":
-        print(f"[skip] schema audit: not applicable to variant {variant!r}")
-        return
+def audit_schema() -> None:
+    """Fail fast if a required column is absent or all-null in profile_data."""
 
     import polars as pl
 
-    sources = DATA_VARIANTS[variant]["sources"]
+    sources = PROFILE_SOURCES
     problems = []
     warnings = []
 
@@ -351,15 +299,14 @@ def _run(cmd, dry_run=False):
     return subprocess.call([str(c) for c in cmd])
 
 
-def compile_cohort(variant: str, arms=("adt",), dry_run: bool = False) -> None:
-    spec = DATA_VARIANTS[variant]
-    data_root = spec["data_root"]
+def compile_cohort(arms=("adt",), dry_run: bool = False) -> None:
+    data_root = _PROFILE_OUTPUT_ROOT
     cmd = [
         PYTHON, DATA_PREPROCESSING_DIR / "compile_COMPASS_cohort_data.py",
-        "--icd-source", spec["sources"]["EHR_DIAGNOSES"],
-        "--medications-source", spec["sources"]["MEDICATIONS"],
-        "--patient-status-source", spec["sources"]["PT_INFO_STATUS_REGISTRATION"],
-        "--labs-csv", spec["sources"]["LABS"],
+        "--icd-source", PROFILE_SOURCES["EHR_DIAGNOSES"],
+        "--medications-source", PROFILE_SOURCES["MEDICATIONS"],
+        "--patient-status-source", PROFILE_SOURCES["PT_INFO_STATUS_REGISTRATION"],
+        "--labs-csv", PROFILE_SOURCES["LABS"],
         "--out-dir", data_root,
         "--mrn-lists-dir", data_root / "mrn_lists",
         "--survival-arms", *arms,
@@ -377,9 +324,7 @@ def preprocess_labs(run: dict, dry_run: bool = False) -> None:
     """Full raw lab standardization for one arm's anchor. Expensive; the Parquet
     cache makes reruns cheap, but the first pass may be slow.
     """
-    variant = run["variant"]
-    spec = DATA_VARIANTS[variant]
-    data_root = spec["data_root"]
+    data_root = _PROFILE_OUTPUT_ROOT
     label = run["label"]
     output_csv = run["input_csv"]
     cache_parquet = data_root / f"consolidated_longitudinal_data_{label}.parquet"
@@ -387,9 +332,9 @@ def preprocess_labs(run: dict, dry_run: bool = False) -> None:
 
     cmd = [
         PYTHON, DATA_PREPROCESSING_DIR / "longitudinal_data_processing.py",
-        "--health-csv", spec["sources"]["HEALTH_HISTORY"],
-        "--labs-csv", spec["sources"]["LABS"],
-        "--medications-csv", spec["sources"]["MEDICATIONS"],
+        "--health-csv", PROFILE_SOURCES["HEALTH_HISTORY"],
+        "--labs-csv", PROFILE_SOURCES["LABS"],
+        "--medications-csv", PROFILE_SOURCES["MEDICATIONS"],
         "--icd-csv", icd_csv,
         "--anchor-med-set", run["anchor"],
         "--survival-cohort-csv", run["restrict_to_mrns"],
@@ -692,113 +637,3 @@ def load_univariate_results(run: dict) -> pd.DataFrame:
     results["p_value"] = pd.to_numeric(results["p_value"], errors="coerce")
     results.insert(0, "cohort", run["label"])
     return results
-
-
-# ---------------------------------------------------------------------------
-# Cohort comparison (profile_data vs. baseline). No-op when the variant has
-# no baseline_root.
-# ---------------------------------------------------------------------------
-
-def _read_landmark_attrition(root: Path, label: str):
-    path = root / "survival_analysis" / f"prediction_inputs_{label}" / "landmark_attrition.json"
-    if not path.exists():
-        return None
-    return json.loads(path.read_text())
-
-
-def _read_cohort_csv_counts(root: Path, label: str) -> dict:
-    """Stage 1 counts straight from that arm's survival cohort CSV."""
-    path = root / f"prostate_{label}_survival_cohort_{label}.csv"
-    if not path.exists():
-        return {}
-    df = pd.read_csv(path, usecols=lambda c: c in ("DFCI_MRN", "PLATINUM_DATE", "DEATH"))
-    out = {"stage1_n_cohort": int(df["DFCI_MRN"].nunique())}
-    if "PLATINUM_DATE" in df.columns:
-        out["stage1_n_platinum_dated"] = int(df["PLATINUM_DATE"].notna().sum())
-    if "DEATH" in df.columns:
-        out["stage1_n_deaths"] = int(df["DEATH"].sum())
-    return out
-
-
-def _read_landmark_counts(root: Path, label: str, landmarks) -> dict:
-    inputs_dir = root / "survival_analysis" / f"prediction_inputs_{label}"
-    out = {}
-    attrition = _read_landmark_attrition(root, label)
-    if attrition:
-        out["stage3_n_loaded_cohort"] = attrition.get("n_loaded_cohort")
-        for lm, n in (attrition.get("eligible_by_landmark") or {}).items():
-            out[f"lm{lm}_n_eligible"] = n
-    for lm in landmarks:
-        agg_path = inputs_dir / f"aggregated_landmark{lm}.csv"
-        if not agg_path.exists():
-            continue
-        agg = pd.read_csv(agg_path, usecols=["DFCI_MRN", "PLATINUM"])
-        out[f"lm{lm}_n_total"] = int(len(agg))
-        out[f"lm{lm}_n_platinum"] = int(agg["PLATINUM"].sum())
-    return out
-
-
-def _collect_metrics(root: Path, label: str, landmarks) -> dict:
-    m = {}
-    m.update(_read_cohort_csv_counts(root, label))
-    m.update(_read_landmark_counts(root, label, landmarks))
-    return m
-
-
-def compare_to_baseline(variant: str, runs: list[dict]) -> pd.DataFrame:
-    """Per-stage patient counts for `runs` against the baseline (ALL_2025_03) root.
-
-    Reads only; nothing under the baseline root is written. No-op (prints a
-    note and returns an empty frame) for variants without a baseline_root,
-    i.e. "baseline" itself.
-    """
-    baseline_root = DATA_VARIANTS[variant]["baseline_root"]
-    if baseline_root is None:
-        print(f"[skip] compare_to_baseline: variant {variant!r} has no baseline_root")
-        return pd.DataFrame()
-
-    new_root = DATA_VARIANTS[variant]["data_root"]
-    comparison_rows = []
-    for run in runs:
-        label, landmarks = run["label"], run["landmarks"]
-        new = _collect_metrics(new_root, label, landmarks)
-        old = _collect_metrics(baseline_root, label, landmarks)
-        for metric in sorted(set(new) | set(old), key=lambda k: (k.split("_")[0], k)):
-            a, b = old.get(metric), new.get(metric)
-            comparison_rows.append({
-                "arm": label,
-                "metric": metric,
-                "ALL_2025_03": a,
-                variant.upper(): b,
-                "delta": (b - a) if (a is not None and b is not None) else None,
-                "pct_change": (100.0 * (b - a) / a) if (a not in (None, 0) and b is not None) else None,
-            })
-
-    comparison_df = pd.DataFrame(comparison_rows)
-    if comparison_df.empty:
-        print("Nothing to compare yet -- run the stages above (and confirm the "
-              f"baseline run exists at {baseline_root}).")
-    else:
-        missing_baseline = comparison_df["ALL_2025_03"].isna().all()
-        if missing_baseline:
-            print(f"WARNING: no baseline outputs found under {baseline_root}; "
-                  "deltas are unavailable.")
-        with pd.option_context("display.max_rows", 200, "display.width", 160):
-            print(comparison_df.to_string(index=False, float_format=lambda v: f"{v:,.1f}"))
-
-    # Stage 2 attrition is written per OUTPUT ROOT, not per arm
-    # (longitudinal_data_processing.py writes cohort_attrition.json next to
-    # --output-csv, and both arms share that directory), so it reflects whichever
-    # anchor ran last. Shown separately for that reason.
-    print(f"\n=== Stage 2 cohort_attrition.json (last anchor run in each root) ===")
-    for name, root in (("ALL_2025_03", baseline_root), (variant.upper(), new_root)):
-        path = root / "cohort_attrition.json"
-        if not path.exists():
-            print(f"  {name}: not found at {path}")
-            continue
-        attrition = json.loads(path.read_text())
-        print(f"  {name}: n_output_patients={attrition.get('n_output_patients')} "
-              f"n_with_highlighted_treatment_anchor={attrition.get('n_with_highlighted_treatment_anchor')} "
-              f"n_after_broad_icd_filter={attrition.get('n_after_broad_icd_filter')}")
-
-    return comparison_df
