@@ -197,6 +197,28 @@ def load_gleason(gleason_path: Path) -> pd.DataFrame:
     ]
 
 
+def load_treatment_anchors(data_path: Path) -> pd.Series:
+    """Recover the patient treatment dates dropped from aggregated inputs."""
+    anchors = _normalize_mrn(
+        _read_table(data_path, columns=[ca.ID_COL, "TREATMENT_ANCHOR_DATE"]),
+        source=str(data_path),
+    )
+    if "TREATMENT_ANCHOR_DATE" not in anchors.columns:
+        raise ValueError(f"{data_path} is missing 'TREATMENT_ANCHOR_DATE'.")
+    anchors["TREATMENT_ANCHOR_DATE"] = pd.to_datetime(
+        anchors["TREATMENT_ANCHOR_DATE"], errors="coerce"
+    )
+    non_null = anchors.dropna(subset=["TREATMENT_ANCHOR_DATE"])
+    distinct = non_null.groupby(ca.ID_COL)["TREATMENT_ANCHOR_DATE"].nunique()
+    conflicts = distinct.index[distinct.gt(1)]
+    if len(conflicts):
+        raise ValueError(
+            f"Longitudinal input has conflicting treatment anchors for {len(conflicts)} "
+            f"MRNs; first values: {conflicts.tolist()[:10]}"
+        )
+    return non_null.groupby(ca.ID_COL)["TREATMENT_ANCHOR_DATE"].first()
+
+
 def _prs_id_in_column(column: str, pgs_id: str) -> bool:
     normalized = str(column).upper().replace("-", "_").replace(".", "_")
     return normalized == pgs_id or normalized.endswith(f"_{pgs_id}")
@@ -273,8 +295,13 @@ def load_biomarker_prs(
             }
         )
     feature_cols = [row["feature"] for row in manifest_rows]
-    for feature in feature_cols:
-        prs[feature] = pd.to_numeric(prs[feature], errors="coerce")
+    numeric_scores = prs[feature_cols].apply(pd.to_numeric, errors="coerce")
+    # Reassemble once so assigning 133 converted columns cannot leave a highly
+    # fragmented frame before the duplicate-MRN groupby.
+    prs = pd.concat(
+        [prs[[ca.ID_COL]].reset_index(drop=True), numeric_scores.reset_index(drop=True)],
+        axis=1,
+    )
 
     if prs[ca.ID_COL].duplicated().any():
         row_counts = prs.groupby(ca.ID_COL).size()
@@ -332,11 +359,24 @@ def build_landmark_features(
     landmark_day: int,
     prs: pd.DataFrame | None = None,
     prs_features: list[str] | None = None,
+    treatment_anchors: pd.Series | None = None,
 ) -> pd.DataFrame:
     base = _normalize_mrn(base, source=f"landmark +{landmark_day} base inputs")
-    if "TREATMENT_ANCHOR_DATE" not in base.columns:
-        raise ValueError("Base inputs are missing 'TREATMENT_ANCHOR_DATE'.")
-    anchor = pd.to_datetime(base["TREATMENT_ANCHOR_DATE"], errors="coerce")
+    if "TREATMENT_ANCHOR_DATE" in base.columns:
+        anchor = pd.to_datetime(base["TREATMENT_ANCHOR_DATE"], errors="coerce")
+    elif treatment_anchors is not None:
+        anchor = base[ca.ID_COL].map(treatment_anchors)
+    else:
+        raise ValueError(
+            "Base inputs omit 'TREATMENT_ANCHOR_DATE' and no treatment-anchor "
+            "mapping was supplied."
+        )
+    if anchor.isna().any():
+        missing_mrns = base.loc[anchor.isna(), ca.ID_COL].tolist()
+        raise ValueError(
+            f"Missing treatment anchors for {len(missing_mrns)} landmark-cohort MRNs; "
+            f"first values: {missing_mrns[:10]}"
+        )
     cutoffs = pd.DataFrame(
         {
             ca.ID_COL: base[ca.ID_COL].values,
@@ -379,6 +419,15 @@ def main(args: argparse.Namespace) -> None:
             f"Missing {base_manifest_path}. Build the standard prediction inputs first."
         )
     base_manifest = json.loads(base_manifest_path.read_text())
+    longitudinal_value = base_manifest.get("data")
+    if not longitudinal_value:
+        raise ValueError(f"{base_manifest_path} has no longitudinal 'data' path.")
+    longitudinal_path = Path(longitudinal_value)
+    treatment_anchors = load_treatment_anchors(longitudinal_path)
+    print(
+        f"Recovered treatment anchors for {len(treatment_anchors):,} patients "
+        f"from {longitudinal_path}."
+    )
     requested_landmarks = (
         [int(value) for value in args.landmark_days]
         if args.landmark_days
@@ -424,6 +473,7 @@ def main(args: argparse.Namespace) -> None:
             landmark_day,
             prs=prs,
             prs_features=prs_features,
+            treatment_anchors=treatment_anchors,
         )
         output_path = output_dir / aggregated_filename(landmark_day)
         built.to_csv(output_path, index=False)
@@ -451,6 +501,7 @@ def main(args: argparse.Namespace) -> None:
         {
             "feature_set": "somatic_gleason",
             "base_inputs_dir": str(base_inputs_dir),
+            "treatment_anchor_source": str(longitudinal_path),
             "somatic_path": str(args.somatic_path),
             "somatic_manifest_path": str(args.somatic_manifest_path),
             "gleason_path": str(args.gleason_path),

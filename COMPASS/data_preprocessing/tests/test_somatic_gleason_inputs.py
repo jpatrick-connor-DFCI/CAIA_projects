@@ -141,6 +141,43 @@ def test_historical_gleason_in_future_note_does_not_leak_backwards():
     assert np.isnan(result.loc[1, GLEASON_FEATURE])
 
 
+def test_landmark_features_can_recover_anchor_dropped_from_base_inputs():
+    base = pd.DataFrame(
+        {
+            "DFCI_MRN": [1, 2],
+            "AGE_AT_TREATMENTSTART": [70, 65],
+            "PLATINUM": [1, 0],
+            "t_platinum": [100, 200],
+            "split": ["train", "test"],
+        }
+    )
+    somatic = pd.DataFrame(
+        {
+            "DFCI_MRN": [1],
+            SOMATIC_AVAILABLE_DATE: pd.to_datetime(["2020-01-20"]),
+            "TP53_SNV": [1],
+        }
+    )
+    gleason = pd.DataFrame(
+        columns=["DFCI_MRN", "gleason_date", GLEASON_AVAILABLE_DATE, GLEASON_FEATURE]
+    )
+    anchors = pd.Series(
+        pd.to_datetime(["2020-01-01", "2020-01-01"]),
+        index=pd.Index([1, 2], name="DFCI_MRN"),
+    )
+
+    result = build_landmark_features(
+        base,
+        somatic,
+        ["TP53_SNV"],
+        gleason,
+        30,
+        treatment_anchors=anchors,
+    ).set_index("DFCI_MRN")
+
+    assert result.loc[1, "TP53_SNV"] == 1
+
+
 def test_prs_loader_uses_supplied_ids_and_preserves_full_column_names():
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "complete_germline_data_df.csv.gz"
