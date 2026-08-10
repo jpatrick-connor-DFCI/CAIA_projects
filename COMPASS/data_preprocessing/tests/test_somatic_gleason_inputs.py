@@ -176,3 +176,22 @@ def test_prs_loader_uses_supplied_ids_and_preserves_full_column_names():
         "PGS000322",
         "PGS000323",
     }
+
+
+def test_prs_loader_averages_conflicting_sample_rows_within_mrn():
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "complete_germline_data_df.csv.gz"
+        score = "PSA_PGS_128_Prostate_specific_antigen__PSA__levels_PGS003378"
+        pd.DataFrame(
+            {
+                "DFCI_MRN": [1, 1, 2],
+                score: [0.2, 0.6, -0.1],
+            }
+        ).to_csv(path, index=False)
+
+        prs, _manifest = load_biomarker_prs(path)
+
+    prs = prs.set_index("DFCI_MRN")
+    assert len(prs) == 2
+    assert np.isclose(prs.loc[1, score], 0.4)
+    assert np.isclose(prs.loc[2, score], -0.1)

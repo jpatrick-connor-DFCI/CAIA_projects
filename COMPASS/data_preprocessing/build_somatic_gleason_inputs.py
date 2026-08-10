@@ -220,7 +220,14 @@ def _prs_trait_group(column: str) -> str:
 def load_biomarker_prs(
     prs_path: Path, *, require_all: bool = False
 ) -> tuple[pd.DataFrame, list[dict[str, str]]]:
-    """Load the supplied PGS allowlist and collapse identical MRN duplicates."""
+    """Load the supplied PGS allowlist and collapse sample rows by patient.
+
+    ``complete_germline_data_df`` may contain more than one genotyped sample for
+    an MRN. PRSs are continuous germline estimates, so repeated sample rows are
+    reduced to their per-score arithmetic mean. This is a no-op for identical
+    duplicates and avoids choosing an arbitrary sample when technical estimates
+    differ slightly.
+    """
     header = _table_columns(prs_path)
     if ca.ID_COL not in header:
         raise ValueError(f"PRS input {prs_path} is missing required column {ca.ID_COL!r}.")
@@ -270,11 +277,21 @@ def load_biomarker_prs(
         prs[feature] = pd.to_numeric(prs[feature], errors="coerce")
 
     if prs[ca.ID_COL].duplicated().any():
-        conflicts = prs.groupby(ca.ID_COL)[feature_cols].nunique(dropna=True).gt(1).any(axis=1)
-        if conflicts.any():
-            bad = conflicts.index[conflicts].tolist()[:10]
-            raise ValueError(f"PRS input has conflicting duplicate rows for MRNs: {bad}")
-        prs = prs.groupby(ca.ID_COL, as_index=False)[feature_cols].first()
+        row_counts = prs.groupby(ca.ID_COL).size()
+        duplicate_mrns = row_counts.index[row_counts.gt(1)]
+        conflicts = (
+            prs.loc[prs[ca.ID_COL].isin(duplicate_mrns)]
+            .groupby(ca.ID_COL)[feature_cols]
+            .nunique(dropna=True)
+            .gt(1)
+            .any(axis=1)
+        )
+        print(
+            f"PRS duplicate resolution: averaging sample rows for "
+            f"{len(duplicate_mrns):,} MRNs; {int(conflicts.sum()):,} have at least "
+            "one discordant score."
+        )
+        prs = prs.groupby(ca.ID_COL, as_index=False)[feature_cols].mean()
     return prs, manifest_rows
 
 
@@ -443,6 +460,7 @@ def main(args: argparse.Namespace) -> None:
             "n_somatic_features": len(somatic_features),
             "gleason_feature": GLEASON_FEATURE,
             "prs_features": prs_features,
+            "prs_duplicate_resolution": "arithmetic mean per PGS column within DFCI_MRN",
             "somatic_selection": "latest result available on or before landmark",
             "gleason_selection": "latest dated score on or before landmark",
         }
