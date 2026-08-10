@@ -1,4 +1,4 @@
-"""Build a separate somatic-feature + Gleason + biomarker-PRS univariate arm.
+"""Build a separate somatic-feature + Gleason + selected-PRS univariate arm.
 
 The risk sets, outcomes, and train/valid/test assignments are inherited from
 the standard COMPASS landmark inputs.  Features come from the two upstream
@@ -67,30 +67,35 @@ GLEASON_FEATURE = "GLEASON_SCORE"
 SOMATIC_AVAILABLE_DATE = "_somatic_available_date"
 GLEASON_AVAILABLE_DATE = "_gleason_available_date"
 
-# PGS Catalog scores mapped specifically to PSA level or testosterone level.
-# The COMPASS cohort is male, so female-specific testosterone scores are
-# intentionally excluded. The loader intersects this allowlist with the
-# locally generated matrix, allowing older matrix snapshots to omit newer IDs.
-# Trait sources: OBA_2050200 (PSA amount) and EFO_0004908 (testosterone).
-PRS_TRAITS = {
-    "PSA": (
-        "PGS003378",
-        "PGS003379",
-        "PGS005098",
-        "PGS005099",
-        "PGS005100",
-        "PGS005101",
-        "PGS005107",
-    ),
-    "TESTOSTERONE": (
-        "PGS000321",  # combined-sex serum testosterone
-        "PGS000323",  # male-specific serum testosterone
-        "PGS000696",  # testosterone concentration
-        "PGS001988",  # male-specific log testosterone
-        "PGS002205",  # male-specific log testosterone
-        "PGS003559",  # male-specific log testosterone
-    ),
-}
+# Exact PGS IDs from the user-supplied complete_germline_data_df column list.
+# Matching on the terminal PGS ID is less brittle than repeating the long
+# human-readable prefix, while still selecting exactly those columns because
+# each PGS ID occurs once in the matrix. Original column names are preserved in
+# model outputs and in the feature manifest.
+PRS_PGS_IDS_OF_INTEREST = (
+    "PGS000030", "PGS000044", "PGS000049", "PGS000067", "PGS000084",
+    "PGS000086", "PGS000160", "PGS000198", "PGS000321", "PGS000322",
+    "PGS000323", "PGS000333", "PGS000342", "PGS000348",
+    *(f"PGS{value:06d}" for value in range(565, 593)),
+    *(f"PGS{value:06d}" for value in range(595, 605)),
+    "PGS000662", "PGS000696", "PGS000714", "PGS000719", "PGS000733",
+    "PGS000741", "PGS000742", "PGS000751", "PGS000795", "PGS000796",
+    "PGS000878", "PGS000881", "PGS000940", "PGS000997", "PGS001015",
+    "PGS001164", "PGS001291", "PGS001292", "PGS001338", "PGS001516",
+    "PGS001805", "PGS001806", "PGS001865", "PGS001914", "PGS001988",
+    "PGS002016", "PGS002076", "PGS002130", "PGS002205", "PGS002240",
+    "PGS002241", "PGS002268", "PGS002747", "PGS002791", "PGS002792",
+    "PGS002793", "PGS002796", "PGS002797", "PGS002798", "PGS002799",
+    "PGS003331", "PGS003378", "PGS003379", "PGS003383", "PGS003415",
+    "PGS003418", "PGS003419", "PGS003460", "PGS003507", "PGS003559",
+    "PGS003743", "PGS003765", "PGS003766", "PGS003985", "PGS004001",
+    "PGS004027", "PGS004042", "PGS004055", "PGS004071", "PGS004085",
+    "PGS004099", "PGS004109", "PGS004125", "PGS004139", "PGS004155",
+    "PGS004251", "PGS004320", "PGS004474", "PGS004475", "PGS004500",
+    "PGS004544", "PGS004545", "PGS004570", "PGS004581", "PGS004599",
+    "PGS004601", "PGS004694", "PGS004815", "PGS004816", "PGS004872",
+    "PGS005107",
+)
 
 
 def _read_table(path: Path, *, columns: list[str] | None = None) -> pd.DataFrame:
@@ -194,52 +199,72 @@ def load_gleason(gleason_path: Path) -> pd.DataFrame:
 
 def _prs_id_in_column(column: str, pgs_id: str) -> bool:
     normalized = str(column).upper().replace("-", "_").replace(".", "_")
-    return normalized == pgs_id or normalized.startswith(f"{pgs_id}_")
+    return normalized == pgs_id or normalized.endswith(f"_{pgs_id}")
 
 
-def load_biomarker_prs(prs_path: Path) -> tuple[pd.DataFrame, list[dict[str, str]]]:
-    """Load only PSA/testosterone PGS columns and collapse identical MRN duplicates."""
+def _prs_trait_group(column: str) -> str:
+    normalized = str(column).lower()
+    if "testosterone" in normalized:
+        return "TESTOSTERONE"
+    if "prostate_specific_antigen" in normalized or "psa_pgs" in normalized:
+        return "PSA"
+    if "psoriatic_arthritis" in normalized:
+        return "PSORIATIC_ARTHRITIS"
+    if "testis" in normalized or "testicular" in normalized:
+        return "TESTICULAR"
+    if "prostate" in normalized or "prca" in normalized or "pca" in normalized:
+        return "PROSTATE"
+    return "OTHER"
+
+
+def load_biomarker_prs(
+    prs_path: Path, *, require_all: bool = False
+) -> tuple[pd.DataFrame, list[dict[str, str]]]:
+    """Load the supplied PGS allowlist and collapse identical MRN duplicates."""
     header = _table_columns(prs_path)
     if ca.ID_COL not in header:
         raise ValueError(f"PRS input {prs_path} is missing required column {ca.ID_COL!r}.")
 
-    selected: list[tuple[str, str, str]] = []
-    for trait, pgs_ids in PRS_TRAITS.items():
-        for pgs_id in pgs_ids:
-            matches = [column for column in header if _prs_id_in_column(column, pgs_id)]
-            if len(matches) > 1:
-                raise ValueError(
-                    f"PRS input has multiple columns matching {pgs_id}: {matches}. "
-                    "Provide a matrix with one score column per PGS ID."
-                )
-            if matches:
-                selected.append((matches[0], trait, pgs_id))
+    selected: list[tuple[str, str]] = []
+    missing_ids = []
+    for pgs_id in PRS_PGS_IDS_OF_INTEREST:
+        matches = [column for column in header if _prs_id_in_column(column, pgs_id)]
+        if len(matches) > 1:
+            raise ValueError(
+                f"PRS input has multiple columns matching {pgs_id}: {matches}. "
+                "Provide a matrix with one score column per PGS ID."
+            )
+        if matches:
+            selected.append((matches[0], pgs_id))
+        else:
+            missing_ids.append(pgs_id)
     if not selected:
-        expected = [pgs_id for values in PRS_TRAITS.values() for pgs_id in values]
         raise ValueError(
-            f"PRS input {prs_path} has none of the PSA/testosterone scores: {expected}"
+            f"PRS input {prs_path} has none of the {len(PRS_PGS_IDS_OF_INTEREST)} "
+            "allowlisted PGS IDs."
+        )
+    if require_all and missing_ids:
+        raise ValueError(
+            f"PRS input {prs_path} is missing {len(missing_ids)} allowlisted PGS IDs: "
+            f"{missing_ids}"
         )
 
-    raw_columns = [source for source, _, _ in selected]
+    raw_columns = [source for source, _ in selected]
     prs = _normalize_mrn(
         _read_table(prs_path, columns=[ca.ID_COL, *raw_columns]), source=str(prs_path)
     )
     manifest_rows = []
-    rename = {}
-    for source, trait, pgs_id in selected:
-        feature = f"PRS_{trait}_{pgs_id}"
-        rename[source] = feature
+    for source, pgs_id in selected:
         manifest_rows.append(
             {
-                "feature": feature,
+                "feature": source,
                 "feature_kind": "prs_continuous",
                 "source": str(prs_path),
                 "pgs_id": pgs_id,
-                "reported_trait_group": trait,
+                "reported_trait_group": _prs_trait_group(source),
                 "source_column": source,
             }
         )
-    prs = prs.rename(columns=rename)
     feature_cols = [row["feature"] for row in manifest_rows]
     for feature in feature_cols:
         prs[feature] = pd.to_numeric(prs[feature], errors="coerce")
@@ -347,12 +372,12 @@ def main(args: argparse.Namespace) -> None:
         Path(args.somatic_path), Path(args.somatic_manifest_path)
     )
     gleason = load_gleason(Path(args.gleason_path))
-    prs, prs_manifest_rows = load_biomarker_prs(Path(args.prs_path))
+    prs, prs_manifest_rows = load_biomarker_prs(Path(args.prs_path), require_all=True)
     prs_features = [row["feature"] for row in prs_manifest_rows]
     print(
         f"Loaded {len(somatic):,} somatic testing groups with {len(somatic_features):,} features; "
         f"{gleason[ca.ID_COL].nunique():,} patients have Gleason timeline rows; "
-        f"{prs[ca.ID_COL].nunique():,} patients have {len(prs_features)} PSA/testosterone PRSs."
+        f"{prs[ca.ID_COL].nunique():,} patients have {len(prs_features)} selected PRSs."
     )
 
     feature_rows = [

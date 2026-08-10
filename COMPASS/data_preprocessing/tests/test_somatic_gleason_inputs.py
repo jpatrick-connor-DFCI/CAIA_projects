@@ -141,16 +141,25 @@ def test_historical_gleason_in_future_note_does_not_leak_backwards():
     assert np.isnan(result.loc[1, GLEASON_FEATURE])
 
 
-def test_prs_loader_keeps_only_psa_and_relevant_testosterone_scores():
+def test_prs_loader_uses_supplied_ids_and_preserves_full_column_names():
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "complete_germline_data_df.csv.gz"
+        psa = "PSA_PGS_CSx_Prostate_specific_antigen__PSA__levels_PGS003379"
+        testosterone_male = (
+            "snpnet_Testosterone_male_specific_"
+            "Serum_testosterone_levels_in_males_PGS000323"
+        )
+        testosterone_female = (
+            "snpnet_Testosterone_female_specific_"
+            "Serum_testosterone_levels_in_females_PGS000322"
+        )
         pd.DataFrame(
             {
                 "DFCI_MRN": [1, 2],
-                "PGS003379": [0.1, 0.2],       # PSA
-                "PGS000323": [-0.1, 0.4],      # male testosterone
-                "PGS000322": [9.0, 9.0],       # female testosterone: exclude
-                "PGS000662": [8.0, 8.0],       # prostate cancer: exclude
+                psa: [0.1, 0.2],
+                testosterone_male: [-0.1, 0.4],
+                testosterone_female: [9.0, 9.0],
+                "unrelated_trait_PGS999999": [8.0, 8.0],
             }
         ).to_csv(path, index=False)
 
@@ -158,7 +167,12 @@ def test_prs_loader_keeps_only_psa_and_relevant_testosterone_scores():
 
     assert set(prs.columns) == {
         "DFCI_MRN",
-        "PRS_PSA_PGS003379",
-        "PRS_TESTOSTERONE_PGS000323",
+        psa,
+        testosterone_male,
+        testosterone_female,
     }
-    assert {row["pgs_id"] for row in manifest} == {"PGS003379", "PGS000323"}
+    assert {row["pgs_id"] for row in manifest} == {
+        "PGS003379",
+        "PGS000322",
+        "PGS000323",
+    }

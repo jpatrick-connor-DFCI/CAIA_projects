@@ -395,7 +395,7 @@ def build_prediction_inputs(run: dict, dry_run: bool = False) -> None:
 
 
 def build_somatic_gleason_inputs(run: dict, dry_run: bool = False) -> None:
-    """Build the separate somatic + Gleason + PSA/testosterone PRS input arm."""
+    """Build the separate somatic + Gleason + selected-PRS input arm."""
     output_dir = run["inputs_dir"] / "somatic_gleason"
     print(f"\n========== build somatic + Gleason inputs: {run['title']} ==========")
     cmd = [
@@ -551,7 +551,7 @@ def run_univariate(run: dict, dry_run: bool = False):
 
 
 def run_somatic_gleason_univariate(run: dict, dry_run: bool = False):
-    """Run the separate somatic + Gleason + biomarker-PRS univariate Cox arm."""
+    """Run the separate somatic + Gleason + selected-PRS univariate Cox arm."""
     print(f"\n========== run somatic + Gleason univariate: {run['title']} ==========")
     summary = []
     for landmark in run["landmarks"]:

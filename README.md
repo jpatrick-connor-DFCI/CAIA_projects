@@ -55,7 +55,7 @@ COMPASS/
 │   ├── longitudinal_data_processing.py   # ENTRY: raw exports -> longitudinal_prediction_data.csv
 │   ├── build_prediction_inputs.py        # ENTRY: landmark cohorts, split, canonical labs, horizons
 │   ├── build_genomic_inputs.py           # legacy sample-anchored genomic + lab arm
-│   └── build_somatic_gleason_inputs.py   # somatic + Gleason + PSA/testosterone PRS inputs
+│   └── build_somatic_gleason_inputs.py   # somatic + Gleason + selected PRS inputs
 │
 └── survival_analysis/
     ├── compass_pipeline.py               # shared setup/helper logic behind the 3 Python notebooks
