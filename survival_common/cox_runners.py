@@ -208,7 +208,8 @@ def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
         for endpoint in endpoints:
             print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
             print(cox.ENDPOINTS[endpoint]["description"])
-            # Univariate testing is restricted to labs and genomics
+            # Univariate testing is restricted to labs and explicitly declared
+            # static features (genomics and, in COMPASS's separate arm, Gleason)
             # (ctx.selected_feature_cols); cancer type, treatment, and gender
             # are never tested as their own feature, but are always included
             # as adjustment covariates (alongside age) in every feature test.

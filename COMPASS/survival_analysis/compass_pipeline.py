@@ -394,6 +394,23 @@ def build_prediction_inputs(run: dict, dry_run: bool = False) -> None:
         raise RuntimeError(f"build_prediction_inputs failed for {run['label']} with rc={rc}")
 
 
+def build_somatic_gleason_inputs(run: dict, dry_run: bool = False) -> None:
+    """Build the separate somatic + Gleason + PSA/testosterone PRS input arm."""
+    output_dir = run["inputs_dir"] / "somatic_gleason"
+    print(f"\n========== build somatic + Gleason inputs: {run['title']} ==========")
+    cmd = [
+        PYTHON, DATA_PREPROCESSING_DIR / "build_somatic_gleason_inputs.py",
+        "--base-inputs-dir", run["inputs_dir"],
+        "--output-dir", output_dir,
+        "--landmark-days", *[str(lm) for lm in run["landmarks"]],
+    ]
+    rc = _run(cmd, dry_run=dry_run)
+    if not dry_run and rc != 0:
+        raise RuntimeError(
+            f"build_somatic_gleason_inputs failed for {run['label']} with rc={rc}"
+        )
+
+
 def cohort_diagnostics(run: dict) -> None:
     print(f"\n========== cohort diagnostics: {run['title']} ==========")
     for lm in run["landmarks"]:
@@ -533,6 +550,40 @@ def run_univariate(run: dict, dry_run: bool = False):
     return summary
 
 
+def run_somatic_gleason_univariate(run: dict, dry_run: bool = False):
+    """Run the separate somatic + Gleason + biomarker-PRS univariate Cox arm."""
+    print(f"\n========== run somatic + Gleason univariate: {run['title']} ==========")
+    summary = []
+    for landmark in run["landmarks"]:
+        row_output_dir = (
+            run["output_dir"] / "cox_somatic_gleason" / f"landmark_{landmark}" / "both"
+        )
+        metrics_path = row_output_dir / "cox_agg_univariate_nobs_adjusted.csv"
+        tag = f"{run['label']:28s} somatic+gleason landmark_{landmark:<3}"
+        if metrics_path.exists() and not FORCE_RERUN:
+            print(f"[skip] {tag} -> {metrics_path.relative_to(run['output_dir'])} exists")
+            summary.append((tag, "skipped", 0.0))
+            continue
+        if not dry_run:
+            row_output_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            PYTHON, SURVIVAL_DIR / "univariate_analysis.py",
+            "--inputs-dir", run["inputs_dir"] / "somatic_gleason",
+            "--output-dir", row_output_dir,
+            "--landmark-days", str(landmark),
+            "--endpoints", "platinum",
+            "--feature-set", "somatic-gleason",
+        ]
+        print(f"[run ] {tag}")
+        t0 = time.time()
+        rc = _run(cmd, dry_run=dry_run)
+        elapsed = time.time() - t0
+        status = "ok" if rc == 0 else f"FAILED (rc={rc})"
+        print(f"[done] {tag} -> {status} ({elapsed/60:.1f} min)\n")
+        summary.append((tag, status, elapsed))
+    return summary
+
+
 def run_multivariate(run: dict, dry_run: bool = False):
     """Elastic-net (both/baseline) and XGBoost (both/baseline) arms."""
     summary = _run_tasks(run, MULTIVARIATE_TASK_SPECS, dry_run=dry_run)
@@ -634,6 +685,34 @@ def load_univariate_results(run: dict) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Univariate results are missing columns: {sorted(missing)}")
 
+    results["p_value"] = pd.to_numeric(results["p_value"], errors="coerce")
+    results.insert(0, "cohort", run["label"])
+    return results
+
+
+def load_somatic_gleason_univariate_results(run: dict) -> pd.DataFrame:
+    """Load outputs from the separate somatic + Gleason univariate run."""
+    import re
+
+    result_root = run["output_dir"] / "cox_somatic_gleason"
+    paths = sorted(
+        result_root.glob("landmark_*/both/cox_agg_univariate_nobs_adjusted.csv")
+    )
+    if not paths:
+        raise FileNotFoundError(
+            f"No somatic + Gleason univariate results found under {result_root}."
+        )
+    frames = []
+    for path in paths:
+        frame = pd.read_csv(path)
+        if "landmark_days" not in frame.columns:
+            match = re.search(r"landmark_(-?\d+)", str(path.parent.parent))
+            if match is None:
+                raise ValueError(f"Could not infer landmark from {path}")
+            frame.insert(0, "landmark_days", int(match.group(1)))
+        frame["source_path"] = str(path)
+        frames.append(frame)
+    results = pd.concat(frames, ignore_index=True)
     results["p_value"] = pd.to_numeric(results["p_value"], errors="coerce")
     results.insert(0, "cohort", run["label"])
     return results

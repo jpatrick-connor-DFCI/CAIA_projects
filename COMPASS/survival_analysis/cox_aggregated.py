@@ -328,6 +328,7 @@ class LandmarkContext:
     canonical_labs: list[str]
     selected_feature_cols: list[str]
     feature_meta_selected: pd.DataFrame
+    always_include_feature_cols: tuple[str, ...] = ()
 
 
 def compute_shared_canonical_labs(
@@ -380,13 +381,45 @@ def prepare_landmark_context(
     *,
     min_patient_coverage: float,
     canonical_labs_override: list[str] | None = None,
+    feature_set: str = "labs",
 ) -> LandmarkContext:
     print(f"\n##### LANDMARK ANALYSES: +{landmark_day} DAYS #####")
     merged, train_val, test, pre_treatment_lab_df = _load_prebuilt_landmark(
         inputs_dir, landmark_day
     )
 
-    raw_feature_cols = [c for c in merged.columns if c not in outcome_columns()]
+    feature_set = str(feature_set).lower().replace("-", "_")
+    if feature_set not in {"labs", "somatic_gleason"}:
+        raise ValueError(
+            f"Unsupported feature set {feature_set!r}; expected 'labs' or 'somatic_gleason'."
+        )
+
+    always_include_feature_cols: tuple[str, ...] = ()
+    if feature_set == "somatic_gleason":
+        manifest_path = inputs_dir / "somatic_gleason_features.csv"
+        if not manifest_path.exists():
+            raise FileNotFoundError(
+                f"Missing {manifest_path}. Run build_somatic_gleason_inputs.py first."
+            )
+        feature_manifest = pd.read_csv(manifest_path)
+        if "feature" not in feature_manifest.columns:
+            raise ValueError(f"{manifest_path} is missing the 'feature' column.")
+        declared_features = [
+            str(feature)
+            for feature in feature_manifest["feature"].dropna().drop_duplicates()
+        ]
+        missing_features = [
+            feature for feature in declared_features if feature not in merged.columns
+        ]
+        if missing_features:
+            raise ValueError(
+                f"Landmark +{landmark_day} inputs are missing {len(missing_features)} "
+                f"declared somatic/Gleason features; first values: {missing_features[:10]}"
+            )
+        raw_feature_cols = declared_features
+        always_include_feature_cols = tuple(raw_feature_cols)
+    else:
+        raw_feature_cols = [c for c in merged.columns if c not in outcome_columns()]
     univariate_data = merged.copy()
     split_stratification = "prebuilt"
 
@@ -396,7 +429,9 @@ def prepare_landmark_context(
         context=f"prepare_landmark_context[landmark+{landmark_day}d]",
     )
 
-    if canonical_labs_override is not None:
+    if feature_set == "somatic_gleason":
+        canonical_labs = []
+    elif canonical_labs_override is not None:
         # Shared-canonical-labs arm: the caller has fixed the canonical set (e.g.
         # the intersection across all landmarks) so every landmark tests an
         # identical lab list. Skip the per-landmark coverage-based selection.
@@ -413,7 +448,8 @@ def prepare_landmark_context(
         train_val,
         raw_feature_cols,
         min_patient_coverage=min_patient_coverage,
-        restrict_to_labs=canonical_labs,
+        restrict_to_labs=[] if feature_set == "somatic_gleason" else canonical_labs,
+        always_include=list(always_include_feature_cols),
     )
     feature_meta_selected = feature_meta.loc[
         feature_meta["selected"],
@@ -424,8 +460,12 @@ def prepare_landmark_context(
     print(f"Full cohort: {len(merged)} patients")
     print(f"Train/val (Arm 2): {len(train_val)} patients")
     print(f"Test (Arm 2):      {len(test)} patients")
+    print(f"Feature set: {feature_set}")
     print(f"Canonical labs (train_val): {len(canonical_labs)}")
-    print(f"Selected summary-lab features (train_val pre-filter): {len(selected_feature_cols)}")
+    feature_label = (
+        "static somatic/Gleason" if feature_set == "somatic_gleason" else "summary-lab"
+    )
+    print(f"Selected {feature_label} features (train_val pre-filter): {len(selected_feature_cols)}")
 
     return LandmarkContext(
         landmark_day=landmark_day,
@@ -439,6 +479,7 @@ def prepare_landmark_context(
         canonical_labs=canonical_labs,
         selected_feature_cols=selected_feature_cols,
         feature_meta_selected=feature_meta_selected,
+        always_include_feature_cols=always_include_feature_cols,
     )
 
 

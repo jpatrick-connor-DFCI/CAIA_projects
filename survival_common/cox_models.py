@@ -258,7 +258,7 @@ def build_model_matrices(
     return train_model, eval_model, covariate_cols
 
 
-def _binary_genomic_association_row(
+def _static_feature_association_row(
     data: pd.DataFrame,
     *,
     feature: str,
@@ -271,11 +271,7 @@ def _binary_genomic_association_row(
     baseline_covariate_cols: tuple[str, ...] = (),
     model_type: str = "cox",
 ) -> dict:
-    """Test a static binary genomic indicator (feature_z + age + baseline covariates, no n_obs).
-
-    Genomic indicators are one-time calls, not repeated-measurement labs, so
-    there is no matching `_n_observations` column and none is required here.
-    """
+    """Test a static feature (feature_z + age + baseline covariates, no n_obs)."""
     total_patients = len(data)
     result = {
         "endpoint": endpoint,
@@ -307,11 +303,11 @@ def _binary_genomic_association_row(
         "coef_age": np.nan,
         "p_value_age": np.nan,
         "fit_penalizer": np.nan,
-        "note": "genomic_binary",
+        "note": "static_feature",
         "model_type": model_type,
     }
     if feature not in data.columns:
-        result["note"] = "genomic_missing_column"
+        result["note"] = "static_missing_column"
         return result
 
     baseline_cols = [c for c in baseline_covariate_cols if c in data.columns]
@@ -332,6 +328,12 @@ def _binary_genomic_association_row(
         return result
 
     feature_values = feature_df[feature].to_numpy(dtype=float)
+    finite_unique = set(np.unique(feature_values[np.isfinite(feature_values)]).tolist())
+    feature_kind = (
+        "genomic_binary"
+        if finite_unique.issubset({0.0, 1.0})
+        else "static_continuous"
+    )
     feature_sd = float(np.std(feature_values, ddof=0))
     if not np.isfinite(feature_sd) or feature_sd <= 0:
         result["note"] = "feature_has_no_variation"
@@ -355,7 +357,7 @@ def _binary_genomic_association_row(
         l1_ratio=0.0,
     )
     result["fit_penalizer"] = used_penalizer
-    result["note"] = f"genomic_binary;{note}" if note else "genomic_binary"
+    result["note"] = f"{feature_kind};{note}" if note else feature_kind
     if model is None:
         return result
 
@@ -389,10 +391,11 @@ def run_univariate_nobs_adjusted_associations(
     `baseline_covariate_cols` (e.g. gender, cancer type, treatment) are
     always-included adjustment terms in every per-feature fit, alongside age.
 
-    `genomic_feature_cols` identifies features that are static binary genomic
-    indicators rather than repeated-measurement labs: they have no matching
-    `_n_observations` column and are tested as the raw binary indicator + age
-    + baseline covariates, instead of the lab n_obs-adjusted model.
+    `genomic_feature_cols` identifies static features rather than repeated-
+    measurement labs (usually binary genomic indicators, but continuous static
+    annotations are supported): they have no matching `_n_observations` column
+    and are tested as the raw standardized feature + age + baseline covariates,
+    instead of the lab n_obs-adjusted model.
     """
     genomic_feature_set = set(genomic_feature_cols) if genomic_feature_cols else set()
     duration_col, event_col = _endpoint_columns(endpoint_map, endpoint)
@@ -402,7 +405,7 @@ def run_univariate_nobs_adjusted_associations(
     for feature in tqdm(feature_cols, desc=f"univariate[{endpoint}]", dynamic_ncols=True):
         if feature in genomic_feature_set:
             rows.append(
-                _binary_genomic_association_row(
+                _static_feature_association_row(
                     data,
                     feature=feature,
                     endpoint=endpoint,
