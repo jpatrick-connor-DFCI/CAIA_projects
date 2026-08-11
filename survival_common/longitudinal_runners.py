@@ -75,6 +75,23 @@ def add_common_longitudinal_args(parser: argparse.ArgumentParser) -> None:
         default="platinum",
         help="platinum (death censored, comparable to Cox/XGBoost) or competing (platinum+death).",
     )
+    parser.add_argument(
+        "--overwrite",
+        dest="overwrite",
+        action="store_true",
+        default=False,
+        help=(
+            "Refit even if this landmark+config's metrics file already exists in "
+            "--output-dir. Default: pick up where left off, skipping a run whose "
+            "output is already present."
+        ),
+    )
+    parser.add_argument(
+        "--no-overwrite",
+        dest="overwrite",
+        action="store_false",
+        help="Skip the run if its output already exists (the default).",
+    )
 
 
 def build_deephit_parser() -> argparse.ArgumentParser:

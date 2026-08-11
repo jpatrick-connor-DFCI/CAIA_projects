@@ -42,6 +42,30 @@ def _set_runtime_schema(cox: Any, args: Namespace) -> None:
     cox.AGE_COL = args.age_col
 
 
+def _per_landmark_path(output_dir: Path, prefix: str, landmark_day: int) -> Path:
+    return output_dir / f"{prefix}_landmark{landmark_day}.csv"
+
+
+def _combine_per_landmark(
+    output_dir: Path, prefix: str, landmark_days: list[int], combined_filename: str
+) -> bool:
+    """Rebuild the combined CSV from whichever per-landmark files exist on disk.
+
+    Reads from disk rather than from in-memory frames so a resumed run's
+    combined output reflects landmarks fit in earlier invocations too, not
+    just the ones (re)computed this call.
+    """
+    frames = []
+    for landmark_day in landmark_days:
+        path = _per_landmark_path(output_dir, prefix, landmark_day)
+        if path.exists():
+            frames.append(pd.read_csv(path, low_memory=False))
+    if not frames:
+        return False
+    pd.concat(frames, ignore_index=True).to_csv(output_dir / combined_filename, index=False)
+    return True
+
+
 def _load_common_inputs(cox: Any, args: Namespace) -> tuple[list[str], list[int], Path, dict]:
     endpoints = cox.normalize_endpoints(args.endpoints)
     landmark_days = cox.normalize_landmark_days(args.landmark_days)
@@ -87,6 +111,23 @@ def add_common_cox_args(parser: argparse.ArgumentParser, config: CoxProjectConfi
         type=int,
         default=cox.DEFAULT_LANDMARK_DAYS,
         help="Landmark offsets to analyze. Each must have prebuilt inputs in --inputs-dir.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        dest="overwrite",
+        action="store_true",
+        default=False,
+        help=(
+            "Refit every --landmark-days even if its per-landmark output files "
+            "already exist in --output-dir. Default: pick up where left off, "
+            "skipping landmarks whose per-landmark files are already present."
+        ),
+    )
+    parser.add_argument(
+        "--no-overwrite",
+        dest="overwrite",
+        action="store_false",
+        help="Skip landmarks whose per-landmark output files already exist (the default).",
     )
 
 
@@ -189,10 +230,15 @@ def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
             min_patient_coverage=min_patient_coverage,
         )
 
-    feature_selection_frames: list[pd.DataFrame] = []
-    univariate_frames: list[pd.DataFrame] = []
+    overwrite = getattr(args, "overwrite", False)
 
     for landmark_day in landmark_days:
+        feature_selection_path = _per_landmark_path(output_dir, "cox_agg_feature_selection", landmark_day)
+        univariate_path = _per_landmark_path(output_dir, "cox_agg_univariate_nobs_adjusted", landmark_day)
+        if not overwrite and feature_selection_path.exists() and univariate_path.exists():
+            print(f"\n[skip] landmark +{landmark_day}d: per-landmark outputs already exist (pass --overwrite to refit)")
+            continue
+
         context_kwargs = dict(config.prepare_context_kwargs(args))
         if shared_canonical_labs is not None:
             context_kwargs["canonical_labs_override"] = shared_canonical_labs
@@ -202,8 +248,9 @@ def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
             min_patient_coverage=min_patient_coverage,
             **context_kwargs,
         )
-        feature_selection_frames.append(ctx.feature_meta_selected)
+        ctx.feature_meta_selected.to_csv(feature_selection_path, index=False)
 
+        univariate_frames: list[pd.DataFrame] = []
         print("\n##### ARM 1: UNIVARIATE (n_obs-adjusted, full follow-up, all endpoints) #####")
         for endpoint in endpoints:
             print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
@@ -236,19 +283,16 @@ def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
                     endpoint=endpoint,
                     label=f"n_obs-adjusted univariate ({model_label})",
                 )
+        if univariate_frames:
+            pd.concat(univariate_frames, ignore_index=True).to_csv(univariate_path, index=False)
+        print(f"\n[done] landmark +{landmark_day}d: saved {feature_selection_path.name}, {univariate_path.name}")
 
-    if feature_selection_frames:
-        pd.concat(feature_selection_frames, ignore_index=True).to_csv(
-            output_dir / "cox_agg_feature_selection.csv", index=False
-        )
-    if univariate_frames:
-        pd.concat(univariate_frames, ignore_index=True).to_csv(
-            output_dir / "cox_agg_univariate_nobs_adjusted.csv", index=False
-        )
-
-    print("\nSaved:")
-    print("  cox_agg_feature_selection.csv")
-    if univariate_frames:
+    print("\nSaved (combined):")
+    if _combine_per_landmark(output_dir, "cox_agg_feature_selection", landmark_days, "cox_agg_feature_selection.csv"):
+        print("  cox_agg_feature_selection.csv")
+    if _combine_per_landmark(
+        output_dir, "cox_agg_univariate_nobs_adjusted", landmark_days, "cox_agg_univariate_nobs_adjusted.csv"
+    ):
         print("  cox_agg_univariate_nobs_adjusted.csv")
 
 
@@ -442,24 +486,24 @@ def run_multivariable(config: CoxProjectConfig, cox: Any, args: Namespace) -> No
         f"auc_time_unit_days={auc_time_unit_days} per build manifest)"
     )
 
-    feature_selection_frames: list[pd.DataFrame] = []
-    horizon_grid_frames: list[pd.DataFrame] = []
-    out = {
-        "frames": [],
-        "metric_rows": [],
-        "test_auc_frames": [],
-        "test_brier_frames": [],
-        "canonical_labs_fold_rows": [],
-    }
+    prefix = "cox_agg_baseline" if args.baseline else "cox_agg_multivariable"
+    overwrite = getattr(args, "overwrite", False)
 
     for landmark_day in landmark_days:
+        metrics_path = _per_landmark_path(output_dir, f"{prefix}_metrics", landmark_day)
+        if not overwrite and metrics_path.exists():
+            print(f"\n[skip] landmark +{landmark_day}d: {metrics_path.name} already exists (pass --overwrite to refit)")
+            continue
+
         ctx = cox.prepare_landmark_context(
             inputs_dir,
             landmark_day,
             min_patient_coverage=min_patient_coverage,
             **config.prepare_context_kwargs(args),
         )
-        feature_selection_frames.append(ctx.feature_meta_selected)
+        ctx.feature_meta_selected.to_csv(
+            _per_landmark_path(output_dir, "cox_agg_feature_selection", landmark_day), index=False
+        )
         endpoint_horizon_grids, horizon_grid_df = cox.build_endpoint_horizon_grids(
             landmark_day,
             endpoints=endpoints,
@@ -468,8 +512,18 @@ def run_multivariable(config: CoxProjectConfig, cox: Any, args: Namespace) -> No
             auc_time_unit_days=auc_time_unit_days,
         )
         if not horizon_grid_df.empty:
-            horizon_grid_frames.append(horizon_grid_df)
+            horizon_grid_df.to_csv(
+                _per_landmark_path(output_dir, cox.HORIZON_GRID_FILENAME.removesuffix(".csv"), landmark_day),
+                index=False,
+            )
 
+        out: dict[str, list] = {
+            "frames": [],
+            "metric_rows": [],
+            "test_auc_frames": [],
+            "test_brier_frames": [],
+            "canonical_labs_fold_rows": [],
+        }
         if args.baseline:
             _run_baseline_landmark(
                 config,
@@ -498,59 +552,66 @@ def run_multivariable(config: CoxProjectConfig, cox: Any, args: Namespace) -> No
                 out=out,
             )
 
-    _write_multivariable_outputs(cox, output_dir, args.baseline, feature_selection_frames, horizon_grid_frames, out)
+        _write_multivariable_landmark_outputs(cox, output_dir, prefix, landmark_day, out)
+        print(f"\n[done] landmark +{landmark_day}d: saved {metrics_path.name}")
+
+    _combine_multivariable_outputs(cox, output_dir, prefix, landmark_days)
 
 
-def _write_multivariable_outputs(
+def _write_multivariable_landmark_outputs(
     cox: Any,
     output_dir: Path,
-    baseline: bool,
-    feature_selection_frames: list[pd.DataFrame],
-    horizon_grid_frames: list[pd.DataFrame],
+    prefix: str,
+    landmark_day: int,
     out: dict[str, list],
 ) -> None:
-    if feature_selection_frames:
-        pd.concat(feature_selection_frames, ignore_index=True).to_csv(
-            output_dir / "cox_agg_feature_selection.csv", index=False
-        )
-    if horizon_grid_frames:
-        pd.concat(horizon_grid_frames, ignore_index=True).to_csv(
-            output_dir / cox.HORIZON_GRID_FILENAME, index=False
-        )
-
-    prefix = "cox_agg_baseline" if baseline else "cox_agg_multivariable"
-    if not baseline and out["canonical_labs_fold_rows"]:
+    if prefix == "cox_agg_multivariable" and out["canonical_labs_fold_rows"]:
         pd.concat(out["canonical_labs_fold_rows"], ignore_index=True).to_csv(
-            output_dir / cox.CANONICAL_LABS_FOLDS_FILENAME, index=False
+            _per_landmark_path(
+                output_dir, cox.CANONICAL_LABS_FOLDS_FILENAME.removesuffix(".csv"), landmark_day
+            ),
+            index=False,
         )
     if out["frames"]:
         pd.concat(out["frames"], ignore_index=True).to_csv(
-            output_dir / f"{prefix}.csv", index=False
+            _per_landmark_path(output_dir, prefix, landmark_day), index=False
         )
     if out["test_auc_frames"]:
         pd.concat(out["test_auc_frames"], ignore_index=True).to_csv(
-            output_dir / f"{prefix}_test_auc_t.csv", index=False
+            _per_landmark_path(output_dir, f"{prefix}_test_auc_t", landmark_day), index=False
         )
     if out["test_brier_frames"]:
         pd.concat(out["test_brier_frames"], ignore_index=True).to_csv(
-            output_dir / f"{prefix}_test_brier.csv", index=False
+            _per_landmark_path(output_dir, f"{prefix}_test_brier", landmark_day), index=False
         )
     if out["metric_rows"]:
         pd.DataFrame(out["metric_rows"]).to_csv(
-            output_dir / f"{prefix}_metrics.csv", index=False
+            _per_landmark_path(output_dir, f"{prefix}_metrics", landmark_day), index=False
         )
 
-    print("\nSaved:")
-    print("  cox_agg_feature_selection.csv")
-    if horizon_grid_frames:
+
+def _combine_multivariable_outputs(
+    cox: Any, output_dir: Path, prefix: str, landmark_days: list[int]
+) -> None:
+    print("\nSaved (combined):")
+    if _combine_per_landmark(output_dir, "cox_agg_feature_selection", landmark_days, "cox_agg_feature_selection.csv"):
+        print("  cox_agg_feature_selection.csv")
+    if _combine_per_landmark(
+        output_dir, cox.HORIZON_GRID_FILENAME.removesuffix(".csv"), landmark_days, cox.HORIZON_GRID_FILENAME
+    ):
         print(f"  {cox.HORIZON_GRID_FILENAME}")
-    if not baseline and out["canonical_labs_fold_rows"]:
+    if prefix == "cox_agg_multivariable" and _combine_per_landmark(
+        output_dir,
+        cox.CANONICAL_LABS_FOLDS_FILENAME.removesuffix(".csv"),
+        landmark_days,
+        cox.CANONICAL_LABS_FOLDS_FILENAME,
+    ):
         print(f"  {cox.CANONICAL_LABS_FOLDS_FILENAME}")
-    if out["frames"]:
+    if _combine_per_landmark(output_dir, prefix, landmark_days, f"{prefix}.csv"):
         print(f"  {prefix}.csv")
-    if out["test_auc_frames"]:
+    if _combine_per_landmark(output_dir, f"{prefix}_test_auc_t", landmark_days, f"{prefix}_test_auc_t.csv"):
         print(f"  {prefix}_test_auc_t.csv")
-    if out["test_brier_frames"]:
+    if _combine_per_landmark(output_dir, f"{prefix}_test_brier", landmark_days, f"{prefix}_test_brier.csv"):
         print(f"  {prefix}_test_brier.csv")
-    if out["metric_rows"]:
+    if _combine_per_landmark(output_dir, f"{prefix}_metrics", landmark_days, f"{prefix}_metrics.csv"):
         print(f"  {prefix}_metrics.csv")
