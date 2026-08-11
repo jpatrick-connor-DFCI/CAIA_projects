@@ -827,6 +827,7 @@ if __name__ == "__main__":
             "same horizon grid."
         ),
     )
+    CONFIG.add_cli_args(parser, _ca)
     parser.add_argument(
         "--auc-max-time-units",
         type=int,
