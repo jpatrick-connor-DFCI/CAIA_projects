@@ -31,10 +31,13 @@ survival_common/                         # shared survival-analysis library used
 ├── config.py                            # project config hooks for shared runners
 ├── cox_runners.py                       # shared univariate/multivariable Cox CLI orchestration
 ├── cox_models.py                        # shared Cox feature selection, CV, final-fit, and manifest helpers
-├── cohort.py                            # landmark/outcome/feature-matrix builders
+├── cohort.py                            # landmark/outcome/feature-matrix/person-period builders
 ├── cox_engine.py                        # shared Cox / Coxnet / IPCW AUC(t) primitives
 ├── xgboost_engine.py                    # shared XGBoost survival:cox primitives
 ├── xgboost_runners.py                   # shared XGBoost CLI orchestration
+├── longitudinal_targets.py              # torch-free platinum/competing target + horizon semantics
+├── deephit_engine.py                    # torch-gated Dynamic-DeepHit model + training engine
+├── longitudinal_runners.py              # Dynamic-DeepHit CLI orchestration
 ├── helper.py                            # canonical labs, horizons, Brier, fold/leakage guards
 ├── loaders.py                           # PROFILE longitudinal loader helpers
 ├── plotting.py                          # lab taxonomy, IRNT, overlay hist/KM, Wilson CI
@@ -58,7 +61,7 @@ COMPASS/
 │   └── build_somatic_gleason_inputs.py   # somatic + Gleason + selected PRS inputs
 │
 └── survival_analysis/
-    ├── compass_pipeline.py               # shared setup/helper logic behind the 3 Python notebooks
+    ├── compass_pipeline.py               # shared setup/helper logic behind the 4 Python notebooks
     ├── cox_aggregated.py                 # PROFILE adapter/config for shared survival code
     ├── univariate_analysis.py            # ENTRY: univariate Cox associations
     ├── multivariate_analysis.py          # ENTRY: elastic-net Cox or XGBoost survival:cox
@@ -66,16 +69,22 @@ COMPASS/
     ├── 01_preprocessing.ipynb            # schema audit, cohort compile, preprocessing, diagnostics
     ├── 02_univariate.ipynb               # univariate arms + nominal-significance filter
     ├── 03_multivariate.ipynb             # elastic-net + XGBoost + summary tables
+    ├── 03b_multivariate_longitudinal.ipynb # Dynamic-DeepHit + SurvLatent ODE (torch, optional)
     ├── 05_figures.ipynb                  # R figures from merged profile_data outputs
+    ├── multivariate_longitudinal/
+    │   ├── dynamic_deephit.py            # ENTRY: thin CLI over survival_common/deephit_engine.py
+    │   ├── survlatent_ode.py             # ENTRY: adapter around the external survlatent_ode repo
+    │   └── README.md                     # survlatent clone/conda-env prerequisites, chdir caveat
     └── GAM/
         ├── gam_trajectory_features.R     # hierarchical longitudinal GAM features
         ├── gam_cox_nonlinearity.R        # smooth-vs-linear Cox GAM tests
         └── 04_gam.ipynb                  # R-kernel GAM runner on merged profile_data
 ```
 
-All five numbered notebooks use the merged PROFILE_data_processing parquets and the
-standard `COMPASS` data/figure roots. The three Python notebooks share
-`compass_pipeline.py`; no single-release baseline run is part of this workflow.
+All six numbered/lettered notebooks use the merged PROFILE_data_processing parquets and the
+standard `COMPASS` data/figure roots. The Python notebooks share `compass_pipeline.py`; no
+single-release baseline run is part of this workflow. `03b` is optional and torch-gated (see
+invariant #7 below) — the other notebooks never require torch.
 
 ---
 
@@ -279,6 +288,8 @@ the input builder must be rerun after this change.
 | `multivariate_analysis.py --model xgboost` | XGBoost `survival:cox`, 5-fold CV grid (`max_depth × eta × min_child_weight`) | `--landmark-days`, `--endpoints`, `--max-features`; IPIO also supports `--feature-subset {labs,genomics,all}` |
 | `gam_trajectory_features.R` (COMPASS only) | Hierarchical GAM (`mgcv::bam`, `bs="fs"` factor-smooth per patient, shrinking sparse patients toward the population curve) per canonical lab, replacing the two-point `__delta` with `__gam_level` / `__gam_slope` / `__gam_curvature` / `__gam_auc` / `__gam_dev` evaluated at the landmark boundary | `--inputs-dir`, `--landmark-days`, `--k-pop`, `--k-pat`, `--trailing-window-days`, `--nthreads`, `--fit-split {all,train_val}` |
 | `gam_cox_nonlinearity.R` (COMPASS only) | Penalized-spline Cox (`mgcv::gam(family=cox.ph())`) per selected feature: fits a smooth and a linear model of the same feature and reports `edf`/`p_lrt`/`q_lrt`/`delta_aic` — flags features whose hazard association is not actually linear | `--inputs-dir`, `--output-dir`, `--landmark-days`, `--feature-selection-csv` |
+| `multivariate_longitudinal/dynamic_deephit.py` (COMPASS only, torch, optional) | Discrete-time competing-risks GRU (Dynamic-DeepHit) fit directly on the person-period lab sequence, in `platinum` (death censored) or `competing` (`0=censored,1=platinum,2=death`) config | `--inputs-dir`, `--output-dir`, `--landmark-day`, `--config {platinum,competing}` |
+| `multivariate_longitudinal/survlatent_ode.py` (COMPASS only, torch + external repo, optional) | Adapter around the external `itmoon7/survlatent_ode` repo's latent-ODE survival model, same `platinum`/`competing` configs and person-period input as Dynamic-DeepHit | `--survlatent-repo` (required), `--inputs-dir`, `--output-dir`, `--landmark-day`, `--config {platinum,competing}` |
 
 `cox_aggregated.py` is now a project adapter: endpoint constants, cohort-specific covariates/restrictions,
 and per-landmark context. The univariate/elastic-net CLI orchestration lives in
@@ -322,8 +333,8 @@ from being tested accidentally. The R notebook uses the merged-profile root excl
 
 ### 2.4 — Notebooks
 
-COMPASS PROFILE has three numbered Python stage notebooks sharing `compass_pipeline.py`, one R
-figure notebook, and one R GAM notebook. All five operate on the merged `profile_data` run:
+COMPASS PROFILE has four Python stage notebooks sharing `compass_pipeline.py` (three numbered plus
+`03b`), one R figure notebook, and one R GAM notebook. All operate on the merged `profile_data` run:
 
 - `01_preprocessing.ipynb` — drives preprocessing (schema audit, cohort compile, longitudinal
   preprocessing, prediction-input build, diagnostics) for whichever arms are selected (`arpi`
@@ -334,6 +345,12 @@ figure notebook, and one R GAM notebook. All five operate on the merged `profile
   univariate, elastic-net, and XGBoost models independently of preprocessing
   (`tasks_for_run(run)` builds the per-run task grid from `run["landmarks"]`); either can be
   re-run alone without touching Stage 1-3 outputs.
+- `03b_multivariate_longitudinal.ipynb` — optional, torch-gated (README invariant #7). Reads `01`'s
+  `longitudinal_landmark{D}.csv` person-period inputs and runs Dynamic-DeepHit and SurvLatent ODE via
+  `compass_pipeline.run_multivariate_longitudinal`; kept out of `03_multivariate.ipynb` so that
+  notebook stays runnable with no torch installed. Requires `cp.SURVLATENT_REPO` to be set to a
+  cloned `itmoon7/survlatent_ode` checkout for the SurvLatent tasks — see
+  `multivariate_longitudinal/README.md`.
 - `05_figures.ipynb` — the sole COMPASS figure notebook, using the R kernel and
   `COMPASS_generate_figures_pipeline.R`. It renders both arms' overview, LLM-label, univariate,
   multivariate, KM, and per-lab distribution/trajectory figures at landmarks 0 and 90. Figure 1A reads
@@ -489,6 +506,17 @@ three tiers — REQUIRED (absent *or* all-null raises), EXPECTED (absent raises,
    through as a parameter instead.
 6. **Horizon grid is shared via `build_manifest.json`** so Cox/XGBoost AUC & Brier are comparable.
    Don't compute horizons ad hoc in a model script.
+7. **Three-layer torch gating.** `multivariate_longitudinal/` is the only torch consumer in this repo,
+   and it must stay optional: (1) `survival_common/deephit_engine.py` does
+   `try/except ModuleNotFoundError` at import time, falling back to `torch = None; Dataset = object` —
+   the `Dataset = object` fallback matters because `class SequenceDataset(Dataset)` is evaluated at
+   import time even when torch is absent; (2) `DynamicDeepHitGRU` is defined under `if nn is not None:`
+   with an `else:` stub that calls `require_torch()` if ever instantiated; (3) `require_torch()` is
+   called at the top of `run_deephit`, never at module import. `survlatent_ode.py` follows the same
+   shape: `import_survlatent()` (which does the external repo's `sys.path`/`os.chdir` setup) is called
+   only from `main()`, never at import. Net effect: `dynamic_deephit.py --help` and
+   `survlatent_ode.py --help` both exit 0, and the full test suite imports cleanly, with no torch
+   installed and no `survlatent_ode` repo cloned.
 
 ---
 
@@ -512,8 +540,10 @@ Run each notebook top to bottom; select ARPI/ADT with each Python notebook's `AR
 1. `COMPASS/survival_analysis/01_preprocessing.ipynb`
 2. `COMPASS/survival_analysis/02_univariate.ipynb`
 3. `COMPASS/survival_analysis/03_multivariate.ipynb`
-4. `COMPASS/survival_analysis/GAM/04_gam.ipynb`
-5. `COMPASS/survival_analysis/05_figures.ipynb`
+4. `COMPASS/survival_analysis/03b_multivariate_longitudinal.ipynb` (optional — requires torch;
+   see [Dependencies](#dependencies) and `multivariate_longitudinal/README.md`)
+5. `COMPASS/survival_analysis/GAM/04_gam.ipynb`
+6. `COMPASS/survival_analysis/05_figures.ipynb`
 
 The notebooks pass `PROFILE_DATA/*.parquet` paths explicitly to the lower-level scripts. Existing
 hand-curated `LLM_NEPC_labels/` inputs remain under the shared `COMPASS` data root.
@@ -523,6 +553,12 @@ hand-curated `LLM_NEPC_labels/` inputs remain under the shared `COMPASS` data ro
 No packaged environment is checked in. Assumed: `pandas`, `numpy`, `scipy`, `tqdm`, `scikit-learn`,
 `scikit-survival` (`sksurv`), `xgboost`, `lifelines`, `matplotlib`. Python **3.10+** is recommended
 for the modern type-hint syntax used by the shared modules.
+
+`torch` is an **optional** dependency, needed only for
+`COMPASS/survival_analysis/multivariate_longitudinal/` (Dynamic-DeepHit directly; SurvLatent ODE via
+its own external repo/conda env). It stays commented out in `requirements.txt` — see that file's
+header and README invariant #7 — so the rest of the pipeline (data compilation, Cox, XGBoost) never
+requires it.
 
 ---
 
@@ -540,6 +576,29 @@ surprised by them.
 - **Silent patient drops** at several inner-joins and `valid`-mask filters (diagnosis/death inner joins,
   duration `> 0` filter). Downstream cohort filters now log attrition in `build_prediction_inputs.py`;
   keep that pattern for any new cohort-selection rule.
+- **`t_platinum > 0` drops patients at later landmarks.** The validity filter runs after landmark
+  rebasing, so at +180d every patient whose platinum event fell in the first 180 days is dropped —
+  the later-landmark cohorts are both smaller and systematically depleted of early-progressing
+  (highest-risk) patients. This bites `multivariate_longitudinal` hardest, since a GRU/ODE needs more
+  data than Cox; treat +180d results there as possibly underpowered rather than as a negative result.
+- **`multivariate_longitudinal` per-landmark cohorts are independent** (`cohort_mode:
+  "independent_by_landmark"`) — the same MRN can be train at one landmark and test at another. Fine
+  within a landmark, since each model only ever reads its own landmark's split, but results must never
+  be pooled across landmarks.
+- **`survlatent_ode.py` does `os.chdir` into the cloned external repo** (`import_survlatent()`,
+  called only from `main()`). `--output-dir`/`--inputs-dir` are resolved to absolute paths before that
+  chdir happens; a hypothetical caller that constructs those paths lazily after `main()` starts would
+  silently write into the wrong place. See `multivariate_longitudinal/README.md`.
+- **Dynamic-DeepHit's CV grid is expensive**: 27 hyperparameter combos × 5 folds, run serially per
+  (landmark, config) by `compass_pipeline._run_tasks`. Reduce the grid for a first pass and rely on
+  `FORCE_RERUN = False` to resume.
+- **Competing-config Brier is the binary cause-of-interest Brier, not the cumulative-incidence
+  Brier.** Both models binarize `event = (label == cause)` and score `1 - S(h)`/`1 - CIF(h)` per
+  cause on the shared platinum horizon grid — this keeps the `competing` config's platinum row
+  numerically comparable to the `platinum` config and to Cox/XGBoost, but it is *not* the
+  methodologically correct CIF Brier for competing risks (a `cif_brier` metric was scoped but not
+  implemented — see the plan's §7). Don't over-read the competing-config Brier as a rigorous
+  competing-risks score without checking which one you're looking at.
 
 ### Low impact / cleanliness
 

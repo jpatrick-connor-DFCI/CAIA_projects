@@ -63,6 +63,13 @@ N_FOLDS = 5
 FORCE_RERUN = True
 REBUILD_PREDICTION_INPUTS = True
 
+# multivariate_longitudinal (SurvLatent ODE + Dynamic-DeepHit) knobs. Notebook
+# 03b sets SURVLATENT_REPO before calling run_multivariate_longitudinal --
+# build_model_command raises a clear RuntimeError if it is still None when a
+# survlatent-ode task is dispatched.
+SURVLATENT_REPO = None
+MAX_PRED_WINDOW = 260
+
 # COMPASS durations (t_lab, t_platinum, ...) are measured from each arm's
 # treatment anchor (time 0), so anchor_col is "none" for every arm: the
 # landmark is a pure offset from the anchor with no anchor column. Arms
@@ -355,6 +362,8 @@ def clear_prediction_inputs(inputs_dir: Path) -> None:
         "aggregated_landmark*.csv",
         "pre_treatment_lab_long_landmark*.csv",
         "split_assignments_landmark*.csv",
+        "longitudinal_landmark*.csv",
+        "longitudinal_landmark*_manifest.json",
     ):
         for p in inputs_dir.glob(pattern):
             p.unlink()
@@ -462,6 +471,33 @@ MULTIVARIATE_TASK_SPECS = [
     ("xgboost", "baseline", "landmark_xgboost_baseline_metrics.csv"),
 ]
 
+# Two models x two configs. config_dir doubles as --config for both models
+# (platinum/competing), reusing tasks_for_run's existing (model, config_dir,
+# metrics_filename) x landmarks cross with zero changes to _run_tasks.
+# metrics_filename is None for survlatent-ode because its filename embeds
+# --run-id (survlatent_ode_test_metrics_{run_id}.csv); see
+# longitudinal_metrics_filename() below for the resolved name.
+LONGITUDINAL_TASK_SPECS = [
+    ("dynamic-deephit", "platinum", "dynamic_deephit_metrics_platinum.csv"),
+    ("dynamic-deephit", "competing", "dynamic_deephit_metrics_competing.csv"),
+    ("survlatent-ode", "platinum", None),
+    ("survlatent-ode", "competing", None),
+]
+
+
+def longitudinal_run_id(config_dir: str, landmark: int) -> str:
+    """Matches survlatent_ode.py's default --run-id (prostate_<config>_landmark<D>_v1)."""
+    return f"prostate_{config_dir}_landmark{landmark}_v1"
+
+
+def longitudinal_metrics_filename(model: str, config_dir: str, landmark: int, metrics_filename) -> str:
+    if metrics_filename is not None:
+        return metrics_filename
+    if model == "survlatent-ode":
+        return f"survlatent_ode_test_metrics_{longitudinal_run_id(config_dir, landmark)}.csv"
+    raise ValueError(f"No metrics filename known for model={model!r}.")
+
+
 def tasks_for_run(run: dict, specs=MULTIVARIATE_TASK_SPECS):
     """Cross a task-spec list with this run's own landmark list.
 
@@ -475,7 +511,16 @@ def tasks_for_run(run: dict, specs=MULTIVARIATE_TASK_SPECS):
 
 
 def model_output_dir(model: str) -> str:
-    return "cox" if model in ("univariate", "elastic-net") else "xgboost"
+    mapping = {
+        "univariate": "cox",
+        "elastic-net": "cox",
+        "xgboost": "xgboost",
+        "dynamic-deephit": "multivariate_longitudinal/dynamic_deephit",
+        "survlatent-ode": "multivariate_longitudinal/survlatent_ode",
+    }
+    if model not in mapping:
+        raise ValueError(f"Unknown model: {model}")
+    return mapping[model]
 
 
 def build_model_command(model, landmark, config_dir, row_output_dir, run):
@@ -500,6 +545,34 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
         if config_dir == "baseline":
             cmd.append("--baseline")
         return cmd
+    if model == "dynamic-deephit":
+        return [
+            PYTHON, SURVIVAL_DIR / "multivariate_longitudinal" / "dynamic_deephit.py",
+            "--inputs-dir", run["inputs_dir"],
+            "--output-dir", row_output_dir,
+            "--landmark-day", str(landmark),
+            "--config", config_dir,
+            "--max-pred-window", str(MAX_PRED_WINDOW),
+        ]
+    if model == "survlatent-ode":
+        if not SURVLATENT_REPO:
+            raise RuntimeError(
+                "compass_pipeline.SURVLATENT_REPO is not set. Set it to the path of a "
+                "cloned itmoon7/survlatent_ode repo (with its conda env active) before "
+                "running survlatent-ode tasks -- see multivariate_longitudinal/README.md."
+            )
+        return [
+            PYTHON, SURVIVAL_DIR / "multivariate_longitudinal" / "survlatent_ode.py",
+            "--survlatent-repo", str(SURVLATENT_REPO),
+            "--inputs-dir", run["inputs_dir"],
+            # Absolute: survlatent_ode.py's import_survlatent() chdirs into the
+            # external repo, so a relative --output-dir would resolve there instead.
+            "--output-dir", str(Path(row_output_dir).resolve()),
+            "--landmark-day", str(landmark),
+            "--config", config_dir,
+            "--run-id", longitudinal_run_id(config_dir, landmark),
+            "--max-pred-window", str(MAX_PRED_WINDOW),
+        ]
     if model == "xgboost":
         cmd = [
             PYTHON, SURVIVAL_DIR / "multivariate_analysis.py",
@@ -522,7 +595,7 @@ def _run_tasks(run: dict, specs, dry_run: bool = False):
     summary = []
     for model, landmark, config_dir, metrics_filename in tasks:
         row_output_dir = run["output_dir"] / model_output_dir(model) / f"landmark_{landmark}" / config_dir
-        metrics_path = row_output_dir / metrics_filename
+        metrics_path = row_output_dir / longitudinal_metrics_filename(model, config_dir, landmark, metrics_filename)
         tag = f"{run['label']:28s} {model:11s} landmark_{landmark:<3} {config_dir}"
         if metrics_path.exists() and not FORCE_RERUN:
             print(f"[skip] {tag} -> {metrics_path.relative_to(run['output_dir'])} exists")
@@ -593,6 +666,15 @@ def run_multivariate(run: dict, dry_run: bool = False):
     return summary
 
 
+def run_multivariate_longitudinal(run: dict, dry_run: bool = False):
+    """Dynamic-DeepHit and SurvLatent ODE, each in platinum/competing configs."""
+    summary = _run_tasks(run, LONGITUDINAL_TASK_SPECS, dry_run=dry_run)
+    print("\n=== run summary ===")
+    for tag, status, elapsed in summary:
+        print(f"  {tag} {status:>20s} {elapsed/60:6.1f} min")
+    return summary
+
+
 def summarize_outputs(run: dict) -> pd.DataFrame:
     rows = []
     for model, landmark, config_dir, metrics_filename in tasks_for_run(run, MULTIVARIATE_TASK_SPECS):
@@ -629,6 +711,68 @@ def summarize_outputs(run: dict) -> pd.DataFrame:
                 "integrated_brier": float(platinum["integrated_brier"]),
                 "status": "ok",
             })
+    return pd.DataFrame(rows).sort_values(["run", "landmark", "model", "config"]).reset_index(drop=True)
+
+
+def summarize_longitudinal_outputs(run: dict) -> pd.DataFrame:
+    """Same schema as summarize_outputs, for the LONGITUDINAL_TASK_SPECS arms.
+
+    A separate function rather than an extension of summarize_outputs: that
+    one hardcodes endpoint == "platinum" against Cox/XGBoost's own column
+    names, which don't match dynamic-deephit's ("event" instead of
+    "endpoint") or survlatent-ode's (external repo's eval_model schema, not
+    ours to pin). Both models report a "platinum" row -- competing reports
+    death too, as a secondary diagnostic -- so filtering to platinum here
+    keeps the headline comparison against Cox/XGBoost's platinum row valid.
+    Frames from both functions share columns and concat cleanly.
+    """
+    rows = []
+    for model, landmark, config_dir, metrics_filename in tasks_for_run(run, LONGITUDINAL_TASK_SPECS):
+        resolved_filename = longitudinal_metrics_filename(model, config_dir, landmark, metrics_filename)
+        metrics_path = run["output_dir"] / model_output_dir(model) / f"landmark_{landmark}" / config_dir / resolved_filename
+        base = {"run": run["label"], "model": model, "landmark": landmark, "config": config_dir, "endpoint": "platinum"}
+        if not metrics_path.exists():
+            rows.append({**base, "n_test": None, "n_test_events": None, "c_index": None,
+                         "mean_auc_t": None, "integrated_brier": None, "status": "missing"})
+            continue
+        df = pd.read_csv(metrics_path)
+        if model == "dynamic-deephit":
+            platinum = df.loc[df["event"] == "platinum"]
+            if platinum.empty:
+                rows.append({**base, "n_test": None, "n_test_events": None, "c_index": None,
+                             "mean_auc_t": None, "integrated_brier": None, "status": "no platinum row"})
+                continue
+            platinum = platinum.iloc[0]
+            rows.append({
+                **base,
+                "n_test": int(platinum["n_test"]),
+                "n_test_events": int(platinum["n_test_events"]),
+                "c_index": float(platinum["c_index"]),
+                "mean_auc_t": float(platinum["mean_auc_t"]),
+                "integrated_brier": float(platinum["integrated_brier"]),
+                "status": "ok",
+            })
+        elif model == "survlatent-ode":
+            # eval_model's exact column names live in the external repo; try
+            # the conventional ones and fall back to a "present but
+            # unparsed" status rather than raising, since a schema drift
+            # there shouldn't take down the whole summary.
+            try:
+                event_col = next(c for c in ("event", "endpoint") if c in df.columns)
+                platinum = df.loc[df[event_col].astype(str).str.lower() == "platinum"]
+                row = platinum.iloc[0] if not platinum.empty else df.iloc[0]
+                rows.append({
+                    **base,
+                    "n_test": int(row.get("n_test", row.get("n", np.nan))) if pd.notna(row.get("n_test", row.get("n", np.nan))) else None,
+                    "n_test_events": int(row.get("n_test_events", row.get("n_events", np.nan))) if pd.notna(row.get("n_test_events", row.get("n_events", np.nan))) else None,
+                    "c_index": float(row.get("c_index", np.nan)),
+                    "mean_auc_t": float(row.get("mean_auc", row.get("mean_auc_t", np.nan))),
+                    "integrated_brier": float(row.get("ibs", row.get("integrated_brier", np.nan))),
+                    "status": "ok",
+                })
+            except (StopIteration, IndexError, KeyError, ValueError) as exc:
+                rows.append({**base, "n_test": None, "n_test_events": None, "c_index": None,
+                             "mean_auc_t": None, "integrated_brier": None, "status": f"unparsed ({exc})"})
     return pd.DataFrame(rows).sort_values(["run", "landmark", "model", "config"]).reset_index(drop=True)
 
 

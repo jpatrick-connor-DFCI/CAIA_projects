@@ -21,6 +21,8 @@ __pycache__/
 !survival_common/
 !data_preprocessing_common/
 !data_preprocessing_common/**
+!tests/
+!tests/**
 !.gitignore
 !README.md
 !requirements.txt

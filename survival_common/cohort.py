@@ -237,10 +237,17 @@ def make_outcome_df(
         horizon = float(max_followup_days)
         platinum_past = pat["PLATINUM"].eq(1) & pat["t_platinum"].gt(horizon)
         death_past = pat["DEATH"].eq(1) & pat["t_death"].gt(horizon)
+        n_platinum_censored = int(platinum_past.sum())
+        n_death_censored = int(death_past.sum())
         pat.loc[platinum_past, "PLATINUM"] = 0
         pat.loc[death_past, "DEATH"] = 0
         for duration_col in ["t_last_contact", "t_death", "t_platinum"]:
             pat[duration_col] = pat[duration_col].clip(upper=horizon)
+        print(
+            f"[make_outcome_df @ landmark +{landmark_offset_days}d] administrative "
+            f"censoring at {horizon:g}d: {n_platinum_censored} PLATINUM events and "
+            f"{n_death_censored} DEATH events pushed past the horizon censored."
+        )
 
     platinum_event_time = np.where(pat["PLATINUM"].eq(1), pat["t_platinum"], np.inf)
     death_event_time = np.where(pat["DEATH"].eq(1), pat["t_death"], np.inf)
@@ -465,12 +472,282 @@ def build_feature_matrix(
     return feature_df
 
 
+def select_longitudinal_labs(
+    labs: pd.DataFrame,
+    *,
+    train_mrns: set,
+    min_coverage: float,
+    max_labs: int | None,
+    canonical_labs: list[str] | None,
+) -> list[str]:
+    """Choose the lab panel for the person-period sequence, coverage-ranked.
+
+    If ``canonical_labs`` is given (the same train+valid-selected panel Cox/
+    XGBoost use, via :func:`survival_common.helper.select_canonical_labs`),
+    intersect it with what is actually present in ``labs`` rather than
+    re-deriving coverage — this keeps the longitudinal panel and the
+    aggregated-feature panel in lockstep. Otherwise rank by train-only
+    coverage (fraction of ``train_mrns`` with >=1 observation) among labs with
+    more than one distinct observed value (a constant lab carries no sequence
+    signal).
+    """
+    if canonical_labs is not None:
+        present = set(labs["LAB_NAME"].astype(str))
+        selected = [lab for lab in canonical_labs if lab in present]
+        if not selected:
+            raise ValueError("No canonical labs are present in the longitudinal lab table.")
+        if max_labs is not None:
+            selected = selected[:max_labs]
+        return selected
+    if not train_mrns:
+        raise ValueError("Training set is empty; cannot select labs.")
+    train_labs = labs.loc[labs[ID_COL].isin(train_mrns)]
+    coverage = train_labs.groupby("LAB_NAME")[ID_COL].nunique() / len(train_mrns)
+    variability = train_labs.groupby("LAB_NAME")["LAB_VALUE"].nunique()
+    eligible = coverage.index[(coverage >= min_coverage) & (variability.reindex(coverage.index) > 1)]
+    if not len(eligible):
+        raise ValueError(f"No labs passed coverage >= {min_coverage} on training set.")
+    ranked = coverage.loc[eligible].sort_values(ascending=False)
+    if max_labs is not None and len(ranked) > max_labs:
+        ranked = ranked.head(max_labs)
+    return ranked.index.tolist()
+
+
+def fit_clip_bounds(
+    agg: pd.DataFrame,
+    *,
+    train_mrns: set,
+    labs: list[str],
+    q_lo: float,
+    q_hi: float,
+) -> dict[str, tuple[float, float]]:
+    """Per-lab (lo, hi) outlier clip bounds fit on TRAIN only.
+
+    Fit on the person-period long frame (one row per patient/TIME/lab), not
+    the static aggregated table, so the bounds reflect the actual sequence
+    values the model will see. Skips a lab if it has fewer than 10 train
+    observations or a degenerate (hi <= lo) range.
+    """
+    train_agg = agg.loc[agg[ID_COL].isin(train_mrns)]
+    bounds: dict[str, tuple[float, float]] = {}
+    for lab in labs:
+        vals = train_agg.loc[train_agg["LAB_NAME"] == lab, "LAB_VALUE"].to_numpy(dtype=float)
+        vals = vals[np.isfinite(vals)]
+        if len(vals) < 10:
+            continue
+        lo = float(np.quantile(vals, q_lo))
+        hi = float(np.quantile(vals, q_hi))
+        if hi <= lo:
+            continue
+        bounds[lab] = (lo, hi)
+    return bounds
+
+
+def apply_clip_bounds(agg: pd.DataFrame, bounds: dict[str, tuple[float, float]]) -> pd.DataFrame:
+    """Clip ``LAB_VALUE`` in a long (id, TIME, LAB_NAME, LAB_VALUE) frame to
+    per-lab ``bounds`` (unbounded labs pass through unchanged)."""
+    if not bounds:
+        return agg
+    vals = agg["LAB_VALUE"].to_numpy(dtype=float)
+    lo_series = agg["LAB_NAME"].map({k: v[0] for k, v in bounds.items()}).to_numpy(dtype=float)
+    hi_series = agg["LAB_NAME"].map({k: v[1] for k, v in bounds.items()}).to_numpy(dtype=float)
+    has_bound = np.isfinite(lo_series) & np.isfinite(hi_series)
+    clipped = vals.copy()
+    clipped[has_bound] = np.clip(vals[has_bound], lo_series[has_bound], hi_series[has_bound])
+    out = agg.copy()
+    out["LAB_VALUE"] = clipped
+    return out
+
+
+def build_person_period_wide(
+    lab_long: pd.DataFrame,
+    outcome_df: pd.DataFrame,
+    *,
+    landmark_day: int,
+    train_mrns: set,
+    canonical_labs: list[str] | None,
+    time_unit_days: int,
+    min_coverage: float,
+    max_labs: int | None,
+    outlier_lo: float,
+    outlier_hi: float,
+    anchor_col: str | None = None,
+) -> tuple[pd.DataFrame, dict, list[str], dict[str, tuple[float, float]]]:
+    """Build the person-period ("wide", binned-time) sequence input consumed
+    by Dynamic-DeepHit and SurvLatent ODE.
+
+    Args:
+        lab_long: pre-landmark lab observations, e.g. from
+            :func:`build_pre_treatment_lab_long` called at the same
+            ``landmark_day``/``anchor_col``. Already windowed to
+            ``t_lab < landmark`` -- this function does not re-filter.
+        outcome_df: the already-built per-patient outcome+feature+split table
+            (:func:`build_landmark_merged`'s ``merged``, post administrative
+            censoring). Outcome columns (``PLATINUM``/``DEATH``/``t_platinum``/
+            ``t_death``/``split``) are read from here rather than a bespoke
+            static table, so the person-period cohort is exactly the
+            aggregated cohort -- the precondition for cross-model
+            comparability with Cox/XGBoost.
+        anchor_col: must match what ``lab_long`` was built with. ``None``
+            (COMPASS) means ``t_lab`` is already landmark-relative, so
+            ``REL_BIN = floor((t_lab - landmark_day) / time_unit_days)``. A
+            real anchor column is not supported here (COMPASS is the only
+            caller today; a future anchored caller must pass anchor-relative
+            ``t_lab`` and adapt this formula rather than silently reusing it).
+
+    Returns ``(wide_df, extras, selected_labs, bounds)`` where ``extras`` has
+    ``max_landmark_time`` (TRAIN-only, for SurvLatent's absolute prediction
+    window) and ``n_patients_without_selected_labs``.
+    """
+    if anchor_col is not None:
+        raise NotImplementedError(
+            "build_person_period_wide only supports anchor_col=None "
+            "(index-relative durations, COMPASS's clock) today."
+        )
+
+    required_outcome_cols = {AGE_COL, "PLATINUM", "DEATH", "t_platinum", "t_death", "split"}
+    missing_outcome = required_outcome_cols - set(outcome_df.columns)
+    if missing_outcome:
+        raise ValueError(
+            f"build_person_period_wide: outcome_df is missing columns {sorted(missing_outcome)}."
+        )
+    static = outcome_df[sorted(required_outcome_cols)].copy()
+
+    labs = lab_long[[ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab"]].copy()
+    labs = labs.loc[labs[ID_COL].isin(static.index)]
+
+    selected_labs = select_longitudinal_labs(
+        labs,
+        train_mrns=train_mrns,
+        min_coverage=min_coverage,
+        max_labs=max_labs,
+        canonical_labs=canonical_labs,
+    )
+    selected_lab_rows = labs.loc[labs["LAB_NAME"].isin(selected_labs)].copy()
+
+    # Anchor-agnostic REL_BIN: t_lab is already landmark-relative (anchor_col
+    # is None), so the bin index is a pure offset from landmark_day -- no
+    # t_first_treatment term. Getting this formula wrong silently shifts
+    # every patient's time axis.
+    selected_lab_rows["REL_BIN"] = np.floor(
+        (selected_lab_rows["t_lab"].to_numpy(dtype=float) - float(landmark_day))
+        / float(time_unit_days)
+    ).astype(int)
+
+    landmark_time = pd.Series(0, index=static.index, dtype=int, name="landmark_time")
+    selected_lab_landmarks = (-selected_lab_rows.groupby(ID_COL)["REL_BIN"].min()).astype(int)
+    landmark_time.loc[selected_lab_landmarks.index] = selected_lab_landmarks
+    n_without_selected_labs = int((landmark_time == 0).sum())
+    print(
+        f"[build_person_period_wide @ landmark +{landmark_day}d] "
+        f"{n_without_selected_labs}/{len(static)} patients have no pre-landmark "
+        "observation of a selected lab (landmark row only)."
+    )
+
+    selected_lab_rows = selected_lab_rows.merge(
+        landmark_time.reset_index(), on=ID_COL, how="inner"
+    )
+    selected_lab_rows["TIME"] = selected_lab_rows["REL_BIN"] + selected_lab_rows["landmark_time"]
+
+    landmark_time = (
+        selected_lab_rows.groupby(ID_COL)["landmark_time"].first()
+        .reindex(static.index)
+        .fillna(0)
+        .astype(int)
+        .rename("landmark_time")
+    )
+
+    agg = (
+        selected_lab_rows.groupby([ID_COL, "TIME", "LAB_NAME"], sort=False)["LAB_VALUE"]
+        .mean()
+        .reset_index()
+    )
+    bounds = fit_clip_bounds(
+        agg, train_mrns=train_mrns, labs=selected_labs, q_lo=outlier_lo, q_hi=outlier_hi
+    )
+    agg = apply_clip_bounds(agg, bounds)
+
+    wide = agg.pivot_table(
+        index=[ID_COL, "TIME"], columns="LAB_NAME", values="LAB_VALUE", aggfunc="mean"
+    ).reset_index()
+    wide.columns.name = None
+    for lab in selected_labs:
+        if lab not in wide.columns:
+            wide[lab] = np.nan
+    wide = wide.merge(landmark_time.reset_index(), on=ID_COL, how="inner")
+
+    # Synthetic all-NaN landmark row at TIME == landmark_time, so every
+    # patient (even one with zero pre-landmark labs) has an anchor row for
+    # the sequence model.
+    landmark_rows = pd.DataFrame(
+        {
+            ID_COL: landmark_time.index,
+            "TIME": landmark_time.to_numpy(dtype=int),
+            "landmark_time": landmark_time.to_numpy(dtype=int),
+        }
+    )
+    for lab in selected_labs:
+        landmark_rows[lab] = np.nan
+    wide = pd.concat([wide, landmark_rows], ignore_index=True, sort=False)
+
+    static_cols = [AGE_COL, "t_platinum", "t_death", "PLATINUM", "DEATH", "split"]
+    wide = wide.merge(static[static_cols], left_on=ID_COL, right_index=True, how="inner")
+
+    # Event-time rebasing: t_platinum/t_death (landmark-relative, already
+    # administratively censored via outcome_df) become bin indices on the
+    # same landmark_time-origin clock as TIME, so patient_targets's
+    # `duration = event_time - landmark` lines up with the person-period axis.
+    t_platinum_after_landmark = np.ceil(
+        (wide["t_platinum"].to_numpy(dtype=float) - float(landmark_day)) / float(time_unit_days)
+    )
+    t_death_after_landmark = np.ceil(
+        (wide["t_death"].to_numpy(dtype=float) - float(landmark_day)) / float(time_unit_days)
+    )
+    wide["t_platinum"] = wide["landmark_time"].to_numpy(dtype=float) + t_platinum_after_landmark
+    wide["t_death"] = wide["landmark_time"].to_numpy(dtype=float) + t_death_after_landmark
+
+    event_time = wide[["t_platinum", "t_death"]].min(axis=1).to_numpy(dtype=float)
+    n_before_event_filter = len(wide)
+    wide = wide.loc[wide["TIME"].to_numpy(dtype=float) < event_time].copy()
+    print(
+        f"[build_person_period_wide @ landmark +{landmark_day}d] pre-event row "
+        f"filter: {n_before_event_filter - len(wide)}/{n_before_event_filter} rows "
+        "dropped (at/after the patient's event or censoring time)."
+    )
+
+    counts = wide.groupby(ID_COL).size()
+    surviving = counts[counts > 0].index
+    wide = wide.loc[wide[ID_COL].isin(surviving)].copy()
+
+    # max_landmark_time is TRAIN-only: SurvLatent needs it to size its
+    # absolute prediction window, and sizing it from TEST would leak
+    # information about the (held-out) test cohort's history length.
+    max_landmark_time = (
+        int(wide.loc[wide["split"] == "train", "landmark_time"].max())
+        if "landmark_time" in wide.columns and not wide.empty
+        else 0
+    )
+    column_order = (
+        [ID_COL, "TIME"]
+        + selected_labs
+        + [AGE_COL, "PLATINUM", "DEATH", "t_platinum", "t_death", "split"]
+    )
+    wide = wide.sort_values([ID_COL, "TIME"])[column_order]
+
+    extras = {
+        "max_landmark_time": max_landmark_time,
+        "n_patients_without_selected_labs": n_without_selected_labs,
+    }
+    return wide, extras, selected_labs, bounds
+
+
 def build_landmark_merged(
     df: pd.DataFrame,
     *,
     landmark_offset_days: int,
     anchor_col: str | None = "t_first_treatment",
     require_first_treatment: bool = True,
+    max_followup_days: float | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Build the landmarked outcome + feature merge for a given anchor.
 
@@ -480,6 +757,10 @@ def build_landmark_merged(
     to survive the per-patient dedup — mirroring how the genomic arm carries
     ``t_sample``. Pass ``anchor_col=None`` when durations are already index-relative
     (COMPASS): the landmark is then a pure offset and no anchor column is needed.
+
+    ``max_followup_days`` forwards to :func:`make_outcome_df`'s administrative
+    censoring horizon; defaults to ``None`` (no cap) so callers must opt in
+    explicitly.
     """
     extra_anchor_cols = (
         () if anchor_col in (None, "t_first_treatment") else (anchor_col,)
@@ -490,6 +771,7 @@ def build_landmark_merged(
         anchor_col=anchor_col,
         extra_anchor_cols=extra_anchor_cols,
         require_first_treatment=require_first_treatment,
+        max_followup_days=max_followup_days,
     )
     print(f"Outcome table @ landmark +{landmark_offset_days}d: {len(outcome_df)} patients")
 

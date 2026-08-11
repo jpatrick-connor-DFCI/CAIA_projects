@@ -35,8 +35,18 @@ scikit-learn==1.3.2      # unverified
 scikit-survival==0.22.2  # unverified
 lifelines==0.27.8        # unverified
 
-# --- Optional: deep-learning survival model stack (DeepHit et al.) ---
-# Only needed if running the torch-based models, not the data compilation.
+# --- Optional: torch-based longitudinal survival models ---
+# COMPASS/survival_analysis/multivariate_longitudinal/ is the *only* consumer
+# of torch in this repo (Dynamic-DeepHit: survival_common/deephit_engine.py,
+# survival_common/longitudinal_runners.py; SurvLatent ODE:
+# multivariate_longitudinal/survlatent_ode.py). Everything else -- data
+# compilation, Cox, XGBoost -- is torch-free by construction (see README
+# invariant #7's three-layer torch-gating pattern), so leave this commented
+# out unless you are running that one arm.
 # torch==2.1.1
 # torchvision==0.16.1
-# torchdiffeq==0.2.3
+#
+# torchdiffeq is NOT this repo's dependency -- it belongs to the external
+# itmoon7/survlatent_ode repo that survlatent_ode.py shells into (see
+# multivariate_longitudinal/README.md). Install it inside that repo's own
+# conda env (survlatent_ode_conda.yml), not here.

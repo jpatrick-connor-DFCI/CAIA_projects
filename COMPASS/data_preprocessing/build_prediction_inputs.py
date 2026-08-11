@@ -55,6 +55,7 @@ from survival_common.cohort import (  # noqa: E402
     ID_COL,
     build_landmark_availability_table,
     build_landmark_merged,
+    build_person_period_wide,
     build_pre_treatment_lab_long,
     normalize_landmark_days,
 )
@@ -72,6 +73,22 @@ DEFAULT_OUTPUT_SUBDIR = "prediction_inputs"
 DEFAULT_VAL_FRAC = 0.20
 DEFAULT_TIME_UNIT_DAYS = 7
 DEFAULT_MIN_PSA_COUNT = 5
+DEFAULT_LONG_MIN_COVERAGE = 0.1
+DEFAULT_OUTLIER_LO = 0.005
+DEFAULT_OUTLIER_HI = 0.995
+# event_cols/time_to_event_cols carried in build_manifest.json (Cox/XGBoost
+# ignore these; see survival_common.longitudinal_targets.LONGITUDINAL_CONFIGS
+# for the platinum-vs-competing config registry that consumes them).
+LONGITUDINAL_EVENT_COLS = ["PLATINUM", "DEATH"]
+LONGITUDINAL_TIME_TO_EVENT_COLS = ["t_platinum", "t_death"]
+LONGITUDINAL_SCHEMA_VERSION = 1
+# ~10 years. Restores administrative censoring at the cohort level so it
+# matches the AUC(t)/Brier evaluation timeline, which is already capped at
+# DEFAULT_AUC_MAX_TIME_UNITS * DEFAULT_TIME_UNIT_DAYS = 260 * 7 = 1820 days by
+# default (see survival_common.helper); kept as an explicit, recorded flag
+# rather than a silent default because it changes every existing
+# prediction-inputs result.
+DEFAULT_MAX_FOLLOWUP_DAYS = 3650.0
 # Broad PSA assay set (raw TEST_TYPE_CD, any assay type: total/free/complexed/
 # ultrasensitive/etc.), read from longitudinal_prediction_data.csv's
 # RAW_TEST_CODE passthrough column. This is deliberately NOT the narrow
@@ -101,6 +118,42 @@ def pre_treatment_lab_filename(landmark_day: int) -> str:
 
 def split_assignments_filename(landmark_day: int) -> str:
     return f"split_assignments_landmark{int(landmark_day)}.csv"
+
+
+def longitudinal_filename(landmark_day: int) -> str:
+    return f"longitudinal_landmark{int(landmark_day)}.csv"
+
+
+def longitudinal_manifest_filename(landmark_day: int) -> str:
+    return f"longitudinal_landmark{int(landmark_day)}_manifest.json"
+
+
+def validate_max_followup_days(
+    max_followup_days: float | None,
+    *,
+    auc_max_time_units: int,
+    time_unit_days: int,
+) -> None:
+    """Raise if the administrative-censoring horizon is shorter than the
+    AUC(t)/Brier evaluation timeline it must cover.
+
+    A cohort censored shorter than the horizons it is scored at would
+    silently blank the tail of every model's evaluation timeline rather than
+    erroring, so this is a hard fail rather than a warning.
+    """
+    if max_followup_days is None:
+        return
+    auc_horizon_days = auc_max_time_units * time_unit_days
+    if max_followup_days < auc_horizon_days:
+        raise ValueError(
+            f"--max-followup-days {max_followup_days:g} is shorter than the "
+            f"AUC(t)/Brier evaluation horizon (--auc-max-time-units "
+            f"{auc_max_time_units} * --time-unit-days {time_unit_days} = "
+            f"{auc_horizon_days:g} days). A cohort censored shorter than the "
+            "horizons it is scored at would silently blank the tail of every "
+            "model's evaluation timeline. Raise --max-followup-days or lower "
+            "--auc-max-time-units."
+        )
 
 
 def load_mrn_subset(mrn_file: Path, id_col: str) -> set[int]:
@@ -323,6 +376,46 @@ def build_aggregated_table(
     return out
 
 
+def assert_split_agreement(
+    aggregated: pd.DataFrame,
+    longitudinal: pd.DataFrame,
+    *,
+    landmark_day: int,
+) -> None:
+    """Guard that the per-landmark longitudinal output agrees with the
+    aggregated output on split assignment: one split per MRN, no MRN present
+    in longitudinal but absent from aggregated, and no disagreement on the
+    overlap. Cheap, and catches exactly the class of bug that would silently
+    leak train/test across the two output families.
+    """
+    long_split = (
+        longitudinal.groupby(ID_COL)["split"].agg(lambda s: s.iloc[0]).rename("split_long")
+    )
+    nunique = longitudinal.groupby(ID_COL)["split"].nunique()
+    inconsistent = nunique[nunique > 1]
+    if not inconsistent.empty:
+        raise AssertionError(
+            f"Landmark +{landmark_day}d: {len(inconsistent)} MRNs have multiple split "
+            f"labels in the longitudinal output (first: {inconsistent.index[0]})."
+        )
+
+    agg_split = aggregated["split"].rename("split_agg")
+    extra_in_long = long_split.index.difference(agg_split.index)
+    if len(extra_in_long):
+        raise AssertionError(
+            f"Landmark +{landmark_day}d: {len(extra_in_long)} MRNs appear in longitudinal "
+            f"but not aggregated (first: {extra_in_long[0]})."
+        )
+
+    overlap = long_split.index.intersection(agg_split.index)
+    mismatched = (agg_split.loc[overlap] != long_split.loc[overlap]).sum()
+    if mismatched:
+        raise AssertionError(
+            f"Landmark +{landmark_day}d: {mismatched} MRNs disagree on split between "
+            "aggregated and longitudinal."
+        )
+
+
 def main(args: argparse.Namespace) -> None:
     global ID_COL, AGE_COL
     ID_COL = args.id_col
@@ -404,6 +497,20 @@ def main(args: argparse.Namespace) -> None:
             f"by the landmark filter)"
         )
 
+    validate_max_followup_days(
+        args.max_followup_days,
+        auc_max_time_units=args.auc_max_time_units,
+        time_unit_days=args.time_unit_days,
+    )
+    if args.max_followup_days is not None:
+        auc_horizon_days = args.auc_max_time_units * args.time_unit_days
+        print(
+            f"Administrative censoring: {args.max_followup_days:g} days "
+            f"(AUC(t)/Brier timeline cap is {auc_horizon_days:g} days)"
+        )
+    else:
+        print("Administrative censoring: disabled (--no-max-followup-days)")
+
     merged_by_landmark: dict[int, pd.DataFrame] = {}
     for landmark_day in landmark_days:
         print(f"\n##### COHORT BUILD: LANDMARK +{landmark_day} DAYS #####")
@@ -412,6 +519,7 @@ def main(args: argparse.Namespace) -> None:
             landmark_offset_days=landmark_day,
             anchor_col=anchor_col,
             require_first_treatment=False,
+            max_followup_days=args.max_followup_days,
         )
         merged_by_landmark[landmark_day] = merged
 
@@ -571,6 +679,77 @@ def main(args: argparse.Namespace) -> None:
             )
         auc_horizons_by_landmark[str(int(landmark_day))] = landmark_horizons
 
+        if args.build_longitudinal:
+            train_mrns = set(split.index[split.eq("train")])
+            merged_with_split = merged.copy()
+            merged_with_split["split"] = split.reindex(merged_with_split.index)
+            wide, manifest_extras, selected_labs, bounds = build_person_period_wide(
+                pre_treatment_lab_df,
+                merged_with_split,
+                landmark_day=landmark_day,
+                train_mrns=train_mrns,
+                canonical_labs=None if args.no_canonical_labs else canonical_labs,
+                time_unit_days=args.time_unit_days,
+                min_coverage=args.long_min_coverage,
+                max_labs=args.max_longitudinal_labs,
+                outlier_lo=args.outlier_lo,
+                outlier_hi=args.outlier_hi,
+                anchor_col=anchor_col,
+            )
+            n_without = manifest_extras["n_patients_without_selected_labs"]
+            if n_without:
+                print(f"  patients with landmark-only longitudinal rows: {n_without}")
+
+            long_csv = output_dir / longitudinal_filename(landmark_day)
+            wide.to_csv(long_csv, index=False)
+            long_manifest_path = output_dir / longitudinal_manifest_filename(landmark_day)
+            longitudinal_manifest = {
+                "id_col": ID_COL,
+                "time_col": "TIME",
+                "event_cols": list(LONGITUDINAL_EVENT_COLS),
+                "time_to_event_cols": list(LONGITUDINAL_TIME_TO_EVENT_COLS),
+                "feat_cont": selected_labs + [AGE_COL],
+                "feat_cat": [],
+                "feat_reconstr": selected_labs,
+                "time_unit_days": int(args.time_unit_days),
+                "time_origin": "first_selected_pre_landmark_lab_bin",
+                "prediction_landmark": f"treatment_anchor_plus_{int(landmark_day)}d",
+                "landmark_days": int(landmark_day),
+                "anchor_col": "none" if anchor_col is None else str(anchor_col),
+                "seed": int(args.seed),
+                "test_frac": float(args.test_frac),
+                "val_frac": float(args.val_frac),
+                "test_stratification": stratification_by_landmark[str(landmark_day)]["test"],
+                "val_stratification": stratification_by_landmark[str(landmark_day)]["validation"],
+                "min_coverage": float(args.long_min_coverage),
+                "outlier_quantiles": [float(args.outlier_lo), float(args.outlier_hi)],
+                "clip_bounds": {k: list(v) for k, v in bounds.items()},
+                "canonical_labs_used": not args.no_canonical_labs,
+                "split_assignments": split_assignments_filename(landmark_day),
+                "split_counts": {
+                    "train": int(wide.loc[wide["split"] == "train", ID_COL].nunique()),
+                    "valid": int(wide.loc[wide["split"] == "valid", ID_COL].nunique()),
+                    "test": int(wide.loc[wide["split"] == "test", ID_COL].nunique()),
+                },
+                "n_rows": int(len(wide)),
+                "longitudinal_schema_version": LONGITUDINAL_SCHEMA_VERSION,
+                **manifest_extras,
+            }
+            long_manifest_path.write_text(json.dumps(longitudinal_manifest, indent=2))
+            print(
+                f"  longitudinal:      rows={len(wide)} patients={wide[ID_COL].nunique()} "
+                f"-> {long_csv}"
+            )
+
+            assert_split_agreement(aggregated, wide, landmark_day=landmark_day)
+            long_mrns = wide[ID_COL].nunique()
+            agg_mrns = len(aggregated)
+            if long_mrns < agg_mrns:
+                print(
+                    f"  note: longitudinal dropped {agg_mrns - long_mrns} MRNs "
+                    "with no usable pre-event observations"
+                )
+
     if canonical_labs_rows:
         canonical_path = output_dir / CANONICAL_LABS_FILENAME
         pd.DataFrame(canonical_labs_rows).to_csv(canonical_path, index=False)
@@ -589,6 +768,9 @@ def main(args: argparse.Namespace) -> None:
         "test_frac": float(args.test_frac),
         "val_frac": float(args.val_frac),
         "min_patient_coverage": float(args.min_patient_coverage),
+        "max_followup_days": (
+            float(args.max_followup_days) if args.max_followup_days is not None else None
+        ),
         "restrict_to_mrns": str(args.restrict_to_mrns) if args.restrict_to_mrns else None,
         "time_unit_days": int(args.time_unit_days),
         "cohort_mode": "independent_by_landmark",
@@ -609,7 +791,18 @@ def main(args: argparse.Namespace) -> None:
         "auc_time_unit_days": int(args.time_unit_days),
         "auc_horizons_by_landmark": auc_horizons_by_landmark,
         "auc_max_horizon": int(max_horizon),
+        # A property of the cohort (it always carries two competing causes),
+        # not of the longitudinal build -- Cox/XGBoost ignore these. See
+        # survival_common.longitudinal_targets.LONGITUDINAL_CONFIGS.
+        "event_cols": list(LONGITUDINAL_EVENT_COLS),
+        "time_to_event_cols": list(LONGITUDINAL_TIME_TO_EVENT_COLS),
+        "longitudinal_schema_version": LONGITUDINAL_SCHEMA_VERSION,
+        "longitudinal_landmarks_built": (
+            [int(d) for d in landmark_days] if args.build_longitudinal else []
+        ),
     }
+    if args.build_longitudinal:
+        build_manifest["longitudinal_time_unit_days"] = int(args.time_unit_days)
     manifest_path = output_dir / BUILD_MANIFEST_FILENAME
     manifest_path.write_text(json.dumps(build_manifest, indent=2))
     print(f"Wrote {manifest_path}")
@@ -717,5 +910,79 @@ if __name__ == "__main__":
             f"timeline; default {DEFAULT_AUC_MAX_TIME_UNITS}. The grid stays strictly "
             "inside it and runners reuse it from the manifest."
         ),
+    )
+    parser.add_argument(
+        "--max-followup-days",
+        dest="max_followup_days",
+        type=float,
+        default=DEFAULT_MAX_FOLLOWUP_DAYS,
+        help=(
+            f"Administrative censoring horizon in days (default {DEFAULT_MAX_FOLLOWUP_DAYS:g}, "
+            "~10 years). Events (PLATINUM/DEATH) occurring after this horizon are "
+            "censored and durations clipped, for every downstream model that reads "
+            "this directory's cohort. Must be >= --auc-max-time-units * "
+            "--time-unit-days, since the AUC(t)/Brier timeline is already capped "
+            "there; use --no-max-followup-days to disable."
+        ),
+    )
+    parser.add_argument(
+        "--no-max-followup-days",
+        dest="max_followup_days",
+        action="store_const",
+        const=None,
+        help="Disable administrative censoring (no cap on follow-up).",
+    )
+    parser.add_argument(
+        "--build-longitudinal",
+        dest="build_longitudinal",
+        action="store_true",
+        default=True,
+        help=(
+            "Build the person-period (wide, binned-time) longitudinal_landmark{D}.csv "
+            "consumed by Dynamic-DeepHit/SurvLatent ODE, alongside the aggregated "
+            "outputs (default; on)."
+        ),
+    )
+    parser.add_argument(
+        "--no-build-longitudinal",
+        dest="build_longitudinal",
+        action="store_false",
+        help="Skip the longitudinal person-period build.",
+    )
+    parser.add_argument(
+        "--long-min-coverage",
+        type=float,
+        default=DEFAULT_LONG_MIN_COVERAGE,
+        help=(
+            "Coverage threshold used by the longitudinal lab selector when "
+            "--no-canonical-labs is set."
+        ),
+    )
+    parser.add_argument(
+        "--no-canonical-labs",
+        action="store_true",
+        help=(
+            "Use the longitudinal builder's own coverage+variability lab selector "
+            "instead of reusing the canonical Cox lab list."
+        ),
+    )
+    parser.add_argument(
+        "--max-longitudinal-labs",
+        dest="max_longitudinal_labs",
+        type=int,
+        default=None,
+        help="Optional cap on the number of labs in the longitudinal output.",
+    )
+    parser.add_argument(
+        "--outlier-lo",
+        type=float,
+        default=DEFAULT_OUTLIER_LO,
+        help="Lower quantile for the longitudinal per-lab clip bounds (train-fit).",
+    )
+    parser.add_argument(
+        "--outlier-hi",
+        type=float,
+        default=DEFAULT_OUTLIER_HI,
+        help="Upper quantile for the longitudinal per-lab clip bounds (train-fit).",
     )
     main(parser.parse_args())
