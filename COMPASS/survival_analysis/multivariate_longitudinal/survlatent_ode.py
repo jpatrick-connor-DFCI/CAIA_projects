@@ -422,6 +422,12 @@ def main(args: argparse.Namespace) -> None:
     # the repo's own workspace.
     output_dir = Path(args.output_dir).resolve()
 
+    run_id = args.run_id or f"prostate_{args.config}_landmark{args.landmark_day}_v1"
+    metrics_path = output_dir / f"survlatent_ode_test_metrics_{run_id}.csv"
+    if not args.overwrite and metrics_path.exists():
+        print(f"[skip] {metrics_path} already exists (pass --overwrite to refit)")
+        return
+
     df, manifest = load_longitudinal_inputs(args)
 
     id_col = manifest["id_col"]
@@ -499,8 +505,6 @@ def main(args: argparse.Namespace) -> None:
         n_events=n_events,
         haz_dec_layers=args.haz_dec_layers,
     )
-
-    run_id = args.run_id or f"prostate_{args.config}_landmark{args.landmark_day}_v1"
 
     if not args.skip_train:
         prepare_run_artifacts(run_id, overwrite=args.overwrite_run, resume=args.resume_run)
@@ -589,7 +593,6 @@ def main(args: argparse.Namespace) -> None:
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    metrics_path = output_dir / f"survlatent_ode_test_metrics_{run_id}.csv"
     cif_path = output_dir / f"survlatent_ode_cif_{run_id}.npz"
     training_curve_path = summarize_training_curve(
         output_dir=output_dir,
@@ -685,6 +688,24 @@ def build_parser() -> argparse.ArgumentParser:
             "Training identifier. Defaults to prostate_<config>_landmark<D>_v1 so "
             "checkpoints do not collide across configs or landmarks."
         ),
+    )
+    parser.add_argument(
+        "--overwrite",
+        dest="overwrite",
+        action="store_true",
+        default=False,
+        help=(
+            "Refit even if this run_id's survlatent_ode_test_metrics_*.csv already "
+            "exists in --output-dir. Default: pick up where left off, skipping a "
+            "run whose output is already present. Distinct from --overwrite-run, "
+            "which controls SurvLatent's own checkpoint artifacts."
+        ),
+    )
+    parser.add_argument(
+        "--no-overwrite",
+        dest="overwrite",
+        action="store_false",
+        help="Skip the run if its output already exists (the default).",
     )
     parser.add_argument("--skip-train", action="store_true", help="Reuse an existing checkpoint.")
     parser.add_argument(

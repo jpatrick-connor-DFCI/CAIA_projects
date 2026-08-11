@@ -230,6 +230,11 @@ def write_deephit_outputs(
 
 
 def run_deephit(args: Namespace) -> None:
+    metrics_path = Path(args.output_dir) / f"dynamic_deephit_metrics_{args.config}.csv"
+    if not getattr(args, "overwrite", False) and metrics_path.exists():
+        print(f"[skip] {metrics_path} already exists (pass --overwrite to refit)")
+        return
+
     engine.require_torch()
     cohort.configure_id_columns(args.id_col, args.age_col)
     engine.set_seed(args.seed)

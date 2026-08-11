@@ -102,7 +102,11 @@ from cox_aggregated import (  # noqa: E402
     prepare_landmark_context,
     select_feature_columns,
 )
-from survival_common.cox_runners import run_multivariable  # noqa: E402
+from survival_common.cox_runners import (  # noqa: E402
+    _combine_per_landmark,
+    _per_landmark_path,
+    run_multivariable,
+)
 from survival_common.cox_engine import summarize_auc_timeline  # noqa: E402
 from survival_common.helper import (  # noqa: E402
     assert_disjoint_folds,
@@ -800,19 +804,30 @@ def run_xgboost(args: argparse.Namespace) -> None:
         f"auc_time_unit_days={args.auc_time_unit_days} per build manifest)"
     )
 
-    out = {
-        "metrics": [],
-        "auc_t": [],
-        "brier": [],
-        "risks": [],
-        "features": [],
-        "importance": [],
-        "cv_folds": [],
-        "cv_summary": [],
-        "canonical_labs_folds": [],
-    }
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    suffix = "_baseline" if args.baseline else ""
+    prefix = f"landmark_xgboost{suffix}"
+    overwrite = getattr(args, "overwrite", False)
 
     for landmark_day in landmark_days:
+        metrics_path = _per_landmark_path(output_dir, f"{prefix}_metrics", landmark_day)
+        if not overwrite and metrics_path.exists():
+            print(f"\n[skip] landmark +{landmark_day}d: {metrics_path.name} already exists (pass --overwrite to refit)")
+            continue
+
+        out = {
+            "metrics": [],
+            "auc_t": [],
+            "brier": [],
+            "risks": [],
+            "features": [],
+            "importance": [],
+            "cv_folds": [],
+            "cv_summary": [],
+            "canonical_labs_folds": [],
+        }
+
         ctx = prepare_landmark_context(
             inputs_dir,
             landmark_day,
@@ -851,50 +866,57 @@ def run_xgboost(args: argparse.Namespace) -> None:
                 out=out,
             )
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    suffix = "_baseline" if args.baseline else ""
-    metrics_path = output_dir / f"landmark_xgboost{suffix}_metrics.csv"
-    auc_path = output_dir / f"landmark_xgboost{suffix}_auc_t.csv"
-    brier_path = output_dir / f"landmark_xgboost{suffix}_brier.csv"
-    risks_path = output_dir / f"landmark_xgboost{suffix}_patient_risks.csv"
-    features_path = output_dir / f"landmark_xgboost{suffix}_feature_selection.csv"
-    importance_path = output_dir / f"landmark_xgboost{suffix}_feature_importance.csv"
-    cv_folds_path = output_dir / f"landmark_xgboost{suffix}_cv_folds.csv"
-    cv_summary_path = output_dir / f"landmark_xgboost{suffix}_cv_summary.csv"
-    fold_labs_path = output_dir / f"landmark_xgboost{suffix}_canonical_labs_folds.csv"
+        if out["metrics"]:
+            pd.concat(out["metrics"], ignore_index=True).to_csv(metrics_path, index=False)
+        if out["auc_t"]:
+            pd.concat(out["auc_t"], ignore_index=True).to_csv(
+                _per_landmark_path(output_dir, f"{prefix}_auc_t", landmark_day), index=False
+            )
+        if out["risks"]:
+            pd.concat(out["risks"], ignore_index=True).to_csv(
+                _per_landmark_path(output_dir, f"{prefix}_patient_risks", landmark_day), index=False
+            )
+        if out["features"]:
+            pd.concat(out["features"], ignore_index=True, sort=False).to_csv(
+                _per_landmark_path(output_dir, f"{prefix}_feature_selection", landmark_day), index=False
+            )
+        if out["importance"]:
+            pd.concat(out["importance"], ignore_index=True, sort=False).to_csv(
+                _per_landmark_path(output_dir, f"{prefix}_feature_importance", landmark_day), index=False
+            )
+        if out["brier"]:
+            pd.concat(out["brier"], ignore_index=True).to_csv(
+                _per_landmark_path(output_dir, f"{prefix}_brier", landmark_day), index=False
+            )
+        if out["cv_folds"]:
+            pd.concat(out["cv_folds"], ignore_index=True).to_csv(
+                _per_landmark_path(output_dir, f"{prefix}_cv_folds", landmark_day), index=False
+            )
+        if out["cv_summary"]:
+            pd.concat(out["cv_summary"], ignore_index=True).to_csv(
+                _per_landmark_path(output_dir, f"{prefix}_cv_summary", landmark_day), index=False
+            )
+        if out["canonical_labs_folds"]:
+            pd.concat(out["canonical_labs_folds"], ignore_index=True).to_csv(
+                _per_landmark_path(output_dir, f"{prefix}_canonical_labs_folds", landmark_day), index=False
+            )
+        print(f"\n[done] landmark +{landmark_day}d: saved {metrics_path.name}")
 
-    saved = []
-    if out["metrics"]:
-        pd.concat(out["metrics"], ignore_index=True).to_csv(metrics_path, index=False)
-        saved.append(metrics_path)
-    if out["auc_t"]:
-        pd.concat(out["auc_t"], ignore_index=True).to_csv(auc_path, index=False)
-        saved.append(auc_path)
-    if out["risks"]:
-        pd.concat(out["risks"], ignore_index=True).to_csv(risks_path, index=False)
-        saved.append(risks_path)
-    if out["features"]:
-        pd.concat(out["features"], ignore_index=True, sort=False).to_csv(features_path, index=False)
-        saved.append(features_path)
-    if out["importance"]:
-        pd.concat(out["importance"], ignore_index=True, sort=False).to_csv(importance_path, index=False)
-        saved.append(importance_path)
-    if out["brier"]:
-        pd.concat(out["brier"], ignore_index=True).to_csv(brier_path, index=False)
-        saved.append(brier_path)
-    if out["cv_folds"]:
-        pd.concat(out["cv_folds"], ignore_index=True).to_csv(cv_folds_path, index=False)
-        saved.append(cv_folds_path)
-    if out["cv_summary"]:
-        pd.concat(out["cv_summary"], ignore_index=True).to_csv(cv_summary_path, index=False)
-        saved.append(cv_summary_path)
-    if out["canonical_labs_folds"]:
-        pd.concat(out["canonical_labs_folds"], ignore_index=True).to_csv(fold_labs_path, index=False)
-        saved.append(fold_labs_path)
-    print("\nSaved:")
-    for path in saved:
-        print(f"  {path}")
+    print("\nSaved (combined):")
+    for suffix_name in (
+        "metrics",
+        "auc_t",
+        "patient_risks",
+        "feature_selection",
+        "feature_importance",
+        "brier",
+        "cv_folds",
+        "cv_summary",
+        "canonical_labs_folds",
+    ):
+        combined_filename = f"{prefix}_{suffix_name}.csv"
+        if _combine_per_landmark(output_dir, f"{prefix}_{suffix_name}", landmark_days, combined_filename):
+            print(f"  {combined_filename}")
 
 
 def main(args: argparse.Namespace) -> None:
@@ -936,6 +958,23 @@ if __name__ == "__main__":
         help="Endpoints to analyze.",
     )
     parser.add_argument("--landmark-days", nargs="+", type=int, default=DEFAULT_LANDMARK_DAYS)
+    parser.add_argument(
+        "--overwrite",
+        dest="overwrite",
+        action="store_true",
+        default=False,
+        help=(
+            "Refit every --landmark-days even if its per-landmark output files "
+            "already exist in --output-dir. Default: pick up where left off, "
+            "skipping landmarks whose per-landmark files are already present."
+        ),
+    )
+    parser.add_argument(
+        "--no-overwrite",
+        dest="overwrite",
+        action="store_false",
+        help="Skip landmarks whose per-landmark output files already exist (the default).",
+    )
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--val-frac", type=float, default=0.20)
     parser.add_argument("--max-features", type=int, default=None)
