@@ -255,17 +255,22 @@ def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
         for endpoint in endpoints:
             print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
             print(cox.ENDPOINTS[endpoint]["description"])
-            # Univariate testing is restricted to labs and explicitly declared
-            # static features (genomics and, in COMPASS's separate arm, Gleason)
-            # (ctx.selected_feature_cols); cancer type, treatment, and gender
-            # are never tested as their own feature, but are always included
-            # as adjustment covariates (alongside age) in every feature test.
+            # Univariate testing runs on the full-cohort candidate universe
+            # (ctx.raw_feature_cols), matching ctx.univariate_data's full-cohort
+            # scope -- not ctx.selected_feature_cols, which is a train_val-only
+            # coverage/prevalence filter used to gate the *multivariable* arm's
+            # feature set (Finding 5: using the train-filtered list here would
+            # under-correct the BH q-values relative to the number of hypotheses
+            # actually tested on the full cohort). Cancer type, treatment, and
+            # gender are never tested as their own feature, but are always
+            # included as adjustment covariates (alongside age) in every
+            # feature test.
             genomic_feature_cols = getattr(ctx, "always_include_feature_cols", ())
             baseline_covariate_cols = config.static_covariates(ctx, args, cox)
             adjusted_frames = [
                 cox.run_univariate_nobs_adjusted_associations(
                     ctx.univariate_data,
-                    feature_cols=ctx.selected_feature_cols,
+                    feature_cols=ctx.raw_feature_cols,
                     endpoint=endpoint,
                     min_events_per_feature=args.min_events_per_feature,
                     fallback_penalizer=args.univariate_penalizer,
