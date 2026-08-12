@@ -63,11 +63,11 @@ N_FOLDS = 5
 FORCE_RERUN = True
 REBUILD_PREDICTION_INPUTS = True
 
-# multivariate_longitudinal (SurvLatent ODE + Dynamic-DeepHit) knobs. Notebook
-# 03b sets SURVLATENT_REPO before calling run_multivariate_longitudinal --
-# build_model_command raises a clear RuntimeError if it is still None when a
-# survlatent-ode task is dispatched.
-SURVLATENT_REPO = None
+# multivariate_longitudinal (SurvLatent ODE + Dynamic-DeepHit) knobs. The
+# editable upstream checkout is kept beside this pipeline so cluster copies of
+# CAIA carry the exact SurvLatent source they run.
+DEFAULT_SURVLATENT_REPO = SURVIVAL_DIR / "survlatent_ode_repo"
+SURVLATENT_REPO = DEFAULT_SURVLATENT_REPO
 MAX_PRED_WINDOW = 260
 # These analyses use the baseline ADT cohort. Sequencing and Gleason get their
 # own observation-date origins; PRS retains ADT start as time zero.

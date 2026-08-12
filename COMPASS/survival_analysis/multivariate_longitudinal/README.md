@@ -32,24 +32,30 @@ python dynamic_deephit.py \
 
 ## `survlatent_ode.py`
 
-Adapter around the external
-[`itmoon7/survlatent_ode`](https://github.com/itmoon7/survlatent_ode) repo.
+Adapter around the editable in-repo checkout of
+[`itmoon7/survlatent_ode`](https://github.com/itmoon7/survlatent_ode) at
+`COMPASS/survival_analysis/survlatent_ode_repo/`.
 Not a reimplementation -- this script imports and drives that repo's
 `SurvLatentODE` class directly.
 
+The adapter creates the upstream repository's empty runtime parents
+(`model_performance/`, `surv_curves/`, and `experiments/`) before training;
+fresh clones do not necessarily preserve these directories in Git.
+
 ### Prerequisites
 
-1. **Clone the repo** somewhere on the cluster, e.g.:
+1. **Use the bundled checkout** at
+   `COMPASS/survival_analysis/survlatent_ode_repo/`. To recreate it if needed:
    ```
-   git clone https://github.com/itmoon7/survlatent_ode.git /path/to/survlatent_ode
+   git clone https://github.com/itmoon7/survlatent_ode.git \
+     COMPASS/survival_analysis/survlatent_ode_repo
    ```
 2. **Create and activate its conda env** from `survlatent_ode_conda.yml` in
    that repo (this pulls torch + `torchdiffeq`; see the root
    `requirements.txt` header -- torch stays commented out of this repo's own
    requirements because `multivariate_longitudinal/` is its only consumer).
-3. Pass the clone's path via `--survlatent-repo` on every invocation. It is
-   **required** and validated at argparse time, not at import time -- `--help`
-   works with no clone and no torch present.
+3. The shared pipeline and notebook 03b default `--survlatent-repo` to that
+   bundled checkout. Set `cp.SURVLATENT_REPO` in 03b only to override it.
 
 ### `os.chdir` side effect
 

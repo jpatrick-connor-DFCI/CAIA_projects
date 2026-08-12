@@ -2,8 +2,8 @@
 produced by ``build_prediction_inputs.py --build-longitudinal``.
 
 Assumes:
-  * The itmoon7/survlatent_ode repo is cloned and importable (pass its path via
-    --survlatent-repo; the script adds it to sys.path and chdirs into it so that
+  * The bundled itmoon7/survlatent_ode checkout is importable (override its path
+    with --survlatent-repo; the script adds it to sys.path and chdirs into it so that
     model_performance/<run_id>/ checkpoints land inside the repo workspace).
   * The associated conda env (from survlatent_ode_conda.yml) is active.
 
@@ -41,6 +41,7 @@ DEFAULT_LR = 0.01
 DEFAULT_SURV_LOSS_SCALE = 10.0
 DEFAULT_WAIT_UNTIL_FULL_SURV_LOSS = 15
 DEFAULT_MAX_PRED_WINDOW = 260
+DEFAULT_SURVLATENT_REPO = SURVIVAL_DIR / "survlatent_ode_repo"
 
 # Event configuration, restricted to the two configs this arm supports (no
 # death-alone config -- see survival_common.longitudinal_targets).
@@ -158,30 +159,38 @@ def import_survlatent(repo_path: Path):
 
 def prepare_run_artifacts(run_id: str, *, overwrite: bool, resume: bool) -> None:
     performance_dir = Path("model_performance") / run_id
+    survival_curves_dir = Path("surv_curves") / run_id
     experiment_paths = [
         Path("experiments") / f"experiment_{run_id}.ckpt",
         Path("experiments") / f"run_{run_id}.ckpt",
     ]
-    existing = [p for p in [performance_dir, *experiment_paths] if p.exists()]
-    if not existing:
-        return
-    if overwrite:
-        for path in existing:
-            if path.is_dir():
-                shutil.rmtree(path)
-            else:
-                path.unlink()
-        print(f"Removed existing artifacts for run_id={run_id}.")
-        return
-    if resume:
-        print(f"Resuming with existing artifacts for run_id={run_id}.")
-        return
-    existing_str = "\n  ".join(str(p) for p in existing)
-    raise RuntimeError(
-        f"Existing SurvLatent artifacts found for run_id={run_id}:\n  {existing_str}\n"
-        "Reusing a run_id can silently load an old best_model.pt and produce misleading AUCs. "
-        "Pass --overwrite-run for a fresh fit or --resume-run if this is intentional."
-    )
+    existing = [
+        p for p in [performance_dir, survival_curves_dir, *experiment_paths] if p.exists()
+    ]
+    if existing:
+        if overwrite:
+            for path in existing:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            print(f"Removed existing artifacts for run_id={run_id}.")
+        elif resume:
+            print(f"Resuming with existing artifacts for run_id={run_id}.")
+        else:
+            existing_str = "\n  ".join(str(p) for p in existing)
+            raise RuntimeError(
+                f"Existing SurvLatent artifacts found for run_id={run_id}:\n  {existing_str}\n"
+                "Reusing a run_id can silently load an old best_model.pt and produce misleading AUCs. "
+                "Pass --overwrite-run for a fresh fit or --resume-run if this is intentional."
+            )
+
+    # Upstream uses os.mkdir() for run-specific paths and assumes these parent
+    # directories already exist in the cloned repository. Fresh clones do not
+    # necessarily contain empty directories (notably surv_curves), so create
+    # every parent before model.fit().
+    for parent in (Path("model_performance"), Path("surv_curves"), Path("experiments")):
+        parent.mkdir(parents=True, exist_ok=True)
 
 
 def _to_numpy(value) -> np.ndarray:
@@ -665,8 +674,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--survlatent-repo",
-        required=True,
-        help="Path to the cloned itmoon7/survlatent_ode repository (used for imports and checkpoint dir).",
+        type=Path,
+        default=DEFAULT_SURVLATENT_REPO,
+        help=(
+            "Path to the editable itmoon7/survlatent_ode checkout used for imports "
+            f"and checkpoints (default: {DEFAULT_SURVLATENT_REPO})."
+        ),
     )
     parser.add_argument(
         "--inputs-dir",

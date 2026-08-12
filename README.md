@@ -72,8 +72,8 @@ COMPASS/
     ├── 05_figures.ipynb                  # R figures from merged profile_data outputs
     ├── multivariate_longitudinal/
     │   ├── dynamic_deephit.py            # ENTRY: thin CLI over survival_common/deephit_engine.py
-    │   ├── survlatent_ode.py             # ENTRY: adapter around the external survlatent_ode repo
-    │   └── README.md                     # survlatent clone/conda-env prerequisites, chdir caveat
+    │   ├── survlatent_ode.py             # ENTRY: adapter around the bundled editable checkout
+    │   └── README.md                     # bundled-checkout/conda-env prerequisites, chdir caveat
     └── GAM/
         ├── gam_trajectory_features.R     # hierarchical longitudinal GAM features
         ├── gam_cox_nonlinearity.R        # smooth-vs-linear Cox GAM tests
@@ -288,7 +288,7 @@ the input builder must be rerun after this change.
 | `gam_trajectory_features.R` (COMPASS only) | Hierarchical GAM (`mgcv::bam`, `bs="fs"` factor-smooth per patient, shrinking sparse patients toward the population curve) per canonical lab, replacing the two-point `__delta` with `__gam_level` / `__gam_slope` / `__gam_curvature` / `__gam_auc` / `__gam_dev` evaluated at the landmark boundary | `--inputs-dir`, `--landmark-days`, `--k-pop`, `--k-pat`, `--trailing-window-days`, `--nthreads`, `--fit-split {all,train_val}` |
 | `gam_cox_nonlinearity.R` (COMPASS only) | Penalized-spline Cox (`mgcv::gam(family=cox.ph())`) per selected feature: fits a smooth and a linear model of the same feature and reports `edf`/`p_lrt`/`q_lrt`/`delta_aic` — flags features whose hazard association is not actually linear | `--inputs-dir`, `--output-dir`, `--landmark-days`, `--feature-selection-csv` |
 | `multivariate_longitudinal/dynamic_deephit.py` (COMPASS only, torch, optional) | Discrete-time competing-risks GRU (Dynamic-DeepHit) fit directly on the person-period lab sequence, in `platinum` (death censored) or `competing` (`0=censored,1=platinum,2=death`) config | `--inputs-dir`, `--output-dir`, `--landmark-day`, `--config {platinum,competing}` |
-| `multivariate_longitudinal/survlatent_ode.py` (COMPASS only, torch + external repo, optional) | Adapter around the external `itmoon7/survlatent_ode` repo's latent-ODE survival model, same `platinum`/`competing` configs and person-period input as Dynamic-DeepHit | `--survlatent-repo` (required), `--inputs-dir`, `--output-dir`, `--landmark-day`, `--config {platinum,competing}` |
+| `multivariate_longitudinal/survlatent_ode.py` (COMPASS only, torch, optional) | Adapter around the bundled editable `survlatent_ode_repo/` source, same `platinum`/`competing` configs and person-period input as Dynamic-DeepHit | `--survlatent-repo` defaults to the bundled checkout; `--inputs-dir`, `--output-dir`, `--landmark-day`, `--config {platinum,competing}` |
 
 `cox_aggregated.py` is now a project adapter: endpoint constants, cohort-specific covariates/restrictions,
 and per-landmark context. The univariate/elastic-net CLI orchestration lives in
@@ -348,8 +348,8 @@ COMPASS PROFILE has four Python stage notebooks sharing `compass_pipeline.py` (t
 - `03b_multivariate_longitudinal.ipynb` — optional, torch-gated (README invariant #7). Reads `01`'s
   `longitudinal_landmark{D}.csv` person-period inputs and runs Dynamic-DeepHit and SurvLatent ODE via
   `compass_pipeline.run_multivariate_longitudinal`; kept out of `03_multivariate.ipynb` so that
-  notebook stays runnable with no torch installed. Requires `cp.SURVLATENT_REPO` to be set to a
-  cloned `itmoon7/survlatent_ode` checkout for the SurvLatent tasks — see
+  notebook stays runnable with no torch installed. SurvLatent tasks default to the bundled editable
+  `survlatent_ode_repo/` checkout through `cp.SURVLATENT_REPO` — see
   `multivariate_longitudinal/README.md`.
 - `05_figures.ipynb` — the sole COMPASS figure notebook, using the R kernel and
   `COMPASS_generate_figures_pipeline.R`. It renders both arms' overview, LLM-label, univariate,
@@ -518,7 +518,7 @@ three tiers — REQUIRED (absent *or* all-null raises), EXPECTED (absent raises,
    shape: `import_survlatent()` (which does the external repo's `sys.path`/`os.chdir` setup) is called
    only from `main()`, never at import. Net effect: `dynamic_deephit.py --help` and
    `survlatent_ode.py --help` both exit 0, and the full test suite imports cleanly, with no torch
-   installed and no `survlatent_ode` repo cloned.
+   installed and without importing the bundled SurvLatent source.
 
 ---
 

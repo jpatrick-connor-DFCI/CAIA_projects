@@ -54,6 +54,13 @@ def test_make_runs_accepts_per_arm_prediction_input_override(monkeypatch, tmp_pa
     assert runs[0]["output_dir"] == tmp_path / "outputs" / "survival_analysis" / "local_runs_adt"
 
 
+def test_default_survlatent_checkout_is_bundled_with_pipeline():
+    assert compass_pipeline.DEFAULT_SURVLATENT_REPO == (
+        compass_pipeline.SURVIVAL_DIR / "survlatent_ode_repo"
+    )
+    assert (compass_pipeline.DEFAULT_SURVLATENT_REPO / "lib" / "neural_ode_surv.py").is_file()
+
+
 def test_somatic_gleason_input_build_requests_only_landmark_zero(monkeypatch, tmp_path):
     commands = []
     monkeypatch.setattr(
