@@ -503,7 +503,9 @@ three tiers — REQUIRED (absent *or* all-null raises), EXPECTED (absent raises,
    IPIO defaults to `DFCI_MRN` with its own baseline covariates. `build_*` and model `main()` functions
    mutate module globals **and monkey-patch `cox_aggregated.ID_COL/AGE_COL`**. If you add a function that captures
    `ID_COL` at import time (default arg, module constant), it will not see the patch — thread the column
-   through as a parameter instead.
+   through as a parameter instead. Concrete example already in the codebase: `survival_common/cox_models.py`
+   imports `AGE_COL`/`ID_COL` from `cohort.py` at module load as `DEFAULT_AGE_COL`/`DEFAULT_ID_COL` — a
+   third, unpatched copy that neither the module-global rebind nor the `cox_aggregated` monkey-patch touches.
 6. **Horizon grid is shared via `build_manifest.json`** so Cox/XGBoost AUC & Brier are comparable.
    Don't compute horizons ad hoc in a model script.
 7. **Three-layer torch gating.** `multivariate_longitudinal/` is the only torch consumer in this repo,
@@ -567,6 +569,30 @@ requires it.
 These are real, verified items found in code review. Fix opportunistically; at minimum, don't be
 surprised by them.
 
+### High impact
+
+- **`t_platinum > 0` drops patients at later landmarks — read +180d results with this in mind.**
+  The validity filter runs after landmark rebasing, so at +180d every patient whose platinum event
+  fell in the first 180 days is dropped — the later-landmark cohorts are both smaller and
+  systematically depleted of early-progressing (highest-risk) patients. This bites
+  `multivariate_longitudinal` hardest, since a GRU/ODE needs more data than Cox; treat +180d results
+  there as possibly underpowered rather than as a negative result. This is a structural landmark-design
+  consequence, not a coding bug, and it also shapes how Finding 5's full-cohort univariate screen and
+  Finding 10's genomic-prevalence floor should be interpreted at later landmarks (a feature's measured
+  prevalence, and hence whether it clears the floor, shifts as the cohort composition shifts).
+- **Competing-config Brier is the binary cause-of-interest Brier, not the cumulative-incidence
+  Brier — and so is the competing-risks IPCW AUC(t).** Both the Brier score and the `cumulative_dynamic_auc`
+  IPCW reference distribution binarize on `event = (label == cause)`, folding any competing event
+  (a different cause, or true censoring) into "censored" for the KM censoring-weight estimator. This
+  keeps the `competing` config's platinum row numerically comparable to the `platinum` config and to
+  Cox/XGBoost, but it is *not* the methodologically correct CIF/Aalen-Johansen-based estimator for
+  competing risks (a `cif_brier` metric was scoped but not implemented — see the plan's §7). The two
+  metrics share one root convention (see `cox_engine.compute_ipcw_auc_t`'s and
+  `deephit_engine.compute_metrics`'s docstrings) — a reader who internalizes the Brier caveat but not
+  the AUC(t) one would still misread the AUC(t) numbers the same way. Document as a stated
+  methodological choice in the paper's methods section; don't over-read either metric as a rigorous
+  competing-risks score without checking which convention you're looking at.
+
 ### Medium impact
 
 - **`auc_max_time_units = 260` is the default** (`DEFAULT_AUC_MAX_TIME_UNITS` in `survival_common/helper.py`)
@@ -576,11 +602,6 @@ surprised by them.
 - **Silent patient drops** at several inner-joins and `valid`-mask filters (diagnosis/death inner joins,
   duration `> 0` filter). Downstream cohort filters now log attrition in `build_prediction_inputs.py`;
   keep that pattern for any new cohort-selection rule.
-- **`t_platinum > 0` drops patients at later landmarks.** The validity filter runs after landmark
-  rebasing, so at +180d every patient whose platinum event fell in the first 180 days is dropped —
-  the later-landmark cohorts are both smaller and systematically depleted of early-progressing
-  (highest-risk) patients. This bites `multivariate_longitudinal` hardest, since a GRU/ODE needs more
-  data than Cox; treat +180d results there as possibly underpowered rather than as a negative result.
 - **`multivariate_longitudinal` per-landmark cohorts are independent** (`cohort_mode:
   "independent_by_landmark"`) — the same MRN can be train at one landmark and test at another. Fine
   within a landmark, since each model only ever reads its own landmark's split, but results must never
@@ -592,13 +613,6 @@ surprised by them.
 - **Dynamic-DeepHit's CV grid is expensive**: 27 hyperparameter combos × 5 folds, run serially per
   (landmark, config) by `compass_pipeline._run_tasks`. Reduce the grid for a first pass and rely on
   `FORCE_RERUN = False` to resume.
-- **Competing-config Brier is the binary cause-of-interest Brier, not the cumulative-incidence
-  Brier.** Both models binarize `event = (label == cause)` and score `1 - S(h)`/`1 - CIF(h)` per
-  cause on the shared platinum horizon grid — this keeps the `competing` config's platinum row
-  numerically comparable to the `platinum` config and to Cox/XGBoost, but it is *not* the
-  methodologically correct CIF Brier for competing risks (a `cif_brier` metric was scoped but not
-  implemented — see the plan's §7). Don't over-read the competing-config Brier as a rigorous
-  competing-risks score without checking which one you're looking at.
 
 ### Low impact / cleanliness
 
