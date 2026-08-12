@@ -816,8 +816,12 @@ def tune_multivariable_model(
     best_row = (
         cv_df.loc[cv_df["all_folds_valid"]]
         .sort_values(
+            # On an exact cv_mean/n_valid_folds tie, prefer the MORE regularized
+            # setting (larger penalizer/l1_ratio) rather than the least, since an
+            # unmotivated preference for the more complex model is not justified
+            # by the CV score alone.
             ["cv_mean", "n_valid_folds", "penalizer", "l1_ratio"],
-            ascending=[False, False, True, True],
+            ascending=[False, False, False, False],
             na_position="last",
         )
         .iloc[0]
