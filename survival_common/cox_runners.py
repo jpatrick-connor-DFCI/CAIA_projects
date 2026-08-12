@@ -46,6 +46,11 @@ def _per_landmark_path(output_dir: Path, prefix: str, landmark_day: int) -> Path
     return output_dir / f"{prefix}_landmark{landmark_day}.csv"
 
 
+def _csv_stem(filename: str) -> str:
+    """Remove one trailing .csv without requiring Python 3.9 removesuffix()."""
+    return filename[:-4] if filename.endswith(".csv") else filename
+
+
 def _combine_per_landmark(
     output_dir: Path, prefix: str, landmark_days: list[int], combined_filename: str
 ) -> bool:
@@ -522,7 +527,9 @@ def run_multivariable(config: CoxProjectConfig, cox: Any, args: Namespace) -> No
         )
         if not horizon_grid_df.empty:
             horizon_grid_df.to_csv(
-                _per_landmark_path(output_dir, cox.HORIZON_GRID_FILENAME.removesuffix(".csv"), landmark_day),
+                _per_landmark_path(
+                    output_dir, _csv_stem(cox.HORIZON_GRID_FILENAME), landmark_day
+                ),
                 index=False,
             )
 
@@ -577,7 +584,9 @@ def _write_multivariable_landmark_outputs(
     if prefix == "cox_agg_multivariable" and out["canonical_labs_fold_rows"]:
         pd.concat(out["canonical_labs_fold_rows"], ignore_index=True).to_csv(
             _per_landmark_path(
-                output_dir, cox.CANONICAL_LABS_FOLDS_FILENAME.removesuffix(".csv"), landmark_day
+                output_dir,
+                _csv_stem(cox.CANONICAL_LABS_FOLDS_FILENAME),
+                landmark_day,
             ),
             index=False,
         )
@@ -606,12 +615,15 @@ def _combine_multivariable_outputs(
     if _combine_per_landmark(output_dir, "cox_agg_feature_selection", landmark_days, "cox_agg_feature_selection.csv"):
         print("  cox_agg_feature_selection.csv")
     if _combine_per_landmark(
-        output_dir, cox.HORIZON_GRID_FILENAME.removesuffix(".csv"), landmark_days, cox.HORIZON_GRID_FILENAME
+        output_dir,
+        _csv_stem(cox.HORIZON_GRID_FILENAME),
+        landmark_days,
+        cox.HORIZON_GRID_FILENAME,
     ):
         print(f"  {cox.HORIZON_GRID_FILENAME}")
     if prefix == "cox_agg_multivariable" and _combine_per_landmark(
         output_dir,
-        cox.CANONICAL_LABS_FOLDS_FILENAME.removesuffix(".csv"),
+        _csv_stem(cox.CANONICAL_LABS_FOLDS_FILENAME),
         landmark_days,
         cox.CANONICAL_LABS_FOLDS_FILENAME,
     ):
