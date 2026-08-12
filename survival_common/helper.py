@@ -678,6 +678,27 @@ def iter_stratified_folds(
 # Leakage guards.
 # ---------------------------------------------------------------------------
 
+def _normalize_mrn(m) -> str:
+    """Stringify an MRN for set comparison, collapsing int/float dtype splits.
+
+    A merge that introduces a NaN elsewhere in an otherwise-integer MRN
+    column upcasts the whole column to float64 in pandas, so the same
+    patient can appear as ``12345`` on one side of a split and ``12345.0``
+    on the other. Plain ``str(m)`` treats those as different keys, so a
+    genuine overlap silently fails to compare equal and the guard passes
+    when it should raise. Route anything that is an int-valued float through
+    ``int()`` first so both forms normalize to the same string; fall back to
+    ``str(m)`` for non-numeric or genuinely fractional IDs.
+    """
+    try:
+        f = float(m)
+    except (TypeError, ValueError):
+        return str(m)
+    if f.is_integer():
+        return str(int(f))
+    return str(m)
+
+
 def assert_no_test_leakage(
     *,
     test_mrns: Iterable,
@@ -689,8 +710,8 @@ def assert_no_test_leakage(
     Cheap to call at every pipeline stage. Raises RuntimeError on overlap so
     the run aborts loudly rather than silently leaking.
     """
-    test_set = {str(m) for m in test_mrns}
-    train_set = {str(m) for m in train_mrns}
+    test_set = {_normalize_mrn(m) for m in test_mrns}
+    train_set = {_normalize_mrn(m) for m in train_mrns}
     overlap = test_set & train_set
     if overlap:
         ctx = f" ({context})" if context else ""
@@ -708,8 +729,8 @@ def assert_disjoint_folds(
     fold: int,
 ) -> None:
     """Hard guard for CV folds: train and val MRNs within a fold must be disjoint."""
-    train_set = {str(m) for m in fold_train_mrns}
-    val_set = {str(m) for m in fold_val_mrns}
+    train_set = {_normalize_mrn(m) for m in fold_train_mrns}
+    val_set = {_normalize_mrn(m) for m in fold_val_mrns}
     overlap = train_set & val_set
     if overlap:
         sample = sorted(overlap)[:5]
