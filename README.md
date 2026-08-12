@@ -34,7 +34,6 @@ survival_common/                         # shared survival-analysis library used
 ├── cohort.py                            # landmark/outcome/feature-matrix/person-period builders
 ├── cox_engine.py                        # shared Cox / Coxnet / IPCW AUC(t) primitives
 ├── xgboost_engine.py                    # shared XGBoost survival:cox primitives
-├── xgboost_runners.py                   # shared XGBoost CLI orchestration
 ├── longitudinal_targets.py              # torch-free platinum/competing target + horizon semantics
 ├── deephit_engine.py                    # torch-gated Dynamic-DeepHit model + training engine
 ├── longitudinal_runners.py              # Dynamic-DeepHit CLI orchestration
@@ -295,8 +294,9 @@ the input builder must be rerun after this change.
 and per-landmark context. The univariate/elastic-net CLI orchestration lives in
 `survival_common/cox_runners.py`; reusable Cox feature selection, CV, final-fit, and manifest helpers live in
 `survival_common/cox_models.py`; low-level Cox fitting/evaluation primitives live in
-`survival_common/cox_engine.py`; XGBoost orchestration lives in `survival_common/xgboost_runners.py`;
-low-level XGBoost mechanics live in `survival_common/xgboost_engine.py`.
+`survival_common/cox_engine.py`; XGBoost orchestration lives in
+`COMPASS/survival_analysis/multivariate_analysis.py`'s `run_xgboost()`, which calls directly into
+low-level XGBoost mechanics in `survival_common/xgboost_engine.py`.
 
 **GAM stages — run order and leakage stance.** Both R scripts are base R + `mgcv` + `data.table`
 only (no `tidyverse`/`survminer`/`broom`, unlike `COMPASS_generate_figures_pipeline.R`) and live under

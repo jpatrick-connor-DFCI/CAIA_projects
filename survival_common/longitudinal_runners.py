@@ -1,6 +1,6 @@
 """Shared CLI and orchestration for the Dynamic-DeepHit longitudinal arm.
 
-Mirrors ``cox_runners.py`` / ``xgboost_runners.py`` in shape, but does not
+Mirrors ``cox_runners.py`` in shape, but does not
 reuse ``add_common_cox_args``: that binds ``--endpoints`` to
 ``choices=list(cox.ENDPOINTS)`` (platinum-only), which is the wrong axis
 here -- these models take ``--config {platinum,competing}`` and run one

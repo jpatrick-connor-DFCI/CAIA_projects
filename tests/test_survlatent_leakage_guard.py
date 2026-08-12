@@ -1,8 +1,9 @@
 """Finding 7: survlatent_ode.py has no assert_no_test_leakage call.
 
 Every other arm (Cox via cox_aggregated.py:426, XGBoost via
-xgboost_runners.py:441, Dynamic-DeepHit via helper.iter_stratified_folds's
-assert_disjoint_folds inside CV) calls one of the two hard leakage guards in
+multivariate_analysis.py's run_xgboost(), Dynamic-DeepHit via
+helper.iter_stratified_folds's assert_disjoint_folds inside CV) calls one of
+the two hard leakage guards in
 survival_common/helper.py before touching test data. survlatent_ode.py's
 ``main()`` loads train/valid/test purely by the ``split`` column
 (:479-481, ``load_split(df, "train"/"valid"/"test", ...)``) and never calls

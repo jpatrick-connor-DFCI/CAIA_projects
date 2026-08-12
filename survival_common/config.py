@@ -64,7 +64,7 @@ class CoxProjectConfig:
     # Adds the project's extra CLI flags; the same flags apply to both the
     # univariate and multivariable runners (no project has needed to differ).
     add_cli_args: ParserHook = no_extra_args
-    # --- XGBoost-arm hooks (used only by survival_common.xgboost_runners) ---
+    # --- XGBoost-arm hooks ---
     # Whether the XGBoost baseline arm feeds config.baseline_feature_cols(...)
     # through the *feature* path (tree splits + missing indicators) rather than
     # the *static covariate* path (IPIO's GENDER/therapy/cancer-type baseline).
