@@ -429,6 +429,19 @@ def compute_metrics(
     quantiles: tuple[float, ...],
     fixed_horizons_by_event: dict[str, np.ndarray] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Compute per-event C-index and IPCW mean AUC(t) (see ``cox_engine.compute_ipcw_auc_t``
+    for the shared fixed-horizon oracle contract this honors).
+
+    Competing-risks convention: the IPCW censoring-weight reference distribution
+    binarizes on ``(label == event_idx)``, so any competing event (a different
+    cause, or true censoring) is folded into "censored" for the KM censoring-weight
+    estimator -- a cause-specific convention, not a CIF/Aalen-Johansen-based one.
+    ``cox_engine.compute_ipcw_auc_t`` uses the identical convention on its
+    pre-supplied cause-specific ``event_col``, so this bias is consistent in
+    direction and magnitude across the Cox, XGBoost, and DeepHit arms wherever
+    competing events exist in the cohort (e.g. death without platinum). This is a
+    stated methodological choice, not a defect -- see REVIEW_FINDINGS.md Finding 2.
+    """
     require_lifelines()
     metric_rows = []
     auc_rows = []
@@ -640,6 +653,15 @@ def cv_run(
     fold and each combo, the model is trained on fold_train MRNs with fold_val
     watched for early stopping (and used as the metric set). Returns
     (fold_df, cv_summary_df, best_row).
+
+    Caveat (Finding 6): because the early-stopping watch set and the reported
+    metric set are the same fold, each fold's c_index_val/mean_auc_t_val is
+    optimistically biased relative to a genuinely held-out 3-way split -- the
+    model is tuned (via early stopping) specifically to perform well on the
+    exact fold whose score is then reported. This is the standard, if slightly
+    optimistic, convention for CV-with-early-stopping at this cohort size (see
+    the identical convention and caveat in multivariate_analysis.py's
+    run_xgboost) and is a documented methodological choice, not a bug.
     """
     fold_partitions = list(
         iter_stratified_folds(train_val_static, n_folds=args.n_folds, seed=args.seed)

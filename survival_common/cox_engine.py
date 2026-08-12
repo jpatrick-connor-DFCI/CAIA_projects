@@ -204,6 +204,15 @@ def compute_ipcw_auc_t(
     The eligible timeline is scored in one ``cumulative_dynamic_auc`` call.
     If that batch fails, each horizon is retried independently so a single
     problematic boundary point cannot erase otherwise valid estimates.
+
+    Competing-risks convention: the censoring-weight reference distribution is
+    built from the pre-supplied, cause-specific ``event_col`` -- any competing
+    event (a different cause, or true censoring) is treated as censored for the
+    KM censoring-weight estimator, not modeled via a CIF/Aalen-Johansen-based
+    estimator. ``deephit_engine.compute_metrics`` uses the identical convention,
+    so this is a shared, stated methodological choice across all arms (Cox,
+    XGBoost, DeepHit), not an engine-specific defect -- see REVIEW_FINDINGS.md
+    Finding 2.
     """
     require_sksurv()
 
