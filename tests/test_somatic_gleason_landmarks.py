@@ -4,6 +4,8 @@ from pathlib import Path
 import sys
 from types import ModuleType
 
+import pytest
+
 # compass_pipeline only needs these names to construct source paths at import
 # time. Stub the optional polars-backed scanner so this orchestration test does
 # not require the preprocessing environment.
@@ -55,7 +57,7 @@ def test_somatic_gleason_input_build_requests_only_landmark_zero(monkeypatch, tm
     assert commands[0][landmark_arg + 1 :] == ["0"]
 
 
-def test_somatic_gleason_univariate_runs_only_landmark_zero(monkeypatch, tmp_path):
+def test_somatic_gleason_univariate_runs_three_index_cohorts_at_zero(monkeypatch, tmp_path):
     commands = []
     monkeypatch.setattr(
         compass_pipeline,
@@ -67,7 +69,23 @@ def test_somatic_gleason_univariate_runs_only_landmark_zero(monkeypatch, tmp_pat
         _run(tmp_path), dry_run=True
     )
 
-    assert len(commands) == 1
-    landmark_arg = commands[0].index("--landmark-days")
-    assert commands[0][landmark_arg + 1] == "0"
-    assert len(summary) == 1
+    assert len(commands) == 3
+    for command in commands:
+        landmark_arg = command.index("--landmark-days")
+        assert command[landmark_arg + 1] == "0"
+    inputs = {str(command[command.index("--inputs-dir") + 1]) for command in commands}
+    assert inputs == {
+        str(tmp_path / "prediction_inputs_adt" / "somatic_gleason" / "gleason"),
+        str(tmp_path / "prediction_inputs_adt" / "somatic_gleason" / "sequencing"),
+        str(tmp_path / "prediction_inputs_adt" / "somatic_gleason" / "prs"),
+    }
+    assert len(summary) == 3
+
+
+def test_somatic_gleason_index_cohorts_reject_non_adt_arm(tmp_path):
+    run = _run(tmp_path)
+    run["label"] = "arpi"
+    run["anchor"] = "arpi"
+
+    with pytest.raises(ValueError, match="require the ADT arm"):
+        compass_pipeline.build_somatic_gleason_inputs(run, dry_run=True)

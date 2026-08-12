@@ -69,9 +69,19 @@ REBUILD_PREDICTION_INPUTS = True
 # survlatent-ode task is dispatched.
 SURVLATENT_REPO = None
 MAX_PRED_WINDOW = 260
-# The static somatic/Gleason/PRS arm is evaluated only at treatment baseline.
-# Other model families continue to use each run's full landmark list.
+# These analyses use the baseline ADT cohort. Sequencing and Gleason get their
+# own observation-date origins; PRS retains ADT start as time zero.
 SOMATIC_GLEASON_LANDMARKS = (0,)
+SOMATIC_GLEASON_INDEX_ANALYSES = ("gleason", "sequencing", "prs")
+
+
+def _require_adt_index_run(run: dict) -> None:
+    anchor = str(run.get("anchor", run.get("label", ""))).lower()
+    if anchor != "adt":
+        raise ValueError(
+            "The sequencing/Gleason/PRS analyses require the ADT arm "
+            f"because observations are selected relative to ADT start; got {anchor!r}."
+        )
 
 # COMPASS durations (t_lab, t_platinum, ...) are measured from each arm's
 # treatment anchor (time 0), so anchor_col is "none" for every arm: the
@@ -407,7 +417,8 @@ def build_prediction_inputs(run: dict, dry_run: bool = False) -> None:
 
 
 def build_somatic_gleason_inputs(run: dict, dry_run: bool = False) -> None:
-    """Build the baseline-only somatic + Gleason + selected-PRS input arm."""
+    """Build separate Gleason-, sequencing-, and PRS-indexed cohorts."""
+    _require_adt_index_run(run)
     output_dir = run["inputs_dir"] / "somatic_gleason"
     print(f"\n========== build somatic + Gleason inputs: {run['title']} ==========")
     cmd = [
@@ -627,15 +638,21 @@ def run_univariate(run: dict, dry_run: bool = False):
 
 
 def run_somatic_gleason_univariate(run: dict, dry_run: bool = False):
-    """Run the baseline-only somatic + Gleason + selected-PRS univariate Cox arm."""
-    print(f"\n========== run somatic + Gleason univariate: {run['title']} ==========")
+    """Run Gleason-, sequencing-, and ADT-indexed PRS Cox analyses."""
+    _require_adt_index_run(run)
+    print(f"\n========== run sequencing + Gleason + PRS univariate: {run['title']} ==========")
     summary = []
-    for landmark in SOMATIC_GLEASON_LANDMARKS:
+    for analysis in SOMATIC_GLEASON_INDEX_ANALYSES:
+        landmark = 0
         row_output_dir = (
-            run["output_dir"] / "cox_somatic_gleason" / f"landmark_{landmark}" / "both"
+            run["output_dir"]
+            / "cox_somatic_gleason"
+            / f"landmark_{landmark}"
+            / analysis
+            / "both"
         )
         metrics_path = row_output_dir / "cox_agg_univariate_nobs_adjusted.csv"
-        tag = f"{run['label']:28s} somatic+gleason landmark_{landmark:<3}"
+        tag = f"{run['label']:28s} {analysis:<10s} index-date"
         if metrics_path.exists() and not FORCE_RERUN:
             print(f"[skip] {tag} -> {metrics_path.relative_to(run['output_dir'])} exists")
             summary.append((tag, "skipped", 0.0))
@@ -644,7 +661,7 @@ def run_somatic_gleason_univariate(run: dict, dry_run: bool = False):
             row_output_dir.mkdir(parents=True, exist_ok=True)
         cmd = [
             PYTHON, SURVIVAL_DIR / "univariate_analysis.py",
-            "--inputs-dir", run["inputs_dir"] / "somatic_gleason",
+            "--inputs-dir", run["inputs_dir"] / "somatic_gleason" / analysis,
             "--output-dir", row_output_dir,
             "--landmark-days", str(landmark),
             "--endpoints", "platinum",
@@ -838,12 +855,14 @@ def load_univariate_results(run: dict) -> pd.DataFrame:
 
 
 def load_somatic_gleason_univariate_results(run: dict) -> pd.DataFrame:
-    """Load outputs from the separate somatic + Gleason univariate run."""
+    """Load outputs from the Gleason- and sequencing-indexed runs."""
     import re
 
     result_root = run["output_dir"] / "cox_somatic_gleason"
     paths = sorted(
-        result_root.glob("landmark_*/both/cox_agg_univariate_nobs_adjusted.csv")
+        result_root.glob(
+            "landmark_*/*/both/cox_agg_univariate_nobs_adjusted.csv"
+        )
     )
     if not paths:
         raise FileNotFoundError(
@@ -853,10 +872,11 @@ def load_somatic_gleason_univariate_results(run: dict) -> pd.DataFrame:
     for path in paths:
         frame = pd.read_csv(path)
         if "landmark_days" not in frame.columns:
-            match = re.search(r"landmark_(-?\d+)", str(path.parent.parent))
+            match = re.search(r"landmark_(-?\d+)", str(path.parent.parent.parent))
             if match is None:
                 raise ValueError(f"Could not infer landmark from {path}")
             frame.insert(0, "landmark_days", int(match.group(1)))
+        frame.insert(0, "index_analysis", path.parent.parent.name)
         frame["source_path"] = str(path)
         frames.append(frame)
     results = pd.concat(frames, ignore_index=True)

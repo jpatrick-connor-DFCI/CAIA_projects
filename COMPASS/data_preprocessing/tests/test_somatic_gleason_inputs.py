@@ -15,9 +15,12 @@ if str(MODULE_DIR) not in sys.path:
 from build_somatic_gleason_inputs import (  # noqa: E402
     GLEASON_FEATURE,
     GLEASON_AVAILABLE_DATE,
+    INDEX_DATE,
+    INDEX_TO_ADT_DAYS,
+    SEQUENCING_DATE,
     SOMATIC_AVAILABLE_DATE,
-    SOMATIC_TESTED_FEATURE,
-    build_landmark_features,
+    build_indexed_feature_sets,
+    closest_observation_to_adt,
     latest_available_by_landmark,
     load_biomarker_prs,
 )
@@ -71,81 +74,91 @@ def test_latest_somatic_testing_groups_on_same_date_are_combined():
     assert result.loc[1, "PTEN_DEL"] == 1
 
 
-def test_build_landmark_features_fills_untested_somatic_as_wild_type():
+def test_closest_observation_uses_absolute_distance_and_prefers_earlier_tie():
+    observations = pd.DataFrame(
+        {
+            "DFCI_MRN": [1, 1, 1],
+            "date": pd.to_datetime(["2020-01-01", "2020-01-09", "2020-01-11"]),
+            "value": [6, 7, 9],
+        }
+    )
+    anchors = pd.Series(
+        pd.to_datetime(["2020-01-10"]), index=pd.Index([1], name="DFCI_MRN")
+    )
+
+    selected = closest_observation_to_adt(
+        observations, anchors, date_col="date", value_cols=["value"]
+    )
+
+    assert selected.loc[1, INDEX_DATE] == pd.Timestamp("2020-01-09")
+    assert selected.loc[1, INDEX_TO_ADT_DAYS] == -1
+    assert selected.loc[1, "value"] == 7
+
+
+def test_indexed_feature_sets_use_distinct_dates_and_followup_clocks():
     base = pd.DataFrame(
         {
-            "DFCI_MRN": [1, 2],
-            "TREATMENT_ANCHOR_DATE": ["2020-01-01", "2020-01-01"],
-            "AGE_AT_TREATMENTSTART": [70, 65],
-            "PLATINUM": [1, 0],
-            "t_platinum": [100, 200],
-            "split": ["train", "test"],
+            "DFCI_MRN": [1, 2, 3],
+            "TREATMENT_ANCHOR_DATE": ["2020-01-10"] * 3,
+            "LAST_CONTACT_DATE": ["2020-06-01"] * 3,
+            "PLATINUM_DATE": ["2020-04-20", "2020-06-01", "2020-01-05"],
+            "AGE_AT_TREATMENTSTART": [70, 65, 72],
+            "PLATINUM": [1, 0, 1],
+            "t_platinum": [101, 143, -5],
+            "split": ["train", "test", "valid"],
         }
     )
     somatic = pd.DataFrame(
         {
-            "DFCI_MRN": [1],
-            SOMATIC_AVAILABLE_DATE: pd.to_datetime(["2020-01-20"]),
-            "TP53_SNV": [1],
-        }
-    )
-    gleason = pd.DataFrame(
-        {
-            "DFCI_MRN": [1, 1, 2],
-            "gleason_date": pd.to_datetime(["2019-01-01", "2020-03-01", "2019-02-01"]),
-            GLEASON_AVAILABLE_DATE: pd.to_datetime(
-                ["2019-01-01", "2020-03-01", "2019-02-01"]
+            "DFCI_MRN": [1, 1, 2, 3],
+            SEQUENCING_DATE: pd.to_datetime(
+                ["2020-01-05", "2020-02-01", "2020-01-20", "2020-01-20"]
             ),
-            GLEASON_FEATURE: [7, 9, 8],
-        }
-    )
-
-    result = build_landmark_features(base, somatic, ["TP53_SNV"], gleason, 30).set_index(
-        "DFCI_MRN"
-    )
-
-    assert result.loc[1, "TP53_SNV"] == 1
-    # Patient 2 was never tested: filled wild type, but flagged as untested.
-    assert result.loc[2, "TP53_SNV"] == 0
-    assert result.loc[1, SOMATIC_TESTED_FEATURE] == 1
-    assert result.loc[2, SOMATIC_TESTED_FEATURE] == 0
-    assert result.loc[1, GLEASON_FEATURE] == 7
-    assert result.loc[2, GLEASON_FEATURE] == 8
-    assert "TREATMENT_ANCHOR_DATE" in result.columns
-    assert "AGE_AT_TREATMENTSTART" in result.columns
-
-
-def test_tested_all_negative_is_distinguishable_from_untested():
-    base = pd.DataFrame(
-        {
-            "DFCI_MRN": [1, 2],
-            "TREATMENT_ANCHOR_DATE": ["2020-01-01", "2020-01-01"],
-            "AGE_AT_TREATMENTSTART": [70, 65],
-            "PLATINUM": [1, 0],
-            "t_platinum": [100, 200],
-            "split": ["train", "test"],
-        }
-    )
-    # Patient 1 was sequenced and came back negative; patient 2 was never tested.
-    somatic = pd.DataFrame(
-        {
-            "DFCI_MRN": [1],
-            SOMATIC_AVAILABLE_DATE: pd.to_datetime(["2020-01-20"]),
-            "TP53_SNV": [0],
+            "TP53_SNV": [1, 0, 0, 1],
         }
     )
     gleason = pd.DataFrame(
-        columns=["DFCI_MRN", "gleason_date", GLEASON_AVAILABLE_DATE, GLEASON_FEATURE]
+        {
+            "DFCI_MRN": [1, 1, 2, 3],
+            "gleason_date": pd.to_datetime(
+                ["2020-01-08", "2020-03-01", "2020-02-01", "2020-01-20"]
+            ),
+            GLEASON_FEATURE: [7, 9, 8, 10],
+        }
+    )
+    prs = pd.DataFrame(
+        {"DFCI_MRN": [1, 2], "PROSTATE_PRS": [0.4, -0.2]}
     )
 
-    result = build_landmark_features(base, somatic, ["TP53_SNV"], gleason, 30).set_index(
-        "DFCI_MRN"
+    result = build_indexed_feature_sets(
+        base,
+        somatic,
+        ["TP53_SNV"],
+        gleason,
+        prs=prs,
+        prs_features=["PROSTATE_PRS"],
     )
+    sequencing = result["sequencing"].set_index("DFCI_MRN")
+    gleason_out = result["gleason"].set_index("DFCI_MRN")
+    prs_out = result["prs"].set_index("DFCI_MRN")
 
-    assert result.loc[1, "TP53_SNV"] == 0
-    assert result.loc[2, "TP53_SNV"] == 0
-    assert result.loc[1, SOMATIC_TESTED_FEATURE] == 1
-    assert result.loc[2, SOMATIC_TESTED_FEATURE] == 0
+    assert sequencing.loc[1, INDEX_DATE] == pd.Timestamp("2020-01-05")
+    assert sequencing.loc[1, "t_platinum"] == 106
+    assert gleason_out.loc[1, INDEX_DATE] == pd.Timestamp("2020-01-08")
+    assert gleason_out.loc[1, GLEASON_FEATURE] == 7
+    assert gleason_out.loc[1, "t_platinum"] == 103
+    # Censored follow-up is rebased from the selected Gleason date.
+    assert gleason_out.loc[2, "t_platinum"] == 121
+    # The outcome precedes patient 3's selected index dates, so that patient is
+    # excluded rather than selecting a different observation using the outcome.
+    assert 3 not in sequencing.index
+    assert 3 not in gleason_out.index
+    # PRS keeps the original ADT-start clock and baseline risk set.
+    assert prs_out.loc[1, INDEX_DATE] == pd.Timestamp("2020-01-10")
+    assert prs_out.loc[1, INDEX_TO_ADT_DAYS] == 0
+    assert prs_out.loc[1, "t_platinum"] == 101
+    assert prs_out.loc[1, "PROSTATE_PRS"] == 0.4
+    assert np.isnan(prs_out.loc[3, "PROSTATE_PRS"])
 
 
 def test_prs_loader_bridges_sample_keyed_matrix_through_idmap():
@@ -221,42 +234,37 @@ def test_prs_loader_missing_ids_degrade_unless_require_all():
             load_biomarker_prs(path, require_all=True)
 
 
-def test_historical_gleason_in_future_note_does_not_leak_backwards():
-    base = pd.DataFrame(
-        {
-            "DFCI_MRN": [1, 2],
-            "TREATMENT_ANCHOR_DATE": ["2020-01-01", "2020-01-01"],
-            "AGE_AT_TREATMENTSTART": [70, 65],
-            "PLATINUM": [1, 0],
-            "t_platinum": [100, 200],
-            "split": ["train", "test"],
-        }
-    )
-    somatic = pd.DataFrame(
-        columns=["DFCI_MRN", SOMATIC_AVAILABLE_DATE, "TP53_SNV"]
-    )
+def test_gleason_selection_uses_score_date_not_source_note_date():
     gleason = pd.DataFrame(
         {
-            "DFCI_MRN": [1],
-            "gleason_date": pd.to_datetime(["2018-01-01"]),
-            # The old score was only surfaced in a note written after the landmark.
-            GLEASON_AVAILABLE_DATE: pd.to_datetime(["2020-03-01"]),
-            GLEASON_FEATURE: [9],
+            "DFCI_MRN": [1, 1],
+            "gleason_date": pd.to_datetime(["2020-01-02", "2019-01-01"]),
+            GLEASON_AVAILABLE_DATE: pd.to_datetime(["2021-01-01", "2019-01-01"]),
+            GLEASON_FEATURE: [9, 7],
         }
     )
-
-    result = build_landmark_features(base, somatic, ["TP53_SNV"], gleason, 30).set_index(
-        "DFCI_MRN"
+    anchors = pd.Series(
+        pd.to_datetime(["2020-01-01"]), index=pd.Index([1], name="DFCI_MRN")
     )
 
-    assert np.isnan(result.loc[1, GLEASON_FEATURE])
+    result = closest_observation_to_adt(
+        gleason,
+        anchors,
+        date_col="gleason_date",
+        value_cols=[GLEASON_FEATURE],
+    )
+
+    assert result.loc[1, GLEASON_FEATURE] == 9
+    assert result.loc[1, INDEX_DATE] == pd.Timestamp("2020-01-02")
 
 
-def test_landmark_features_can_recover_anchor_dropped_from_base_inputs():
+def test_indexed_features_can_recover_anchor_dropped_from_base_inputs():
     base = pd.DataFrame(
         {
             "DFCI_MRN": [1, 2],
             "AGE_AT_TREATMENTSTART": [70, 65],
+            "LAST_CONTACT_DATE": ["2020-06-01", "2020-06-01"],
+            "PLATINUM_DATE": ["2020-04-10", "2020-06-01"],
             "PLATINUM": [1, 0],
             "t_platinum": [100, 200],
             "split": ["train", "test"],
@@ -265,7 +273,7 @@ def test_landmark_features_can_recover_anchor_dropped_from_base_inputs():
     somatic = pd.DataFrame(
         {
             "DFCI_MRN": [1],
-            SOMATIC_AVAILABLE_DATE: pd.to_datetime(["2020-01-20"]),
+            SEQUENCING_DATE: pd.to_datetime(["2020-01-20"]),
             "TP53_SNV": [1],
         }
     )
@@ -277,14 +285,13 @@ def test_landmark_features_can_recover_anchor_dropped_from_base_inputs():
         index=pd.Index([1, 2], name="DFCI_MRN"),
     )
 
-    result = build_landmark_features(
+    result = build_indexed_feature_sets(
         base,
         somatic,
         ["TP53_SNV"],
         gleason,
-        30,
         treatment_anchors=anchors,
-    ).set_index("DFCI_MRN")
+    )["sequencing"].set_index("DFCI_MRN")
 
     assert result.loc[1, "TP53_SNV"] == 1
 

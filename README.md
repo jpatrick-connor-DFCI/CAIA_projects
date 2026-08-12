@@ -57,7 +57,7 @@ COMPASS/
 │   ├── longitudinal_data_processing.py   # ENTRY: raw exports -> longitudinal_prediction_data.csv
 │   ├── build_prediction_inputs.py        # ENTRY: landmark cohorts, split, canonical labs, horizons
 │   ├── build_genomic_inputs.py           # legacy sample-anchored genomic + lab arm
-│   └── build_somatic_gleason_inputs.py   # somatic + Gleason + selected PRS inputs
+│   └── build_somatic_gleason_inputs.py   # sequencing, Gleason, and PRS inputs
 │
 └── survival_analysis/
     ├── compass_pipeline.py               # shared setup/helper logic behind the 4 Python notebooks
@@ -282,7 +282,7 @@ the input builder must be rerun after this change.
 
 | Script | Model | CLI notes |
 |---|---|---|
-| `univariate_analysis.py` | Cox: univariate n_obs-adjusted lab associations, or static somatic/Gleason/biomarker-PRS associations in the separate baseline-only COMPASS arm | `--landmark-days`, `--endpoints`; the COMPASS pipeline schedules `somatic-gleason` only at +0 days; IPIO supports `--feature-subset {labs,genomics,all}` |
+| `univariate_analysis.py` | Cox: univariate n_obs-adjusted lab associations, or separate sequencing, Gleason, and PRS COMPASS associations | `--landmark-days`, `--endpoints`; sequencing/Gleason use the observation nearest ADT as origin, while PRS uses ADT start; IPIO supports `--feature-subset {labs,genomics,all}` |
 | `multivariate_analysis.py --model elastic-net` | Elastic-net Cox multivariable model (sksurv `CoxnetSurvivalAnalysis`, 5-fold CV, AGE unpenalized) | `--landmark-days`, `--endpoints`, `--n-folds`; IPIO also supports `--feature-subset {labs,genomics,all}` |
 | `multivariate_analysis.py --model xgboost` | XGBoost `survival:cox`, 5-fold CV grid (`max_depth × eta × min_child_weight`) | `--landmark-days`, `--endpoints`, `--max-features`; IPIO also supports `--feature-subset {labs,genomics,all}` |
 | `gam_trajectory_features.R` (COMPASS only) | Hierarchical GAM (`mgcv::bam`, `bs="fs"` factor-smooth per patient, shrinking sparse patients toward the population curve) per canonical lab, replacing the two-point `__delta` with `__gam_level` / `__gam_slope` / `__gam_curvature` / `__gam_auc` / `__gam_dev` evaluated at the landmark boundary | `--inputs-dir`, `--landmark-days`, `--k-pop`, `--k-pat`, `--trailing-window-days`, `--nthreads`, `--fit-split {all,train_val}` |

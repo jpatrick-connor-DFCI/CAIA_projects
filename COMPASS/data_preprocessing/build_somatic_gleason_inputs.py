@@ -1,30 +1,22 @@
-"""Build a separate somatic-feature + Gleason + selected-PRS univariate arm.
+"""Build sequencing-, Gleason-, and PRS-indexed univariate Cox inputs.
 
-The risk sets, outcomes, and train/valid/test assignments are inherited from
-the standard COMPASS landmark inputs.  Features come from the two upstream
-artifacts named in the project workflow:
+The baseline ADT cohort and train/valid/test assignments are inherited from
+the standard COMPASS landmark-0 inputs. Three distinct analyses are built:
 
-* PROFILE_data_processing/SOMATIC_WIDE_BY_SAMPLE.parquet
-* LLM_clinical_annotations/LLM_gleason_timeline/gleason_timeline.parquet
-* the raw PGS catalog matrix (pgs_matrix_with_avg.tsv), bridged to DFCI_MRN
-  through PROFILE_2024_idmap.csv
+* ``sequencing`` selects the sample-collection date closest to ADT start and
+  predicts from that collection date to platinum (or last contact).
+* ``gleason`` selects the Gleason score date closest to ADT start and predicts
+  from that score date to platinum (or last contact).
+* ``prs`` uses ADT start as time zero and predicts from ADT start to platinum
+  (or last contact), because germline scores have no observation-date clock.
 
-For each treatment landmark, the most recent somatic testing group whose
-result was available by the landmark and the most recent dated Gleason score
-at or before the landmark are selected.
+Closest means minimum absolute calendar distance, so an observation may fall
+before or after ADT. An exact-distance tie prefers the earlier date. Patients
+whose selected index date is on/after platinum or last contact are excluded;
+the builder never substitutes a different observation based on the outcome.
 
-PRS is read from the raw PGS matrix rather than from the clinical text
-embedding project's ``complete_germline_data_df.csv.gz``.  That derived file
-is gated on a pan-cancer, note-filtered, treatment-anchored cohort built for
-a different project, so joining COMPASS MRNs against it returned mostly
-nulls.  The raw matrix is keyed on ``IID`` (a cbio sample id carrying no
-MRN), so the idmap join remains structurally required; patients absent from
-the idmap have no reachable germline data and stay missing.  Patients with
-several genotyped samples are collapsed to a per-score arithmetic mean.
-
-A patient without an eligible somatic test is treated as wild type (0) for
-every somatic feature, and carries ``HAS_SOMATIC_TEST=0`` so models can still
-separate an untested patient from a tested all-negative one.
+The PRS matrix is bridged from sample ID to MRN and duplicate sample rows are
+averaged per patient, as in the prior implementation.
 """
 
 from __future__ import annotations
@@ -85,10 +77,11 @@ FEATURE_MANIFEST_FILENAME = "somatic_gleason_features.csv"
 GLEASON_FEATURE = "GLEASON_SCORE"
 SOMATIC_AVAILABLE_DATE = "_somatic_available_date"
 GLEASON_AVAILABLE_DATE = "_gleason_available_date"
-# Marks whether a patient had any somatic result available by the landmark, so
-# an untested patient stays separable from a tested all-wild-type one even
-# though both carry 0 for every alteration indicator.
-SOMATIC_TESTED_FEATURE = "HAS_SOMATIC_TEST"
+SOMATIC_TESTED_FEATURE = "HAS_SOMATIC_TEST"  # legacy compatibility constant
+SEQUENCING_DATE = "SEQUENCING_DATE"
+INDEX_DATE = "INDEX_DATE"
+INDEX_TO_ADT_DAYS = "INDEX_TO_ADT_DAYS"
+INDEX_ANALYSES = ("gleason", "sequencing", "prs")
 PRS_SAMPLE_ID_COL = "cbio_sample_id"
 
 # Exact PGS IDs from the user-supplied complete_germline_data_df column list.
@@ -185,7 +178,6 @@ def load_somatic_features(
     if not features:
         raise ValueError(f"Somatic manifest {manifest_path} contains no features.")
 
-    date_cols = ["REPORT_DT", "SAMPLE_COLLECTION_DT", "TEST_ORDER_DT"]
     somatic = _normalize_mrn(_read_table(somatic_path), source=str(somatic_path))
     missing = [column for column in features if column not in somatic.columns]
     if missing:
@@ -193,25 +185,23 @@ def load_somatic_features(
             f"Somatic matrix is missing {len(missing)} manifest features; "
             f"first values: {missing[:10]}"
         )
-    present_dates = [column for column in date_cols if column in somatic.columns]
-    if not present_dates:
+    if "SAMPLE_COLLECTION_DT" not in somatic.columns:
         raise ValueError(
-            f"Somatic matrix {somatic_path} has none of the availability-date columns {date_cols}."
+            f"Somatic matrix {somatic_path} is missing 'SAMPLE_COLLECTION_DT', "
+            "which is required as the sequencing prediction index date."
         )
-    for column in present_dates:
-        somatic[column] = pd.to_datetime(somatic[column], errors="coerce")
-
-    # REPORT_DT is the conservative availability time. Fall back only when it
-    # is absent, then prefer order date over collection date.
-    somatic[SOMATIC_AVAILABLE_DATE] = pd.NaT
-    for column in ("REPORT_DT", "TEST_ORDER_DT", "SAMPLE_COLLECTION_DT"):
-        if column in somatic.columns:
-            somatic[SOMATIC_AVAILABLE_DATE] = somatic[SOMATIC_AVAILABLE_DATE].fillna(
-                somatic[column]
-            )
+    somatic[SEQUENCING_DATE] = pd.to_datetime(
+        somatic["SAMPLE_COLLECTION_DT"], errors="coerce"
+    )
+    # Retain the old internal alias for callers that import it, but its meaning
+    # is now explicitly the specimen collection/index date rather than report
+    # availability.
+    somatic[SOMATIC_AVAILABLE_DATE] = somatic[SEQUENCING_DATE]
     for feature in features:
         somatic[feature] = pd.to_numeric(somatic[feature], errors="coerce")
-    return somatic[[ca.ID_COL, SOMATIC_AVAILABLE_DATE, *features]], features
+    return somatic[
+        [ca.ID_COL, SEQUENCING_DATE, SOMATIC_AVAILABLE_DATE, *features]
+    ], features
 
 
 def load_gleason(gleason_path: Path) -> pd.DataFrame:
@@ -463,75 +453,164 @@ def latest_available_by_landmark(
     return candidates.groupby(ca.ID_COL, sort=False).tail(1).set_index(ca.ID_COL)[value_cols]
 
 
-def build_landmark_features(
+def closest_observation_to_adt(
+    frame: pd.DataFrame,
+    treatment_anchors: pd.Series,
+    *,
+    date_col: str,
+    value_cols: list[str],
+    combine_date_ties_with_max: bool = False,
+) -> pd.DataFrame:
+    """Select each patient's observation closest in absolute time to ADT start.
+
+    An equal-distance tie is resolved toward the earlier date. Multiple rows on
+    the selected date can optionally be collapsed with a per-feature maximum,
+    which preserves alterations split across same-day sequencing groups.
+    """
+    anchor_frame = treatment_anchors.rename("_adt_start_date").reset_index()
+    candidates = frame.merge(
+        anchor_frame, on=ca.ID_COL, how="inner", validate="many_to_one"
+    )
+    candidates = candidates.loc[
+        candidates[date_col].notna() & candidates["_adt_start_date"].notna()
+    ].copy()
+    output_cols = [INDEX_DATE, INDEX_TO_ADT_DAYS, *value_cols]
+    if candidates.empty:
+        return pd.DataFrame(index=pd.Index([], name=ca.ID_COL), columns=output_cols)
+
+    candidates[INDEX_TO_ADT_DAYS] = (
+        candidates[date_col] - candidates["_adt_start_date"]
+    ).dt.days
+    candidates["_absolute_distance_days"] = candidates[INDEX_TO_ADT_DAYS].abs()
+    candidates = candidates.sort_values(
+        [ca.ID_COL, "_absolute_distance_days", date_col], kind="mergesort"
+    )
+    best_distance = candidates.groupby(ca.ID_COL)[
+        "_absolute_distance_days"
+    ].transform("min")
+    nearest = candidates.loc[
+        candidates["_absolute_distance_days"].eq(best_distance)
+    ].copy()
+    # If observations are equally distant on opposite sides of ADT, use the
+    # earlier one. This decision is outcome-independent.
+    preferred_date = nearest.groupby(ca.ID_COL)[date_col].transform("min")
+    nearest = nearest.loc[nearest[date_col].eq(preferred_date)].copy()
+    nearest[INDEX_DATE] = nearest[date_col]
+
+    if combine_date_ties_with_max:
+        aggregations = {
+            INDEX_DATE: "first",
+            INDEX_TO_ADT_DAYS: "first",
+            **{feature: "max" for feature in value_cols},
+        }
+        return nearest.groupby(ca.ID_COL, sort=False).agg(aggregations)[output_cols]
+    return (
+        nearest.groupby(ca.ID_COL, sort=False)
+        .head(1)
+        .set_index(ca.ID_COL)[output_cols]
+    )
+
+
+def _rebase_platinum_from_index(
+    base: pd.DataFrame,
+    selected: pd.DataFrame,
+    *,
+    feature_cols: list[str],
+) -> pd.DataFrame:
+    """Join selected features and rebase survival from their index date."""
+    metadata = [ca.ID_COL]
+    metadata += [column for column in base.columns if column in ca.outcome_columns()]
+    out = base[metadata].set_index(ca.ID_COL).join(selected, how="inner")
+
+    required = {"PLATINUM", "PLATINUM_DATE", "LAST_CONTACT_DATE", INDEX_DATE}
+    missing = required - set(out.columns)
+    if missing:
+        raise ValueError(
+            "Index-date survival rebasing requires columns: "
+            f"{sorted(required)}; missing {sorted(missing)}."
+        )
+    out[INDEX_DATE] = pd.to_datetime(out[INDEX_DATE], errors="coerce")
+    out["PLATINUM_DATE"] = pd.to_datetime(out["PLATINUM_DATE"], errors="coerce")
+    out["LAST_CONTACT_DATE"] = pd.to_datetime(
+        out["LAST_CONTACT_DATE"], errors="coerce"
+    )
+    event = pd.to_numeric(out["PLATINUM"], errors="coerce").fillna(0).eq(1)
+    followup_end = out["LAST_CONTACT_DATE"].where(~event, out["PLATINUM_DATE"])
+    out["t_platinum"] = (followup_end - out[INDEX_DATE]).dt.days.astype(float)
+    out["PLATINUM"] = event.astype(int)
+
+    valid = out[INDEX_DATE].notna() & followup_end.notna() & out["t_platinum"].gt(0)
+    out = out.loc[valid].copy()
+    for feature in feature_cols:
+        out[feature] = pd.to_numeric(out[feature], errors="coerce")
+    return out.rename_axis(ca.ID_COL).reset_index()
+
+
+def build_indexed_feature_sets(
     base: pd.DataFrame,
     somatic: pd.DataFrame,
     somatic_features: list[str],
     gleason: pd.DataFrame,
-    landmark_day: int,
+    *,
     prs: pd.DataFrame | None = None,
     prs_features: list[str] | None = None,
     treatment_anchors: pd.Series | None = None,
-) -> pd.DataFrame:
-    base = _normalize_mrn(base, source=f"landmark +{landmark_day} base inputs")
+) -> dict[str, pd.DataFrame]:
+    """Build Gleason-, sequencing-, and ADT-indexed PRS cohorts."""
+    base = _normalize_mrn(base, source="landmark +0 base inputs")
     if "TREATMENT_ANCHOR_DATE" in base.columns:
-        anchor = pd.to_datetime(base["TREATMENT_ANCHOR_DATE"], errors="coerce")
-    elif treatment_anchors is not None:
-        anchor = base[ca.ID_COL].map(treatment_anchors)
-    else:
+        anchors = pd.Series(
+            pd.to_datetime(base["TREATMENT_ANCHOR_DATE"], errors="coerce").values,
+            index=pd.Index(base[ca.ID_COL], name=ca.ID_COL),
+        )
+    elif treatment_anchors is None:
         raise ValueError(
             "Base inputs omit 'TREATMENT_ANCHOR_DATE' and no treatment-anchor "
             "mapping was supplied."
         )
-    if anchor.isna().any():
-        missing_mrns = base.loc[anchor.isna(), ca.ID_COL].tolist()
+    else:
+        anchors = treatment_anchors.reindex(base[ca.ID_COL])
+        anchors.index = pd.Index(base[ca.ID_COL], name=ca.ID_COL)
+    if anchors.isna().any():
+        missing_mrns = anchors.index[anchors.isna()].tolist()
         raise ValueError(
-            f"Missing treatment anchors for {len(missing_mrns)} landmark-cohort MRNs; "
+            f"Missing ADT anchors for {len(missing_mrns)} baseline-cohort MRNs; "
             f"first values: {missing_mrns[:10]}"
         )
-    cutoffs = pd.DataFrame(
-        {
-            ca.ID_COL: base[ca.ID_COL].values,
-            "_landmark_date": anchor + pd.to_timedelta(int(landmark_day), unit="D"),
-        }
-    )
 
-    latest_somatic = latest_available_by_landmark(
+    selected_somatic = closest_observation_to_adt(
         somatic,
-        cutoffs,
-        date_col=SOMATIC_AVAILABLE_DATE,
+        anchors,
+        date_col=SEQUENCING_DATE,
         value_cols=somatic_features,
-        combine_latest_ties_with_max=True,
+        combine_date_ties_with_max=True,
     )
-    latest_gleason = latest_available_by_landmark(
+    selected_gleason = closest_observation_to_adt(
         gleason,
-        cutoffs,
-        date_col=GLEASON_AVAILABLE_DATE,
+        anchors,
+        date_col="gleason_date",
         value_cols=[GLEASON_FEATURE],
-        order_col="gleason_date",
     )
-
-    metadata = [ca.ID_COL]
-    metadata += [column for column in base.columns if column in ca.outcome_columns()]
-    out = base[metadata].set_index(ca.ID_COL)
-    out = out.join(latest_somatic, how="left").join(latest_gleason, how="left")
-
-    # Patients with no somatic result available by this landmark are treated as
-    # wild type. HAS_SOMATIC_TEST records who was actually tested, so an
-    # untested patient stays distinguishable from a tested all-negative one.
-    out[SOMATIC_TESTED_FEATURE] = (
-        out.index.isin(latest_somatic.index).astype(int)
-        if len(latest_somatic.index)
-        else 0
+    sequencing = _rebase_platinum_from_index(
+        base, selected_somatic, feature_cols=somatic_features
     )
     for feature in somatic_features:
-        # to_numeric first: an all-missing column arrives as object dtype, and
-        # a bare fillna would leave it object rather than numeric.
-        out[feature] = pd.to_numeric(out[feature], errors="coerce").fillna(0)
+        sequencing[feature] = sequencing[feature].fillna(0)
+    gleason_out = _rebase_platinum_from_index(
+        base, selected_gleason, feature_cols=[GLEASON_FEATURE]
+    )
 
+    prs_features = list(prs_features or [])
+    metadata = [ca.ID_COL]
+    metadata += [column for column in base.columns if column in ca.outcome_columns()]
+    prs_out = base[metadata].set_index(ca.ID_COL)
+    prs_out[INDEX_DATE] = anchors
+    prs_out[INDEX_TO_ADT_DAYS] = 0
     if prs is not None and prs_features:
-        out = out.join(prs.set_index(ca.ID_COL)[prs_features], how="left")
-    return out.rename_axis(ca.ID_COL).reset_index()
+        prs_out = prs_out.join(prs.set_index(ca.ID_COL)[prs_features], how="left")
+    prs_out = prs_out.rename_axis(ca.ID_COL).reset_index()
+
+    return {"gleason": gleason_out, "sequencing": sequencing, "prs": prs_out}
 
 
 def main(args: argparse.Namespace) -> None:
@@ -554,11 +633,11 @@ def main(args: argparse.Namespace) -> None:
         f"Recovered treatment anchors for {len(treatment_anchors):,} patients "
         f"from {longitudinal_path}."
     )
-    requested_landmarks = (
-        [int(value) for value in args.landmark_days]
-        if args.landmark_days
-        else [int(value) for value in base_manifest["landmark_days"]]
-    )
+    if args.landmark_days and [int(value) for value in args.landmark_days] != [0]:
+        raise ValueError(
+            "The sequencing/Gleason index-date arm is baseline-only; "
+            "--landmark-days must be exactly 0."
+        )
 
     somatic, somatic_features = load_somatic_features(
         Path(args.somatic_path), Path(args.somatic_manifest_path)
@@ -576,96 +655,108 @@ def main(args: argparse.Namespace) -> None:
         f"{prs[ca.ID_COL].nunique():,} patients have {len(prs_features)} selected PRSs."
     )
 
-    feature_rows = [
-        {"feature": feature, "feature_kind": "somatic_binary", "source": str(args.somatic_path)}
-        for feature in somatic_features
-    ]
-    feature_rows.append(
-        {
-            "feature": SOMATIC_TESTED_FEATURE,
-            "feature_kind": "somatic_tested_indicator",
-            "source": str(args.somatic_path),
-        }
+    base_path = base_inputs_dir / aggregated_filename(0)
+    if not base_path.exists():
+        raise FileNotFoundError(f"Missing base landmark input: {base_path}")
+    source_labs = base_inputs_dir / pre_treatment_lab_filename(0)
+    if not source_labs.exists():
+        raise FileNotFoundError(f"Missing base pre-landmark lab input: {source_labs}")
+    feature_sets = build_indexed_feature_sets(
+        pd.read_csv(base_path, low_memory=False),
+        somatic,
+        somatic_features,
+        gleason,
+        prs=prs,
+        prs_features=prs_features,
+        treatment_anchors=treatment_anchors,
     )
-    feature_rows.append(
-        {
-            "feature": GLEASON_FEATURE,
-            "feature_kind": "gleason_continuous",
-            "source": str(args.gleason_path),
-        }
-    )
-    feature_rows.extend(prs_manifest_rows)
-    pd.DataFrame(feature_rows).to_csv(output_dir / FEATURE_MANIFEST_FILENAME, index=False)
+
+    feature_rows_by_analysis = {
+        "sequencing": [
+            {
+                "feature": feature,
+                "feature_kind": "somatic_binary",
+                "source": str(args.somatic_path),
+            }
+            for feature in somatic_features
+        ],
+        "gleason": [
+            {
+                "feature": GLEASON_FEATURE,
+                "feature_kind": "gleason_continuous",
+                "source": str(args.gleason_path),
+            }
+        ],
+        "prs": prs_manifest_rows,
+    }
 
     cohort_sizes: dict[str, int] = {}
-    for landmark_day in requested_landmarks:
-        base_path = base_inputs_dir / aggregated_filename(landmark_day)
-        if not base_path.exists():
-            raise FileNotFoundError(f"Missing base landmark input: {base_path}")
-        built = build_landmark_features(
-            pd.read_csv(base_path, low_memory=False),
-            somatic,
-            somatic_features,
-            gleason,
-            landmark_day,
-            prs=prs,
-            prs_features=prs_features,
-            treatment_anchors=treatment_anchors,
-        )
-        output_path = output_dir / aggregated_filename(landmark_day)
+    for analysis in INDEX_ANALYSES:
+        analysis_dir = output_dir / analysis
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        built = feature_sets[analysis]
+        output_path = analysis_dir / aggregated_filename(0)
         built.to_csv(output_path, index=False)
-        cohort_sizes[str(landmark_day)] = len(built)
-        # Alteration columns are wild-type filled, so the tested indicator -- not
-        # notna() -- is what counts genuine somatic coverage here.
-        n_somatic = int(built[SOMATIC_TESTED_FEATURE].sum())
-        n_gleason = int(built[GLEASON_FEATURE].notna().sum())
-        n_prs = int(built[prs_features].notna().any(axis=1).sum())
-        print(
-            f"Landmark +{landmark_day}d: {len(built):,} patients; "
-            f"somatic tested={n_somatic:,} (untested filled wild type), "
-            f"Gleason={n_gleason:,}, PRS={n_prs:,} -> {output_path}"
+        cohort_sizes[analysis] = len(built)
+        pd.DataFrame(feature_rows_by_analysis[analysis]).to_csv(
+            analysis_dir / FEATURE_MANIFEST_FILENAME, index=False
         )
-
-        # The shared loader requires this companion filename, but this arm has
-        # no lab candidates. Use a header-only table instead of duplicating the
-        # potentially very large standard lab-long file.
-        source_labs = base_inputs_dir / pre_treatment_lab_filename(landmark_day)
-        if not source_labs.exists():
-            raise FileNotFoundError(f"Missing base pre-landmark lab input: {source_labs}")
         pd.DataFrame(columns=[ca.ID_COL, "LAB_NAME"]).to_csv(
-            output_dir / source_labs.name, index=False
+            analysis_dir / pre_treatment_lab_filename(0), index=False
         )
 
-    manifest = dict(base_manifest)
-    manifest.update(
-        {
-            "feature_set": "somatic_gleason",
-            "base_inputs_dir": str(base_inputs_dir),
-            "treatment_anchor_source": str(longitudinal_path),
-            "somatic_path": str(args.somatic_path),
-            "somatic_manifest_path": str(args.somatic_manifest_path),
-            "gleason_path": str(args.gleason_path),
-            "prs_path": str(args.prs_path),
-            "prs_idmap_path": str(args.idmap_path),
-            "prs_source": "raw PGS catalog matrix bridged via PROFILE idmap",
-            "landmark_days": requested_landmarks,
-            "n_patients_by_landmark": cohort_sizes,
-            "n_somatic_features": len(somatic_features),
-            "somatic_tested_feature": SOMATIC_TESTED_FEATURE,
-            "somatic_missing_policy": (
-                "untested patients filled wild type (0); HAS_SOMATIC_TEST records "
-                "whether any result was available by the landmark"
-            ),
-            "gleason_feature": GLEASON_FEATURE,
-            "prs_features": prs_features,
-            "n_prs_features_requested": len(PRS_PGS_IDS_OF_INTEREST),
-            "prs_duplicate_resolution": "arithmetic mean per PGS column within DFCI_MRN",
-            "somatic_selection": "latest result available on or before landmark",
-            "gleason_selection": "latest dated score on or before landmark",
-        }
+        manifest = dict(base_manifest)
+        manifest.update(
+            {
+                "feature_set": "somatic_gleason",
+                "index_analysis": analysis,
+                "base_inputs_dir": str(base_inputs_dir),
+                "treatment_anchor_source": str(longitudinal_path),
+                "somatic_path": str(args.somatic_path),
+                "somatic_manifest_path": str(args.somatic_manifest_path),
+                "gleason_path": str(args.gleason_path),
+                "landmark_days": [0],
+                "n_patients_by_landmark": {"0": len(built)},
+                "n_patients": len(built),
+                "prediction_time_origin": (
+                    "ADT start" if analysis == "prs" else INDEX_DATE
+                ),
+                "index_selection": (
+                    "ADT start"
+                    if analysis == "prs"
+                    else "minimum absolute days from ADT start; earlier date wins exact tie"
+                ),
+                "outcome": (
+                    "days from ADT start to platinum or last contact"
+                    if analysis == "prs"
+                    else "days from selected index date to platinum or last contact"
+                ),
+                "endpoint_description": (
+                    "Time from ADT start to first platinum exposure"
+                    if analysis == "prs"
+                    else f"Time from the selected {analysis} index date to first platinum exposure"
+                ),
+                "patients_with_nonpositive_followup_excluded": True,
+                "prs_included": analysis == "prs",
+            }
+        )
+        (analysis_dir / BUILD_MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, indent=2)
+        )
+        print(
+            f"{analysis}: {len(built):,} patients indexed from {INDEX_DATE} -> {output_path}"
+        )
+
+    root_manifest = {
+        "feature_set": "somatic_gleason_indexed",
+        "analyses": list(INDEX_ANALYSES),
+        "cohort_sizes": cohort_sizes,
+        "prs_included": True,
+    }
+    (output_dir / BUILD_MANIFEST_FILENAME).write_text(
+        json.dumps(root_manifest, indent=2)
     )
-    (output_dir / BUILD_MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2))
-    print(f"Wrote {output_dir / BUILD_MANIFEST_FILENAME}")
+    print(f"Wrote indexed-analysis manifest: {output_dir / BUILD_MANIFEST_FILENAME}")
 
 
 if __name__ == "__main__":
@@ -681,21 +772,18 @@ if __name__ == "__main__":
         "--prs-path",
         type=Path,
         default=DEFAULT_PRS_PATH,
-        help="Raw PGS catalog matrix (keyed on IID) or a matrix already keyed on DFCI_MRN.",
+        help="Raw PGS matrix keyed on IID, or a matrix already keyed on DFCI_MRN.",
     )
     parser.add_argument(
         "--idmap-path",
         type=Path,
         default=DEFAULT_IDMAP_PATH,
-        help="cbio_sample_id -> DFCI_MRN bridge; required when the PRS matrix is sample-keyed.",
+        help="cbio_sample_id to DFCI_MRN bridge for a sample-keyed PGS matrix.",
     )
     parser.add_argument(
         "--require-all-prs",
         action="store_true",
-        help=(
-            "Fail if any allowlisted PGS ID is absent from the matrix. Off by "
-            "default so a single missing score degrades instead of aborting."
-        ),
+        help="Fail if any allowlisted PGS ID is absent from the matrix.",
     )
     parser.add_argument("--landmark-days", nargs="+", type=int, default=None)
     main(parser.parse_args())

@@ -254,7 +254,11 @@ def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
         print("\n##### ARM 1: UNIVARIATE (n_obs-adjusted, full follow-up, all endpoints) #####")
         for endpoint in endpoints:
             print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
-            print(cox.ENDPOINTS[endpoint]["description"])
+            print(
+                build_manifest.get(
+                    "endpoint_description", cox.ENDPOINTS[endpoint]["description"]
+                )
+            )
             # Univariate testing runs on the full-cohort candidate universe
             # (ctx.raw_feature_cols), matching ctx.univariate_data's full-cohort
             # scope -- not ctx.selected_feature_cols, which is a train_val-only
