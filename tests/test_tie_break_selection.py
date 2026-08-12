@@ -1,16 +1,16 @@
 """Tie-break determinism test for the CV hyperparameter selection at
-cox_models.py:816-825 (Finding 3).
+cox_models.py:816-834 (Finding 3, and now Finding 4).
 
 ``tune_multivariable_model`` selects the winning (penalizer, l1_ratio) row by
-sorting on ``["cv_mean", "n_valid_folds", "penalizer", "l1_ratio"]``. Before
-the fix, ties on ``cv_mean``/``n_valid_folds`` broke toward the SMALLEST
-penalizer -- i.e. the *least* regularized model -- an unmotivated preference
-for the more complex/overfit-prone model whenever two hyperparameter
-settings scored identically. The fix flips the tie-break to prefer the
-*most* regularized setting (``ascending=[False, False, False, False]``).
-``cv_std`` is computed in the same aggregation but intentionally still not
-consulted -- a full 1-SE-style rule is a scientific choice (REPORT item, not
-FIX) per the plan's triage rule.
+sorting on ``["mean_auc_t_cv_mean" (or "cv_mean" fallback), "cv_mean",
+"n_valid_folds", "penalizer", "l1_ratio"]``. Before the Finding-3 fix, ties
+on the score/``n_valid_folds`` broke toward the SMALLEST penalizer -- i.e.
+the *least* regularized model -- an unmotivated preference for the more
+complex/overfit-prone model whenever two hyperparameter settings scored
+identically. The fix flips the tie-break to prefer the *most* regularized
+setting. ``cv_std`` is computed in the same aggregation but intentionally
+still not consulted -- a full 1-SE-style rule is a scientific choice
+(REPORT item, not FIX) per the plan's triage rule.
 
 This test exercises the selection logic in isolation (mirroring the exact
 sort/ascending/columns cox_models.py uses) rather than driving a full
@@ -24,14 +24,17 @@ import pandas as pd
 import pytest
 
 
-def _select_best_row_current_tiebreak(cv_df: pd.DataFrame) -> dict:
-    """Verbatim reproduction of cox_models.py:816-825's selection rule
-    (post-fix: ties prefer more regularization)."""
+def _select_best_row_current_tiebreak(cv_df: pd.DataFrame, n_folds: int = 5) -> dict:
+    """Verbatim reproduction of cox_models.py's selection rule (post-fix:
+    IPCW mean_auc_t is the primary key when fully estimable, ties prefer
+    more regularization)."""
+    valid_candidates = cv_df.loc[cv_df["all_folds_valid"]]
+    has_full_auc_t_coverage = valid_candidates["n_valid_auc_t_folds"].eq(int(n_folds))
+    selection_key = "mean_auc_t_cv_mean" if has_full_auc_t_coverage.any() else "cv_mean"
     return (
-        cv_df.loc[cv_df["all_folds_valid"]]
-        .sort_values(
-            ["cv_mean", "n_valid_folds", "penalizer", "l1_ratio"],
-            ascending=[False, False, False, False],
+        valid_candidates.sort_values(
+            [selection_key, "cv_mean", "n_valid_folds", "penalizer", "l1_ratio"],
+            ascending=[False, False, False, False, False],
             na_position="last",
         )
         .iloc[0]
@@ -46,6 +49,8 @@ def _tied_cv_df() -> pd.DataFrame:
             "l1_ratio": [0.5, 0.5, 0.5, 0.5],
             "cv_mean": [0.70, 0.70, 0.70, 0.70],  # exact tie across the board
             "cv_std": [0.05, 0.02, 0.02, 0.02],  # least-regularized is noisiest
+            "mean_auc_t_cv_mean": [0.65, 0.65, 0.65, 0.65],  # also tied
+            "n_valid_auc_t_folds": [5, 5, 5, 5],
             "n_valid_folds": [5, 5, 5, 5],
             "all_folds_valid": [True, True, True, True],
         }

@@ -813,15 +813,24 @@ def tune_multivariable_model(
             f"'{endpoint}'. Best observed validity was {best_valid}/{n_folds} folds.\n{diagnostic}"
         )
 
+    valid_candidates = cv_df.loc[cv_df["all_folds_valid"]]
+    # Select on the same capped, IPCW-weighted mean AUC(t) that is ultimately
+    # reported, not the uncapped/unweighted Harrell C (cv_mean) — otherwise the
+    # "best" hyperparameter setting can be tuned to a metric different from the
+    # one published for it (Finding 4). Fall back to cv_mean only when no
+    # candidate has an estimable IPCW mean for every fold (n_valid_auc_t_folds
+    # short of n_folds), since a NaN-sorted candidate can't be meaningfully
+    # compared on that key at all.
+    has_full_auc_t_coverage = valid_candidates["n_valid_auc_t_folds"].eq(int(n_folds))
+    selection_key = "mean_auc_t_cv_mean" if has_full_auc_t_coverage.any() else "cv_mean"
     best_row = (
-        cv_df.loc[cv_df["all_folds_valid"]]
-        .sort_values(
-            # On an exact cv_mean/n_valid_folds tie, prefer the MORE regularized
-            # setting (larger penalizer/l1_ratio) rather than the least, since an
-            # unmotivated preference for the more complex model is not justified
-            # by the CV score alone.
-            ["cv_mean", "n_valid_folds", "penalizer", "l1_ratio"],
-            ascending=[False, False, False, False],
+        valid_candidates.sort_values(
+            # On an exact selection-key/cv_mean/n_valid_folds tie, prefer the
+            # MORE regularized setting (larger penalizer/l1_ratio) rather than
+            # the least, since an unmotivated preference for the more complex
+            # model is not justified by the CV score alone.
+            [selection_key, "cv_mean", "n_valid_folds", "penalizer", "l1_ratio"],
+            ascending=[False, False, False, False, False],
             na_position="last",
         )
         .iloc[0]
