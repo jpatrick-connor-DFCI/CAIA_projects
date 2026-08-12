@@ -134,6 +134,15 @@ def cv_one_endpoint(
     fold (fold_val) as the watch — same set used for metric reporting, which
     is the standard CV-with-early-stopping convention.
 
+    Caveat (Finding 6): because the early-stopping watch set and the reported
+    metric set are the same fold, each fold's CV metric is optimistically
+    biased relative to a genuinely held-out 3-way split -- the model is tuned
+    (via early stopping) specifically to perform well on the exact fold whose
+    score is then reported. The bias direction is the same convention used by
+    the DeepHit arm (survival_common.deephit_engine.cv_run), so relative
+    comparisons between arms aren't distorted, but absolute CV numbers for
+    both overstate generalization. Documented methodological choice, not a bug.
+
     Returns (fold_df, cv_df, best_row, fold_canonical_labs_df).
     """
     require_xgboost()
