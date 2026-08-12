@@ -98,12 +98,20 @@ for v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR
     os.environ.setdefault(v, "1")
 
 
-def make_runs(arms=("adt",)) -> list[dict]:
+def make_runs(
+    arms=("adt",),
+    *,
+    prediction_input_dirs: dict[str, str | Path] | None = None,
+) -> list[dict]:
     """Build the merged-profile RUNS list, restricted to ``arms``.
 
     ARPI is disabled by default: build_prediction_inputs.py
     raised "No patients have both engineered features and valid outcomes" for
     that arm on the merged-parquet root. Re-enable once that is root-caused.
+
+    ``prediction_input_dirs`` optionally overrides the prebuilt input directory
+    for individual arms. This is primarily used by notebook 03b when GPU jobs
+    run on a cluster whose prediction data are mounted somewhere else.
     """
     data_root = _PROFILE_OUTPUT_ROOT
     mrn_lists_dir = data_root / "mrn_lists"
@@ -112,6 +120,13 @@ def make_runs(arms=("adt",)) -> list[dict]:
     survival_output_root = data_root / "survival_analysis"
 
     runs = []
+    prediction_input_dirs = prediction_input_dirs or {}
+    unknown_overrides = set(prediction_input_dirs) - set(_ARM_SPECS)
+    if unknown_overrides:
+        raise ValueError(
+            "Unknown prediction-input override arms: "
+            f"{sorted(unknown_overrides)} (expected a subset of {sorted(_ARM_SPECS)})"
+        )
     for label in arms:
         if label not in _ARM_SPECS:
             raise ValueError(f"Unknown arm: {label!r} (expected one of {sorted(_ARM_SPECS)})")
@@ -125,7 +140,11 @@ def make_runs(arms=("adt",)) -> list[dict]:
             "landmarks": arm_spec["landmarks"],
             "input_csv": data_arpi if arm_spec["anchor"] == "arpi" else data_adt,
             "restrict_to_mrns": data_root / f"prostate_{label}_survival_cohort_{label}.csv",
-            "inputs_dir": survival_output_root / f"prediction_inputs_{label}",
+            "inputs_dir": Path(
+                prediction_input_dirs.get(
+                    label, survival_output_root / f"prediction_inputs_{label}"
+                )
+            ).expanduser(),
             "output_dir": survival_output_root / f"local_runs_{label}",
             "data_root": data_root,
             "mrn_lists_dir": mrn_lists_dir,

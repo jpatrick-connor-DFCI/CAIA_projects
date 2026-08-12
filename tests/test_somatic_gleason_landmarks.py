@@ -42,6 +42,18 @@ def _run(tmp_path: Path) -> dict:
     }
 
 
+def test_make_runs_accepts_per_arm_prediction_input_override(monkeypatch, tmp_path):
+    monkeypatch.setattr(compass_pipeline, "_PROFILE_OUTPUT_ROOT", tmp_path / "outputs")
+    custom_inputs = tmp_path / "gpu_mount" / "prediction_inputs_adt"
+
+    runs = compass_pipeline.make_runs(
+        ["adt"], prediction_input_dirs={"adt": custom_inputs}
+    )
+
+    assert runs[0]["inputs_dir"] == custom_inputs
+    assert runs[0]["output_dir"] == tmp_path / "outputs" / "survival_analysis" / "local_runs_adt"
+
+
 def test_somatic_gleason_input_build_requests_only_landmark_zero(monkeypatch, tmp_path):
     commands = []
     monkeypatch.setattr(
