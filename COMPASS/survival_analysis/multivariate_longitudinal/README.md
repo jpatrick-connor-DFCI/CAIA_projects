@@ -21,6 +21,9 @@ Thin wrapper around `survival_common.longitudinal_runners` /
 `survival_common.deephit_engine`. Torch-gated: `--help` works without torch
 installed; running the arm requires torch (see `requirements.txt`).
 
+Training automatically uses the first CUDA GPU when PyTorch detects one and
+falls back to CPU otherwise.
+
 ```
 python dynamic_deephit.py \
   --inputs-dir <prediction_inputs_dir> --output-dir <out> \

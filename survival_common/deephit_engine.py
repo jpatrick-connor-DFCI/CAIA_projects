@@ -112,6 +112,12 @@ def require_lifelines() -> None:
         ) from LIFELINES_IMPORT_ERROR
 
 
+def select_device() -> str:
+    """Use the first CUDA GPU when available, otherwise fall back to CPU."""
+    require_torch()
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def set_seed(seed: int) -> None:
     np.random.seed(seed)
     require_torch()
@@ -383,7 +389,7 @@ def train_evaluate(
         eval_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_batch
     )
 
-    device = "cuda" if getattr(args, "cuda", False) and torch.cuda.is_available() else "cpu"
+    device = select_device()
     input_dim = next(iter(train_loader))["x"].shape[-1]
     model = DynamicDeepHitGRU(
         input_dim=input_dim,

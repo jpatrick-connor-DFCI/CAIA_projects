@@ -117,7 +117,9 @@ def build_deephit_parser() -> argparse.ArgumentParser:
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--min-delta", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=engine.DEFAULT_SEED)
-    parser.add_argument("--cuda", action="store_true")
+    # Kept as a hidden no-op so older launch commands continue to parse. CUDA
+    # is now selected automatically whenever torch reports it is available.
+    parser.add_argument("--cuda", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--n-folds", type=int, default=engine.DEFAULT_N_FOLDS)
     parser.add_argument(
         "--cv-hidden-dims", nargs="+", type=int, default=list(engine.DEFAULT_CV_HIDDEN_DIMS)
