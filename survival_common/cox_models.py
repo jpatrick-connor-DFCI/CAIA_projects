@@ -600,13 +600,26 @@ def tune_multivariable_model(
     endpoint_map: EndpointMap,
     static_covariate_cols: tuple[str, ...] = (),
     always_include_feature_cols: tuple[str, ...] = (),
+    genomic_feature_cols: tuple[str, ...] | None = None,
     min_genomic_prevalence: float | None = None,
     id_col: str = DEFAULT_ID_COL,
     age_col: str = DEFAULT_AGE_COL,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict, pd.DataFrame]:
-    """Run per-fold canonical-lab selection and elastic-net Cox CV."""
+    """Run per-fold canonical-lab selection and elastic-net Cox CV.
+
+    `genomic_feature_cols`, when given, is the subset of
+    `always_include_feature_cols` that are genuine binary mutation
+    indicators eligible for the `min_genomic_prevalence` floor (Finding 10).
+    Defaults to `always_include_feature_cols` itself for callers (e.g. IPIO's
+    genomics/all feature subsets) where every always-include feature is
+    genomic; callers whose always-include set also contains non-genomic
+    features (e.g. COMPASS's Gleason score) must pass this explicitly so the
+    prevalence floor isn't applied to a continuous clinical score.
+    """
     require_sksurv()
     duration_col, event_col = _endpoint_columns(endpoint_map, endpoint)
+    if genomic_feature_cols is None:
+        genomic_feature_cols = always_include_feature_cols
 
     splitter, strat_labels, cv_stratification = make_cv_splitter(
         train_val,
@@ -644,7 +657,7 @@ def tune_multivariable_model(
             min_patient_coverage=min_patient_coverage,
             restrict_to_labs=canonical,
             always_include=list(always_include_feature_cols),
-            genomic_feature_cols=list(always_include_feature_cols),
+            genomic_feature_cols=list(genomic_feature_cols),
             min_genomic_prevalence=min_genomic_prevalence,
         )
         fold_selected_features[fold] = selected

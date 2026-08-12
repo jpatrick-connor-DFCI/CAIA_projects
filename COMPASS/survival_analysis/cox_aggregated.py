@@ -90,6 +90,11 @@ DEFAULT_CV_PENALIZERS = [0.001, 0.01, 0.05, 0.20, 0.80, 3.20]
 DEFAULT_CV_L1_RATIOS = [0.01, 0.5, 1.0]
 DEFAULT_AUC_QUANTILES = (0.25, 0.375, 0.50, 0.625, 0.75)
 DEFAULT_AUC_TIME_UNIT_DAYS = 7
+# Mirrors IPIO.survival_analysis.cox_aggregated.DEFAULT_MIN_GENOMIC_PREVALENCE
+# (Finding 10): a genomic mutation indicator present in fewer than this
+# fraction of train_val patients is dropped, since near-zero-prevalence
+# binary indicators are essentially unfittable and unstable across folds.
+DEFAULT_MIN_GENOMIC_PREVALENCE = 0.025
 HORIZON_GRID_FILENAME = "cox_agg_horizon_grid.csv"
 CANONICAL_LABS_FOLDS_FILENAME = "cox_agg_canonical_labs_folds.csv"
 
@@ -223,7 +228,8 @@ def tune_multivariable_model(
     min_patient_coverage: float,
     static_covariate_cols: tuple[str, ...] = (),
     always_include_feature_cols: tuple[str, ...] = (),
-    min_genomic_prevalence: float | None = None,
+    genomic_feature_cols: tuple[str, ...] = (),
+    min_genomic_prevalence: float | None = DEFAULT_MIN_GENOMIC_PREVALENCE,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict, pd.DataFrame]:
     return _shared_tune_multivariable_model(
         train_val,
@@ -240,6 +246,7 @@ def tune_multivariable_model(
         min_patient_coverage=min_patient_coverage,
         static_covariate_cols=static_covariate_cols,
         always_include_feature_cols=always_include_feature_cols,
+        genomic_feature_cols=genomic_feature_cols,
         min_genomic_prevalence=min_genomic_prevalence,
         endpoint_map=ENDPOINTS,
         id_col=ID_COL,
@@ -329,6 +336,7 @@ class LandmarkContext:
     selected_feature_cols: list[str]
     feature_meta_selected: pd.DataFrame
     always_include_feature_cols: tuple[str, ...] = ()
+    genomic_feature_cols: tuple[str, ...] = ()
 
 
 def compute_shared_canonical_labs(
@@ -395,6 +403,7 @@ def prepare_landmark_context(
         )
 
     always_include_feature_cols: tuple[str, ...] = ()
+    genomic_feature_cols: tuple[str, ...] = ()
     if feature_set == "somatic_gleason":
         manifest_path = inputs_dir / "somatic_gleason_features.csv"
         if not manifest_path.exists():
@@ -418,6 +427,22 @@ def prepare_landmark_context(
             )
         raw_feature_cols = declared_features
         always_include_feature_cols = tuple(raw_feature_cols)
+        # The manifest's 'feature_kind' column (written by
+        # build_somatic_gleason_inputs.py) distinguishes genuine binary
+        # somatic mutation indicators ("somatic_binary") from the Gleason
+        # score ("gleason_continuous"), the tested-coverage flag, and PRS
+        # rows -- so unlike IPIO's naming-convention regex, COMPASS can read
+        # the genomic subset directly off the manifest (Finding 10).
+        if "feature_kind" in feature_manifest.columns:
+            genomic_feature_cols = tuple(
+                str(feature)
+                for feature in feature_manifest.loc[
+                    feature_manifest["feature_kind"] == "somatic_binary", "feature"
+                ]
+                .dropna()
+                .drop_duplicates()
+                if str(feature) in raw_feature_cols
+            )
     else:
         raw_feature_cols = [c for c in merged.columns if c not in outcome_columns()]
     univariate_data = merged.copy()
@@ -450,6 +475,8 @@ def prepare_landmark_context(
         min_patient_coverage=min_patient_coverage,
         restrict_to_labs=[] if feature_set == "somatic_gleason" else canonical_labs,
         always_include=list(always_include_feature_cols),
+        genomic_feature_cols=list(genomic_feature_cols),
+        min_genomic_prevalence=DEFAULT_MIN_GENOMIC_PREVALENCE,
     )
     feature_meta_selected = feature_meta.loc[
         feature_meta["selected"],
@@ -480,6 +507,7 @@ def prepare_landmark_context(
         selected_feature_cols=selected_feature_cols,
         feature_meta_selected=feature_meta_selected,
         always_include_feature_cols=always_include_feature_cols,
+        genomic_feature_cols=genomic_feature_cols,
     )
 
 
