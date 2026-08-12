@@ -81,6 +81,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
     SKSURV_IMPORT_ERROR = exc
 
 from survival_common.helper import (
+    MIN_IPCW_TIMELINE_COVERAGE,
+    MIN_IPCW_VALID_HORIZONS,
     _make_survival_array,
     assert_disjoint_folds,
     compute_brier,
@@ -492,18 +494,33 @@ def compute_metrics(
                         "note": note,
                     }
                 )
-            if len(horizons) >= 2 and horizons[-1] > horizons[0]:
-                times = np.arange(horizons[0], horizons[-1], dtype=float)
+            # Mean AUC(t) is integrated over exactly the fixed requested
+            # timeline (never a re-derived np.arange grid), masking any
+            # horizon whose risk_h{t} column isn't materialized rather than
+            # substituting the time-constant total risk -- matching the
+            # oracle contract in cox_engine.compute_ipcw_auc_t (:194-207).
+            estimable_times = np.asarray(
+                [
+                    t
+                    for t in horizons
+                    if f"event_{event_idx}_risk_h{int(t)}" in pred.columns
+                ],
+                dtype=float,
+            )
+            if len(estimable_times) >= MIN_IPCW_VALID_HORIZONS and len(
+                estimable_times
+            ) / len(horizons) >= MIN_IPCW_TIMELINE_COVERAGE:
                 try:
-                    risk_cols = []
-                    for t in times:
-                        risk_col = f"event_{event_idx}_risk_h{int(t)}"
-                        if risk_col in pred.columns:
-                            risk_cols.append(pred.loc[valid, risk_col].to_numpy(dtype=float))
-                        else:
-                            risk_cols.append(risk[valid])
+                    risk_cols = [
+                        pred.loc[valid, f"event_{event_idx}_risk_h{int(t)}"].to_numpy(
+                            dtype=float
+                        )
+                        for t in estimable_times
+                    ]
                     time_risk = np.column_stack(risk_cols)
-                    _, mean_auc = cumulative_dynamic_auc(ref_surv, eval_surv, time_risk, times)
+                    _, mean_auc = cumulative_dynamic_auc(
+                        ref_surv, eval_surv, time_risk, estimable_times
+                    )
                     mean_auc = float(mean_auc)
                 except ValueError:
                     mean_auc = np.nan
@@ -562,21 +579,21 @@ def compute_brier_for_pred(
             integrated_by_event[event_name] = float("nan")
             continue
 
-        surv_cols = []
-        for h in horizons:
-            risk_col = f"event_{event_idx}_risk_h{int(h)}"
-            if risk_col not in pred.columns:
-                surv_cols = []
-                break
-            cif = pred.loc[valid, risk_col].to_numpy(dtype=float)
-            surv_cols.append(1.0 - cif)
-        if not surv_cols:
-            # Fall back to the cumulative total risk if per-horizon columns
-            # aren't materialized (legacy paths).
-            total = pred.loc[valid, f"event_{event_idx}_risk_total"].to_numpy(
-                dtype=float
-            )
-            surv_cols = [1.0 - total for _ in horizons]
+        # Mask any horizon whose risk_h{t} column isn't materialized rather
+        # than substituting the time-constant total risk -- matching the
+        # oracle contract's masking behavior (never a substitute summary).
+        estimable_horizons = np.asarray(
+            [h for h in horizons if f"event_{event_idx}_risk_h{int(h)}" in pred.columns],
+            dtype=float,
+        )
+        if len(estimable_horizons) == 0:
+            integrated_by_event[event_name] = float("nan")
+            continue
+        surv_cols = [
+            1.0 - pred.loc[valid, f"event_{event_idx}_risk_h{int(h)}"].to_numpy(dtype=float)
+            for h in estimable_horizons
+        ]
+        horizons = estimable_horizons
         surv_at_horizons = np.column_stack(surv_cols)
 
         train_event = (ref_event_any[ref_valid] == event_idx).astype(int)
