@@ -1,7 +1,8 @@
 """
 Build prediction inputs for the genomic-landmark univariate survival arm.
 
-Index time = SAMPLE_COLLECTION_DT (per patient, from the somatic table).
+Index time = earliest SAMPLE_COLLECTION_DT (per patient, from the raw
+per-sample somatic matrix SOMATIC_WIDE_BY_SAMPLE.parquet).
 Predicts platinum exposure from sample collection forward, with
 features derived from labs measured strictly before t_sample plus 12 binary
 genomic indicators ({TP53, RB1, PTEN} x {SV, DEL, AMP, SNV}).
@@ -65,10 +66,18 @@ from build_prediction_inputs import (  # noqa: E402
     SPLIT_ASSIGNMENTS_FILENAME,
 )
 
-DEFAULT_SOMATIC_PATH = Path(
-    "/data/gusev/USERS/jpconnor/data/clinical_text_embedding_project/"
-    "clinical_and_genomic_features/complete_somatic_data_df.csv.gz"
+import os  # noqa: E402
+
+# The raw per-sample somatic matrix, not the clinical text embedding project's
+# complete_somatic_data_df.csv.gz. That derived file is gated on a pan-cancer,
+# note-filtered cohort and additionally drops any patient sequenced after their
+# first treatment -- which removes most prostate patients, since sequencing
+# usually follows ADT. Reading the raw matrix and doing our own per-patient
+# sample selection keeps the COMPASS cohort intact.
+PROFILE_DATA_ROOT = Path(
+    os.environ.get("PROFILE_DATA_PATH", "/data/gusev/USERS/jpconnor/data/PROFILE_DATA/")
 )
+DEFAULT_SOMATIC_PATH = PROFILE_DATA_ROOT / "SOMATIC_WIDE_BY_SAMPLE.parquet"
 DEFAULT_TIME_UNIT_DAYS = 7
 GENOMIC_GENES = ("TP53", "RB1", "PTEN")
 GENOMIC_VARIANT_TYPES = ("SV", "DEL", "AMP", "SNV")
@@ -82,24 +91,42 @@ GENOMIC_BUILD_MANIFEST_FILENAME = "genomic_build_manifest.json"
 
 
 def load_somatic(path: Path) -> pd.DataFrame:
+    """Load the per-sample somatic matrix and collapse it to one row per patient.
+
+    The raw matrix carries one row per (patient, sample, test type), so a
+    patient with several specimens appears several times. The earliest dated
+    sample is used as the index time, and the alteration indicators are OR-ed
+    across that patient's samples: a call made on any specimen is a call.
+    """
     needed_cols = [ID_COL, "SAMPLE_COLLECTION_DT", *GENOMIC_FEATURE_COLS]
-    raw = pd.read_csv(path, usecols=lambda c: c in needed_cols)
+    if path.suffix.lower() in {".parquet", ".pq"}:
+        raw = pd.read_parquet(path, columns=None)
+        raw = raw[[c for c in raw.columns if c in needed_cols]]
+    else:
+        raw = pd.read_csv(path, usecols=lambda c: c in needed_cols)
     missing = [c for c in needed_cols if c not in raw.columns]
     if missing:
-        raise ValueError(f"Somatic CSV missing columns: {missing}")
+        raise ValueError(f"Somatic matrix {path} missing columns: {missing}")
     raw[ID_COL] = pd.to_numeric(raw[ID_COL], errors="coerce")
     raw = raw.loc[raw[ID_COL].notna()].copy()
     raw[ID_COL] = raw[ID_COL].astype(int)
-    if raw[ID_COL].nunique() != len(raw):
-        n_dup = len(raw) - raw[ID_COL].nunique()
-        raise ValueError(
-            f"Somatic CSV is not deduplicated by DFCI_MRN ({n_dup} duplicate rows). "
-            "Decision §0.1 assumed one row per patient."
-        )
     raw["SAMPLE_COLLECTION_DT"] = pd.to_datetime(raw["SAMPLE_COLLECTION_DT"], errors="coerce")
     for col in GENOMIC_FEATURE_COLS:
         raw[col] = pd.to_numeric(raw[col], errors="coerce").fillna(0).astype(int)
-    return raw.set_index(ID_COL)
+
+    n_rows, n_patients = len(raw), raw[ID_COL].nunique()
+    if n_rows != n_patients:
+        print(
+            f"Somatic matrix has {n_rows:,} sample rows for {n_patients:,} patients; "
+            "collapsing to earliest sample date with alterations OR-ed across samples."
+        )
+    collapsed = raw.groupby(ID_COL).agg(
+        {
+            "SAMPLE_COLLECTION_DT": "min",
+            **{col: "max" for col in GENOMIC_FEATURE_COLS},
+        }
+    )
+    return collapsed
 
 
 def attach_t_sample(df: pd.DataFrame, somatic: pd.DataFrame) -> pd.DataFrame:
@@ -182,12 +209,14 @@ def main(args: argparse.Namespace) -> None:
         raise ValueError("No patients survived feature+outcome join in the genomic arm.")
 
     genomics = somatic.loc[somatic.index.intersection(merged.index), GENOMIC_FEATURE_COLS]
+    # This arm is anchored on t_sample, so every surviving patient has a somatic
+    # row by construction; untested patients were dropped by the t_sample join
+    # rather than filled. The fill below is a guard, not the missingness policy.
     n_missing_genomics = int(merged.index.difference(somatic.index).size)
     if n_missing_genomics:
-        print(
-            f"WARNING: {n_missing_genomics} patients in the genomic cohort had no somatic row; "
-            "their 12 genomic indicators are being set to 0 (indistinguishable from a true "
-            "all-negative profile)."
+        raise ValueError(
+            f"{n_missing_genomics} patients reached the genomic join without a somatic "
+            "row despite being anchored on t_sample; the somatic index is inconsistent."
         )
     merged = merged.join(genomics, how="left")
     for col in GENOMIC_FEATURE_COLS:
@@ -274,7 +303,10 @@ def main(args: argparse.Namespace) -> None:
         "data": str(args.data),
         "somatic_path": str(args.somatic_path),
         "anchor": "t_sample",
-        "sample_pick_rule": "input csv assumed deduplicated by DFCI_MRN",
+        "sample_pick_rule": (
+            "earliest SAMPLE_COLLECTION_DT per DFCI_MRN; alteration indicators "
+            "OR-ed across that patient's samples"
+        ),
         "min_patient_coverage": float(args.min_patient_coverage),
         "time_unit_days": int(args.time_unit_days),
         "auc_quantiles": list(auc_quantiles),
