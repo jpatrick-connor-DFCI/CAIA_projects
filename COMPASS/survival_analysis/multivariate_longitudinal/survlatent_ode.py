@@ -34,6 +34,7 @@ for _p in (str(REPO_ROOT), str(SURVIVAL_PARENT), str(SURVIVAL_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from survival_common.helper import assert_no_test_leakage  # noqa: E402
 from survival_common.longitudinal_targets import LONGITUDINAL_CONFIGS  # noqa: E402
 
 DEFAULT_LR = 0.01
@@ -479,6 +480,17 @@ def main(args: argparse.Namespace) -> None:
     data_train = load_split(df, "train", id_col=id_col, time_col=time_col)
     data_valid = load_split(df, "valid", id_col=id_col, time_col=time_col)
     data_test = load_split(df, "test", id_col=id_col, time_col=time_col)
+
+    assert_no_test_leakage(
+        test_mrns=data_test[id_col],
+        train_mrns=data_train[id_col],
+        context="survlatent_ode.main train/test",
+    )
+    assert_no_test_leakage(
+        test_mrns=data_test[id_col],
+        train_mrns=data_valid[id_col],
+        context="survlatent_ode.main valid/test",
+    )
 
     print(
         f"Loaded splits: "
