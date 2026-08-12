@@ -546,6 +546,42 @@ def _rebase_platinum_from_index(
     return out.rename_axis(ca.ID_COL).reset_index()
 
 
+def _materialize_absolute_followup_dates(
+    base: pd.DataFrame, anchors: pd.Series
+) -> pd.DataFrame:
+    """Restore absolute dates dropped from aggregated landmark inputs.
+
+    COMPASS's ``t_platinum`` and ``t_last_contact`` are days from ADT start.
+    Therefore adding them back to the ADT anchor exactly reconstructs the
+    absolute event/censoring dates needed for observation-date rebasing.
+    """
+    out = base.copy()
+    anchor_by_row = out[ca.ID_COL].map(anchors)
+    duration_by_date = {
+        "PLATINUM_DATE": "t_platinum",
+        "LAST_CONTACT_DATE": "t_last_contact",
+    }
+    for date_col, duration_col in duration_by_date.items():
+        existing = (
+            pd.to_datetime(out[date_col], errors="coerce")
+            if date_col in out.columns
+            else pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns]")
+        )
+        if existing.notna().all():
+            out[date_col] = existing
+            continue
+        if duration_col not in out.columns:
+            raise ValueError(
+                f"Cannot reconstruct {date_col}: baseline inputs are missing "
+                f"ADT-relative duration {duration_col!r}."
+            )
+        reconstructed = anchor_by_row + pd.to_timedelta(
+            pd.to_numeric(out[duration_col], errors="coerce"), unit="D"
+        )
+        out[date_col] = existing.fillna(reconstructed)
+    return out
+
+
 def build_indexed_feature_sets(
     base: pd.DataFrame,
     somatic: pd.DataFrame,
@@ -577,6 +613,7 @@ def build_indexed_feature_sets(
             f"Missing ADT anchors for {len(missing_mrns)} baseline-cohort MRNs; "
             f"first values: {missing_mrns[:10]}"
         )
+    base = _materialize_absolute_followup_dates(base, anchors)
 
     selected_somatic = closest_observation_to_adt(
         somatic,

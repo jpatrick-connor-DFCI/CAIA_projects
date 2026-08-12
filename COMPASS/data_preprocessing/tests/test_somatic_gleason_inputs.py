@@ -100,11 +100,10 @@ def test_indexed_feature_sets_use_distinct_dates_and_followup_clocks():
         {
             "DFCI_MRN": [1, 2, 3],
             "TREATMENT_ANCHOR_DATE": ["2020-01-10"] * 3,
-            "LAST_CONTACT_DATE": ["2020-06-01"] * 3,
-            "PLATINUM_DATE": ["2020-04-20", "2020-06-01", "2020-01-05"],
             "AGE_AT_TREATMENTSTART": [70, 65, 72],
             "PLATINUM": [1, 0, 1],
             "t_platinum": [101, 143, -5],
+            "t_last_contact": [143, 143, 143],
             "split": ["train", "test", "valid"],
         }
     )
