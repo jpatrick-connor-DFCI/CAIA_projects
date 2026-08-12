@@ -69,6 +69,9 @@ REBUILD_PREDICTION_INPUTS = True
 # survlatent-ode task is dispatched.
 SURVLATENT_REPO = None
 MAX_PRED_WINDOW = 260
+# The static somatic/Gleason/PRS arm is evaluated only at treatment baseline.
+# Other model families continue to use each run's full landmark list.
+SOMATIC_GLEASON_LANDMARKS = (0,)
 
 # COMPASS durations (t_lab, t_platinum, ...) are measured from each arm's
 # treatment anchor (time 0), so anchor_col is "none" for every arm: the
@@ -404,14 +407,14 @@ def build_prediction_inputs(run: dict, dry_run: bool = False) -> None:
 
 
 def build_somatic_gleason_inputs(run: dict, dry_run: bool = False) -> None:
-    """Build the separate somatic + Gleason + selected-PRS input arm."""
+    """Build the baseline-only somatic + Gleason + selected-PRS input arm."""
     output_dir = run["inputs_dir"] / "somatic_gleason"
     print(f"\n========== build somatic + Gleason inputs: {run['title']} ==========")
     cmd = [
         PYTHON, DATA_PREPROCESSING_DIR / "build_somatic_gleason_inputs.py",
         "--base-inputs-dir", run["inputs_dir"],
         "--output-dir", output_dir,
-        "--landmark-days", *[str(lm) for lm in run["landmarks"]],
+        "--landmark-days", *[str(lm) for lm in SOMATIC_GLEASON_LANDMARKS],
     ]
     rc = _run(cmd, dry_run=dry_run)
     if not dry_run and rc != 0:
@@ -624,10 +627,10 @@ def run_univariate(run: dict, dry_run: bool = False):
 
 
 def run_somatic_gleason_univariate(run: dict, dry_run: bool = False):
-    """Run the separate somatic + Gleason + selected-PRS univariate Cox arm."""
+    """Run the baseline-only somatic + Gleason + selected-PRS univariate Cox arm."""
     print(f"\n========== run somatic + Gleason univariate: {run['title']} ==========")
     summary = []
-    for landmark in run["landmarks"]:
+    for landmark in SOMATIC_GLEASON_LANDMARKS:
         row_output_dir = (
             run["output_dir"] / "cox_somatic_gleason" / f"landmark_{landmark}" / "both"
         )
