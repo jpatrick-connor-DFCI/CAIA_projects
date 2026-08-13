@@ -358,6 +358,9 @@ COMPASS PROFILE has four Python stage notebooks sharing `compass_pipeline.py` (t
   ADT entry, the requested post-ADT cancer exclusion, PARPi, and ≥5-PSA-test criteria; the ARPI
   arm additionally displays its ARPI/docetaxel exposure criterion. Axis and table labels throughout
   name the arm's anchor ("ARPI/chemo initiation" vs. "ADT initiation") via `ANCHOR_LABEL`.
+  When the optional `03b_multivariate_longitudinal.ipynb` outputs exist, Figure 4 additionally emits
+  `figure4s_multivariate_all_models`, a supplemental held-out comparison of elastic-net Cox,
+  XGBoost, and death-censored Dynamic-DeepHit using mean AUC(t), C-index, and integrated Brier score.
   - **LLM label strata:** alongside the existing `LLM_v3_labels.tsv`-driven Figure 2, the pipeline
     loads `LLM_NEPC_classifier_labels.tsv` from
     `/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_NEPC_labels/` (`DFCI_MRN`, `primary_label`

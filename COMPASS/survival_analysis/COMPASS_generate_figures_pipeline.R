@@ -1,7 +1,5 @@
-# Per-cohort figure-generation pipeline for the COMPASS figure notebook, extracted
-# from COMPASS_generate_figures.ipynb so the notebook can call it once per
-# cohort in the same R session instead of re-executing itself via Rscript per
-# cohort.
+# Per-cohort figure-generation pipeline called from 05_figures.Rmd once per
+# cohort in the same R session.
 #
 # Required packages (install once on the cluster):
 #   install.packages(c("tidyverse", "survival", "survminer", "broom",
@@ -319,6 +317,32 @@ parse_feature <- function(name) {
   }
 }
 
+# Read held-out platinum discrimination/calibration metrics across model
+# families with slightly different output schemas. Missing optional outputs or
+# columns return NA so figure generation can continue without a torch install.
+read_platinum_performance <- function(path, auc_cols, cindex_cols, brier_cols) {
+  missing_metrics <- c(auc = NA_real_, cindex = NA_real_, brier = NA_real_)
+  if (!file.exists(path)) return(missing_metrics)
+
+  df <- read_csv(path, show_col_types = FALSE)
+  endpoint_col <- intersect(c("endpoint", "event"), names(df))
+  if (length(endpoint_col) == 0) return(missing_metrics)
+  row <- df %>%
+    filter(tolower(as.character(.data[[endpoint_col[1]]])) == "platinum")
+  if (nrow(row) == 0) return(missing_metrics)
+
+  first_numeric <- function(candidates) {
+    column <- intersect(candidates, names(row))
+    if (length(column) == 0) return(NA_real_)
+    suppressWarnings(as.numeric(row[[column[1]]][1]))
+  }
+  c(
+    auc = first_numeric(auc_cols),
+    cindex = first_numeric(cindex_cols),
+    brier = first_numeric(brier_cols)
+  )
+}
+
 
 SUPPORTED_COHORTS <- c("arpi", "adt")
 # Notebook default: render ADT only. Call generate_figures("arpi", ...) directly
@@ -335,9 +359,8 @@ COHORT_LANDMARKS <- list(
 )
 
 # Render the full COMPASS figure set for one cohort arm. Mirrors the body of
-# COMPASS_generate_figures.ipynb's per-cohort cells (Figures 1-7 + Table 1)
-# so the notebook can call this once per cohort in the same R session instead
-# of re-executing itself via Rscript.
+# the former figure notebook's per-cohort cells (Figures 1-7 + Table 1), so
+# the R Markdown document can call it once per cohort in the same R session.
 generate_figures <- function(cohort, nepc_proj_path, fig_root,
                              cohorts = SUPPORTED_COHORTS, show = FALSE,
                              llm_annotations_path = DEFAULT_LLM_ANNOTATIONS_PATH,
@@ -1811,18 +1834,24 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   OUT_DIR <- fig_dir("figure4_multivariate")
   HAS_GGPATTERN <- requireNamespace("ggpattern", quietly = TRUE)
 
-  # (mean_auc_t, c_index) for the platinum endpoint, or (NA, NA) if missing.
-  read_metrics <- function(path, auc_col, cindex_col) {
-    if (!file.exists(path)) return(c(auc = NA_real_, cindex = NA_real_))
-    df <- read_csv(path, show_col_types = FALSE)
-    row <- df %>% filter(endpoint == "platinum")
-    if (nrow(row) == 0) return(c(auc = NA_real_, cindex = NA_real_))
-    c(auc = as.numeric(row[[auc_col]][1]), cindex = as.numeric(row[[cindex_col]][1]))
-  }
-  cox_labs     <- function(lm) read_metrics(file.path(BASE,"cox",sprintf("landmark_%s",lm),"both","cox_agg_multivariable_metrics.csv"), "test_mean_auc_t","test_c_index")
-  cox_baseline <- function(lm) read_metrics(file.path(BASE,"cox",sprintf("landmark_%s",lm),"baseline","cox_agg_baseline_metrics.csv"), "test_mean_auc_t","test_c_index")
-  xgb_labs     <- function(lm) read_metrics(file.path(BASE,"xgboost",sprintf("landmark_%s",lm),"both","landmark_xgboost_metrics.csv"), "mean_auc_t","c_index")
-  xgb_baseline <- function(lm) read_metrics(file.path(BASE,"xgboost",sprintf("landmark_%s",lm),"baseline","landmark_xgboost_baseline_metrics.csv"), "mean_auc_t","c_index")
+  cox_labs <- function(lm) read_platinum_performance(
+    file.path(BASE, "cox", sprintf("landmark_%s", lm), "both", "cox_agg_multivariable_metrics.csv"),
+    "test_mean_auc_t", "test_c_index", "test_integrated_brier")
+  cox_baseline <- function(lm) read_platinum_performance(
+    file.path(BASE, "cox", sprintf("landmark_%s", lm), "baseline", "cox_agg_baseline_metrics.csv"),
+    "test_mean_auc_t", "test_c_index", "test_integrated_brier")
+  xgb_labs <- function(lm) read_platinum_performance(
+    file.path(BASE, "xgboost", sprintf("landmark_%s", lm), "both", "landmark_xgboost_metrics.csv"),
+    "mean_auc_t", "c_index", "integrated_brier")
+  xgb_baseline <- function(lm) read_platinum_performance(
+    file.path(BASE, "xgboost", sprintf("landmark_%s", lm), "baseline", "landmark_xgboost_baseline_metrics.csv"),
+    "mean_auc_t", "c_index", "integrated_brier")
+  dynamic_deephit <- function(lm) read_platinum_performance(
+    file.path(
+      BASE, "multivariate_longitudinal", "dynamic_deephit",
+      sprintf("landmark_%s", lm), "platinum", "dynamic_deephit_metrics_platinum.csv"
+    ),
+    "mean_auc_t", "c_index", "integrated_brier")
 
   # (label, loader, color, is_baseline). Age baselines are the lighter, patterned twins.
   DISCRIMINATION_SERIES <- tibble::tribble(
@@ -1897,6 +1926,116 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       theme(plot.title = element_text(face = "bold", size = 11))
     save_fig(p, OUT_DIR, dp[[1]], width = 7.5, height = 5.5)
     if (show) print(p)
+  }
+
+  # Supplemental held-out comparison across every directly comparable
+  # multivariate lab model. Dynamic-DeepHit's platinum configuration censors
+  # death, matching the Cox/XGBoost endpoint; the competing-risk configuration
+  # is intentionally excluded because it estimates a different quantity.
+  SUPPLEMENT_SERIES <- tibble::tribble(
+    ~name,               ~loader,                 ~color,
+    "Elastic-Net Cox",   list(cox_labs),           "#4C72B0",
+    "XGBoost Survival",  list(xgb_labs),           "#B58900",
+    "Dynamic-DeepHit",   list(dynamic_deephit),    "#2A9D8F"
+  )
+  supplement_levels <- SUPPLEMENT_SERIES$name
+  supplement_colors <- setNames(SUPPLEMENT_SERIES$color, supplement_levels)
+  multivariate_supplement_data <- SUPPLEMENT_SERIES %>%
+    rowwise() %>%
+    do({
+      s <- .
+      map_dfr(LANDMARKS, function(lm) {
+        v <- s$loader[[1]](lm)
+        tibble(
+          model = s$name, landmark_days = lm,
+          mean_auc_t = v[["auc"]], c_index = v[["cindex"]],
+          integrated_brier = v[["brier"]]
+        )
+      })
+    }) %>%
+    ungroup() %>%
+    mutate(model = factor(model, levels = supplement_levels))
+
+  deephit_available <- multivariate_supplement_data %>%
+    filter(model == "Dynamic-DeepHit") %>%
+    select(mean_auc_t, c_index, integrated_brier) %>%
+    unlist(use.names = FALSE) %>%
+    is.finite() %>%
+    any()
+  if (deephit_available) {
+    supplement_long <- multivariate_supplement_data %>%
+      pivot_longer(
+        c(mean_auc_t, c_index, integrated_brier),
+        names_to = "metric", values_to = "value"
+      ) %>%
+      mutate(
+        metric = factor(
+          metric,
+          levels = c("mean_auc_t", "c_index", "integrated_brier"),
+          labels = c("Mean AUC(t)", "C-index", "Integrated Brier score")
+        ),
+        landmark = factor(
+          sprintf("%s%d days", ifelse(landmark_days > 0, "+", ""), landmark_days),
+          levels = sprintf(
+            "%s%d days", ifelse(LANDMARKS > 0, "+", ""), LANDMARKS
+          )
+        )
+      )
+
+    p_supplement <- ggplot(
+      supplement_long,
+      aes(landmark, value, color = model, group = model)
+    ) +
+      geom_hline(
+        data = tibble(
+          metric = factor(
+            c("Mean AUC(t)", "C-index"),
+            levels = levels(supplement_long$metric)
+          ),
+          reference = 0.5
+        ),
+        aes(yintercept = reference), inherit.aes = FALSE,
+        color = "grey65", linetype = "dotted", linewidth = 0.7
+      ) +
+      geom_line(linewidth = 0.9, na.rm = TRUE) +
+      geom_point(size = 2.7, na.rm = TRUE) +
+      geom_text(
+        aes(label = ifelse(is.finite(value), sprintf("%.3f", value), "")),
+        vjust = -0.8, size = 2.5, show.legend = FALSE, na.rm = TRUE
+      ) +
+      facet_wrap(~metric, scales = "free_y", nrow = 1) +
+      scale_color_manual(values = supplement_colors, drop = FALSE, name = NULL) +
+      scale_y_continuous(labels = label_number(accuracy = 0.01), expand = expansion(mult = c(0.08, 0.2))) +
+      labs(
+        title = "Supplementary Figure — Held-out multivariate model performance",
+        subtitle = "Death-censored platinum endpoint; Dynamic-DeepHit uses longitudinal person-period labs",
+        x = NULL, y = NULL,
+        caption = "Higher AUC(t)/C-index and lower integrated Brier score indicate better performance."
+      ) +
+      theme_fig() +
+      theme(
+        legend.position = "top",
+        legend.direction = "horizontal",
+        panel.spacing.x = unit(1.2, "lines"),
+        panel.grid.major.x = element_blank(),
+        strip.text = element_text(face = "bold")
+      )
+
+    supplement_stem <- "figure4s_multivariate_all_models"
+    save_fig(p_supplement, OUT_DIR, supplement_stem, width = 13, height = 5.5)
+    supplement_csv <- file.path(
+      output_dir_for_stem(supplement_stem),
+      paste0(COHORT, "_", supplement_stem, "_data.csv")
+    )
+    write_csv(multivariate_supplement_data, supplement_csv)
+    message("wrote ", supplement_csv)
+    if (show) print(p_supplement)
+  } else {
+    message(paste0(
+      "Figure 4 supplement: no Dynamic-DeepHit platinum metrics found beneath ",
+      file.path(BASE, "multivariate_longitudinal", "dynamic_deephit"),
+      " -- run 03b_multivariate_longitudinal.ipynb to generate them"
+    ))
   }
 
   OUT_DIR <- fig_dir("figure4_multivariate")

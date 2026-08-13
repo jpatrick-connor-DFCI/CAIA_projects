@@ -25,6 +25,10 @@ All figure-generation logic lives in `COMPASS_generate_figures_pipeline.R` as
 `generate_figures(cohort, ...)`. This document just sources that file and
 calls it for each cohort in `COHORTS`, which defaults to `c("adt")`.
 
+When `03b_multivariate_longitudinal.ipynb` outputs are available, Figure 4 also
+includes a supplemental held-out comparison of elastic-net Cox, XGBoost, and
+Dynamic-DeepHit across mean AUC(t), C-index, and integrated Brier score.
+
 Run `01_preprocessing.ipynb` to completion first; this document only reads
 that merged-profile run's outputs.
 
