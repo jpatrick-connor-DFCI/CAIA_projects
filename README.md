@@ -10,7 +10,7 @@ COMPASS uses numbered stage notebooks (`01_preprocessing.ipynb`, `02_univariate.
 ICD-C61 cohort: `arpi` (anchored at first ARPI/chemo exposure) and `adt` (anchored at first ADT
 exposure, years earlier in the treatment sequence). Patients with bladder (C67), lung (C34),
 head-and-neck (C00-C14/C30-C32), or testicular (C62) cancer diagnosed strictly after ADT start are
-excluded. The paired, R-only `05_figures.ipynb` emits manuscript figures for both.
+excluded. The paired, R-only `05_figures.Rmd` emits manuscript figures for both.
 
 > This README is the canonical reference for editing the pipeline. It documents the directory
 > layout, the data flow, every script's inputs/outputs, the **conventions and invariants that
@@ -69,7 +69,7 @@ COMPASS/
     ├── 02_univariate.ipynb               # univariate arms + nominal-significance filter
     ├── 03_multivariate.ipynb             # elastic-net + XGBoost + summary tables
     ├── 03b_multivariate_longitudinal.ipynb # Dynamic-DeepHit + SurvLatent ODE (torch, optional)
-    ├── 05_figures.ipynb                  # R figures from merged profile_data outputs
+    ├── 05_figures.Rmd                    # R figures from merged profile_data outputs
     ├── multivariate_longitudinal/
     │   ├── dynamic_deephit.py            # ENTRY: thin CLI over survival_common/deephit_engine.py
     │   ├── survlatent_ode.py             # ENTRY: adapter around the bundled editable checkout
@@ -109,7 +109,7 @@ invariant #7 below) — the other notebooks never require torch.
         ▼  survival_analysis/univariate_analysis.py
            survival_analysis/multivariate_analysis.py
         │
-        ▼  05_figures.ipynb (R; 2 cohort arms: arpi, adt)
+        ▼  05_figures.Rmd (R; 2 cohort arms: arpi, adt)
  figures/
 ```
 
@@ -351,7 +351,7 @@ COMPASS PROFILE has four Python stage notebooks sharing `compass_pipeline.py` (t
   notebook stays runnable with no torch installed. SurvLatent tasks default to the bundled editable
   `survlatent_ode_repo/` checkout through `cp.SURVLATENT_REPO` — see
   `multivariate_longitudinal/README.md`.
-- `05_figures.ipynb` — the sole COMPASS figure notebook, using the R kernel and
+- `05_figures.Rmd` — the sole COMPASS figure document, using R Markdown and
   `COMPASS_generate_figures_pipeline.R`. It renders both arms' overview, LLM-label, univariate,
   multivariate, KM, and per-lab distribution/trajectory figures at landmarks 0 and 90. Figure 1A reads
   `mrn_lists/icd_prostate_mrn_flags.csv` and displays cumulative ICD-C61 cohort selection through
@@ -545,7 +545,7 @@ Run each notebook top to bottom; select ARPI/ADT with each Python notebook's `AR
 4. `COMPASS/survival_analysis/03b_multivariate_longitudinal.ipynb` (optional — requires torch;
    see [Dependencies](#dependencies) and `multivariate_longitudinal/README.md`)
 5. `COMPASS/survival_analysis/GAM/04_gam.ipynb`
-6. `COMPASS/survival_analysis/05_figures.ipynb`
+6. `COMPASS/survival_analysis/05_figures.Rmd`
 
 The notebooks pass `PROFILE_DATA/*.parquet` paths explicitly to the lower-level scripts. Existing
 hand-curated `LLM_NEPC_labels/` inputs remain under the shared `COMPASS` data root.

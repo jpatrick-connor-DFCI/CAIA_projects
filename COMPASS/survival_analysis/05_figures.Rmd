@@ -1,0 +1,88 @@
+---
+title: "Generate COMPASS platinum-arm figures"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+Canonical R figure workflow using tidyverse/ggplot2. **Knit** renders the
+**ADT** cohort by default. ARPI remains available by explicit request.
+
+The document reads the merged `profile_data` run under `.../CAIA/COMPASS`
+and writes to `figures/CAIA/COMPASS`.
+
+Outputs are split by cohort arm, then flattened within each figure directory:
+
+`FIG_ROOT/ADT/<figure>/adt_<plot-stem>.png`
+
+For example, `figure1/adt_figure1a_consort.png` is written directly in
+`figure1/`. Plot PDFs and legacy `original_*` Figure 2 variants are not
+generated. Tables remain CSV/Markdown and use the same flat
+figure/cohort-prefix convention. There is no `R/` language subdirectory.
+
+All figure-generation logic lives in `COMPASS_generate_figures_pipeline.R` as
+`generate_figures(cohort, ...)`. This document just sources that file and
+calls it for each cohort in `COHORTS`, which defaults to `c("adt")`.
+
+Run `01_preprocessing.ipynb` to completion first; this document only reads
+that merged-profile run's outputs.
+
+## Setup
+
+```{r setup}
+pipeline_path <- normalizePath(
+  file.path(getwd(), "COMPASS_generate_figures_pipeline.R"),
+  mustWork = FALSE
+)
+if (!file.exists(pipeline_path)) {
+  pipeline_path <- normalizePath(
+    file.path(getwd(), "COMPASS", "survival_analysis", "COMPASS_generate_figures_pipeline.R"),
+    mustWork = FALSE
+  )
+}
+if (!file.exists(pipeline_path))
+  stop("Could not locate COMPASS_generate_figures_pipeline.R")
+source(pipeline_path)
+
+NEPC_PROJ_PATH <- "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS"
+FIG_ROOT <- "/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS"
+
+# Generate lab-specific panels only for PSA and Testosterone.
+# Non-androgen labs remain available to models and aggregate feature plots.
+PLOT_NON_ANDROGEN_DISTRIBUTIONS <- FALSE
+PLOT_NON_ANDROGEN_LAB_FIGURES <- FALSE
+
+# Fail early with a useful message rather than deep inside generate_figures().
+for (required_path in c(
+    file.path(NEPC_PROJ_PATH, "LLM_NEPC_labels"),
+    file.path(NEPC_PROJ_PATH, "mrn_lists", "platinum_MRN_list.csv"),
+    file.path(NEPC_PROJ_PATH, "mrn_lists", "icd_prostate_mrn_flags.csv"),
+    file.path(NEPC_PROJ_PATH, "longitudinal_prediction_data_adt.csv")
+)) {
+    if (!file.exists(required_path))
+      stop(required_path, " not found -- run 01_preprocessing.ipynb first.")
+}
+
+message("data root:   ", NEPC_PROJ_PATH)
+message("figure root: ", FIG_ROOT)
+```
+
+## Render ADT figures
+
+Runs the R figure-generation pipeline for ADT by default. Outputs are written under
+`FIG_ROOT/ADT/`. Set `COHORTS <- c("arpi", "adt")` to opt into both.
+
+```{r render-figures}
+for (COHORT in COHORTS) {
+  message(sprintf("\n========== R figures: %s ==========", COHORT_LABELS[[COHORT]]))
+  generate_figures(
+    COHORT,
+    nepc_proj_path = NEPC_PROJ_PATH,
+    fig_root = FIG_ROOT,
+    plot_non_androgen_distributions = PLOT_NON_ANDROGEN_DISTRIBUTIONS,
+    plot_non_androgen_lab_figures = PLOT_NON_ANDROGEN_LAB_FIGURES
+  )
+  message(sprintf("\nCompleted R figures for %s.", COHORT_LABELS[[COHORT]]))
+}
+```
