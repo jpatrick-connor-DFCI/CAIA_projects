@@ -557,6 +557,7 @@ def model_output_dir(model: str) -> str:
 
 
 def build_model_command(model, landmark, config_dir, row_output_dir, run):
+    overwrite_flag = "--overwrite" if FORCE_RERUN else "--no-overwrite"
     if model == "univariate":
         return [
             PYTHON, SURVIVAL_DIR / "univariate_analysis.py",
@@ -564,6 +565,7 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             "--output-dir", row_output_dir,
             "--landmark-days", str(landmark),
             "--endpoints", "platinum",
+            overwrite_flag,
         ]
     if model == "elastic-net":
         cmd = [
@@ -574,6 +576,7 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             "--landmark-days", str(landmark),
             "--endpoints", "platinum",
             "--n-folds", str(N_FOLDS),
+            overwrite_flag,
         ]
         if config_dir == "baseline":
             cmd.append("--baseline")
@@ -615,6 +618,7 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             "--landmark-days", str(landmark),
             "--endpoints", "platinum",
             "--n-folds", str(N_FOLDS),
+            overwrite_flag,
         ]
         if config_dir == "baseline":
             cmd.append("--baseline")
@@ -685,6 +689,7 @@ def run_somatic_gleason_univariate(run: dict, dry_run: bool = False):
             "--landmark-days", str(landmark),
             "--endpoints", "platinum",
             "--feature-set", "somatic-gleason",
+            "--overwrite" if FORCE_RERUN else "--no-overwrite",
         ]
         print(f"[run ] {tag}")
         t0 = time.time()
