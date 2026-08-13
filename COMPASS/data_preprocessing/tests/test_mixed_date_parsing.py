@@ -49,3 +49,22 @@ def test_mixed_medication_dates_survive_anchor_and_platinum_processing():
     assert set(anchors["DFCI_MRN"]) == {1, 2, 3}
     assert set(platinum["DFCI_MRN"]) == {4}
 
+
+def test_platinum_endpoint_is_limited_to_carboplatin_and_cisplatin():
+    medications = pd.DataFrame(
+        {
+            "DFCI_MRN": [1, 2, 3, 4],
+            "NCI_PREFERRED_MED_NM": [
+                " carboplatin ",
+                "Cisplatin",
+                "CISPLATIN/CYCLOPHOSPHAMIDE/ETOPOSIDE",
+                "OXALIPLATIN",
+            ],
+            "MED_START_DT": ["2024-01-01"] * 4,
+        }
+    )
+
+    platinum = compute_first_platinum(medications)
+
+    assert set(platinum["DFCI_MRN"]) == {1, 2}
+    assert set(platinum["medication"]) == {"CARBOPLATIN", "CISPLATIN"}

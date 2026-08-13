@@ -1,8 +1,7 @@
-import polars as pl
-
 from COMPASS.data_preprocessing.compile_COMPASS_cohort_data import (
     MIN_PSA_COUNT,
     build_icd_prostate_mrn_flags,
+    compute_psa_eligible_mrns,
 )
 
 
@@ -49,16 +48,21 @@ def test_psa_gate_counts_deduped_rows(tmp_path):
 
     assert MIN_PSA_COUNT == 5  # sanity: the fixture is built against this
 
-    meds = pl.DataFrame(
-        {"DFCI_MRN": pl.Series([], dtype=pl.Int64), "NCI_PREFERRED_MED_NM": pl.Series([], dtype=pl.Utf8)}
+    psa_eligible_mrns = compute_psa_eligible_mrns(
+        str(labs_path), {1, 2}
     )
-
     flags = build_icd_prostate_mrn_flags(
         c61_mrns={1, 2},
         non_prostate_primary_mrns=set(),
         post_adt_exclusion_cancer_mrns=set(),
-        meds=meds,
-        labs_path=str(labs_path),
+        dated_diagnosis_mrns={1, 2},
+        male_mrns={1, 2},
+        parpi_mrns=set(),
+        arpi_docetaxel_post_diagnosis_mrns=set(),
+        adt_post_diagnosis_mrns={1, 2},
+        platinum_pre_diagnosis_mrns=set(),
+        eligible_mrns={2},
+        psa_eligible_mrns=psa_eligible_mrns,
     )
 
     flags_by_mrn = {row["DFCI_MRN"]: row["HAS_5_OR_MORE_PSA_TESTS"] for row in flags.to_dicts()}
@@ -68,3 +72,5 @@ def test_psa_gate_counts_deduped_rows(tmp_path):
     assert flags_by_mrn[1] == 0
     # Patient 2 has 5 genuinely distinct draws -- still included.
     assert flags_by_mrn[2] == 1
+    eligible_by_mrn = {row["DFCI_MRN"]: row["ELIGIBLE"] for row in flags.to_dicts()}
+    assert eligible_by_mrn == {1: 0, 2: 1}

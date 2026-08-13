@@ -610,11 +610,15 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     required <- c(
       ID_COL,
       "HAS_NON_PROSTATE_PRIMARY",
+      "DATED_PROSTATE_DIAGNOSIS",
+      "MALE",
       "HAS_POST_ADT_EXCLUSION_CANCER",
       "PARPI_EXPOSED",
       "ARPI_DOCETAXEL_EXPOSED",
       "ADT_EXPOSED",
-      "HAS_5_OR_MORE_PSA_TESTS"
+      "PLATINUM_BEFORE_DIAGNOSIS",
+      "HAS_5_OR_MORE_PSA_TESTS",
+      "ELIGIBLE"
     )
     flags <- read_csv(path, show_col_types = FALSE)
     missing <- setdiff(required, names(flags))
@@ -643,22 +647,29 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     steps <- list(
       c("ICD-defined prostate cancer", sum(keep))
     )
+    keep <- keep & mrn_flags$DATED_PROSTATE_DIAGNOSIS == 1
+    steps[[length(steps) + 1]] <- c("Dated prostate cancer diagnosis", sum(keep))
+    keep <- keep & mrn_flags$MALE == 1
+    steps[[length(steps) + 1]] <- c("Male sex", sum(keep))
+    keep <- keep & mrn_flags$HAS_5_OR_MORE_PSA_TESTS == 1
+    steps[[length(steps) + 1]] <- c("\u22655 PSA tests", sum(keep))
     keep <- keep & mrn_flags$ADT_EXPOSED == 1
-    steps[[length(steps) + 1]] <- c("ADT entry requirement", sum(keep))
-    keep <- keep & mrn_flags$HAS_POST_ADT_EXCLUSION_CANCER == 0
-    steps[[length(steps) + 1]] <- c(
-      "No bladder, lung, head and neck,\nor testicular cancer after ADT",
-      sum(keep)
-    )
+    steps[[length(steps) + 1]] <- c("ADT on/after prostate diagnosis", sum(keep))
     keep <- keep & mrn_flags$PARPI_EXPOSED == 0
     steps[[length(steps) + 1]] <- c("No PARPi exposure", sum(keep))
+    keep <- keep & mrn_flags$PLATINUM_BEFORE_DIAGNOSIS == 0
+    steps[[length(steps) + 1]] <- c("No platinum before prostate diagnosis", sum(keep))
+    keep <- keep & mrn_flags$HAS_POST_ADT_EXCLUSION_CANCER == 0
+    steps[[length(steps) + 1]] <- c(
+      "No bladder, lung, head and neck,\nor testicular cancer after first ADT",
+      sum(keep)
+    )
+    if (any(keep != (mrn_flags$ELIGIBLE == 1)))
+      stop("CONSORT criteria do not reproduce the ELIGIBLE flag")
     if (!IS_ADT) {
       keep <- keep & mrn_flags$ARPI_DOCETAXEL_EXPOSED == 1
       steps[[length(steps) + 1]] <- c("ARPI/docetaxel exposure", sum(keep))
     }
-    keep <- keep & mrn_flags$HAS_5_OR_MORE_PSA_TESTS == 1
-    steps[[length(steps) + 1]] <- c("\u22655 PSA tests", sum(keep))
-
     n_steps <- length(steps)
     df <- tibble(i = seq_len(n_steps) - 1,
                  label = vapply(steps, `[`, character(1), 1),
@@ -810,7 +821,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                   format(nrow(patient_df), big.mark = ","), format(nrow(labs_df), big.mark = ",")))
 
   pA <- render_consort_panel(icd_prostate_mrn_flags)
-  save_fig(pA, OUT_DIR, "figure1a_consort", 7.5, 5.8)
+  save_fig(pA, OUT_DIR, "figure1a_consort", 7.5, 8.0)
   pB <- render_km_panel(patient_df)
   save_fig(pB, OUT_DIR, "figure1b_km", 6.5, 4.8)
 
@@ -842,7 +853,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     plot_layout(heights = c(1.25, 1)) +
     plot_annotation(title = sprintf("Figure 1 — COMPASS cohort overview (%s)", COHORT_DISPLAY),
                     tag_levels = "A")
-  save_fig(fig1, OUT_DIR, "figure1_cohort_overview", 16, 10)
+  save_fig(fig1, OUT_DIR, "figure1_cohort_overview", 16, 12)
   if (show) print(fig1)
 
   if (!IS_ADT)
@@ -1433,7 +1444,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     # Same label source and panel set as v2; the only difference is the patient
     # universe. v2 is restricted to the landmark-0 prediction cohort (the
     # eligible_landmark_0 MRNs from landmark_mrn_availability.csv, i.e. after the
-    # post-ADT exclusion / PARPi / >=5-PSA-test filters), whereas v3 uses every MRN
+    # male / post-ADT cancer / PARPi / prior-platinum / >=5-PSA-test filters), whereas v3 uses every MRN
     # with ADT_EXPOSED == 1 in the ICD prostate workflow flags -- the "ADT entry
     # requirement" step of the Figure 1 CONSORT, before any downstream filtering.
     # Nested inside the v2 branch so render_confusion_panel_v2 is always defined.
@@ -1846,12 +1857,54 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   xgb_baseline <- function(lm) read_platinum_performance(
     file.path(BASE, "xgboost", sprintf("landmark_%s", lm), "baseline", "landmark_xgboost_baseline_metrics.csv"),
     "mean_auc_t", "c_index", "integrated_brier")
-  dynamic_deephit <- function(lm) read_platinum_performance(
-    file.path(
-      BASE, "multivariate_longitudinal", "dynamic_deephit",
-      sprintf("landmark_%s", lm), "platinum", "dynamic_deephit_metrics_platinum.csv"
-    ),
-    "mean_auc_t", "c_index", "integrated_brier")
+  resolve_dynamic_deephit_metrics <- function(lm) {
+    filename <- "dynamic_deephit_metrics_platinum.csv"
+    preferred <- c(
+      file.path(
+        BASE, "multivariate_longitudinal", "dynamic_deephit",
+        sprintf("landmark_%s", lm), "platinum", filename
+      ),
+      file.path(
+        BASE, "multivariate_longitudinal", "dynamic-deephit",
+        sprintf("landmark_%s", lm), "platinum", filename
+      )
+    )
+    existing <- preferred[file.exists(preferred)]
+    if (length(existing) > 0) return(existing[1])
+
+    # Accommodate older/custom 03b output roots while still requiring the
+    # requested landmark, platinum config, and exact metrics filename.
+    longitudinal_root <- file.path(BASE, "multivariate_longitudinal")
+    if (!dir.exists(longitudinal_root)) return(NA_character_)
+    discovered <- list.files(
+      longitudinal_root, pattern = paste0("^", filename, "$"),
+      recursive = TRUE, full.names = TRUE
+    )
+    normalized <- gsub("\\\\", "/", discovered)
+    wanted <- endsWith(
+      normalized,
+      paste0("/landmark_", lm, "/platinum/", filename)
+    )
+    discovered <- discovered[wanted]
+    if (length(discovered) > 1) {
+      warning(sprintf(
+        "Figure 4 supplement: multiple Dynamic-DeepHit files for landmark %s; using %s",
+        lm, discovered[1]
+      ))
+    }
+    if (length(discovered) == 0) NA_character_ else discovered[1]
+  }
+  DEEPHIT_METRIC_PATHS <- setNames(
+    map_chr(LANDMARKS, resolve_dynamic_deephit_metrics),
+    as.character(LANDMARKS)
+  )
+  dynamic_deephit <- function(lm) {
+    path <- DEEPHIT_METRIC_PATHS[[as.character(lm)]]
+    if (is.na(path)) return(c(auc = NA_real_, cindex = NA_real_, brier = NA_real_))
+    read_platinum_performance(
+      path, "mean_auc_t", "c_index", "integrated_brier"
+    )
+  }
 
   # (label, loader, color, is_baseline). Age baselines are the lighter, patterned twins.
   DISCRIMINATION_SERIES <- tibble::tribble(
@@ -1956,87 +2009,108 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     ungroup() %>%
     mutate(model = factor(model, levels = supplement_levels))
 
-  deephit_available <- multivariate_supplement_data %>%
-    filter(model == "Dynamic-DeepHit") %>%
-    select(mean_auc_t, c_index, integrated_brier) %>%
-    unlist(use.names = FALSE) %>%
-    is.finite() %>%
-    any()
-  if (deephit_available) {
-    supplement_long <- multivariate_supplement_data %>%
-      pivot_longer(
-        c(mean_auc_t, c_index, integrated_brier),
-        names_to = "metric", values_to = "value"
-      ) %>%
-      mutate(
-        metric = factor(
-          metric,
-          levels = c("mean_auc_t", "c_index", "integrated_brier"),
-          labels = c("Mean AUC(t)", "C-index", "Integrated Brier score")
-        ),
-        landmark = factor(
-          sprintf("%s%d days", ifelse(landmark_days > 0, "+", ""), landmark_days),
-          levels = sprintf(
-            "%s%d days", ifelse(LANDMARKS > 0, "+", ""), LANDMARKS
-          )
-        )
+  multivariate_supplement_data <- multivariate_supplement_data %>%
+    mutate(
+      metrics_status = if_else(
+        is.finite(mean_auc_t) | is.finite(c_index) | is.finite(integrated_brier),
+        "available", "missing"
+      ),
+      source_path = if_else(
+        model == "Dynamic-DeepHit",
+        unname(DEEPHIT_METRIC_PATHS[as.character(landmark_days)]),
+        NA_character_
       )
-
-    p_supplement <- ggplot(
-      supplement_long,
-      aes(landmark, value, color = model, group = model)
-    ) +
-      geom_hline(
-        data = tibble(
-          metric = factor(
-            c("Mean AUC(t)", "C-index"),
-            levels = levels(supplement_long$metric)
-          ),
-          reference = 0.5
-        ),
-        aes(yintercept = reference), inherit.aes = FALSE,
-        color = "grey65", linetype = "dotted", linewidth = 0.7
-      ) +
-      geom_line(linewidth = 0.9, na.rm = TRUE) +
-      geom_point(size = 2.7, na.rm = TRUE) +
-      geom_text(
-        aes(label = ifelse(is.finite(value), sprintf("%.3f", value), "")),
-        vjust = -0.8, size = 2.5, show.legend = FALSE, na.rm = TRUE
-      ) +
-      facet_wrap(~metric, scales = "free_y", nrow = 1) +
-      scale_color_manual(values = supplement_colors, drop = FALSE, name = NULL) +
-      scale_y_continuous(labels = label_number(accuracy = 0.01), expand = expansion(mult = c(0.08, 0.2))) +
-      labs(
-        title = "Supplementary Figure — Held-out multivariate model performance",
-        subtitle = "Death-censored platinum endpoint; Dynamic-DeepHit uses longitudinal person-period labs",
-        x = NULL, y = NULL,
-        caption = "Higher AUC(t)/C-index and lower integrated Brier score indicate better performance."
-      ) +
-      theme_fig() +
-      theme(
-        legend.position = "top",
-        legend.direction = "horizontal",
-        panel.spacing.x = unit(1.2, "lines"),
-        panel.grid.major.x = element_blank(),
-        strip.text = element_text(face = "bold")
-      )
-
-    supplement_stem <- "figure4s_multivariate_all_models"
-    save_fig(p_supplement, OUT_DIR, supplement_stem, width = 13, height = 5.5)
-    supplement_csv <- file.path(
-      output_dir_for_stem(supplement_stem),
-      paste0(COHORT, "_", supplement_stem, "_data.csv")
     )
-    write_csv(multivariate_supplement_data, supplement_csv)
-    message("wrote ", supplement_csv)
-    if (show) print(p_supplement)
+  deephit_landmarks_found <- multivariate_supplement_data %>%
+    filter(model == "Dynamic-DeepHit", metrics_status == "available") %>%
+    pull(landmark_days)
+  deephit_status <- if (length(deephit_landmarks_found) > 0) {
+    sprintf(
+      "Dynamic-DeepHit metrics found at landmark(s): %s days",
+      paste(deephit_landmarks_found, collapse = ", ")
+    )
   } else {
-    message(paste0(
-      "Figure 4 supplement: no Dynamic-DeepHit platinum metrics found beneath ",
-      file.path(BASE, "multivariate_longitudinal", "dynamic_deephit"),
-      " -- run 03b_multivariate_longitudinal.ipynb to generate them"
+    "Dynamic-DeepHit metrics not found; run 03b_multivariate_longitudinal.ipynb"
+  }
+  message("Figure 4 supplement: ", deephit_status)
+  for (lm in LANDMARKS) {
+    path <- DEEPHIT_METRIC_PATHS[[as.character(lm)]]
+    message(sprintf(
+      "  Dynamic-DeepHit landmark %s: %s",
+      lm, if (is.na(path)) "missing" else path
     ))
   }
+
+  supplement_long <- multivariate_supplement_data %>%
+    pivot_longer(
+      c(mean_auc_t, c_index, integrated_brier),
+      names_to = "metric", values_to = "value"
+    ) %>%
+    mutate(
+      metric = factor(
+        metric,
+        levels = c("mean_auc_t", "c_index", "integrated_brier"),
+        labels = c("Mean AUC(t)", "C-index", "Integrated Brier score")
+      ),
+      landmark = factor(
+        sprintf("%s%d days", ifelse(landmark_days > 0, "+", ""), landmark_days),
+        levels = sprintf(
+          "%s%d days", ifelse(LANDMARKS > 0, "+", ""), LANDMARKS
+        )
+      )
+    )
+
+  p_supplement <- ggplot(
+    supplement_long,
+    aes(landmark, value, color = model, group = model)
+  ) +
+    geom_hline(
+      data = tibble(
+        metric = factor(
+          c("Mean AUC(t)", "C-index"),
+          levels = levels(supplement_long$metric)
+        ),
+        reference = 0.5
+      ),
+      aes(yintercept = reference), inherit.aes = FALSE,
+      color = "grey65", linetype = "dotted", linewidth = 0.7
+    ) +
+    geom_line(linewidth = 0.9, na.rm = TRUE) +
+    geom_point(size = 2.7, na.rm = TRUE) +
+    geom_text(
+      aes(label = ifelse(is.finite(value), sprintf("%.3f", value), "")),
+      vjust = -0.8, size = 2.5, show.legend = FALSE, na.rm = TRUE
+    ) +
+    facet_wrap(~metric, scales = "free_y", nrow = 1) +
+    scale_color_manual(values = supplement_colors, drop = FALSE, name = NULL) +
+    scale_y_continuous(labels = label_number(accuracy = 0.01), expand = expansion(mult = c(0.08, 0.2))) +
+    labs(
+      title = "Supplementary Figure — Held-out multivariate model performance",
+      subtitle = paste(
+        "Death-censored platinum endpoint; Dynamic-DeepHit uses longitudinal person-period labs.",
+        deephit_status
+      ),
+      x = NULL, y = NULL,
+      caption = "Higher AUC(t)/C-index and lower integrated Brier score indicate better performance."
+    ) +
+    theme_fig() +
+    theme(
+      legend.position = "top",
+      legend.direction = "horizontal",
+      panel.spacing.x = unit(1.2, "lines"),
+      panel.grid.major.x = element_blank(),
+      strip.text = element_text(face = "bold")
+    )
+
+  supplement_stem <- "figure4s_multivariate_all_models"
+  save_fig(p_supplement, OUT_DIR, supplement_stem, width = 13, height = 5.5)
+  supplement_csv <- file.path(
+    output_dir_for_stem(supplement_stem),
+    paste0(COHORT, "_", supplement_stem, "_data.csv")
+  )
+  write_csv(multivariate_supplement_data, supplement_csv)
+  message("wrote ", supplement_csv)
+  if (show) print(p_supplement)
 
   OUT_DIR <- fig_dir("figure4_multivariate")
 

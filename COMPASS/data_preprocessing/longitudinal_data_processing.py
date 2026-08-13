@@ -54,17 +54,17 @@ DEFAULT_SURVIVAL_COHORT_CSV = (
     / "prostate_arpi_survival_cohort_arpi.csv"
 )
 
-# Cisplatin appears both as a single agent and coded within a combination
-# regimen name; both count as platinum exposure. Oxaliplatin is intentionally
-# excluded (not a relevant platinum agent for this cohort). Kept in sync with
-# PLATINUM_MEDS in compile_COMPASS_cohort_data.py.
-PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN", "CISPLATIN/CYCLOPHOSPHAMIDE/ETOPOSIDE"}
+# Restrict the endpoint to exact single-agent carboplatin or cisplatin
+# preferred-medication names. Kept in sync with PLATINUM_MEDS in
+# compile_COMPASS_cohort_data.py.
+PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
 PARPI_MEDS = {
     "OLAPARIB",
     "RUCAPARIB",
+    "RUCAPARIB CAMSYLATE",
     "NIRAPARIB",
     "TALAZOPARIB",
-    "VELIPARIB",
+    "TALAZOPARIB TOSYLATE",
 }
 MIN_PSA_COUNT = 5
 # Broad PSA assay set (raw TEST_TYPE_CD, any assay type: total/free/complexed/
@@ -97,9 +97,8 @@ CONSOLIDATED_CACHE_VERSION = 5
 
 # Highlighted antineoplastic treatments used to anchor the "time to platinum"
 # prediction window. The treatment anchor (TREATMENT_ANCHOR_DATE) is the first
-# date a patient received ANY of these drugs (earliest MED_START_DT in the
-# medications table, across all treatment lines) and defines time 0 for every
-# duration in the output. Mirrors `drugs_to_filter_for` in
+# date on/after prostate diagnosis that a patient received any of these drugs
+# and defines time 0 for every duration in the output. Mirrors `drugs_to_filter_for` in
 # analyze_prostate_metadata.py: ARPIs/androgen-axis, taxanes, and radium-223.
 ARPI_ANCHOR_MEDS = {
     "ABIRATERONE ACETATE",
@@ -121,7 +120,6 @@ ADT_ANCHOR_MEDS = {
     "TRIPTORELIN PAMOATE",
     "HISTRELIN ACETATE",
     "DEGARELIX",
-    "RELUGOLIX",
     "BICALUTAMIDE",
     "FLUTAMIDE",
     "NILUTAMIDE",
@@ -147,15 +145,9 @@ def coerce_mixed_datetime(values: pd.Series) -> pd.Series:
     parser as Stage 1 so a date cannot be accepted while compiling the cohort
     and then rejected while constructing its longitudinal rows.
     """
-    parsed = (
-        pl.from_pandas(values.rename("_date"))
-        .cast(pl.Utf8, strict=False)
-        .str.to_datetime(strict=False)
-    )
-    result = parsed.to_pandas()
-    result.index = values.index
-    result.name = values.name
-    return result
+    # pandas >=2's format="mixed" performs per-value inference rather than
+    # inferring one format from the first non-null row.
+    return pd.to_datetime(values, errors="coerce", format="mixed")
 
 
 def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFrame:
@@ -402,12 +394,16 @@ def compute_first_prostate_diagnosis(icds: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def compute_treatment_anchor(medications_df: pd.DataFrame, meds_set: set = ARPI_ANCHOR_MEDS) -> pd.DataFrame:
-    """Earliest highlighted-treatment start date per patient.
+def compute_treatment_anchor(
+    medications_df: pd.DataFrame,
+    meds_set: set = ARPI_ANCHOR_MEDS,
+    diagnosis_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Earliest highlighted-treatment date, optionally on/after diagnosis.
 
     Filters the medications table to rows whose NCI_PREFERRED_MED_NM is one of
     ``meds_set`` and returns one row per patient with the earliest
-    ``MED_START_DT`` (across all treatment lines). Patients who never received a
+    ``MED_START_DT`` (on/after diagnosis when diagnosis_df is supplied). Patients who never received a
     highlighted drug are simply absent, so the downstream left-join leaves their
     ``TREATMENT_ANCHOR_DATE`` NaN and the anchor's landmark filter drops them when
     this anchor is selected.
@@ -417,6 +413,11 @@ def compute_treatment_anchor(medications_df: pd.DataFrame, meds_set: set = ARPI_
     meds = meds.loc[meds["NCI_PREFERRED_MED_NM"].isin(meds_set)].copy()
     meds["TREATMENT_ANCHOR_DATE"] = coerce_mixed_datetime(meds["MED_START_DT"])
     meds = meds.dropna(subset=["TREATMENT_ANCHOR_DATE"])
+    if diagnosis_df is not None:
+        meds = meds.merge(diagnosis_df, on=ID_COL, how="inner")
+        meds = meds.loc[
+            meds["TREATMENT_ANCHOR_DATE"] >= meds["DIAGNOSIS_DATE"]
+        ].copy()
     return (
         meds.groupby(ID_COL, as_index=False)["TREATMENT_ANCHOR_DATE"]
         .min()
@@ -663,9 +664,9 @@ def summarize_default_cohort_filters(
 ) -> dict:
     """Preview the default downstream cohort filters on the broad lab frame.
 
-    These filters are applied by `build_prediction_inputs.py`, not here; the
-    row-level output stays the broad prostate lab frame. This preview reports the
-    attrition they would produce so the counts land in cohort_attrition.json.
+    Stage 1 already applies these criteria to the survival-cohort MRN list.
+    The repeated filters in `build_prediction_inputs.py` are consistency guards;
+    this preview records whether any unexpected attrition remains.
 
     Default downstream inclusion:
       - >= ``min_psa_count`` PSA labs counted from the BROAD PSA set
@@ -681,8 +682,9 @@ def summarize_default_cohort_filters(
     make_outcome_df: durations are measured from the treatment anchor, so patients
     with no ARPI/taxane/radium-223 anchor have all-NaN durations and fail its
     validity checks. There is no separate first-treatment inclusion step.
-    Non-prostate-primary exclusion is already enforced upstream at stage 1. A C61
-    diagnosis date is attached when available, but is not an inclusion requirement.
+    Other non-prostate primaries are descriptive only. A dated C61 diagnosis,
+    male sex, post-diagnosis ADT, >=5 PSA rows, no PARPi, no pre-diagnosis
+    platinum, and no specified post-ADT cancer are enforced upstream at Stage 1.
     """
     n_before = pred_df[ID_COL].nunique()
     print(f"Broad longitudinal prostate lab frame: {n_before} patients")
@@ -1217,7 +1219,11 @@ def main() -> None:
     first_prostate_diagnosis = compute_first_prostate_diagnosis(icds)
 
     anchor_meds = ANCHOR_MED_SETS[args.anchor_med_set]
-    treatment_anchor_df = compute_treatment_anchor(medications_df, meds_set=anchor_meds)
+    treatment_anchor_df = compute_treatment_anchor(
+        medications_df,
+        meds_set=anchor_meds,
+        diagnosis_df=first_prostate_diagnosis,
+    )
     n_anchor = len(treatment_anchor_df)
     print(
         f"Treatment anchor ({args.anchor_med_set}): {n_anchor} patients received a "

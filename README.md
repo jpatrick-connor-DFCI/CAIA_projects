@@ -8,9 +8,11 @@ Entry points are command-line scripts orchestrated from notebooks.
 COMPASS uses numbered stage notebooks (`01_preprocessing.ipynb`, `02_univariate.ipynb`,
 `03_multivariate.ipynb`) for two treatment-anchored cohort arms, both drawn from an ADT-entry
 ICD-C61 cohort: `arpi` (anchored at first ARPI/chemo exposure) and `adt` (anchored at first ADT
-exposure, years earlier in the treatment sequence). Patients with bladder (C67), lung (C34),
-head-and-neck (C00-C14/C30-C32), or testicular (C62) cancer diagnosed strictly after ADT start are
-excluded. The paired, R-only `05_figures.Rmd` emits manuscript figures for both.
+exposure, years earlier in the treatment sequence). Entry requires a dated prostate diagnosis, male
+sex, at least five PSA measurements, and ADT on/after diagnosis; PARPi exposure, platinum before
+diagnosis, and bladder (C67), lung (C34), head-and-neck (C00-C14/C30-C32), or testicular (C62)
+cancer diagnosed strictly after first ADT are excluded. The paired, R-only `05_figures.Rmd` emits
+manuscript figures for both.
 
 > This README is the canonical reference for editing the pipeline. It documents the directory
 > layout, the data flow, every script's inputs/outputs, the **conventions and invariants that
@@ -122,12 +124,12 @@ Every raw OncDRS read in Stage 1 and Stage 2 goes through
 ## Stage 1 — Compile prostate cohort source data
 
 `data_preprocessing/compile_COMPASS_cohort_data.py` (module-level script, argparse CLI for path
-overrides). Derives the ICD-C61 universe, requires a dated ADT exposure as the primary entry
-criterion, and excludes bladder (C67), lung (C34), head-and-neck (C00-C14/C30-C32), and
-testicular (C62) cancer diagnosed strictly after first ADT. Other non-prostate primaries remain
-descriptive only. The same eligible base cohort feeds the ARPI/chemo-anchored and ADT-anchored
-survival data (age, treatment anchor, death, time-to-platinum), with `anchor_df`/`adt_anchor_df`
-computed from the same medication scan.
+overrides). It applies the same seven criteria as `caia-project-compass`: dated ICD-C61 prostate
+diagnosis; male sex; at least five broad-PSA measurements at any time; ADT on/after diagnosis; no
+PARPi exposure; no carboplatin/cisplatin exposure before diagnosis; and no bladder (C67), lung
+(C34), head-and-neck (C00-C14/C30-C32), or testicular (C62) cancer diagnosed strictly after first
+ADT anywhere in the record. Other non-prostate primaries remain descriptive only. The same
+eligible base cohort feeds the ARPI/chemo-anchored and ADT-anchored survival data.
 
 - **Inputs (hard-coded under `DATA_PATH = /data/gusev/USERS/jpconnor/data/`, plus the raw OncDRS pull
   at `ONCDRS_PATH`):** `EHR_DIAGNOSIS.csv`, `HEALTH_HISTORY.csv`, `MEDICATIONS.csv`,
@@ -144,15 +146,16 @@ computed from the same medication scan.
   (`mrn_lists/arpi_mrns.csv`, `mrn_lists/adt_mrns.csv`), the ADT-entry-cohort
   platinum-recipient list (`mrn_lists/platinum_MRN_list.csv`), `prostate_icd_data.csv`, and
   `mrn_lists/icd_prostate_mrn_flags.csv`. The latter contains every ICD-C61 MRN plus binary
-  indicators for a non-prostate primary (`HAS_NON_PROSTATE_PRIMARY`, descriptive only), a
-  requested post-ADT cancer exclusion (`HAS_POST_ADT_EXCLUSION_CANCER`), PARPi exposure,
-  ARPI/docetaxel exposure, ADT exposure (`ADT_EXPOSED`), and at least five broad PSA tests.
-- **Cohort definition:** ICD-C61 plus dated ADT exposure, excluding the four specified cancer
-  groups only when diagnosis is strictly after ADT start. The `adt` arm uses this cohort directly;
-  the `arpi` arm additionally requires an ARPI/chemo anchor.
+  indicators for dated prostate diagnosis, male sex, a non-prostate primary
+  (`HAS_NON_PROSTATE_PRIMARY`, descriptive only), the requested post-ADT cancer exclusion,
+  PARPi exposure, pre-diagnosis platinum, ARPI/docetaxel exposure, ADT on/after diagnosis,
+  at least five broad PSA tests, and final eligibility.
+- **Cohort definition:** the seven criteria above are enforced in Stage 1. The `adt` arm uses this
+  cohort directly; the `arpi` arm additionally requires a post-diagnosis ARPI/chemo anchor.
 - **Anchor sets:** `ARPI_ANCHOR_MEDS` (7 drugs: ARPIs, taxanes, radium-223 — unchanged,
-  `TREATMENT_ANCHOR_MEDS` alias retained) and `ADT_ANCHOR_MEDS` (10 drugs: GnRH agonists/antagonists
-  + first-generation antiandrogens). `compute_treatment_anchor(meds, meds_set=...)` takes either set;
+  `TREATMENT_ANCHOR_MEDS` alias retained) and `ADT_ANCHOR_MEDS` (the eight CAIA-COMPASS ADT
+  ingredients; PROFILE has separate preferred names for triptorelin and triptorelin pamoate).
+  `compute_treatment_anchor(meds, meds_set=...)` takes either set;
   `ANCHOR_MED_SETS = {"arpi": ..., "adt": ...}` maps the CLI-facing key to the drug set.
 
 `compile_MRNs_for_manual_review.py` builds an auxiliary manual-review MRN sheet from the
@@ -235,9 +238,9 @@ cohort.
   `--auc-quantiles`, `--id-col`, `--age-col`, `--anchor-col`,
   `--restrict-to-mrns`, `--require-first-treatment` / `--no-require-first-treatment`,
   `--min-psa-count`, `--exclude-parpi` / `--include-parpi`.
-- **Default downstream cohort filters:** `FIRST_TREATMENT == 1`, ≥5 PSA rows, and PARPi exclusion
-  (when `PARPI_EXPOSED` is present). These defaults preserve the original first-treatment cohort, but
-  alternate anchors can relax them explicitly.
+- **Default downstream cohort filters:** ≥5 PSA rows and PARPi exclusion are repeated as consistency
+  guards after the Stage-1 restriction. They should produce no further criterion-related attrition
+  for newly rebuilt cohorts; alternate inputs can relax them explicitly.
 - **Outputs:** `aggregated_landmark{D}.csv`, `pre_treatment_lab_long_landmark{D}.csv`,
   `split_assignments_landmark{D}.csv`, the base-landmark compatibility copy
   `split_assignments.csv`, `landmark_mrn_availability.csv`, `canonical_labs_train_val.csv`,
@@ -355,12 +358,14 @@ COMPASS PROFILE has four Python stage notebooks sharing `compass_pipeline.py` (t
   `COMPASS_generate_figures_pipeline.R`. It renders both arms' overview, LLM-label, univariate,
   multivariate, KM, and per-lab distribution/trajectory figures at landmarks 0 and 90. Figure 1A reads
   `mrn_lists/icd_prostate_mrn_flags.csv` and displays cumulative ICD-C61 cohort selection through
-  ADT entry, the requested post-ADT cancer exclusion, PARPi, and ≥5-PSA-test criteria; the ARPI
-  arm additionally displays its ARPI/docetaxel exposure criterion. Axis and table labels throughout
+  dated diagnosis, male sex, ≥5 PSA tests, post-diagnosis ADT, PARPi exclusion, pre-diagnosis
+  platinum exclusion, and the requested post-ADT cancer exclusion; the ARPI arm additionally
+  displays its post-diagnosis ARPI/docetaxel exposure criterion. Axis and table labels throughout
   name the arm's anchor ("ARPI/chemo initiation" vs. "ADT initiation") via `ANCHOR_LABEL`.
-  When the optional `03b_multivariate_longitudinal.ipynb` outputs exist, Figure 4 additionally emits
-  `figure4s_multivariate_all_models`, a supplemental held-out comparison of elastic-net Cox,
-  XGBoost, and death-censored Dynamic-DeepHit using mean AUC(t), C-index, and integrated Brier score.
+  Figure 4 additionally emits `figure4s_multivariate_all_models`, a supplemental held-out comparison
+  of elastic-net Cox, XGBoost, and death-censored Dynamic-DeepHit using mean AUC(t), C-index, and
+  integrated Brier score. If optional `03b_multivariate_longitudinal.ipynb` results are absent, the
+  figure and data CSV mark Dynamic-DeepHit as missing instead of suppressing the supplement.
   - **LLM label strata:** alongside the existing `LLM_v3_labels.tsv`-driven Figure 2, the pipeline
     loads `LLM_NEPC_classifier_labels.tsv` from
     `/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_NEPC_labels/` (`DFCI_MRN`, `primary_label`
@@ -386,10 +391,11 @@ COMPASS PROFILE has four Python stage notebooks sharing `compass_pipeline.py` (t
       (`figure2v3_confusion_matrix`, `figure2v3_metric_bar`, `figure2v3_confusion_has_nepc`,
       `figure2v3_confusion_has_avpc`, `figure2v3_subtype_landscape`, `figure2v3_enrichment`,
       `figure2v3_llm_subtype_platinum`) over a **wider patient universe**: every MRN with
-      `ADT_EXPOSED = 1` in `mrn_lists/icd_prostate_mrn_flags.csv` — the "ADT entry requirement"
+      `ADT_EXPOSED = 1` in `mrn_lists/icd_prostate_mrn_flags.csv` — ADT on/after diagnosis —
       step of the Figure 1 CONSORT — rather than only the landmark-0 prediction cohort
       (`eligible_landmark_0` in `landmark_mrn_availability.csv`) that v2 uses. So v3 includes
-      patients later dropped by the post-ADT exclusion-cancer, PARPi, and ≥5-PSA-test criteria.
+      patients later dropped by the male-sex, post-ADT cancer, PARPi, pre-diagnosis-platinum,
+      and ≥5-PSA-test criteria.
       Like v2 it carries no `stopifnot` count assertions; it is emitted from the ADT pass only.
     - **All-lab longitudinal dynamics** — Figure 7's group-mean-CI trajectory machinery
       (`bin_group_ci()`/`plot_group_ci_panel()`) generalized from PSA/Testosterone-only to every

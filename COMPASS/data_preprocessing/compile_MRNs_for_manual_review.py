@@ -16,7 +16,15 @@ PROFILE_PATH = '/data/gusev/PROFILE/CLINICAL/'
 INTAE_DATA_PATH = os.path.join(PROFILE_PATH, 'robust_VTE_pred_project_2025_03_cohort/data/')
 ONCDRS_PATH = os.path.join(PROFILE_PATH, 'OncDRS/ALL_2025_03/')
 
-PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN", "CISPLATIN/CYCLOPHOSPHAMIDE/ETOPOSIDE"}
+PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
+PARPI_MEDS = {
+    "OLAPARIB",
+    "RUCAPARIB",
+    "RUCAPARIB CAMSYLATE",
+    "NIRAPARIB",
+    "TALAZOPARIB",
+    "TALAZOPARIB TOSYLATE",
+}
 
 # Load metadata
 cancer_types = pd.read_csv(os.path.join(INTAE_DATA_PATH, 'first_treatments_dfci_w_inferred_cancers.csv'))[['DFCI_MRN', 'med_genomics_merged_cancer_group']]
@@ -85,7 +93,7 @@ df_out = (
 )
 
 ## ADDING INFO FOR PARP INHIBITORS
-parp_df = (meds.loc[meds['NCI_PREFERRED_MED_NM'].isin(['OLAPARIB', 'RUCAPARIB', 'NIRAPARIB', 'TALAZOPARIB'])]
+parp_df = (platinum_meds_pd.loc[platinum_meds_pd['NCI_PREFERRED_MED_NM'].isin(PARPI_MEDS)]
            .sort_values(by='MED_START_DT').drop_duplicates(subset='DFCI_MRN')
            .rename(columns={'NCI_PREFERRED_MED_NM' : 'PARPi_NM',
                             'MED_START_DT' : 'PARPi_START_TIME'}))[['DFCI_MRN', 'PARPi_NM', 'PARPi_START_TIME']]

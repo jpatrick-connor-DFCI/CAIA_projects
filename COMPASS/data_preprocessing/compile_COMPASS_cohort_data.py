@@ -15,11 +15,13 @@ cohorts directly from the raw OncDRS 2025-03 pull.
   * prostate_arpi_survival_preprocessing.py -- per-patient ARPI/chemo-anchored
                                     survival cohort (age, treatment anchor,
                                     death, platinum time-to-event).
-Cohort definitions:
-The primary entry requirement is a dated ADT exposure among ICD-10 C61
-patients. Patients are then excluded if bladder, lung, head-and-neck, or
-testicular cancer is diagnosed strictly after ADT start. This common eligible
-MRN set drives two survival cohorts:
+Cohort definitions (aligned with caia-project-compass):
+Patients must have an ICD-10 C61 diagnosis with a date, male sex, at least five
+PSA measurements, and dated ADT exposure on/after prostate diagnosis. Patients
+are excluded for any PARP-inhibitor exposure, carboplatin/cisplatin exposure
+before prostate diagnosis, or bladder, lung, head-and-neck, or testicular
+cancer diagnosed strictly after first ADT anywhere in the record. This common
+eligible MRN set drives two survival cohorts:
 
   * arpi -- eligible ADT-entry patients anchored on first ARPI/chemo exposure.
   * adt  -- eligible ADT-entry patients anchored on first ADT (GnRH
@@ -58,9 +60,10 @@ recipients from the eligible ADT-entry cohort only.
 
 Finally, writes ``icd_prostate_mrn_flags.csv`` to ``mrn_lists_dir``. This
 patient-level audit table includes every MRN with an ICD-10 C61 diagnosis and
-binary indicators for a competing non-prostate primary, a specified
-post-ADT exclusion cancer, PARPi exposure, ARPI/docetaxel exposure, ADT
-exposure, and at least five broad PSA tests.
+binary indicators for dated prostate diagnosis, male sex, a competing
+non-prostate primary, a specified post-ADT exclusion cancer, PARPi exposure,
+pre-diagnosis platinum, ARPI/docetaxel exposure, post-diagnosis ADT exposure,
+at least five broad PSA tests, and final eligibility.
 
 Author: J. Patrick Connor
 Date: 2026-07-18
@@ -85,6 +88,17 @@ from data_preprocessing_common.oncdrs_dedup import apply_dedup  # noqa: E402
 from data_preprocessing_common.oncdrs_sources import scan_source  # noqa: E402
 
 ID_COL = "DFCI_MRN"
+
+
+def parse_mixed_datetime_expr(column: str) -> pl.Expr:
+    """Parse ISO and US slash-formatted calendar dates row by row."""
+    raw = pl.col(column).cast(pl.Utf8, strict=False).str.strip_chars()
+    return pl.coalesce(
+        raw.str.to_datetime(strict=False),
+        raw.str.strptime(pl.Datetime, "%m/%d/%Y", strict=False),
+        raw.str.strptime(pl.Datetime, "%m/%d/%Y %H:%M:%S", strict=False),
+    )
+
 
 # Paths
 DATA_PATH = '/data/gusev/USERS/jpconnor/data/'
@@ -117,7 +131,6 @@ ADT_ANCHOR_MEDS = {
     "HISTRELIN ACETATE",
     # GnRH antagonists
     "DEGARELIX",
-    "RELUGOLIX",
     # First-generation antiandrogens
     "BICALUTAMIDE",
     "FLUTAMIDE",
@@ -140,9 +153,10 @@ ARPI_DOCETAXEL_MEDS = {
 PARPI_MEDS = {
     "OLAPARIB",
     "RUCAPARIB",
+    "RUCAPARIB CAMSYLATE",
     "NIRAPARIB",
     "TALAZOPARIB",
-    "VELIPARIB",
+    "TALAZOPARIB TOSYLATE",
 }
 
 # Broad PSA assay definition used by the longitudinal preprocessing gate.
@@ -157,14 +171,10 @@ BROAD_PSA_CODES = {
 }
 MIN_PSA_COUNT = 5
 
-# Cisplatin appears both as a single agent and coded within a combination
-# regimen name; both count as platinum exposure. Oxaliplatin is intentionally
-# excluded (not a relevant platinum agent for this cohort).
-PLATINUM_MEDS = {
-    "CARBOPLATIN",
-    "CISPLATIN",
-    "CISPLATIN/CYCLOPHOSPHAMIDE/ETOPOSIDE",
-}
+# The endpoint is restricted to exact single-agent carboplatin or cisplatin
+# preferred-medication names. Combination-regimen labels and other platinum
+# agents (including oxaliplatin) are intentionally excluded.
+PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
 
 # ICD-10-CM primary malignancies requested for exclusion when their diagnosis
 # date is strictly after first ADT. Head and neck follows the standard
@@ -183,6 +193,70 @@ POST_ADT_EXCLUSION_CANCER_GROUPS = {
 POST_ADT_EXCLUSION_CANCER_PREFIXES = set().union(
     *POST_ADT_EXCLUSION_CANCER_GROUPS.values()
 )
+
+
+def compute_first_prostate_diagnosis(icds: pl.DataFrame) -> pl.DataFrame:
+    """Return the earliest dated ICD-C61 diagnosis for each patient."""
+    return (
+        icds.select(
+            pl.col(ID_COL)
+            .cast(pl.Float64, strict=False)
+            .cast(pl.Int64, strict=False)
+            .alias(ID_COL),
+            pl.col("DIAGNOSIS_ICD10_CD")
+            .cast(pl.Utf8)
+            .str.to_uppercase()
+            .str.strip_chars()
+            .alias("_ICD_CODE"),
+            parse_mixed_datetime_expr("START_DT").alias("DIAGNOSIS_DATE"),
+        )
+        .filter(
+            pl.col("_ICD_CODE").str.starts_with("C61")
+            & pl.col(ID_COL).is_not_null()
+            & pl.col("DIAGNOSIS_DATE").is_not_null()
+        )
+        .group_by(ID_COL)
+        .agg(pl.col("DIAGNOSIS_DATE").min())
+    )
+
+
+def compute_male_mrns(status_df: pl.DataFrame) -> set:
+    """Return patients whose normalized PROFILE sex value is male."""
+    normalized_gender = (
+        pl.col("GENDER").cast(pl.Utf8).str.to_uppercase().str.strip_chars()
+    )
+    return set(
+        status_df.filter(normalized_gender.is_in(["MALE", "M"]))[ID_COL]
+        .drop_nulls()
+        .to_list()
+    )
+
+
+def compute_eligible_mrns(
+    *,
+    c61_mrns: set,
+    dated_diagnosis_mrns: set,
+    male_mrns: set,
+    psa_eligible_mrns: set,
+    adt_post_diagnosis_mrns: set,
+    parpi_mrns: set,
+    platinum_pre_diagnosis_mrns: set,
+    post_adt_exclusion_cancer_mrns: set,
+) -> set:
+    """Apply the seven CAIA-COMPASS entry/exclusion criteria."""
+    included = (
+        c61_mrns
+        & dated_diagnosis_mrns
+        & male_mrns
+        & psa_eligible_mrns
+        & adt_post_diagnosis_mrns
+    )
+    excluded = (
+        parpi_mrns
+        | platinum_pre_diagnosis_mrns
+        | post_adt_exclusion_cancer_mrns
+    )
+    return included - excluded
 
 
 
@@ -255,10 +329,7 @@ def compute_post_adt_exclusion_cancer_mrns(
         .str.strip_chars()
         .str.extract(r"^(C\d{2})", 1)
         .alias("_ICD_PREFIX"),
-        pl.col("START_DT")
-        .cast(pl.Utf8)
-        .str.to_datetime(strict=False)
-        .alias("_DIAGNOSIS_DATE"),
+        parse_mixed_datetime_expr("START_DT").alias("_DIAGNOSIS_DATE"),
     )
     post_adt = (
         diagnosis.filter(
@@ -400,6 +471,46 @@ def filter_cohort(filename, cohort_mrns, cols=None, table=None) -> pl.DataFrame:
     return filtered
 
 
+def compute_psa_eligible_mrns(labs_path: str, c61_mrns: set) -> set:
+    """Return MRNs with at least five deduplicated broad-PSA measurements."""
+    labs = filter_cohort(
+        labs_path,
+        c61_mrns,
+        cols=[ID_COL, "TEST_TYPE_CD"],
+        # Deduplicate on the canonical full LABS key before projection.
+        table="LABS",
+    ).with_columns(
+        pl.col("TEST_TYPE_CD")
+        .cast(pl.Utf8)
+        .str.to_uppercase()
+        .str.strip_chars()
+        .alias("TEST_TYPE_CD")
+    )
+    return set(
+        labs.filter(pl.col("TEST_TYPE_CD").is_in(sorted(BROAD_PSA_CODES)))
+        .group_by(ID_COL)
+        .agg(pl.len().alias("_PSA_COUNT"))
+        .filter(pl.col("_PSA_COUNT") >= MIN_PSA_COUNT)[ID_COL]
+        .drop_nulls()
+        .to_list()
+    )
+
+
+def compute_medication_exposure_mrns(meds: pl.DataFrame, medication_names: set) -> set:
+    """Return MRNs with any matching normalized preferred-medication name."""
+    normalized_name = (
+        pl.col("NCI_PREFERRED_MED_NM")
+        .cast(pl.Utf8)
+        .str.to_uppercase()
+        .str.strip_chars()
+    )
+    return set(
+        meds.filter(normalized_name.is_in(sorted(medication_names)))[ID_COL]
+        .drop_nulls()
+        .to_list()
+    )
+
+
 def compile_cohort_tables(
     icd_mrns,
     all_cohort_mrns,
@@ -437,74 +548,36 @@ def build_icd_prostate_mrn_flags(
     c61_mrns: set,
     non_prostate_primary_mrns: set,
     post_adt_exclusion_cancer_mrns: set,
-    meds: pl.DataFrame,
-    labs_path: str,
+    dated_diagnosis_mrns: set,
+    male_mrns: set,
+    parpi_mrns: set,
+    arpi_docetaxel_post_diagnosis_mrns: set,
+    adt_post_diagnosis_mrns: set,
+    platinum_pre_diagnosis_mrns: set,
+    eligible_mrns: set,
+    psa_eligible_mrns: set,
 ) -> pl.DataFrame:
     """Build one audit row for every ICD-C61 patient.
 
-    Medication exposure is based on any matching medication row. PSA
-    eligibility counts rows from the same broad raw TEST_TYPE_CD set used by
-    longitudinal preprocessing.
+    Criterion sets are computed once in main() and reused here so the audit
+    flags cannot drift from the actual cohort-membership calculation.
     """
     c61_mrns = set(int(m) for m in c61_mrns)
     cohort = pl.DataFrame({ID_COL: sorted(c61_mrns)}, schema={ID_COL: pl.Int64})
-
-    normalized_meds = meds.with_columns(
-        pl.col("NCI_PREFERRED_MED_NM")
-        .cast(pl.Utf8)
-        .str.to_uppercase()
-        .str.strip_chars()
-        .alias("_MED_NAME")
-    )
-    parpi_mrns = set(
-        normalized_meds.filter(pl.col("_MED_NAME").is_in(sorted(PARPI_MEDS)))[ID_COL]
-        .drop_nulls()
-        .to_list()
-    )
-    arpi_docetaxel_mrns = set(
-        normalized_meds.filter(
-            pl.col("_MED_NAME").is_in(sorted(ARPI_DOCETAXEL_MEDS))
-        )[ID_COL]
-        .drop_nulls()
-        .to_list()
-    )
-    adt_mrns = set(
-        normalized_meds.filter(pl.col("_MED_NAME").is_in(sorted(ADT_ANCHOR_MEDS)))[ID_COL]
-        .drop_nulls()
-        .to_list()
-    )
-
-    labs = filter_cohort(
-        labs_path,
-        c61_mrns,
-        cols=[ID_COL, "TEST_TYPE_CD"],
-        # This is exactly the case the plan's dedup-on-canonical-columns
-        # invariant exists for: deduping on this 2-column projection instead
-        # of the full LABS column set would collapse every patient to ~1 row
-        # per TEST_TYPE_CD and fail MIN_PSA_COUNT for everyone. table="LABS"
-        # makes scan_filter dedup BEFORE this projection is applied.
-        table="LABS",
-    ).with_columns(
-        pl.col("TEST_TYPE_CD")
-        .cast(pl.Utf8)
-        .str.to_uppercase()
-        .str.strip_chars()
-        .alias("TEST_TYPE_CD")
-    )
-    psa_eligible_mrns = set(
-        labs.filter(pl.col("TEST_TYPE_CD").is_in(sorted(BROAD_PSA_CODES)))
-        .group_by(ID_COL)
-        .agg(pl.len().alias("_PSA_COUNT"))
-        .filter(pl.col("_PSA_COUNT") >= MIN_PSA_COUNT)[ID_COL]
-        .drop_nulls()
-        .to_list()
-    )
 
     return cohort.with_columns(
         pl.col(ID_COL)
         .is_in(sorted(c61_mrns & non_prostate_primary_mrns))
         .cast(pl.Int8)
         .alias("HAS_NON_PROSTATE_PRIMARY"),
+        pl.col(ID_COL)
+        .is_in(sorted(dated_diagnosis_mrns))
+        .cast(pl.Int8)
+        .alias("DATED_PROSTATE_DIAGNOSIS"),
+        pl.col(ID_COL)
+        .is_in(sorted(male_mrns))
+        .cast(pl.Int8)
+        .alias("MALE"),
         pl.col(ID_COL)
         .is_in(sorted(c61_mrns & post_adt_exclusion_cancer_mrns))
         .cast(pl.Int8)
@@ -514,17 +587,25 @@ def build_icd_prostate_mrn_flags(
         .cast(pl.Int8)
         .alias("PARPI_EXPOSED"),
         pl.col(ID_COL)
-        .is_in(sorted(arpi_docetaxel_mrns))
+        .is_in(sorted(arpi_docetaxel_post_diagnosis_mrns))
         .cast(pl.Int8)
         .alias("ARPI_DOCETAXEL_EXPOSED"),
         pl.col(ID_COL)
-        .is_in(sorted(adt_mrns))
+        .is_in(sorted(adt_post_diagnosis_mrns))
         .cast(pl.Int8)
         .alias("ADT_EXPOSED"),
+        pl.col(ID_COL)
+        .is_in(sorted(platinum_pre_diagnosis_mrns))
+        .cast(pl.Int8)
+        .alias("PLATINUM_BEFORE_DIAGNOSIS"),
         pl.col(ID_COL)
         .is_in(sorted(psa_eligible_mrns))
         .cast(pl.Int8)
         .alias("HAS_5_OR_MORE_PSA_TESTS"),
+        pl.col(ID_COL)
+        .is_in(sorted(eligible_mrns))
+        .cast(pl.Int8)
+        .alias("ELIGIBLE"),
     )
 
 
@@ -543,17 +624,24 @@ def load_medications_for_survival(meds: pl.DataFrame) -> pl.DataFrame:
         pl.col('NCI_PREFERRED_MED_NM').cast(pl.Utf8).str.to_uppercase().str.strip_chars().alias('NCI_PREFERRED_MED_NM')
     )
     out = out.filter(pl.col('NCI_PREFERRED_MED_NM').is_in(list(keep_meds)))
-    out = out.with_columns(
-        pl.col('MED_START_DT').str.to_datetime(strict=False).alias('MED_START_DT')
-    )
+    out = out.with_columns(parse_mixed_datetime_expr('MED_START_DT').alias('MED_START_DT'))
     out = out.filter(pl.col('MED_START_DT').is_not_null())
     return out
 
 
-def compute_treatment_anchor(meds: pl.DataFrame, meds_set: set = ARPI_ANCHOR_MEDS) -> pl.DataFrame:
-    """Earliest anchor-drug MED_START_DT per patient -> TREATMENT_ANCHOR_DATE."""
+def compute_treatment_anchor(
+    meds: pl.DataFrame,
+    meds_set: set = ARPI_ANCHOR_MEDS,
+    diagnosis_df: pl.DataFrame | None = None,
+) -> pl.DataFrame:
+    """Earliest anchor-drug date, optionally restricted to on/after diagnosis."""
     anchor = meds.filter(pl.col('NCI_PREFERRED_MED_NM').is_in(list(meds_set)))
     anchor = anchor.filter(pl.col('MED_START_DT').is_not_null())
+    if diagnosis_df is not None:
+        anchor = (
+            anchor.join(diagnosis_df, on=ID_COL, how="inner")
+            .filter(pl.col("MED_START_DT") >= pl.col("DIAGNOSIS_DATE"))
+        )
     return (
         anchor.group_by(ID_COL)
         .agg(pl.col('MED_START_DT').min())
@@ -572,6 +660,18 @@ def compute_first_platinum(meds: pl.DataFrame) -> pl.DataFrame:
             'MED_START_DT': 'PLATINUM_DATE',
         }
     )
+
+
+def compute_platinum_pre_diagnosis_mrns(
+    platinum_df: pl.DataFrame,
+    diagnosis_df: pl.DataFrame,
+) -> set:
+    """Patients whose earliest carboplatin/cisplatin predates prostate diagnosis."""
+    prior = (
+        platinum_df.join(diagnosis_df, on=ID_COL, how="inner")
+        .filter(pl.col("PLATINUM_DATE") < pl.col("DIAGNOSIS_DATE"))
+    )
+    return set(prior[ID_COL].drop_nulls().to_list())
 
 
 def load_patient_status(path) -> pl.DataFrame:
@@ -597,9 +697,9 @@ def load_patient_status(path) -> pl.DataFrame:
 
     # All dates are raw calendar strings.
     pt = pt.with_columns(
-        pl.col('BIRTH_DT').str.to_datetime(strict=False).alias('BIRTH_DATE'),
-        pl.col('HYBRID_DEATH_DT').str.to_datetime(strict=False).alias('DEATH_DATE'),
-        pl.col('DERIVED_LAST_ALIVE_DATE').str.to_datetime(strict=False).alias('LAST_CONTACT_DATE'),
+        parse_mixed_datetime_expr('BIRTH_DT').alias('BIRTH_DATE'),
+        parse_mixed_datetime_expr('HYBRID_DEATH_DT').alias('DEATH_DATE'),
+        parse_mixed_datetime_expr('DERIVED_LAST_ALIVE_DATE').alias('LAST_CONTACT_DATE'),
         pl.when(
             pl.col('GENDER_NM')
             .cast(pl.Utf8)
@@ -856,40 +956,89 @@ def main():
         args.out_dir,
     )
 
-    # 3. Establish first ADT (the primary entry requirement), then exclude
-    #    the requested cancers only when diagnosed strictly after ADT start.
+    # 3. Apply the same seven entry/exclusion criteria as CAIA-COMPASS.
+    #    First ADT anywhere anchors only the post-ADT cancer exclusion; cohort
+    #    entry and the ADT analysis anchor require ADT on/after diagnosis.
     meds_for_survival = load_medications_for_survival(meds)
+    first_diagnosis_df = compute_first_prostate_diagnosis(icds)
+    dated_diagnosis_mrns = set(
+        first_diagnosis_df[ID_COL].drop_nulls().to_list()
+    )
+    status_df = load_patient_status(args.patient_status_source)
+    male_mrns = compute_male_mrns(status_df)
+    psa_eligible_mrns = compute_psa_eligible_mrns(
+        args.labs_csv, all_cohort_mrns
+    )
+    parpi_mrns = compute_medication_exposure_mrns(meds, PARPI_MEDS)
+
     selected_arms = set(args.survival_arms)
     anchor_df = (
-        compute_treatment_anchor(meds_for_survival, meds_set=ARPI_ANCHOR_MEDS)
+        compute_treatment_anchor(
+            meds_for_survival,
+            meds_set=ARPI_ANCHOR_MEDS,
+            diagnosis_df=first_diagnosis_df,
+        )
         if "arpi" in selected_arms
         else None
     )
-    adt_anchor_df = compute_treatment_anchor(meds_for_survival, meds_set=ADT_ANCHOR_MEDS)
+    arpi_docetaxel_anchor_df = compute_treatment_anchor(
+        meds_for_survival,
+        meds_set=ARPI_DOCETAXEL_MEDS,
+        diagnosis_df=first_diagnosis_df,
+    )
+    arpi_docetaxel_post_diagnosis_mrns = set(
+        arpi_docetaxel_anchor_df[ID_COL].drop_nulls().to_list()
+    )
+    adt_anchor_all_df = compute_treatment_anchor(
+        meds_for_survival, meds_set=ADT_ANCHOR_MEDS
+    )
+    adt_anchor_df = compute_treatment_anchor(
+        meds_for_survival,
+        meds_set=ADT_ANCHOR_MEDS,
+        diagnosis_df=first_diagnosis_df,
+    )
     platinum_df = compute_first_platinum(meds_for_survival)
+    platinum_pre_diagnosis_mrns = compute_platinum_pre_diagnosis_mrns(
+        platinum_df, first_diagnosis_df
+    )
     post_adt_exclusion_cancer_mrns = compute_post_adt_exclusion_cancer_mrns(
         icds,
-        adt_anchor_df,
+        adt_anchor_all_df,
     )
-    adt_entry_mrns = set(adt_anchor_df[ID_COL].drop_nulls().to_list())
-    eligible_mrns = (
-        all_cohort_mrns & adt_entry_mrns
-    ) - post_adt_exclusion_cancer_mrns
+    adt_post_diagnosis_mrns = set(
+        adt_anchor_df[ID_COL].drop_nulls().to_list()
+    )
+    eligible_mrns = compute_eligible_mrns(
+        c61_mrns=all_cohort_mrns,
+        dated_diagnosis_mrns=dated_diagnosis_mrns,
+        male_mrns=male_mrns,
+        psa_eligible_mrns=psa_eligible_mrns,
+        adt_post_diagnosis_mrns=adt_post_diagnosis_mrns,
+        parpi_mrns=parpi_mrns,
+        platinum_pre_diagnosis_mrns=platinum_pre_diagnosis_mrns,
+        post_adt_exclusion_cancer_mrns=post_adt_exclusion_cancer_mrns,
+    )
     eligible_platinum_df = platinum_df.filter(
         pl.col(ID_COL).is_in(sorted(eligible_mrns))
     )
     print(
+        "CAIA-COMPASS criteria: "
+        f"dated C61 diagnosis={len(all_cohort_mrns & dated_diagnosis_mrns)}; "
+        f"male={len(all_cohort_mrns & male_mrns)}; "
+        f">=5 PSA={len(all_cohort_mrns & psa_eligible_mrns)}; "
+        f"ADT on/after diagnosis={len(all_cohort_mrns & adt_post_diagnosis_mrns)}; "
+        f"PARPi exclusions={len(all_cohort_mrns & parpi_mrns)}; "
+        f"pre-diagnosis platinum exclusions="
+        f"{len(all_cohort_mrns & platinum_pre_diagnosis_mrns)}; "
+        f"post-ADT specified-cancer exclusions="
+        f"{len(all_cohort_mrns & post_adt_exclusion_cancer_mrns)}; "
+        f"eligible={len(eligible_mrns)}.\n"
         f"ARPI anchor drug recipients: "
         f"{len(anchor_df) if anchor_df is not None else 'not requested'}; "
-        f"ADT anchor drug recipients: {len(adt_anchor_df)}; "
-        f"post-ADT specified-cancer exclusions: "
-        f"{len(all_cohort_mrns & post_adt_exclusion_cancer_mrns)}; "
-        f"eligible after ADT entry/exclusion: {len(eligible_mrns)}; "
+        f"post-diagnosis ADT anchor recipients: {len(adt_anchor_df)}; "
         f"eligible platinum recipients: {len(eligible_platinum_df)} "
         f"(of {len(platinum_df)} across ICD-C61)."
     )
-
-    status_df = load_patient_status(args.patient_status_source)
 
     os.makedirs(args.mrn_lists_dir, exist_ok=True)
 
@@ -910,8 +1059,14 @@ def main():
         all_cohort_mrns,
         non_prostate_primary_mrns,
         post_adt_exclusion_cancer_mrns,
-        meds,
-        args.labs_csv,
+        dated_diagnosis_mrns,
+        male_mrns,
+        parpi_mrns,
+        arpi_docetaxel_post_diagnosis_mrns,
+        adt_post_diagnosis_mrns,
+        platinum_pre_diagnosis_mrns,
+        eligible_mrns,
+        psa_eligible_mrns,
     )
     icd_prostate_flags_path = os.path.join(
         args.mrn_lists_dir,
