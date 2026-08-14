@@ -104,6 +104,11 @@ ENDPOINTS = {
         "event_col": "PLATINUM",
         "description": "Time from the treatment anchor (first ARPI/taxane/radium-223 exposure = time 0) to first platinum exposure",
     },
+    "nepc": {
+        "duration_col": "t_nepc",
+        "event_col": "NEPC",
+        "description": "Time from the treatment anchor (first ADT exposure = time 0) to LLM-adjudicated NEPC diagnosis",
+    },
 }
 
 # Non-feature outcome/metadata columns, independent of the age column. The age
@@ -130,6 +135,16 @@ OUTCOME_METADATA_COLUMNS = {
     "t_death_from_first_record",
     "t_either",
     "split",
+    # NEPC endpoint. These MUST be listed even when the platinum endpoint is
+    # being run: they are outcome columns for either run, and omitting one lets
+    # NEPC status enter the feature matrix and predict NEPC.
+    "NEPC_DATE",
+    "NEPC",
+    "t_nepc",
+    "t_nepc_from_first_record",
+    "NEPC_DATE_SOURCE",
+    "NEPC_DATE_PRECISION",
+    "NEPC_LABEL_SOURCE",
 }
 
 

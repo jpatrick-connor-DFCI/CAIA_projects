@@ -221,6 +221,19 @@ def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFram
     ]
     if "death_date" in death_df.columns:
         keep_cols.append("death_date")
+    # NEPC endpoint columns, absent when the cohort was built without the LLM
+    # annotations mounted. Optional so the platinum-only path still works.
+    keep_cols.extend(
+        col
+        for col in (
+            "NEPC",
+            "NEPC_DATE",
+            "NEPC_DATE_SOURCE",
+            "NEPC_DATE_PRECISION",
+            "NEPC_LABEL_SOURCE",
+        )
+        if col in death_df.columns
+    )
     return death_df[keep_cols].copy()
 
 
@@ -542,6 +555,8 @@ def build_longitudinal_prediction_data(
     ]
     if "death_date" in pred_df.columns:
         date_cols.append("death_date")
+    if "NEPC_DATE" in pred_df.columns:
+        date_cols.append("NEPC_DATE")
     for col in date_cols:
         pred_df[col] = coerce_mixed_datetime(pred_df[col]).dt.floor("D")
 
@@ -609,6 +624,25 @@ def build_longitudinal_prediction_data(
         pred_df["t_last_contact"],
     ).astype(float)
 
+    # Second endpoint, built the same way: days from the treatment anchor to the
+    # LLM-adjudicated NEPC diagnosis for NEPC-positive patients, otherwise days
+    # from the anchor to last contact (censored). Absent when the survival cohort
+    # was built without the LLM annotations mounted, in which case the nepc
+    # endpoint simply isn't runnable and the platinum path is unaffected.
+    if "NEPC" in pred_df.columns:
+        pred_df["NEPC"] = (
+            pd.to_numeric(pred_df["NEPC"], errors="coerce").fillna(0).astype(int)
+        )
+        nepc_days = (pred_df["NEPC_DATE"] - anchor).dt.days
+        pred_df["t_nepc"] = np.where(
+            pred_df["NEPC"].eq(1),
+            nepc_days,
+            pred_df["t_last_contact"],
+        ).astype(float)
+        # A positive with no usable date would yield NaN here; Stage 1 already
+        # demotes undated positives to censored, so this is belt-and-braces.
+        pred_df["t_nepc"] = pred_df["t_nepc"].fillna(pred_df["t_last_contact"])
+
     # Patients who never received a highlighted drug have no anchor date, so every
     # anchor-relative duration is NaN and they are dropped by the outcome builder's
     # notna() validity checks. No separate anchor index column is emitted: the
@@ -637,6 +671,17 @@ def build_longitudinal_prediction_data(
         "LAB_VALUE",
         "RAW_TEST_CODE",
     ]
+    # NEPC endpoint columns are appended only when the survival cohort carried
+    # them, so the platinum-only output schema is byte-for-byte unchanged.
+    nepc_cols = [
+        "NEPC",
+        "NEPC_DATE",
+        "t_nepc",
+        "NEPC_DATE_SOURCE",
+        "NEPC_DATE_PRECISION",
+        "NEPC_LABEL_SOURCE",
+    ]
+    ordered_cols.extend(col for col in nepc_cols if col in pred_df.columns)
     return pred_df[ordered_cols].copy(), attrition
 
 

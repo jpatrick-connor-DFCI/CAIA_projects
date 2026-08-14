@@ -43,8 +43,8 @@ DEFAULT_WAIT_UNTIL_FULL_SURV_LOSS = 15
 DEFAULT_MAX_PRED_WINDOW = 260
 DEFAULT_SURVLATENT_REPO = SURVIVAL_DIR / "survlatent_ode_repo"
 
-# Event configuration, restricted to the two configs this arm supports (no
-# death-alone config -- see survival_common.longitudinal_targets).
+# Event configuration, mirroring survival_common.longitudinal_targets (no
+# death-alone config -- see that module).
 #
 # For single-event configs, event_col / time_to_event_col are strings (not
 # lists of length 1) because pre_process_data dispatches on isinstance(...,
@@ -59,11 +59,36 @@ EVENT_CONFIGS = {
         "event_col": ["PLATINUM", "DEATH"],
         "time_to_event_col": ["t_platinum", "t_death"],
     },
+    "nepc": {
+        "event_col": "NEPC",
+        "time_to_event_col": "t_nepc",
+    },
+    "nepc_competing": {
+        "event_col": ["NEPC", "DEATH"],
+        "time_to_event_col": ["t_nepc", "t_death"],
+    },
 }
 assert set(EVENT_CONFIGS) == set(LONGITUDINAL_CONFIGS), (
     "EVENT_CONFIGS must stay in lockstep with survival_common.longitudinal_targets."
     "LONGITUDINAL_CONFIGS so both models take identical --config values."
 )
+for _name, _spec in EVENT_CONFIGS.items():
+    # Also pin the columns, not just the config names: a config that agreed by
+    # name but disagreed on which event it reads would make the two models'
+    # identically-labelled outputs mean different things. Normalize the
+    # string-vs-list dispatch convention above before comparing.
+    _events = _spec["event_col"]
+    _times = _spec["time_to_event_col"]
+    _events = [_events] if isinstance(_events, str) else list(_events)
+    _times = [_times] if isinstance(_times, str) else list(_times)
+    assert _events == LONGITUDINAL_CONFIGS[_name]["event_cols"], (
+        f"EVENT_CONFIGS[{_name!r}] event columns {_events} disagree with "
+        f"LONGITUDINAL_CONFIGS[{_name!r}] {LONGITUDINAL_CONFIGS[_name]['event_cols']}."
+    )
+    assert _times == LONGITUDINAL_CONFIGS[_name]["time_cols"], (
+        f"EVENT_CONFIGS[{_name!r}] time columns {_times} disagree with "
+        f"LONGITUDINAL_CONFIGS[{_name!r}] {LONGITUDINAL_CONFIGS[_name]['time_cols']}."
+    )
 
 
 def load_split(

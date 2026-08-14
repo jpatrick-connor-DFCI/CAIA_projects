@@ -6,25 +6,45 @@ without torch or the external SurvLatent repo. Both models import
 ``LONGITUDINAL_CONFIGS`` / ``resolve_config`` / ``patient_targets`` from here
 and take identical ``--config`` values.
 
-Two fixed configs, deliberately no third "death-alone" config:
+Four configs, deliberately no "death-alone" config. Each names a primary
+cause of interest, optionally paired with death as a competing cause:
 
-  platinum   -- n_events=1. Death is never read; a patient who dies without
-                platinum is already censored at death via t_platinum's
-                fallback to t_last_contact (see cohort.make_outcome_df). This
-                is cause-specific censoring with zero special-casing, and is
-                what makes this config directly comparable to the existing
-                Cox/XGBoost arms (same cohort, same censoring).
-  competing  -- n_events=2. label = 0 (censored) / 1 (platinum) / 2 (death),
-                fixed by the order of event_cols below. A patient with both
-                events observed is labeled by whichever has the smaller
-                post-landmark duration (argmin ties break toward the first
-                listed cause, i.e. platinum).
+  platinum       -- n_events=1. Death is never read; a patient who dies without
+                    platinum is already censored at death via t_platinum's
+                    fallback to t_last_contact (see cohort.make_outcome_df).
+                    This is cause-specific censoring with zero special-casing,
+                    and is what makes this config directly comparable to the
+                    existing Cox/XGBoost arms (same cohort, same censoring).
+  competing      -- n_events=2. label = 0 (censored) / 1 (platinum) / 2 (death),
+                    fixed by the order of event_cols below. A patient with both
+                    events observed is labeled by whichever has the smaller
+                    post-landmark duration (argmin ties break toward the first
+                    listed cause, i.e. platinum).
+  nepc           -- the platinum config's analogue for the LLM-adjudicated NEPC
+                    diagnosis endpoint. Same cause-specific censoring.
+  nepc_competing -- the competing analogue: label 1 = NEPC, 2 = death.
+
+The nepc configs read a cohort built with ``--require-nepc`` (an incident-NEPC
+risk set), so they are NOT the same patients as the platinum configs -- their
+metrics are not a like-for-like comparison. See the README's "Arms and
+endpoints" section.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
+# Maps each config to the cox_aggregated.ENDPOINTS key whose AUC(t) horizon
+# grid it evaluates on, so a discrete-time head is scored on the same timeline
+# as the Cox/XGBoost arm for the same event. Kept beside the configs because
+# adding one without the other yields a KeyError at horizon-resolution time.
+CONFIG_ENDPOINTS: dict[str, str] = {
+    "platinum": "platinum",
+    "competing": "platinum",
+    "nepc": "nepc",
+    "nepc_competing": "nepc",
+}
 
 LONGITUDINAL_CONFIGS: dict[str, dict[str, list[str]]] = {
     "platinum": {
@@ -37,10 +57,24 @@ LONGITUDINAL_CONFIGS: dict[str, dict[str, list[str]]] = {
         "time_cols": ["t_platinum", "t_death"],
         "event_names": ["platinum", "death"],
     },
+    "nepc": {
+        "event_cols": ["NEPC"],
+        "time_cols": ["t_nepc"],
+        "event_names": ["nepc"],
+    },
+    "nepc_competing": {
+        "event_cols": ["NEPC", "DEATH"],
+        "time_cols": ["t_nepc", "t_death"],
+        "event_names": ["nepc", "death"],
+    },
 }
-# Fixed cause ordering: a future reorder of LONGITUDINAL_CONFIGS["competing"]
-# would silently swap which label (1 vs 2) every downstream risk column means.
-assert LONGITUDINAL_CONFIGS["competing"]["event_cols"][0] == "PLATINUM"
+# Fixed cause ordering: a future reorder of either competing config would
+# silently swap which label (1 vs 2) every downstream risk column means. The
+# cause of interest must stay first, and death second.
+assert LONGITUDINAL_CONFIGS["competing"]["event_cols"] == ["PLATINUM", "DEATH"]
+assert LONGITUDINAL_CONFIGS["nepc_competing"]["event_cols"] == ["NEPC", "DEATH"]
+# Every config must declare the horizon grid it evaluates on.
+assert set(CONFIG_ENDPOINTS) == set(LONGITUDINAL_CONFIGS)
 
 
 class LongitudinalEventConfig:
@@ -204,15 +238,21 @@ def manifest_horizons_for_config(
     event_names: list[str],
     *,
     max_pred_window: int,
+    endpoint: str = "platinum",
 ) -> dict[str, np.ndarray]:
     """Read the shared AUC(t) horizon grid for each cause, clamped to the window.
 
     Sourced from ``build_manifest["auc_horizons_by_landmark"][str(landmark_day)]``
     (README invariant #6) so DeepHit/SurvLatent evaluate on the identical grid
-    Cox/XGBoost do. Both the ``platinum`` and ``competing`` configs read the
-    **platinum** grid for every cause (see plan §7): the platinum row is then
-    comparable across all four model arms, and the death row (competing only)
-    is reported on the same grid as a secondary diagnostic.
+    Cox/XGBoost do.
+
+    ``endpoint`` selects which endpoint's grid to read -- ``CONFIG_ENDPOINTS``
+    maps each config to it, so the ``nepc*`` configs score against the NEPC
+    grid and the ``platinum*`` configs against the platinum one. Within a
+    config, **every** cause reads that one grid: the cause-of-interest row is
+    then comparable across all model arms for the same endpoint, and the death
+    row (competing configs only) is reported on the same grid as a secondary
+    diagnostic.
     """
     landmark_horizons = build_manifest.get("auc_horizons_by_landmark", {}).get(str(int(landmark_day)))
     if landmark_horizons is None:
@@ -220,15 +260,17 @@ def manifest_horizons_for_config(
             f"build_manifest.json has no auc_horizons_by_landmark entry for landmark "
             f"+{landmark_day}d."
         )
-    platinum_horizons = landmark_horizons.get("platinum")
-    if platinum_horizons is None:
+    endpoint_horizons = landmark_horizons.get(endpoint)
+    if endpoint_horizons is None:
         raise KeyError(
             f"build_manifest.json's auc_horizons_by_landmark[{landmark_day}] has no "
-            f"'platinum' entry to source horizons from; got keys "
-            f"{list(landmark_horizons)}."
+            f"{endpoint!r} entry to source horizons from; got keys "
+            f"{list(landmark_horizons)}. A cohort built without --require-nepc "
+            "carries no NEPC horizon grid -- rebuild prediction inputs for that "
+            "endpoint."
         )
 
-    horizons = np.asarray(platinum_horizons, dtype=float)
+    horizons = np.asarray(endpoint_horizons, dtype=float)
     horizons = horizons[(horizons > 0) & (horizons <= float(max_pred_window))]
 
     horizons_by_event: dict[str, np.ndarray] = {}

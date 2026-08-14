@@ -78,9 +78,29 @@ DEFAULT_OUTLIER_LO = 0.005
 DEFAULT_OUTLIER_HI = 0.995
 # event_cols/time_to_event_cols carried in build_manifest.json (Cox/XGBoost
 # ignore these; see survival_common.longitudinal_targets.LONGITUDINAL_CONFIGS
-# for the platinum-vs-competing config registry that consumes them).
+# for the config registry that consumes them). NEPC is appended only when the
+# cohort actually carries it -- see longitudinal_event_columns().
 LONGITUDINAL_EVENT_COLS = ["PLATINUM", "DEATH"]
 LONGITUDINAL_TIME_TO_EVENT_COLS = ["t_platinum", "t_death"]
+LONGITUDINAL_OPTIONAL_EVENT_COLS = {"NEPC": "t_nepc"}
+
+
+def longitudinal_event_columns(frame) -> tuple[list[str], list[str]]:
+    """(event_cols, time_to_event_cols) for the manifest, given a cohort frame.
+
+    The base platinum/death pair is always declared. Optional endpoints are
+    appended only when both their event and duration columns are present, so a
+    cohort built without the LLM annotations mounted advertises exactly what it
+    used to and ``resolve_config("nepc", ...)`` fails with a clear "rebuild
+    prediction inputs" message rather than a KeyError deep in target building.
+    """
+    event_cols = list(LONGITUDINAL_EVENT_COLS)
+    time_cols = list(LONGITUDINAL_TIME_TO_EVENT_COLS)
+    for event_col, time_col in LONGITUDINAL_OPTIONAL_EVENT_COLS.items():
+        if event_col in frame.columns and time_col in frame.columns:
+            event_cols.append(event_col)
+            time_cols.append(time_col)
+    return event_cols, time_cols
 LONGITUDINAL_SCHEMA_VERSION = 1
 # ~10 years. Restores administrative censoring at the cohort level so it
 # matches the AUC(t)/Brier evaluation timeline, which is already capped at
@@ -339,9 +359,11 @@ AGGREGATED_DROP_COLUMNS = (
     "DIAGNOSIS_DATE",
     "LAST_CONTACT_DATE",
     "PLATINUM_DATE",
+    "NEPC_DATE",
     "TREATMENT_ANCHOR_DATE",
     # Pre-rebase duration duplicates kept for debugging by make_outcome_df.
     "t_platinum_from_first_record",
+    "t_nepc_from_first_record",
     "t_last_contact_from_first_record",
     "t_death_from_first_record",
     # Shared make_outcome_df still derives these first-treatment fields (falling
@@ -511,6 +533,15 @@ def main(args: argparse.Namespace) -> None:
     else:
         print("Administrative censoring: disabled (--no-max-followup-days)")
 
+    # getattr default: callers (tests, notebooks) build the Namespace directly
+    # rather than through the parser, so a bare attribute access would break them.
+    require_nepc = bool(getattr(args, "require_nepc", False))
+    if require_nepc:
+        print(
+            "NEPC endpoint cohort: ON (--require-nepc). t_nepc must be non-null and "
+            "> 0, so NEPC diagnosed at or before the landmark (prevalent) is excluded "
+            "and this build is NOT interchangeable with the platinum build."
+        )
     merged_by_landmark: dict[int, pd.DataFrame] = {}
     for landmark_day in landmark_days:
         print(f"\n##### COHORT BUILD: LANDMARK +{landmark_day} DAYS #####")
@@ -520,6 +551,7 @@ def main(args: argparse.Namespace) -> None:
             anchor_col=anchor_col,
             require_first_treatment=False,
             max_followup_days=args.max_followup_days,
+            require_nepc=require_nepc,
         )
         merged_by_landmark[landmark_day] = merged
 
@@ -663,6 +695,21 @@ def main(args: argparse.Namespace) -> None:
         train_val_block = aggregated.loc[aggregated["split"].isin(["train", "valid"])]
         landmark_horizons: dict[str, list[int]] = {}
         for endpoint, cfg in ENDPOINTS.items():
+            # Endpoints whose outcome columns this build doesn't carry (nepc,
+            # when the cohort was compiled without the LLM annotations) get no
+            # horizon grid rather than a KeyError. A run that later asks for
+            # such an endpoint fails at fit time on the missing manifest key.
+            missing = [
+                col
+                for col in (cfg["duration_col"], cfg["event_col"])
+                if col not in train_val_block.columns
+            ]
+            if missing:
+                print(
+                    f"  AUC horizons ({endpoint}): skipped, cohort has no "
+                    f"{', '.join(missing)}"
+                )
+                continue
             grid = compute_horizon_grid(
                 train_val_block,
                 duration_col=cfg["duration_col"],
@@ -703,11 +750,12 @@ def main(args: argparse.Namespace) -> None:
             long_csv = output_dir / longitudinal_filename(landmark_day)
             wide.to_csv(long_csv, index=False)
             long_manifest_path = output_dir / longitudinal_manifest_filename(landmark_day)
+            long_event_cols, long_time_cols = longitudinal_event_columns(merged)
             longitudinal_manifest = {
                 "id_col": ID_COL,
                 "time_col": "TIME",
-                "event_cols": list(LONGITUDINAL_EVENT_COLS),
-                "time_to_event_cols": list(LONGITUDINAL_TIME_TO_EVENT_COLS),
+                "event_cols": long_event_cols,
+                "time_to_event_cols": long_time_cols,
                 "feat_cont": selected_labs + [AGE_COL],
                 "feat_cat": [],
                 "feat_reconstr": selected_labs,
@@ -759,6 +807,11 @@ def main(args: argparse.Namespace) -> None:
         (h for endpoints in auc_horizons_by_landmark.values() for hs in endpoints.values() for h in hs),
         default=0,
     )
+    # Every landmark's outcome frame comes from the same cohort build, so the
+    # available causes are identical across them; read the first.
+    build_event_cols, build_time_cols = longitudinal_event_columns(
+        merged_by_landmark[landmark_days[0]]
+    )
     build_manifest = {
         "data": str(args.data),
         "anchor_col": "none" if anchor_col is None else str(anchor_col),
@@ -772,6 +825,10 @@ def main(args: argparse.Namespace) -> None:
             float(args.max_followup_days) if args.max_followup_days is not None else None
         ),
         "restrict_to_mrns": str(args.restrict_to_mrns) if args.restrict_to_mrns else None,
+        # Whether the incident-NEPC validity conditions gated the cohort. A
+        # require_nepc=true build is a different cohort from the platinum build
+        # and the two must not be compared as if they were the same patients.
+        "require_nepc": require_nepc,
         "time_unit_days": int(args.time_unit_days),
         "cohort_mode": "independent_by_landmark",
         "stratification_by_landmark": stratification_by_landmark,
@@ -791,11 +848,12 @@ def main(args: argparse.Namespace) -> None:
         "auc_time_unit_days": int(args.time_unit_days),
         "auc_horizons_by_landmark": auc_horizons_by_landmark,
         "auc_max_horizon": int(max_horizon),
-        # A property of the cohort (it always carries two competing causes),
-        # not of the longitudinal build -- Cox/XGBoost ignore these. See
+        # A property of the cohort (which causes it carries), not of the
+        # longitudinal build -- Cox/XGBoost ignore these. Always platinum+death;
+        # NEPC too when the cohort carries it. See
         # survival_common.longitudinal_targets.LONGITUDINAL_CONFIGS.
-        "event_cols": list(LONGITUDINAL_EVENT_COLS),
-        "time_to_event_cols": list(LONGITUDINAL_TIME_TO_EVENT_COLS),
+        "event_cols": build_event_cols,
+        "time_to_event_cols": build_time_cols,
         "longitudinal_schema_version": LONGITUDINAL_SCHEMA_VERSION,
         "longitudinal_landmarks_built": (
             [int(d) for d in landmark_days] if args.build_longitudinal else []
@@ -931,6 +989,19 @@ if __name__ == "__main__":
         action="store_const",
         const=None,
         help="Disable administrative censoring (no cap on follow-up).",
+    )
+    parser.add_argument(
+        "--require-nepc",
+        dest="require_nepc",
+        action="store_true",
+        default=False,
+        help=(
+            "Gate the cohort on the NEPC endpoint being modelable: t_nepc non-null "
+            "and > 0. 't_nepc > 0' drops prevalent NEPC (diagnosed at or before the "
+            "landmark), making this an incident endpoint. Off by default because "
+            "turning it on shrinks the cohort and would change the existing platinum "
+            "results; use it for a separate --output-dir NEPC build."
+        ),
     )
     parser.add_argument(
         "--build-longitudinal",

@@ -2,9 +2,11 @@
 
 Mirrors ``cox_runners.py`` in shape, but does not
 reuse ``add_common_cox_args``: that binds ``--endpoints`` to
-``choices=list(cox.ENDPOINTS)`` (platinum-only), which is the wrong axis
-here -- these models take ``--config {platinum,competing}`` and run one
-landmark per invocation (not a list). See
+``choices=list(cox.ENDPOINTS)`` and takes a list, which is the wrong axis
+here -- these models take a single ``--config`` (a cause-of-interest plus an
+optional competing cause) and run one landmark per invocation. The two
+registries are related but not identical: ``CONFIG_ENDPOINTS`` maps each
+config to the ``cox.ENDPOINTS`` key whose AUC(t) grid it scores on. See
 ``survival_common.longitudinal_targets`` for config/target semantics and
 ``survival_common.deephit_engine`` for the torch-gated model itself.
 """
@@ -22,6 +24,7 @@ import pandas as pd
 from survival_common import cohort, deephit_engine as engine
 from survival_common.helper import assert_no_test_leakage, resolve_auc_max_time_units
 from survival_common.longitudinal_targets import (
+    CONFIG_ENDPOINTS,
     LONGITUDINAL_CONFIGS,
     manifest_horizons_for_config,
     patient_targets,
@@ -73,7 +76,13 @@ def add_common_longitudinal_args(parser: argparse.ArgumentParser) -> None:
         "--config",
         choices=sorted(LONGITUDINAL_CONFIGS),
         default="platinum",
-        help="platinum (death censored, comparable to Cox/XGBoost) or competing (platinum+death).",
+        help=(
+            "Cause of interest, optionally with death as a competing cause: "
+            "platinum / competing (platinum+death), or nepc / nepc_competing "
+            "(nepc+death). The cause-only configs censor at death and are the "
+            "ones comparable to Cox/XGBoost for the same endpoint. The nepc "
+            "configs need inputs built with --require-nepc."
+        ),
     )
     parser.add_argument(
         "--overwrite",
@@ -251,6 +260,9 @@ def run_deephit(args: Namespace) -> None:
     event_cols = event_config.event_cols
     time_cols = event_config.time_cols
     event_names = event_config.event_names
+    # Which endpoint's AUC(t) grid this config scores against; see
+    # longitudinal_targets.CONFIG_ENDPOINTS.
+    horizon_endpoint = CONFIG_ENDPOINTS[event_config.name]
 
     auc_max_time_units = resolve_auc_max_time_units(build_manifest, None)
     landmark_horizons = build_manifest.get("auc_horizons_by_landmark", {}).get(str(landmark_day))
@@ -258,12 +270,15 @@ def run_deephit(args: Namespace) -> None:
         raise KeyError(
             f"build_manifest.json has no auc_horizons_by_landmark entry for landmark +{landmark_day}d."
         )
-    max_manifest_horizon = max((h for hs in landmark_horizons.values() for h in hs), default=0)
+    # Scoped to this config's own endpoint grid: a NEPC run must not be failed
+    # by a long platinum horizon it never evaluates on (and vice versa).
+    max_manifest_horizon = max(landmark_horizons.get(horizon_endpoint, []), default=0)
     if args.max_pred_window < max_manifest_horizon:
         raise ValueError(
             f"--max-pred-window={args.max_pred_window} is shorter than the largest "
-            f"manifest horizon ({max_manifest_horizon}) at landmark +{landmark_day}d. "
-            "Increase it so DeepHit's AUC grid is comparable to Cox/XGBoost."
+            f"{horizon_endpoint} manifest horizon ({max_manifest_horizon}) at landmark "
+            f"+{landmark_day}d. Increase it so DeepHit's AUC grid is comparable to "
+            "Cox/XGBoost."
         )
 
     targets = patient_targets(
@@ -294,7 +309,11 @@ def run_deephit(args: Namespace) -> None:
 
     train_val_targets = targets.loc[targets.index.map(str).isin(train_val_ids)].copy()
     fixed_horizons_by_event = manifest_horizons_for_config(
-        build_manifest, landmark_day, event_names, max_pred_window=args.max_pred_window
+        build_manifest,
+        landmark_day,
+        event_names,
+        max_pred_window=args.max_pred_window,
+        endpoint=horizon_endpoint,
     )
     for event_name in event_names:
         if event_name not in fixed_horizons_by_event:
@@ -399,7 +418,7 @@ def run_deephit(args: Namespace) -> None:
         "config": args.config,
         "event_names": event_names,
         "feature_cols": feature_cols,
-        "horizon_source": "auc_horizons_by_landmark[landmark]['platinum']",
+        "horizon_source": f"auc_horizons_by_landmark[landmark][{horizon_endpoint!r}]",
         "auc_horizons_by_event": {
             event_name: [float(v) for v in horizons]
             for event_name, horizons in fixed_horizons_by_event.items()

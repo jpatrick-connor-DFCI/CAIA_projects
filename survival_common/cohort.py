@@ -98,6 +98,7 @@ def make_outcome_df(
     extra_anchor_cols: tuple[str, ...] = (),
     require_first_treatment: bool = True,
     max_followup_days: float | None = None,
+    require_nepc: bool = False,
 ) -> pd.DataFrame:
     """Build the per-patient outcome table rebased to a landmark.
 
@@ -123,6 +124,12 @@ def make_outcome_df(
             ``None`` (no cap, full follow-up used). Previously defaulted to
             3650 (10 years) to guard against a sparse tail destabilizing the
             Cox fits; pass an explicit value to restore that horizon.
+        require_nepc: whether the ``t_nepc`` validity conditions (notna, > 0)
+            join the cohort filter. Off by default: ``t_nepc > 0`` is what makes
+            NEPC an *incident* endpoint (it drops diagnoses at or before the
+            landmark), so applying it unconditionally would silently shrink the
+            platinum cohort and change existing results. Turn it on only when
+            the NEPC endpoint is the one being modeled.
     """
     patient_level_cols = [
         ID_COL,
@@ -141,6 +148,14 @@ def make_outcome_df(
         "t_platinum",
         "t_last_contact",
         "t_death",
+        # NEPC endpoint. Absent unless the cohort was built with the LLM
+        # annotations mounted; every use below is guarded on presence.
+        "NEPC_DATE",
+        "NEPC",
+        "t_nepc",
+        "NEPC_DATE_SOURCE",
+        "NEPC_DATE_PRECISION",
+        "NEPC_LABEL_SOURCE",
         *extra_anchor_cols,
     ]
     available_cols = [col for col in patient_level_cols if col in df.columns]
@@ -161,6 +176,7 @@ def make_outcome_df(
         "FIRST_TREATMENT_DATE",
         "LAST_CONTACT_DATE",
         "PLATINUM_DATE",
+        "NEPC_DATE",
     ]:
         if date_col in pat.columns:
             pat[date_col] = _coerce_datetime(pat[date_col])
@@ -214,6 +230,24 @@ def make_outcome_df(
         pat["t_platinum"].fillna(pat["t_last_contact"]),
     )
 
+    # NEPC endpoint, derived exactly like platinum but only when the upstream
+    # cohort carried it. ``has_nepc`` gates every NEPC-touching block below, so
+    # a platinum-only input flows through unchanged.
+    has_nepc = "NEPC" in pat.columns or "t_nepc" in pat.columns
+    if has_nepc:
+        pat["NEPC"] = (
+            pd.to_numeric(pat.get("NEPC"), errors="coerce").fillna(0).astype(int)
+        )
+        pat["t_nepc"] = _derive_duration(
+            pat,
+            duration_col="t_nepc",
+            event_date_col="NEPC_DATE",
+        )
+        pat["t_nepc"] = pat["t_nepc"].where(
+            pat["NEPC"].eq(1),
+            pat["t_nepc"].fillna(pat["t_last_contact"]),
+        )
+
     if anchor_col is None:
         # Durations are already measured from the index date; the landmark is a
         # pure offset from time 0 (no anchor term, no anchor-based filtering).
@@ -222,7 +256,10 @@ def make_outcome_df(
         if anchor_col not in pat.columns:
             raise ValueError(f"make_outcome_df: anchor_col {anchor_col!r} missing from input.")
         landmark_time = pat[anchor_col].astype(float) + float(landmark_offset_days)
-    for duration_col in ["t_last_contact", "t_death", "t_platinum"]:
+    rebased_duration_cols = ["t_last_contact", "t_death", "t_platinum"]
+    if has_nepc:
+        rebased_duration_cols.append("t_nepc")
+    for duration_col in rebased_duration_cols:
         pat[f"{duration_col}_from_first_record"] = pat[duration_col]
         pat[duration_col] = pat[duration_col].astype(float) - landmark_time
 
@@ -241,12 +278,17 @@ def make_outcome_df(
         n_death_censored = int(death_past.sum())
         pat.loc[platinum_past, "PLATINUM"] = 0
         pat.loc[death_past, "DEATH"] = 0
-        for duration_col in ["t_last_contact", "t_death", "t_platinum"]:
+        nepc_msg = ""
+        if has_nepc:
+            nepc_past = pat["NEPC"].eq(1) & pat["t_nepc"].gt(horizon)
+            pat.loc[nepc_past, "NEPC"] = 0
+            nepc_msg = f" and {int(nepc_past.sum())} NEPC events"
+        for duration_col in rebased_duration_cols:
             pat[duration_col] = pat[duration_col].clip(upper=horizon)
         print(
             f"[make_outcome_df @ landmark +{landmark_offset_days}d] administrative "
             f"censoring at {horizon:g}d: {n_platinum_censored} PLATINUM events and "
-            f"{n_death_censored} DEATH events pushed past the horizon censored."
+            f"{n_death_censored} DEATH events{nepc_msg} pushed past the horizon censored."
         )
 
     platinum_event_time = np.where(pat["PLATINUM"].eq(1), pat["t_platinum"], np.inf)
@@ -271,6 +313,20 @@ def make_outcome_df(
         "t_last_contact > 0": pat["t_last_contact"].gt(0),
         "t_either > 0": pat["t_either"].gt(0),
     }
+    if require_nepc:
+        # Gated deliberately: "t_nepc > 0" excludes prevalent NEPC (diagnosed at
+        # or before the landmark), which is the right incident-endpoint
+        # semantics for the NEPC run but would shrink the platinum cohort if
+        # applied to it.
+        if not has_nepc:
+            raise ValueError(
+                "make_outcome_df: require_nepc=True but the input carries no NEPC "
+                "columns. Rebuild the survival cohort with the LLM NEPC diagnosis "
+                "labels (--nepc-labels) before running the nepc endpoint."
+            )
+        conditions["t_nepc notna"] = pat["t_nepc"].notna()
+        conditions["t_nepc > 0"] = pat["t_nepc"].gt(0)
+
     if anchor_col is not None:
         # A real anchor column must be present and on-or-after first record; with
         # anchor_col=None the durations are already index-relative and there is no
@@ -748,6 +804,7 @@ def build_landmark_merged(
     anchor_col: str | None = "t_first_treatment",
     require_first_treatment: bool = True,
     max_followup_days: float | None = None,
+    require_nepc: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Build the landmarked outcome + feature merge for a given anchor.
 
@@ -760,7 +817,8 @@ def build_landmark_merged(
 
     ``max_followup_days`` forwards to :func:`make_outcome_df`'s administrative
     censoring horizon; defaults to ``None`` (no cap) so callers must opt in
-    explicitly.
+    explicitly. ``require_nepc`` likewise forwards the NEPC validity conditions,
+    which build an incident-NEPC cohort and are off by default.
     """
     extra_anchor_cols = (
         () if anchor_col in (None, "t_first_treatment") else (anchor_col,)
@@ -772,6 +830,7 @@ def build_landmark_merged(
         extra_anchor_cols=extra_anchor_cols,
         require_first_treatment=require_first_treatment,
         max_followup_days=max_followup_days,
+        require_nepc=require_nepc,
     )
     print(f"Outcome table @ landmark +{landmark_offset_days}d: {len(outcome_df)} patients")
 

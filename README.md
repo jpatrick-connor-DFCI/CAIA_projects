@@ -14,6 +14,15 @@ diagnosis, and bladder (C67), lung (C34), head-and-neck (C00-C14/C30-C32), or te
 cancer diagnosed strictly after first ADT are excluded. The paired, R-only `05_figures.Rmd` emits
 manuscript figures for both.
 
+**Arm and endpoint are two orthogonal axes.** The *arm* sets time 0 (the index-date anchor); the
+*endpoint* sets the event being modelled. They are selected independently, and the pair is what
+defines a run — see [Arms and endpoints](#arms-and-endpoints).
+
+| Axis | Registry | Declared in | Values |
+| --- | --- | --- | --- |
+| **Arm** (index date / time 0) | `_ARM_SPECS` | `COMPASS/survival_analysis/compass_pipeline.py` | `arpi`, `adt` |
+| **Endpoint** (the event) | `ENDPOINTS` | `COMPASS/survival_analysis/cox_aggregated.py` | `platinum`, `nepc` |
+
 > This README is the canonical reference for editing the pipeline. It documents the directory
 > layout, the data flow, every script's inputs/outputs, the **conventions and invariants that
 > must be preserved** (split discipline, train-only fitting, landmark base, ID-column handling),
@@ -36,7 +45,7 @@ survival_common/                         # shared survival-analysis library used
 ├── cohort.py                            # landmark/outcome/feature-matrix/person-period builders
 ├── cox_engine.py                        # shared Cox / Coxnet / IPCW AUC(t) primitives
 ├── xgboost_engine.py                    # shared XGBoost survival:cox primitives
-├── longitudinal_targets.py              # torch-free platinum/competing target + horizon semantics
+├── longitudinal_targets.py              # torch-free cause/competing target + horizon semantics
 ├── deephit_engine.py                    # torch-gated Dynamic-DeepHit model + training engine
 ├── longitudinal_runners.py              # Dynamic-DeepHit CLI orchestration
 ├── helper.py                            # canonical labs, horizons, Brier, fold/leakage guards
@@ -70,8 +79,10 @@ COMPASS/
     ├── 01_preprocessing.ipynb            # schema audit, cohort compile, preprocessing, diagnostics
     ├── 02_univariate.ipynb               # univariate arms + nominal-significance filter
     ├── 03_multivariate.ipynb             # elastic-net + XGBoost + summary tables
-    ├── 03b_multivariate_longitudinal.ipynb # Dynamic-DeepHit + SurvLatent ODE (torch, optional)
+    ├── 03b_multivariate_longitudinal.ipynb # Dynamic-DeepHit (torch, optional; SurvLatent ODE off by default)
     ├── 05_figures.Rmd                    # R figures from merged profile_data outputs
+    ├── 06_abstract_numbers.ipynb         # read-only: abstract/manuscript counts from built artifacts
+    ├── 07_endpoint_comparison.ipynb      # read-only: platinum vs nepc endpoint comparison
     ├── multivariate_longitudinal/
     │   ├── dynamic_deephit.py            # ENTRY: thin CLI over survival_common/deephit_engine.py
     │   ├── survlatent_ode.py             # ENTRY: adapter around the bundled editable checkout
@@ -82,10 +93,11 @@ COMPASS/
         └── 04_gam.ipynb                  # R-kernel GAM runner on merged profile_data
 ```
 
-All six numbered/lettered notebooks use the merged PROFILE_data_processing parquets and the
+All eight numbered/lettered notebooks use the merged PROFILE_data_processing parquets and the
 standard `COMPASS` data/figure roots. The Python notebooks share `compass_pipeline.py`; no
 single-release baseline run is part of this workflow. `03b` is optional and torch-gated (see
-invariant #7 below) — the other notebooks never require torch.
+invariant #7 below) — the other notebooks never require torch. `06` and `07` are read-only
+reporting notebooks: they read already-generated artifacts and refit nothing.
 
 ---
 
@@ -102,18 +114,25 @@ invariant #7 below) — the other notebooks never require torch.
         ▼  data_preprocessing/longitudinal_data_processing.py  (--anchor-med-set {arpi,adt})
  longitudinal_prediction_data.csv, longitudinal_prediction_data_adt.csv
         │
-        ▼  data_preprocessing/build_prediction_inputs.py
- prediction_inputs/  (aggregated + pre-treatment long labs + split + horizons)
+        ▼  data_preprocessing/build_prediction_inputs.py     [forks per endpoint]
+ prediction_inputs_<arm>/        (aggregated + pre-treatment long labs + split + horizons)
+ prediction_inputs_<arm>_nepc/   (same, built with --require-nepc: incident-NEPC risk set)
         │
         ├──► build_somatic_gleason_inputs.py
         │    prediction_inputs_<arm>/somatic_gleason/
         │
         ▼  survival_analysis/univariate_analysis.py
            survival_analysis/multivariate_analysis.py
+ local_runs_<arm>/ , local_runs_<arm>_nepc/
         │
-        ▼  05_figures.Rmd (R; 2 cohort arms: arpi, adt)
- figures/
+        ├──► 05_figures.Rmd (R; 2 cohort arms: arpi, adt)
+        │    figures/
+        │
+        ▼  07_endpoint_comparison.ipynb (read-only; platinum vs nepc)
 ```
+
+Everything above `build_prediction_inputs.py` is endpoint-independent and shared: one survival
+cohort carries every endpoint's columns. Only Stage 3 onward is duplicated per endpoint.
 
 Every raw OncDRS read in Stage 1 and Stage 2 goes through
 `data_preprocessing_common/oncdrs_sources.scan_source()`. The COMPASS notebooks pass the merged
@@ -139,6 +158,12 @@ eligible base cohort feeds the ARPI/chemo-anchored and ADT-anchored survival dat
   The two `*-source` flags default to `<--oncdrs-path>/{MEDICATIONS,PT_INFO_STATUS_REGISTRATION}.csv`,
   so existing invocations are unchanged. `load_patient_status()` takes a **file** path, not a
   directory.
+  `--nepc-labels` points at the strict LLM NEPC diagnosis labels
+  (`LLM_annotations/LLM_nepc_diagnosis/nepc_dx_labels.parquet`, one row per patient, written by the
+  sibling `LLM_clinical_annotations` repo). A **missing file is non-fatal**: the stage warns and
+  emits no NEPC columns, leaving the platinum pipeline unaffected. Note `diagnosis_date` arrives as
+  an ISO **string**, not a date type, with partial dates already normalized (year → Jan 1,
+  year-month → the 1st).
 - **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`, or `--out-dir`; all outputs including
   `prostate_icd_data.csv` honour it):** `prostate_arpi_survival_cohort_arpi.csv`
   and `prostate_adt_survival_cohort_adt.csv` (ARPI-treatment-anchor-restricted and
@@ -149,7 +174,11 @@ eligible base cohort feeds the ARPI/chemo-anchored and ADT-anchored survival dat
   indicators for dated prostate diagnosis, male sex, a non-prostate primary
   (`HAS_NON_PROSTATE_PRIMARY`, descriptive only), the requested post-ADT cancer exclusion,
   PARPi exposure, pre-diagnosis platinum, ARPI/docetaxel exposure, ADT on/after diagnosis,
-  at least five broad PSA tests, and final eligibility.
+  at least five broad PSA tests, and final eligibility. When the NEPC labels are available, the two
+  survival cohorts additionally carry `NEPC`, `NEPC_DATE`, `TT_NEPC`, and the three provenance
+  columns (`NEPC_DATE_SOURCE`, `NEPC_DATE_PRECISION`, `NEPC_LABEL_SOURCE`); one cohort file serves
+  **both** endpoints. The printed summary reports NEPC positives, the provenance breakdowns, and how
+  many diagnoses are prevalent at the anchor — read it before committing to NEPC modelling.
 - **Cohort definition:** the seven criteria above are enforced in Stage 1. The `adt` arm uses this
   cohort directly; the `arpi` arm additionally requires a post-diagnosis ARPI/chemo anchor.
 - **Anchor sets:** `ARPI_ANCHOR_MEDS` (7 drugs: ARPIs, taxanes, radium-223 — unchanged,
@@ -221,9 +250,11 @@ prostate lab frame used by the current treatment-anchored analyses.
   `unique_lab_ids_w_units.csv` inventory can be generated per project with
   `--write-unique-labs` for diagnostics or mapping refreshes; it is not a repo source of truth.
 - **Timing semantics:** `t_lab`, `t_diagnosis`, `t_first_treatment`, `t_treatment_anchor`,
-  `t_platinum`, `t_last_contact`, `t_death`. `t_death` is a real death-date-derived duration when the
-  survival cohort's `death_date` is available (falls back to the last-contact proxy for dead patients
-  with no recorded date); COMPASS models still use the `platinum` endpoint only.
+  `t_platinum`, `t_nepc`, `t_last_contact`, `t_death`. `t_death` is a real death-date-derived duration
+  when the survival cohort's `death_date` is available (falls back to the last-contact proxy for dead
+  patients with no recorded date); it is not itself a registered model endpoint. `t_nepc` is built
+  exactly like `t_platinum` (days from anchor to `NEPC_DATE` for positives, else `t_last_contact`)
+  and is emitted only when the upstream NEPC labels were available at Stage 1.
 
 ### 2.2 — `data_preprocessing/build_prediction_inputs.py` → `prediction_inputs/`
 
@@ -237,7 +268,14 @@ cohort.
   `--seed`, `--test-frac`, `--val-frac`, `--time-unit-days 7`, `--min-patient-coverage`,
   `--auc-quantiles`, `--id-col`, `--age-col`, `--anchor-col`,
   `--restrict-to-mrns`, `--require-first-treatment` / `--no-require-first-treatment`,
-  `--min-psa-count`, `--exclude-parpi` / `--include-parpi`.
+  `--min-psa-count`, `--exclude-parpi` / `--include-parpi`, `--require-nepc`.
+- **`--require-nepc`** restricts the risk set to patients with an incident NEPC diagnosis
+  (`t_nepc` present and `> 0` after landmark rebasing). Off by default, and recorded in
+  `build_manifest.json`. It changes cohort membership, so a build made with it must go to its own
+  `prediction_inputs_<arm>_nepc/` directory — `compass_pipeline.make_runs(output_suffix=...)` does
+  that automatically. The horizon-grid loop skips any registered endpoint whose duration/event
+  columns are absent from the build, so a platinum-only cohort is unaffected by the `nepc`
+  registration.
 - **Default downstream cohort filters:** ≥5 PSA rows and PARPi exclusion are repeated as consistency
   guards after the Stage-1 restriction. They should produce no further criterion-related attrition
   for newly rebuilt cohorts; alternate inputs can relax them explicitly.
@@ -262,9 +300,11 @@ cohort.
 
 ### 2.3 — Models
 
-All read prebuilt inputs and the `split` column; none re-derive the split. COMPASS models use the
-`platinum` endpoint only (time to first platinum). Both ARPI- and ADT-anchored arms use landmarks
-`[0, 90, 180]`. Metrics: Harrell C-index, IPCW
+All read prebuilt inputs and the `split` column; none re-derive the split. COMPASS models default to
+the `platinum` endpoint (time to first platinum) and additionally support `nepc` (time to
+LLM-adjudicated NEPC diagnosis) — see [Arms and endpoints](#arms-and-endpoints). `--endpoints` is
+built from `cox.ENDPOINTS`, so every runner gets the choice for free. Both ARPI- and ADT-anchored
+arms use landmarks `[0, 90, 180]`. Metrics: Harrell C-index, IPCW
 mean AUC(t), integrated IPCW Brier — horizons come from `build_manifest.json` so all models share a
 grid. The outer train+valid event-time quantiles define a bounded interval that is filled with up to
 25 evenly spaced time points (interior quantiles are provenance only, not horizons). The builders clamp
@@ -290,8 +330,8 @@ the input builder must be rerun after this change.
 | `multivariate_analysis.py --model xgboost` | XGBoost `survival:cox`, 5-fold CV grid (`max_depth × eta × min_child_weight`) | `--landmark-days`, `--endpoints`, `--max-features`; IPIO also supports `--feature-subset {labs,genomics,all}` |
 | `gam_trajectory_features.R` (COMPASS only) | Hierarchical GAM (`mgcv::bam`, `bs="fs"` factor-smooth per patient, shrinking sparse patients toward the population curve) per canonical lab, replacing the two-point `__delta` with `__gam_level` / `__gam_slope` / `__gam_curvature` / `__gam_auc` / `__gam_dev` evaluated at the landmark boundary | `--inputs-dir`, `--landmark-days`, `--k-pop`, `--k-pat`, `--trailing-window-days`, `--nthreads`, `--fit-split {all,train_val}` |
 | `gam_cox_nonlinearity.R` (COMPASS only) | Penalized-spline Cox (`mgcv::gam(family=cox.ph())`) per selected feature: fits a smooth and a linear model of the same feature and reports `edf`/`p_lrt`/`q_lrt`/`delta_aic` — flags features whose hazard association is not actually linear | `--inputs-dir`, `--output-dir`, `--landmark-days`, `--feature-selection-csv` |
-| `multivariate_longitudinal/dynamic_deephit.py` (COMPASS only, torch, optional) | Discrete-time competing-risks GRU (Dynamic-DeepHit) fit directly on the person-period lab sequence, in `platinum` (death censored) or `competing` (`0=censored,1=platinum,2=death`) config | `--inputs-dir`, `--output-dir`, `--landmark-day`, `--config {platinum,competing}` |
-| `multivariate_longitudinal/survlatent_ode.py` (COMPASS only, torch, optional) | Adapter around the bundled editable `survlatent_ode_repo/` source, same `platinum`/`competing` configs and person-period input as Dynamic-DeepHit | `--survlatent-repo` defaults to the bundled checkout; `--inputs-dir`, `--output-dir`, `--landmark-day`, `--config {platinum,competing}` |
+| `multivariate_longitudinal/dynamic_deephit.py` (COMPASS only, torch, optional) | Discrete-time competing-risks GRU (Dynamic-DeepHit) fit directly on the person-period lab sequence, in a cause-only config (death censored) or a competing config (`0=censored,1=cause,2=death`) | `--inputs-dir`, `--output-dir`, `--landmark-day`, `--config {platinum,competing,nepc,nepc_competing}` |
+| `multivariate_longitudinal/survlatent_ode.py` (COMPASS only, torch, optional) | Adapter around the bundled editable `survlatent_ode_repo/` source, same configs and person-period input as Dynamic-DeepHit. Off by default in `03b` (`cp.RUN_SURVLATENT = False`) | `--survlatent-repo` defaults to the bundled checkout; `--inputs-dir`, `--output-dir`, `--landmark-day`, `--config {platinum,competing,nepc,nepc_competing}` |
 
 `cox_aggregated.py` is now a project adapter: endpoint constants, cohort-specific covariates/restrictions,
 and per-landmark context. The univariate/elastic-net CLI orchestration lives in
@@ -337,23 +377,41 @@ from being tested accidentally. The R notebook uses the merged-profile root excl
 ### 2.4 — Notebooks
 
 COMPASS PROFILE has four Python stage notebooks sharing `compass_pipeline.py` (three numbered plus
-`03b`), one R figure notebook, and one R GAM notebook. All operate on the merged `profile_data` run:
+`03b`), two read-only Python reporting notebooks (`06`, `07`), one R figure notebook, and one R GAM
+notebook. All operate on the merged `profile_data` run:
 
 - `01_preprocessing.ipynb` — drives preprocessing (schema audit, cohort compile, longitudinal
   preprocessing, prediction-input build, diagnostics) for whichever arms are selected (`arpi`
   and/or `adt`, with landmarks 0/90/180), over the common ADT-entry eligible cohort. Each arm gets
   independent prediction inputs at its own landmark list, and Stage 2 runs
-  `longitudinal_data_processing.py` once per anchor (`--anchor-med-set {arpi,adt}`).
+  `longitudinal_data_processing.py` once per anchor (`--anchor-med-set {arpi,adt}`). Stages 0-2 are
+  endpoint-independent and only need running once; Stage 3 forks per endpoint.
 - `02_univariate.ipynb` / `03_multivariate.ipynb` — read `01`'s prediction inputs and run
   univariate, elastic-net, and XGBoost models independently of preprocessing
   (`tasks_for_run(run)` builds the per-run task grid from `run["landmarks"]`); either can be
   re-run alone without touching Stage 1-3 outputs.
-- `03b_multivariate_longitudinal.ipynb` — optional, torch-gated (README invariant #7). Reads `01`'s
-  `longitudinal_landmark{D}.csv` person-period inputs and runs Dynamic-DeepHit and SurvLatent ODE via
+- `03b_multivariate_longitudinal.ipynb` — optional, torch-gated (README invariant #7).
+  Follows `ENDPOINT` like `02`/`03`, via its own config registry in
+  `survival_common/longitudinal_targets.py` (see
+  [Longitudinal configs](#longitudinal-configs)). **SurvLatent ODE is off by default**
+  (`cp.RUN_SURVLATENT = False`) so the notebook runs Dynamic-DeepHit alone without the bundled
+  external checkout and its conda env; set it to `True` to re-enable. Reads `01`'s
+  `longitudinal_landmark{D}.csv` person-period inputs and runs the enabled models via
   `compass_pipeline.run_multivariate_longitudinal`; kept out of `03_multivariate.ipynb` so that
-  notebook stays runnable with no torch installed. SurvLatent tasks default to the bundled editable
-  `survlatent_ode_repo/` checkout through `cp.SURVLATENT_REPO` — see
+  notebook stays runnable with no torch installed. When enabled, SurvLatent tasks default to the
+  bundled editable `survlatent_ode_repo/` checkout through `cp.SURVLATENT_REPO` — see
   `multivariate_longitudinal/README.md`.
+- `06_abstract_numbers.ipynb` — read-only. Collects the cohort/event/performance counts quoted in
+  the abstract and manuscript from already-generated artifacts. Refits nothing.
+- `07_endpoint_comparison.ipynb` — read-only. Compares the `platinum` and `nepc` endpoint runs
+  side by side: cohort and event counts per landmark (including how many diagnoses the incident
+  gate removed as prevalent, and a loud warning when an endpoint has too few events to interpret),
+  NEPC date/label provenance breakdowns, held-out performance pivots with `nepc - platinum`
+  deltas, univariate association overlap flagged shared / platinum-only / nepc-only, and overlaid
+  KM curves. Requires `01`-`03` to have been run for **both** endpoints; missing artifacts are
+  collected and reported rather than raising. Its header restates the two caveats that govern
+  reading it — the cohorts are not the same patients, and the strict NEPC label is narrower than
+  the Figure 2 classifier definition.
 - `05_figures.Rmd` — the sole COMPASS figure document, using R Markdown and
   `COMPASS_generate_figures_pipeline.R`. It renders both arms' overview, LLM-label, univariate,
   multivariate, KM, and per-lab distribution/trajectory figures at landmarks 0 and 90. Figure 1A reads
@@ -504,10 +562,17 @@ three tiers — REQUIRED (absent *or* all-null raises), EXPECTED (absent raises,
    AUC/Brier horizons are derived on **train+valid**; CV recomputes canonical labs on each fold-train.
    Evaluation data may only mask requested horizons that are not estimable—it never supplies
    replacement times. Do not derive the requested timeline from held-out test patients.
-4. **Endpoint and duration:** COMPASS uses `(t_platinum, PLATINUM)` only. For non-platinum patients,
+4. **Endpoint and duration:** COMPASS registers `(t_platinum, PLATINUM)` and `(t_nepc, NEPC)`;
+   `platinum` is the default and the one the manuscript figures use. For patients without the event,
    the anchor time is filled with `t_last_contact` (censoring). After landmark rebasing, the validity
-   filter requires duration `> 0`, which silently drops patients with platinum before/at the landmark —
-   add count logging if you depend on it.
+   filter requires duration `> 0`, which silently drops patients whose event falls before/at the
+   landmark — add count logging if you depend on it. The `t_nepc` conditions are applied **only**
+   under `--require-nepc`, so registering the second endpoint cannot change the platinum cohort;
+   `tests/test_nepc_endpoint.py` asserts that equivalence.
+   **Any new endpoint's outcome columns must also be added to
+   `cox_aggregated.OUTCOME_METADATA_COLUMNS`**, the set consumed by `outcome_columns()` to keep
+   outcome data out of the feature matrix. Miss it and the event becomes a predictor of itself. The
+   set lists every endpoint's columns unconditionally, including on runs that don't model them.
 5. **ID/age columns are injected at runtime.** PROFILE defaults to `DFCI_MRN` / `AGE_AT_TREATMENTSTART`;
    IPIO defaults to `DFCI_MRN` with its own baseline covariates. `build_*` and model `main()` functions
    mutate module globals **and monkey-patch `cox_aggregated.ID_COL/AGE_COL`**. If you add a function that captures
@@ -544,9 +609,103 @@ three tiers — REQUIRED (absent *or* all-null raises), EXPECTED (absent raises,
   `resources/lab_mappings/OMOP_to_DFCI_lab_ids.csv` by default. Per-project lab inventory outputs
   default to `/data/gusev/USERS/jpconnor/data/CAIA/<project>/unique_lab_ids_w_units.csv`.
 
+## Arms and endpoints
+
+A run is an (arm, endpoint) pair. The arm sets time 0; the endpoint sets the event. Selecting a
+different endpoint does **not** fork the cohort assembly — Stages 0-2 are endpoint-independent and
+write one survival cohort carrying every endpoint's columns. Stage 3 is where the fork happens.
+
+### Endpoints
+
+| Endpoint | Duration / event | Source of the event date |
+| --- | --- | --- |
+| `platinum` | `t_platinum` / `PLATINUM` | First carboplatin/cisplatin exposure in `MEDICATIONS` |
+| `nepc` | `t_nepc` / `NEPC` | `LLM_annotations/LLM_nepc_diagnosis/nepc_dx_labels.parquet` |
+
+The `nepc` endpoint models **time from the treatment anchor to LLM-adjudicated NEPC diagnosis**.
+Four properties of it differ from `platinum` and matter for interpretation:
+
+- **It is an incident endpoint, gated by `--require-nepc`.** That flag adds `t_nepc notna` and
+  `t_nepc > 0` to the `make_outcome_df` validity conditions, dropping patients whose NEPC diagnosis
+  falls at or before the landmark (prevalent, not incident). The gate is **off by default** so it
+  can never silently shrink the platinum cohort — `compass_pipeline` passes it only when
+  `ENDPOINT == "nepc"`. The consequence is that the two endpoints' cohorts are **not the same
+  patients**; per-landmark attrition is reported in the Stage 3 build log.
+- **The label definition is strict, and narrower than the classifier used in Figure 2.** The
+  `nepc_dx_labels` labels are veto-gated and precision-biased; the Figure 2 `has_nepc` strata come
+  from the broader "any NE feature → NEPC" binary classifier. They are not interchangeable — name
+  which definition is in play in any resulting text.
+- **Event counts may be low.** Check the Stage 1 summary and the `07` notebook's count table
+  *before* spending modelling time; `07` prints an explicit underpowered warning below 50 events.
+- **Date provenance is carried, not filtered.** `NEPC_DATE_SOURCE`, `NEPC_DATE_PRECISION`, and
+  `NEPC_LABEL_SOURCE` ride through to the prediction inputs for sensitivity analysis. Two are worth
+  knowing: `date_source = note_date` means *earliest documentation*, not onset; and
+  `label_source = auto_negative_no_evidence` patients were never seen by an LLM — legitimate
+  censored observations, but distinct from adjudicated negatives.
+
+If `nepc_dx_labels.parquet` is not mounted, Stage 1 warns and emits no NEPC columns. Every
+downstream NEPC touchpoint is presence-guarded, so the platinum path runs unchanged.
+
+### Longitudinal configs
+
+`03b`'s Dynamic-DeepHit / SurvLatent arm uses a **second, related registry**:
+`survival_common/longitudinal_targets.py`'s `LONGITUDINAL_CONFIGS`. It selects a cause of
+interest plus an optional competing cause, which is a finer axis than `ENDPOINTS`' single
+(duration, event) pair — hence `--config`, not `--endpoints`:
+
+| `--config` | causes (label 1, label 2) | AUC(t) grid read |
+| --- | --- | --- |
+| `platinum` | platinum; death censored | `platinum` |
+| `competing` | platinum, death | `platinum` |
+| `nepc` | nepc; death censored | `nepc` |
+| `nepc_competing` | nepc, death | `nepc` |
+
+`CONFIG_ENDPOINTS` maps each config to the `ENDPOINTS` key whose horizon grid it scores on, so a
+NEPC model is evaluated on the NEPC timeline and stays comparable to the NEPC Cox/XGBoost arms
+(README invariant #6). `compass_pipeline.longitudinal_task_specs(endpoint)` picks the pair for the
+selected endpoint, so `03b` needs only `ENDPOINT` set — the same knob as `02`/`03`.
+
+Two ordering invariants are asserted at import: the cause of interest is always label 1 and death
+always label 2 (a reorder would silently reinterpret every downstream risk column), and
+`survlatent_ode.py`'s parallel `EVENT_CONFIGS` must agree with this registry on both names **and**
+columns, so the two models cannot drift into meaning different things by the same config name.
+
+The cause-only configs (`platinum`, `nepc`) censor at death and are the ones comparable to
+Cox/XGBoost for that endpoint; `summarize_longitudinal_outputs` filters to that row. The competing
+configs' death rows are written to disk but excluded from the summary.
+
+### Running a second endpoint
+
+Set the parameter cell of `01`/`02`/`03`, then run each top to bottom:
+
+```python
+ARMS = ["adt"]
+ENDPOINT = "nepc"        # "platinum" reproduces the original run exactly
+OUTPUT_SUFFIX = "_nepc"  # "" for the original tree
+OVERWRITE = False
+
+cp.ENDPOINT = ENDPOINT
+cp.FORCE_RERUN = OVERWRITE
+RUNS = cp.make_runs(ARMS, output_suffix=OUTPUT_SUFFIX)
+```
+
+`OUTPUT_SUFFIX` suffixes **both** `prediction_inputs_<arm>` and `local_runs_<arm>`. Both are
+required: because `--require-nepc` changes which patients survive the landmark filter, and that
+filter runs at *preprocessing* time inside `build_landmark_merged`, the NEPC build needs its own
+inputs tree — not just its own output tree. With the suffix set, `prediction_inputs_adt/` and
+`local_runs_adt/` are never touched.
+
+Stages 0-2 of `01` (schema audit, cohort compile, lab preprocessing) only need running once; they
+are shared. Re-run Stage 3 onward per endpoint.
+
+`03b` takes the same `ENDPOINT` / `OUTPUT_SUFFIX` pair and derives its `--config` values from it
+(see [Longitudinal configs](#longitudinal-configs)); it additionally has `RUN_SURVLATENT`, left off
+by default.
+
 ## Recommended run order
 
-Run each notebook top to bottom; select ARPI/ADT with each Python notebook's `ARMS` setting:
+Run each notebook top to bottom; select ARPI/ADT with each Python notebook's `ARMS` setting, and
+the event with its `ENDPOINT` / `OUTPUT_SUFFIX` setting (see [Arms and endpoints](#arms-and-endpoints)):
 
 1. `COMPASS/survival_analysis/01_preprocessing.ipynb`
 2. `COMPASS/survival_analysis/02_univariate.ipynb`
@@ -555,6 +714,9 @@ Run each notebook top to bottom; select ARPI/ADT with each Python notebook's `AR
    see [Dependencies](#dependencies) and `multivariate_longitudinal/README.md`)
 5. `COMPASS/survival_analysis/GAM/04_gam.ipynb`
 6. `COMPASS/survival_analysis/05_figures.Rmd`
+7. `COMPASS/survival_analysis/06_abstract_numbers.ipynb` (read-only; abstract/manuscript counts)
+8. `COMPASS/survival_analysis/07_endpoint_comparison.ipynb` (read-only; only after steps 1-3 have
+   been run for **both** endpoints)
 
 The notebooks pass `PROFILE_DATA/*.parquet` paths explicitly to the lower-level scripts. Existing
 hand-curated `LLM_NEPC_labels/` inputs remain under the shared `COMPASS` data root.
@@ -589,6 +751,19 @@ surprised by them.
   consequence, not a coding bug, and it also shapes how Finding 5's full-cohort univariate screen and
   Finding 10's genomic-prevalence floor should be interpreted at later landmarks (a feature's measured
   prevalence, and hence whether it clears the floor, shifts as the cohort composition shifts).
+- **The `nepc` endpoint is likely event-poor, and its cohort is not the platinum cohort.** The
+  strict `nepc_dx_labels` definition is precision-biased by design, and `--require-nepc` further
+  removes prevalent diagnoses, so NEPC event counts can be far smaller than platinum's at the same
+  landmark. Two consequences: multivariate NEPC results may be underpowered rather than negative
+  (`07` warns below 50 events), and **platinum-vs-NEPC metric differences are confounded by cohort
+  composition** — they are not a like-for-like model comparison. If counts are too low to work
+  with, the fallback is the broader `avpc_nepc_timeline.parquet` definition (more events, lower
+  precision), which is a different label and would need its own endpoint.
+- **Two different NEPC definitions are in play in this repo.** The `nepc` *endpoint* uses the
+  strict, veto-gated, dated `nepc_dx_labels.parquet`. The Figure 2 / Figure 2v2 / Figure 2v3
+  `has_nepc` *strata* use the broader "any NE feature → NEPC" binary classifier from
+  `LLM_NEPC_labels/LLM_NEPC_classifier_labels.tsv`. They are **not interchangeable** and will not
+  agree on patient counts. Always name which one a given number came from.
 - **Competing-config Brier is the binary cause-of-interest Brier, not the cumulative-incidence
   Brier — and so is the competing-risks IPCW AUC(t).** Both the Brier score and the `cumulative_dynamic_auc`
   IPCW reference distribution binarize on `event = (label == cause)`, folding any competing event

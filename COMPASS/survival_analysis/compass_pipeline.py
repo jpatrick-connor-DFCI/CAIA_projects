@@ -62,6 +62,13 @@ PROFILE_SOURCES = {
 N_FOLDS = 5
 FORCE_RERUN = True
 REBUILD_PREDICTION_INPUTS = True
+# Which event is modeled. Must be a key of
+# COMPASS.survival_analysis.cox_aggregated.ENDPOINTS. "platinum" is the
+# original endpoint; "nepc" is time from the ADT anchor to the LLM-adjudicated
+# NEPC diagnosis. Changing this changes the cohort (see RUN_REQUIRE_NEPC), so
+# a non-platinum endpoint belongs in its own inputs/output tree -- pass
+# output_suffix to make_runs.
+ENDPOINT = "platinum"
 
 # multivariate_longitudinal (SurvLatent ODE + Dynamic-DeepHit) knobs. The
 # editable upstream checkout is kept beside this pipeline so cluster copies of
@@ -102,6 +109,7 @@ def make_runs(
     arms=("adt",),
     *,
     prediction_input_dirs: dict[str, str | Path] | None = None,
+    output_suffix: str = "",
 ) -> list[dict]:
     """Build the merged-profile RUNS list, restricted to ``arms``.
 
@@ -112,6 +120,14 @@ def make_runs(
     ``prediction_input_dirs`` optionally overrides the prebuilt input directory
     for individual arms. This is primarily used by notebook 03b when GPU jobs
     run on a cluster whose prediction data are mounted somewhere else.
+
+    ``output_suffix`` appends to BOTH the prediction-inputs and the outputs
+    directory names, giving a second endpoint its own parallel tree. Both are
+    suffixed, not just outputs: the NEPC cohort is gated on ``t_nepc > 0``
+    (see ``--require-nepc``), so its prediction inputs are a different set of
+    patients and must not overwrite the platinum build. With
+    ``output_suffix="_nepc"`` a run reads/writes ``prediction_inputs_adt_nepc``
+    and ``local_runs_adt_nepc``, leaving the platinum tree untouched.
     """
     data_root = _PROFILE_OUTPUT_ROOT
     mrn_lists_dir = data_root / "mrn_lists"
@@ -142,10 +158,12 @@ def make_runs(
             "restrict_to_mrns": data_root / f"prostate_{label}_survival_cohort_{label}.csv",
             "inputs_dir": Path(
                 prediction_input_dirs.get(
-                    label, survival_output_root / f"prediction_inputs_{label}"
+                    label,
+                    survival_output_root / f"prediction_inputs_{label}{output_suffix}",
                 )
             ).expanduser(),
-            "output_dir": survival_output_root / f"local_runs_{label}",
+            "output_dir": survival_output_root / f"local_runs_{label}{output_suffix}",
+            "endpoint": ENDPOINT,
             "data_root": data_root,
             "mrn_lists_dir": mrn_lists_dir,
         })
@@ -161,6 +179,7 @@ def make_runs(
     print("survival_dir:      ", SURVIVAL_DIR)
     print("data_preprocessing:", DATA_PREPROCESSING_DIR)
     print("data root:         ", data_root)
+    print("endpoint:          ", ENDPOINT)
     for run in runs:
         print(
             f"{run['label']:30s}: anchor={run['anchor']:4s} landmarks={run['landmarks']} "
@@ -430,6 +449,11 @@ def build_prediction_inputs(run: dict, dry_run: bool = False) -> None:
     ]
     if run.get("restrict_to_mrns"):
         cmd += ["--restrict-to-mrns", run["restrict_to_mrns"]]
+    # The NEPC endpoint needs an incident-NEPC cohort (t_nepc non-null and > 0).
+    # That is a different patient set from the platinum cohort, which is why
+    # make_runs gives it its own suffixed inputs_dir.
+    if run.get("endpoint", ENDPOINT) == "nepc":
+        cmd += ["--require-nepc"]
     rc = _run(cmd, dry_run=dry_run)
     if not dry_run and rc != 0:
         raise RuntimeError(f"build_prediction_inputs failed for {run['label']} with rc={rc}")
@@ -504,18 +528,51 @@ MULTIVARIATE_TASK_SPECS = [
     ("xgboost", "baseline", "landmark_xgboost_baseline_metrics.csv"),
 ]
 
-# Two models x two configs. config_dir doubles as --config for both models
-# (platinum/competing), reusing tasks_for_run's existing (model, config_dir,
-# metrics_filename) x landmarks cross with zero changes to _run_tasks.
-# metrics_filename is None for survlatent-ode because its filename embeds
-# --run-id (survlatent_ode_test_metrics_{run_id}.csv); see
+# Per-endpoint config pair for the longitudinal arm. config_dir doubles as
+# --config for both models, reusing tasks_for_run's existing
+# (model, config_dir, metrics_filename) x landmarks cross with zero changes to
+# _run_tasks. metrics_filename is None for survlatent-ode because its filename
+# embeds --run-id (survlatent_ode_test_metrics_{run_id}.csv); see
 # longitudinal_metrics_filename() below for the resolved name.
-LONGITUDINAL_TASK_SPECS = [
-    ("dynamic-deephit", "platinum", "dynamic_deephit_metrics_platinum.csv"),
-    ("dynamic-deephit", "competing", "dynamic_deephit_metrics_competing.csv"),
-    ("survlatent-ode", "platinum", None),
-    ("survlatent-ode", "competing", None),
-]
+_LONGITUDINAL_CONFIGS_BY_ENDPOINT = {
+    "platinum": ("platinum", "competing"),
+    "nepc": ("nepc", "nepc_competing"),
+}
+
+# SurvLatent ODE needs the bundled external checkout and its own conda env
+# (see multivariate_longitudinal/README.md). Off by default so 03b runs with
+# Dynamic-DeepHit alone; set to True once that environment is available.
+RUN_SURVLATENT = False
+
+
+def longitudinal_task_specs(endpoint: str = None, *, include_survlatent: bool = None):
+    """(model, config_dir, metrics_filename) triples for one endpoint.
+
+    The cause-only config is listed first so it leads the summary table; it is
+    the row comparable to that endpoint's Cox/XGBoost arms.
+    """
+    endpoint = ENDPOINT if endpoint is None else endpoint
+    if include_survlatent is None:
+        include_survlatent = RUN_SURVLATENT
+    if endpoint not in _LONGITUDINAL_CONFIGS_BY_ENDPOINT:
+        valid = ", ".join(sorted(_LONGITUDINAL_CONFIGS_BY_ENDPOINT))
+        raise ValueError(
+            f"No longitudinal configs registered for endpoint {endpoint!r}. "
+            f"Known: {valid}."
+        )
+    configs = _LONGITUDINAL_CONFIGS_BY_ENDPOINT[endpoint]
+    specs = [
+        ("dynamic-deephit", cfg, f"dynamic_deephit_metrics_{cfg}.csv") for cfg in configs
+    ]
+    if include_survlatent:
+        specs.extend(("survlatent-ode", cfg, None) for cfg in configs)
+    return specs
+
+
+# Backwards-compatible module-level view for the default endpoint. Prefer
+# longitudinal_task_specs(), which honours ENDPOINT and RUN_SURVLATENT at call
+# time rather than at import time.
+LONGITUDINAL_TASK_SPECS = longitudinal_task_specs("platinum", include_survlatent=True)
 
 
 def longitudinal_run_id(config_dir: str, landmark: int) -> str:
@@ -564,7 +621,7 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             "--inputs-dir", run["inputs_dir"],
             "--output-dir", row_output_dir,
             "--landmark-days", str(landmark),
-            "--endpoints", "platinum",
+            "--endpoints", run.get("endpoint", ENDPOINT),
             overwrite_flag,
         ]
     if model == "elastic-net":
@@ -574,7 +631,7 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             "--inputs-dir", run["inputs_dir"],
             "--output-dir", row_output_dir,
             "--landmark-days", str(landmark),
-            "--endpoints", "platinum",
+            "--endpoints", run.get("endpoint", ENDPOINT),
             "--n-folds", str(N_FOLDS),
             overwrite_flag,
         ]
@@ -616,7 +673,7 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             "--inputs-dir", run["inputs_dir"],
             "--output-dir", row_output_dir,
             "--landmark-days", str(landmark),
-            "--endpoints", "platinum",
+            "--endpoints", run.get("endpoint", ENDPOINT),
             "--n-folds", str(N_FOLDS),
             overwrite_flag,
         ]
@@ -687,7 +744,7 @@ def run_somatic_gleason_univariate(run: dict, dry_run: bool = False):
             "--inputs-dir", run["inputs_dir"] / "somatic_gleason" / analysis,
             "--output-dir", row_output_dir,
             "--landmark-days", str(landmark),
-            "--endpoints", "platinum",
+            "--endpoints", run.get("endpoint", ENDPOINT),
             "--feature-set", "somatic-gleason",
             "--overwrite" if FORCE_RERUN else "--no-overwrite",
         ]
@@ -711,8 +768,15 @@ def run_multivariate(run: dict, dry_run: bool = False):
 
 
 def run_multivariate_longitudinal(run: dict, dry_run: bool = False):
-    """Dynamic-DeepHit and SurvLatent ODE, each in platinum/competing configs."""
-    summary = _run_tasks(run, LONGITUDINAL_TASK_SPECS, dry_run=dry_run)
+    """Dynamic-DeepHit (and optionally SurvLatent ODE) in this run's configs.
+
+    Configs follow the run's endpoint: platinum/competing, or nepc/
+    nepc_competing. SurvLatent ODE is included only when RUN_SURVLATENT is on.
+    """
+    specs = longitudinal_task_specs(run.get("endpoint", ENDPOINT))
+    if not RUN_SURVLATENT:
+        print("[survlatent-ode] disabled (compass_pipeline.RUN_SURVLATENT = False)")
+    summary = _run_tasks(run, specs, dry_run=dry_run)
     print("\n=== run summary ===")
     for tag, status, elapsed in summary:
         print(f"  {tag} {status:>20s} {elapsed/60:6.1f} min")
@@ -720,19 +784,23 @@ def run_multivariate_longitudinal(run: dict, dry_run: bool = False):
 
 
 def summarize_outputs(run: dict) -> pd.DataFrame:
+    # Reads back whichever endpoint this run modeled; the "endpoint" column it
+    # emits is what lets platinum and NEPC summaries be concatenated and
+    # compared side by side (see 07_endpoint_comparison.ipynb).
+    endpoint = run.get("endpoint", ENDPOINT)
     rows = []
     for model, landmark, config_dir, metrics_filename in tasks_for_run(run, MULTIVARIATE_TASK_SPECS):
         metrics_path = run["output_dir"] / model_output_dir(model) / f"landmark_{landmark}" / config_dir / metrics_filename
-        base = {"run": run["label"], "model": model, "landmark": landmark, "config": config_dir, "endpoint": "platinum"}
+        base = {"run": run["label"], "model": model, "landmark": landmark, "config": config_dir, "endpoint": endpoint}
         if not metrics_path.exists():
             rows.append({**base, "n_test": None, "n_test_events": None, "c_index": None,
                          "mean_auc_t": None, "integrated_brier": None, "status": "missing"})
             continue
         df = pd.read_csv(metrics_path)
-        platinum = df.loc[df["endpoint"] == "platinum"]
+        platinum = df.loc[df["endpoint"] == endpoint]
         if platinum.empty:
             rows.append({**base, "n_test": None, "n_test_events": None, "c_index": None,
-                         "mean_auc_t": None, "integrated_brier": None, "status": "no platinum row"})
+                         "mean_auc_t": None, "integrated_brier": None, "status": f"no {endpoint} row"})
             continue
         platinum = platinum.iloc[0]
         if model == "elastic-net":
@@ -759,41 +827,42 @@ def summarize_outputs(run: dict) -> pd.DataFrame:
 
 
 def summarize_longitudinal_outputs(run: dict) -> pd.DataFrame:
-    """Same schema as summarize_outputs, for the LONGITUDINAL_TASK_SPECS arms.
+    """Same schema as summarize_outputs, for the longitudinal arms.
 
     A separate function rather than an extension of summarize_outputs: that
-    one hardcodes endpoint == "platinum" against Cox/XGBoost's own column
-    names, which don't match dynamic-deephit's ("event" instead of
-    "endpoint") or survlatent-ode's (external repo's eval_model schema, not
-    ours to pin). Both models report a "platinum" row -- competing reports
-    death too, as a secondary diagnostic -- so filtering to platinum here
-    keeps the headline comparison against Cox/XGBoost's platinum row valid.
-    Frames from both functions share columns and concat cleanly.
+    one reads Cox/XGBoost's own column names, which don't match
+    dynamic-deephit's ("event" instead of "endpoint") or survlatent-ode's
+    (external repo's eval_model schema, not ours to pin). Both models report a
+    row per cause -- the competing configs report death too, as a secondary
+    diagnostic -- so filtering to the run's cause of interest here keeps the
+    headline comparison against that endpoint's Cox/XGBoost row valid. Frames
+    from both functions share columns and concat cleanly.
     """
+    endpoint = run.get("endpoint", ENDPOINT)
     rows = []
-    for model, landmark, config_dir, metrics_filename in tasks_for_run(run, LONGITUDINAL_TASK_SPECS):
+    for model, landmark, config_dir, metrics_filename in tasks_for_run(run, longitudinal_task_specs(endpoint)):
         resolved_filename = longitudinal_metrics_filename(model, config_dir, landmark, metrics_filename)
         metrics_path = run["output_dir"] / model_output_dir(model) / f"landmark_{landmark}" / config_dir / resolved_filename
-        base = {"run": run["label"], "model": model, "landmark": landmark, "config": config_dir, "endpoint": "platinum"}
+        base = {"run": run["label"], "model": model, "landmark": landmark, "config": config_dir, "endpoint": endpoint}
         if not metrics_path.exists():
             rows.append({**base, "n_test": None, "n_test_events": None, "c_index": None,
                          "mean_auc_t": None, "integrated_brier": None, "status": "missing"})
             continue
         df = pd.read_csv(metrics_path)
         if model == "dynamic-deephit":
-            platinum = df.loc[df["event"] == "platinum"]
-            if platinum.empty:
+            cause = df.loc[df["event"] == endpoint]
+            if cause.empty:
                 rows.append({**base, "n_test": None, "n_test_events": None, "c_index": None,
-                             "mean_auc_t": None, "integrated_brier": None, "status": "no platinum row"})
+                             "mean_auc_t": None, "integrated_brier": None, "status": f"no {endpoint} row"})
                 continue
-            platinum = platinum.iloc[0]
+            cause = cause.iloc[0]
             rows.append({
                 **base,
-                "n_test": int(platinum["n_test"]),
-                "n_test_events": int(platinum["n_test_events"]),
-                "c_index": float(platinum["c_index"]),
-                "mean_auc_t": float(platinum["mean_auc_t"]),
-                "integrated_brier": float(platinum["integrated_brier"]),
+                "n_test": int(cause["n_test"]),
+                "n_test_events": int(cause["n_test_events"]),
+                "c_index": float(cause["c_index"]),
+                "mean_auc_t": float(cause["mean_auc_t"]),
+                "integrated_brier": float(cause["integrated_brier"]),
                 "status": "ok",
             })
         elif model == "survlatent-ode":
@@ -803,8 +872,8 @@ def summarize_longitudinal_outputs(run: dict) -> pd.DataFrame:
             # there shouldn't take down the whole summary.
             try:
                 event_col = next(c for c in ("event", "endpoint") if c in df.columns)
-                platinum = df.loc[df[event_col].astype(str).str.lower() == "platinum"]
-                row = platinum.iloc[0] if not platinum.empty else df.iloc[0]
+                cause = df.loc[df[event_col].astype(str).str.lower() == endpoint]
+                row = cause.iloc[0] if not cause.empty else df.iloc[0]
                 rows.append({
                     **base,
                     "n_test": int(row.get("n_test", row.get("n", np.nan))) if pd.notna(row.get("n_test", row.get("n", np.nan))) else None,
