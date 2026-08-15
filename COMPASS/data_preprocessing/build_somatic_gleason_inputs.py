@@ -511,18 +511,26 @@ def closest_observation_to_adt(
     )
 
 
-def _rebase_platinum_from_index(
+def _rebase_endpoint_from_index(
     base: pd.DataFrame,
     selected: pd.DataFrame,
     *,
     feature_cols: list[str],
+    endpoint: str,
 ) -> pd.DataFrame:
     """Join selected features and rebase survival from their index date."""
     metadata = [ca.ID_COL]
     metadata += [column for column in base.columns if column in ca.outcome_columns()]
     out = base[metadata].set_index(ca.ID_COL).join(selected, how="inner")
 
-    required = {"PLATINUM", "PLATINUM_DATE", "LAST_CONTACT_DATE", INDEX_DATE}
+    endpoint_cfg = {
+        "platinum": ("PLATINUM", "PLATINUM_DATE", "t_platinum"),
+        "nepc": ("NEPC", "NEPC_DATE", "t_nepc"),
+    }
+    if endpoint not in endpoint_cfg:
+        raise ValueError(f"Unknown endpoint {endpoint!r}; expected one of {sorted(endpoint_cfg)}")
+    event_col, event_date_col, duration_col = endpoint_cfg[endpoint]
+    required = {event_col, event_date_col, "LAST_CONTACT_DATE", INDEX_DATE}
     missing = required - set(out.columns)
     if missing:
         raise ValueError(
@@ -530,16 +538,16 @@ def _rebase_platinum_from_index(
             f"{sorted(required)}; missing {sorted(missing)}."
         )
     out[INDEX_DATE] = pd.to_datetime(out[INDEX_DATE], errors="coerce")
-    out["PLATINUM_DATE"] = pd.to_datetime(out["PLATINUM_DATE"], errors="coerce")
+    out[event_date_col] = pd.to_datetime(out[event_date_col], errors="coerce")
     out["LAST_CONTACT_DATE"] = pd.to_datetime(
         out["LAST_CONTACT_DATE"], errors="coerce"
     )
-    event = pd.to_numeric(out["PLATINUM"], errors="coerce").fillna(0).eq(1)
-    followup_end = out["LAST_CONTACT_DATE"].where(~event, out["PLATINUM_DATE"])
-    out["t_platinum"] = (followup_end - out[INDEX_DATE]).dt.days.astype(float)
-    out["PLATINUM"] = event.astype(int)
+    event = pd.to_numeric(out[event_col], errors="coerce").fillna(0).eq(1)
+    followup_end = out["LAST_CONTACT_DATE"].where(~event, out[event_date_col])
+    out[duration_col] = (followup_end - out[INDEX_DATE]).dt.days.astype(float)
+    out[event_col] = event.astype(int)
 
-    valid = out[INDEX_DATE].notna() & followup_end.notna() & out["t_platinum"].gt(0)
+    valid = out[INDEX_DATE].notna() & followup_end.notna() & out[duration_col].gt(0)
     out = out.loc[valid].copy()
     for feature in feature_cols:
         out[feature] = pd.to_numeric(out[feature], errors="coerce")
@@ -559,9 +567,12 @@ def _materialize_absolute_followup_dates(
     anchor_by_row = out[ca.ID_COL].map(anchors)
     duration_by_date = {
         "PLATINUM_DATE": "t_platinum",
+        "NEPC_DATE": "t_nepc",
         "LAST_CONTACT_DATE": "t_last_contact",
     }
     for date_col, duration_col in duration_by_date.items():
+        if date_col not in out.columns and duration_col not in out.columns:
+            continue
         existing = (
             pd.to_datetime(out[date_col], errors="coerce")
             if date_col in out.columns
@@ -591,6 +602,7 @@ def build_indexed_feature_sets(
     prs: pd.DataFrame | None = None,
     prs_features: list[str] | None = None,
     treatment_anchors: pd.Series | None = None,
+    endpoint: str = "platinum",
 ) -> dict[str, pd.DataFrame]:
     """Build Gleason-, sequencing-, and ADT-indexed PRS cohorts."""
     base = _normalize_mrn(base, source="landmark +0 base inputs")
@@ -628,13 +640,13 @@ def build_indexed_feature_sets(
         date_col="gleason_date",
         value_cols=[GLEASON_FEATURE],
     )
-    sequencing = _rebase_platinum_from_index(
-        base, selected_somatic, feature_cols=somatic_features
+    sequencing = _rebase_endpoint_from_index(
+        base, selected_somatic, feature_cols=somatic_features, endpoint=endpoint
     )
     for feature in somatic_features:
         sequencing[feature] = sequencing[feature].fillna(0)
-    gleason_out = _rebase_platinum_from_index(
-        base, selected_gleason, feature_cols=[GLEASON_FEATURE]
+    gleason_out = _rebase_endpoint_from_index(
+        base, selected_gleason, feature_cols=[GLEASON_FEATURE], endpoint=endpoint
     )
 
     prs_features = list(prs_features or [])
@@ -706,6 +718,7 @@ def main(args: argparse.Namespace) -> None:
         prs=prs,
         prs_features=prs_features,
         treatment_anchors=treatment_anchors,
+        endpoint=args.endpoint,
     )
 
     feature_rows_by_analysis = {
@@ -764,15 +777,16 @@ def main(args: argparse.Namespace) -> None:
                     else "minimum absolute days from ADT start; earlier date wins exact tie"
                 ),
                 "outcome": (
-                    "days from ADT start to platinum or last contact"
+                    f"days from ADT start to {args.endpoint} or last contact"
                     if analysis == "prs"
-                    else "days from selected index date to platinum or last contact"
+                    else f"days from selected index date to {args.endpoint} or last contact"
                 ),
                 "endpoint_description": (
-                    "Time from ADT start to first platinum exposure"
+                    f"Time from ADT start to {args.endpoint}"
                     if analysis == "prs"
-                    else f"Time from the selected {analysis} index date to first platinum exposure"
+                    else f"Time from the selected {analysis} index date to {args.endpoint}"
                 ),
+                "endpoint": args.endpoint,
                 "patients_with_nonpositive_followup_excluded": True,
                 "prs_included": analysis == "prs",
             }
@@ -800,6 +814,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-inputs-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--endpoint", choices=sorted(ca.ENDPOINTS), default="platinum")
     parser.add_argument("--somatic-path", type=Path, default=DEFAULT_SOMATIC_PATH)
     parser.add_argument(
         "--somatic-manifest-path", type=Path, default=DEFAULT_SOMATIC_MANIFEST_PATH

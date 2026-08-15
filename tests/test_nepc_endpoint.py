@@ -101,6 +101,16 @@ class TestTNepcConstruction:
         kept = _outcome(rows)
         assert 3 in kept.index
 
+    def test_pre_anchor_platinum_does_not_exclude_nepc_patient(self):
+        rows = [
+            _patient_row(
+                4, platinum=1, t_platinum=-10.0, nepc=1, t_nepc=250.0,
+                t_last_contact=1200.0,
+            )
+        ]
+        kept = _outcome(rows, endpoint="nepc")
+        assert 4 in kept.index
+
     def test_landmark_rebasing_shifts_t_nepc(self):
         out = _outcome(
             [_patient_row(1, nepc=1, t_nepc=531.0, t_last_contact=1200.0)],
@@ -148,6 +158,13 @@ class TestPlatinumPathUnchanged:
         assert list(a.index) == list(b.index)
         for col in ("PLATINUM", "t_platinum", "DEATH", "t_death", "EITHER", "t_either"):
             pd.testing.assert_series_equal(a[col], b[col], check_names=False)
+
+    def test_prevalent_nepc_does_not_exclude_platinum_patient(self):
+        kept = _outcome(
+            [_patient_row(4, platinum=1, t_platinum=300.0, nepc=1, t_nepc=-10.0)],
+            endpoint="platinum",
+        )
+        assert 4 in kept.index
 
     def test_require_nepc_raises_when_the_cohort_has_no_nepc_columns(self):
         with pytest.raises(ValueError, match="require_nepc"):

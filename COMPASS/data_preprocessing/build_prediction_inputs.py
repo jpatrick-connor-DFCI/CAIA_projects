@@ -536,11 +536,17 @@ def main(args: argparse.Namespace) -> None:
     # getattr default: callers (tests, notebooks) build the Namespace directly
     # rather than through the parser, so a bare attribute access would break them.
     require_nepc = bool(getattr(args, "require_nepc", False))
-    if require_nepc:
+    endpoint = "nepc" if require_nepc else str(getattr(args, "endpoint", "platinum")).lower()
+    if endpoint == "nepc":
         print(
-            "NEPC endpoint cohort: ON (--require-nepc). t_nepc must be non-null and "
+            "NEPC endpoint cohort: ON (--endpoint nepc). t_nepc must be non-null and "
             "> 0, so NEPC diagnosed at or before the landmark (prevalent) is excluded "
-            "and this build is NOT interchangeable with the platinum build."
+            "without applying any platinum-time eligibility filter."
+        )
+    else:
+        print(
+            "Platinum endpoint cohort: ON (--endpoint platinum). t_platinum must be "
+            "non-null and > 0, without applying any NEPC-time eligibility filter."
         )
     merged_by_landmark: dict[int, pd.DataFrame] = {}
     for landmark_day in landmark_days:
@@ -551,7 +557,7 @@ def main(args: argparse.Namespace) -> None:
             anchor_col=anchor_col,
             require_first_treatment=False,
             max_followup_days=args.max_followup_days,
-            require_nepc=require_nepc,
+            endpoint=endpoint,
         )
         merged_by_landmark[landmark_day] = merged
 
@@ -825,10 +831,9 @@ def main(args: argparse.Namespace) -> None:
             float(args.max_followup_days) if args.max_followup_days is not None else None
         ),
         "restrict_to_mrns": str(args.restrict_to_mrns) if args.restrict_to_mrns else None,
-        # Whether the incident-NEPC validity conditions gated the cohort. A
-        # require_nepc=true build is a different cohort from the platinum build
-        # and the two must not be compared as if they were the same patients.
-        "require_nepc": require_nepc,
+        "endpoint": endpoint,
+        # Retained for older readers of the manifest.
+        "require_nepc": endpoint == "nepc",
         "time_unit_days": int(args.time_unit_days),
         "cohort_mode": "independent_by_landmark",
         "stratification_by_landmark": stratification_by_landmark,
@@ -991,16 +996,21 @@ if __name__ == "__main__":
         help="Disable administrative censoring (no cap on follow-up).",
     )
     parser.add_argument(
+        "--endpoint",
+        choices=sorted(ENDPOINTS),
+        default="platinum",
+        help=(
+            "Endpoint whose duration defines cohort eligibility. Only that endpoint's "
+            "non-null and >0 checks are applied; the other endpoint never excludes a patient."
+        ),
+    )
+    parser.add_argument(
         "--require-nepc",
         dest="require_nepc",
         action="store_true",
         default=False,
         help=(
-            "Gate the cohort on the NEPC endpoint being modelable: t_nepc non-null "
-            "and > 0. 't_nepc > 0' drops prevalent NEPC (diagnosed at or before the "
-            "landmark), making this an incident endpoint. Off by default because "
-            "turning it on shrinks the cohort and would change the existing platinum "
-            "results; use it for a separate --output-dir NEPC build."
+            "Deprecated alias for --endpoint nepc."
         ),
     )
     parser.add_argument(

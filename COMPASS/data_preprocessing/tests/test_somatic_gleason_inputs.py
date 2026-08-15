@@ -160,6 +160,35 @@ def test_indexed_feature_sets_use_distinct_dates_and_followup_clocks():
     assert np.isnan(prs_out.loc[3, "PROSTATE_PRS"])
 
 
+def test_nepc_indexed_feature_sets_ignore_pre_anchor_platinum():
+    base = pd.DataFrame(
+        {
+            "DFCI_MRN": [1],
+            "TREATMENT_ANCHOR_DATE": ["2020-01-10"],
+            "AGE_AT_TREATMENTSTART": [70],
+            "PLATINUM": [1],
+            "t_platinum": [-5],
+            "NEPC": [1],
+            "t_nepc": [100],
+            "t_last_contact": [300],
+            "split": ["train"],
+        }
+    )
+    somatic = pd.DataFrame(
+        {"DFCI_MRN": [1], SEQUENCING_DATE: pd.to_datetime(["2020-01-20"]), "TP53_SNV": [1]}
+    )
+    gleason = pd.DataFrame(
+        {"DFCI_MRN": [1], "gleason_date": pd.to_datetime(["2020-01-20"]), GLEASON_FEATURE: [9]}
+    )
+
+    result = build_indexed_feature_sets(
+        base, somatic, ["TP53_SNV"], gleason, endpoint="nepc"
+    )
+
+    assert result["sequencing"].loc[0, "t_nepc"] == 90
+    assert result["gleason"].loc[0, "t_nepc"] == 90
+
+
 def test_prs_loader_bridges_sample_keyed_matrix_through_idmap():
     with tempfile.TemporaryDirectory() as directory:
         prs_path = Path(directory) / "pgs_matrix_with_avg.tsv"

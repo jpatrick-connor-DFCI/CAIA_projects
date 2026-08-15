@@ -65,9 +65,8 @@ REBUILD_PREDICTION_INPUTS = True
 # Which event is modeled. Must be a key of
 # COMPASS.survival_analysis.cox_aggregated.ENDPOINTS. "platinum" is the
 # original endpoint; "nepc" is time from the ADT anchor to the LLM-adjudicated
-# NEPC diagnosis. Changing this changes the cohort (see RUN_REQUIRE_NEPC), so
-# a non-platinum endpoint belongs in its own inputs/output tree -- pass
-# output_suffix to make_runs.
+# NEPC diagnosis. Each endpoint belongs in its own inputs/output tree; new
+# notebooks use make_endpoint_runs() to construct both trees together.
 ENDPOINT = "platinum"
 
 # multivariate_longitudinal (SurvLatent ODE + Dynamic-DeepHit) knobs. The
@@ -110,6 +109,7 @@ def make_runs(
     *,
     prediction_input_dirs: dict[str, str | Path] | None = None,
     output_suffix: str = "",
+    endpoint: str | None = None,
 ) -> list[dict]:
     """Build the merged-profile RUNS list, restricted to ``arms``.
 
@@ -121,6 +121,10 @@ def make_runs(
     for individual arms. This is primarily used by notebook 03b when GPU jobs
     run on a cluster whose prediction data are mounted somewhere else.
 
+    ``endpoint`` defaults to the legacy module-level ``ENDPOINT`` knob. New
+    callers should pass it explicitly so multiple endpoints can coexist in one
+    notebook process.
+
     ``output_suffix`` appends to BOTH the prediction-inputs and the outputs
     directory names, giving a second endpoint its own parallel tree. Both are
     suffixed, not just outputs: the NEPC cohort is gated on ``t_nepc > 0``
@@ -129,6 +133,11 @@ def make_runs(
     ``output_suffix="_nepc"`` a run reads/writes ``prediction_inputs_adt_nepc``
     and ``local_runs_adt_nepc``, leaving the platinum tree untouched.
     """
+    selected_endpoint = ENDPOINT if endpoint is None else str(endpoint).lower()
+    if selected_endpoint not in {"platinum", "nepc"}:
+        raise ValueError(
+            f"Unknown endpoint: {selected_endpoint!r} (expected 'platinum' or 'nepc')"
+        )
     data_root = _PROFILE_OUTPUT_ROOT
     mrn_lists_dir = data_root / "mrn_lists"
     data_arpi = data_root / "longitudinal_prediction_data.csv"
@@ -163,7 +172,7 @@ def make_runs(
                 )
             ).expanduser(),
             "output_dir": survival_output_root / f"local_runs_{label}{output_suffix}",
-            "endpoint": ENDPOINT,
+            "endpoint": selected_endpoint,
             "data_root": data_root,
             "mrn_lists_dir": mrn_lists_dir,
         })
@@ -179,11 +188,37 @@ def make_runs(
     print("survival_dir:      ", SURVIVAL_DIR)
     print("data_preprocessing:", DATA_PREPROCESSING_DIR)
     print("data root:         ", data_root)
-    print("endpoint:          ", ENDPOINT)
+    print("endpoint:          ", selected_endpoint)
     for run in runs:
         print(
             f"{run['label']:30s}: anchor={run['anchor']:4s} landmarks={run['landmarks']} "
             f"inputs={run['inputs_dir']} outputs={run['output_dir']}"
+        )
+    return runs
+
+
+def make_endpoint_runs(
+    arms=("adt",),
+    *,
+    endpoints=("platinum", "nepc"),
+    prediction_input_dirs_by_endpoint: dict[str, dict[str, str | Path]] | None = None,
+) -> list[dict]:
+    """Create independent input/output trees for every requested endpoint."""
+    overrides = prediction_input_dirs_by_endpoint or {}
+    unknown = set(overrides) - set(endpoints)
+    if unknown:
+        raise ValueError(f"Prediction-input overrides supplied for unrequested endpoints: {sorted(unknown)}")
+    runs: list[dict] = []
+    for raw_endpoint in endpoints:
+        endpoint = str(raw_endpoint).lower()
+        suffix = "" if endpoint == "platinum" else f"_{endpoint}"
+        runs.extend(
+            make_runs(
+                arms,
+                endpoint=endpoint,
+                output_suffix=suffix,
+                prediction_input_dirs=overrides.get(endpoint),
+            )
         )
     return runs
 
@@ -449,11 +484,10 @@ def build_prediction_inputs(run: dict, dry_run: bool = False) -> None:
     ]
     if run.get("restrict_to_mrns"):
         cmd += ["--restrict-to-mrns", run["restrict_to_mrns"]]
-    # The NEPC endpoint needs an incident-NEPC cohort (t_nepc non-null and > 0).
-    # That is a different patient set from the platinum cohort, which is why
-    # make_runs gives it its own suffixed inputs_dir.
-    if run.get("endpoint", ENDPOINT) == "nepc":
-        cmd += ["--require-nepc"]
+    # The builder applies only this endpoint's validity gate. Thus pre-anchor
+    # platinum does not remove NEPC patients, and prevalent NEPC does not remove
+    # platinum patients.
+    cmd += ["--endpoint", run.get("endpoint", ENDPOINT)]
     rc = _run(cmd, dry_run=dry_run)
     if not dry_run and rc != 0:
         raise RuntimeError(f"build_prediction_inputs failed for {run['label']} with rc={rc}")
@@ -468,6 +502,7 @@ def build_somatic_gleason_inputs(run: dict, dry_run: bool = False) -> None:
         PYTHON, DATA_PREPROCESSING_DIR / "build_somatic_gleason_inputs.py",
         "--base-inputs-dir", run["inputs_dir"],
         "--output-dir", output_dir,
+        "--endpoint", run.get("endpoint", ENDPOINT),
         "--landmark-days", *[str(lm) for lm in SOMATIC_GLEASON_LANDMARKS],
     ]
     rc = _run(cmd, dry_run=dry_run)
@@ -570,8 +605,8 @@ def longitudinal_task_specs(endpoint: str = None, *, include_survlatent: bool = 
 
 
 # Backwards-compatible module-level view for the default endpoint. Prefer
-# longitudinal_task_specs(), which honours ENDPOINT and RUN_SURVLATENT at call
-# time rather than at import time.
+# longitudinal_task_specs(), which honors its explicit endpoint (or the legacy
+# ENDPOINT fallback) and RUN_SURVLATENT at call time rather than at import time.
 LONGITUDINAL_TASK_SPECS = longitudinal_task_specs("platinum", include_survlatent=True)
 
 

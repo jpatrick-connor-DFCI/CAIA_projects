@@ -98,6 +98,7 @@ def make_outcome_df(
     extra_anchor_cols: tuple[str, ...] = (),
     require_first_treatment: bool = True,
     max_followup_days: float | None = None,
+    endpoint: str = "platinum",
     require_nepc: bool = False,
 ) -> pd.DataFrame:
     """Build the per-patient outcome table rebased to a landmark.
@@ -124,12 +125,10 @@ def make_outcome_df(
             ``None`` (no cap, full follow-up used). Previously defaulted to
             3650 (10 years) to guard against a sparse tail destabilizing the
             Cox fits; pass an explicit value to restore that horizon.
-        require_nepc: whether the ``t_nepc`` validity conditions (notna, > 0)
-            join the cohort filter. Off by default: ``t_nepc > 0`` is what makes
-            NEPC an *incident* endpoint (it drops diagnoses at or before the
-            landmark), so applying it unconditionally would silently shrink the
-            platinum cohort and change existing results. Turn it on only when
-            the NEPC endpoint is the one being modeled.
+        endpoint: endpoint whose duration must be non-null and positive. This is
+            deliberately exclusive: platinum timing never gates an NEPC cohort,
+            and NEPC timing never gates a platinum cohort.
+        require_nepc: deprecated compatibility alias for ``endpoint="nepc"``.
     """
     patient_level_cols = [
         ID_COL,
@@ -298,32 +297,39 @@ def make_outcome_df(
     pat["EITHER"] = np.isfinite(first_event_time).astype(int)
     pat["t_either"] = np.where(pat["EITHER"].eq(1), first_event_time, pat["t_death"])
 
+    if require_nepc:
+        endpoint = "nepc"
+    endpoint = str(endpoint).lower()
+    if endpoint not in {"platinum", "nepc"}:
+        raise ValueError(
+            f"make_outcome_df: unknown endpoint {endpoint!r}; expected 'platinum' or 'nepc'."
+        )
+    if endpoint == "nepc" and not has_nepc:
+        raise ValueError(
+            "make_outcome_df: endpoint='nepc' (require_nepc) but the input carries no NEPC "
+            "columns. Rebuild the survival cohort with the LLM NEPC diagnosis "
+            "labels (--nepc-labels) before running the nepc endpoint."
+        )
+
     # Individual validity conditions, kept separate so the attrition each one
     # causes can be reported below. Durations here are already landmark-rebased
     # (shifted by landmark_time above), so a non-positive value means the event /
     # last contact falls at or before the landmark.
     conditions: dict[str, pd.Series] = {
         "FIRST_RECORD_DATE notna": pat["FIRST_RECORD_DATE"].notna(),
-        "t_platinum notna": pat["t_platinum"].notna(),
         "t_death notna": pat["t_death"].notna(),
         "t_last_contact notna": pat["t_last_contact"].notna(),
-        "t_either notna": pat["t_either"].notna(),
-        "t_platinum > 0": pat["t_platinum"].gt(0),
         "t_death > 0": pat["t_death"].gt(0),
         "t_last_contact > 0": pat["t_last_contact"].gt(0),
-        "t_either > 0": pat["t_either"].gt(0),
     }
-    if require_nepc:
-        # Gated deliberately: "t_nepc > 0" excludes prevalent NEPC (diagnosed at
-        # or before the landmark), which is the right incident-endpoint
-        # semantics for the NEPC run but would shrink the platinum cohort if
-        # applied to it.
-        if not has_nepc:
-            raise ValueError(
-                "make_outcome_df: require_nepc=True but the input carries no NEPC "
-                "columns. Rebuild the survival cohort with the LLM NEPC diagnosis "
-                "labels (--nepc-labels) before running the nepc endpoint."
-            )
+    if endpoint == "platinum":
+        conditions["t_platinum notna"] = pat["t_platinum"].notna()
+        conditions["t_platinum > 0"] = pat["t_platinum"].gt(0)
+        conditions["t_either notna"] = pat["t_either"].notna()
+        conditions["t_either > 0"] = pat["t_either"].gt(0)
+    else:
+        # Incident-NEPC semantics: only NEPC timing joins the endpoint-specific
+        # gate. In particular, pre-anchor platinum exposure is irrelevant here.
         conditions["t_nepc notna"] = pat["t_nepc"].notna()
         conditions["t_nepc > 0"] = pat["t_nepc"].gt(0)
 
@@ -804,6 +810,7 @@ def build_landmark_merged(
     anchor_col: str | None = "t_first_treatment",
     require_first_treatment: bool = True,
     max_followup_days: float | None = None,
+    endpoint: str = "platinum",
     require_nepc: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Build the landmarked outcome + feature merge for a given anchor.
@@ -817,8 +824,8 @@ def build_landmark_merged(
 
     ``max_followup_days`` forwards to :func:`make_outcome_df`'s administrative
     censoring horizon; defaults to ``None`` (no cap) so callers must opt in
-    explicitly. ``require_nepc`` likewise forwards the NEPC validity conditions,
-    which build an incident-NEPC cohort and are off by default.
+    explicitly. ``endpoint`` selects the only endpoint-specific validity gate.
+    ``require_nepc`` remains as a deprecated compatibility alias.
     """
     extra_anchor_cols = (
         () if anchor_col in (None, "t_first_treatment") else (anchor_col,)
@@ -830,6 +837,7 @@ def build_landmark_merged(
         extra_anchor_cols=extra_anchor_cols,
         require_first_treatment=require_first_treatment,
         max_followup_days=max_followup_days,
+        endpoint=endpoint,
         require_nepc=require_nepc,
     )
     print(f"Outcome table @ landmark +{landmark_offset_days}d: {len(outcome_df)} patients")
