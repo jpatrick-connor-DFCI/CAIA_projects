@@ -317,18 +317,27 @@ parse_feature <- function(name) {
   }
 }
 
-# Read held-out platinum discrimination/calibration metrics across model
+# Read held-out discrimination/calibration metrics for one endpoint across model
 # families with slightly different output schemas. Missing optional outputs or
 # columns return NA so figure generation can continue without a torch install.
-read_platinum_performance <- function(path, auc_cols, cindex_cols, brier_cols) {
+#
+# `endpoint` must match the lowercase key written by cox_aggregated.py's
+# ENDPOINTS map ("platinum" or "nepc"). It is required rather than defaulted:
+# a wrong-but-silent default here yields an all-NA panel that looks like a
+# missing torch install instead of an endpoint mismatch.
+read_endpoint_performance <- function(path, endpoint, auc_cols, cindex_cols, brier_cols) {
   missing_metrics <- c(auc = NA_real_, cindex = NA_real_, brier = NA_real_)
   if (!file.exists(path)) return(missing_metrics)
 
   df <- read_csv(path, show_col_types = FALSE)
   endpoint_col <- intersect(c("endpoint", "event"), names(df))
   if (length(endpoint_col) == 0) return(missing_metrics)
+  # `.env` is required: the argument shares its name with the data column, and
+  # under dplyr's data masking a bare `endpoint` would resolve to the column,
+  # making this an elementwise self-comparison that keeps every row.
+  wanted_endpoint <- tolower(endpoint)
   row <- df %>%
-    filter(tolower(as.character(.data[[endpoint_col[1]]])) == "platinum")
+    filter(tolower(as.character(.data[[endpoint_col[1]]])) == .env$wanted_endpoint)
   if (nrow(row) == 0) return(missing_metrics)
 
   first_numeric <- function(candidates) {
@@ -358,10 +367,27 @@ COHORT_LANDMARKS <- list(
   adt = c(0, 90, 180)
 )
 
-# Render the full COMPASS figure set for one cohort arm. Mirrors the body of
-# the former figure notebook's per-cohort cells (Figures 1-7 + Table 1), so
-# the R Markdown document can call it once per cohort in the same R session.
+# Survival endpoints with an independent results tree, as built by
+# compass_pipeline.make_endpoint_runs(). The suffix must match the
+# `output_suffix` that make_runs() appends to BOTH prediction_inputs_* and
+# local_runs_*: "" for platinum, "_nepc" for NEPC.
+SUPPORTED_ENDPOINTS <- c("platinum", "nepc")
+ENDPOINT_SUFFIXES <- c(
+  platinum = "",
+  nepc = "_nepc"
+)
+# Figure 1/2 are classifier- and platinum-cohort figures (CONSORT, LLM
+# validation, platinum enrichment); their subject is the platinum MRN list
+# itself, not the modelled endpoint, so they are generated once under the
+# platinum endpoint rather than duplicated per endpoint.
+ENDPOINT_INDEPENDENT_FIGURES_ENDPOINT <- "platinum"
+
+# Render the full COMPASS figure set for one cohort arm and one survival
+# endpoint. Mirrors the body of the former figure notebook's per-cohort cells
+# (Figures 1-7 + Table 1), so the R Markdown document can call it once per
+# (cohort, endpoint) pair in the same R session.
 generate_figures <- function(cohort, nepc_proj_path, fig_root,
+                             endpoint = "platinum",
                              cohorts = SUPPORTED_COHORTS, show = FALSE,
                              llm_annotations_path = DEFAULT_LLM_ANNOTATIONS_PATH,
                              plot_non_androgen_distributions = FALSE,
@@ -380,6 +406,17 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   if (!COHORT %in% cohorts)
     stop(sprintf("Unknown cohort=%s; expected one of %s",
                  COHORT, paste(cohorts, collapse = ", ")))
+  if (!is.character(endpoint) || length(endpoint) != 1 || is.na(endpoint))
+    stop("endpoint must be one non-missing character value")
+  ENDPOINT <- tolower(endpoint)
+  if (!ENDPOINT %in% SUPPORTED_ENDPOINTS)
+    stop(sprintf("Unknown endpoint=%s; expected one of %s",
+                 ENDPOINT, paste(SUPPORTED_ENDPOINTS, collapse = ", ")))
+  ENDPOINT_SUFFIX <- unname(ENDPOINT_SUFFIXES[[ENDPOINT]])
+  # Figures 1-2 describe the platinum-labelled cohort itself and are identical
+  # across endpoints; emit them only on the platinum pass so a NEPC run does
+  # not rewrite them with byte-identical output.
+  EMIT_ENDPOINT_INDEPENDENT <- identical(ENDPOINT, ENDPOINT_INDEPENDENT_FIGURES_ENDPOINT)
   if (!is.logical(plot_non_androgen_distributions) ||
       length(plot_non_androgen_distributions) != 1 ||
       is.na(plot_non_androgen_distributions))
@@ -389,17 +426,24 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       is.na(plot_non_androgen_lab_figures))
     stop("plot_non_androgen_lab_figures must be one non-missing logical value")
   COHORT_DISPLAY <- unname(COHORT_LABELS[[COHORT]])
-  message(sprintf("Generating figures for cohort: %s", COHORT_DISPLAY))
+  ENDPOINT_DISPLAY <- toupper(ENDPOINT)
+  message(sprintf("Generating figures for cohort: %s, endpoint: %s",
+                  COHORT_DISPLAY, ENDPOINT_DISPLAY))
 
   IS_ADT <- identical(COHORT, "adt")
   ANCHOR_LABEL <- if (IS_ADT) "ADT initiation" else "ARPI/chemo initiation"
 
-  BASE <- file.path(NEPC_PROJ_PATH, "survival_analysis", paste0("local_runs_", COHORT))
+  # Both trees are endpoint-suffixed, matching make_runs(): the NEPC cohort is
+  # gated on t_nepc > 0, so its prediction inputs are a different patient set
+  # and must be read from prediction_inputs_<cohort>_nepc, not the platinum build.
+  BASE <- file.path(NEPC_PROJ_PATH, "survival_analysis",
+                    paste0("local_runs_", COHORT, ENDPOINT_SUFFIX))
   LONGITUDINAL_CSV <- file.path(
     NEPC_PROJ_PATH,
     if (IS_ADT) "longitudinal_prediction_data_adt.csv" else "longitudinal_prediction_data.csv"
   )
-  INPUTS_DIR <- file.path(NEPC_PROJ_PATH, "survival_analysis", paste0("prediction_inputs_", COHORT))
+  INPUTS_DIR <- file.path(NEPC_PROJ_PATH, "survival_analysis",
+                          paste0("prediction_inputs_", COHORT, ENDPOINT_SUFFIX))
   ICD_PROSTATE_MRN_FLAGS_CSV <- file.path(
     NEPC_PROJ_PATH, "mrn_lists", "icd_prostate_mrn_flags.csv"
   )
@@ -407,7 +451,13 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # Keep the two requested deliverables physically separate:
   #   .../CAIA/COMPASS/ARPI/
   #   .../CAIA/COMPASS/ADT/
+  # The NEPC endpoint nests one level deeper (.../ADT/nepc/) so its panels
+  # cannot overwrite the platinum ones, which share every plot stem. Platinum
+  # keeps the un-suffixed path so existing figure references stay valid.
   FIG_ROOT <- file.path(fig_root, toupper(COHORT))
+  if (!identical(ENDPOINT_SUFFIX, "")) {
+    FIG_ROOT <- file.path(FIG_ROOT, ENDPOINT)
+  }
   # Canonical-lab names sorted longest-first so e.g. "Direct bilirubin" is
   # matched before "Total bilirubin" would ever partially collide, and so a
   # lab-specific stem is never mis-routed to a shorter substring match.
@@ -851,7 +901,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
   fig1 <- (pA | pB) / wrap_plots(timing_panels, nrow = 1) +
     plot_layout(heights = c(1.25, 1)) +
-    plot_annotation(title = sprintf("Figure 1 — COMPASS cohort overview (%s)", COHORT_DISPLAY),
+    plot_annotation(title = sprintf("Figure 1 — COMPASS cohort overview (%s, %s endpoint)",
+                                    COHORT_DISPLAY, ENDPOINT),
                     tag_levels = "A")
   save_fig(fig1, OUT_DIR, "figure1_cohort_overview", 16, 12)
   if (show) print(fig1)
@@ -861,7 +912,17 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                    "pass. Figure 2 v0 and v3 are not restricted to the prediction cohort but ",
                    "are emitted once from the ADT pass, so they are skipped here too."))
 
-  if (IS_ADT) {
+  # Figure 2 validates the LLM classifier against manual annotations and
+  # measures platinum enrichment. Its subject is the label set and the platinum
+  # MRN list, neither of which depends on the modelled endpoint, so it is
+  # emitted once from the platinum pass rather than duplicated per endpoint.
+  if (IS_ADT && !EMIT_ENDPOINT_INDEPENDENT)
+    message(sprintf(paste0("Figure 2 (all variants): classifier/platinum-enrichment figures are ",
+                           "endpoint-independent and are emitted from the %s pass -- skipping ",
+                           "for endpoint=%s."),
+                    ENDPOINT_INDEPENDENT_FIGURES_ENDPOINT, ENDPOINT))
+
+  if (IS_ADT && EMIT_ENDPOINT_INDEPENDENT) {
   ## ---- Figure 2 v0 -- original LLM_v3 labels, no cohort restriction ----
   # This block runs on `nepc_annotations` before it is narrowed to the ADT
   # time-0 cohort at the Figure 2 section below, so its panels describe the
@@ -1791,7 +1852,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
 
   uni <- map_dfr(LANDMARKS, load_uni) %>%
-    filter(endpoint == "platinum") %>%
+    filter(tolower(as.character(endpoint)) == ENDPOINT) %>%
     drop_na(coef_feature, p_value, q_value)
   cat(sprintf("%d (lab x stat) rows across landmarks %s\n",
               nrow(uni), paste(sort(unique(uni$landmark_days)), collapse = ", ")))
@@ -1818,7 +1879,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     } else {
       p <- plot_volcano_panel(sub, title)
     }
-    save_fig(p, OUT_DIR, sprintf("figure3_univariate_platinum_landmark%d", lm),
+    save_fig(p, OUT_DIR, sprintf("figure3_univariate_%s_landmark%d", ENDPOINT, lm),
              width = 7.5, height = 6)
     if (show) print(p)
   }
@@ -1837,7 +1898,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     } else {
       p <- plot_volcano_panel_by_significance(sub, title, highlight_labs = HIGHLIGHT_LABS)
     }
-    save_fig(p, OUT_DIR, sprintf("figure3_univariate_platinum_significance_landmark%d", lm),
+    save_fig(p, OUT_DIR, sprintf("figure3_univariate_%s_significance_landmark%d", ENDPOINT, lm),
              width = 7.5, height = 6)
     if (show) print(p)
   }
@@ -1845,35 +1906,39 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   OUT_DIR <- fig_dir("figure4_multivariate")
   HAS_GGPATTERN <- requireNamespace("ggpattern", quietly = TRUE)
 
-  cox_labs <- function(lm) read_platinum_performance(
+  cox_labs <- function(lm) read_endpoint_performance(
     file.path(BASE, "cox", sprintf("landmark_%s", lm), "both", "cox_agg_multivariable_metrics.csv"),
-    "test_mean_auc_t", "test_c_index", "test_integrated_brier")
-  cox_baseline <- function(lm) read_platinum_performance(
+    ENDPOINT, "test_mean_auc_t", "test_c_index", "test_integrated_brier")
+  cox_baseline <- function(lm) read_endpoint_performance(
     file.path(BASE, "cox", sprintf("landmark_%s", lm), "baseline", "cox_agg_baseline_metrics.csv"),
-    "test_mean_auc_t", "test_c_index", "test_integrated_brier")
-  xgb_labs <- function(lm) read_platinum_performance(
+    ENDPOINT, "test_mean_auc_t", "test_c_index", "test_integrated_brier")
+  xgb_labs <- function(lm) read_endpoint_performance(
     file.path(BASE, "xgboost", sprintf("landmark_%s", lm), "both", "landmark_xgboost_metrics.csv"),
-    "mean_auc_t", "c_index", "integrated_brier")
-  xgb_baseline <- function(lm) read_platinum_performance(
+    ENDPOINT, "mean_auc_t", "c_index", "integrated_brier")
+  xgb_baseline <- function(lm) read_endpoint_performance(
     file.path(BASE, "xgboost", sprintf("landmark_%s", lm), "baseline", "landmark_xgboost_baseline_metrics.csv"),
-    "mean_auc_t", "c_index", "integrated_brier")
+    ENDPOINT, "mean_auc_t", "c_index", "integrated_brier")
+  # 03b writes one directory per config in _LONGITUDINAL_CONFIGS_BY_ENDPOINT.
+  # The cause-only config leads that tuple and is the arm comparable to
+  # Cox/XGBoost here, so it is named for the endpoint itself.
+  DEEPHIT_CONFIG <- ENDPOINT
   resolve_dynamic_deephit_metrics <- function(lm) {
-    filename <- "dynamic_deephit_metrics_platinum.csv"
+    filename <- sprintf("dynamic_deephit_metrics_%s.csv", DEEPHIT_CONFIG)
     preferred <- c(
       file.path(
         BASE, "multivariate_longitudinal", "dynamic_deephit",
-        sprintf("landmark_%s", lm), "platinum", filename
+        sprintf("landmark_%s", lm), DEEPHIT_CONFIG, filename
       ),
       file.path(
         BASE, "multivariate_longitudinal", "dynamic-deephit",
-        sprintf("landmark_%s", lm), "platinum", filename
+        sprintf("landmark_%s", lm), DEEPHIT_CONFIG, filename
       )
     )
     existing <- preferred[file.exists(preferred)]
     if (length(existing) > 0) return(existing[1])
 
     # Accommodate older/custom 03b output roots while still requiring the
-    # requested landmark, platinum config, and exact metrics filename.
+    # requested landmark, endpoint config, and exact metrics filename.
     longitudinal_root <- file.path(BASE, "multivariate_longitudinal")
     if (!dir.exists(longitudinal_root)) return(NA_character_)
     discovered <- list.files(
@@ -1883,7 +1948,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     normalized <- gsub("\\\\", "/", discovered)
     wanted <- endsWith(
       normalized,
-      paste0("/landmark_", lm, "/platinum/", filename)
+      paste0("/landmark_", lm, "/", DEEPHIT_CONFIG, "/", filename)
     )
     discovered <- discovered[wanted]
     if (length(discovered) > 1) {
@@ -1901,8 +1966,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   dynamic_deephit <- function(lm) {
     path <- DEEPHIT_METRIC_PATHS[[as.character(lm)]]
     if (is.na(path)) return(c(auc = NA_real_, cindex = NA_real_, brier = NA_real_))
-    read_platinum_performance(
-      path, "mean_auc_t", "c_index", "integrated_brier"
+    read_endpoint_performance(
+      path, ENDPOINT, "mean_auc_t", "c_index", "integrated_brier"
     )
   }
 
@@ -1970,19 +2035,19 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
 
   disc_panels <- list(
-    list("figure4a_discrimination_auc_platinum",    "auc",    "Test Mean AUC(t)"),
-    list("figure4a_discrimination_cindex_platinum", "cindex", "Test C-index")
+    list(sprintf("figure4a_discrimination_auc_%s", ENDPOINT),    "auc",    "Test Mean AUC(t)"),
+    list(sprintf("figure4a_discrimination_cindex_%s", ENDPOINT), "cindex", "Test C-index")
   )
   for (dp in disc_panels) {
     p <- render_discrimination_panel(dp[[2]], dp[[3]], show_legend = TRUE) +
-      labs(title = sprintf("Labs vs. age baseline \u2014 platinum (%s)", dp[[3]])) +
+      labs(title = sprintf("Labs vs. age baseline \u2014 %s (%s)", ENDPOINT, dp[[3]])) +
       theme(plot.title = element_text(face = "bold", size = 11))
     save_fig(p, OUT_DIR, dp[[1]], width = 7.5, height = 5.5)
     if (show) print(p)
   }
 
   # Supplemental held-out comparison across every directly comparable
-  # multivariate lab model. Dynamic-DeepHit's platinum configuration censors
+  # multivariate lab model. Dynamic-DeepHit's cause-only configuration censors
   # death, matching the Cox/XGBoost endpoint; the competing-risk configuration
   # is intentionally excluded because it estimates a different quantity.
   SUPPLEMENT_SERIES <- tibble::tribble(
@@ -2087,7 +2152,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     labs(
       title = "Supplementary Figure — Held-out multivariate model performance",
       subtitle = paste(
-        "Death-censored platinum endpoint; Dynamic-DeepHit uses longitudinal person-period labs.",
+        sprintf("Death-censored %s endpoint; Dynamic-DeepHit uses longitudinal person-period labs.",
+                ENDPOINT),
         deephit_status
       ),
       x = NULL, y = NULL,
@@ -2117,7 +2183,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   load_cox_coefs <- function(landmark) {
     p <- file.path(BASE, "cox", sprintf("landmark_%s", landmark), "both", "cox_agg_multivariable.csv")
     read_csv(p, show_col_types = FALSE) %>%
-      filter(endpoint == "platinum") %>%
+      filter(tolower(as.character(endpoint)) == ENDPOINT) %>%
       filter(!coalesce(as.logical(is_age_covariate), FALSE)) %>%
       filter(coalesce(coef, 0) != 0)
   }
@@ -2125,7 +2191,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   load_xgb_importance <- function(landmark) {
     p <- file.path(BASE, "xgboost", sprintf("landmark_%s", landmark), "both", "landmark_xgboost_feature_importance.csv")
     df <- read_csv(p, show_col_types = FALSE) %>%
-      filter(endpoint == "platinum") %>%
+      filter(tolower(as.character(endpoint)) == ENDPOINT) %>%
       filter(tolower(feature) != "age") %>%
       filter(coalesce(gain, 0) > 0)
     parsed <- t(vapply(df$feature, parse_feature, character(2)))
@@ -2183,7 +2249,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       sign <- if (lm > 0) "+" else ""
       title <- sprintf("%s  \u00b7  %s%d days", model_name, sign, lm)
       p <- render_importance_panel(df, kind, title)
-      save_fig(p, OUT_DIR, sprintf("figure4b_importance_platinum_%s_landmark%d", kind, lm),
+      save_fig(p, OUT_DIR, sprintf("figure4b_importance_%s_%s_landmark%d", ENDPOINT, kind, lm),
                width = 7.5, height = 5.5)
       if (show) print(p)
       importance_panels[[sprintf("%s_%d", kind, lm)]] <- p
