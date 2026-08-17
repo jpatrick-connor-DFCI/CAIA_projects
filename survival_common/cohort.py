@@ -25,6 +25,15 @@ AGE_COL = "AGE_AT_TREATMENTSTART"
 PLATINUM_MEDS = {"CARBOPLATIN", "CISPLATIN"}
 MIN_DELTA_OBS = 2
 
+# Causes beyond the always-present platinum/death pair, as {event_col:
+# time_col}. Carried through the person-period builder only when the cohort
+# supplies both columns, mirroring make_outcome_df's presence gate. Keep in
+# sync with build_prediction_inputs.LONGITUDINAL_OPTIONAL_EVENT_COLS -- the
+# manifest is written from that one and the data from this one, so a cause
+# listed in only one of them yields a manifest that promises a column the
+# person-period frame does not carry.
+OPTIONAL_LONGITUDINAL_CAUSES = {"NEPC": "t_nepc"}
+
 
 def configure_id_columns(id_col: str, age_col: str) -> None:
     """Set the patient-id / age columns used by every builder in this module.
@@ -673,7 +682,22 @@ def build_person_period_wide(
         raise ValueError(
             f"build_person_period_wide: outcome_df is missing columns {sorted(missing_outcome)}."
         )
-    static = outcome_df[sorted(required_outcome_cols)].copy()
+    # Optional causes are carried only when the cohort actually has them, the
+    # same gate make_outcome_df applies. This must stay in step with
+    # build_prediction_inputs.longitudinal_event_columns(), which advertises
+    # the cause in the longitudinal manifest off the *same* outcome frame: if
+    # the manifest declares NEPC but the person-period frame drops it,
+    # resolve_config("nepc") passes and patient_targets then dies on a
+    # KeyError for the missing column.
+    optional_outcome_cols = {
+        event_col: time_col
+        for event_col, time_col in OPTIONAL_LONGITUDINAL_CAUSES.items()
+        if event_col in outcome_df.columns and time_col in outcome_df.columns
+    }
+    carried_cols = set(required_outcome_cols)
+    for event_col, time_col in optional_outcome_cols.items():
+        carried_cols.update((event_col, time_col))
+    static = outcome_df[sorted(carried_cols)].copy()
 
     labs = lab_long[[ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab"]].copy()
     labs = labs.loc[labs[ID_COL].isin(static.index)]
@@ -752,22 +776,32 @@ def build_person_period_wide(
         landmark_rows[lab] = np.nan
     wide = pd.concat([wide, landmark_rows], ignore_index=True, sort=False)
 
-    static_cols = [AGE_COL, "t_platinum", "t_death", "PLATINUM", "DEATH", "split"]
+    optional_time_cols = [optional_outcome_cols[e] for e in sorted(optional_outcome_cols)]
+    static_cols = (
+        [AGE_COL, "t_platinum", "t_death"]
+        + optional_time_cols
+        + ["PLATINUM", "DEATH"]
+        + sorted(optional_outcome_cols)
+        + ["split"]
+    )
     wide = wide.merge(static[static_cols], left_on=ID_COL, right_index=True, how="inner")
 
-    # Event-time rebasing: t_platinum/t_death (landmark-relative, already
+    # Event-time rebasing: the cause time columns (landmark-relative, already
     # administratively censored via outcome_df) become bin indices on the
     # same landmark_time-origin clock as TIME, so patient_targets's
     # `duration = event_time - landmark` lines up with the person-period axis.
-    t_platinum_after_landmark = np.ceil(
-        (wide["t_platinum"].to_numpy(dtype=float) - float(landmark_day)) / float(time_unit_days)
-    )
-    t_death_after_landmark = np.ceil(
-        (wide["t_death"].to_numpy(dtype=float) - float(landmark_day)) / float(time_unit_days)
-    )
-    wide["t_platinum"] = wide["landmark_time"].to_numpy(dtype=float) + t_platinum_after_landmark
-    wide["t_death"] = wide["landmark_time"].to_numpy(dtype=float) + t_death_after_landmark
+    for time_col in ["t_platinum", "t_death"] + optional_time_cols:
+        after_landmark = np.ceil(
+            (wide[time_col].to_numpy(dtype=float) - float(landmark_day)) / float(time_unit_days)
+        )
+        wide[time_col] = wide["landmark_time"].to_numpy(dtype=float) + after_landmark
 
+    # Deliberately platinum/death-only, and *not* widened to the optional
+    # causes. Every row here is at TIME <= landmark_time (pre-landmark labs
+    # plus the synthetic landmark anchor) while an optional cause's event is
+    # post-landmark by cohort construction, so adding it to this min() cannot
+    # drop a row it should drop -- it can only drop rows from the platinum
+    # arm, whose person-period frame must stay byte-identical to today's.
     event_time = wide[["t_platinum", "t_death"]].min(axis=1).to_numpy(dtype=float)
     n_before_event_filter = len(wide)
     wide = wide.loc[wide["TIME"].to_numpy(dtype=float) < event_time].copy()
@@ -789,10 +823,15 @@ def build_person_period_wide(
         if "landmark_time" in wide.columns and not wide.empty
         else 0
     )
+    # Optional causes are appended after the always-present platinum/death
+    # block so a platinum-only cohort's column order is unchanged.
     column_order = (
         [ID_COL, "TIME"]
         + selected_labs
-        + [AGE_COL, "PLATINUM", "DEATH", "t_platinum", "t_death", "split"]
+        + [AGE_COL, "PLATINUM", "DEATH", "t_platinum", "t_death"]
+        + sorted(optional_outcome_cols)
+        + optional_time_cols
+        + ["split"]
     )
     wide = wide.sort_values([ID_COL, "TIME"])[column_order]
 

@@ -322,3 +322,122 @@ class TestClipBounds:
         )
         bounds = fit_clip_bounds(agg, train_mrns={1}, labs=["RARE"], q_lo=0.05, q_hi=0.95)
         assert "RARE" not in bounds
+
+
+class TestOptionalNepcCause:
+    """NEPC must survive the person-period builder, not just make_outcome_df.
+
+    The longitudinal manifest advertises its event columns from
+    build_prediction_inputs.longitudinal_event_columns(merged), which sees
+    NEPC on the merged frame. If build_person_period_wide then drops NEPC,
+    resolve_config("nepc") still validates against the manifest and
+    patient_targets dies on `KeyError: 'NEPC'` deep inside the DeepHit run.
+    These tests pin the two frames together.
+    """
+
+    @staticmethod
+    def _nepc_rows(mrn: int, *, nepc: int, t_nepc: float, **kwargs) -> list[dict]:
+        rows = _patient_rows(mrn, **kwargs)
+        for row in rows:
+            row["NEPC"] = nepc
+            row["t_nepc"] = t_nepc
+        return rows
+
+    def _nepc_cohort(self) -> pd.DataFrame:
+        rows = self._nepc_rows(
+            1, nepc=1, t_nepc=120.0,
+            lab_times=[-21.0, -14.0, -7.0], lab_values=[1.0, 2.0, 3.0],
+            platinum=1, t_platinum=100.0,
+        ) + self._nepc_rows(
+            2, nepc=0, t_nepc=np.nan,
+            lab_times=[-21.0, -14.0, -7.0], lab_values=[4.0, 5.0, 6.0],
+        )
+        return _cohort(rows)
+
+    def test_nepc_columns_are_carried_into_the_wide_frame(self):
+        wide, _, _, _, merged = _build(self._nepc_cohort())
+        assert "NEPC" in merged.columns and "t_nepc" in merged.columns
+        assert "NEPC" in wide.columns, "NEPC dropped by build_person_period_wide"
+        assert "t_nepc" in wide.columns, "t_nepc dropped by build_person_period_wide"
+
+    def test_wide_carries_every_cause_the_manifest_advertises(self):
+        """The manifest and the data must agree on the available causes."""
+        from COMPASS.data_preprocessing.build_prediction_inputs import (
+            longitudinal_event_columns,
+        )
+
+        wide, _, _, _, merged = _build(self._nepc_cohort())
+        event_cols, time_cols = longitudinal_event_columns(merged)
+        assert "NEPC" in event_cols and "t_nepc" in time_cols, (
+            "fixture no longer exercises the optional cause"
+        )
+        for col in event_cols + time_cols:
+            assert col in wide.columns, (
+                f"manifest advertises {col} but the person-period frame "
+                "does not carry it"
+            )
+
+    def test_patient_targets_resolves_the_nepc_config(self):
+        """The end of the path that raised KeyError: 'NEPC' on the cluster."""
+        from survival_common.longitudinal_targets import patient_targets
+
+        wide, _, _, _, _ = _build(self._nepc_cohort())
+        targets = patient_targets(
+            wide,
+            id_col="DFCI_MRN",
+            time_col="TIME",
+            event_cols=["NEPC", "DEATH"],
+            time_cols=["t_nepc", "t_death"],
+            max_pred_window=52,
+        )
+        assert not targets.empty
+        # Patient 1 has NEPC at t=120d -> a positive post-landmark duration
+        # and the cause-of-interest label (1 = first entry in event_cols).
+        assert targets.loc[1, "label"] == 1
+
+    def test_nepc_is_rebased_onto_the_person_period_clock(self):
+        """t_nepc must share TIME's landmark_time origin, like t_platinum."""
+        wide, _, _, _, _ = _build(self._nepc_cohort())
+        patient = wide.loc[wide["DFCI_MRN"] == 1]
+        landmark_time = float(patient["TIME"].max())
+        # t_nepc = 120d, landmark_day = 0, 7d bins -> ceil(120/7) = 18 bins out.
+        assert float(patient["t_nepc"].iloc[0]) == landmark_time + 18.0
+
+    def test_platinum_only_cohort_is_unchanged(self):
+        """A cohort without NEPC keeps exactly today's columns and order."""
+        rows = _patient_rows(
+            1, lab_times=[-21.0, -14.0, -7.0], lab_values=[1.0, 2.0, 3.0],
+            platinum=1, t_platinum=100.0,
+        ) + _patient_rows(
+            2, lab_times=[-21.0, -14.0, -7.0], lab_values=[4.0, 5.0, 6.0],
+        )
+        wide, _, selected_labs, _, _ = _build(_cohort(rows))
+        assert "NEPC" not in wide.columns and "t_nepc" not in wide.columns
+        assert list(wide.columns) == (
+            ["DFCI_MRN", "TIME"] + selected_labs
+            + ["AGE_AT_TREATMENTSTART", "PLATINUM", "DEATH",
+               "t_platinum", "t_death", "split"]
+        )
+
+    def test_nepc_does_not_truncate_the_platinum_arms_rows(self):
+        """Adding NEPC must not change which person-period rows survive.
+
+        The pre-event row filter stays platinum/death-only; a patient whose
+        NEPC precedes their platinum must keep the same rows either way.
+        """
+        with_nepc = self._nepc_rows(
+            1, nepc=1, t_nepc=60.0,
+            lab_times=[-21.0, -14.0, -7.0], lab_values=[1.0, 2.0, 3.0],
+            platinum=1, t_platinum=200.0,
+        )
+        without = [
+            {k: v for k, v in row.items() if k not in ("NEPC", "t_nepc")}
+            for row in with_nepc
+        ]
+        wide_with, _, _, _, _ = _build(_cohort(with_nepc))
+        wide_without, _, _, _, _ = _build(_cohort(without))
+        shared = [c for c in wide_without.columns]
+        pd.testing.assert_frame_equal(
+            wide_with[shared].reset_index(drop=True),
+            wide_without.reset_index(drop=True),
+        )
