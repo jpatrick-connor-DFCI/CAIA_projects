@@ -681,6 +681,7 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             "--landmark-day", str(landmark),
             "--config", config_dir,
             "--max-pred-window", str(MAX_PRED_WINDOW),
+            overwrite_flag,
         ]
     if model == "survlatent-ode":
         if not SURVLATENT_REPO:
@@ -689,7 +690,7 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
                 "cloned itmoon7/survlatent_ode repo (with its conda env active) before "
                 "running survlatent-ode tasks -- see multivariate_longitudinal/README.md."
             )
-        return [
+        cmd = [
             PYTHON, SURVIVAL_DIR / "multivariate_longitudinal" / "survlatent_ode.py",
             "--survlatent-repo", str(SURVLATENT_REPO),
             "--inputs-dir", run["inputs_dir"],
@@ -700,7 +701,13 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             "--config", config_dir,
             "--run-id", longitudinal_run_id(config_dir, landmark),
             "--max-pred-window", str(MAX_PRED_WINDOW),
+            overwrite_flag,
         ]
+        if FORCE_RERUN:
+            # A forced refit is a fresh fit: clear this run_id's checkpoints too,
+            # or prepare_run_artifacts() aborts on the leftover artifacts.
+            cmd.append("--overwrite-run")
+        return cmd
     if model == "xgboost":
         cmd = [
             PYTHON, SURVIVAL_DIR / "multivariate_analysis.py",
