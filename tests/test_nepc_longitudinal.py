@@ -1,18 +1,19 @@
-"""Tests for the nepc/nepc_competing longitudinal configs.
+"""Tests for the nepc/nepc_competing and avpc_nepc/avpc_nepc_competing
+longitudinal configs.
 
-Companion to test_nepc_endpoint.py (which covers the Cox/XGBoost endpoint
-axis). The two registries are separate by design -- cox_aggregated.ENDPOINTS
-selects a (duration, event) pair, LONGITUDINAL_CONFIGS selects a cause of
-interest plus an optional competing cause -- so the nepc endpoint needs
-independent coverage on this side.
+Companion to test_nepc_endpoint.py / test_avpc_nepc_endpoint.py (which cover
+the Cox/XGBoost endpoint axis). The two registries are separate by design --
+cox_aggregated.ENDPOINTS selects a (duration, event) pair, LONGITUDINAL_CONFIGS
+selects a cause of interest plus an optional competing cause -- so each
+endpoint needs independent coverage on this side.
 
 The invariants pinned here:
   1. label 1 is always the cause of interest and label 2 always death, for
-     BOTH competing configs. A reorder silently reinterprets every downstream
+     ALL competing configs. A reorder silently reinterprets every downstream
      risk column.
   2. each config scores on its own endpoint's AUC(t) horizon grid.
   3. the platinum configs are byte-identical to what they were before the
-     nepc configs were registered.
+     nepc/avpc_nepc configs were registered.
 """
 
 from __future__ import annotations
@@ -73,12 +74,49 @@ class TestNepcConfigResolution:
             resolve_config("nepc", platinum_only)
 
     def test_cause_of_interest_is_ordered_first(self):
-        """Label 1 = cause of interest, label 2 = death, for both configs."""
+        """Label 1 = cause of interest, label 2 = death, for all competing
+        configs."""
         assert LONGITUDINAL_CONFIGS["competing"]["event_cols"] == ["PLATINUM", "DEATH"]
         assert LONGITUDINAL_CONFIGS["nepc_competing"]["event_cols"] == ["NEPC", "DEATH"]
+        assert LONGITUDINAL_CONFIGS["avpc_nepc_competing"]["event_cols"] == ["AVPC_NEPC", "DEATH"]
 
     def test_every_config_declares_a_horizon_endpoint(self):
         assert set(CONFIG_ENDPOINTS) == set(LONGITUDINAL_CONFIGS)
+
+
+class TestAvpcNepcConfigResolution:
+    """Mirrors TestNepcConfigResolution for the avpc_nepc/avpc_nepc_competing
+    pair, added alongside nepc as a third, independently-gated endpoint."""
+
+    FULL_MANIFEST = {"event_cols": ["PLATINUM", "DEATH", "NEPC", "AVPC_NEPC"]}
+
+    def test_avpc_nepc_config(self):
+        cfg = resolve_config("avpc_nepc", self.FULL_MANIFEST)
+        assert cfg.event_cols == ["AVPC_NEPC"]
+        assert cfg.time_cols == ["t_avpc_nepc"]
+        assert cfg.event_names == ["avpc_nepc"]
+        assert cfg.n_events == 1
+
+    def test_avpc_nepc_competing_config(self):
+        cfg = resolve_config("avpc_nepc_competing", self.FULL_MANIFEST)
+        assert cfg.event_cols == ["AVPC_NEPC", "DEATH"]
+        assert cfg.time_cols == ["t_avpc_nepc", "t_death"]
+        assert cfg.event_names == ["avpc_nepc", "death"]
+        assert cfg.n_events == 2
+
+    def test_case_insensitive(self):
+        assert resolve_config("AVPC_NEPC_Competing", self.FULL_MANIFEST).name == "avpc_nepc_competing"
+
+    def test_cohort_without_avpc_nepc_raises_actionable_error(self):
+        """A platinum/nepc-only build must reject the avpc_nepc config, not
+        KeyError later."""
+        without_avpc_nepc = {"event_cols": ["PLATINUM", "DEATH", "NEPC"]}
+        with pytest.raises(ValueError, match="AVPC_NEPC"):
+            resolve_config("avpc_nepc", without_avpc_nepc)
+
+    def test_config_endpoint_map_routes_avpc_nepc(self):
+        assert CONFIG_ENDPOINTS["avpc_nepc"] == "avpc_nepc"
+        assert CONFIG_ENDPOINTS["avpc_nepc_competing"] == "avpc_nepc"
 
 
 class TestNepcTargets:

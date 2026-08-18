@@ -81,6 +81,16 @@ def test_endpoint_suffixes_match_make_runs():
     body = block.group(1)
     assert re.search(r'platinum\s*=\s*""', body), "platinum suffix must be empty"
     assert re.search(r'nepc\s*=\s*"_nepc"', body), "nepc suffix must be _nepc"
+    assert re.search(r'avpc_nepc\s*=\s*"_avpc_nepc"', body), "avpc_nepc suffix must be _avpc_nepc"
+
+
+def test_supported_endpoints_includes_avpc_nepc():
+    """SUPPORTED_ENDPOINTS must list avpc_nepc alongside platinum/nepc."""
+    source = _pipeline_source()
+    block = re.search(r"SUPPORTED_ENDPOINTS <- c\((.*?)\)", source, re.S)
+    assert block, "SUPPORTED_ENDPOINTS not found"
+    body = block.group(1)
+    assert '"avpc_nepc"' in body, "avpc_nepc must be a supported endpoint"
 
 
 def test_endpoint_filter_is_not_data_masked():
@@ -103,10 +113,10 @@ def test_endpoint_filter_is_not_data_masked():
 
 
 @pytest.mark.parametrize(
-    ("endpoint", "expected_auc"), [("platinum", 0.71), ("nepc", 0.64)]
+    ("endpoint", "expected_auc"), [("platinum", 0.71), ("nepc", 0.64), ("avpc_nepc", 0.58)]
 )
 def test_reads_the_requested_endpoints_row(tmp_path, endpoint, expected_auc):
-    """A metrics CSV holding both endpoints must yield the requested one."""
+    """A metrics CSV holding all three endpoints must yield the requested one."""
     script = textwrap.dedent(
         f"""
         suppressPackageStartupMessages({{library(dplyr); library(readr)}})
@@ -114,10 +124,10 @@ def test_reads_the_requested_endpoints_row(tmp_path, endpoint, expected_auc):
 
         path <- file.path(tempdir(), "metrics.csv")
         write_csv(tibble(
-          endpoint = c("platinum", "nepc"),
-          test_mean_auc_t = c(0.71, 0.64),
-          test_c_index = c(0.69, 0.62),
-          test_integrated_brier = c(0.15, 0.19)
+          endpoint = c("platinum", "nepc", "avpc_nepc"),
+          test_mean_auc_t = c(0.71, 0.64, 0.58),
+          test_c_index = c(0.69, 0.62, 0.57),
+          test_integrated_brier = c(0.15, 0.19, 0.21)
         ), path)
 
         got <- read_endpoint_performance(
@@ -210,14 +220,27 @@ def test_figure_roots_do_not_collide():
 def test_results_trees_are_endpoint_suffixed():
     """BASE and INPUTS_DIR must both carry the endpoint suffix.
 
-    make_runs suffixes both trees, because the NEPC cohort is gated on
-    t_nepc > 0 and is therefore a different patient set.
+    make_runs suffixes both trees, because the NEPC and AVPC_NEPC cohorts are
+    each gated on their own t_* > 0 incident condition and are therefore
+    different patient sets from platinum (and from each other).
     """
     source = _pipeline_source()
     for prefix in ("local_runs_", "prediction_inputs_"):
         assert f'paste0("{prefix}", COHORT, ENDPOINT_SUFFIX)' in source, (
             f"{prefix} must be endpoint-suffixed"
         )
+
+
+def test_avpc_nepc_figure_root_nests_like_nepc():
+    """avpc_nepc must take the same non-platinum nesting path as nepc -- the
+    ENDPOINT_SUFFIX-driven FIG_ROOT branch is generic over the suffix, so no
+    avpc_nepc-specific branch should exist (and none is needed)."""
+    source = _pipeline_source()
+    assert re.search(
+        r'if \(!identical\(ENDPOINT_SUFFIX, ""\)\) \{\s*\n\s*'
+        r"FIG_ROOT <- file\.path\(FIG_ROOT, ENDPOINT\)",
+        source,
+    ), "non-platinum endpoints (including avpc_nepc) must nest one level deeper"
 
 
 def test_pipeline_parses(tmp_path):

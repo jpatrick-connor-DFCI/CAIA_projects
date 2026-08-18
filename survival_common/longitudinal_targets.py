@@ -6,28 +6,35 @@ without torch or the external SurvLatent repo. Both models import
 ``LONGITUDINAL_CONFIGS`` / ``resolve_config`` / ``patient_targets`` from here
 and take identical ``--config`` values.
 
-Four configs, deliberately no "death-alone" config. Each names a primary
+Six configs, deliberately no "death-alone" config. Each names a primary
 cause of interest, optionally paired with death as a competing cause:
 
-  platinum       -- n_events=1. Death is never read; a patient who dies without
-                    platinum is already censored at death via t_platinum's
-                    fallback to t_last_contact (see cohort.make_outcome_df).
-                    This is cause-specific censoring with zero special-casing,
-                    and is what makes this config directly comparable to the
-                    existing Cox/XGBoost arms (same cohort, same censoring).
-  competing      -- n_events=2. label = 0 (censored) / 1 (platinum) / 2 (death),
-                    fixed by the order of event_cols below. A patient with both
-                    events observed is labeled by whichever has the smaller
-                    post-landmark duration (argmin ties break toward the first
-                    listed cause, i.e. platinum).
-  nepc           -- the platinum config's analogue for the LLM-adjudicated NEPC
-                    diagnosis endpoint. Same cause-specific censoring.
-  nepc_competing -- the competing analogue: label 1 = NEPC, 2 = death.
+  platinum            -- n_events=1. Death is never read; a patient who dies
+                         without platinum is already censored at death via
+                         t_platinum's fallback to t_last_contact (see
+                         cohort.make_outcome_df). This is cause-specific
+                         censoring with zero special-casing, and is what makes
+                         this config directly comparable to the existing
+                         Cox/XGBoost arms (same cohort, same censoring).
+  competing           -- n_events=2. label = 0 (censored) / 1 (platinum) /
+                         2 (death), fixed by the order of event_cols below. A
+                         patient with both events observed is labeled by
+                         whichever has the smaller post-landmark duration
+                         (argmin ties break toward the first listed cause,
+                         i.e. platinum).
+  nepc                -- the platinum config's analogue for the LLM-adjudicated
+                         NEPC diagnosis endpoint. Same cause-specific censoring.
+  nepc_competing      -- the competing analogue: label 1 = NEPC, 2 = death.
+  avpc_nepc           -- the platinum config's analogue for the broader
+                         AVPC_NEPC criteria-timeline endpoint (>=3 Aparicio
+                         criteria or any NEPC feature, NEPC-precedence timing).
+                         Same cause-specific censoring.
+  avpc_nepc_competing -- the competing analogue: label 1 = AVPC_NEPC, 2 = death.
 
-The nepc configs read a cohort built with ``--require-nepc`` (an incident-NEPC
-risk set), so they are NOT the same patients as the platinum configs -- their
-metrics are not a like-for-like comparison. See the README's "Arms and
-endpoints" section.
+The nepc/avpc_nepc configs each read a cohort built with their own incident
+gate (``--require-nepc`` / ``endpoint=avpc_nepc``), so neither is the same
+patient set as the platinum configs, nor as each other -- their metrics are
+not a like-for-like comparison. See the README's "Arms and endpoints" section.
 """
 
 from __future__ import annotations
@@ -44,6 +51,8 @@ CONFIG_ENDPOINTS: dict[str, str] = {
     "competing": "platinum",
     "nepc": "nepc",
     "nepc_competing": "nepc",
+    "avpc_nepc": "avpc_nepc",
+    "avpc_nepc_competing": "avpc_nepc",
 }
 
 LONGITUDINAL_CONFIGS: dict[str, dict[str, list[str]]] = {
@@ -67,12 +76,23 @@ LONGITUDINAL_CONFIGS: dict[str, dict[str, list[str]]] = {
         "time_cols": ["t_nepc", "t_death"],
         "event_names": ["nepc", "death"],
     },
+    "avpc_nepc": {
+        "event_cols": ["AVPC_NEPC"],
+        "time_cols": ["t_avpc_nepc"],
+        "event_names": ["avpc_nepc"],
+    },
+    "avpc_nepc_competing": {
+        "event_cols": ["AVPC_NEPC", "DEATH"],
+        "time_cols": ["t_avpc_nepc", "t_death"],
+        "event_names": ["avpc_nepc", "death"],
+    },
 }
-# Fixed cause ordering: a future reorder of either competing config would
+# Fixed cause ordering: a future reorder of any competing config would
 # silently swap which label (1 vs 2) every downstream risk column means. The
 # cause of interest must stay first, and death second.
 assert LONGITUDINAL_CONFIGS["competing"]["event_cols"] == ["PLATINUM", "DEATH"]
 assert LONGITUDINAL_CONFIGS["nepc_competing"]["event_cols"] == ["NEPC", "DEATH"]
+assert LONGITUDINAL_CONFIGS["avpc_nepc_competing"]["event_cols"] == ["AVPC_NEPC", "DEATH"]
 # Every config must declare the horizon grid it evaluates on.
 assert set(CONFIG_ENDPOINTS) == set(LONGITUDINAL_CONFIGS)
 

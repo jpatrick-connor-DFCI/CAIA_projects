@@ -34,6 +34,17 @@ MIN_DELTA_OBS = 2
 # person-period frame does not carry.
 OPTIONAL_LONGITUDINAL_CAUSES = {"NEPC": "t_nepc"}
 
+# Optional per-patient endpoints make_outcome_df derives generically, as
+# {endpoint_key: (event_col, duration_col, date_col)}. Each is independently
+# present or absent in the input (an upstream cohort can carry NEPC,
+# AVPC_NEPC, both, or neither) -- presence is detected per-key, not via a
+# single shared flag. `platinum` is not in this registry: it has its own
+# bespoke, always-present derivation path feeding t_either/EITHER below.
+OPTIONAL_ENDPOINT_SPECS = {
+    "nepc": ("NEPC", "t_nepc", "NEPC_DATE"),
+    "avpc_nepc": ("AVPC_NEPC", "t_avpc_nepc", "AVPC_NEPC_DATE"),
+}
+
 
 def configure_id_columns(id_col: str, age_col: str) -> None:
     """Set the patient-id / age columns used by every builder in this module.
@@ -164,6 +175,20 @@ def make_outcome_df(
         "NEPC_DATE_SOURCE",
         "NEPC_DATE_PRECISION",
         "NEPC_LABEL_SOURCE",
+        # AVPC_NEPC endpoint. Absent unless the cohort was built with the LLM
+        # annotations mounted; every use below is guarded on presence.
+        "AVPC_NEPC_DATE",
+        "AVPC_NEPC",
+        "t_avpc_nepc",
+        # Audit/provenance columns for AVPC_NEPC, not used in duration math.
+        "AVPC_NEPC_DATE_SOURCE",
+        "AVPC_NEPC_DATE_PRECISION",
+        "AVPC_NEPC_LABEL_SOURCE",
+        "AVPC",
+        "AVPC_DATE",
+        "AVPC_N_CRITERIA",
+        "NEPC_TIMELINE",
+        "NEPC_TIMELINE_DATE",
         *extra_anchor_cols,
     ]
     available_cols = [col for col in patient_level_cols if col in df.columns]
@@ -185,6 +210,7 @@ def make_outcome_df(
         "LAST_CONTACT_DATE",
         "PLATINUM_DATE",
         "NEPC_DATE",
+        "AVPC_NEPC_DATE",
     ]:
         if date_col in pat.columns:
             pat[date_col] = _coerce_datetime(pat[date_col])
@@ -238,22 +264,27 @@ def make_outcome_df(
         pat["t_platinum"].fillna(pat["t_last_contact"]),
     )
 
-    # NEPC endpoint, derived exactly like platinum but only when the upstream
-    # cohort carried it. ``has_nepc`` gates every NEPC-touching block below, so
-    # a platinum-only input flows through unchanged.
-    has_nepc = "NEPC" in pat.columns or "t_nepc" in pat.columns
-    if has_nepc:
-        pat["NEPC"] = (
-            pd.to_numeric(pat.get("NEPC"), errors="coerce").fillna(0).astype(int)
+    # Optional endpoints (NEPC, AVPC_NEPC, ...), each derived exactly like
+    # platinum but only when the upstream cohort carried it. ``has_optional``
+    # gates every endpoint-touching block below per key, so an input missing
+    # one or both optional endpoints flows through unchanged for the rest.
+    has_optional: dict[str, bool] = {}
+    for key, (event_col, duration_col, date_col) in OPTIONAL_ENDPOINT_SPECS.items():
+        has_col = event_col in pat.columns or duration_col in pat.columns
+        has_optional[key] = has_col
+        if not has_col:
+            continue
+        pat[event_col] = (
+            pd.to_numeric(pat.get(event_col), errors="coerce").fillna(0).astype(int)
         )
-        pat["t_nepc"] = _derive_duration(
+        pat[duration_col] = _derive_duration(
             pat,
-            duration_col="t_nepc",
-            event_date_col="NEPC_DATE",
+            duration_col=duration_col,
+            event_date_col=date_col,
         )
-        pat["t_nepc"] = pat["t_nepc"].where(
-            pat["NEPC"].eq(1),
-            pat["t_nepc"].fillna(pat["t_last_contact"]),
+        pat[duration_col] = pat[duration_col].where(
+            pat[event_col].eq(1),
+            pat[duration_col].fillna(pat["t_last_contact"]),
         )
 
     if anchor_col is None:
@@ -265,8 +296,9 @@ def make_outcome_df(
             raise ValueError(f"make_outcome_df: anchor_col {anchor_col!r} missing from input.")
         landmark_time = pat[anchor_col].astype(float) + float(landmark_offset_days)
     rebased_duration_cols = ["t_last_contact", "t_death", "t_platinum"]
-    if has_nepc:
-        rebased_duration_cols.append("t_nepc")
+    for key, (_event_col, duration_col, _date_col) in OPTIONAL_ENDPOINT_SPECS.items():
+        if has_optional[key]:
+            rebased_duration_cols.append(duration_col)
     for duration_col in rebased_duration_cols:
         pat[f"{duration_col}_from_first_record"] = pat[duration_col]
         pat[duration_col] = pat[duration_col].astype(float) - landmark_time
@@ -286,17 +318,19 @@ def make_outcome_df(
         n_death_censored = int(death_past.sum())
         pat.loc[platinum_past, "PLATINUM"] = 0
         pat.loc[death_past, "DEATH"] = 0
-        nepc_msg = ""
-        if has_nepc:
-            nepc_past = pat["NEPC"].eq(1) & pat["t_nepc"].gt(horizon)
-            pat.loc[nepc_past, "NEPC"] = 0
-            nepc_msg = f" and {int(nepc_past.sum())} NEPC events"
+        optional_msg = ""
+        for key, (event_col, duration_col, _date_col) in OPTIONAL_ENDPOINT_SPECS.items():
+            if not has_optional[key]:
+                continue
+            optional_past = pat[event_col].eq(1) & pat[duration_col].gt(horizon)
+            pat.loc[optional_past, event_col] = 0
+            optional_msg += f" and {int(optional_past.sum())} {event_col} events"
         for duration_col in rebased_duration_cols:
             pat[duration_col] = pat[duration_col].clip(upper=horizon)
         print(
             f"[make_outcome_df @ landmark +{landmark_offset_days}d] administrative "
             f"censoring at {horizon:g}d: {n_platinum_censored} PLATINUM events and "
-            f"{n_death_censored} DEATH events{nepc_msg} pushed past the horizon censored."
+            f"{n_death_censored} DEATH events{optional_msg} pushed past the horizon censored."
         )
 
     platinum_event_time = np.where(pat["PLATINUM"].eq(1), pat["t_platinum"], np.inf)
@@ -309,15 +343,26 @@ def make_outcome_df(
     if require_nepc:
         endpoint = "nepc"
     endpoint = str(endpoint).lower()
-    if endpoint not in {"platinum", "nepc"}:
+    if endpoint not in {"platinum", *OPTIONAL_ENDPOINT_SPECS}:
+        expected = "', '".join(["platinum", *OPTIONAL_ENDPOINT_SPECS])
         raise ValueError(
-            f"make_outcome_df: unknown endpoint {endpoint!r}; expected 'platinum' or 'nepc'."
+            f"make_outcome_df: unknown endpoint {endpoint!r}; expected '{expected}'."
         )
-    if endpoint == "nepc" and not has_nepc:
+    if endpoint in OPTIONAL_ENDPOINT_SPECS and not has_optional[endpoint]:
+        event_col, duration_col, date_col = OPTIONAL_ENDPOINT_SPECS[endpoint]
+        if endpoint == "nepc":
+            # Preserve the exact historical message text (including the
+            # "(require_nepc)" mention some callers/tests match on) for the
+            # one endpoint that predates this generic registry.
+            raise ValueError(
+                "make_outcome_df: endpoint='nepc' (require_nepc) but the input carries no NEPC "
+                "columns. Rebuild the survival cohort with the LLM NEPC diagnosis "
+                "labels (--nepc-labels) before running the nepc endpoint."
+            )
         raise ValueError(
-            "make_outcome_df: endpoint='nepc' (require_nepc) but the input carries no NEPC "
-            "columns. Rebuild the survival cohort with the LLM NEPC diagnosis "
-            "labels (--nepc-labels) before running the nepc endpoint."
+            f"make_outcome_df: endpoint={endpoint!r} but the input carries no "
+            f"{event_col} columns. Rebuild the survival cohort with the LLM "
+            f"{event_col} labels before running the {endpoint} endpoint."
         )
 
     # Individual validity conditions, kept separate so the attrition each one
@@ -337,10 +382,12 @@ def make_outcome_df(
         conditions["t_either notna"] = pat["t_either"].notna()
         conditions["t_either > 0"] = pat["t_either"].gt(0)
     else:
-        # Incident-NEPC semantics: only NEPC timing joins the endpoint-specific
-        # gate. In particular, pre-anchor platinum exposure is irrelevant here.
-        conditions["t_nepc notna"] = pat["t_nepc"].notna()
-        conditions["t_nepc > 0"] = pat["t_nepc"].gt(0)
+        # Incident semantics for optional endpoints (NEPC, AVPC_NEPC, ...):
+        # only that endpoint's own timing joins the endpoint-specific gate. In
+        # particular, pre-anchor platinum exposure is irrelevant here.
+        _, duration_col, _ = OPTIONAL_ENDPOINT_SPECS[endpoint]
+        conditions[f"{duration_col} notna"] = pat[duration_col].notna()
+        conditions[f"{duration_col} > 0"] = pat[duration_col].gt(0)
 
     if anchor_col is not None:
         # A real anchor column must be present and on-or-after first record; with

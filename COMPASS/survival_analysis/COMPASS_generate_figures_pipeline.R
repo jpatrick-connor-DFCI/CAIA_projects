@@ -371,10 +371,11 @@ COHORT_LANDMARKS <- list(
 # compass_pipeline.make_endpoint_runs(). The suffix must match the
 # `output_suffix` that make_runs() appends to BOTH prediction_inputs_* and
 # local_runs_*: "" for platinum, "_nepc" for NEPC.
-SUPPORTED_ENDPOINTS <- c("platinum", "nepc")
+SUPPORTED_ENDPOINTS <- c("platinum", "nepc", "avpc_nepc")
 ENDPOINT_SUFFIXES <- c(
   platinum = "",
-  nepc = "_nepc"
+  nepc = "_nepc",
+  avpc_nepc = "_avpc_nepc"
 )
 # Figure 1/2 are classifier- and platinum-cohort figures (CONSORT, LLM
 # validation, platinum enrichment); their subject is the platinum MRN list

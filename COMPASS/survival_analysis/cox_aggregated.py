@@ -109,6 +109,13 @@ ENDPOINTS = {
         "event_col": "NEPC",
         "description": "Time from the treatment anchor (first ADT exposure = time 0) to LLM-adjudicated NEPC diagnosis",
     },
+    "avpc_nepc": {
+        "duration_col": "t_avpc_nepc",
+        "event_col": "AVPC_NEPC",
+        "description": "Time from the treatment anchor (first ADT exposure = time 0) to the "
+                        "first documented AVPC (>=3 Aparicio criteria) or NEPC criterion, "
+                        "from the longitudinal criteria timeline",
+    },
 }
 
 # Non-feature outcome/metadata columns, independent of the age column. The age
@@ -135,9 +142,12 @@ OUTCOME_METADATA_COLUMNS = {
     "t_death_from_first_record",
     "t_either",
     "split",
-    # NEPC endpoint. These MUST be listed even when the platinum endpoint is
-    # being run: they are outcome columns for either run, and omitting one lets
-    # NEPC status enter the feature matrix and predict NEPC.
+    # NEPC and AVPC_NEPC endpoints. These MUST be listed even when the platinum
+    # endpoint is being run: they are outcome columns for every run, and
+    # omitting one lets that endpoint's status enter the feature matrix and
+    # predict itself. AVPC_NEPC is especially leaky if missed here: AVPC,
+    # NEPC_TIMELINE, and AVPC_N_CRITERIA are its own components and would let
+    # a model trivially reconstruct the label from them.
     "NEPC_DATE",
     "NEPC",
     "t_nepc",
@@ -145,6 +155,18 @@ OUTCOME_METADATA_COLUMNS = {
     "NEPC_DATE_SOURCE",
     "NEPC_DATE_PRECISION",
     "NEPC_LABEL_SOURCE",
+    "AVPC_NEPC",
+    "t_avpc_nepc",
+    "t_avpc_nepc_from_first_record",
+    "AVPC_NEPC_DATE",
+    "AVPC_NEPC_DATE_SOURCE",
+    "AVPC_NEPC_DATE_PRECISION",
+    "AVPC_NEPC_LABEL_SOURCE",
+    "AVPC",
+    "AVPC_DATE",
+    "AVPC_N_CRITERIA",
+    "NEPC_TIMELINE",
+    "NEPC_TIMELINE_DATE",
 }
 
 

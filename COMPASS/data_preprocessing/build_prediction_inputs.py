@@ -82,7 +82,7 @@ DEFAULT_OUTLIER_HI = 0.995
 # cohort actually carries it -- see longitudinal_event_columns().
 LONGITUDINAL_EVENT_COLS = ["PLATINUM", "DEATH"]
 LONGITUDINAL_TIME_TO_EVENT_COLS = ["t_platinum", "t_death"]
-LONGITUDINAL_OPTIONAL_EVENT_COLS = {"NEPC": "t_nepc"}
+LONGITUDINAL_OPTIONAL_EVENT_COLS = {"NEPC": "t_nepc", "AVPC_NEPC": "t_avpc_nepc"}
 
 
 def longitudinal_event_columns(frame) -> tuple[list[str], list[str]]:
@@ -360,10 +360,14 @@ AGGREGATED_DROP_COLUMNS = (
     "LAST_CONTACT_DATE",
     "PLATINUM_DATE",
     "NEPC_DATE",
+    "AVPC_NEPC_DATE",
+    "AVPC_DATE",
+    "NEPC_TIMELINE_DATE",
     "TREATMENT_ANCHOR_DATE",
     # Pre-rebase duration duplicates kept for debugging by make_outcome_df.
     "t_platinum_from_first_record",
     "t_nepc_from_first_record",
+    "t_avpc_nepc_from_first_record",
     "t_last_contact_from_first_record",
     "t_death_from_first_record",
     # Shared make_outcome_df still derives these first-treatment fields (falling
@@ -537,16 +541,20 @@ def main(args: argparse.Namespace) -> None:
     # rather than through the parser, so a bare attribute access would break them.
     require_nepc = bool(getattr(args, "require_nepc", False))
     endpoint = "nepc" if require_nepc else str(getattr(args, "endpoint", "platinum")).lower()
-    if endpoint == "nepc":
-        print(
-            "NEPC endpoint cohort: ON (--endpoint nepc). t_nepc must be non-null and "
-            "> 0, so NEPC diagnosed at or before the landmark (prevalent) is excluded "
-            "without applying any platinum-time eligibility filter."
-        )
-    else:
+    if endpoint == "platinum":
         print(
             "Platinum endpoint cohort: ON (--endpoint platinum). t_platinum must be "
-            "non-null and > 0, without applying any NEPC-time eligibility filter."
+            "non-null and > 0, without applying any other endpoint's timing "
+            "eligibility filter."
+        )
+    else:
+        duration_col = ENDPOINTS[endpoint]["duration_col"]
+        description = ENDPOINTS[endpoint]["description"]
+        print(
+            f"{endpoint!r} endpoint cohort: ON (--endpoint {endpoint}). "
+            f"{duration_col} must be non-null and > 0, so an event at or before "
+            "the landmark (prevalent) is excluded, without applying any "
+            f"platinum-time eligibility filter. {description}."
         )
     merged_by_landmark: dict[int, pd.DataFrame] = {}
     for landmark_day in landmark_days:

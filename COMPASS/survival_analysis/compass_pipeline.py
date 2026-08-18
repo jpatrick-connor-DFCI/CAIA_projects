@@ -28,6 +28,7 @@ for _p in (str(PROJECT_ROOT),):
 
 from data_preprocessing_common.oncdrs_sources import TABLE_FILES  # noqa: E402
 from data_preprocessing_common.oncdrs_sources import scan_source  # noqa: E402
+from COMPASS.survival_analysis import cox_aggregated as _ca  # noqa: E402
 
 PYTHON = sys.executable
 
@@ -134,9 +135,10 @@ def make_runs(
     and ``local_runs_adt_nepc``, leaving the platinum tree untouched.
     """
     selected_endpoint = ENDPOINT if endpoint is None else str(endpoint).lower()
-    if selected_endpoint not in {"platinum", "nepc"}:
+    valid_endpoints = set(_ca.ENDPOINTS)
+    if selected_endpoint not in valid_endpoints:
         raise ValueError(
-            f"Unknown endpoint: {selected_endpoint!r} (expected 'platinum' or 'nepc')"
+            f"Unknown endpoint: {selected_endpoint!r} (expected one of {sorted(valid_endpoints)})"
         )
     data_root = _PROFILE_OUTPUT_ROOT
     mrn_lists_dir = data_root / "mrn_lists"
@@ -392,7 +394,12 @@ def _run(cmd, dry_run=False):
     return subprocess.call([str(c) for c in cmd])
 
 
-def compile_cohort(arms=("adt",), dry_run: bool = False) -> None:
+def compile_cohort(
+    arms=("adt",),
+    dry_run: bool = False,
+    *,
+    avpc_nepc_labels_path: str | Path | None = None,
+) -> None:
     data_root = _PROFILE_OUTPUT_ROOT
     cmd = [
         PYTHON, DATA_PREPROCESSING_DIR / "compile_COMPASS_cohort_data.py",
@@ -404,6 +411,8 @@ def compile_cohort(arms=("adt",), dry_run: bool = False) -> None:
         "--mrn-lists-dir", data_root / "mrn_lists",
         "--survival-arms", *arms,
     ]
+    if avpc_nepc_labels_path is not None:
+        cmd += ["--avpc-nepc-labels", avpc_nepc_labels_path]
     rc = _run(cmd, dry_run=dry_run)
     if not dry_run and rc != 0:
         raise RuntimeError(f"compile_COMPASS_cohort_data.py failed with rc={rc}")
@@ -572,6 +581,7 @@ MULTIVARIATE_TASK_SPECS = [
 _LONGITUDINAL_CONFIGS_BY_ENDPOINT = {
     "platinum": ("platinum", "competing"),
     "nepc": ("nepc", "nepc_competing"),
+    "avpc_nepc": ("avpc_nepc", "avpc_nepc_competing"),
 }
 
 # SurvLatent ODE needs the bundled external checkout and its own conda env

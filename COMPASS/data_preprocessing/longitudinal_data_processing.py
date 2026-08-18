@@ -643,6 +643,26 @@ def build_longitudinal_prediction_data(
         # demotes undated positives to censored, so this is belt-and-braces.
         pred_df["t_nepc"] = pred_df["t_nepc"].fillna(pred_df["t_last_contact"])
 
+    # Third endpoint, built the same way: days from the treatment anchor to the
+    # broader AVPC/NEPC criteria-timeline event for AVPC_NEPC-positive patients,
+    # otherwise days from the anchor to last contact (censored). Absent when the
+    # survival cohort was built without the LLM annotations mounted, in which
+    # case the avpc_nepc endpoint simply isn't runnable and the platinum/nepc
+    # paths are unaffected.
+    if "AVPC_NEPC" in pred_df.columns:
+        pred_df["AVPC_NEPC"] = (
+            pd.to_numeric(pred_df["AVPC_NEPC"], errors="coerce").fillna(0).astype(int)
+        )
+        avpc_nepc_days = (pred_df["AVPC_NEPC_DATE"] - anchor).dt.days
+        pred_df["t_avpc_nepc"] = np.where(
+            pred_df["AVPC_NEPC"].eq(1),
+            avpc_nepc_days,
+            pred_df["t_last_contact"],
+        ).astype(float)
+        # A positive with no usable date would yield NaN here; Stage 1 already
+        # demotes undated positives to censored, so this is belt-and-braces.
+        pred_df["t_avpc_nepc"] = pred_df["t_avpc_nepc"].fillna(pred_df["t_last_contact"])
+
     # Patients who never received a highlighted drug have no anchor date, so every
     # anchor-relative duration is NaN and they are dropped by the outcome builder's
     # notna() validity checks. No separate anchor index column is emitted: the
@@ -682,6 +702,16 @@ def build_longitudinal_prediction_data(
         "NEPC_LABEL_SOURCE",
     ]
     ordered_cols.extend(col for col in nepc_cols if col in pred_df.columns)
+    # AVPC_NEPC endpoint columns, same append-only-if-present contract as NEPC.
+    avpc_nepc_cols = [
+        "AVPC_NEPC",
+        "AVPC_NEPC_DATE",
+        "t_avpc_nepc",
+        "AVPC_NEPC_DATE_SOURCE",
+        "AVPC_NEPC_DATE_PRECISION",
+        "AVPC_NEPC_LABEL_SOURCE",
+    ]
+    ordered_cols.extend(col for col in avpc_nepc_cols if col in pred_df.columns)
     return pred_df[ordered_cols].copy(), attrition
 
 

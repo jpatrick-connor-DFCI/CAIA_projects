@@ -621,6 +621,7 @@ write one survival cohort carrying every endpoint's columns. Stage 3 is where th
 | --- | --- | --- |
 | `platinum` | `t_platinum` / `PLATINUM` | First carboplatin/cisplatin exposure in `MEDICATIONS` |
 | `nepc` | `t_nepc` / `NEPC` | `LLM_annotations/LLM_nepc_diagnosis/nepc_dx_labels.parquet` |
+| `avpc_nepc` | `t_avpc_nepc` / `AVPC_NEPC` | `LLM_annotations/LLM_avpc_nepc_timeline/avpc_nepc_labels.parquet` (≥3 Aparicio AVPC criteria, or any NEPC feature, with NEPC-precedence timing) |
 
 The `nepc` endpoint models **time from the treatment anchor to LLM-adjudicated NEPC diagnosis**.
 Four properties of it differ from `platinum` and matter for interpretation:
@@ -659,6 +660,8 @@ interest plus an optional competing cause, which is a finer axis than `ENDPOINTS
 | `competing` | platinum, death | `platinum` |
 | `nepc` | nepc; death censored | `nepc` |
 | `nepc_competing` | nepc, death | `nepc` |
+| `avpc_nepc` | avpc_nepc; death censored | `avpc_nepc` |
+| `avpc_nepc_competing` | avpc_nepc, death | `avpc_nepc` |
 
 `CONFIG_ENDPOINTS` maps each config to the `ENDPOINTS` key whose horizon grid it scores on, so a
 NEPC model is evaluated on the NEPC timeline and stays comparable to the NEPC Cox/XGBoost arms
@@ -674,38 +677,50 @@ The cause-only configs (`platinum`, `nepc`) censor at death and are the ones com
 Cox/XGBoost for that endpoint; `summarize_longitudinal_outputs` filters to that row. The competing
 configs' death rows are written to disk but excluded from the summary.
 
-### Running a second endpoint
+### Running a second (or third) endpoint
 
-Set the parameter cell of `01`/`02`/`03`, then run each top to bottom:
+Set the parameter cell of `01`/`02`/`03`/`03b`, then run each top to bottom:
 
 ```python
 ARMS = ["adt"]
-ENDPOINT = "nepc"        # "platinum" reproduces the original run exactly
-OUTPUT_SUFFIX = "_nepc"  # "" for the original tree
+ENDPOINTS = ("platinum", "nepc", "avpc_nepc")  # any subset of cox_aggregated.ENDPOINTS
 OVERWRITE = False
 
-cp.ENDPOINT = ENDPOINT
 cp.FORCE_RERUN = OVERWRITE
-RUNS = cp.make_runs(ARMS, output_suffix=OUTPUT_SUFFIX)
+RUNS = cp.make_endpoint_runs(ARMS, endpoints=ENDPOINTS)
 ```
 
-`OUTPUT_SUFFIX` suffixes **both** `prediction_inputs_<arm>` and `local_runs_<arm>`. Both are
-required: because `--require-nepc` changes which patients survive the landmark filter, and that
-filter runs at *preprocessing* time inside `build_landmark_merged`, the NEPC build needs its own
-inputs tree — not just its own output tree. With the suffix set, `prediction_inputs_adt/` and
-`local_runs_adt/` are never touched.
+`make_endpoint_runs(arms, *, endpoints=("platinum", "nepc"), prediction_input_dirs_by_endpoint=None)`
+builds one independent input/output tree per requested endpoint by calling `make_runs` once per
+endpoint under the hood, with `output_suffix` set to `""` for `platinum` and `f"_{endpoint}"` for
+everything else (e.g. `"_nepc"`, `"_avpc_nepc"`). It supports any number of endpoints, not just two
+— the tuple can carry all three of `platinum`, `nepc`, `avpc_nepc` in one `RUNS` list, and each
+notebook's `for run in RUNS:` loop iterates every (arm, endpoint) pair produced. Every notebook now
+calls `make_endpoint_runs` directly; the older single-endpoint `cp.make_runs(..., output_suffix=...)`
+call shown in earlier versions of this doc is a lower-level helper `make_endpoint_runs` wraps — no
+notebook calls it directly today.
+
+The suffix pattern suffixes **both** `prediction_inputs_<arm>` and `local_runs_<arm>`. Both are
+required: because `--require-nepc` (and the `avpc_nepc` incident gate) change which patients survive
+the landmark filter, and that filter runs at *preprocessing* time inside `build_landmark_merged`,
+each optional endpoint needs its own inputs tree — not just its own output tree. With the suffix set,
+`prediction_inputs_adt/` and `local_runs_adt/` (the unsuffixed `platinum` tree) are never touched by
+an `nepc` or `avpc_nepc` run.
 
 Stages 0-2 of `01` (schema audit, cohort compile, lab preprocessing) only need running once; they
-are shared. Re-run Stage 3 onward per endpoint.
+are shared across all endpoints. Re-run Stage 3 onward per endpoint — `RUNS` already contains one
+entry per (arm, endpoint) pair, so the existing `for run in RUNS:` loops handle this.
 
-`03b` takes the same `ENDPOINT` / `OUTPUT_SUFFIX` pair and derives its `--config` values from it
-(see [Longitudinal configs](#longitudinal-configs)); it additionally has `RUN_SURVLATENT`, left off
-by default.
+`03b` takes the same `ENDPOINTS` tuple and derives each endpoint's `--config` values from it via
+`cp.longitudinal_task_specs(endpoint)` (see [Longitudinal configs](#longitudinal-configs)); it
+additionally has `RUN_SURVLATENT`, left off by default, and an optional
+`PREDICTION_INPUT_DIRS_BY_ENDPOINT` override for cluster-mounted prediction-input paths, passed
+through as `make_endpoint_runs`'s `prediction_input_dirs_by_endpoint`.
 
 ## Recommended run order
 
 Run each notebook top to bottom; select ARPI/ADT with each Python notebook's `ARMS` setting, and
-the event with its `ENDPOINT` / `OUTPUT_SUFFIX` setting (see [Arms and endpoints](#arms-and-endpoints)):
+the event(s) with its `ENDPOINTS` setting (see [Arms and endpoints](#arms-and-endpoints)):
 
 1. `COMPASS/survival_analysis/01_preprocessing.ipynb`
 2. `COMPASS/survival_analysis/02_univariate.ipynb`
@@ -716,7 +731,7 @@ the event with its `ENDPOINT` / `OUTPUT_SUFFIX` setting (see [Arms and endpoints
 6. `COMPASS/survival_analysis/05_figures.Rmd`
 7. `COMPASS/survival_analysis/06_abstract_numbers.ipynb` (read-only; abstract/manuscript counts)
 8. `COMPASS/survival_analysis/07_endpoint_comparison.ipynb` (read-only; only after steps 1-3 have
-   been run for **both** endpoints)
+   been run for **all** endpoints being compared)
 
 The notebooks pass `PROFILE_DATA/*.parquet` paths explicitly to the lower-level scripts. Existing
 hand-curated `LLM_NEPC_labels/` inputs remain under the shared `COMPASS` data root.
@@ -758,12 +773,19 @@ surprised by them.
   (`07` warns below 50 events), and **platinum-vs-NEPC metric differences are confounded by cohort
   composition** — they are not a like-for-like model comparison. If counts are too low to work
   with, the fallback is the broader `avpc_nepc_timeline.parquet` definition (more events, lower
-  precision), which is a different label and would need its own endpoint.
-- **Two different NEPC definitions are in play in this repo.** The `nepc` *endpoint* uses the
-  strict, veto-gated, dated `nepc_dx_labels.parquet`. The Figure 2 / Figure 2v2 / Figure 2v3
-  `has_nepc` *strata* use the broader "any NE feature → NEPC" binary classifier from
-  `LLM_NEPC_labels/LLM_NEPC_classifier_labels.tsv`. They are **not interchangeable** and will not
-  agree on patient counts. Always name which one a given number came from.
+  precision), which is a different label and would need its own endpoint. **This is now the
+  `avpc_nepc` endpoint**: it trades precision for events by using the broader ≥3 Aparicio-criteria
+  (or any NEPC feature) definition instead of the strict veto-gated diagnosis, so it is expected to
+  carry a larger, less event-poor cohort than `nepc` at the same landmark — check its own event
+  count against the 50-event floor before treating it as adequately powered either.
+- **Three different NEPC-adjacent definitions are in play in this repo.** The `nepc` *endpoint*
+  uses the strict, veto-gated, dated `nepc_dx_labels.parquet`. The `avpc_nepc` *endpoint* uses a
+  broader, criteria-based definition (≥3 Aparicio AVPC criteria, or any NEPC feature, with
+  NEPC-precedence timing) built from `avpc_nepc_timeline.parquet`, trading precision for events.
+  The Figure 2 / Figure 2v2 / Figure 2v3 `has_nepc` *strata* use a third, separate "any NE feature →
+  NEPC" binary classifier from `LLM_NEPC_labels/LLM_NEPC_classifier_labels.tsv`. None of the three
+  are interchangeable and none will agree on patient counts. Always name which one a given number
+  came from.
 - **Competing-config Brier is the binary cause-of-interest Brier, not the cumulative-incidence
   Brier — and so is the competing-risks IPCW AUC(t).** Both the Brier score and the `cumulative_dynamic_auc`
   IPCW reference distribution binarize on `event = (label == cause)`, folding any competing event
