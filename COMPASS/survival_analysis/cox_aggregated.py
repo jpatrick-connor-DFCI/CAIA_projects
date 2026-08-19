@@ -107,7 +107,16 @@ ENDPOINTS = {
     "nepc": {
         "duration_col": "t_nepc",
         "event_col": "NEPC",
-        "description": "Time from the treatment anchor (first ADT exposure = time 0) to LLM-adjudicated NEPC diagnosis",
+        "description": "Time from the treatment anchor (first ADT exposure = time 0) to the "
+                        "first documented NEPC criterion (NEPC-only, independent of AVPC "
+                        "criteria), from the longitudinal AVPC/NEPC criteria timeline",
+    },
+    "avpc": {
+        "duration_col": "t_avpc",
+        "event_col": "AVPC",
+        "description": "Time from the treatment anchor (first ADT exposure = time 0) to "
+                        "first meeting AVPC (>=3 Aparicio criteria, independent of any NEPC "
+                        "feature), from the longitudinal AVPC/NEPC criteria timeline",
     },
     "avpc_nepc": {
         "duration_col": "t_avpc_nepc",
@@ -164,6 +173,8 @@ OUTCOME_METADATA_COLUMNS = {
     "AVPC_NEPC_LABEL_SOURCE",
     "AVPC",
     "AVPC_DATE",
+    "t_avpc",
+    "t_avpc_from_first_record",
     "AVPC_N_CRITERIA",
     "NEPC_TIMELINE",
     "NEPC_TIMELINE_DATE",

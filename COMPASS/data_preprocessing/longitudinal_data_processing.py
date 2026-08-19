@@ -221,8 +221,11 @@ def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFram
     ]
     if "death_date" in death_df.columns:
         keep_cols.append("death_date")
-    # NEPC endpoint columns, absent when the cohort was built without the LLM
-    # annotations mounted. Optional so the platinum-only path still works.
+    # NEPC/AVPC/AVPC_NEPC endpoint columns, absent when the cohort was built
+    # without the LLM annotations mounted. Optional so the platinum-only path
+    # still works. NEPC and AVPC are each read from their own component of the
+    # same AVPC/NEPC criteria-timeline file as AVPC_NEPC (the union); all three
+    # must be kept here or their endpoints silently break further downstream.
     keep_cols.extend(
         col
         for col in (
@@ -231,6 +234,13 @@ def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFram
             "NEPC_DATE_SOURCE",
             "NEPC_DATE_PRECISION",
             "NEPC_LABEL_SOURCE",
+            "AVPC",
+            "AVPC_DATE",
+            "AVPC_NEPC",
+            "AVPC_NEPC_DATE",
+            "AVPC_NEPC_DATE_SOURCE",
+            "AVPC_NEPC_DATE_PRECISION",
+            "AVPC_NEPC_LABEL_SOURCE",
         )
         if col in death_df.columns
     )
@@ -557,6 +567,10 @@ def build_longitudinal_prediction_data(
         date_cols.append("death_date")
     if "NEPC_DATE" in pred_df.columns:
         date_cols.append("NEPC_DATE")
+    if "AVPC_DATE" in pred_df.columns:
+        date_cols.append("AVPC_DATE")
+    if "AVPC_NEPC_DATE" in pred_df.columns:
+        date_cols.append("AVPC_NEPC_DATE")
     for col in date_cols:
         pred_df[col] = coerce_mixed_datetime(pred_df[col]).dt.floor("D")
 
@@ -643,6 +657,27 @@ def build_longitudinal_prediction_data(
         # demotes undated positives to censored, so this is belt-and-braces.
         pred_df["t_nepc"] = pred_df["t_nepc"].fillna(pred_df["t_last_contact"])
 
+    # AVPC endpoint, built the same way: days from the treatment anchor to
+    # first meeting AVPC (>=3 Aparicio criteria, independent of any NEPC
+    # feature) for AVPC-positive patients, otherwise days from the anchor to
+    # last contact (censored). Absent when the survival cohort was built
+    # without the LLM annotations mounted, in which case the avpc endpoint
+    # simply isn't runnable and the platinum/nepc/avpc_nepc paths are
+    # unaffected.
+    if "AVPC" in pred_df.columns:
+        pred_df["AVPC"] = (
+            pd.to_numeric(pred_df["AVPC"], errors="coerce").fillna(0).astype(int)
+        )
+        avpc_days = (pred_df["AVPC_DATE"] - anchor).dt.days
+        pred_df["t_avpc"] = np.where(
+            pred_df["AVPC"].eq(1),
+            avpc_days,
+            pred_df["t_last_contact"],
+        ).astype(float)
+        # A positive with no usable date would yield NaN here; Stage 1 already
+        # demotes undated positives to censored, so this is belt-and-braces.
+        pred_df["t_avpc"] = pred_df["t_avpc"].fillna(pred_df["t_last_contact"])
+
     # Third endpoint, built the same way: days from the treatment anchor to the
     # broader AVPC/NEPC criteria-timeline event for AVPC_NEPC-positive patients,
     # otherwise days from the anchor to last contact (censored). Absent when the
@@ -702,6 +737,9 @@ def build_longitudinal_prediction_data(
         "NEPC_LABEL_SOURCE",
     ]
     ordered_cols.extend(col for col in nepc_cols if col in pred_df.columns)
+    # AVPC endpoint columns, same append-only-if-present contract as NEPC.
+    avpc_cols = ["AVPC", "AVPC_DATE", "t_avpc"]
+    ordered_cols.extend(col for col in avpc_cols if col in pred_df.columns)
     # AVPC_NEPC endpoint columns, same append-only-if-present contract as NEPC.
     avpc_nepc_cols = [
         "AVPC_NEPC",

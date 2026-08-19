@@ -108,17 +108,24 @@ PROFILE_PATH = '/data/gusev/PROFILE/CLINICAL/'
 ONCDRS_PATH = os.path.join(PROFILE_PATH, 'OncDRS/ALL_2025_03/')
 
 # Strict per-patient NEPC diagnosis labels from the LLM_clinical_annotations
-# repo (tasks/nepc_diagnosis). One row per patient with a diagnosis date; the
-# source for the "nepc" survival endpoint.
+# repo (tasks/nepc_diagnosis). One row per patient with a diagnosis date. Not
+# used by any endpoint below by default -- the "nepc" endpoint now reads its
+# NEPC-only signal from the broader criteria-timeline file instead (see
+# AVPC_NEPC_LABELS_PATH) -- but the path constant is kept for ad hoc scripts
+# that still want the narrower veto-gated diagnosis.
 LLM_ANNOTATIONS_PATH = os.path.join(DATA_PATH, 'LLM_annotations/')
 NEPC_DX_LABELS_PATH = os.path.join(
     LLM_ANNOTATIONS_PATH, 'LLM_nepc_diagnosis/nepc_dx_labels.parquet'
 )
 
-# Broader per-patient AVPC/NEPC labels reduced from the longitudinal criteria
-# timeline (tasks/longitudinal_NEPC/build_avpc_nepc_labels.py in the
-# LLM_clinical_annotations repo). One row per patient; the source for the
-# "avpc_nepc" survival endpoint.
+# Broader per-patient AVPC/NEPC criteria-timeline labels (tasks/longitudinal_NEPC/
+# build_avpc_nepc_labels.py in the LLM_clinical_annotations repo). One row per
+# patient, with three independently-usable components:
+#   has_nepc_timeline/nepc_timeline_date -> "nepc" endpoint (NEPC-only)
+#   has_avpc/avpc_date                   -> "avpc" endpoint (AVPC-only, >=3
+#                                            Aparicio criteria)
+#   has_avpc_nepc/avpc_nepc_date         -> "avpc_nepc" endpoint (the union)
+# All three endpoints read this same file by default.
 AVPC_NEPC_LABELS_PATH = os.path.join(
     LLM_ANNOTATIONS_PATH, 'LLM_avpc_nepc_timeline/avpc_nepc_labels.parquet'
 )
@@ -679,13 +686,16 @@ def compute_first_platinum(meds: pl.DataFrame) -> pl.DataFrame:
 
 
 def load_nepc_dx_labels(path) -> pl.DataFrame:
-    """Load the strict LLM NEPC diagnosis labels keyed by patient.
+    """Load the LLM NEPC labels keyed by patient, for the "nepc" endpoint.
 
-    Written by LLM_clinical_annotations tasks/nepc_diagnosis/build_nepc_dx_labels.py
-    as one row per patient. Only the columns this cohort needs are kept:
+    Written by LLM_clinical_annotations tasks/longitudinal_NEPC/
+    build_avpc_nepc_labels.py as one row per patient (the same file
+    --avpc-nepc-labels reads for the broader "avpc_nepc" union endpoint). Only
+    the NEPC-component columns are kept here -- this is the NEPC-only timeline
+    signal, not the AVPC-or-NEPC union:
 
-      has_nepc_diagnosis -> NEPC        (event indicator)
-      diagnosis_date     -> NEPC_DATE   (event date)
+      has_nepc_timeline  -> NEPC        (event indicator)
+      nepc_timeline_date -> NEPC_DATE   (event date)
 
     plus three provenance columns carried through unfiltered so a downstream
     sensitivity analysis can restrict on them (see the module docstring):
@@ -696,9 +706,9 @@ def load_nepc_dx_labels(path) -> pl.DataFrame:
     seen by an LLM; they are legitimate censored observations but are not
     adjudicated negatives).
 
-    ``diagnosis_date`` arrives as an ISO ``YYYY-MM-DD`` *string*, not a date
-    type, so it is parsed here with the same permissive parser used for the
-    OncDRS date columns.
+    ``nepc_timeline_date`` arrives as an ISO ``YYYY-MM-DD`` *string*, not a
+    date type, so it is parsed here with the same permissive parser used for
+    the OncDRS date columns.
 
     Returns an empty frame with the right schema when ``path`` is missing, so a
     run without the annotations mounted still produces the platinum cohort.
@@ -724,12 +734,12 @@ def load_nepc_dx_labels(path) -> pl.DataFrame:
         return empty
 
     labels = pl.read_parquet(path)
-    required = {ID_COL, "has_nepc_diagnosis", "diagnosis_date"}
+    required = {ID_COL, "has_nepc_timeline", "nepc_timeline_date"}
     missing = required - set(labels.columns)
     if missing:
         raise ValueError(
             f"{path} is missing expected columns: {sorted(missing)}. Expected the "
-            "nepc_dx_labels.parquet schema from tasks/nepc_diagnosis."
+            "avpc_nepc_labels.parquet schema from tasks/longitudinal_NEPC."
         )
 
     # Match the upstream writer's exact-integer MRN handling: cast via Float64
@@ -744,7 +754,7 @@ def load_nepc_dx_labels(path) -> pl.DataFrame:
     if len(duplicates):
         raise ValueError(
             f"{path} contains {duplicates[ID_COL].n_unique()} duplicated MRNs; "
-            "nepc_dx_labels is expected to be one row per patient."
+            "avpc_nepc_labels is expected to be one row per patient."
         )
 
     for optional in ("date_source", "date_precision", "label_source"):
@@ -752,8 +762,8 @@ def load_nepc_dx_labels(path) -> pl.DataFrame:
             labels = labels.with_columns(pl.lit(None, dtype=pl.Utf8).alias(optional))
 
     labels = labels.with_columns(
-        parse_mixed_datetime_expr("diagnosis_date").alias("NEPC_DATE"),
-        pl.col("has_nepc_diagnosis").cast(pl.Boolean, strict=False)
+        parse_mixed_datetime_expr("nepc_timeline_date").alias("NEPC_DATE"),
+        pl.col("has_nepc_timeline").cast(pl.Boolean, strict=False)
         .fill_null(False).cast(pl.Int64).alias("NEPC"),
     )
 
@@ -764,7 +774,7 @@ def load_nepc_dx_labels(path) -> pl.DataFrame:
     if len(undated):
         print(
             f"[nepc] {len(undated)} positive label(s) have no parseable "
-            "diagnosis_date; censoring them."
+            "nepc_timeline_date; censoring them."
         )
         labels = labels.with_columns(
             pl.when(pl.col("NEPC_DATE").is_null()).then(0)
@@ -1068,6 +1078,10 @@ def build_survival_cohort(
         .then(pl.lit('auto_negative_no_evidence'))
         .otherwise(pl.col('AVPC_NEPC_LABEL_SOURCE'))
         .alias('AVPC_NEPC_LABEL_SOURCE'),
+        # AVPC (>=3 Aparicio criteria, independent of any NEPC feature) rides
+        # in on the same avpc_nepc_df join above as an audit column; apply the
+        # same join-miss-is-censored contract here for its own "avpc" endpoint.
+        pl.col('AVPC').fill_null(0).cast(pl.Int64),
     )
 
     cohort = cohort.with_columns(
@@ -1113,6 +1127,15 @@ def build_survival_cohort(
         (avpc_nepc_end - pl.col('TREATMENT_ANCHOR_DATE')).dt.total_days().alias('TT_AVPC_NEPC')
     )
 
+    # AVPC (>=3 Aparicio criteria alone, independent of any NEPC feature)
+    # mirrors AVPC_NEPC/NEPC/platinum exactly: event date when the event
+    # occurred, else censored at end of follow-up.
+    has_avpc = pl.col('AVPC').eq(1)
+    avpc_end = pl.when(has_avpc).then(pl.col('AVPC_DATE')).otherwise(pl.col('FOLLOW_UP_END_DATE'))
+    cohort = cohort.with_columns(
+        (avpc_end - pl.col('TREATMENT_ANCHOR_DATE')).dt.total_days().alias('TT_AVPC')
+    )
+
     no_anchor = pl.col('TREATMENT_ANCHOR_DATE').is_null()
     cohort = cohort.with_columns(
         pl.when(no_anchor).then(None).otherwise(pl.col('AGE')).alias('AGE'),
@@ -1120,6 +1143,7 @@ def build_survival_cohort(
         pl.when(no_anchor).then(None).otherwise(pl.col('TT_PLATINUM')).alias('TT_PLATINUM'),
         pl.when(no_anchor).then(None).otherwise(pl.col('TT_NEPC')).alias('TT_NEPC'),
         pl.when(no_anchor).then(None).otherwise(pl.col('TT_AVPC_NEPC')).alias('TT_AVPC_NEPC'),
+        pl.when(no_anchor).then(None).otherwise(pl.col('TT_AVPC')).alias('TT_AVPC'),
     )
 
     return cohort.select(
@@ -1150,8 +1174,9 @@ def build_survival_cohort(
             'AVPC_NEPC_DATE_SOURCE',
             'AVPC_NEPC_DATE_PRECISION',
             'AVPC_NEPC_LABEL_SOURCE',
-            'AVPC',
             'AVPC_DATE',
+            'TT_AVPC',
+            'AVPC',
             'NEPC_TIMELINE',
             'NEPC_TIMELINE_DATE',
             'AVPC_N_CRITERIA',
@@ -1265,6 +1290,28 @@ def summarize_survival_cohort(cohort: pl.DataFrame, label="cohort"):
                 "before the anchor (prevalent, not incident); the "
                 "t_avpc_nepc > 0 landmark filter will exclude them."
             )
+
+    if 'AVPC' in cohort.columns:
+        n_avpc = int(cohort['AVPC'].sum())
+        print(f"AVPC (timeline, >=3 Aparicio criteria): {n_avpc}")
+        if n_avpc:
+            avpc_times = cohort.filter(
+                pl.col('AVPC').eq(1) & pl.col('TT_AVPC').is_not_null()
+            )
+            if len(avpc_times):
+                print(
+                    f"Median TT_AVPC among events (days): "
+                    f"{avpc_times['TT_AVPC'].median():.0f}"
+                )
+        # Events at or before the anchor cannot be incident; make the count
+        # visible here because the landmark filter drops them silently later.
+        prevalent_avpc = cohort.filter(pl.col('AVPC').eq(1) & pl.col('TT_AVPC').le(0))
+        if len(prevalent_avpc):
+            print(
+                f"  NOTE: {len(prevalent_avpc)} AVPC events fall at or before "
+                "the anchor (prevalent, not incident); the t_avpc > 0 "
+                "landmark filter will exclude them."
+            )
     neg = cohort.filter(pl.col('TT_DEATH') < 0)
     if len(neg):
         print(
@@ -1295,11 +1342,16 @@ def main():
     parser.add_argument(
         "--nepc-labels",
         type=str,
-        default=NEPC_DX_LABELS_PATH,
-        help="Strict per-patient NEPC diagnosis labels (nepc_dx_labels.parquet "
-             "from LLM_clinical_annotations tasks/nepc_diagnosis), supplying the "
-             "NEPC/NEPC_DATE columns for the 'nepc' endpoint. A missing file is "
-             "not fatal: NEPC columns come out null and only the platinum "
+        default=AVPC_NEPC_LABELS_PATH,
+        help="Per-patient AVPC/NEPC criteria-timeline labels "
+             "(avpc_nepc_labels.parquet from LLM_clinical_annotations "
+             "tasks/longitudinal_NEPC), supplying the NEPC/NEPC_DATE columns "
+             "for the 'nepc' endpoint from the timeline's NEPC-only component "
+             "(has_nepc_timeline/nepc_timeline_date) -- any NEPC feature, "
+             "independent of AVPC criteria. Same file as --avpc-nepc-labels "
+             "by default, which also supplies this cohort's AVPC/AVPC_DATE "
+             "audit columns for the 'avpc' endpoint. A missing file is not "
+             "fatal: NEPC columns come out null and only the platinum "
              "endpoint is usable.",
     )
     parser.add_argument(
@@ -1308,10 +1360,15 @@ def main():
         default=AVPC_NEPC_LABELS_PATH,
         help="Broader per-patient AVPC/NEPC criteria-timeline labels "
              "(avpc_nepc_labels.parquet from LLM_clinical_annotations "
-             "tasks/longitudinal_NEPC), supplying the AVPC_NEPC/AVPC_NEPC_DATE "
-             "columns for the 'avpc_nepc' endpoint. A missing file is not "
-             "fatal: AVPC_NEPC columns come out null and only the platinum "
-             "(and nepc, if mounted) endpoint(s) are usable.",
+             "tasks/longitudinal_NEPC), supplying: AVPC_NEPC/AVPC_NEPC_DATE "
+             "for the 'avpc_nepc' endpoint (the union of AVPC and NEPC, with "
+             "NEPC-precedence timing), and AVPC/AVPC_DATE for the 'avpc' "
+             "endpoint (the timeline's AVPC-only component, "
+             "has_avpc/avpc_date -- >=3 Aparicio criteria, independent of any "
+             "NEPC feature). Same file as --nepc-labels by default. A "
+             "missing file is not fatal: AVPC_NEPC/AVPC columns come out "
+             "null and only the platinum (and nepc, if mounted) endpoint(s) "
+             "are usable.",
     )
     parser.add_argument(
         "--medications-source",
@@ -1529,7 +1586,8 @@ def main():
     if len(avpc_nepc_df):
         print(
             f"Loaded {len(avpc_nepc_df)} AVPC_NEPC criteria-timeline labels "
-            f"({int(avpc_nepc_df['AVPC_NEPC'].sum())} positive) from "
+            f"({int(avpc_nepc_df['AVPC_NEPC'].sum())} AVPC_NEPC positive, "
+            f"{int(avpc_nepc_df['AVPC'].sum())} AVPC positive) from "
             f"{args.avpc_nepc_labels}"
         )
 

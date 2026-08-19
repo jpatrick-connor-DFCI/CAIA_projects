@@ -82,7 +82,11 @@ DEFAULT_OUTLIER_HI = 0.995
 # cohort actually carries it -- see longitudinal_event_columns().
 LONGITUDINAL_EVENT_COLS = ["PLATINUM", "DEATH"]
 LONGITUDINAL_TIME_TO_EVENT_COLS = ["t_platinum", "t_death"]
-LONGITUDINAL_OPTIONAL_EVENT_COLS = {"NEPC": "t_nepc", "AVPC_NEPC": "t_avpc_nepc"}
+LONGITUDINAL_OPTIONAL_EVENT_COLS = {
+    "NEPC": "t_nepc",
+    "AVPC": "t_avpc",
+    "AVPC_NEPC": "t_avpc_nepc",
+}
 
 
 def longitudinal_event_columns(frame) -> tuple[list[str], list[str]]:

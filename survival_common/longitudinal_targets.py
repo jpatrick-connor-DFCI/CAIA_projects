@@ -6,7 +6,7 @@ without torch or the external SurvLatent repo. Both models import
 ``LONGITUDINAL_CONFIGS`` / ``resolve_config`` / ``patient_targets`` from here
 and take identical ``--config`` values.
 
-Six configs, deliberately no "death-alone" config. Each names a primary
+Eight configs, deliberately no "death-alone" config. Each names a primary
 cause of interest, optionally paired with death as a competing cause:
 
   platinum            -- n_events=1. Death is never read; a patient who dies
@@ -22,19 +22,28 @@ cause of interest, optionally paired with death as a competing cause:
                          whichever has the smaller post-landmark duration
                          (argmin ties break toward the first listed cause,
                          i.e. platinum).
-  nepc                -- the platinum config's analogue for the LLM-adjudicated
-                         NEPC diagnosis endpoint. Same cause-specific censoring.
+  nepc                -- the platinum config's analogue for the NEPC-only
+                         component of the AVPC/NEPC criteria-timeline endpoint
+                         (any NEPC feature, independent of AVPC criteria).
+                         Same cause-specific censoring.
   nepc_competing      -- the competing analogue: label 1 = NEPC, 2 = death.
+  avpc                -- the platinum config's analogue for the AVPC-only
+                         component of the same timeline (>=3 Aparicio
+                         criteria, independent of any NEPC feature). Same
+                         cause-specific censoring.
+  avpc_competing      -- the competing analogue: label 1 = AVPC, 2 = death.
   avpc_nepc           -- the platinum config's analogue for the broader
                          AVPC_NEPC criteria-timeline endpoint (>=3 Aparicio
-                         criteria or any NEPC feature, NEPC-precedence timing).
-                         Same cause-specific censoring.
+                         criteria or any NEPC feature, NEPC-precedence timing;
+                         the union of nepc and avpc above). Same cause-specific
+                         censoring.
   avpc_nepc_competing -- the competing analogue: label 1 = AVPC_NEPC, 2 = death.
 
-The nepc/avpc_nepc configs each read a cohort built with their own incident
-gate (``--require-nepc`` / ``endpoint=avpc_nepc``), so neither is the same
-patient set as the platinum configs, nor as each other -- their metrics are
-not a like-for-like comparison. See the README's "Arms and endpoints" section.
+The nepc/avpc/avpc_nepc configs each read a cohort built with their own
+incident gate (``endpoint=nepc`` / ``endpoint=avpc`` / ``endpoint=avpc_nepc``),
+so none is the same patient set as the platinum configs, nor as each other --
+their metrics are not a like-for-like comparison. See the README's "Arms and
+endpoints" section.
 """
 
 from __future__ import annotations
@@ -51,6 +60,8 @@ CONFIG_ENDPOINTS: dict[str, str] = {
     "competing": "platinum",
     "nepc": "nepc",
     "nepc_competing": "nepc",
+    "avpc": "avpc",
+    "avpc_competing": "avpc",
     "avpc_nepc": "avpc_nepc",
     "avpc_nepc_competing": "avpc_nepc",
 }
@@ -76,6 +87,16 @@ LONGITUDINAL_CONFIGS: dict[str, dict[str, list[str]]] = {
         "time_cols": ["t_nepc", "t_death"],
         "event_names": ["nepc", "death"],
     },
+    "avpc": {
+        "event_cols": ["AVPC"],
+        "time_cols": ["t_avpc"],
+        "event_names": ["avpc"],
+    },
+    "avpc_competing": {
+        "event_cols": ["AVPC", "DEATH"],
+        "time_cols": ["t_avpc", "t_death"],
+        "event_names": ["avpc", "death"],
+    },
     "avpc_nepc": {
         "event_cols": ["AVPC_NEPC"],
         "time_cols": ["t_avpc_nepc"],
@@ -92,6 +113,7 @@ LONGITUDINAL_CONFIGS: dict[str, dict[str, list[str]]] = {
 # cause of interest must stay first, and death second.
 assert LONGITUDINAL_CONFIGS["competing"]["event_cols"] == ["PLATINUM", "DEATH"]
 assert LONGITUDINAL_CONFIGS["nepc_competing"]["event_cols"] == ["NEPC", "DEATH"]
+assert LONGITUDINAL_CONFIGS["avpc_competing"]["event_cols"] == ["AVPC", "DEATH"]
 assert LONGITUDINAL_CONFIGS["avpc_nepc_competing"]["event_cols"] == ["AVPC_NEPC", "DEATH"]
 # Every config must declare the horizon grid it evaluates on.
 assert set(CONFIG_ENDPOINTS) == set(LONGITUDINAL_CONFIGS)

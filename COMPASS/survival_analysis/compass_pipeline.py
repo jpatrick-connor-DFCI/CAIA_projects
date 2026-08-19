@@ -581,6 +581,7 @@ MULTIVARIATE_TASK_SPECS = [
 _LONGITUDINAL_CONFIGS_BY_ENDPOINT = {
     "platinum": ("platinum", "competing"),
     "nepc": ("nepc", "nepc_competing"),
+    "avpc": ("avpc", "avpc_competing"),
     "avpc_nepc": ("avpc_nepc", "avpc_nepc_competing"),
 }
 

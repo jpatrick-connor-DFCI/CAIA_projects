@@ -67,6 +67,14 @@ EVENT_CONFIGS = {
         "event_col": ["NEPC", "DEATH"],
         "time_to_event_col": ["t_nepc", "t_death"],
     },
+    "avpc": {
+        "event_col": "AVPC",
+        "time_to_event_col": "t_avpc",
+    },
+    "avpc_competing": {
+        "event_col": ["AVPC", "DEATH"],
+        "time_to_event_col": ["t_avpc", "t_death"],
+    },
     "avpc_nepc": {
         "event_col": "AVPC_NEPC",
         "time_to_event_col": "t_avpc_nepc",

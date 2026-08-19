@@ -21,7 +21,7 @@ defines a run — see [Arms and endpoints](#arms-and-endpoints).
 | Axis | Registry | Declared in | Values |
 | --- | --- | --- | --- |
 | **Arm** (index date / time 0) | `_ARM_SPECS` | `COMPASS/survival_analysis/compass_pipeline.py` | `arpi`, `adt` |
-| **Endpoint** (the event) | `ENDPOINTS` | `COMPASS/survival_analysis/cox_aggregated.py` | `platinum`, `nepc` |
+| **Endpoint** (the event) | `ENDPOINTS` | `COMPASS/survival_analysis/cox_aggregated.py` | `platinum`, `nepc`, `avpc`, `avpc_nepc` |
 
 > This README is the canonical reference for editing the pipeline. It documents the directory
 > layout, the data flow, every script's inputs/outputs, the **conventions and invariants that
@@ -116,7 +116,8 @@ reporting notebooks: they read already-generated artifacts and refit nothing.
         │
         ▼  data_preprocessing/build_prediction_inputs.py     [forks per endpoint]
  prediction_inputs_<arm>/        (aggregated + pre-treatment long labs + split + horizons)
- prediction_inputs_<arm>_nepc/   (same, built with --require-nepc: incident-NEPC risk set)
+ prediction_inputs_<arm>_nepc/   (same, built with --endpoint nepc: incident-NEPC risk set)
+ prediction_inputs_<arm>_avpc/, prediction_inputs_<arm>_avpc_nepc/   (same pattern, other endpoints)
         │
         ├──► build_somatic_gleason_inputs.py
         │    prediction_inputs_<arm>/somatic_gleason/
@@ -158,12 +159,19 @@ eligible base cohort feeds the ARPI/chemo-anchored and ADT-anchored survival dat
   The two `*-source` flags default to `<--oncdrs-path>/{MEDICATIONS,PT_INFO_STATUS_REGISTRATION}.csv`,
   so existing invocations are unchanged. `load_patient_status()` takes a **file** path, not a
   directory.
-  `--nepc-labels` points at the strict LLM NEPC diagnosis labels
-  (`LLM_annotations/LLM_nepc_diagnosis/nepc_dx_labels.parquet`, one row per patient, written by the
-  sibling `LLM_clinical_annotations` repo). A **missing file is non-fatal**: the stage warns and
-  emits no NEPC columns, leaving the platinum pipeline unaffected. Note `diagnosis_date` arrives as
-  an ISO **string**, not a date type, with partial dates already normalized (year → Jan 1,
-  year-month → the 1st).
+  `--nepc-labels` and `--avpc-nepc-labels` both point at the same per-patient AVPC/NEPC
+  criteria-timeline labels by default
+  (`LLM_annotations/LLM_avpc_nepc_timeline/avpc_nepc_labels.parquet`, one row per patient, written
+  by the sibling `LLM_clinical_annotations` repo's `tasks/longitudinal_NEPC/build_avpc_nepc_labels.py`).
+  `--nepc-labels` supplies the NEPC-only `NEPC`/`NEPC_DATE` columns (the timeline's
+  `has_nepc_timeline`/`nepc_timeline_date` component); `--avpc-nepc-labels` supplies the
+  AVPC-or-NEPC union `AVPC_NEPC`/`AVPC_NEPC_DATE` and the AVPC-only `AVPC`/`AVPC_DATE` audit
+  columns. A stricter, veto-gated per-patient NEPC diagnosis file also exists
+  (`NEPC_DX_LABELS_PATH`, `LLM_annotations/LLM_nepc_diagnosis/nepc_dx_labels.parquet`) but is not
+  read by any endpoint by default any more — it remains available for ad hoc scripts. A **missing
+  file is non-fatal**: the stage warns and emits no NEPC/AVPC/AVPC_NEPC columns, leaving the
+  platinum pipeline unaffected. Note the timeline's date columns arrive as ISO **strings**, not a
+  date type, with partial dates already normalized (year → Jan 1, year-month → the 1st).
 - **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`, or `--out-dir`; all outputs including
   `prostate_icd_data.csv` honour it):** `prostate_arpi_survival_cohort_arpi.csv`
   and `prostate_adt_survival_cohort_adt.csv` (ARPI-treatment-anchor-restricted and
@@ -174,11 +182,12 @@ eligible base cohort feeds the ARPI/chemo-anchored and ADT-anchored survival dat
   indicators for dated prostate diagnosis, male sex, a non-prostate primary
   (`HAS_NON_PROSTATE_PRIMARY`, descriptive only), the requested post-ADT cancer exclusion,
   PARPi exposure, pre-diagnosis platinum, ARPI/docetaxel exposure, ADT on/after diagnosis,
-  at least five broad PSA tests, and final eligibility. When the NEPC labels are available, the two
-  survival cohorts additionally carry `NEPC`, `NEPC_DATE`, `TT_NEPC`, and the three provenance
-  columns (`NEPC_DATE_SOURCE`, `NEPC_DATE_PRECISION`, `NEPC_LABEL_SOURCE`); one cohort file serves
-  **both** endpoints. The printed summary reports NEPC positives, the provenance breakdowns, and how
-  many diagnoses are prevalent at the anchor — read it before committing to NEPC modelling.
+  at least five broad PSA tests, and final eligibility. When the labels are available, the two
+  survival cohorts additionally carry `NEPC`/`NEPC_DATE`/`TT_NEPC`, `AVPC`/`AVPC_DATE`/`TT_AVPC`,
+  and `AVPC_NEPC`/`AVPC_NEPC_DATE`/`TT_AVPC_NEPC`, each with its own provenance columns; one cohort
+  file serves **all four** endpoints (`platinum`, `nepc`, `avpc`, `avpc_nepc`). The printed summary
+  reports positives, the provenance breakdowns, and how many diagnoses are prevalent at the anchor
+  for each — read it before committing to NEPC/AVPC modelling.
 - **Cohort definition:** the seven criteria above are enforced in Stage 1. The `adt` arm uses this
   cohort directly; the `arpi` arm additionally requires a post-diagnosis ARPI/chemo anchor.
 - **Anchor sets:** `ARPI_ANCHOR_MEDS` (7 drugs: ARPIs, taxanes, radium-223 — unchanged,
@@ -250,11 +259,12 @@ prostate lab frame used by the current treatment-anchored analyses.
   `unique_lab_ids_w_units.csv` inventory can be generated per project with
   `--write-unique-labs` for diagnostics or mapping refreshes; it is not a repo source of truth.
 - **Timing semantics:** `t_lab`, `t_diagnosis`, `t_first_treatment`, `t_treatment_anchor`,
-  `t_platinum`, `t_nepc`, `t_last_contact`, `t_death`. `t_death` is a real death-date-derived duration
-  when the survival cohort's `death_date` is available (falls back to the last-contact proxy for dead
-  patients with no recorded date); it is not itself a registered model endpoint. `t_nepc` is built
-  exactly like `t_platinum` (days from anchor to `NEPC_DATE` for positives, else `t_last_contact`)
-  and is emitted only when the upstream NEPC labels were available at Stage 1.
+  `t_platinum`, `t_nepc`, `t_avpc`, `t_avpc_nepc`, `t_last_contact`, `t_death`. `t_death` is a real
+  death-date-derived duration when the survival cohort's `death_date` is available (falls back to
+  the last-contact proxy for dead patients with no recorded date); it is not itself a registered
+  model endpoint. `t_nepc`/`t_avpc`/`t_avpc_nepc` are each built exactly like `t_platinum` (days
+  from anchor to the endpoint's date column for positives, else `t_last_contact`) and are emitted
+  only when the upstream AVPC/NEPC criteria-timeline labels were available at Stage 1.
 
 ### 2.2 — `data_preprocessing/build_prediction_inputs.py` → `prediction_inputs/`
 
@@ -268,14 +278,16 @@ cohort.
   `--seed`, `--test-frac`, `--val-frac`, `--time-unit-days 7`, `--min-patient-coverage`,
   `--auc-quantiles`, `--id-col`, `--age-col`, `--anchor-col`,
   `--restrict-to-mrns`, `--require-first-treatment` / `--no-require-first-treatment`,
-  `--min-psa-count`, `--exclude-parpi` / `--include-parpi`, `--require-nepc`.
-- **`--require-nepc`** restricts the risk set to patients with an incident NEPC diagnosis
-  (`t_nepc` present and `> 0` after landmark rebasing). Off by default, and recorded in
-  `build_manifest.json`. It changes cohort membership, so a build made with it must go to its own
-  `prediction_inputs_<arm>_nepc/` directory — `compass_pipeline.make_runs(output_suffix=...)` does
-  that automatically. The horizon-grid loop skips any registered endpoint whose duration/event
-  columns are absent from the build, so a platinum-only cohort is unaffected by the `nepc`
-  registration.
+  `--min-psa-count`, `--exclude-parpi` / `--include-parpi`, `--endpoint` (`--require-nepc` is a
+  deprecated alias for `--endpoint nepc`).
+- **`--endpoint`** restricts the risk set to patients with an incident event for the selected
+  endpoint (that endpoint's `t_*` duration present and `> 0` after landmark rebasing) — `platinum`
+  by default, or `nepc`/`avpc`/`avpc_nepc`. Non-`platinum` values are recorded in
+  `build_manifest.json`. It changes cohort membership, so a build made with a non-`platinum`
+  endpoint must go to its own `prediction_inputs_<arm>_<endpoint>/` directory —
+  `compass_pipeline.make_runs(output_suffix=...)` does that automatically. The horizon-grid loop
+  skips any registered endpoint whose duration/event columns are absent from the build, so a
+  platinum-only cohort is unaffected by any of these registrations.
 - **Default downstream cohort filters:** ≥5 PSA rows and PARPi exclusion are repeated as consistency
   guards after the Stage-1 restriction. They should produce no further criterion-related attrition
   for newly rebuilt cohorts; alternate inputs can relax them explicitly.
@@ -301,9 +313,10 @@ cohort.
 ### 2.3 — Models
 
 All read prebuilt inputs and the `split` column; none re-derive the split. COMPASS models default to
-the `platinum` endpoint (time to first platinum) and additionally support `nepc` (time to
-LLM-adjudicated NEPC diagnosis) — see [Arms and endpoints](#arms-and-endpoints). `--endpoints` is
-built from `cox.ENDPOINTS`, so every runner gets the choice for free. Both ARPI- and ADT-anchored
+the `platinum` endpoint (time to first platinum) and additionally support `nepc`, `avpc`, and
+`avpc_nepc` (time to the corresponding component of the AVPC/NEPC criteria timeline) — see
+[Arms and endpoints](#arms-and-endpoints). `--endpoints` is built from `cox.ENDPOINTS`, so every
+runner gets the choice for free. Both ARPI- and ADT-anchored
 arms use landmarks `[0, 90, 180]`. Metrics: Harrell C-index, IPCW
 mean AUC(t), integrated IPCW Brier — horizons come from `build_manifest.json` so all models share a
 grid. The outer train+valid event-time quantiles define a bounded interval that is filled with up to
@@ -562,13 +575,15 @@ three tiers — REQUIRED (absent *or* all-null raises), EXPECTED (absent raises,
    AUC/Brier horizons are derived on **train+valid**; CV recomputes canonical labs on each fold-train.
    Evaluation data may only mask requested horizons that are not estimable—it never supplies
    replacement times. Do not derive the requested timeline from held-out test patients.
-4. **Endpoint and duration:** COMPASS registers `(t_platinum, PLATINUM)` and `(t_nepc, NEPC)`;
-   `platinum` is the default and the one the manuscript figures use. For patients without the event,
-   the anchor time is filled with `t_last_contact` (censoring). After landmark rebasing, the validity
-   filter requires duration `> 0`, which silently drops patients whose event falls before/at the
-   landmark — add count logging if you depend on it. The `t_nepc` conditions are applied **only**
-   under `--require-nepc`, so registering the second endpoint cannot change the platinum cohort;
-   `tests/test_nepc_endpoint.py` asserts that equivalence.
+4. **Endpoint and duration:** COMPASS registers `(t_platinum, PLATINUM)`, `(t_nepc, NEPC)`,
+   `(t_avpc, AVPC)`, and `(t_avpc_nepc, AVPC_NEPC)`; `platinum` is the default and the one the
+   manuscript figures use. For patients without the event, the anchor time is filled with
+   `t_last_contact` (censoring). After landmark rebasing, the validity filter requires duration
+   `> 0`, which silently drops patients whose event falls before/at the landmark — add count
+   logging if you depend on it. Each non-`platinum` endpoint's duration conditions are applied
+   **only** when that endpoint is selected (`--endpoint nepc|avpc|avpc_nepc`, or the deprecated
+   `--require-nepc` alias for `nepc`), so registering additional endpoints cannot change the
+   platinum cohort; `tests/test_nepc_endpoint.py` asserts that equivalence.
    **Any new endpoint's outcome columns must also be added to
    `cox_aggregated.OUTCOME_METADATA_COLUMNS`**, the set consumed by `outcome_columns()` to keep
    outcome data out of the feature matrix. Miss it and the event becomes a predictor of itself. The
@@ -620,32 +635,43 @@ write one survival cohort carrying every endpoint's columns. Stage 3 is where th
 | Endpoint | Duration / event | Source of the event date |
 | --- | --- | --- |
 | `platinum` | `t_platinum` / `PLATINUM` | First carboplatin/cisplatin exposure in `MEDICATIONS` |
-| `nepc` | `t_nepc` / `NEPC` | `LLM_annotations/LLM_nepc_diagnosis/nepc_dx_labels.parquet` |
-| `avpc_nepc` | `t_avpc_nepc` / `AVPC_NEPC` | `LLM_annotations/LLM_avpc_nepc_timeline/avpc_nepc_labels.parquet` (≥3 Aparicio AVPC criteria, or any NEPC feature, with NEPC-precedence timing) |
+| `nepc` | `t_nepc` / `NEPC` | `LLM_annotations/LLM_avpc_nepc_timeline/avpc_nepc_labels.parquet`, NEPC-only component (any NEPC feature, independent of AVPC criteria) |
+| `avpc` | `t_avpc` / `AVPC` | Same file, AVPC-only component (≥3 Aparicio AVPC criteria, independent of any NEPC feature) |
+| `avpc_nepc` | `t_avpc_nepc` / `AVPC_NEPC` | Same file, the union (≥3 Aparicio AVPC criteria, or any NEPC feature, with NEPC-precedence timing) |
 
-The `nepc` endpoint models **time from the treatment anchor to LLM-adjudicated NEPC diagnosis**.
-Four properties of it differ from `platinum` and matter for interpretation:
+`nepc`, `avpc`, and `avpc_nepc` all read the **same** criteria-timeline labels file — each just
+keeps a different component/pair of columns from it (`compile_COMPASS_cohort_data.py`'s
+`load_nepc_dx_labels` / `load_avpc_nepc_labels`). `nepc` used to source from a separate, stricter
+`nepc_dx_labels.parquet` (veto-gated LLM diagnosis); that narrower file still exists
+(`NEPC_DX_LABELS_PATH`) for ad hoc scripts, but no endpoint below reads it by default any more.
 
-- **It is an incident endpoint, gated by `--require-nepc`.** That flag adds `t_nepc notna` and
-  `t_nepc > 0` to the `make_outcome_df` validity conditions, dropping patients whose NEPC diagnosis
-  falls at or before the landmark (prevalent, not incident). The gate is **off by default** so it
-  can never silently shrink the platinum cohort — `compass_pipeline` passes it only when
-  `ENDPOINT == "nepc"`. The consequence is that the two endpoints' cohorts are **not the same
-  patients**; per-landmark attrition is reported in the Stage 3 build log.
-- **The label definition is strict, and narrower than the classifier used in Figure 2.** The
-  `nepc_dx_labels` labels are veto-gated and precision-biased; the Figure 2 `has_nepc` strata come
-  from the broader "any NE feature → NEPC" binary classifier. They are not interchangeable — name
-  which definition is in play in any resulting text.
-- **Event counts may be low.** Check the Stage 1 summary and the `07` notebook's count table
-  *before* spending modelling time; `07` prints an explicit underpowered warning below 50 events.
-- **Date provenance is carried, not filtered.** `NEPC_DATE_SOURCE`, `NEPC_DATE_PRECISION`, and
-  `NEPC_LABEL_SOURCE` ride through to the prediction inputs for sensitivity analysis. Two are worth
-  knowing: `date_source = note_date` means *earliest documentation*, not onset; and
+Four properties of `nepc`/`avpc`/`avpc_nepc` differ from `platinum` and matter for interpretation:
+
+- **They are incident endpoints, gated per-endpoint.** `--require-nepc` (legacy alias for
+  `endpoint=nepc`) adds `t_nepc notna` and `t_nepc > 0` to the `make_outcome_df` validity
+  conditions; `avpc` and `avpc_nepc` get the analogous `t_avpc`/`t_avpc_nepc` gates. Each drops
+  patients whose event falls at or before the landmark (prevalent, not incident). The gate is
+  **off by default** so it can never silently shrink the platinum cohort — `compass_pipeline`
+  passes it only when the endpoint matches. The consequence is that these endpoints' cohorts are
+  **not the same patients** as `platinum`'s, nor as each other's; per-landmark attrition is
+  reported in the Stage 3 build log.
+- **The label definitions are narrower than the classifier used in Figure 2.** The timeline's
+  per-criterion evidence is more literal than the Figure 2 `has_nepc` strata, which come from the
+  broader "any NE feature → NEPC" binary classifier. They are not interchangeable — name which
+  definition is in play in any resulting text.
+- **Event counts may be low**, especially for `nepc` alone (a strict subset of `avpc_nepc`). Check
+  the Stage 1 summary and the `07` notebook's count table *before* spending modelling time; `07`
+  prints an explicit underpowered warning below 50 events.
+- **Date provenance is carried, not filtered.** `NEPC_DATE_SOURCE`/`NEPC_DATE_PRECISION`/
+  `NEPC_LABEL_SOURCE` and `AVPC_NEPC_DATE_SOURCE`/`AVPC_NEPC_DATE_PRECISION`/
+  `AVPC_NEPC_LABEL_SOURCE` ride through to the prediction inputs for sensitivity analysis. Two are
+  worth knowing: `date_source = note_date` means *earliest documentation*, not onset; and
   `label_source = auto_negative_no_evidence` patients were never seen by an LLM — legitimate
   censored observations, but distinct from adjudicated negatives.
 
-If `nepc_dx_labels.parquet` is not mounted, Stage 1 warns and emits no NEPC columns. Every
-downstream NEPC touchpoint is presence-guarded, so the platinum path runs unchanged.
+If `avpc_nepc_labels.parquet` is not mounted, Stage 1 warns and emits no NEPC/AVPC/AVPC_NEPC
+columns. Every downstream touchpoint for these three endpoints is presence-guarded, so the
+platinum path runs unchanged.
 
 ### Longitudinal configs
 
@@ -660,6 +686,8 @@ interest plus an optional competing cause, which is a finer axis than `ENDPOINTS
 | `competing` | platinum, death | `platinum` |
 | `nepc` | nepc; death censored | `nepc` |
 | `nepc_competing` | nepc, death | `nepc` |
+| `avpc` | avpc; death censored | `avpc` |
+| `avpc_competing` | avpc, death | `avpc` |
 | `avpc_nepc` | avpc_nepc; death censored | `avpc_nepc` |
 | `avpc_nepc_competing` | avpc_nepc, death | `avpc_nepc` |
 
@@ -673,17 +701,17 @@ always label 2 (a reorder would silently reinterpret every downstream risk colum
 `survlatent_ode.py`'s parallel `EVENT_CONFIGS` must agree with this registry on both names **and**
 columns, so the two models cannot drift into meaning different things by the same config name.
 
-The cause-only configs (`platinum`, `nepc`) censor at death and are the ones comparable to
-Cox/XGBoost for that endpoint; `summarize_longitudinal_outputs` filters to that row. The competing
-configs' death rows are written to disk but excluded from the summary.
+The cause-only configs (`platinum`, `nepc`, `avpc`, `avpc_nepc`) censor at death and are the ones
+comparable to Cox/XGBoost for that endpoint; `summarize_longitudinal_outputs` filters to that row.
+The competing configs' death rows are written to disk but excluded from the summary.
 
-### Running a second (or third) endpoint
+### Running additional endpoints
 
 Set the parameter cell of `01`/`02`/`03`/`03b`, then run each top to bottom:
 
 ```python
 ARMS = ["adt"]
-ENDPOINTS = ("platinum", "nepc", "avpc_nepc")  # any subset of cox_aggregated.ENDPOINTS
+ENDPOINTS = ("platinum", "nepc", "avpc", "avpc_nepc")  # any subset of cox_aggregated.ENDPOINTS
 OVERWRITE = False
 
 cp.FORCE_RERUN = OVERWRITE
@@ -693,19 +721,20 @@ RUNS = cp.make_endpoint_runs(ARMS, endpoints=ENDPOINTS)
 `make_endpoint_runs(arms, *, endpoints=("platinum", "nepc"), prediction_input_dirs_by_endpoint=None)`
 builds one independent input/output tree per requested endpoint by calling `make_runs` once per
 endpoint under the hood, with `output_suffix` set to `""` for `platinum` and `f"_{endpoint}"` for
-everything else (e.g. `"_nepc"`, `"_avpc_nepc"`). It supports any number of endpoints, not just two
-— the tuple can carry all three of `platinum`, `nepc`, `avpc_nepc` in one `RUNS` list, and each
+everything else (e.g. `"_nepc"`, `"_avpc"`, `"_avpc_nepc"`). It supports any number of endpoints —
+the tuple can carry all four of `platinum`, `nepc`, `avpc`, `avpc_nepc` in one `RUNS` list, and each
 notebook's `for run in RUNS:` loop iterates every (arm, endpoint) pair produced. Every notebook now
 calls `make_endpoint_runs` directly; the older single-endpoint `cp.make_runs(..., output_suffix=...)`
 call shown in earlier versions of this doc is a lower-level helper `make_endpoint_runs` wraps — no
 notebook calls it directly today.
 
 The suffix pattern suffixes **both** `prediction_inputs_<arm>` and `local_runs_<arm>`. Both are
-required: because `--require-nepc` (and the `avpc_nepc` incident gate) change which patients survive
-the landmark filter, and that filter runs at *preprocessing* time inside `build_landmark_merged`,
-each optional endpoint needs its own inputs tree — not just its own output tree. With the suffix set,
-`prediction_inputs_adt/` and `local_runs_adt/` (the unsuffixed `platinum` tree) are never touched by
-an `nepc` or `avpc_nepc` run.
+required: because each endpoint's incident gate (`--require-nepc` and its `avpc`/`avpc_nepc`
+analogues) changes which patients survive the landmark filter, and that filter runs at
+*preprocessing* time inside `build_landmark_merged`, each optional endpoint needs its own inputs
+tree — not just its own output tree. With the suffix set, `prediction_inputs_adt/` and
+`local_runs_adt/` (the unsuffixed `platinum` tree) are never touched by an `nepc`, `avpc`, or
+`avpc_nepc` run.
 
 Stages 0-2 of `01` (schema audit, cohort compile, lab preprocessing) only need running once; they
 are shared across all endpoints. Re-run Stage 3 onward per endpoint — `RUNS` already contains one
@@ -766,26 +795,29 @@ surprised by them.
   consequence, not a coding bug, and it also shapes how Finding 5's full-cohort univariate screen and
   Finding 10's genomic-prevalence floor should be interpreted at later landmarks (a feature's measured
   prevalence, and hence whether it clears the floor, shifts as the cohort composition shifts).
-- **The `nepc` endpoint is likely event-poor, and its cohort is not the platinum cohort.** The
-  strict `nepc_dx_labels` definition is precision-biased by design, and `--require-nepc` further
-  removes prevalent diagnoses, so NEPC event counts can be far smaller than platinum's at the same
-  landmark. Two consequences: multivariate NEPC results may be underpowered rather than negative
-  (`07` warns below 50 events), and **platinum-vs-NEPC metric differences are confounded by cohort
-  composition** — they are not a like-for-like model comparison. If counts are too low to work
-  with, the fallback is the broader `avpc_nepc_timeline.parquet` definition (more events, lower
-  precision), which is a different label and would need its own endpoint. **This is now the
-  `avpc_nepc` endpoint**: it trades precision for events by using the broader ≥3 Aparicio-criteria
-  (or any NEPC feature) definition instead of the strict veto-gated diagnosis, so it is expected to
-  carry a larger, less event-poor cohort than `nepc` at the same landmark — check its own event
-  count against the 50-event floor before treating it as adequately powered either.
-- **Three different NEPC-adjacent definitions are in play in this repo.** The `nepc` *endpoint*
-  uses the strict, veto-gated, dated `nepc_dx_labels.parquet`. The `avpc_nepc` *endpoint* uses a
-  broader, criteria-based definition (≥3 Aparicio AVPC criteria, or any NEPC feature, with
-  NEPC-precedence timing) built from `avpc_nepc_timeline.parquet`, trading precision for events.
-  The Figure 2 / Figure 2v2 / Figure 2v3 `has_nepc` *strata* use a third, separate "any NE feature →
-  NEPC" binary classifier from `LLM_NEPC_labels/LLM_NEPC_classifier_labels.tsv`. None of the three
-  are interchangeable and none will agree on patient counts. Always name which one a given number
-  came from.
+- **`nepc` and `avpc` are likely event-poor, and neither's cohort is the platinum cohort.** Both
+  are single-criterion slices of the same `avpc_nepc_labels.parquet` criteria timeline (`nepc` =
+  any NEPC feature; `avpc` = ≥3 Aparicio criteria), each strictly narrower than their union,
+  `avpc_nepc`. Each endpoint's incident gate (`--endpoint nepc|avpc|avpc_nepc`, or the deprecated
+  `--require-nepc` alias for `nepc`) further removes prevalent events, so event counts can be far
+  smaller than platinum's at the same landmark, and `nepc`/`avpc` individually are typically
+  smaller than `avpc_nepc`. Two consequences: multivariate results for any of the three may be
+  underpowered rather than negative (`07` warns below 50 events), and **platinum-vs-nepc/avpc/
+  avpc_nepc metric differences are confounded by cohort composition** — they are not a
+  like-for-like model comparison. Check each endpoint's own event count against the 50-event floor
+  before treating it as adequately powered.
+- **Three different NEPC-adjacent definitions are in play in this repo.** The `nepc`, `avpc`, and
+  `avpc_nepc` *endpoints* all read the same criteria-timeline file
+  (`avpc_nepc_labels.parquet`, built by `tasks/longitudinal_NEPC/build_avpc_nepc_labels.py` in the
+  sibling `LLM_clinical_annotations` repo), each keeping a different component: NEPC-only,
+  AVPC-only, or their union with NEPC-precedence timing. A separate, stricter, veto-gated
+  per-patient NEPC diagnosis file also exists (`nepc_dx_labels.parquet`,
+  `NEPC_DX_LABELS_PATH`) but is not read by any endpoint by default any more — it remains available
+  for ad hoc scripts and is a narrower, more precision-biased definition than the timeline's
+  NEPC-only component. The Figure 2 / Figure 2v2 / Figure 2v3 `has_nepc` *strata* use a fourth,
+  separate "any NE feature → NEPC" binary classifier from
+  `LLM_NEPC_labels/LLM_NEPC_classifier_labels.tsv`. None of these definitions are interchangeable
+  and none will agree on patient counts. Always name which one a given number came from.
 - **Competing-config Brier is the binary cause-of-interest Brier, not the cumulative-incidence
   Brier — and so is the competing-risks IPCW AUC(t).** Both the Brier score and the `cumulative_dynamic_auc`
   IPCW reference distribution binarize on `event = (label == cause)`, folding any competing event

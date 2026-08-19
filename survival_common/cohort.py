@@ -32,16 +32,23 @@ MIN_DELTA_OBS = 2
 # manifest is written from that one and the data from this one, so a cause
 # listed in only one of them yields a manifest that promises a column the
 # person-period frame does not carry.
-OPTIONAL_LONGITUDINAL_CAUSES = {"NEPC": "t_nepc"}
+OPTIONAL_LONGITUDINAL_CAUSES = {
+    "NEPC": "t_nepc",
+    "AVPC": "t_avpc",
+    "AVPC_NEPC": "t_avpc_nepc",
+}
 
 # Optional per-patient endpoints make_outcome_df derives generically, as
 # {endpoint_key: (event_col, duration_col, date_col)}. Each is independently
-# present or absent in the input (an upstream cohort can carry NEPC,
-# AVPC_NEPC, both, or neither) -- presence is detected per-key, not via a
-# single shared flag. `platinum` is not in this registry: it has its own
-# bespoke, always-present derivation path feeding t_either/EITHER below.
+# present or absent in the input (an upstream cohort can carry NEPC, AVPC,
+# AVPC_NEPC, any combination, or none) -- presence is detected per-key, not
+# via a single shared flag. `platinum` is not in this registry: it has its
+# own bespoke, always-present derivation path feeding t_either/EITHER below.
+# `nepc` and `avpc` are the two components of the `avpc_nepc` union endpoint,
+# all three sourced from the same AVPC/NEPC criteria-timeline labels file.
 OPTIONAL_ENDPOINT_SPECS = {
     "nepc": ("NEPC", "t_nepc", "NEPC_DATE"),
+    "avpc": ("AVPC", "t_avpc", "AVPC_DATE"),
     "avpc_nepc": ("AVPC_NEPC", "t_avpc_nepc", "AVPC_NEPC_DATE"),
 }
 
@@ -184,8 +191,12 @@ def make_outcome_df(
         "AVPC_NEPC_DATE_SOURCE",
         "AVPC_NEPC_DATE_PRECISION",
         "AVPC_NEPC_LABEL_SOURCE",
+        # AVPC endpoint (>=3 Aparicio criteria alone, independent of any NEPC
+        # feature). Absent unless the cohort was built with the LLM
+        # annotations mounted; every use below is guarded on presence.
         "AVPC",
         "AVPC_DATE",
+        "t_avpc",
         "AVPC_N_CRITERIA",
         "NEPC_TIMELINE",
         "NEPC_TIMELINE_DATE",
@@ -351,13 +362,15 @@ def make_outcome_df(
     if endpoint in OPTIONAL_ENDPOINT_SPECS and not has_optional[endpoint]:
         event_col, duration_col, date_col = OPTIONAL_ENDPOINT_SPECS[endpoint]
         if endpoint == "nepc":
-            # Preserve the exact historical message text (including the
-            # "(require_nepc)" mention some callers/tests match on) for the
-            # one endpoint that predates this generic registry.
+            # Preserve the "(require_nepc)" substring some callers/tests
+            # match on for the one endpoint that predates this generic
+            # registry; the rest of the text reflects the current label
+            # source (the avpc_nepc criteria-timeline file, not the old
+            # strict NEPC diagnosis labels).
             raise ValueError(
                 "make_outcome_df: endpoint='nepc' (require_nepc) but the input carries no NEPC "
-                "columns. Rebuild the survival cohort with the LLM NEPC diagnosis "
-                "labels (--nepc-labels) before running the nepc endpoint."
+                "columns. Rebuild the survival cohort with the LLM AVPC/NEPC "
+                "criteria-timeline labels (--nepc-labels) before running the nepc endpoint."
             )
         raise ValueError(
             f"make_outcome_df: endpoint={endpoint!r} but the input carries no "
