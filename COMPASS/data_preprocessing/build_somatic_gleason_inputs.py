@@ -526,6 +526,8 @@ def _rebase_endpoint_from_index(
     endpoint_cfg = {
         "platinum": ("PLATINUM", "PLATINUM_DATE", "t_platinum"),
         "nepc": ("NEPC", "NEPC_DATE", "t_nepc"),
+        "avpc": ("AVPC", "AVPC_DATE", "t_avpc"),
+        "avpc_nepc": ("AVPC_NEPC", "AVPC_NEPC_DATE", "t_avpc_nepc"),
     }
     if endpoint not in endpoint_cfg:
         raise ValueError(f"Unknown endpoint {endpoint!r}; expected one of {sorted(endpoint_cfg)}")
