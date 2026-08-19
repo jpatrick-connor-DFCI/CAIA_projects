@@ -189,6 +189,82 @@ def test_nepc_indexed_feature_sets_ignore_pre_anchor_platinum():
     assert result["gleason"].loc[0, "t_nepc"] == 90
 
 
+@pytest.mark.parametrize(
+    "endpoint, event_col, duration_col",
+    [
+        ("platinum", "PLATINUM", "t_platinum"),
+        ("nepc", "NEPC", "t_nepc"),
+        ("avpc", "AVPC", "t_avpc"),
+        ("avpc_nepc", "AVPC_NEPC", "t_avpc_nepc"),
+    ],
+)
+def test_every_endpoint_rebases_from_dropped_date_columns(
+    endpoint, event_col, duration_col
+):
+    """build_prediction_inputs strips every raw *_DATE column from the aggregated
+    table, so each endpoint must be reconstructible from its ADT-relative
+    duration alone. An endpoint added to _rebase_endpoint_from_index without a
+    matching entry in _materialize_absolute_followup_dates fails here.
+    """
+    base = pd.DataFrame(
+        {
+            "DFCI_MRN": [1],
+            "TREATMENT_ANCHOR_DATE": ["2020-01-10"],
+            "AGE_AT_TREATMENTSTART": [70],
+            event_col: [1],
+            duration_col: [100],
+            "t_last_contact": [300],
+            "split": ["train"],
+        }
+    )
+    somatic = pd.DataFrame(
+        {"DFCI_MRN": [1], SEQUENCING_DATE: pd.to_datetime(["2020-01-20"]), "TP53_SNV": [1]}
+    )
+    gleason = pd.DataFrame(
+        {"DFCI_MRN": [1], "gleason_date": pd.to_datetime(["2020-01-20"]), GLEASON_FEATURE: [9]}
+    )
+
+    result = build_indexed_feature_sets(
+        base, somatic, ["TP53_SNV"], gleason, endpoint=endpoint
+    )
+
+    # Index date is 10 days after the ADT anchor, so the event clock loses 10 days.
+    assert result["sequencing"].loc[0, duration_col] == 90
+    assert result["gleason"].loc[0, duration_col] == 90
+    assert result["sequencing"].loc[0, event_col] == 1
+
+
+def test_censored_patient_rebases_to_last_contact_not_event_date():
+    """For a censored patient the endpoint duration falls back to t_last_contact,
+    so reconstruction puts a last-contact date in AVPC_DATE. The rebased clock
+    must still be last contact minus the index date, and the event must stay 0.
+    """
+    base = pd.DataFrame(
+        {
+            "DFCI_MRN": [1],
+            "TREATMENT_ANCHOR_DATE": ["2020-01-10"],
+            "AGE_AT_TREATMENTSTART": [70],
+            "AVPC": [0],
+            "t_avpc": [300],
+            "t_last_contact": [300],
+            "split": ["train"],
+        }
+    )
+    somatic = pd.DataFrame(
+        {"DFCI_MRN": [1], SEQUENCING_DATE: pd.to_datetime(["2020-01-20"]), "TP53_SNV": [1]}
+    )
+    gleason = pd.DataFrame(
+        {"DFCI_MRN": [1], "gleason_date": pd.to_datetime(["2020-01-20"]), GLEASON_FEATURE: [9]}
+    )
+
+    result = build_indexed_feature_sets(
+        base, somatic, ["TP53_SNV"], gleason, endpoint="avpc"
+    )
+
+    assert result["sequencing"].loc[0, "AVPC"] == 0
+    assert result["sequencing"].loc[0, "t_avpc"] == 290
+
+
 def test_prs_loader_bridges_sample_keyed_matrix_through_idmap():
     with tempfile.TemporaryDirectory() as directory:
         prs_path = Path(directory) / "pgs_matrix_with_avg.tsv"

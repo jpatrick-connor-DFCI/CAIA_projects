@@ -561,15 +561,28 @@ def _materialize_absolute_followup_dates(
 ) -> pd.DataFrame:
     """Restore absolute dates dropped from aggregated landmark inputs.
 
-    COMPASS's ``t_platinum`` and ``t_last_contact`` are days from ADT start.
-    Therefore adding them back to the ADT anchor exactly reconstructs the
-    absolute event/censoring dates needed for observation-date rebasing.
+    Every endpoint duration COMPASS emits -- ``t_platinum``, ``t_nepc``,
+    ``t_avpc``, ``t_avpc_nepc``, ``t_last_contact`` -- is days from ADT start.
+    Therefore adding one back to the ADT anchor exactly reconstructs the
+    absolute event/censoring date needed for observation-date rebasing.
+
+    This map must carry an entry for every endpoint in
+    ``_rebase_endpoint_from_index``: ``build_prediction_inputs`` strips all raw
+    date columns from the aggregated table, so an endpoint missing here fails
+    there with a missing-column error rather than being silently mis-rebased.
+
+    For a censored patient the endpoint duration falls back to
+    ``t_last_contact``, so the reconstructed event date is that patient's last
+    contact rather than a real event. That is safe because the caller reads
+    the event date only where the event indicator is 1.
     """
     out = base.copy()
     anchor_by_row = out[ca.ID_COL].map(anchors)
     duration_by_date = {
         "PLATINUM_DATE": "t_platinum",
         "NEPC_DATE": "t_nepc",
+        "AVPC_DATE": "t_avpc",
+        "AVPC_NEPC_DATE": "t_avpc_nepc",
         "LAST_CONTACT_DATE": "t_last_contact",
     }
     for date_col, duration_col in duration_by_date.items():
