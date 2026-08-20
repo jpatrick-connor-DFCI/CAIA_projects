@@ -1,0 +1,872 @@
+---
+title: "COMPASS endpoint comparison (platinum / NEPC / AVPC / AVPC-NEPC)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    df_print: paged
+---
+
+Cross-endpoint comparison for the ADT anchor. Where `05_figures.Rmd` renders
+one endpoint's figures at a time, this document puts all four side by side:
+event counts, event-positive overlap, pre-anchor events, time to event,
+univariate significance overlap, the PSA/Testosterone log-HR panel, and
+held-out prediction accuracy per landmark.
+
+**Read-only.** It refits nothing and reads the artifacts written by
+`01_preprocessing.ipynb`, `02_univariate.ipynb`, and `03_multivariate.ipynb`
+run with `ENDPOINTS = ("platinum", "nepc", "avpc", "avpc_nepc")`. Missing
+artifacts are reported in the closing section rather than aborting the knit,
+so a partially complete run still renders every section it can.
+
+### Three things to keep in view while reading
+
+**These are not the same patients.** Each endpoint's `prediction_inputs_*`
+tree is gated on its own duration being positive, which drops *prevalent*
+cases (event at or before the anchor) to make the endpoint incident. Section 2
+quantifies that per endpoint and section 3 counts exactly who was dropped.
+Any metric difference across endpoints therefore confounds *event* with
+*cohort*.
+
+**Sections 2-4 read the Stage 1 cohort, not the per-endpoint trees.** Stage 1
+carries all four endpoints' event/duration columns for one common patient set,
+before any endpoint-specific gating. That is the only place where the overlap
+and pre-anchor questions are answerable: a Venn built from the gated trees
+cannot see a pre-anchor event, because the gate already removed it.
+
+**NEPC, AVPC and AVPC_NEPC are nested by construction.** `AVPC_NEPC` is
+"first of AVPC (>=3 Aparicio criteria) or any NEPC criterion", so its
+event set is close to the union of the other two and its overlap statistics
+are definitionally high, not empirically interesting. The pairs worth reading
+are platinum vs each of the three.
+
+## Setup
+
+```{r setup, message = FALSE, warning = FALSE}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(scales)
+})
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 9, fig.height = 5.5, dpi = 150)
+
+NEPC_PROJ_PATH <- "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS"
+FIG_ROOT       <- "/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS"
+
+ARM       <- "adt"
+LANDMARKS <- c(0, 90, 180)
+ID_COL    <- "DFCI_MRN"
+ALPHA     <- 0.05
+
+SURVIVAL_ROOT <- file.path(NEPC_PROJ_PATH, "survival_analysis")
+
+# Output for this document only. Kept out of the numbered figure*/ groups that
+# generate_figures() manages (and prunes), so nothing here collides with it.
+OUT_DIR <- file.path(FIG_ROOT, toupper(ARM), "endpoint_comparison")
+dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
+
+# Mirrors COMPASS.survival_analysis.cox_aggregated.ENDPOINTS. The suffix is ""
+# for platinum (the historical un-suffixed tree) and "_<endpoint>" otherwise,
+# matching compass_pipeline.make_endpoint_runs().
+ENDPOINT_SPECS <- list(
+  platinum   = list(event_col = "PLATINUM",   duration_col = "t_platinum",   label = "Platinum"),
+  nepc       = list(event_col = "NEPC",       duration_col = "t_nepc",       label = "NEPC"),
+  avpc       = list(event_col = "AVPC",       duration_col = "t_avpc",       label = "AVPC"),
+  avpc_nepc  = list(event_col = "AVPC_NEPC",  duration_col = "t_avpc_nepc",  label = "AVPC/NEPC")
+)
+ENDPOINTS <- names(ENDPOINT_SPECS)
+
+for (ep in ENDPOINTS) {
+  suffix <- if (identical(ep, "platinum")) "" else paste0("_", ep)
+  ENDPOINT_SPECS[[ep]]$inputs  <- file.path(SURVIVAL_ROOT, paste0("prediction_inputs_", ARM, suffix))
+  ENDPOINT_SPECS[[ep]]$results <- file.path(SURVIVAL_ROOT, paste0("local_runs_", ARM, suffix))
+}
+
+ENDPOINT_LABELS <- vapply(ENDPOINT_SPECS, `[[`, character(1), "label")
+
+# Fixed colorblind-safe assignment, held constant across every panel below.
+ENDPOINT_COLORS <- c(
+  platinum  = "#2a78d6",
+  nepc      = "#eb6834",
+  avpc      = "#22a884",
+  avpc_nepc = "#7b52ab"
+)
+
+# Stage 1 cohort: all four endpoints' columns on one common patient set,
+# before any per-endpoint landmark/validity gating.
+COHORT_PATH <- file.path(NEPC_PROJ_PATH,
+                         sprintf("prostate_%s_survival_cohort_%s.csv", ARM, ARM))
+
+# Collect rather than crash, so a partial run still renders.
+MISSING <- character(0)
+require_path <- function(path, what) {
+  if (file.exists(path)) return(TRUE)
+  MISSING <<- c(MISSING, sprintf("%s: %s", what, path))
+  FALSE
+}
+
+# MRNs arrive as int/float/character across CSVs; normalize before any set op
+# or join so a 12345 / 12345.0 round-trip cannot silently break a merge.
+normalize_id <- function(x) {
+  num <- suppressWarnings(as.numeric(as.character(x)))
+  out <- ifelse(is.finite(num), format(num, scientific = FALSE, trim = TRUE), NA_character_)
+  trimws(out)
+}
+
+save_fig <- function(plot, stem, width = 9, height = 5.5) {
+  path <- file.path(OUT_DIR, sprintf("%s_%s.png", ARM, stem))
+  ggsave(path, plot = plot, width = width, height = height, units = "in",
+         dpi = 600, bg = "white")
+  message("wrote ", path)
+  invisible(plot)
+}
+
+write_out <- function(df, stem) {
+  path <- file.path(OUT_DIR, sprintf("%s_%s.csv", ARM, stem))
+  readr::write_csv(df, path)
+  message("wrote ", path)
+  invisible(df)
+}
+
+theme_ep <- function(base_size = 11) {
+  theme_classic(base_size = base_size) +
+    theme(
+      plot.title       = element_text(face = "bold", size = base_size + 1),
+      plot.subtitle    = element_text(size = base_size - 1, color = "#52514e"),
+      axis.text        = element_text(size = base_size - 1.5, color = "#1a1a1a"),
+      legend.key       = element_blank(),
+      legend.position  = "top",
+      strip.background = element_blank(),
+      strip.text       = element_text(face = "bold", size = base_size - 1),
+      plot.background  = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA)
+    )
+}
+theme_set(theme_ep())
+
+message("data root:   ", NEPC_PROJ_PATH)
+message("figure root: ", OUT_DIR)
+for (ep in ENDPOINTS) {
+  message(sprintf("  %-9s inputs=%-5s results=%-5s", ep,
+                  dir.exists(ENDPOINT_SPECS[[ep]]$inputs),
+                  dir.exists(ENDPOINT_SPECS[[ep]]$results)))
+}
+```
+
+## 1. Load the Stage 1 cohort
+
+One row per patient, carrying every endpoint's event flag and duration. All
+durations are on the anchor-relative clock (ADT start = day 0), so a value
+`<= 0` is an event at or before the anchor.
+
+```{r load-cohort}
+cohort <- NULL
+if (require_path(COHORT_PATH, "Stage 1 survival cohort")) {
+  cohort <- read_csv(COHORT_PATH, show_col_types = FALSE, guess_max = 100000)
+  cohort[[ID_COL]] <- normalize_id(cohort[[ID_COL]])
+  cohort <- cohort %>% filter(!is.na(.data[[ID_COL]])) %>%
+    distinct(.data[[ID_COL]], .keep_all = TRUE)
+
+  present <- vapply(ENDPOINTS, function(ep) {
+    ENDPOINT_SPECS[[ep]]$event_col %in% names(cohort)
+  }, logical(1))
+  cat(sprintf("Stage 1 cohort: %s patients\n", comma(nrow(cohort))))
+  cat("endpoint columns present: ",
+      paste(sprintf("%s=%s", ENDPOINTS, ifelse(present, "yes", "NO")), collapse = "  "),
+      "\n", sep = "")
+
+  # Endpoints whose event column never made it into this cohort build cannot be
+  # compared; drop them once here rather than guarding every section.
+  ENDPOINTS <- ENDPOINTS[present]
+  if (length(ENDPOINTS) < length(ENDPOINT_SPECS))
+    warning("Dropping endpoints absent from the Stage 1 cohort: ",
+            paste(setdiff(names(ENDPOINT_SPECS), ENDPOINTS), collapse = ", "))
+}
+```
+
+```{r endpoint-long}
+# Long form: one row per (patient, endpoint) with a numeric event flag and the
+# anchor-relative duration. Every section below is a summarise() over this.
+endpoint_long <- NULL
+if (!is.null(cohort) && length(ENDPOINTS) > 0) {
+  endpoint_long <- map_dfr(ENDPOINTS, function(ep) {
+    spec <- ENDPOINT_SPECS[[ep]]
+    dur <- if (spec$duration_col %in% names(cohort)) {
+      suppressWarnings(as.numeric(cohort[[spec$duration_col]]))
+    } else NA_real_
+    tibble(
+      !!ID_COL := cohort[[ID_COL]],
+      endpoint = ep,
+      event    = suppressWarnings(as.numeric(cohort[[spec$event_col]])) %>% replace_na(0),
+      duration = dur
+    )
+  }) %>%
+    mutate(endpoint = factor(endpoint, levels = ENDPOINTS,
+                             labels = ENDPOINT_LABELS[ENDPOINTS]))
+}
+```
+
+## 2. Number of events under each endpoint
+
+Stage 1 counts, before landmark gating. `n_prevalent` are events at or before
+the ADT anchor (`duration <= 0`): real events that the incident-endpoint gate
+removes, so `n_incident` is what the models can actually see at landmark 0.
+
+```{r event-counts}
+event_counts <- NULL
+if (!is.null(endpoint_long)) {
+  event_counts <- endpoint_long %>%
+    group_by(endpoint) %>%
+    summarise(
+      n_patients      = n(),
+      n_events        = sum(event == 1, na.rm = TRUE),
+      event_rate_pct  = 100 * mean(event == 1, na.rm = TRUE),
+      n_prevalent     = sum(event == 1 & !is.na(duration) & duration <= 0),
+      n_incident      = sum(event == 1 & !is.na(duration) & duration > 0),
+      n_event_no_time = sum(event == 1 & is.na(duration)),
+      .groups = "drop"
+    ) %>%
+    mutate(pct_of_events_prevalent = 100 * n_prevalent / pmax(n_events, 1))
+
+  write_out(event_counts, "endpoint_event_counts")
+  knitr::kable(event_counts, digits = 1)
+}
+```
+
+```{r event-counts-plot, fig.height = 4.5}
+if (!is.null(event_counts)) {
+  plot_df <- event_counts %>%
+    select(endpoint, n_incident, n_prevalent) %>%
+    pivot_longer(-endpoint, names_to = "kind", values_to = "n") %>%
+    mutate(kind = factor(kind, levels = c("n_incident", "n_prevalent"),
+                         labels = c("Incident (after anchor)", "Prevalent (at/before anchor)")))
+
+  p <- ggplot(plot_df, aes(endpoint, n, fill = kind)) +
+    geom_col(width = 0.65) +
+    geom_text(aes(label = comma(n)), position = position_stack(vjust = 0.5),
+              size = 3.1, color = "white", fontface = "bold") +
+    scale_fill_manual(values = c("Incident (after anchor)" = "#2a78d6",
+                                 "Prevalent (at/before anchor)" = "#b5b3ae")) +
+    scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.08))) +
+    labs(title = "Event counts by endpoint (Stage 1, ADT anchor)",
+         subtitle = "Prevalent events are dropped by each endpoint's incident gate",
+         x = NULL, y = "Patients with the event", fill = NULL)
+  save_fig(p, "endpoint_event_counts", height = 4.5)
+  p
+}
+```
+
+## 3. Overlap in event-positive patients
+
+Venn-style set statistics over the **event-positive** patients in Stage 1, on
+the common patient set (so every endpoint is counted over the same
+denominator). Pairwise Jaccard is `|A & B| / |A | B|`.
+
+```{r overlap-pairwise}
+positive_sets <- NULL
+pairwise <- NULL
+if (!is.null(endpoint_long)) {
+  positive_sets <- endpoint_long %>%
+    filter(event == 1) %>%
+    { split(.[[ID_COL]], .$endpoint) } %>%
+    lapply(unique)
+
+  pairs <- combn(names(positive_sets), 2, simplify = FALSE)
+  pairwise <- map_dfr(pairs, function(pr) {
+    a <- positive_sets[[pr[1]]]; b <- positive_sets[[pr[2]]]
+    inter <- length(intersect(a, b)); uni <- length(union(a, b))
+    tibble(
+      endpoint_a = pr[1], endpoint_b = pr[2],
+      n_a = length(a), n_b = length(b),
+      n_both = inter,
+      n_a_only = length(setdiff(a, b)),
+      n_b_only = length(setdiff(b, a)),
+      jaccard = if (uni > 0) inter / uni else NA_real_,
+      pct_of_a_shared = 100 * inter / max(length(a), 1),
+      pct_of_b_shared = 100 * inter / max(length(b), 1)
+    )
+  })
+  write_out(pairwise, "endpoint_event_overlap_pairwise")
+  knitr::kable(pairwise, digits = c(rep(0, 7), 3, 1, 1))
+}
+```
+
+```{r overlap-exclusive}
+# Full exclusive breakdown: every patient positive for at least one endpoint,
+# labeled by the exact combination they fall into. This is the Venn's regions.
+combo_counts <- NULL
+if (!is.null(endpoint_long)) {
+  combo_counts <- endpoint_long %>%
+    filter(event == 1) %>%
+    group_by(.data[[ID_COL]]) %>%
+    summarise(combination = paste(sort(as.character(endpoint)), collapse = " + "),
+              n_endpoints = n(), .groups = "drop") %>%
+    count(combination, n_endpoints, name = "n_patients") %>%
+    arrange(desc(n_patients))
+
+  write_out(combo_counts, "endpoint_event_overlap_combinations")
+  knitr::kable(combo_counts)
+}
+```
+
+```{r overlap-plot, fig.height = 5}
+if (!is.null(combo_counts) && nrow(combo_counts) > 0) {
+  p <- combo_counts %>%
+    mutate(combination = fct_reorder(combination, n_patients)) %>%
+    ggplot(aes(n_patients, combination, fill = factor(n_endpoints))) +
+    geom_col(width = 0.7) +
+    geom_text(aes(label = comma(n_patients)), hjust = -0.15, size = 3.1) +
+    scale_fill_brewer(palette = "Blues", name = "Endpoints\nco-occurring") +
+    scale_x_continuous(labels = comma, expand = expansion(mult = c(0, 0.15))) +
+    labs(title = "Event-positive patients by exact endpoint combination",
+         subtitle = "Exclusive regions: each patient is counted once",
+         x = "Patients", y = NULL)
+  save_fig(p, "endpoint_event_overlap", height = 5)
+  p
+}
+```
+
+## 4. Events occurring before the ADT anchor
+
+Counted as `event == 1 & duration <= 0` on the anchor-relative clock. These
+are the prevalent cases each endpoint's gate removes. A large share here means
+the incident cohort is a materially different population from Stage 1, and it
+is also the mechanism behind the cohort-size differences in section 8.
+
+```{r pre-adt}
+pre_adt <- NULL
+if (!is.null(endpoint_long)) {
+  pre_adt <- endpoint_long %>%
+    filter(event == 1, !is.na(duration)) %>%
+    group_by(endpoint) %>%
+    summarise(
+      n_events            = n(),
+      n_before_anchor     = sum(duration <= 0),
+      pct_before_anchor   = 100 * mean(duration <= 0),
+      median_days_before  = median(duration[duration <= 0], na.rm = TRUE),
+      earliest_days_before = suppressWarnings(min(duration[duration <= 0], na.rm = TRUE)),
+      n_after_anchor      = sum(duration > 0),
+      .groups = "drop"
+    ) %>%
+    mutate(across(where(is.numeric), ~ ifelse(is.finite(.x), .x, NA_real_)))
+
+  write_out(pre_adt, "endpoint_events_before_adt")
+  knitr::kable(pre_adt, digits = 1)
+}
+```
+
+```{r pre-adt-plot, fig.height = 4.5}
+if (!is.null(endpoint_long)) {
+  dens_df <- endpoint_long %>% filter(event == 1, !is.na(duration))
+  if (nrow(dens_df) > 0) {
+    p <- ggplot(dens_df, aes(duration, fill = endpoint, color = endpoint)) +
+      geom_vline(xintercept = 0, linetype = "dashed", color = "#52514e") +
+      geom_density(alpha = 0.25, adjust = 0.9) +
+      scale_fill_manual(values = unname(ENDPOINT_COLORS[ENDPOINTS])) +
+      scale_color_manual(values = unname(ENDPOINT_COLORS[ENDPOINTS])) +
+      scale_x_continuous(labels = comma) +
+      labs(title = "Event timing relative to the ADT anchor",
+           subtitle = "Mass left of the dashed line is prevalent disease, dropped by the incident gate",
+           x = "Days from ADT start (negative = before ADT)", y = "Density",
+           fill = NULL, color = NULL)
+    save_fig(p, "endpoint_event_timing_density", height = 4.5)
+    p
+  }
+}
+```
+
+## 5. Time to event
+
+Restricted to incident events (`duration > 0`), since a prevalent event's
+negative duration is not a "time to event". Mean is reported because it was
+asked for; median is the one to quote in text, as these distributions are
+right-skewed and the mean is sensitive to the administrative tail.
+
+```{r time-to-event}
+tte <- NULL
+if (!is.null(endpoint_long)) {
+  tte <- endpoint_long %>%
+    filter(event == 1, !is.na(duration), duration > 0) %>%
+    group_by(endpoint) %>%
+    summarise(
+      n_incident_events = n(),
+      mean_days   = mean(duration),
+      sd_days     = sd(duration),
+      median_days = median(duration),
+      q1_days     = quantile(duration, 0.25),
+      q3_days     = quantile(duration, 0.75),
+      min_days    = min(duration),
+      max_days    = max(duration),
+      mean_years  = mean(duration) / 365.25,
+      .groups = "drop"
+    )
+
+  write_out(tte, "endpoint_time_to_event")
+  knitr::kable(tte, digits = 1)
+}
+```
+
+```{r time-to-event-plot, fig.height = 4.5}
+if (!is.null(endpoint_long)) {
+  box_df <- endpoint_long %>% filter(event == 1, !is.na(duration), duration > 0)
+  if (nrow(box_df) > 0) {
+    p <- ggplot(box_df, aes(endpoint, duration, fill = endpoint)) +
+      geom_boxplot(width = 0.55, outlier.alpha = 0.25, outlier.size = 0.8) +
+      stat_summary(fun = mean, geom = "point", shape = 23, size = 2.4,
+                   fill = "white", color = "#1a1a1a") +
+      scale_fill_manual(values = unname(ENDPOINT_COLORS[ENDPOINTS]), guide = "none") +
+      scale_y_continuous(labels = comma) +
+      labs(title = "Time from ADT start to event, incident events only",
+           subtitle = "Diamond = mean, line = median",
+           x = NULL, y = "Days to event")
+    save_fig(p, "endpoint_time_to_event", height = 4.5)
+    p
+  }
+}
+```
+
+## 6. Univariate significance: shared vs distinct vs total
+
+Reads each endpoint's `cox_agg_univariate_nobs_adjusted.csv` per landmark and
+counts nominally significant features (`p < 0.05`), then the same on the
+BH-adjusted `q_value` when present.
+
+A feature significant for one endpoint and not another is **not** evidence of
+a real difference when the two arms have very different event counts —
+section 2 sets that expectation, and `n_events_used` is carried through here
+so the comparison can be read against it.
+
+```{r load-univariate}
+univariate <- NULL
+uni_frames <- list()
+for (ep in ENDPOINTS) {
+  for (lm in LANDMARKS) {
+    path <- file.path(ENDPOINT_SPECS[[ep]]$results, "cox",
+                      sprintf("landmark_%s", lm), "both",
+                      "cox_agg_univariate_nobs_adjusted.csv")
+    if (!require_path(path, sprintf("%s univariate landmark %s", ep, lm))) next
+    frame <- read_csv(path, show_col_types = FALSE)
+    # Each tree models one endpoint, but the CSV carries an endpoint column;
+    # filter to this run's endpoint so a stale extra row cannot leak in.
+    if ("endpoint" %in% names(frame))
+      frame <- frame %>% filter(tolower(as.character(endpoint)) == ep)
+    if (nrow(frame) == 0) next
+    frame$endpoint <- ep
+    frame$landmark_days <- lm
+    uni_frames[[length(uni_frames) + 1]] <- frame
+  }
+}
+if (length(uni_frames) > 0) {
+  univariate <- bind_rows(uni_frames) %>%
+    mutate(
+      p_value = suppressWarnings(as.numeric(p_value)),
+      q_value = if ("q_value" %in% names(.)) suppressWarnings(as.numeric(q_value)) else NA_real_,
+      coef_feature = if ("coef_feature" %in% names(.)) suppressWarnings(as.numeric(coef_feature)) else NA_real_,
+      sig_nominal = !is.na(p_value) & p_value < ALPHA,
+      sig_fdr     = !is.na(q_value) & q_value < ALPHA
+    )
+  cat(sprintf("univariate rows: %s across %d endpoint(s) x %d landmark(s)\n",
+              comma(nrow(univariate)),
+              n_distinct(univariate$endpoint), n_distinct(univariate$landmark_days)))
+}
+```
+
+```{r univariate-totals}
+uni_totals <- NULL
+if (!is.null(univariate)) {
+  uni_totals <- univariate %>%
+    group_by(endpoint, landmark_days) %>%
+    summarise(
+      n_features_tested = n_distinct(feature),
+      n_fitted          = sum(!is.na(p_value)),
+      n_sig_nominal     = n_distinct(feature[sig_nominal]),
+      n_sig_fdr         = n_distinct(feature[sig_fdr]),
+      median_events_used = if ("n_events_used" %in% names(univariate))
+        median(suppressWarnings(as.numeric(n_events_used)), na.rm = TRUE) else NA_real_,
+      .groups = "drop"
+    ) %>%
+    arrange(landmark_days, endpoint)
+
+  write_out(uni_totals, "univariate_significance_totals")
+  knitr::kable(uni_totals, digits = 1)
+}
+```
+
+```{r univariate-shared}
+# Shared vs distinct, per landmark. "shared_all" = significant under every
+# endpoint that has a fitted result for that feature at that landmark;
+# "unique_to" = significant under exactly one.
+uni_overlap <- NULL
+if (!is.null(univariate)) {
+  sig_sets <- univariate %>%
+    filter(sig_nominal) %>%
+    distinct(landmark_days, endpoint, feature)
+
+  uni_overlap <- sig_sets %>%
+    group_by(landmark_days, feature) %>%
+    summarise(
+      n_endpoints = n_distinct(endpoint),
+      endpoints   = paste(sort(unique(endpoint)), collapse = " + "),
+      .groups = "drop"
+    )
+
+  overlap_summary <- uni_overlap %>%
+    group_by(landmark_days) %>%
+    summarise(
+      n_sig_any        = n_distinct(feature),
+      n_shared_all     = sum(n_endpoints == length(ENDPOINTS)),
+      n_shared_2plus   = sum(n_endpoints >= 2),
+      n_unique_to_one  = sum(n_endpoints == 1),
+      .groups = "drop"
+    )
+  write_out(overlap_summary, "univariate_shared_distinct_summary")
+  knitr::kable(overlap_summary)
+
+  combo_summary <- uni_overlap %>%
+    count(landmark_days, endpoints, n_endpoints, name = "n_features") %>%
+    arrange(landmark_days, desc(n_features))
+  write_out(combo_summary, "univariate_significance_combinations")
+  knitr::kable(combo_summary)
+}
+```
+
+```{r univariate-pairwise}
+uni_pairwise <- NULL
+if (!is.null(univariate)) {
+  uni_pairwise <- map_dfr(LANDMARKS, function(lm) {
+    sets <- univariate %>%
+      filter(landmark_days == lm, sig_nominal) %>%
+      { split(.$feature, .$endpoint) } %>%
+      lapply(unique)
+    if (length(sets) < 2) return(tibble())
+    map_dfr(combn(names(sets), 2, simplify = FALSE), function(pr) {
+      a <- sets[[pr[1]]]; b <- sets[[pr[2]]]
+      uni <- length(union(a, b))
+      tibble(landmark_days = lm, endpoint_a = pr[1], endpoint_b = pr[2],
+             n_a = length(a), n_b = length(b), n_shared = length(intersect(a, b)),
+             n_a_only = length(setdiff(a, b)), n_b_only = length(setdiff(b, a)),
+             jaccard = if (uni > 0) length(intersect(a, b)) / uni else NA_real_)
+    })
+  })
+  if (nrow(uni_pairwise) > 0) {
+    write_out(uni_pairwise, "univariate_significance_pairwise")
+    knitr::kable(uni_pairwise, digits = 3)
+  }
+}
+```
+
+```{r univariate-plot, fig.height = 4.5}
+if (!is.null(uni_totals)) {
+  p <- uni_totals %>%
+    select(endpoint, landmark_days, n_sig_nominal, n_sig_fdr) %>%
+    pivot_longer(starts_with("n_sig"), names_to = "threshold", values_to = "n") %>%
+    mutate(threshold = factor(threshold, levels = c("n_sig_nominal", "n_sig_fdr"),
+                              labels = c("nominal p < 0.05", "FDR q < 0.05")),
+           endpoint = factor(endpoint, levels = ENDPOINTS,
+                             labels = ENDPOINT_LABELS[ENDPOINTS])) %>%
+    ggplot(aes(factor(landmark_days), n, fill = endpoint)) +
+    geom_col(position = position_dodge(width = 0.8), width = 0.72) +
+    facet_wrap(~ threshold) +
+    scale_fill_manual(values = unname(ENDPOINT_COLORS[ENDPOINTS]), name = NULL) +
+    labs(title = "Significant univariate lab features by endpoint and landmark",
+         subtitle = "Counts are sensitive to each endpoint's event count; read with section 2",
+         x = "Landmark (days from ADT start)", y = "Significant features")
+  save_fig(p, "univariate_significance_counts", height = 4.5)
+  p
+}
+```
+
+## 7. PSA and Testosterone: direction, magnitude, significance
+
+`coef_feature` is the log hazard ratio per SD of the feature, so its **sign is
+the direction**: positive = higher values associate with shorter time to
+event. The 95% CI is reported on the HR scale by the pipeline and is
+log-transformed here so the interval matches the plotted point estimate.
+
+Features are matched on the canonical lab name, following the R pipeline's
+convention that the raw OMOP `Prostate specific Ag` maps to PSA. All summary
+statistics of each lab (mean, slope, last value, ...) are kept and shown as
+separate rows, since direction can legitimately differ between a level and a
+trend feature.
+
+```{r androgen-extract}
+ANDROGEN <- c("PSA", "Testosterone")
+
+# Mirrors match_canonical_lab_name() in COMPASS_generate_figures_pipeline.R.
+match_androgen <- function(x) {
+  n <- tolower(as.character(x))
+  out <- rep(NA_character_, length(n))
+  out[grepl("prostate specific ag", n, fixed = FALSE)] <- "PSA"
+  out[is.na(out) & grepl("^psa$|(^|[^a-z])psa([^a-z]|$)", n)] <- "PSA"
+  out[is.na(out) & grepl("testosterone", n)] <- "Testosterone"
+  out
+}
+
+androgen <- NULL
+if (!is.null(univariate)) {
+  # feature is "<lab>__<stat>"; prefer the pipeline's own lab_name/feature_stat
+  # columns when present and fall back to splitting the feature name.
+  androgen <- univariate %>%
+    mutate(
+      .lab  = if ("lab_name" %in% names(.)) lab_name else str_replace(feature, "__[^_]*$", ""),
+      .stat = if ("feature_stat" %in% names(.)) feature_stat
+              else ifelse(str_detect(feature, "__"), str_extract(feature, "[^_]+$"), "value"),
+      androgen_lab = match_androgen(.lab)
+    ) %>%
+    filter(!is.na(androgen_lab)) %>%
+    mutate(
+      log_hr    = coef_feature,
+      hr        = suppressWarnings(as.numeric(hazard_ratio_per_sd)),
+      log_ci_lo = suppressWarnings(log(as.numeric(ci_lower))),
+      log_ci_hi = suppressWarnings(log(as.numeric(ci_upper))),
+      direction = case_when(is.na(log_hr) ~ NA_character_,
+                            log_hr > 0 ~ "higher -> shorter time to event",
+                            log_hr < 0 ~ "higher -> longer time to event",
+                            TRUE ~ "null"),
+      significance = case_when(sig_fdr ~ "FDR q < 0.05",
+                               sig_nominal ~ "nominal p < 0.05",
+                               TRUE ~ "ns")
+    )
+
+  if (nrow(androgen) == 0) {
+    MISSING <- c(MISSING, "PSA/Testosterone features: none matched in the univariate results")
+  } else {
+    androgen_table <- androgen %>%
+      select(androgen_lab, source_lab = .lab, feature_stat = .stat,
+             endpoint, landmark_days,
+             log_hr, hr, log_ci_lo, log_ci_hi, p_value, q_value,
+             any_of(c("n_patients_used", "n_events_used")),
+             direction, significance) %>%
+      arrange(androgen_lab, source_lab, feature_stat, landmark_days, endpoint)
+    write_out(androgen_table, "androgen_loghr_by_endpoint")
+    knitr::kable(androgen_table, digits = 3)
+  }
+}
+```
+
+```{r androgen-plot, fig.height = 7}
+if (!is.null(androgen) && nrow(androgen) > 0) {
+  plot_df <- androgen %>%
+    filter(!is.na(log_hr)) %>%
+    mutate(endpoint = factor(endpoint, levels = ENDPOINTS,
+                             labels = ENDPOINT_LABELS[ENDPOINTS]),
+           # Facet on the source lab so an aliased variant ("Prostate specific
+           # Ag" vs "PSA") gets its own panel instead of overplotting.
+           panel = ifelse(.lab == androgen_lab,
+                          sprintf("%s :: %s", androgen_lab, .stat),
+                          sprintf("%s [%s] :: %s", androgen_lab, .lab, .stat)))
+
+  if (nrow(plot_df) > 0) {
+    p <- ggplot(plot_df, aes(log_hr, endpoint, color = endpoint, shape = significance)) +
+      geom_vline(xintercept = 0, linetype = "dashed", color = "#52514e") +
+      geom_errorbar(aes(xmin = log_ci_lo, xmax = log_ci_hi),
+                    orientation = "y", width = 0.18,
+                    linewidth = 0.5, na.rm = TRUE) +
+      geom_point(size = 2.4) +
+      facet_grid(panel ~ landmark_days, scales = "free_y",
+                 labeller = labeller(landmark_days = function(x) paste0("landmark +", x, "d"))) +
+      scale_color_manual(values = unname(ENDPOINT_COLORS[ENDPOINTS]), guide = "none") +
+      scale_shape_manual(values = c("FDR q < 0.05" = 16, "nominal p < 0.05" = 17, "ns" = 1),
+                         name = NULL) +
+      labs(title = "PSA and Testosterone log hazard ratio per SD, by endpoint",
+           subtitle = "Right of the dashed line = higher values associate with shorter time to event; bars are 95% CI",
+           x = "log HR per SD", y = NULL)
+    save_fig(p, "androgen_loghr_forest", height = max(5, 1.1 * n_distinct(plot_df$panel) + 2))
+    p
+  }
+}
+```
+
+```{r androgen-direction}
+# Compact direction/significance grid: the "does PSA point the same way for
+# every endpoint" question, answered without reading the forest plot.
+if (!is.null(androgen) && nrow(androgen) > 0) {
+  # Key on the SOURCE lab name, not the canonical one. Several raw lab names
+  # (e.g. "Prostate specific Ag" and "PSA") collapse to the same canonical lab
+  # but are distinct columns in the feature matrix; keying on the canonical
+  # name would make the key non-unique, and pivot_wider would silently emit
+  # list-columns that serialize to blank cells.
+  direction_grid <- androgen %>%
+    filter(!is.na(log_hr)) %>%
+    mutate(cell = sprintf("%+.3f%s", log_hr,
+                          case_when(sig_fdr ~ "**", sig_nominal ~ "*", TRUE ~ ""))) %>%
+    select(androgen_lab, source_lab = .lab, feature_stat = .stat,
+           landmark_days, endpoint, cell)
+
+  dup_keys <- direction_grid %>%
+    count(androgen_lab, source_lab, feature_stat, landmark_days, endpoint) %>%
+    filter(n > 1)
+  if (nrow(dup_keys) > 0) {
+    warning("Duplicate (lab, stat, landmark, endpoint) keys in the androgen grid; ",
+            "showing the first fitted value per key. Inspect ",
+            "androgen_loghr_by_endpoint.csv for the full set.")
+    direction_grid <- direction_grid %>%
+      group_by(androgen_lab, source_lab, feature_stat, landmark_days, endpoint) %>%
+      slice(1) %>% ungroup()
+  }
+
+  direction_grid <- direction_grid %>%
+    pivot_wider(names_from = endpoint, values_from = cell) %>%
+    arrange(androgen_lab, source_lab, feature_stat, landmark_days)
+
+  write_out(direction_grid, "androgen_loghr_direction_grid")
+  cat("log HR per SD;  * nominal p < 0.05,  ** FDR q < 0.05\n\n")
+  knitr::kable(direction_grid)
+}
+```
+
+## 8. Prediction accuracy at each timepoint
+
+Held-out test metrics only, never cross-validation, read from the same
+per-model metrics files `compass_pipeline.summarize_outputs()` reads. Both
+`both` (full feature set) and `baseline` configs are included so the
+lab-feature contribution is visible per endpoint.
+
+Differences across endpoints confound event definition with cohort and with
+event count — `n_test_events` is carried in every table for that reason.
+
+```{r load-performance}
+MODEL_SPECS <- tribble(
+  ~model,         ~subdir,   ~config,    ~metrics_file,
+  "elastic-net",  "cox",     "both",     "cox_agg_multivariable_metrics.csv",
+  "elastic-net",  "cox",     "baseline", "cox_agg_baseline_metrics.csv",
+  "xgboost",      "xgboost", "both",     "landmark_xgboost_metrics.csv",
+  "xgboost",      "xgboost", "baseline", "landmark_xgboost_baseline_metrics.csv"
+)
+
+read_metrics_row <- function(path, ep, model) {
+  df <- read_csv(path, show_col_types = FALSE)
+  if ("endpoint" %in% names(df))
+    df <- df %>% filter(tolower(as.character(endpoint)) == ep)
+  if (nrow(df) == 0) return(NULL)
+  row <- df[1, ]
+  # elastic-net and xgboost emit the same metrics under different column names.
+  pick <- function(...) {
+    for (nm in c(...)) if (nm %in% names(row)) return(suppressWarnings(as.numeric(row[[nm]])))
+    NA_real_
+  }
+  tibble(
+    n_test          = pick("n_test"),
+    n_test_events   = pick("n_events_test", "n_test_events"),
+    c_index         = pick("test_c_index", "c_index"),
+    mean_auc_t      = pick("test_mean_auc_t", "mean_auc_t"),
+    integrated_brier = pick("test_integrated_brier", "integrated_brier")
+  )
+}
+
+performance <- NULL
+perf_rows <- list()
+for (ep in ENDPOINTS) {
+  for (i in seq_len(nrow(MODEL_SPECS))) {
+    spec <- MODEL_SPECS[i, ]
+    for (lm in LANDMARKS) {
+      path <- file.path(ENDPOINT_SPECS[[ep]]$results, spec$subdir,
+                        sprintf("landmark_%s", lm), spec$config, spec$metrics_file)
+      if (!require_path(path, sprintf("%s %s/%s landmark %s", ep, spec$model, spec$config, lm)))
+        next
+      vals <- read_metrics_row(path, ep, spec$model)
+      if (is.null(vals)) {
+        MISSING <- c(MISSING, sprintf("%s %s/%s landmark %s: no %s row in %s",
+                                      ep, spec$model, spec$config, lm, ep, path))
+        next
+      }
+      perf_rows[[length(perf_rows) + 1]] <- bind_cols(
+        tibble(endpoint = ep, model = spec$model, config = spec$config, landmark = lm),
+        vals
+      )
+    }
+  }
+}
+if (length(perf_rows) > 0) {
+  performance <- bind_rows(perf_rows) %>% arrange(endpoint, model, config, landmark)
+  write_out(performance, "endpoint_performance")
+  knitr::kable(performance, digits = 3)
+}
+```
+
+```{r performance-pivots}
+if (!is.null(performance)) {
+  for (metric in c("c_index", "mean_auc_t", "integrated_brier")) {
+    wide <- performance %>%
+      select(model, config, landmark, endpoint, all_of(metric)) %>%
+      pivot_wider(names_from = endpoint, values_from = all_of(metric)) %>%
+      arrange(model, config, landmark)
+    # Every non-platinum endpoint's delta against platinum, the reference arm.
+    if ("platinum" %in% names(wide)) {
+      for (ep in setdiff(ENDPOINTS, "platinum")) {
+        if (ep %in% names(wide))
+          wide[[paste0(ep, " - platinum")]] <- wide[[ep]] - wide[["platinum"]]
+      }
+    }
+    write_out(wide, sprintf("endpoint_performance_%s", metric))
+    cat(sprintf("\n\n### %s\n\n", metric))
+    print(knitr::kable(wide, digits = 3))
+  }
+}
+```
+
+```{r performance-plot, fig.height = 6.5}
+if (!is.null(performance)) {
+  plot_df <- performance %>%
+    select(endpoint, model, config, landmark, c_index, mean_auc_t, integrated_brier) %>%
+    pivot_longer(c(c_index, mean_auc_t, integrated_brier),
+                 names_to = "metric", values_to = "value") %>%
+    filter(!is.na(value)) %>%
+    mutate(endpoint = factor(endpoint, levels = ENDPOINTS,
+                             labels = ENDPOINT_LABELS[ENDPOINTS]),
+           arm = paste(model, config, sep = " / "))
+
+  if (nrow(plot_df) > 0) {
+    p <- ggplot(plot_df, aes(landmark, value, color = endpoint, group = endpoint)) +
+      geom_hline(data = tibble(metric = "c_index", y = 0.5), aes(yintercept = y),
+                 linetype = "dashed", color = "#52514e") +
+      geom_hline(data = tibble(metric = "mean_auc_t", y = 0.5), aes(yintercept = y),
+                 linetype = "dashed", color = "#52514e") +
+      geom_line(linewidth = 0.6) +
+      geom_point(size = 2.2) +
+      facet_grid(metric ~ arm, scales = "free_y") +
+      scale_x_continuous(breaks = LANDMARKS) +
+      scale_color_manual(values = unname(ENDPOINT_COLORS[ENDPOINTS]), name = NULL) +
+      labs(title = "Held-out prediction accuracy by endpoint and landmark",
+           subtitle = "Dashed line = chance for discrimination metrics; lower is better for integrated Brier",
+           x = "Landmark (days from ADT start)", y = NULL)
+    save_fig(p, "endpoint_performance", height = 6.5)
+    p
+  }
+}
+```
+
+```{r performance-events}
+# Event counts behind each metric. The interpretive guardrail for section 8:
+# a lower C-index on a few dozen test events is a statement about power.
+if (!is.null(performance)) {
+  event_support <- performance %>%
+    distinct(endpoint, model, config, landmark, n_test, n_test_events) %>%
+    arrange(endpoint, landmark, model, config)
+  write_out(event_support, "endpoint_performance_event_support")
+
+  thin <- event_support %>% filter(!is.na(n_test_events), n_test_events < 25)
+  if (nrow(thin) > 0) {
+    cat("!! arms with fewer than 25 held-out events -- treat their metrics as underpowered:\n")
+    print(knitr::kable(thin))
+  }
+}
+```
+
+## 9. Missing artifacts
+
+```{r missing}
+if (length(MISSING) > 0) {
+  cat(sprintf("%d artifact(s) were not found:\n\n", length(unique(MISSING))))
+  for (item in unique(MISSING)) cat("  ", item, "\n", sep = "")
+  cat("\nRun 01/02/03 for the corresponding endpoint with",
+      "ENDPOINTS = (\"platinum\", \"nepc\", \"avpc\", \"avpc_nepc\").\n")
+} else {
+  cat("All expected artifacts were found.\n")
+}
+```
+
+```{r session-info}
+sessionInfo()
+```
