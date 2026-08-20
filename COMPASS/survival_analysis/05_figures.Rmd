@@ -1,5 +1,5 @@
 ---
-title: "Generate COMPASS figures (platinum and NEPC endpoints)"
+title: "Generate COMPASS figures (NEPC, AVPC, AVPC/NEPC, and platinum endpoints)"
 output:
   html_document:
     toc: true
@@ -7,32 +7,46 @@ output:
 ---
 
 Canonical R figure workflow using tidyverse/ggplot2. **Knit** renders the
-**ADT** cohort for both the **platinum** and **NEPC** endpoints by default.
-ARPI remains available by explicit request.
+**ADT** cohort for the **NEPC**, **AVPC**, **AVPC/NEPC**, and **platinum**
+endpoints by default. ARPI remains available by explicit request.
 
 The document reads the merged `profile_data` run under `.../CAIA/COMPASS`
 and writes to `figures/CAIA/COMPASS`.
 
 Outputs are split by cohort arm, then by endpoint, then flattened within each
-figure directory. The platinum endpoint keeps the historical un-suffixed path
-so existing references stay valid; NEPC nests one level deeper:
+figure directory. Every endpoint nests one level below its cohort arm --
+platinum included, so no endpoint's panels can overwrite another's:
 
-`FIG_ROOT/ADT/<figure>/adt_<plot-stem>.png`         (platinum)
-`FIG_ROOT/ADT/nepc/<figure>/adt_<plot-stem>.png`    (NEPC)
+`FIG_ROOT/ADT/nepc/<figure>/adt_<plot-stem>.png`
+`FIG_ROOT/ADT/avpc/<figure>/adt_<plot-stem>.png`
+`FIG_ROOT/ADT/avpc_nepc/<figure>/adt_<plot-stem>.png`
+`FIG_ROOT/ADT/platinum/<figure>/adt_<plot-stem>.png`
 
-For example, `figure1/adt_figure1a_consort.png` is written directly in
-`figure1/`. Plot PDFs and legacy `original_*` Figure 2 variants are not
-generated. Tables remain CSV/Markdown and use the same flat
+Note that platinum figures moved out of the old un-suffixed `FIG_ROOT/ADT/`
+path; references to that location need updating. For example,
+`figure1/adt_figure1a_consort.png` is written directly in `platinum/figure1/`.
+Plot PDFs are not generated. Tables remain CSV/Markdown and use the same flat
 figure/cohort-prefix convention. There is no `R/` language subdirectory.
 
-Figure 2 (LLM classifier validation and platinum enrichment) describes the
-label set and the platinum MRN list rather than a modelled endpoint, so it is
-emitted once from the platinum pass and skipped for NEPC.
+Figure 2 v3 (LLM classifier validation and platinum enrichment over every
+ADT-exposed patient) describes the label set and the platinum MRN list rather
+than a modelled endpoint, so it is emitted once from the platinum pass and
+skipped for the other endpoints. It is the only Figure 2 variant retained;
+the earlier v0/v1/v2 variants have been removed.
+
+Figure 3b adds the somatic, Gleason, and PRS univariate associations as their
+own plots, one per index analysis. Each is built on its own cohort and index
+date (sequencing = specimen collection, Gleason = the score date nearest ADT
+start, PRS = ADT start), so they are not merged into the Figure 3 lab
+volcanoes. Gleason is drawn as a forest plot because it contributes a single
+continuous feature; sequencing and PRS get a volcano plus a top-hits forest.
+These analyses exist for the ADT arm at landmark 0 only, and a missing
+`cox_somatic_gleason/` tree is reported and skipped.
 
 All figure-generation logic lives in `COMPASS_generate_figures_pipeline.R` as
 `generate_figures(cohort, endpoint, ...)`. This document just sources that file
 and calls it for each cohort in `COHORTS` (defaults to `c("adt")`) crossed with
-each endpoint in `ENDPOINTS` (defaults to both).
+each endpoint in `ENDPOINTS` (defaults to all four).
 
 Figure 4 also includes a supplemental held-out comparison of elastic-net Cox,
 XGBoost, and Dynamic-DeepHit across mean AUC(t), C-index, and integrated Brier
@@ -64,7 +78,7 @@ FIG_ROOT <- "/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS"
 
 # Endpoints to render. Each needs its own 01/02/03 build; see
 # compass_pipeline.make_endpoint_runs().
-ENDPOINTS <- c("platinum", "nepc")
+ENDPOINTS <- c("nepc", "avpc", "avpc_nepc", "platinum")
 
 # Generate lab-specific panels only for PSA and Testosterone.
 # Non-androgen labs remain available to models and aggregate feature plots.
@@ -86,12 +100,12 @@ for (required_path in c(
 # missing NEPC build fails here rather than partway through the platinum pass.
 for (COHORT in COHORTS) {
   for (ENDPOINT in ENDPOINTS) {
-    suffix <- if (identical(ENDPOINT, "platinum")) "" else paste0("_", ENDPOINT)
+    suffix <- unname(ENDPOINT_SUFFIXES[[ENDPOINT]])
     inputs_dir <- file.path(NEPC_PROJ_PATH, "survival_analysis",
                             paste0("prediction_inputs_", COHORT, suffix))
     if (!dir.exists(inputs_dir))
-      stop(inputs_dir, " not found -- run 01_preprocessing.ipynb with ENDPOINTS = ",
-           "(\"platinum\", \"nepc\") first.")
+      stop(inputs_dir, " not found -- run 01_preprocessing.ipynb for endpoint ",
+           ENDPOINT, " first.")
   }
 }
 
@@ -103,7 +117,8 @@ message("endpoints:   ", paste(ENDPOINTS, collapse = ", "))
 ## Render ADT figures
 
 Runs the R figure-generation pipeline for ADT by default, once per endpoint.
-Platinum outputs go to `FIG_ROOT/ADT/`, NEPC to `FIG_ROOT/ADT/nepc/`.
+Each endpoint's outputs go to `FIG_ROOT/ADT/<endpoint>/`, i.e. `ADT/nepc/`,
+`ADT/avpc/`, `ADT/avpc_nepc/`, and `ADT/platinum/`.
 Set `COHORTS <- c("arpi", "adt")` to opt into both arms, or narrow `ENDPOINTS`
 to render a single endpoint.
 
@@ -120,11 +135,7 @@ for (COHORT in COHORTS) {
       plot_non_androgen_distributions = PLOT_NON_ANDROGEN_DISTRIBUTIONS,
       plot_non_androgen_lab_figures = PLOT_NON_ANDROGEN_LAB_FIGURES
     )
-    endpoint_fig_root <- if (identical(ENDPOINT, "platinum")) {
-      file.path(FIG_ROOT, toupper(COHORT))
-    } else {
-      file.path(FIG_ROOT, toupper(COHORT), ENDPOINT)
-    }
+    endpoint_fig_root <- file.path(FIG_ROOT, toupper(COHORT), ENDPOINT)
     supplement_path <- file.path(
       endpoint_fig_root, "figure4",
       paste0(COHORT, "_figure4s_multivariate_all_models.png")

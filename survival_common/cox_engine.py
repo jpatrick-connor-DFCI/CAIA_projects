@@ -42,7 +42,12 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
     Surv = None
     SKSURV_IMPORT_ERROR = exc
 
-DEFAULT_COXNET_MAX_ITER = 20000
+# Matches the clinical text embedding project's Coxnet max_iter
+# (clinical_text_embedding_project/v2: run_grid_CoxPH_parallel max_iter=1000,
+# the argparse default across the training pipelines). Coxnet warns rather
+# than raises on a hit iteration cap, so watch for ConvergenceWarning if
+# coefficients look shrunk on wide/collinear designs.
+DEFAULT_COXNET_MAX_ITER = 1000
 DEFAULT_UNPENALIZED_ALPHA = 1e-6
 DEFAULT_AUC_QUANTILES = (0.25, 0.375, 0.50, 0.625, 0.75)
 DEFAULT_AUC_TIME_UNIT_DAYS = 7

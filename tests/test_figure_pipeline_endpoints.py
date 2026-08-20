@@ -201,20 +201,23 @@ def test_missing_file_returns_na(tmp_path):
 
 
 def test_figure_roots_do_not_collide():
-    """Platinum keeps the historical path; NEPC nests below it.
+    """Every endpoint nests one level below its cohort arm -- platinum included.
 
-    The two endpoints share every plot stem, so a shared FIG_ROOT would have
-    NEPC overwrite the platinum panels.
+    All endpoints share every plot stem, so any two sharing a FIG_ROOT would
+    overwrite each other's panels. Platinum used to keep the un-suffixed
+    cohort root; it is now nested like the rest, so the figure path must be
+    driven by ENDPOINT itself rather than by ENDPOINT_SUFFIX (which stays ""
+    for platinum because it still names the un-suffixed *data* trees).
     """
     source = _pipeline_source()
-    assert 'FIG_ROOT <- file.path(fig_root, toupper(COHORT))' in source, (
-        "platinum must keep its un-suffixed figure root"
+    assert "FIG_ROOT <- file.path(fig_root, toupper(COHORT), ENDPOINT)" in source, (
+        "every endpoint's figure root must nest under <cohort>/<endpoint>"
     )
-    assert re.search(
+    assert not re.search(
         r'if \(!identical\(ENDPOINT_SUFFIX, ""\)\) \{\s*\n\s*'
         r"FIG_ROOT <- file\.path\(FIG_ROOT, ENDPOINT\)",
         source,
-    ), "non-platinum endpoints must nest one level deeper"
+    ), "platinum must no longer be special-cased out of the nesting"
 
 
 def test_results_trees_are_endpoint_suffixed():
@@ -231,16 +234,18 @@ def test_results_trees_are_endpoint_suffixed():
         )
 
 
-def test_avpc_nepc_figure_root_nests_like_nepc():
-    """avpc_nepc must take the same non-platinum nesting path as nepc -- the
-    ENDPOINT_SUFFIX-driven FIG_ROOT branch is generic over the suffix, so no
-    avpc_nepc-specific branch should exist (and none is needed)."""
+def test_every_supported_endpoint_nests_uniformly():
+    """avpc and avpc_nepc take the same nesting path as nepc and platinum.
+
+    The FIG_ROOT expression is generic over ENDPOINT, so no endpoint-specific
+    branch should exist (and none is needed) for any supported endpoint.
+    """
     source = _pipeline_source()
-    assert re.search(
-        r'if \(!identical\(ENDPOINT_SUFFIX, ""\)\) \{\s*\n\s*'
-        r"FIG_ROOT <- file\.path\(FIG_ROOT, ENDPOINT\)",
-        source,
-    ), "non-platinum endpoints (including avpc_nepc) must nest one level deeper"
+    assert "FIG_ROOT <- file.path(fig_root, toupper(COHORT), ENDPOINT)" in source
+    for endpoint in ("platinum", "nepc", "avpc", "avpc_nepc"):
+        assert not re.search(
+            rf'FIG_ROOT.*identical\(ENDPOINT, "{endpoint}"\)', source
+        ), f"{endpoint} must not be special-cased in the figure root"
 
 
 def test_pipeline_parses(tmp_path):

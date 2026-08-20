@@ -53,8 +53,8 @@ COLOR_NEUTRAL_INK  <- "#52514e"   # secondary ink, for annotations/text only
 # Root for the newer classifier-derived LLM NEPC labels (LLM_NEPC_classifier_labels.tsv).
 # Deliberately a different root than NEPC_PROJ_PATH: this file lives under the
 # user's data/LLM_annotations/ tree, not the CAIA/COMPASS project tree, and is
-# loaded alongside (not instead of) the original LLM_v3_labels.tsv used by
-# Figure 2. Overridable per-call by generate_figures(); this default matches
+# is the sole LLM label source for Figure 2 v3 and the Section 4-5
+# stratifications. Overridable per-call by generate_figures(); this default matches
 # the path used everywhere else in the pipeline invocation.
 DEFAULT_LLM_ANNOTATIONS_PATH <- "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_NEPC_labels"
 
@@ -371,10 +371,11 @@ COHORT_LANDMARKS <- list(
 # compass_pipeline.make_endpoint_runs(). The suffix must match the
 # `output_suffix` that make_runs() appends to BOTH prediction_inputs_* and
 # local_runs_*: "" for platinum, "_nepc" for NEPC.
-SUPPORTED_ENDPOINTS <- c("platinum", "nepc", "avpc_nepc")
+SUPPORTED_ENDPOINTS <- c("platinum", "nepc", "avpc", "avpc_nepc")
 ENDPOINT_SUFFIXES <- c(
   platinum = "",
   nepc = "_nepc",
+  avpc = "_avpc",
   avpc_nepc = "_avpc_nepc"
 )
 # Figure 1/2 are classifier- and platinum-cohort figures (CONSORT, LLM
@@ -452,13 +453,14 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # Keep the two requested deliverables physically separate:
   #   .../CAIA/COMPASS/ARPI/
   #   .../CAIA/COMPASS/ADT/
-  # The NEPC endpoint nests one level deeper (.../ADT/nepc/) so its panels
-  # cannot overwrite the platinum ones, which share every plot stem. Platinum
-  # keeps the un-suffixed path so existing figure references stay valid.
-  FIG_ROOT <- file.path(fig_root, toupper(COHORT))
-  if (!identical(ENDPOINT_SUFFIX, "")) {
-    FIG_ROOT <- file.path(FIG_ROOT, ENDPOINT)
-  }
+  # Every endpoint nests one level deeper under its cohort arm, so panels that
+  # share a plot stem cannot overwrite each other:
+  #   .../CAIA/COMPASS/ADT/{platinum,nepc,avpc,avpc_nepc}/
+  # Platinum is nested like the rest rather than keeping the historical
+  # un-suffixed path: ENDPOINT_SUFFIX stays "" for platinum because it still
+  # names the un-suffixed *data* trees (local_runs_adt, prediction_inputs_adt)
+  # that the Python pipeline writes, but the figure path uses ENDPOINT itself.
+  FIG_ROOT <- file.path(fig_root, toupper(COHORT), ENDPOINT)
   # Canonical-lab names sorted longest-first so e.g. "Direct bilirubin" is
   # matched before "Total bilirubin" would ever partially collide, and so a
   # lab-specific stem is never mis-routed to a shorter substring match.
@@ -482,11 +484,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # stay navigable instead of dumping ~160+ files into one flat directory:
   #   FIG_ROOT/labs/<category>/<lab>/{longitudinal,km_quartile,distribution}/<cohort>_<stem>.png
   figure_group <- function(plot_stem) {
+    # Checked before the "figure1" prefix so the supplement gets its own
+    # directory instead of being swallowed by the main Figure 1 group.
+    if (startsWith(plot_stem, "figure1s")) return("figure1s_analysis_sets")
     if (startsWith(plot_stem, "figure1") || startsWith(plot_stem, "table1")) return("figure1")
-    if (startsWith(plot_stem, "figure2v0")) return("figure2v0_llm")
-    if (startsWith(plot_stem, "figure2v2")) return("figure2v2_llm")
     if (startsWith(plot_stem, "figure2v3")) return("figure2v3_llm")
-    if (startsWith(plot_stem, "figure2")) return("figure2")
+    if (startsWith(plot_stem, "figure3b")) return("figure3b")
     if (startsWith(plot_stem, "figure3")) return("figure3")
     if (startsWith(plot_stem, "figure4")) return("figure4")
     if (startsWith(plot_stem, "km_llm_")) return("km_llm")
@@ -522,8 +525,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # Remove only the legacy per-panel directories under numbered figure groups.
   # Flat files already in those groups are retained and overwritten normally.
   numbered_figure_groups <- c(
-    "figure1", "figure2", "figure2v0_llm", "figure2v2_llm",
-    "figure2v3_llm", "figure3", "figure4"
+    "figure1", "figure1s_analysis_sets", "figure2v3_llm", "figure3", "figure3b", "figure4"
   )
   for (group in numbered_figure_groups) {
     group_dir <- file.path(FIG_ROOT, group)
@@ -551,22 +553,13 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   LLM_LABEL_PATH <- file.path(NEPC_PROJ_PATH, "LLM_NEPC_labels")
   manual_annotations <- read_csv(file.path(LLM_LABEL_PATH, "baca_lab_annotations.csv"),
                                  show_col_types = FALSE)
-  nepc_annotations <- read_tsv(file.path(LLM_LABEL_PATH, "LLM_v3_labels.tsv"),
-                               show_col_types = FALSE)
   platinum_mrns <- read_csv(file.path(NEPC_PROJ_PATH, "mrn_lists/platinum_MRN_list.csv"),
                             show_col_types = FALSE)
   platinum_set <- unique(platinum_mrns$DFCI_MRN)
-  nepc_annotations <- nepc_annotations %>%
-    mutate(is_platinum = DFCI_MRN %in% platinum_set)
-  nepc_annotations_all <- nepc_annotations
-  cat(sprintf("nepc_annotations: %s rows (%s platinum+, %s platinum-)\n",
-              format(nrow(nepc_annotations), big.mark = ","),
-              format(sum(nepc_annotations$is_platinum), big.mark = ","),
-              format(sum(!nepc_annotations$is_platinum), big.mark = ",")))
 
-  # Newer classifier-derived labels (primary_label/has_nepc/has_avpc), loaded
-  # alongside the LLM_v3_labels.tsv above -- drives Figure 2 v2 and the
-  # all-lab longitudinal/KM stratification in Sections 4-5. NULL if absent.
+  # Classifier-derived labels (primary_label/has_nepc/has_avpc). The sole label
+  # source: it drives Figure 2 v3 and the all-lab longitudinal/KM
+  # stratification in Sections 4-5. NULL if absent.
   llm_classifier_labels <- load_llm_strata(llm_annotations_path)
   if (!is.null(llm_classifier_labels)) {
     llm_classifier_labels <- llm_classifier_labels %>%
@@ -908,447 +901,294 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   save_fig(fig1, OUT_DIR, "figure1_cohort_overview", 16, 12)
   if (show) print(fig1)
 
+  ## ---- Figure 1 supplement -- final analysis-set sizes per arm x landmark ----
+  # Every downstream model is fit on its own patient set: the univariate lab
+  # screen keeps whoever has that feature at the landmark, the somatic/Gleason
+  # screens are built on three different index dates, and the multivariate
+  # arms report a held-out split. Reviewers ask for the final N and event count
+  # behind each of those numbers, so this panel reads them back out of the same
+  # result files the analysis figures plot and renders them as one table.
+  #
+  # It is deliberately read-only over already-written results: an arm whose
+  # tree does not exist for this (cohort, endpoint) is reported as absent
+  # rather than aborting the figure pass.
+  SUPP_OUT_DIR <- fig_dir("figure1s_analysis_sets")
+
+  # Univariate screens report one row per (feature x stat), each with its own
+  # complete-case n. Summarise the arm by the maximum -- the fully observed
+  # feature set, i.e. the landmark cohort actually carried into the screen --
+  # and keep the minimum so the sparsest feature's support stays visible.
+  summarise_univariate_set <- function(path, arm, landmark) {
+    if (!file.exists(path))
+      return(tibble(analysis = "Univariate", arm = arm, landmark_days = landmark,
+                    n_patients = NA_integer_, n_events = NA_integer_,
+                    detail = "results not found"))
+    df <- read_csv(path, show_col_types = FALSE)
+    if (!all(c("endpoint", "n_patients_used", "n_events_used") %in% names(df)))
+      return(tibble(analysis = "Univariate", arm = arm, landmark_days = landmark,
+                    n_patients = NA_integer_, n_events = NA_integer_,
+                    detail = "unexpected schema"))
+    df <- df %>% filter(tolower(as.character(endpoint)) == ENDPOINT)
+    n_used <- suppressWarnings(as.numeric(df$n_patients_used))
+    e_used <- suppressWarnings(as.numeric(df$n_events_used))
+    keep <- is.finite(n_used) & is.finite(e_used)
+    if (!any(keep))
+      return(tibble(analysis = "Univariate", arm = arm, landmark_days = landmark,
+                    n_patients = NA_integer_, n_events = NA_integer_,
+                    detail = sprintf("no %s rows", ENDPOINT)))
+    n_used <- n_used[keep]; e_used <- e_used[keep]
+    # The max-n row is the one whose counts head the row; report its event
+    # count rather than max(events) so N and events describe the same fit.
+    top <- which.max(n_used)
+    tibble(analysis = "Univariate", arm = arm, landmark_days = landmark,
+           n_patients = as.integer(n_used[top]), n_events = as.integer(e_used[top]),
+           detail = sprintf("%d feature%s; min n=%s", length(n_used),
+                            ifelse(length(n_used) == 1, "", "s"),
+                            format(as.integer(min(n_used)), big.mark = ",", trim = TRUE)))
+  }
+
+  # Multivariate arms write one metrics row per endpoint carrying the split
+  # sizes. Cox and XGBoost disagree on column naming (n_events_train_val vs
+  # n_train_val_events) and Dynamic-DeepHit reports only the held-out side
+  # keyed by `event`, so accept every spelling and report what is present.
+  summarise_multivariate_set <- function(path, arm, landmark) {
+    absent <- function(detail)
+      tibble(analysis = "Multivariate", arm = arm, landmark_days = landmark,
+             n_patients = NA_integer_, n_events = NA_integer_, detail = detail)
+    if (is.na(path) || !file.exists(path)) return(absent("results not found"))
+    df <- read_csv(path, show_col_types = FALSE)
+    endpoint_col <- intersect(c("endpoint", "event"), names(df))
+    if (length(endpoint_col) == 0) return(absent("no endpoint column"))
+    row <- df %>%
+      filter(tolower(as.character(.data[[endpoint_col[1]]])) == .env$ENDPOINT)
+    if (nrow(row) == 0) return(absent(sprintf("no %s row", ENDPOINT)))
+    pick <- function(candidates) {
+      column <- intersect(candidates, names(row))
+      if (length(column) == 0) return(NA_real_)
+      suppressWarnings(as.numeric(row[[column[1]]][1]))
+    }
+    n_train_val <- pick("n_train_val")
+    n_test      <- pick("n_test")
+    e_train_val <- pick(c("n_events_train_val", "n_train_val_events"))
+    e_test      <- pick(c("n_events_test", "n_test_events"))
+    # Total analysis set = train/val + held-out test. Dynamic-DeepHit reports
+    # only the held-out side, so fall back to it alone and say so.
+    if (is.finite(n_train_val)) {
+      detail <- sprintf("train/val %s + test %s",
+                        format(as.integer(n_train_val), big.mark = ","),
+                        format(as.integer(n_test), big.mark = ","))
+      n_total <- n_train_val + n_test
+      e_total <- e_train_val + e_test
+    } else {
+      detail <- sprintf("held-out test only (%s)",
+                        format(as.integer(n_test), big.mark = ","))
+      n_total <- n_test
+      e_total <- e_test
+    }
+    tibble(analysis = "Multivariate", arm = arm, landmark_days = landmark,
+           n_patients = if (is.finite(n_total)) as.integer(n_total) else NA_integer_,
+           n_events   = if (is.finite(e_total)) as.integer(e_total) else NA_integer_,
+           detail     = detail)
+  }
+
+  SUPP_BASE <- BASE
+  # Univariate arms: the lab screen at every landmark, plus the three
+  # somatic/Gleason/PRS screens, which are ADT-only and landmark-0 only
+  # (SOMATIC_GLEASON_LANDMARKS = (0,) in build_somatic_gleason_inputs.py).
+  supp_univariate <- map_dfr(LANDMARKS, function(lm) {
+    summarise_univariate_set(
+      file.path(SUPP_BASE, "cox", sprintf("landmark_%s", lm), "both",
+                "cox_agg_univariate_nobs_adjusted.csv"),
+      "Labs", lm)
+  })
+  SUPP_SG_LABELS <- c(gleason    = "Gleason score",
+                      sequencing = "Somatic alterations",
+                      prs        = "Polygenic risk scores")
+  # Arms evaluated at only a subset of LANDMARKS. Anything absent here is
+  # assumed to be run at every landmark, so a blank cell means "not found".
+  ARM_LANDMARKS <- setNames(rep(list(0L), length(SUPP_SG_LABELS)),
+                            unname(SUPP_SG_LABELS))
+  supp_univariate <- bind_rows(
+    supp_univariate,
+    map_dfr(names(SUPP_SG_LABELS), function(analysis) {
+      summarise_univariate_set(
+        file.path(SUPP_BASE, "cox_somatic_gleason", "landmark_0", analysis, "both",
+                  "cox_agg_univariate_nobs_adjusted.csv"),
+        unname(SUPP_SG_LABELS[[analysis]]), 0L)
+    })
+  )
+
+  # Multivariate arms mirror Figure 4's series exactly, including the age-only
+  # baselines (same patient set as their lab twin, but reported separately so a
+  # split mismatch would be visible) and Dynamic-DeepHit's cause-only config.
+  SUPP_MV_ARMS <- list(
+    list(name = "Elastic-Net Cox",
+         path = function(lm) file.path(SUPP_BASE, "cox", sprintf("landmark_%s", lm),
+                                       "both", "cox_agg_multivariable_metrics.csv")),
+    list(name = "Cox baseline (age)",
+         path = function(lm) file.path(SUPP_BASE, "cox", sprintf("landmark_%s", lm),
+                                       "baseline", "cox_agg_baseline_metrics.csv")),
+    list(name = "XGBoost Survival",
+         path = function(lm) file.path(SUPP_BASE, "xgboost", sprintf("landmark_%s", lm),
+                                       "both", "landmark_xgboost_metrics.csv")),
+    list(name = "XGBoost baseline (age)",
+         path = function(lm) file.path(SUPP_BASE, "xgboost", sprintf("landmark_%s", lm),
+                                       "baseline", "landmark_xgboost_baseline_metrics.csv")),
+    list(name = "Dynamic-DeepHit",
+         path = function(lm) {
+           candidates <- file.path(
+             SUPP_BASE, "multivariate_longitudinal",
+             c("dynamic_deephit", "dynamic-deephit"), sprintf("landmark_%s", lm),
+             ENDPOINT, sprintf("dynamic_deephit_metrics_%s.csv", ENDPOINT)
+           )
+           existing <- candidates[file.exists(candidates)]
+           if (length(existing) == 0) NA_character_ else existing[1]
+         })
+  )
+  supp_multivariate <- map_dfr(SUPP_MV_ARMS, function(arm) {
+    map_dfr(LANDMARKS, function(lm) summarise_multivariate_set(arm$path(lm), arm$name, lm))
+  })
+
+  supp_sets <- bind_rows(supp_univariate, supp_multivariate) %>%
+    mutate(
+      analysis = factor(analysis, levels = c("Univariate", "Multivariate")),
+      arm = factor(arm, levels = unique(c(
+        "Labs", unname(SUPP_SG_LABELS), map_chr(SUPP_MV_ARMS, "name")
+      ))),
+      landmark_label = factor(
+        sprintf("%s%d days", ifelse(landmark_days > 0, "+", ""), landmark_days),
+        levels = sprintf("%s%d days", ifelse(sort(unique(landmark_days)) > 0, "+", ""),
+                         sort(unique(landmark_days)))
+      )
+    ) %>%
+    # Same restriction the panel applies: a landmark-0-only arm has no row at
+    # +90/+180 to report, as opposed to a missing one.
+    filter(map2_lgl(as.character(arm), landmark_days, function(a, lm) {
+      evaluated <- ARM_LANDMARKS[[a]]
+      is.null(evaluated) || lm %in% evaluated
+    })) %>%
+    arrange(analysis, arm, landmark_days)
+
+  # Persist the numbers alongside the panel: the table is the deliverable a
+  # methods section quotes, the plot is the at-a-glance version.
+  supp_table <- supp_sets %>%
+    transmute(Analysis = as.character(analysis),
+              Arm = as.character(arm),
+              Landmark = as.character(landmark_label),
+              `N patients` = ifelse(is.na(n_patients), "n/a",
+                                    format(n_patients, big.mark = ",", trim = TRUE)),
+              `N events` = ifelse(is.na(n_events), "n/a",
+                                  format(n_events, big.mark = ",", trim = TRUE)),
+              `Event rate` = ifelse(is.na(n_patients) | is.na(n_events) | n_patients == 0,
+                                    "n/a", sprintf("%.1f%%", 100 * n_events / n_patients)),
+              Notes = detail)
+  for (p in write_table1(supp_table,
+                         file.path(SUPP_OUT_DIR,
+                                   sprintf("figure1s_analysis_sets_%s", ENDPOINT))))
+    message(sprintf("wrote %s", p))
+  if (show) print(supp_table)
+
+  # Heat-table: one tile per (arm x landmark), labelled "N (events)". A tile is
+  # grey when that arm has no results for this (cohort, endpoint, landmark),
+  # which is itself the informative outcome -- it says the run never produced
+  # that cell rather than that it produced a zero.
+  render_analysis_set_panel <- function(d, title) {
+    if (nrow(d) == 0)
+      return(ggplot() + annotate("text", x = 0, y = 0, label = "(no results found)") +
+               theme_void() + labs(title = title))
+    # An arm evaluated at only some landmarks (the somatic/Gleason/PRS screens
+    # are landmark-0 only) should leave the other columns blank rather than
+    # drawing a tile that implies a run was attempted and lost.
+    d <- d %>%
+      filter(map2_lgl(as.character(arm), landmark_days, function(a, lm) {
+        evaluated <- ARM_LANDMARKS[[a]]
+        is.null(evaluated) || lm %in% evaluated
+      })) %>%
+      mutate(arm = factor(as.character(arm), levels = rev(levels(droplevels(arm)))))
+    ggplot(d, aes(landmark_label, arm)) +
+      geom_tile(aes(fill = n_patients), color = "white", linewidth = 1) +
+      geom_text(aes(label = ifelse(is.na(n_patients), "\u2014",
+                                   sprintf("%s\n(%s events)",
+                                           format(n_patients, big.mark = ",", trim = TRUE),
+                                           ifelse(is.na(n_events), "?",
+                                                  format(n_events, big.mark = ",", trim = TRUE))))),
+                size = 3.1, lineheight = 0.95, color = "#0b0b0b") +
+      scale_fill_gradient(low = "#eaf1fb", high = "#9dbbe6",
+                          na.value = "#e6e6e6", guide = "none") +
+      labs(x = NULL, y = NULL, title = title) +
+      theme_fig() +
+      theme(panel.grid = element_blank(),
+            plot.title = element_text(face = "bold", size = 11))
+  }
+
+  supp_uni_panel <- render_analysis_set_panel(
+    supp_sets %>% filter(analysis == "Univariate"),
+    "Panel A — univariate screens")
+  supp_mv_panel <- render_analysis_set_panel(
+    supp_sets %>% filter(analysis == "Multivariate"),
+    "Panel B — multivariate models (train/val + held-out test)")
+  save_fig(supp_uni_panel, SUPP_OUT_DIR,
+           sprintf("figure1s_analysis_sets_univariate_%s", ENDPOINT), 7.0, 3.6)
+  save_fig(supp_mv_panel, SUPP_OUT_DIR,
+           sprintf("figure1s_analysis_sets_multivariate_%s", ENDPOINT), 7.0, 4.2)
+
+  fig1s <- supp_uni_panel / supp_mv_panel +
+    plot_layout(heights = c(1, 1.15)) +
+    plot_annotation(
+      title = sprintf(paste0("Figure 1 supplement — final analysis-set sizes ",
+                             "(%s, %s endpoint)"), COHORT_DISPLAY, ENDPOINT),
+      subtitle = paste0("Each tile: patients analysed (events). Univariate cells are the ",
+                        "best-covered feature's\ncomplete-case set; multivariate cells pool ",
+                        "the train/validation and held-out test splits."),
+      tag_levels = "A")
+  save_fig(fig1s, SUPP_OUT_DIR, sprintf("figure1s_analysis_sets_%s", ENDPOINT), 9.0, 8.0)
+  if (show) print(fig1s)
+
   if (!IS_ADT)
-    message(paste0("Figure 2 and Figure 2 v2: ADT time-0 cohort only -- skipping ARPI figure ",
-                   "pass. Figure 2 v0 and v3 are not restricted to the prediction cohort but ",
-                   "are emitted once from the ADT pass, so they are skipped here too."))
+    message(paste0("Figure 2 v3: emitted once from the ADT pass over the ADT-exposed ",
+                   "universe -- skipping for the ARPI figure pass."))
 
   # Figure 2 validates the LLM classifier against manual annotations and
   # measures platinum enrichment. Its subject is the label set and the platinum
   # MRN list, neither of which depends on the modelled endpoint, so it is
   # emitted once from the platinum pass rather than duplicated per endpoint.
   if (IS_ADT && !EMIT_ENDPOINT_INDEPENDENT)
-    message(sprintf(paste0("Figure 2 (all variants): classifier/platinum-enrichment figures are ",
+    message(sprintf(paste0("Figure 2 v3: classifier/platinum-enrichment figures are ",
                            "endpoint-independent and are emitted from the %s pass -- skipping ",
                            "for endpoint=%s."),
                     ENDPOINT_INDEPENDENT_FIGURES_ENDPOINT, ENDPOINT))
 
   if (IS_ADT && EMIT_ENDPOINT_INDEPENDENT) {
-  ## ---- Figure 2 v0 -- original LLM_v3 labels, no cohort restriction ----
-  # This block runs on `nepc_annotations` before it is narrowed to the ADT
-  # time-0 cohort at the Figure 2 section below, so its panels describe the
-  # complete LLM_v3_labels.tsv label set as originally produced. Emitted from
-  # the ADT pass only because that is where the Figure 2 machinery is set up;
-  # the contents are cohort-independent, hence the fixed "original" filename
-  # prefix instead of the per-arm COHORT prefix.
-  OUT_DIR <- fig_dir("figure2_llm")
-  OUT_DIR_V0 <- fig_dir("figure2v0_llm")
-  SAVE_ORIGINAL_LLM <- TRUE
-
-  drop_cols <- function(df, cols) df %>% select(-any_of(cols))
-
-  merged_results <- manual_annotations %>%
-    drop_cols(c("pathology_details", "manual_platinum_reason")) %>%
-    inner_join(
-      nepc_annotations %>% drop_cols(c("has_nepc","has_avpc","has_molecular_avpc",
-                                       "avpc_criteria","visceral_met_pattern","num_snippets")),
-      by = "DFCI_MRN"
-    ) %>%
-    mutate(
-      manual_NEPC = simplified_manual_platinum_reason %in% c("nepc","squamous_transformation"),
-      LLM_NEPC    = primary_label == "nepc"
-    )
-
-  cat(sprintf("merged_results: %s rows, %s manual-NEPC positive\n",
-              format(nrow(merged_results), big.mark = ","),
-              format(sum(merged_results$manual_NEPC), big.mark = ",")))
-
-  # manual = truth, LLM = pred (correct argument order for binary_metrics).
-  metrics <- binary_metrics(merged_results$manual_NEPC, merged_results$LLM_NEPC)
-
-  # Sanity check: confusion-matrix counts must reconstruct N and the manual-NEPC total.
-  stopifnot(metrics$TP + metrics$FP + metrics$TN + metrics$FN == nrow(merged_results))
-  stopifnot(metrics$TP + metrics$FN == sum(merged_results$manual_NEPC))
-
-  if (show) print(as_tibble(metrics))
-
-  # Annotated 2x2 confusion matrix, LLM (rows) vs manual truth (cols).
-  render_confusion_panel <- function(metrics) {
-    cm <- tibble(
-      truth = factor(c("Non-NEPC","NEPC","Non-NEPC","NEPC"),
-                     levels = c("Non-NEPC","NEPC")),
-      pred  = factor(c("Non-NEPC","Non-NEPC","NEPC","NEPC"),
-                     levels = c("NEPC","Non-NEPC")),   # reversed so NEPC row is on top
-      n     = c(metrics$TN, metrics$FP, metrics$FN, metrics$TP)
-    )
-    thresh <- max(cm$n) / 2
-    ggplot(cm, aes(truth, pred, fill = n)) +
-      geom_tile(color = "white", linewidth = 1) +
-      geom_text(aes(label = format(n, big.mark = ","),
-                    color = n > thresh), size = 5, fontface = "bold") +
-      scale_fill_gradient(low = "#eaf1fb", high = COLOR_PLATINUM_POS, guide = "none") +
-      scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "#0b0b0b"), guide = "none") +
-      labs(x = "Manual annotation (truth)", y = "LLM label (prediction)",
-           title = "Panel A1 \u2014 confusion matrix") +
-      theme_fig() +
-      theme(panel.grid = element_blank(),
-            plot.title = element_text(face = "bold", size = 11))
-  }
-
-  # Compact metric bar: Accuracy, Precision, Recall, Specificity (Specificity == TNR).
-  render_metric_bar_panel <- function(metrics) {
-    d <- tibble(
-      metric = factor(c("Accuracy","Precision","Recall","Specificity"),
-                      levels = c("Accuracy","Precision","Recall","Specificity")),
-      value  = c(metrics$Accuracy, metrics$Precision, metrics$Recall, metrics$TNR)
-    )
-    ggplot(d, aes(metric, value)) +
-      geom_col(fill = COLOR_PLATINUM_POS, width = 0.6) +
-      geom_text(aes(label = sprintf("%.2f", value)), vjust = -0.4, size = 3.6, color = "#0b0b0b") +
-      coord_cartesian(ylim = c(0, 1.0)) +
-      labs(x = NULL, y = "Metric value", title = "Panel A2 \u2014 classifier metrics") +
-      theme_fig() +
-      theme(plot.title = element_text(face = "bold", size = 11))
-  }
-
-  n_total       <- nrow(merged_results)
-  n_nepc_manual <- sum(merged_results$manual_NEPC)
-  caption_a <- sprintf("All LLM_v3 labels, no cohort restriction; N = %s chart-reviewed patients; %s manual-NEPC positive.",
-                       format(n_total, big.mark = ","),
-                       format(n_nepc_manual, big.mark = ","))
-
-  pA1 <- render_confusion_panel(metrics) +
-    labs(caption = caption_a) + theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
-  if (SAVE_ORIGINAL_LLM)
-    save_fig(pA1, OUT_DIR_V0, "figure2v0_confusion_matrix", width = 4.2, height = 4.2,
-             prefix = "original")
-  if (show) print(pA1)
-
-  pA2 <- render_metric_bar_panel(metrics) +
-    labs(caption = caption_a) + theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
-  if (SAVE_ORIGINAL_LLM)
-    save_fig(pA2, OUT_DIR_V0, "figure2v0_metric_bar", width = 5.0, height = 4.2,
-             prefix = "original")
-  if (show) print(pA2)
-
-  ## Panel B -- subtype landscape (descriptive, 4-class)
-  # Split labels by current platinum-list membership. Counts are intentionally
-  # derived from the inputs because both source files can be refreshed.
-  count_labels <- function(df) {
-    df %>% count(primary_label, name = "count") %>%
-      mutate(frac = count / sum(count))
-  }
-  platinum_positive_labels <- nepc_annotations %>% filter(is_platinum)  %>% count_labels() %>%
-    mutate(platinum_status = "positive")
-  platinum_negative_labels <- nepc_annotations %>% filter(!is_platinum) %>% count_labels() %>%
-    mutate(platinum_status = "negative")
-
-  label_distributions <- bind_rows(platinum_positive_labels, platinum_negative_labels)
-
-  # Sanity checks guard against a status swap or silently dropped labels without
-  # pinning the figure to counts from an older snapshot of the input files.
-  expected_primary_labels <- c("avpc", "nepc", "conventional", "biomarker")
-  observed_primary_labels <- unique(as.character(nepc_annotations$primary_label))
-  invalid_primary_labels <- setdiff(observed_primary_labels, expected_primary_labels)
-  if (anyNA(nepc_annotations$primary_label) || length(invalid_primary_labels) > 0) {
-    stop(sprintf(
-      "Figure 2 requires non-missing primary_label values in {%s}; found invalid value(s): %s",
-      paste(expected_primary_labels, collapse = ", "),
-      paste(c(if (anyNA(nepc_annotations$primary_label)) "NA", invalid_primary_labels),
-            collapse = ", ")
-    ), call. = FALSE)
-  }
-  named_counts <- function(df) { v <- df$count; names(v) <- df$primary_label; v }
-  pos_counts <- named_counts(platinum_positive_labels)
-  neg_counts <- named_counts(platinum_negative_labels)
-  stopifnot(
-    !anyNA(nepc_annotations$is_platinum),
-    sum(platinum_positive_labels$count) == sum(nepc_annotations$is_platinum),
-    sum(platinum_negative_labels$count) == sum(!nepc_annotations$is_platinum),
-    sum(label_distributions$count) == nrow(nepc_annotations)
-  )
-
-  if (show) print(label_distributions)
-
-  # Fixed class order groups the two aggressive classes together for readability.
-  CLASS_ORDER <- c("conventional", "avpc", "nepc", "biomarker")
-  CLASS_LABELS <- c(conventional = "Conventional", avpc = "AVPC", nepc = "NEPC",
-                    biomarker = "Biomarker")
-  n_pos <- sum(platinum_positive_labels$count)
-  n_neg <- sum(platinum_negative_labels$count)
-
-  render_landscape_panel <- function(title = "Panel B \u2014 subtype landscape by platinum status (descriptive)") {
-    d <- label_distributions %>%
-      mutate(primary_label   = factor(primary_label, levels = CLASS_ORDER,
-                                      labels = CLASS_LABELS[CLASS_ORDER]),
-             platinum_status = factor(platinum_status, levels = c("positive","negative"))) %>%
-      # Anything outside CLASS_ORDER became NA in the factor() above; keeping it
-      # would draw an "NA" column. Callers are expected to have filtered already.
-      filter(!is.na(primary_label))
-    ggplot(d, aes(primary_label, frac, fill = platinum_status)) +
-      geom_col(position = position_dodge(width = 0.8), width = 0.72) +
-      scale_fill_manual(
-        values = c(positive = COLOR_PLATINUM_POS, negative = COLOR_PLATINUM_NEG),
-        labels = c(sprintf("Platinum+ (n=%s)", format(n_pos, big.mark = ",")),
-                   sprintf("Platinum- (n=%s)", format(n_neg, big.mark = ","))),
-        name = NULL) +
-      coord_cartesian(ylim = c(0, 1.0)) +
-      labs(x = NULL, y = "Fraction within platinum group", title = title) +
-      theme_fig() +
-      theme(plot.title = element_text(face = "bold", size = 11),
-            axis.title.x = element_blank(),
-            axis.title.y = element_text(size = 16),
-            axis.text  = element_text(size = 14),
-            legend.position = c(0.98, 0.98), legend.justification = c(1, 1))
-  }
-
-  caption_b <- sprintf(paste0("All %s LLM_v3 labels, no cohort restriction. Fractions computed ",
-                              "within each platinum group separately; groups differ greatly in ",
-                              "size and are not a random sample of the same population -- see ",
-                              "Panel C for the base-rate-robust enrichment statistic."),
-                       format(nrow(nepc_annotations), big.mark = ","))
-  pB <- render_landscape_panel() +
-    labs(caption = caption_b) +
-    theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-  if (SAVE_ORIGINAL_LLM)
-    save_fig(pB, OUT_DIR_V0, "figure2v0_subtype_landscape", width = 6.5, height = 8,
-             prefix = "original")
-  if (show) print(pB)
-
-  df <- nepc_annotations
-
-  # Exclude 'biomarker' (and anything outside the 3 core classes) from the contrast.
-  n_before <- nrow(df)
-  df <- df %>% filter(primary_label %in% c("conventional","avpc","nepc"))
-  n_excluded <- n_before - nrow(df)
-  cat(sprintf("Excluded %s rows outside {conventional, avpc, nepc} (e.g. 'biomarker') from the enrichment contrast; %s rows remain.\n",
-              format(n_excluded, big.mark = ","), format(nrow(df), big.mark = ",")))
-
-  df <- df %>% mutate(aggressive = primary_label %in% c("avpc","nepc"))
-
-  # 2x2 table: rows = aggressive/conventional, cols = platinum TRUE/FALSE.
-  ct <- matrix(
-    c(sum(df$aggressive   & df$is_platinum),  sum(df$aggressive   & !df$is_platinum),
-      sum(!df$aggressive  & df$is_platinum),  sum(!df$aggressive  & !df$is_platinum)),
-    nrow = 2, byrow = TRUE,
-    dimnames = list(c("aggressive","conventional"), c("platinum+","platinum-"))
-  )
-  print(ct)
-
-  # Cross-check the enrichment table against the four-class distributions.
-  count_or_zero <- function(counts, labels) {
-    values <- counts[intersect(labels, names(counts))]
-    if (length(values) == 0) 0 else sum(values)
-  }
-  stopifnot(
-    ct["aggressive","platinum+"] ==
-      count_or_zero(pos_counts, c("avpc", "nepc")),
-    ct["conventional","platinum+"] ==
-      count_or_zero(pos_counts, "conventional"),
-    ct["aggressive","platinum-"] ==
-      count_or_zero(neg_counts, c("avpc", "nepc")),
-    ct["conventional","platinum-"] ==
-      count_or_zero(neg_counts, "conventional")
-  )
-
-  ft <- fisher.test(ct, alternative = "greater")
-  OR <- unname(ft$estimate); p_value <- ft$p.value
-  cat(sprintf("\nOdds ratio (aggressive vs conventional, platinum+ vs platinum-): OR = %.2f\n", OR))
-  cat(sprintf("Fisher's exact p-value (one-sided, OR > 1): p = %.3g\n", p_value))
-
-  stopifnot(OR > 1)
-
-  # P(platinum+ | aggressive) vs P(platinum+ | conventional), with Wilson CIs.
-  n_aggressive   <- sum(ct["aggressive", ])
-  n_conventional <- sum(ct["conventional", ])
-  platinum_given_aggressive   <- ct["aggressive",   "platinum+"]
-  platinum_given_conventional <- ct["conventional", "platinum+"]
-
-  w_agg  <- wilson_ci(platinum_given_aggressive,   n_aggressive)    # c(phat, lo, hi)
-  w_conv <- wilson_ci(platinum_given_conventional, n_conventional)
-  p_agg <- w_agg[1];  lo_agg <- w_agg[2];  hi_agg <- w_agg[3]
-  p_conv <- w_conv[1]; lo_conv <- w_conv[2]; hi_conv <- w_conv[3]
-
-  cat(sprintf("P(platinum+ | aggressive)   = %d/%d = %.1f%%  (95%% CI %.1f%%-%.1f%%)\n",
-              platinum_given_aggressive, n_aggressive, 100*p_agg, 100*lo_agg, 100*hi_agg))
-  cat(sprintf("P(platinum+ | conventional) = %d/%d = %.1f%%  (95%% CI %.1f%%-%.1f%%)\n",
-              platinum_given_conventional, n_conventional, 100*p_conv, 100*lo_conv, 100*hi_conv))
-
-  render_enrichment_panel <- function() {
-    d <- tibble(
-      group = factor(c("Aggressive\n(AVPC + NEPC)", "Conventional"),
-                     levels = c("Aggressive\n(AVPC + NEPC)", "Conventional")),
-      prop  = c(p_agg, p_conv), lo = c(lo_agg, lo_conv), hi = c(hi_agg, hi_conv),
-      n     = c(n_aggressive, n_conventional),
-      k     = c(platinum_given_aggressive, platinum_given_conventional)
-    )
-    ymax <- max(hi_agg, hi_conv) * 1.35
-    ggplot(d, aes(group, prop, fill = group)) +
-      geom_col(width = 0.55) +
-      geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.18,
-                    color = COLOR_NEUTRAL_INK, linewidth = 0.7) +
-      scale_fill_manual(values = c(COLOR_PLATINUM_POS, "#9a9890"), guide = "none") +
-      annotate("text", x = 1.5, y = ymax * 0.97,
-               label = sprintf("OR = %.1f, Fisher's exact p = %.1e", OR, p_value),
-               fontface = "bold", size = 3.7, color = COLOR_NEUTRAL_INK) +
-      scale_y_continuous(labels = scales::percent, limits = c(0, ymax)) +
-      labs(x = NULL, y = "P(platinum+ | subtype group)",
-           title = "Panel C \u2014 platinum enrichment among aggressive variants") +
-      theme_fig() +
-      theme(plot.title = element_text(face = "bold", size = 11))
-  }
-
-  caption_c <- sprintf(paste0("All LLM_v3 labels, no cohort restriction. Excludes 'biomarker' ",
-    "primary_label (%s rows) from the aggressive/conventional contrast. Error bars are 95%% ",
-    "Wilson score intervals. OR and p from Fisher's exact test (one-sided, OR > 1) on the 2x2 ",
-    "aggressive/conventional x platinum+/- table."), format(n_excluded, big.mark = ","))
-  pC <- render_enrichment_panel() +
-    labs(caption = caption_c) +
-    theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-  if (SAVE_ORIGINAL_LLM)
-    save_fig(pC, OUT_DIR_V0, "figure2v0_enrichment", width = 4.5, height = 5.5,
-             prefix = "original")
-  if (show) print(pC)
-
-  # Layout mirrors the Python subplot_mosaic [[A1, A2, B],[C, C, B]]:
-  # left column stacks A1/A2 over C; right column is B spanning full height.
-  left  <- (render_confusion_panel(metrics) + render_metric_bar_panel(metrics)) /
-           render_enrichment_panel()
-  right <- render_landscape_panel("Panel B \u2014 subtype landscape (descriptive)")
-
-  full_caption <- sprintf(paste0(
-    "Original LLM_v3 labels over all %s labeled patients, with no cohort restriction. ",
-    "(A) NEPC-vs-rest classifier, LLM vs Baca-lab manual annotation (N=%s, %s manual-NEPC+). ",
-    "(B) Descriptive subtype landscape, platinum+ (n=%s) vs platinum- (n=%s); not itself the ",
-    "enrichment claim. (C) Platinum+ rate among aggressive (AVPC+NEPC) vs conventional ",
-    "patients (OR=%.1f, Fisher p=%.1e)."),
-    format(nrow(nepc_annotations), big.mark = ","),
-    format(n_total, big.mark = ","), format(n_nepc_manual, big.mark = ","),
-    format(n_pos, big.mark = ","), format(n_neg, big.mark = ","), OR, p_value)
-
-  fig2_v0 <- (left | right) +
-    plot_layout(widths = c(2, 1.3)) +
-    plot_annotation(
-      title = paste0("Figure 2 v0 \u2014 LLM-extracted prostate subtypes (original labels, ",
-                     "all patients)"),
-      caption = str_wrap(full_caption, 130),
-      theme = theme(plot.title = element_text(face = "bold", size = 13),
-                    plot.caption = element_text(size = 8.5, color = COLOR_NEUTRAL_INK)))
-  if (SAVE_ORIGINAL_LLM)
-    save_fig(fig2_v0, OUT_DIR_V0, "figure2v0_llm_subtype_platinum", width = 15, height = 9,
-             prefix = "original")
-  if (show) print(fig2_v0)
-
-  ## ---- Figure 2 -- same original labels, restricted to the ADT time-0 cohort ----
-  # Figure 2 uses the complete ADT time-0 cohort as its patient universe, then
-  # retains the patients with available LLM labels for label-based panels. This
-  # narrows `nepc_annotations`, so every Figure 2 v0 panel above must already be
-  # rendered and saved by this point.
-  cohort_mrns <- unique(as.character(patient_df[[ID_COL]]))
-  stopifnot(base_landmark == 0L, length(cohort_mrns) == nrow(patient_df))
-  nepc_annotations <- nepc_annotations_all %>%
-    filter(as.character(DFCI_MRN) %in% cohort_mrns)
-  message(sprintf(
-    "Figure 2 ADT time-0 cohort: %s total patients; %s labeled/evaluable (%s source labels total)",
-    format(length(cohort_mrns), big.mark = ","),
-    format(nrow(nepc_annotations), big.mark = ","),
-    format(nrow(nepc_annotations_all), big.mark = ",")
-  ))
-
-  merged_results <- manual_annotations %>%
-    drop_cols(c("pathology_details", "manual_platinum_reason")) %>%
-    inner_join(
-      nepc_annotations %>% drop_cols(c("has_nepc","has_avpc","has_molecular_avpc",
-                                       "avpc_criteria","visceral_met_pattern","num_snippets")),
-      by = "DFCI_MRN"
-    ) %>%
-    mutate(
-      manual_NEPC = simplified_manual_platinum_reason %in% c("nepc","squamous_transformation"),
-      LLM_NEPC    = primary_label == "nepc"
-    )
-  metrics <- binary_metrics(merged_results$manual_NEPC, merged_results$LLM_NEPC)
-  n_total <- nrow(merged_results)
-  n_nepc_manual <- sum(merged_results$manual_NEPC)
-  caption_a <- sprintf("ADT time-0 cohort (N=%s total); %s chart-reviewed/labeled patients; %s manual-NEPC positive.",
-                       format(length(cohort_mrns), big.mark = ","),
-                       format(n_total, big.mark = ","),
-                       format(n_nepc_manual, big.mark = ","))
-  pA1 <- render_confusion_panel(metrics) + labs(caption = caption_a) +
-    theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
-  pA2 <- render_metric_bar_panel(metrics) + labs(caption = caption_a) +
-    theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
-  save_fig(pA1, OUT_DIR, "figure2a1_confusion_matrix", 4.2, 4.2)
-  save_fig(pA2, OUT_DIR, "figure2a2_metric_bar", 5.0, 4.2)
-
-  platinum_positive_labels <- nepc_annotations %>% filter(is_platinum) %>% count_labels() %>%
-    mutate(platinum_status = "positive")
-  platinum_negative_labels <- nepc_annotations %>% filter(!is_platinum) %>% count_labels() %>%
-    mutate(platinum_status = "negative")
-  label_distributions <- bind_rows(platinum_positive_labels, platinum_negative_labels)
-  n_pos <- sum(platinum_positive_labels$count)
-  n_neg <- sum(platinum_negative_labels$count)
-  caption_b <- sprintf(paste0(
-    "LLM labels restricted to the ADT time-0 cohort: %s labeled of %s total patients; ",
-    "fractions are computed within each platinum group."),
-    format(nrow(nepc_annotations), big.mark = ","),
-    format(length(cohort_mrns), big.mark = ","))
-  pB <- render_landscape_panel() + labs(caption = caption_b) +
-    theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-  save_fig(pB, OUT_DIR, "figure2b_subtype_landscape", 6.5 * 0.8, 8)
-
-  df <- nepc_annotations %>% filter(primary_label %in% c("conventional","avpc","nepc")) %>%
-    mutate(aggressive = primary_label %in% c("avpc","nepc"))
-  n_excluded <- nrow(nepc_annotations) - nrow(df)
-  ct <- matrix(
-    c(sum(df$aggressive & df$is_platinum), sum(df$aggressive & !df$is_platinum),
-      sum(!df$aggressive & df$is_platinum), sum(!df$aggressive & !df$is_platinum)),
-    nrow = 2, byrow = TRUE,
-    dimnames = list(c("aggressive","conventional"), c("platinum+","platinum-")))
-  ft <- fisher.test(ct, alternative = "greater")
-  OR <- unname(ft$estimate); p_value <- ft$p.value
-  n_aggressive <- sum(ct["aggressive", ]); n_conventional <- sum(ct["conventional", ])
-  platinum_given_aggressive <- ct["aggressive", "platinum+"]
-  platinum_given_conventional <- ct["conventional", "platinum+"]
-  w_agg <- wilson_ci(platinum_given_aggressive, n_aggressive)
-  w_conv <- wilson_ci(platinum_given_conventional, n_conventional)
-  p_agg <- w_agg[1]; lo_agg <- w_agg[2]; hi_agg <- w_agg[3]
-  p_conv <- w_conv[1]; lo_conv <- w_conv[2]; hi_conv <- w_conv[3]
-  caption_c <- sprintf("%s MRN subset; excludes 'biomarker' labels (%s rows). Error bars are 95%% Wilson intervals.",
-                       COHORT_DISPLAY, format(n_excluded, big.mark = ","))
-  pC <- render_enrichment_panel() + labs(caption = caption_c) +
-    theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-  save_fig(pC, OUT_DIR, "figure2c_enrichment", 4.5, 5.5)
-
-  left <- (render_confusion_panel(metrics) + render_metric_bar_panel(metrics)) /
-          render_enrichment_panel()
-  right <- render_landscape_panel("Panel B — subtype landscape (cohort MRN subset)")
-  full_caption <- sprintf("LLM calls restricted to the ADT time-0 cohort (n=%s labels among %s total patients; platinum+ n=%s, platinum- n=%s).",
-                          format(nrow(nepc_annotations), big.mark = ","),
-                          format(length(cohort_mrns), big.mark = ","),
-                          format(n_pos, big.mark = ","), format(n_neg, big.mark = ","))
-  fig2 <- (left | right) + plot_layout(widths = c(2, 1.3)) +
-    plot_annotation(
-      title = "Figure 2 — LLM-extracted prostate subtypes (ADT time-0 cohort)",
-      caption = str_wrap(full_caption, 130),
-      theme = theme(plot.title = element_text(face = "bold", size = 13),
-                    plot.caption = element_text(size = 8.5, color = COLOR_NEUTRAL_INK)))
-  save_fig(fig2, OUT_DIR, "figure2_llm_subtype_platinum", 15, 9)
-  if (show) print(fig2)
-
-  ## ---- Figure 2 v2 -- same panel set, driven by LLM_NEPC_classifier_labels.tsv ----
-  # Reuses render_confusion_panel/render_metric_bar_panel/render_landscape_panel/
-  # render_enrichment_panel unchanged -- only the input frame differs. This new
-  # label file has a different patient population/counts than LLM_v3_labels.tsv,
-  # so (per the plan) NO stopifnot count tripwires are added here; captions carry
-  # computed counts instead.
+  ## ---- Figure 2 v3 -- classifier labels over every ADT-exposed patient ----
+  # The only Figure 2 variant retained. Earlier variants (v0: unrestricted
+  # LLM_v3_labels.tsv; v1: those labels narrowed to the ADT landmark-0
+  # prediction cohort; v2: the classifier labels on that same prediction
+  # cohort) have been removed. v3 uses LLM_NEPC_classifier_labels.tsv over
+  # every MRN with ADT_EXPOSED == 1 in the ICD prostate workflow flags -- the
+  # "ADT entry requirement" step of the Figure 1 CONSORT, before any
+  # downstream prediction-cohort filtering.
   if (is.null(llm_classifier_labels)) {
-    message("Figure 2 v2: llm_classifier_labels unavailable -- skipping.")
+    message("Figure 2 v3: llm_classifier_labels unavailable -- skipping.")
   } else {
-    OUT_DIR_V2 <- fig_dir("figure2v2_llm")
+    OUT_DIR_V3 <- fig_dir("figure2v3_llm")
 
-    # Figure 2 v2 uses the same complete ADT time-0 patient universe as Figure 2.
-    adt_cohort_mrns_v2 <- unique(as.character(patient_df[[ID_COL]]))
-    stopifnot(base_landmark == 0L, setequal(adt_cohort_mrns_v2, cohort_mrns))
-    v2_labels_all <- llm_classifier_labels %>%
-      filter(as.character(DFCI_MRN) %in% adt_cohort_mrns_v2)
-    message(sprintf(
-      "Figure 2 v2 ADT time-0 cohort: %s total patients; %s labeled/evaluable (%s source labels total)",
-      format(length(adt_cohort_mrns_v2), big.mark = ","),
-      format(nrow(v2_labels_all), big.mark = ","),
-      format(nrow(llm_classifier_labels), big.mark = ",")
-    ))
+    drop_cols <- function(df, cols) df %>% select(-any_of(cols))
 
-    render_confusion_panel_v2 <- function(metrics, truth_label, pred_label, title) {
+    # Fixed class order groups the two aggressive classes together for readability.
+    CLASS_ORDER <- c("conventional", "avpc", "nepc", "biomarker")
+    CLASS_LABELS <- c(conventional = "Conventional", avpc = "AVPC", nepc = "NEPC",
+                      biomarker = "Biomarker")
+
+    count_labels <- function(df) {
+      df %>% count(primary_label, name = "count") %>%
+        mutate(frac = count / sum(count))
+    }
+
+    # Annotated 2x2 confusion matrix, LLM (rows) vs manual truth (cols).
+    render_confusion_panel <- function(metrics,
+                                       truth_label = "NEPC",
+                                       pred_label = "NEPC",
+                                       title = "Panel A1 — confusion matrix") {
       cm <- tibble(
         truth = factor(c(paste0("Non-", truth_label), truth_label,
                          paste0("Non-", truth_label), truth_label),
@@ -1367,150 +1207,108 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "#0b0b0b"), guide = "none") +
         labs(x = "Manual annotation (truth)", y = "LLM label (prediction)", title = title) +
         theme_fig() +
-        theme(panel.grid = element_blank(), plot.title = element_text(face = "bold", size = 11))
+        theme(panel.grid = element_blank(),
+              plot.title = element_text(face = "bold", size = 11))
     }
 
-    ## Panel A -- LLM validation (NEPC-vs-rest classifier, primary_label == "nepc")
-    merged_v2 <- manual_annotations %>%
-      drop_cols(c("pathology_details", "manual_platinum_reason")) %>%
-      inner_join(v2_labels_all, by = "DFCI_MRN") %>%
-      mutate(
-        manual_NEPC = simplified_manual_platinum_reason %in% c("nepc", "squamous_transformation"),
-        LLM_NEPC    = primary_label == "nepc"
+    # Compact metric bar: Accuracy, Precision, Recall, Specificity (Specificity == TNR).
+    render_metric_bar_panel <- function(metrics) {
+      d <- tibble(
+        metric = factor(c("Accuracy","Precision","Recall","Specificity"),
+                        levels = c("Accuracy","Precision","Recall","Specificity")),
+        value  = c(metrics$Accuracy, metrics$Precision, metrics$Recall, metrics$TNR)
       )
-    cat(sprintf("figure2v2 merged_results: %s rows, %s manual-NEPC positive\n",
-                format(nrow(merged_v2), big.mark = ","),
-                format(sum(merged_v2$manual_NEPC), big.mark = ",")))
-    metrics_v2 <- binary_metrics(merged_v2$manual_NEPC, merged_v2$LLM_NEPC)
-    n_total_v2 <- metrics_v2$N
-    n_nepc_manual_v2 <- metrics_v2$TP + metrics_v2$FN
-    caption_a_v2 <- sprintf("ADT time-0 cohort (N=%s total); %s chart-reviewed/labeled patients; %s manual-NEPC positive (LLM_NEPC_classifier_labels.tsv).",
-                            format(length(adt_cohort_mrns_v2), big.mark = ","),
-                            format(n_total_v2, big.mark = ","), format(n_nepc_manual_v2, big.mark = ","))
-    pA1_v2 <- render_confusion_panel(metrics_v2) + labs(caption = caption_a_v2) +
-      theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
-    pA2_v2 <- render_metric_bar_panel(metrics_v2) + labs(caption = caption_a_v2) +
-      theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
-    save_fig(pA1_v2, OUT_DIR_V2, "figure2v2_confusion_matrix", 4.2, 4.2)
-    save_fig(pA2_v2, OUT_DIR_V2, "figure2v2_metric_bar", 5.0, 4.2)
-
-    ## has_nepc / has_avpc binary confusion panels against manual truth.
-    merged_bin_v2 <- manual_annotations %>%
-      drop_cols(c("pathology_details", "manual_platinum_reason")) %>%
-      inner_join(v2_labels_all, by = "DFCI_MRN") %>%
-      mutate(manual_NEPC = simplified_manual_platinum_reason %in% c("nepc", "squamous_transformation"))
-
-    metrics_has_nepc <- binary_metrics(merged_bin_v2$manual_NEPC, merged_bin_v2$has_nepc)
-    caption_has_nepc <- sprintf(
-      "N = %s patients with evaluable manual and has_nepc calls; %s manual-NEPC positive.",
-      format(metrics_has_nepc$N, big.mark = ","),
-      format(metrics_has_nepc$TP + metrics_has_nepc$FN, big.mark = ",")
-    )
-    p_has_nepc <- render_confusion_panel_v2(metrics_has_nepc, "NEPC", "has_nepc=1",
-                                            "Panel A — has_nepc confusion matrix") +
-      labs(caption = caption_has_nepc) + theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
-    save_fig(p_has_nepc, OUT_DIR_V2, "figure2v2_confusion_has_nepc", 4.2, 4.2)
-
-    metrics_has_avpc <- binary_metrics(merged_bin_v2$manual_NEPC, merged_bin_v2$has_avpc)
-    caption_has_avpc <- sprintf(
-      "N = %s patients with evaluable manual and has_avpc calls; %s manual-NEPC positive.",
-      format(metrics_has_avpc$N, big.mark = ","),
-      format(metrics_has_avpc$TP + metrics_has_avpc$FN, big.mark = ",")
-    )
-    p_has_avpc <- render_confusion_panel_v2(metrics_has_avpc, "NEPC", "has_avpc=1",
-                                            "Panel A — has_avpc confusion matrix") +
-      labs(caption = caption_has_avpc) + theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
-    save_fig(p_has_avpc, OUT_DIR_V2, "figure2v2_confusion_has_avpc", 4.2, 4.2)
-
-    ## Panel B -- subtype landscape by platinum status (4-class primary_label).
-    # load_llm_strata only warns about primary_label values outside the four
-    # modeled classes and coerces them to NA when it factors the column, so the
-    # panel would otherwise carry an "NA" bar. Drop those rows here (fractions
-    # are then within the four classes) and report the count in the caption.
-    v2_labels_classified <- v2_labels_all %>% filter(!is.na(primary_label))
-    n_unclassified_v2 <- nrow(v2_labels_all) - nrow(v2_labels_classified)
-    if (n_unclassified_v2 > 0) {
-      message(sprintf(
-        "figure2v2 Panel B: dropped %s row(s) without one of the four primary_label classes",
-        format(n_unclassified_v2, big.mark = ",")
-      ))
+      ggplot(d, aes(metric, value)) +
+        geom_col(fill = COLOR_PLATINUM_POS, width = 0.6) +
+        geom_text(aes(label = sprintf("%.2f", value)), vjust = -0.4, size = 3.6, color = "#0b0b0b") +
+        coord_cartesian(ylim = c(0, 1.0)) +
+        labs(x = NULL, y = "Metric value", title = "Panel A2 — classifier metrics") +
+        theme_fig() +
+        theme(plot.title = element_text(face = "bold", size = 11))
     }
-    platinum_positive_v2 <- v2_labels_classified %>% filter(is_platinum) %>% count_labels() %>%
-      mutate(platinum_status = "positive")
-    platinum_negative_v2 <- v2_labels_classified %>% filter(!is_platinum) %>% count_labels() %>%
-      mutate(platinum_status = "negative")
-    label_distributions <- bind_rows(platinum_positive_v2, platinum_negative_v2)
-    n_pos <- sum(platinum_positive_v2$count)
-    n_neg <- sum(platinum_negative_v2$count)
-    caption_b_v2 <- sprintf("ADT time-0 cohort; %s classified of %s total patients%s; platinum+ n=%s, platinum- n=%s.",
-                            format(nrow(v2_labels_classified), big.mark = ","),
-                            format(length(adt_cohort_mrns_v2), big.mark = ","),
-                            if (n_unclassified_v2 > 0)
-                              sprintf(" (%s labeled row(s) outside the four classes excluded)",
-                                      format(n_unclassified_v2, big.mark = ","))
-                            else "",
-                            format(n_pos, big.mark = ","), format(n_neg, big.mark = ","))
-    pB_v2 <- render_landscape_panel("Panel B — subtype landscape by platinum status (classifier labels)") +
-      labs(caption = caption_b_v2) +
-      theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-    save_fig(pB_v2, OUT_DIR_V2, "figure2v2_subtype_landscape", 6.5, 8)
 
-    ## Panel C -- aggressive (avpc+nepc) vs conventional platinum enrichment.
-    df_v2 <- v2_labels_all %>% filter(primary_label %in% c("conventional", "avpc", "nepc")) %>%
-      mutate(aggressive = primary_label %in% c("avpc", "nepc"))
-    n_excluded_v2 <- nrow(v2_labels_all) - nrow(df_v2)
-    ct_v2 <- matrix(
-      c(sum(df_v2$aggressive & df_v2$is_platinum), sum(df_v2$aggressive & !df_v2$is_platinum),
-        sum(!df_v2$aggressive & df_v2$is_platinum), sum(!df_v2$aggressive & !df_v2$is_platinum)),
-      nrow = 2, byrow = TRUE,
-      dimnames = list(c("aggressive", "conventional"), c("platinum+", "platinum-")))
-    print(ct_v2)
-    ft_v2 <- fisher.test(ct_v2, alternative = "greater")
-    OR <- unname(ft_v2$estimate); p_value <- ft_v2$p.value
-    cat(sprintf("figure2v2 enrichment: OR = %.2f, Fisher p = %.3g\n", OR, p_value))
-    n_aggressive <- sum(ct_v2["aggressive", ]); n_conventional <- sum(ct_v2["conventional", ])
-    platinum_given_aggressive <- ct_v2["aggressive", "platinum+"]
-    platinum_given_conventional <- ct_v2["conventional", "platinum+"]
-    w_agg <- wilson_ci(platinum_given_aggressive, n_aggressive)
-    w_conv <- wilson_ci(platinum_given_conventional, n_conventional)
-    p_agg <- w_agg[1]; lo_agg <- w_agg[2]; hi_agg <- w_agg[3]
-    p_conv <- w_conv[1]; lo_conv <- w_conv[2]; hi_conv <- w_conv[3]
-    caption_c_v2 <- sprintf("ADT cohort; excludes 'biomarker' labels (%s rows). Error bars are 95%% Wilson intervals. OR=%.1f, Fisher p=%.1e.",
-                            format(n_excluded_v2, big.mark = ","), OR, p_value)
-    pC_v2 <- render_enrichment_panel() + labs(caption = caption_c_v2) +
-      theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-    save_fig(pC_v2, OUT_DIR_V2, "figure2v2_enrichment", 4.5, 5.5)
+    # Panel B/C renderers take their data explicitly rather than closing over
+    # mutable outer-scope state, so a single call site cannot silently pick up
+    # another variant's counts.
+    render_landscape_panel <- function(label_distributions, n_pos, n_neg,
+                                       title = "Panel B — subtype landscape by platinum status (descriptive)") {
+      d <- label_distributions %>%
+        mutate(primary_label   = factor(primary_label, levels = CLASS_ORDER,
+                                        labels = CLASS_LABELS[CLASS_ORDER]),
+               platinum_status = factor(platinum_status, levels = c("positive","negative"))) %>%
+        # Anything outside CLASS_ORDER became NA in the factor() above; keeping it
+        # would draw an "NA" column. Callers are expected to have filtered already.
+        filter(!is.na(primary_label))
+      ggplot(d, aes(primary_label, frac, fill = platinum_status)) +
+        geom_col(position = position_dodge(width = 0.8), width = 0.72) +
+        scale_fill_manual(
+          values = c(positive = COLOR_PLATINUM_POS, negative = COLOR_PLATINUM_NEG),
+          labels = c(sprintf("Platinum+ (n=%s)", format(n_pos, big.mark = ",")),
+                     sprintf("Platinum- (n=%s)", format(n_neg, big.mark = ","))),
+          name = NULL) +
+        coord_cartesian(ylim = c(0, 1.0)) +
+        labs(x = NULL, y = "Fraction within platinum group", title = title) +
+        theme_fig() +
+        theme(plot.title = element_text(face = "bold", size = 11),
+              axis.title.x = element_blank(),
+              axis.title.y = element_text(size = 16),
+              axis.text  = element_text(size = 14),
+              legend.position = c(0.98, 0.98), legend.justification = c(1, 1))
+    }
 
-    left_v2  <- (render_confusion_panel(metrics_v2) + render_metric_bar_panel(metrics_v2)) /
-               render_enrichment_panel()
-    right_v2 <- render_landscape_panel("Panel B — subtype landscape (classifier labels)")
-    full_caption_v2 <- sprintf(paste0(
-      "(A) NEPC-vs-rest classifier (LLM_NEPC_classifier_labels.tsv) vs Baca-lab manual ",
-      "annotation (N=%s evaluable among %s ADT time-0 patients, %s manual-NEPC+). (B) Subtype landscape, platinum+ (n=%s) vs ",
-      "platinum- (n=%s). (C) Platinum+ rate among aggressive (AVPC+NEPC) vs conventional ",
-      "patients (OR=%.1f, Fisher p=%.1e)."),
-      format(n_total_v2, big.mark = ","), format(length(adt_cohort_mrns_v2), big.mark = ","),
-      format(n_nepc_manual_v2, big.mark = ","),
-      format(n_pos, big.mark = ","), format(n_neg, big.mark = ","), OR, p_value)
-    fig2v2 <- (left_v2 | right_v2) +
-      plot_layout(widths = c(2, 1.3)) +
-      plot_annotation(
-        title = "Figure 2 v2 — LLM classifier-derived prostate subtypes (ADT cohort)",
-        caption = str_wrap(full_caption_v2, 130),
-        theme = theme(plot.title = element_text(face = "bold", size = 13),
-                      plot.caption = element_text(size = 8.5, color = COLOR_NEUTRAL_INK)))
-    save_fig(fig2v2, OUT_DIR_V2, "figure2v2_llm_subtype_platinum", 15, 9)
-    if (show) print(fig2v2)
+    render_enrichment_panel <- function(enrichment) {
+      d <- tibble(
+        group = factor(c("Aggressive\n(AVPC + NEPC)", "Conventional"),
+                       levels = c("Aggressive\n(AVPC + NEPC)", "Conventional")),
+        prop  = c(enrichment$p_agg, enrichment$p_conv),
+        lo    = c(enrichment$lo_agg, enrichment$lo_conv),
+        hi    = c(enrichment$hi_agg, enrichment$hi_conv),
+        n     = c(enrichment$n_aggressive, enrichment$n_conventional),
+        k     = c(enrichment$k_agg, enrichment$k_conv)
+      )
+      ymax <- max(enrichment$hi_agg, enrichment$hi_conv) * 1.35
+      ggplot(d, aes(group, prop, fill = group)) +
+        geom_col(width = 0.55) +
+        geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.18,
+                      color = COLOR_NEUTRAL_INK, linewidth = 0.7) +
+        scale_fill_manual(values = c(COLOR_PLATINUM_POS, "#9a9890"), guide = "none") +
+        annotate("text", x = 1.5, y = ymax * 0.97,
+                 label = sprintf("OR = %.1f, Fisher's exact p = %.1e",
+                                 enrichment$OR, enrichment$p_value),
+                 fontface = "bold", size = 3.7, color = COLOR_NEUTRAL_INK) +
+        scale_y_continuous(labels = scales::percent, limits = c(0, ymax)) +
+        labs(x = NULL, y = "P(platinum+ | subtype group)",
+             title = "Panel C — platinum enrichment among aggressive variants") +
+        theme_fig() +
+        theme(plot.title = element_text(face = "bold", size = 11))
+    }
 
-    ## ---- Figure 2 v3 -- v2's classifier labels over every ADT-exposed patient ----
-    # Same label source and panel set as v2; the only difference is the patient
-    # universe. v2 is restricted to the landmark-0 prediction cohort (the
-    # eligible_landmark_0 MRNs from landmark_mrn_availability.csv, i.e. after the
-    # male / post-ADT cancer / PARPi / prior-platinum / >=5-PSA-test filters), whereas v3 uses every MRN
-    # with ADT_EXPOSED == 1 in the ICD prostate workflow flags -- the "ADT entry
-    # requirement" step of the Figure 1 CONSORT, before any downstream filtering.
-    # Nested inside the v2 branch so render_confusion_panel_v2 is always defined.
-    OUT_DIR_V3 <- fig_dir("figure2v3_llm")
+    # 2x2 aggressive/conventional x platinum+/- contrast with Wilson intervals.
+    compute_enrichment <- function(labels_all) {
+      df <- labels_all %>%
+        filter(primary_label %in% c("conventional", "avpc", "nepc")) %>%
+        mutate(aggressive = primary_label %in% c("avpc", "nepc"))
+      n_excluded <- nrow(labels_all) - nrow(df)
+      ct <- matrix(
+        c(sum(df$aggressive  &  df$is_platinum), sum(df$aggressive  & !df$is_platinum),
+          sum(!df$aggressive &  df$is_platinum), sum(!df$aggressive & !df$is_platinum)),
+        nrow = 2, byrow = TRUE,
+        dimnames = list(c("aggressive", "conventional"), c("platinum+", "platinum-")))
+      print(ct)
+      ft <- fisher.test(ct, alternative = "greater")
+      n_aggressive   <- sum(ct["aggressive", ])
+      n_conventional <- sum(ct["conventional", ])
+      k_agg  <- ct["aggressive",   "platinum+"]
+      k_conv <- ct["conventional", "platinum+"]
+      w_agg  <- wilson_ci(k_agg,  n_aggressive)
+      w_conv <- wilson_ci(k_conv, n_conventional)
+      list(ct = ct, n_excluded = n_excluded,
+           OR = unname(ft$estimate), p_value = ft$p.value,
+           n_aggressive = n_aggressive, n_conventional = n_conventional,
+           k_agg = k_agg, k_conv = k_conv,
+           p_agg = w_agg[1], lo_agg = w_agg[2], hi_agg = w_agg[3],
+           p_conv = w_conv[1], lo_conv = w_conv[2], hi_conv = w_conv[3])
+    }
 
     adt_exposed_mrns_v3 <- unique(as.character(
       icd_prostate_mrn_flags[[ID_COL]][icd_prostate_mrn_flags$ADT_EXPOSED == 1]))
@@ -1518,15 +1316,17 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       filter(as.character(DFCI_MRN) %in% adt_exposed_mrns_v3)
     # Not a stopifnot: a shortfall here means the prediction cohort and the ICD
     # flag table disagree, which is worth surfacing but should not abort the pass.
+    cohort_mrns <- unique(as.character(patient_df[[ID_COL]]))
+    stopifnot(base_landmark == 0L, length(cohort_mrns) == nrow(patient_df))
     n_pred_outside_v3 <- sum(!cohort_mrns %in% adt_exposed_mrns_v3)
     if (n_pred_outside_v3 > 0)
       message(sprintf(
         "Figure 2 v3: %s prediction-cohort MRN(s) are absent from ADT_EXPOSED == 1 in %s",
         format(n_pred_outside_v3, big.mark = ","), ICD_PROSTATE_MRN_FLAGS_CSV))
     message(sprintf(
-      "Figure 2 v3 ADT-exposed universe: %s total patients (%s in the v2 prediction cohort); %s labeled/evaluable (%s source labels total)",
+      "Figure 2 v3 ADT-exposed universe: %s total patients (%s in the landmark-0 prediction cohort); %s labeled/evaluable (%s source labels total)",
       format(length(adt_exposed_mrns_v3), big.mark = ","),
-      format(length(adt_cohort_mrns_v2), big.mark = ","),
+      format(length(cohort_mrns), big.mark = ","),
       format(nrow(v3_labels_all), big.mark = ","),
       format(nrow(llm_classifier_labels), big.mark = ",")
     ))
@@ -1567,8 +1367,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       format(metrics_has_nepc_v3$N, big.mark = ","),
       format(metrics_has_nepc_v3$TP + metrics_has_nepc_v3$FN, big.mark = ",")
     )
-    p_has_nepc_v3 <- render_confusion_panel_v2(metrics_has_nepc_v3, "NEPC", "has_nepc=1",
-                                               "Panel A — has_nepc confusion matrix") +
+    p_has_nepc_v3 <- render_confusion_panel(metrics_has_nepc_v3, "NEPC", "has_nepc=1",
+                                            "Panel A — has_nepc confusion matrix") +
       labs(caption = caption_has_nepc_v3) + theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
     save_fig(p_has_nepc_v3, OUT_DIR_V3, "figure2v3_confusion_has_nepc", 4.2, 4.2)
 
@@ -1578,14 +1378,14 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       format(metrics_has_avpc_v3$N, big.mark = ","),
       format(metrics_has_avpc_v3$TP + metrics_has_avpc_v3$FN, big.mark = ",")
     )
-    p_has_avpc_v3 <- render_confusion_panel_v2(metrics_has_avpc_v3, "NEPC", "has_avpc=1",
-                                               "Panel A — has_avpc confusion matrix") +
+    p_has_avpc_v3 <- render_confusion_panel(metrics_has_avpc_v3, "NEPC", "has_avpc=1",
+                                            "Panel A — has_avpc confusion matrix") +
       labs(caption = caption_has_avpc_v3) + theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
     save_fig(p_has_avpc_v3, OUT_DIR_V3, "figure2v3_confusion_has_avpc", 4.2, 4.2)
 
     ## Panel B -- subtype landscape by platinum status (4-class primary_label).
-    # Same NA handling as v2: load_llm_strata coerces primary_label values outside
-    # the four modeled classes to NA, and those rows would draw an "NA" bar.
+    # load_llm_strata coerces primary_label values outside the four modeled
+    # classes to NA, and those rows would draw an "NA" bar.
     v3_labels_classified <- v3_labels_all %>% filter(!is.na(primary_label))
     n_unclassified_v3 <- nrow(v3_labels_all) - nrow(v3_labels_classified)
     if (n_unclassified_v3 > 0) {
@@ -1598,7 +1398,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       mutate(platinum_status = "positive")
     platinum_negative_v3 <- v3_labels_classified %>% filter(!is_platinum) %>% count_labels() %>%
       mutate(platinum_status = "negative")
-    label_distributions <- bind_rows(platinum_positive_v3, platinum_negative_v3)
+    label_distributions_v3 <- bind_rows(platinum_positive_v3, platinum_negative_v3)
     n_pos <- sum(platinum_positive_v3$count)
     n_neg <- sum(platinum_negative_v3$count)
     caption_b_v3 <- sprintf("All ADT-exposed patients; %s classified of %s total patients%s; platinum+ n=%s, platinum- n=%s.",
@@ -1609,49 +1409,39 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                                       format(n_unclassified_v3, big.mark = ","))
                             else "",
                             format(n_pos, big.mark = ","), format(n_neg, big.mark = ","))
-    pB_v3 <- render_landscape_panel("Panel B — subtype landscape by platinum status (classifier labels, all ADT)") +
+    pB_v3 <- render_landscape_panel(
+        label_distributions_v3, n_pos, n_neg,
+        "Panel B — subtype landscape by platinum status (classifier labels, all ADT)") +
       labs(caption = caption_b_v3) +
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
     save_fig(pB_v3, OUT_DIR_V3, "figure2v3_subtype_landscape", 6.5, 8)
 
     ## Panel C -- aggressive (avpc+nepc) vs conventional platinum enrichment.
-    df_v3 <- v3_labels_all %>% filter(primary_label %in% c("conventional", "avpc", "nepc")) %>%
-      mutate(aggressive = primary_label %in% c("avpc", "nepc"))
-    n_excluded_v3 <- nrow(v3_labels_all) - nrow(df_v3)
-    ct_v3 <- matrix(
-      c(sum(df_v3$aggressive & df_v3$is_platinum), sum(df_v3$aggressive & !df_v3$is_platinum),
-        sum(!df_v3$aggressive & df_v3$is_platinum), sum(!df_v3$aggressive & !df_v3$is_platinum)),
-      nrow = 2, byrow = TRUE,
-      dimnames = list(c("aggressive", "conventional"), c("platinum+", "platinum-")))
-    print(ct_v3)
-    ft_v3 <- fisher.test(ct_v3, alternative = "greater")
-    OR <- unname(ft_v3$estimate); p_value <- ft_v3$p.value
-    cat(sprintf("figure2v3 enrichment: OR = %.2f, Fisher p = %.3g\n", OR, p_value))
-    n_aggressive <- sum(ct_v3["aggressive", ]); n_conventional <- sum(ct_v3["conventional", ])
-    platinum_given_aggressive <- ct_v3["aggressive", "platinum+"]
-    platinum_given_conventional <- ct_v3["conventional", "platinum+"]
-    w_agg <- wilson_ci(platinum_given_aggressive, n_aggressive)
-    w_conv <- wilson_ci(platinum_given_conventional, n_conventional)
-    p_agg <- w_agg[1]; lo_agg <- w_agg[2]; hi_agg <- w_agg[3]
-    p_conv <- w_conv[1]; lo_conv <- w_conv[2]; hi_conv <- w_conv[3]
+    enrichment_v3 <- compute_enrichment(v3_labels_all)
+    cat(sprintf("figure2v3 enrichment: OR = %.2f, Fisher p = %.3g\n",
+                enrichment_v3$OR, enrichment_v3$p_value))
     caption_c_v3 <- sprintf("All ADT-exposed patients; excludes 'biomarker' labels (%s rows). Error bars are 95%% Wilson intervals. OR=%.1f, Fisher p=%.1e.",
-                            format(n_excluded_v3, big.mark = ","), OR, p_value)
-    pC_v3 <- render_enrichment_panel() + labs(caption = caption_c_v3) +
+                            format(enrichment_v3$n_excluded, big.mark = ","),
+                            enrichment_v3$OR, enrichment_v3$p_value)
+    pC_v3 <- render_enrichment_panel(enrichment_v3) + labs(caption = caption_c_v3) +
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
     save_fig(pC_v3, OUT_DIR_V3, "figure2v3_enrichment", 4.5, 5.5)
 
     left_v3  <- (render_confusion_panel(metrics_v3) + render_metric_bar_panel(metrics_v3)) /
-               render_enrichment_panel()
-    right_v3 <- render_landscape_panel("Panel B — subtype landscape (classifier labels, all ADT)")
+               render_enrichment_panel(enrichment_v3)
+    right_v3 <- render_landscape_panel(
+      label_distributions_v3, n_pos, n_neg,
+      "Panel B — subtype landscape (classifier labels, all ADT)")
     full_caption_v3 <- sprintf(paste0(
       "(A) NEPC-vs-rest classifier (LLM_NEPC_classifier_labels.tsv) vs Baca-lab manual ",
       "annotation (N=%s evaluable among %s ADT-exposed patients, %s manual-NEPC+). (B) Subtype landscape, platinum+ (n=%s) vs ",
       "platinum- (n=%s). (C) Platinum+ rate among aggressive (AVPC+NEPC) vs conventional ",
       "patients (OR=%.1f, Fisher p=%.1e). Universe is every ICD prostate patient with ADT ",
-      "exposure, not just the landmark-0 prediction cohort used in Figure 2 v2."),
+      "exposure, not just the landmark-0 prediction cohort."),
       format(n_total_v3, big.mark = ","), format(length(adt_exposed_mrns_v3), big.mark = ","),
       format(n_nepc_manual_v3, big.mark = ","),
-      format(n_pos, big.mark = ","), format(n_neg, big.mark = ","), OR, p_value)
+      format(n_pos, big.mark = ","), format(n_neg, big.mark = ","),
+      enrichment_v3$OR, enrichment_v3$p_value)
     fig2v3 <- (left_v3 | right_v3) +
       plot_layout(widths = c(2, 1.3)) +
       plot_annotation(
@@ -1902,6 +1692,202 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     save_fig(p, OUT_DIR, sprintf("figure3_univariate_%s_significance_landmark%d", ENDPOINT, lm),
              width = 7.5, height = 6)
     if (show) print(p)
+  }
+
+  ## ---- Figure 3b -- somatic, Gleason, and PRS univariate associations ----
+  # Separate plots from the lab volcanoes above: these come from
+  # build_somatic_gleason_inputs.py / run_somatic_gleason_univariate(), which
+  # build three DIFFERENT cohorts with three different index dates
+  # (sequencing = specimen collection, gleason = the Gleason score date nearest
+  # ADT start, prs = ADT start). Pooling them into one panel would mix index
+  # dates and patient sets, so each index analysis gets its own figure.
+  #
+  # Only ADT is built (the index dates are defined relative to ADT start) and
+  # only at landmark 0 (SOMATIC_GLEASON_LANDMARKS = (0,)). A missing tree is
+  # reported and skipped rather than aborting the endpoint's figure pass.
+  OUT_DIR <- fig_dir("figure3b_somatic_gleason")
+
+  SG_LANDMARK  <- 0L
+  SG_ANALYSES  <- c("gleason", "sequencing", "prs")
+  SG_LABELS <- c(
+    gleason    = "Gleason score",
+    sequencing = "Somatic alterations",
+    prs        = "Polygenic risk scores"
+  )
+  # Each analysis' prediction time origin, from build_somatic_gleason_inputs.py.
+  SG_ORIGINS <- c(
+    gleason    = "Gleason score date nearest ADT start",
+    sequencing = "sequencing specimen collection date",
+    prs        = "ADT start"
+  )
+  SG_TOP_N <- 25   # forest plots show at most this many features, ranked by p
+
+  sg_path <- function(analysis, landmark = SG_LANDMARK) {
+    file.path(BASE, "cox_somatic_gleason", sprintf("landmark_%s", landmark),
+              analysis, "both", "cox_agg_univariate_nobs_adjusted.csv")
+  }
+
+  # Same stability filter as the lab volcanoes: drop |log HR| > 4 or a CI
+  # spanning more than two orders of magnitude. Binary somatic indicators at
+  # low prevalence are the usual source of both.
+  load_sg <- function(analysis) {
+    path <- sg_path(analysis)
+    if (!file.exists(path)) {
+      message(sprintf("Figure 3b %s: %s not found -- skipping.", analysis, path))
+      return(NULL)
+    }
+    df <- read_csv(path, show_col_types = FALSE) %>%
+      filter(tolower(as.character(endpoint)) == ENDPOINT) %>%
+      drop_na(coef_feature, p_value, q_value)
+    if (nrow(df) == 0) {
+      message(sprintf("Figure 3b %s: no %s rows in %s -- skipping.",
+                      analysis, ENDPOINT, path))
+      return(NULL)
+    }
+    n_before <- nrow(df)
+    keep <- abs(df$coef_feature) <= COEF_CAP & (df$ci_upper / df$ci_lower) < CI_RATIO_CAP
+    df <- df[keep, ]
+    cat(sprintf("Figure 3b %s: %d features, dropped %d unstable, %d remaining\n",
+                analysis, n_before, sum(!keep), nrow(df)))
+    if (nrow(df) == 0) return(NULL)
+    df
+  }
+
+  # Forest of log HR per SD with 95% CI, ranked by p-value. Used wherever a
+  # volcano would be uninformative -- notably Gleason, which contributes a
+  # single continuous feature (GLEASON_SCORE) and so would plot as one point.
+  plot_sg_forest <- function(sub, title, subtitle, top_n = SG_TOP_N) {
+    d <- sub %>%
+      arrange(p_value) %>%
+      head(top_n) %>%
+      mutate(
+        sig   = q_value < 0.05,
+        # ci_lower/ci_upper are hazard-ratio bounds; the x axis is on the log
+        # HR scale to match coef_feature (= log HR per SD).
+        lo    = log(ci_lower),
+        hi    = log(ci_upper),
+        # Somatic/Gleason/PRS rows carry an empty feature_stat, which readr
+        # parses as an all-NA logical column when no row has a value; coerce
+        # before testing so the label does not collapse to NA.
+        .stat = ifelse(is.na(feature_stat), "", as.character(feature_stat)),
+        label = ifelse(nzchar(.stat) & .stat != "value",
+                       sprintf("%s (%s)", lab_name, .stat),
+                       as.character(lab_name))
+      ) %>%
+      mutate(label = factor(label, levels = rev(unique(label))))
+    n_sig <- sum(d$sig)
+    x_span <- range(c(d$lo, d$hi, 0), na.rm = TRUE, finite = TRUE)
+    ggplot(d, aes(coef_feature, label, color = sig)) +
+      geom_vline(xintercept = 0, color = "grey", linewidth = 0.7) +
+      geom_errorbar(aes(xmin = lo, xmax = hi), orientation = "y",
+                    width = 0.28, linewidth = 0.7) +
+      geom_point(size = 2.6) +
+      scale_color_manual(
+        values = c(`TRUE` = SIG_COLOR, `FALSE` = "#9a9890"),
+        breaks = c(TRUE, FALSE),
+        labels = c("q<0.05", "n.s."), name = NULL,
+        guide = guide_legend(override.aes = list(size = 3.2))) +
+      coord_cartesian(xlim = x_span * 1.05) +
+      labs(x = "Cox log HR per SD (95% CI)", y = NULL,
+           title = title, subtitle = subtitle,
+           caption = sprintf("%d / %d features q<0.05%s", n_sig, nrow(sub),
+                             if (nrow(sub) > nrow(d))
+                               sprintf("; showing the %d smallest p-values", nrow(d))
+                             else "")) +
+      theme_fig() +
+      theme(plot.title = element_text(face = "bold", size = 14),
+            plot.subtitle = element_text(size = 10, color = COLOR_NEUTRAL_INK),
+            plot.caption = element_text(size = 9, color = COLOR_NEUTRAL_INK, hjust = 0),
+            axis.text.y = element_text(size = 9),
+            legend.position = "top")
+  }
+
+  # Volcano for the analyses that test many features at once (somatic binary
+  # indicators, PRS). Reuses the significance-only styling of the lab volcano
+  # -- lab CATEGORY_COLORS do not apply to genomic features. Axis limits are
+  # data-driven rather than the labs' fixed PANEL_XLIM, because somatic
+  # indicators and PRS live on different effect-size scales.
+  plot_sg_volcano <- function(sub, title, subtitle, top_k = 8) {
+    d <- sub %>%
+      mutate(
+        .point_id = row_number(),
+        neglog10p = -log10(pmax(p_value, 1e-300)),
+        sig       = q_value < 0.05,
+        capped    = neglog10p > Y_MAX_CAP,
+        y         = pmin(neglog10p, Y_MAX_CAP),
+        label     = as.character(lab_name)
+      )
+    # Label the strongest hits: every significant feature when there are few,
+    # otherwise the top_k by p-value.
+    lab_ids <- d %>% filter(sig) %>% arrange(p_value) %>% head(top_k) %>% pull(.point_id)
+    d <- d %>% mutate(repel_label = ifelse(.point_id %in% lab_ids, label, ""))
+
+    q_y <- q_threshold_neglog10p(d)
+    x_span <- max(abs(d$coef_feature), na.rm = TRUE) * 1.1
+    n_sig <- sum(d$sig)
+
+    ggplot(d, aes(coef_feature, y)) +
+      geom_vline(xintercept = 0, color = "grey", linewidth = 0.7) +
+      { if (!is.na(q_y)) geom_hline(yintercept = q_y, color = "black",
+                                    linetype = "dotted", linewidth = 0.9) } +
+      geom_point(data = ~ dplyr::filter(.x, !sig), color = NS_COLOR, size = 2.2, alpha = 0.55) +
+      geom_point(data = ~ dplyr::filter(.x, sig & !capped), shape = 21,
+                 fill = SIG_COLOR, color = "white", size = 3.0, stroke = 0.6, alpha = 0.92) +
+      geom_point(data = ~ dplyr::filter(.x, sig & capped), shape = 24,
+                 fill = SIG_COLOR, color = "white", size = 4.0, stroke = 0.6, alpha = 0.92) +
+      ggrepel::geom_text_repel(
+        aes(label = repel_label), size = 3.6, fontface = "bold",
+        segment.color = "#95a5a6", segment.size = 0.3, max.overlaps = Inf,
+        min.segment.length = 0, box.padding = 0.5, point.padding = 0.4,
+        force = 1.5, max.time = 2, seed = 0) +
+      coord_cartesian(xlim = c(-x_span, x_span)) +
+      labs(x = "Cox log HR per SD", y = expression(-log[10](p)),
+           title = title, subtitle = subtitle,
+           caption = sprintf("%d / %d features q<0.05", n_sig, nrow(d))) +
+      theme_fig() +
+      theme(plot.title = element_text(face = "bold", size = 14),
+            plot.subtitle = element_text(size = 10, color = COLOR_NEUTRAL_INK),
+            plot.caption = element_text(size = 9, color = COLOR_NEUTRAL_INK, hjust = 0))
+  }
+
+  if (!IS_ADT) {
+    message(paste0("Figure 3b: the sequencing/Gleason/PRS index dates are defined ",
+                   "relative to ADT start, so these analyses are built for the ADT ",
+                   "arm only -- skipping for the ARPI pass."))
+  } else {
+    for (analysis in SG_ANALYSES) {
+      sub <- load_sg(analysis)
+      if (is.null(sub)) next
+      subtitle <- sprintf("%s endpoint  ·  time origin: %s  ·  n=%s patients",
+                          toupper(ENDPOINT), SG_ORIGINS[[analysis]],
+                          format(max(sub$n_patients_used, na.rm = TRUE), big.mark = ","))
+      title <- sprintf("%s — univariate Cox", SG_LABELS[[analysis]])
+
+      # Gleason contributes a single continuous feature, so a volcano would be
+      # one point; a forest shows the effect size and its CI instead. The
+      # many-feature analyses get a volcano plus a forest of the top hits.
+      if (identical(analysis, "gleason") || nrow(sub) < 10) {
+        p <- plot_sg_forest(sub, title, subtitle)
+        save_fig(p, OUT_DIR,
+                 sprintf("figure3b_%s_%s_forest_landmark%d", analysis, ENDPOINT, SG_LANDMARK),
+                 width = 7.5, height = max(3.0, 0.32 * nrow(sub) + 2.4))
+        if (show) print(p)
+      } else {
+        p <- plot_sg_volcano(sub, title, subtitle)
+        save_fig(p, OUT_DIR,
+                 sprintf("figure3b_%s_%s_volcano_landmark%d", analysis, ENDPOINT, SG_LANDMARK),
+                 width = 7.5, height = 6)
+        if (show) print(p)
+
+        p_forest <- plot_sg_forest(sub, sprintf("%s — top associations", SG_LABELS[[analysis]]),
+                                   subtitle)
+        n_shown <- min(SG_TOP_N, nrow(sub))
+        save_fig(p_forest, OUT_DIR,
+                 sprintf("figure3b_%s_%s_forest_landmark%d", analysis, ENDPOINT, SG_LANDMARK),
+                 width = 8.5, height = max(3.0, 0.32 * n_shown + 2.4))
+        if (show) print(p_forest)
+      }
+    }
   }
 
   OUT_DIR <- fig_dir("figure4_multivariate")

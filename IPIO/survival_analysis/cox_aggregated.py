@@ -89,8 +89,17 @@ DEFAULT_MIN_PATIENT_COVERAGE = 0.20
 DEFAULT_MIN_EVENTS_PER_FEATURE = 10
 # DEFAULT_AUC_MAX_TIME_UNITS is re-exported from survival_common.helper so the
 # builders' horizon grid and the runners' evaluation cap cannot drift apart.
-DEFAULT_CV_PENALIZERS = [0.001, 0.01, 0.05, 0.20, 0.80, 3.20]
-DEFAULT_CV_L1_RATIOS = [0.01, 0.5, 1.0]
+# Elastic-net CV grid aligned with the clinical text embedding project
+# (clinical_text_embedding_project/v2/pipelines/training/slurm_array_utils.py:
+# DEFAULT_ALPHAS / DEFAULT_LOW_ALPHAS / DEFAULT_L1_RATIOS). Both projects fit
+# with sksurv CoxnetSurvivalAnalysis + penalty_factor, so the alpha scale is
+# directly comparable. The low-alpha block is the embedding project's adaptive
+# refinement, prepended here because this runner searches one flat grid rather
+# than re-running on a boundary hit.
+DEFAULT_CV_PENALIZERS = (
+    np.logspace(-5, -4, 6).tolist()[:-1] + np.logspace(-4, 0, 10).tolist()
+)
+DEFAULT_CV_L1_RATIOS = [0.5, 1.0]
 DEFAULT_AUC_QUANTILES = (0.25, 0.375, 0.50, 0.625, 0.75)
 DEFAULT_AUC_TIME_UNIT_DAYS = 7
 HORIZON_GRID_FILENAME = "cox_agg_horizon_grid.csv"
