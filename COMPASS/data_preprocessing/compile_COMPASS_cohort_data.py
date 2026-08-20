@@ -799,14 +799,22 @@ def load_avpc_nepc_labels(path) -> pl.DataFrame:
     Written by LLM_clinical_annotations
     tasks/longitudinal_NEPC/build_avpc_nepc_labels.py as one row per patient.
     This is a *different, broader* label than ``load_nepc_dx_labels``'s strict
-    veto-gated diagnosis: it fires on >=3 Aparicio (AVPC) criteria or any NEPC
+    veto-gated diagnosis: it fires on >=4 Aparicio (AVPC) criteria or any NEPC
     feature from the longitudinal criteria timeline, with NEPC-precedence
     timing. See COMPASS/survival_analysis/AVPC_NEPC_ENDPOINT_PLAN.md.
 
+    NOTE: the union this loader reads (``has_avpc_nepc`` = AVPC or
+    NEPC_TIMELINE) is NOT the modeled ``AVPC_NEPC`` endpoint.
+    ``build_survival_cohort`` renames these to ``AVPC_NEPC_TIMELINE*`` and
+    recomputes ``AVPC_NEPC`` as AVPC or the *strict* veto-gated ``NEPC``
+    label, so the modeled composite is the union of the two endpoints that are
+    themselves modeled. The columns below keep the loader's own naming.
+
     Only the columns this cohort needs are kept, renamed:
 
-      has_avpc_nepc      -> AVPC_NEPC              (event indicator, modeled)
-      avpc_nepc_date      -> AVPC_NEPC_DATE          (event date, modeled)
+      has_avpc_nepc      -> AVPC_NEPC       (timeline union; renamed
+                                              AVPC_NEPC_TIMELINE downstream)
+      avpc_nepc_date      -> AVPC_NEPC_DATE  (ditto)
       date_source         -> AVPC_NEPC_DATE_SOURCE
       date_precision      -> AVPC_NEPC_DATE_PRECISION
       label_source        -> AVPC_NEPC_LABEL_SOURCE
@@ -1078,10 +1086,70 @@ def build_survival_cohort(
         .then(pl.lit('auto_negative_no_evidence'))
         .otherwise(pl.col('AVPC_NEPC_LABEL_SOURCE'))
         .alias('AVPC_NEPC_LABEL_SOURCE'),
-        # AVPC (>=3 Aparicio criteria, independent of any NEPC feature) rides
+        # AVPC (>=4 Aparicio criteria, independent of any NEPC feature) rides
         # in on the same avpc_nepc_df join above as an audit column; apply the
         # same join-miss-is-censored contract here for its own "avpc" endpoint.
         pl.col('AVPC').fill_null(0).cast(pl.Int64),
+    )
+
+    # Recompute AVPC_NEPC as AVPC OR NEPC using the *strict* veto-gated NEPC
+    # label (load_nepc_dx_labels, the same column the "nepc" endpoint models),
+    # overriding the timeline builder's own union which used the broader
+    # NEPC_TIMELINE arm. The timeline's AVPC_NEPC_* columns are kept as
+    # AVPC_NEPC_TIMELINE_* audit columns so the two definitions stay
+    # comparable.
+    #
+    # Timing keeps the builder's NEPC-precedence rule: when the strict NEPC
+    # label fires, the event is dated at NEPC_DATE regardless of whether AVPC
+    # crossed threshold earlier; otherwise it is dated at AVPC_DATE.
+    #
+    # NEPC is already undated-demoted by load_nepc_dx_labels, but AVPC is not:
+    # load_avpc_nepc_labels only demotes the union column it built, so an AVPC
+    # positive can still carry a null AVPC_DATE. Demote those here, otherwise
+    # they would enter the new union as positives with no event time and be
+    # silently censored at follow-up end by the TT_AVPC_NEPC branch below.
+    undated_avpc = cohort.filter(
+        pl.col('AVPC').eq(1) & pl.col('AVPC_DATE').is_null()
+    )
+    if len(undated_avpc):
+        print(
+            f"[avpc] {len(undated_avpc)} positive label(s) have no parseable "
+            "avpc_date; censoring them."
+        )
+        cohort = cohort.with_columns(
+            pl.when(pl.col('AVPC_DATE').is_null()).then(0)
+            .otherwise(pl.col('AVPC')).alias('AVPC')
+        )
+
+    cohort = cohort.rename({
+        'AVPC_NEPC': 'AVPC_NEPC_TIMELINE',
+        'AVPC_NEPC_DATE': 'AVPC_NEPC_TIMELINE_DATE',
+        'AVPC_NEPC_DATE_SOURCE': 'AVPC_NEPC_TIMELINE_DATE_SOURCE',
+        'AVPC_NEPC_DATE_PRECISION': 'AVPC_NEPC_TIMELINE_DATE_PRECISION',
+        'AVPC_NEPC_LABEL_SOURCE': 'AVPC_NEPC_TIMELINE_LABEL_SOURCE',
+    })
+
+    strict_nepc = pl.col('NEPC').eq(1)
+    strict_avpc = pl.col('AVPC').eq(1)
+    cohort = cohort.with_columns(
+        (strict_nepc | strict_avpc).cast(pl.Int64).alias('AVPC_NEPC'),
+        pl.when(strict_nepc).then(pl.col('NEPC_DATE'))
+        .when(strict_avpc).then(pl.col('AVPC_DATE'))
+        .otherwise(None)
+        .alias('AVPC_NEPC_DATE'),
+        # Only the NEPC arm carries date provenance: the timeline builder's
+        # date_source/date_precision describe its own union's defining row,
+        # not AVPC's, so there is no AVPC-specific provenance to forward.
+        pl.when(strict_nepc).then(pl.col('NEPC_DATE_SOURCE'))
+        .otherwise(None)
+        .alias('AVPC_NEPC_DATE_SOURCE'),
+        pl.when(strict_nepc).then(pl.col('NEPC_DATE_PRECISION'))
+        .otherwise(None)
+        .alias('AVPC_NEPC_DATE_PRECISION'),
+        pl.when(strict_nepc).then(pl.lit('nepc_strict'))
+        .when(strict_avpc).then(pl.lit('avpc_criteria'))
+        .otherwise(pl.lit('auto_negative_no_evidence'))
+        .alias('AVPC_NEPC_LABEL_SOURCE'),
     )
 
     cohort = cohort.with_columns(
@@ -1127,7 +1195,7 @@ def build_survival_cohort(
         (avpc_nepc_end - pl.col('TREATMENT_ANCHOR_DATE')).dt.total_days().alias('TT_AVPC_NEPC')
     )
 
-    # AVPC (>=3 Aparicio criteria alone, independent of any NEPC feature)
+    # AVPC (>=4 Aparicio criteria alone, independent of any NEPC feature)
     # mirrors AVPC_NEPC/NEPC/platinum exactly: event date when the event
     # occurred, else censored at end of follow-up.
     has_avpc = pl.col('AVPC').eq(1)
@@ -1180,6 +1248,13 @@ def build_survival_cohort(
             'NEPC_TIMELINE',
             'NEPC_TIMELINE_DATE',
             'AVPC_N_CRITERIA',
+            # The timeline builder's own AVPC-or-NEPC_TIMELINE union, kept for
+            # audit against the modeled AVPC_NEPC (= AVPC or strict NEPC).
+            'AVPC_NEPC_TIMELINE',
+            'AVPC_NEPC_TIMELINE_DATE',
+            'AVPC_NEPC_TIMELINE_DATE_SOURCE',
+            'AVPC_NEPC_TIMELINE_DATE_PRECISION',
+            'AVPC_NEPC_TIMELINE_LABEL_SOURCE',
         ]
     )
 
@@ -1249,7 +1324,12 @@ def summarize_survival_cohort(cohort: pl.DataFrame, label="cohort"):
 
     if 'AVPC_NEPC' in cohort.columns:
         n_avpc_nepc = int(cohort['AVPC_NEPC'].sum())
-        print(f"AVPC_NEPC (timeline, broad): {n_avpc_nepc}")
+        print(f"AVPC_NEPC (AVPC or strict NEPC): {n_avpc_nepc}")
+        if 'AVPC_NEPC_TIMELINE' in cohort.columns:
+            print(
+                "  vs. timeline union (AVPC or NEPC_TIMELINE): "
+                f"{int(cohort['AVPC_NEPC_TIMELINE'].sum())}"
+            )
         if n_avpc_nepc:
             avpc_nepc_times = cohort.filter(
                 pl.col('AVPC_NEPC').eq(1) & pl.col('TT_AVPC_NEPC').is_not_null()
@@ -1293,7 +1373,7 @@ def summarize_survival_cohort(cohort: pl.DataFrame, label="cohort"):
 
     if 'AVPC' in cohort.columns:
         n_avpc = int(cohort['AVPC'].sum())
-        print(f"AVPC (timeline, >=3 Aparicio criteria): {n_avpc}")
+        print(f"AVPC (timeline, >=4 Aparicio criteria): {n_avpc}")
         if n_avpc:
             avpc_times = cohort.filter(
                 pl.col('AVPC').eq(1) & pl.col('TT_AVPC').is_not_null()
@@ -1364,7 +1444,7 @@ def main():
              "for the 'avpc_nepc' endpoint (the union of AVPC and NEPC, with "
              "NEPC-precedence timing), and AVPC/AVPC_DATE for the 'avpc' "
              "endpoint (the timeline's AVPC-only component, "
-             "has_avpc/avpc_date -- >=3 Aparicio criteria, independent of any "
+             "has_avpc/avpc_date -- >=4 Aparicio criteria, independent of any "
              "NEPC feature). Same file as --nepc-labels by default. A "
              "missing file is not fatal: AVPC_NEPC/AVPC columns come out "
              "null and only the platinum (and nepc, if mounted) endpoint(s) "

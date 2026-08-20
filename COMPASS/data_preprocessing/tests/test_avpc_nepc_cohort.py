@@ -45,6 +45,22 @@ def _write_labels(tmp_path, rows: dict, name="avpc_nepc_labels.parquet"):
     return path
 
 
+def _strict_nepc_df(rows: dict | None = None) -> pl.DataFrame:
+    """A load_nepc_dx_labels-shaped frame for the *strict* veto-gated NEPC
+    label, which is what build_survival_cohort now unions with AVPC to form
+    the modeled AVPC_NEPC endpoint."""
+    if rows is None:
+        return load_nepc_dx_labels(None)
+    return pl.DataFrame(rows).with_columns(
+        pl.col("DFCI_MRN").cast(pl.Int64),
+        pl.col("NEPC_DATE").str.to_datetime("%Y-%m-%d", strict=False),
+        pl.col("NEPC").cast(pl.Int64),
+        pl.col("NEPC_DATE_SOURCE").cast(pl.Utf8),
+        pl.col("NEPC_DATE_PRECISION").cast(pl.Utf8),
+        pl.col("NEPC_LABEL_SOURCE").cast(pl.Utf8),
+    )
+
+
 def _full_label_row(**overrides) -> dict:
     row = {
         "DFCI_MRN": ["1001"],
@@ -224,8 +240,15 @@ class TestBuildSurvivalCohortAvpcNepc:
         by_mrn = {row["DFCI_MRN"]: row for row in cohort.iter_rows(named=True)}
         assert by_mrn[1002]["AVPC_NEPC"] == 0
         assert by_mrn[1002]["AVPC_NEPC_LABEL_SOURCE"] == "auto_negative_no_evidence"
-        # The patient the labels file DID cover keeps its own label_source.
-        assert by_mrn[1001]["AVPC_NEPC_LABEL_SOURCE"] == "timeline_positive"
+        # 1001 is a timeline positive via has_nepc_timeline only, with no
+        # strict NEPC label and no AVPC -- under the modeled definition
+        # (AVPC or strict NEPC) it is negative, and its label_source reflects
+        # the recomputed union, not the timeline builder's own verdict. The
+        # timeline's verdict is preserved in the audit column.
+        assert by_mrn[1001]["AVPC_NEPC"] == 0
+        assert by_mrn[1001]["AVPC_NEPC_LABEL_SOURCE"] == "auto_negative_no_evidence"
+        assert by_mrn[1001]["AVPC_NEPC_TIMELINE"] == 1
+        assert by_mrn[1001]["AVPC_NEPC_TIMELINE_LABEL_SOURCE"] == "timeline_positive"
 
     def test_tt_avpc_nepc_derivation_for_event_and_censored(self, tmp_path):
         """TT_AVPC_NEPC = event date minus anchor when the event occurred,
@@ -249,7 +272,17 @@ class TestBuildSurvivalCohortAvpcNepc:
             },
         )
         avpc_nepc_df = load_avpc_nepc_labels(avpc_nepc_path)
-        nepc_df = load_nepc_dx_labels(None)
+        # 2001 carries the strict NEPC label so the modeled union fires on it.
+        nepc_df = _strict_nepc_df(
+            {
+                "DFCI_MRN": [2001],
+                "NEPC_DATE": ["2020-04-10"],
+                "NEPC": [1],
+                "NEPC_DATE_SOURCE": ["stated"],
+                "NEPC_DATE_PRECISION": ["day"],
+                "NEPC_LABEL_SOURCE": ["nepc_dx_positive"],
+            }
+        )
 
         cohort = build_survival_cohort(
             mrns, anchor_df, platinum_df, status_df,
@@ -259,9 +292,100 @@ class TestBuildSurvivalCohortAvpcNepc:
         # Anchor 2020-01-01 -> event 2020-04-10 is 100 days.
         assert by_mrn[2001]["AVPC_NEPC"] == 1
         assert by_mrn[2001]["TT_AVPC_NEPC"] == 100
+        assert by_mrn[2001]["AVPC_NEPC_LABEL_SOURCE"] == "nepc_strict"
         # Censored: follow-up end (2022-01-01) minus anchor (2020-01-01) = 731 days.
         assert by_mrn[2002]["AVPC_NEPC"] == 0
         assert by_mrn[2002]["TT_AVPC_NEPC"] == 731
+
+    def test_avpc_arm_fires_union_with_avpc_timing(self, tmp_path):
+        """AVPC alone (no strict NEPC) makes the union positive, dated at
+        AVPC_DATE."""
+        mrns = [2101]
+        status_df, anchor_df, platinum_df = self._base_cohort_frames(mrns)
+        avpc_nepc_path = _write_labels(
+            tmp_path,
+            _full_label_row(
+                DFCI_MRN=["2101"],
+                has_avpc=[1],
+                avpc_date=["2020-04-10"],
+                has_nepc_timeline=[0],
+                nepc_timeline_date=[None],
+                n_avpc_criteria=[4],
+            ),
+        )
+        cohort = build_survival_cohort(
+            mrns, anchor_df, platinum_df, status_df,
+            nepc_df=_strict_nepc_df(),
+            avpc_nepc_df=load_avpc_nepc_labels(avpc_nepc_path),
+        )
+        row = cohort.row(0, named=True)
+        assert row["AVPC"] == 1
+        assert row["AVPC_NEPC"] == 1
+        assert row["TT_AVPC_NEPC"] == 100
+        assert row["AVPC_NEPC_LABEL_SOURCE"] == "avpc_criteria"
+
+    def test_strict_nepc_takes_timing_precedence_over_earlier_avpc(self, tmp_path):
+        """When both arms fire, NEPC precedence dates the event at NEPC_DATE
+        even though AVPC crossed threshold earlier."""
+        mrns = [2201]
+        status_df, anchor_df, platinum_df = self._base_cohort_frames(mrns)
+        avpc_nepc_path = _write_labels(
+            tmp_path,
+            _full_label_row(
+                DFCI_MRN=["2201"],
+                has_avpc=[1],
+                avpc_date=["2020-04-10"],  # 100 days, earlier
+                n_avpc_criteria=[4],
+            ),
+        )
+        nepc_df = _strict_nepc_df(
+            {
+                "DFCI_MRN": [2201],
+                "NEPC_DATE": ["2020-07-19"],  # 200 days, later
+                "NEPC": [1],
+                "NEPC_DATE_SOURCE": ["stated"],
+                "NEPC_DATE_PRECISION": ["day"],
+                "NEPC_LABEL_SOURCE": ["nepc_dx_positive"],
+            }
+        )
+        cohort = build_survival_cohort(
+            mrns, anchor_df, platinum_df, status_df,
+            nepc_df=nepc_df,
+            avpc_nepc_df=load_avpc_nepc_labels(avpc_nepc_path),
+        )
+        row = cohort.row(0, named=True)
+        assert row["AVPC_NEPC"] == 1
+        assert row["TT_AVPC_NEPC"] == 200
+        assert row["AVPC_NEPC_LABEL_SOURCE"] == "nepc_strict"
+
+    def test_undated_avpc_positive_is_censored_out_of_union(self, tmp_path):
+        """An AVPC positive with no parseable avpc_date carries no event time;
+        it must be demoted rather than entering the union undated."""
+        mrns = [2301]
+        status_df, anchor_df, platinum_df = self._base_cohort_frames(mrns)
+        avpc_nepc_path = _write_labels(
+            tmp_path,
+            _full_label_row(
+                DFCI_MRN=["2301"],
+                has_avpc=[1],
+                avpc_date=[None],
+                has_nepc_timeline=[0],
+                nepc_timeline_date=[None],
+                has_avpc_nepc=[0],
+                avpc_nepc_date=[None],
+                n_avpc_criteria=[4],
+            ),
+        )
+        cohort = build_survival_cohort(
+            mrns, anchor_df, platinum_df, status_df,
+            nepc_df=_strict_nepc_df(),
+            avpc_nepc_df=load_avpc_nepc_labels(avpc_nepc_path),
+        )
+        row = cohort.row(0, named=True)
+        assert row["AVPC"] == 0
+        assert row["AVPC_NEPC"] == 0
+        # Censored at follow-up end, not left with a null event time.
+        assert row["TT_AVPC_NEPC"] == 731
 
     def test_cohort_builds_with_no_avpc_nepc_labels_mounted(self):
         """Passing avpc_nepc_df=None (the default) must not break the

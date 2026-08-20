@@ -115,14 +115,14 @@ ENDPOINTS = {
         "duration_col": "t_avpc",
         "event_col": "AVPC",
         "description": "Time from the treatment anchor (first ADT exposure = time 0) to "
-                        "first meeting AVPC (>=3 Aparicio criteria, independent of any NEPC "
+                        "first meeting AVPC (>=4 Aparicio criteria, independent of any NEPC "
                         "feature), from the longitudinal AVPC/NEPC criteria timeline",
     },
     "avpc_nepc": {
         "duration_col": "t_avpc_nepc",
         "event_col": "AVPC_NEPC",
         "description": "Time from the treatment anchor (first ADT exposure = time 0) to the "
-                        "first documented AVPC (>=3 Aparicio criteria) or NEPC criterion, "
+                        "first documented AVPC (>=4 Aparicio criteria) or NEPC criterion, "
                         "from the longitudinal criteria timeline",
     },
 }

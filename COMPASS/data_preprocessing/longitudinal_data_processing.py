@@ -658,7 +658,7 @@ def build_longitudinal_prediction_data(
         pred_df["t_nepc"] = pred_df["t_nepc"].fillna(pred_df["t_last_contact"])
 
     # AVPC endpoint, built the same way: days from the treatment anchor to
-    # first meeting AVPC (>=3 Aparicio criteria, independent of any NEPC
+    # first meeting AVPC (>=4 Aparicio criteria, independent of any NEPC
     # feature) for AVPC-positive patients, otherwise days from the anchor to
     # last contact (censored). Absent when the survival cohort was built
     # without the LLM annotations mounted, in which case the avpc endpoint

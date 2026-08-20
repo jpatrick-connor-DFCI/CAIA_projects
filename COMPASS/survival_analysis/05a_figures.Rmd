@@ -69,11 +69,22 @@ dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
 # Mirrors COMPASS.survival_analysis.cox_aggregated.ENDPOINTS. The suffix is ""
 # for platinum (the historical un-suffixed tree) and "_<endpoint>" otherwise,
 # matching compass_pipeline.make_endpoint_runs().
+# duration_col is the LANDMARK-relative column produced by make_outcome_df in
+# the per-endpoint prediction-input build. stage1_duration_col is the
+# ANCHOR-relative column that compile_COMPASS_cohort_data.py writes into the
+# Stage 1 cohort. They are different columns at different stages: the lowercase
+# t_* names do NOT exist in the Stage 1 CSV, so sections 2-5 (which read Stage 1)
+# must use TT_*. Using t_* there silently yields all-NA durations and collapses
+# every prevalent/incident count to zero.
 ENDPOINT_SPECS <- list(
-  platinum   = list(event_col = "PLATINUM",   duration_col = "t_platinum",   label = "Platinum"),
-  nepc       = list(event_col = "NEPC",       duration_col = "t_nepc",       label = "NEPC"),
-  avpc       = list(event_col = "AVPC",       duration_col = "t_avpc",       label = "AVPC"),
-  avpc_nepc  = list(event_col = "AVPC_NEPC",  duration_col = "t_avpc_nepc",  label = "AVPC/NEPC")
+  platinum   = list(event_col = "PLATINUM",   duration_col = "t_platinum",
+                    stage1_duration_col = "TT_PLATINUM",  label = "Platinum"),
+  nepc       = list(event_col = "NEPC",       duration_col = "t_nepc",
+                    stage1_duration_col = "TT_NEPC",      label = "NEPC"),
+  avpc       = list(event_col = "AVPC",       duration_col = "t_avpc",
+                    stage1_duration_col = "TT_AVPC",      label = "AVPC"),
+  avpc_nepc  = list(event_col = "AVPC_NEPC",  duration_col = "t_avpc_nepc",
+                    stage1_duration_col = "TT_AVPC_NEPC", label = "AVPC/NEPC")
 )
 ENDPOINTS <- names(ENDPOINT_SPECS)
 
@@ -192,18 +203,46 @@ endpoint_long <- NULL
 if (!is.null(cohort) && length(ENDPOINTS) > 0) {
   endpoint_long <- map_dfr(ENDPOINTS, function(ep) {
     spec <- ENDPOINT_SPECS[[ep]]
-    dur <- if (spec$duration_col %in% names(cohort)) {
-      suppressWarnings(as.numeric(cohort[[spec$duration_col]]))
-    } else NA_real_
+    # Prefer the Stage 1 (anchor-relative) column; fall back to the
+    # landmark-relative name only if a build carried it here instead.
+    dur_col <- NULL
+    for (cand in c(spec$stage1_duration_col, spec$duration_col)) {
+      if (!is.null(cand) && cand %in% names(cohort)) { dur_col <- cand; break }
+    }
+    if (is.null(dur_col)) {
+      # Never fall back to a scalar NA: that silently zeroes every
+      # prevalent/incident count instead of reporting the real problem.
+      MISSING <<- c(MISSING, sprintf(
+        "%s duration column: neither %s nor %s is in the Stage 1 cohort",
+        ep, spec$stage1_duration_col, spec$duration_col))
+      warning(sprintf("No duration column for %s; its timing rows are dropped.", ep))
+      return(NULL)
+    }
     tibble(
       !!ID_COL := cohort[[ID_COL]],
       endpoint = ep,
       event    = suppressWarnings(as.numeric(cohort[[spec$event_col]])) %>% replace_na(0),
-      duration = dur
+      duration = suppressWarnings(as.numeric(cohort[[dur_col]])),
+      duration_col_used = dur_col
     )
-  }) %>%
-    mutate(endpoint = factor(endpoint, levels = ENDPOINTS,
-                             labels = ENDPOINT_LABELS[ENDPOINTS]))
+  })
+
+  if (is.null(endpoint_long) || nrow(endpoint_long) == 0) {
+    endpoint_long <- NULL
+  } else {
+    # Report the resolved column per endpoint. If this ever prints a t_* name
+    # for a Stage 1 read, the timing columns are not what this document assumes.
+    endpoint_long %>%
+      distinct(endpoint, duration_col_used) %>%
+      { cat("duration column used per endpoint:\n"); print(as.data.frame(.)) }
+
+    # Restrict to endpoints that actually produced rows, so a dropped endpoint
+    # does not linger as an empty factor level in every table and plot.
+    ENDPOINTS <- ENDPOINTS[ENDPOINTS %in% unique(endpoint_long$endpoint)]
+    endpoint_long <- endpoint_long %>%
+      mutate(endpoint = factor(endpoint, levels = ENDPOINTS,
+                               labels = ENDPOINT_LABELS[ENDPOINTS]))
+  }
 }
 ```
 
