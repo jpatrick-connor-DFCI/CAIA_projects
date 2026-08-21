@@ -5,8 +5,7 @@ Description:
 Longitudinal lab trajectories and Kaplan-Meier curves stratified by the
 `ADT_INTENT` label from `classify_adt_intent.py`.
 
-Two views of the same three groups (METASTATIC / LOCALIZED_ADJUVANT /
-INDETERMINATE):
+Two views of the same two groups (METASTATIC / LOCALIZED_ADJUVANT):
 
   1. Lab trajectories -- testosterone and PSA from one year before the ADT
      anchor to five years after, summarized as a median with an IQR band in
@@ -95,10 +94,12 @@ if str(_REPO_ROOT) not in sys.path:
 ID_COL = "DFCI_MRN"
 
 INTENT_COL = "ADT_INTENT"
+# The label is binary. INDETERMINATE is kept in the order and palette only so
+# that previously written label files still plot; current runs never emit it.
 INTENT_ORDER = ["METASTATIC", "LOCALIZED_ADJUVANT", "INDETERMINATE"]
 
 # Colours are fixed per intent class so every figure in the set is read the
-# same way. Red = metastatic, blue = adjuvant, grey = indeterminate.
+# same way. Red = metastatic, blue = adjuvant, grey = legacy indeterminate.
 INTENT_COLORS = {
     "METASTATIC": "#c1272d",
     "LOCALIZED_ADJUVANT": "#0b6ba8",

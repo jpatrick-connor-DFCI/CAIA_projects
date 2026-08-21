@@ -8,6 +8,8 @@ same-day duplicate rows so record counts cannot stand in for duration.
 
 from __future__ import annotations
 
+import os
+import tempfile
 from datetime import datetime, timedelta
 
 import polars as pl
@@ -29,6 +31,10 @@ from COMPASS.data_preprocessing.classify_adt_intent import (
 from COMPASS.data_preprocessing.validate_adt_intent import (
     compute_first_metastasis_icd_date,
     compute_psa_nadir_features,
+    load_met_burden_reference,
+    load_stage_reference,
+    report_against_met_burden,
+    report_stage_contradictions,
 )
 
 ADT_START = datetime(2015, 1, 1)
@@ -215,16 +221,16 @@ def test_ongoing_adt_at_last_contact_is_metastatic():
 # ---------------------------------------------------------------------------
 
 
-def test_short_course_truncated_by_data_cutoff_is_indeterminate():
+def test_short_course_truncated_by_data_cutoff_is_not_adjuvant():
     """The single most important rule: an 18-month course whose follow-up ends
     right at the last fill is indistinguishable from ongoing therapy, and must
-    never be labelled adjuvant."""
+    never be labelled adjuvant. With no third class it falls to METASTATIC."""
     meds = _meds(_depot_course(1, months=18))
     last_fill = ADT_START + timedelta(days=90 * (18 // 3))
     labelled = classify_adt_intent(
         meds, follow_up=_follow_up(1, last_fill + timedelta(days=5))
     )
-    assert _intent(labelled, 1) == INTENT_INDETERMINATE
+    assert _intent(labelled, 1) == INTENT_METASTATIC
     # What matters is that the patient is kept, not which disqualifier is
     # named: cutting follow-up at the last fill trips both the ongoing-therapy
     # and the insufficient-observation test, and either is a correct reason.
@@ -236,11 +242,15 @@ def test_short_course_truncated_by_data_cutoff_is_indeterminate():
 
 
 def test_missing_follow_up_cannot_yield_adjuvant():
-    """Without follow-up dates, censoring cannot be ruled out for anyone."""
+    """Without follow-up dates, censoring cannot be ruled out for anyone, so
+    nobody is excluded and everybody is assumed METASTATIC."""
     meds = _meds(_depot_course(1, months=18))
     labelled = classify_adt_intent(meds, follow_up=None)
-    assert _intent(labelled, 1) == INTENT_INDETERMINATE
+    assert _intent(labelled, 1) == INTENT_METASTATIC
+    assert not _excluded(labelled, 1)
     assert _reason(labelled, 1) == "retained_insufficient_followup"
+    # Assumed, not evidenced -- the audit flag must say so.
+    assert not labelled["HAS_POSITIVE_METASTATIC_EVIDENCE"][0]
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +491,58 @@ def test_intent_and_exclusion_flag_agree_on_the_adjuvant_class():
     assert mismatched.height == 0
 
 
+def test_label_is_binary_and_mirrors_the_exclusion_flag():
+    """No INDETERMINATE class: every patient is one of two labels, and the
+    label is exactly IS_LOCALIZED_ADJUVANT restated."""
+    meds = _meds(
+        _depot_course(1, months=24)          # excludable
+        + _depot_course(2, months=48)        # too long
+        + _depot_course(3, months=6)         # short but under-observed below
+        + [(4, "DOCETAXEL", ADT_START)]
+        + _depot_course(4, months=12)        # escalation
+    )
+    labelled = classify_adt_intent(
+        meds,
+        follow_up=_follow_up_many([1, 2, 3, 4], ADT_START + timedelta(days=2500)),
+    )
+    assert set(labelled["ADT_INTENT"].to_list()) <= {
+        INTENT_METASTATIC,
+        INTENT_LOCALIZED,
+    }
+    mismatched = labelled.filter(
+        (pl.col("ADT_INTENT") == INTENT_LOCALIZED)
+        != pl.col("IS_LOCALIZED_ADJUVANT")
+    )
+    assert mismatched.height == 0
+
+
+def test_metastatic_separates_evidenced_from_assumed():
+    """The assumption has to stay auditable: a patient with a taxane and one
+    merely lacking adjuvant evidence share a label but not the audit flag."""
+    meds = _meds(
+        _depot_course(1, months=12)
+        + [(1, "DOCETAXEL", ADT_START + timedelta(days=200))]
+        + _depot_course(2, months=6)
+        + [
+            (2, "LEUPROLIDE ACETATE", ADT_START + timedelta(days=720 + 90 * i))
+            for i in range(2)
+        ]
+    )
+    labelled = classify_adt_intent(
+        meds, follow_up=_follow_up_many([1, 2], ADT_START + timedelta(days=2500))
+    )
+    assert _intent(labelled, 1) == INTENT_METASTATIC
+    assert _intent(labelled, 2) == INTENT_METASTATIC
+
+    def flag(mrn):
+        return labelled.filter(pl.col("DFCI_MRN") == mrn)[
+            "HAS_POSITIVE_METASTATIC_EVIDENCE"
+        ][0]
+
+    assert flag(1)       # taxane: affirmatively evidenced
+    assert not flag(2)   # two short episodes: metastatic by assumption only
+
+
 def test_escalation_tiers_are_disjoint():
     assert not (DEFINITIVE_METASTATIC_MEDS & ARPI_METASTATIC_MEDS)
 
@@ -631,3 +693,113 @@ def test_psa_nadir_ignores_pre_adt_measurements():
     got = compute_psa_nadir_features(labs)
     assert got["PSA_NADIR"][0] == 5.0
     assert got["PSA_N_POST_ADT"][0] == 1
+
+
+# ---------------------------------------------------------------------------
+# Cross-reference against clinical_text_embedding_project stage / met burden
+# ---------------------------------------------------------------------------
+
+
+def _xref_labelled() -> pl.DataFrame:
+    """Four labelled patients spanning both stage cells that matter."""
+    return pl.DataFrame(
+        {
+            "DFCI_MRN": [1, 2, 3, 4],
+            "ADT_INTENT": [
+                INTENT_LOCALIZED,
+                INTENT_METASTATIC,
+                INTENT_METASTATIC,
+                INTENT_LOCALIZED,
+            ],
+            "IS_LOCALIZED_ADJUVANT": [True, False, False, True],
+            "ADT_EXCLUSION_REASON": ["excluded_completed_adjuvant_course"] * 4,
+            "ADT_SPAN_DAYS": [400, 2000, 1500, 300],
+        }
+    )
+
+
+def test_stage_reference_normalizes_and_dedupes():
+    """Unknown stages drop out; duplicate MRNs collapse to one row."""
+    raw = pl.DataFrame(
+        {
+            "DFCI_MRN": [1.0, 2.0, 2.0, 3.0],
+            "CANCER_STAGE": ["I", "IV", "IV", "Unknown"],
+        }
+    )
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "cancer_stage_df.csv")
+        raw.write_csv(path)
+        got = load_stage_reference(path).sort("DFCI_MRN")
+    assert got["DFCI_MRN"].to_list() == [1, 2]
+    assert got["IS_STAGE_IV"].to_list() == [False, True]
+
+
+def test_stage_reference_reconstructs_legacy_one_hot():
+    """Older files carry only drop-first dummies; all-zero means stage I."""
+    raw = pl.DataFrame(
+        {
+            "DFCI_MRN": [7, 8, 9],
+            "CANCER_STAGE_II": [0, 1, 0],
+            "CANCER_STAGE_III": [0, 0, 0],
+            "CANCER_STAGE_IV": [0, 0, 1],
+        }
+    )
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "legacy_stage.csv")
+        raw.write_csv(path)
+        got = load_stage_reference(path).sort("DFCI_MRN")
+    assert got["CANCER_STAGE"].to_list() == ["I", "II", "IV"]
+
+
+def test_only_stage_iv_among_excluded_counts_as_a_contradiction():
+    """Stage I-III + METASTATIC is progression, not error; the reverse is.
+
+    The label adjudicates in one direction only, so the contradiction report
+    must pick up the excluded stage IV patient and nothing else.
+    """
+    stage = pl.DataFrame(
+        {
+            "DFCI_MRN": [1, 2, 3, 4],
+            "CANCER_STAGE": ["I", "IV", "III", "IV"],
+            "IS_STAGE_IV": [False, True, False, True],
+        }
+    )
+    labelled = _xref_labelled().join(stage, on="DFCI_MRN", how="left")
+    got = report_stage_contradictions(labelled)
+    assert got.height == 1
+    assert got["DFCI_MRN"][0] == 4
+
+
+def test_met_burden_coverage_gaps_are_not_counted_as_zero_burden():
+    """A patient missing from the burden file is uncovered, not met-free.
+
+    Treating an absent row as zero would silently understate burden in the
+    excluded group -- exactly the direction that would hide a bad exclusion.
+    """
+    raw = pl.DataFrame(
+        {
+            "DFCI_MRN": [1.0, 2.0],
+            "N_MET_SITES": [0, 3],
+            "MET_SITE_bone": [0, 1],
+            "MET_SITE_liver": [0, 1],
+        }
+    )
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "met_burden_df.csv")
+        raw.write_csv(path)
+        burden = load_met_burden_reference(path)
+
+    labelled = _xref_labelled().join(burden, on="DFCI_MRN", how="left")
+    got = report_against_met_burden(labelled)
+    # Patients 3 and 4 have no burden row and must not enter any denominator.
+    assert got["n_covered"].sum() == 2
+    localized = got.filter(pl.col("ADT_INTENT") == INTENT_LOCALIZED)
+    assert localized["n_covered"][0] == 1
+    assert localized["pct_zero_sites"][0] == 100.0
+
+
+def test_cross_reference_reports_are_silent_without_the_files():
+    """Both reports degrade to empty frames when the columns are absent."""
+    labelled = _xref_labelled()
+    assert report_against_met_burden(labelled).height == 0
+    assert report_stage_contradictions(labelled).height == 0

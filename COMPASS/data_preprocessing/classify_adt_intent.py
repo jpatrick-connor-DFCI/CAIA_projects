@@ -15,9 +15,11 @@ That collapses two clinically opposite populations into one cohort:
 
 Mixing them biases every downstream survival model, because the adjuvant group
 contributes long event-free follow-up unrelated to the mCRPC/NEPC biology the
-models target. This module emits `ADT_INTENT` in {METASTATIC,
-LOCALIZED_ADJUVANT, INDETERMINATE} plus the features and the rule that produced
-it, so any label can be audited back to its evidence.
+models target. This module emits `IS_LOCALIZED_ADJUVANT` -- the exclusion
+decision -- alongside `ADT_INTENT` in {METASTATIC, LOCALIZED_ADJUVANT} and the
+features behind it, so any label can be audited back to its evidence. The
+label is binary: absent positive evidence of a completed localized course, a
+patient is assumed METASTATIC.
 
 Medication-only by design
 -------------------------
@@ -50,10 +52,9 @@ Two guards keep that reconstruction honest, and both are load-bearing:
      gaps; `ADT_N_RECORDS` is reported for audit but never classifies.
   2. A patient whose first ADT falls shortly before the data cutoff looks
      exactly like one who stopped after a short course. Anyone with less than
-     `MIN_FOLLOWUP_DAYS` of observation after ADT start is forced to
-     INDETERMINATE and can never be labelled LOCALIZED_ADJUVANT. Without this
-     the adjuvant class silently fills with recently-treated metastatic
-     patients.
+     `MIN_FOLLOWUP_DAYS` of observation after ADT start can never be labelled
+     LOCALIZED_ADJUVANT, and is therefore assumed METASTATIC. Without this the
+     adjuvant class silently fills with recently-treated metastatic patients.
 
 This module is purely additive: it changes no existing constant, cohort rule,
 or pipeline output.
@@ -190,6 +191,8 @@ FLARE_PROPHYLAXIS_WINDOW_DAYS = 30
 
 INTENT_METASTATIC = "METASTATIC"
 INTENT_LOCALIZED = "LOCALIZED_ADJUVANT"
+# No longer emitted: ambiguity resolves to METASTATIC rather than into a third
+# class. Kept so existing readers of previously written files still import.
 INTENT_INDETERMINATE = "INDETERMINATE"
 
 
@@ -462,10 +465,11 @@ def classify_adt_intent(
 
     Three columns come out of this:
 
-      IS_LOCALIZED_ADJUVANT  bool  -- positive evidence of a completed course
-      ADT_EXCLUSION_REASON   str   -- why a patient was, or was not, excluded
-      ADT_INTENT             str   -- LOCALIZED_ADJUVANT / METASTATIC /
-                                      INDETERMINATE, retained for continuity
+      IS_LOCALIZED_ADJUVANT             bool -- evidence of a completed course
+      ADT_EXCLUSION_REASON              str  -- why kept, or why excluded
+      ADT_INTENT                        str  -- LOCALIZED_ADJUVANT / METASTATIC
+      HAS_POSITIVE_METASTATIC_EVIDENCE  bool -- audit: affirmative evidence,
+                                                as opposed to assumed by default
 
     A patient is LOCALIZED_ADJUVANT only when every one of these holds:
 
@@ -484,12 +488,17 @@ def classify_adt_intent(
     test: ARPIs are approved in non-metastatic CRPC and used in high-risk
     localized disease, so they neither prove nor disprove adjuvant intent.
 
-    ADT_INTENT sub-divides the retained group into METASTATIC (positive
-    evidence of advanced disease: escalation, sustained ADT over <= 2 episodes,
-    or ongoing ADT past 2 years) and INDETERMINATE (retained, but no positive
-    evidence either way). That split is descriptive only -- both are kept by an
-    exclusion filter, and no downstream filter should depend on the boundary
-    between them.
+    ADT_INTENT is binary and is exactly this decision under another name:
+    LOCALIZED_ADJUVANT where IS_LOCALIZED_ADJUVANT is true, METASTATIC
+    everywhere else. There is no INDETERMINATE class -- a patient with no
+    evidence of localized therapy is assumed metastatic rather than parked in a
+    third bin.
+
+    That assumption is deliberate but not free: it means the METASTATIC group
+    mixes patients with affirmative evidence and patients who merely lack
+    evidence of anything else. HAS_POSITIVE_METASTATIC_EVIDENCE separates the
+    two so the assumption can be audited, and a sensitivity analysis can
+    restrict to the affirmatively-evidenced subset.
     """
     prepared = load_medications_for_intent(meds)
     episodes = build_adt_episodes(prepared, gap_threshold_days=gap_threshold_days)
@@ -583,9 +592,22 @@ def classify_adt_intent(
         .alias("ADT_EXCLUSION_REASON")
     )
 
-    # ADT_INTENT is descriptive: it sub-divides the retained group for the
-    # validation reports. An exclusion filter uses IS_LOCALIZED_ADJUVANT and
-    # must not depend on the METASTATIC / INDETERMINATE boundary.
+    # ADT_INTENT is binary: absent positive evidence of a completed localized
+    # course, the patient is assumed METASTATIC. There is no INDETERMINATE
+    # class -- ambiguity resolves toward metastatic rather than into a third
+    # bin, so the label is exactly the exclusion decision under another name.
+    intent = (
+        pl.when(is_localized_adjuvant)
+        .then(pl.lit(INTENT_LOCALIZED))
+        .otherwise(pl.lit(INTENT_METASTATIC))
+        .alias("ADT_INTENT")
+    )
+
+    # Retained on purpose. With ambiguity folded into METASTATIC, the label no
+    # longer shows how well-evidenced a given metastatic call is; this flag
+    # separates the patients with affirmative evidence (escalation, sustained
+    # ADT, or ongoing therapy past 2 years) from those assumed metastatic by
+    # default. Not used to classify -- it is how the assumption gets audited.
     has_positive_metastatic_evidence = (
         pl.col("HAS_DEFINITIVE_ESCALATION")
         | (
@@ -598,17 +620,9 @@ def classify_adt_intent(
         )
     ).fill_null(False)
 
-    intent = (
-        pl.when(is_localized_adjuvant)
-        .then(pl.lit(INTENT_LOCALIZED))
-        .when(has_positive_metastatic_evidence)
-        .then(pl.lit(INTENT_METASTATIC))
-        .otherwise(pl.lit(INTENT_INDETERMINATE))
-        .alias("ADT_INTENT")
-    )
-
     return df.with_columns(
         is_localized_adjuvant.alias("IS_LOCALIZED_ADJUVANT"),
+        has_positive_metastatic_evidence.alias("HAS_POSITIVE_METASTATIC_EVIDENCE"),
         exclusion_reason,
         intent,
     ).drop("_days_from_last_adt_to_end")
@@ -672,8 +686,8 @@ def main() -> None:
     else:
         print(
             "WARNING: no --patient-status-path given. Administrative censoring "
-            "cannot be ruled out, so every patient will fall to INDETERMINATE "
-            "rather than LOCALIZED_ADJUVANT.",
+            "cannot be ruled out, so no patient can be excluded as a completed "
+            "adjuvant course and every patient will be assumed METASTATIC.",
             file=sys.stderr,
         )
 
