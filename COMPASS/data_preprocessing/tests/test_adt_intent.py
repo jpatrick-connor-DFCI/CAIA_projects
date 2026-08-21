@@ -245,15 +245,24 @@ def test_short_course_truncated_by_data_cutoff_is_not_adjuvant():
     )
 
 
-def test_missing_follow_up_cannot_yield_adjuvant():
-    """Without follow-up dates, censoring cannot be ruled out for anyone, so
-    nobody is excluded and everybody is assumed METASTATIC."""
+def test_missing_follow_up_now_yields_adjuvant():
+    """The minimum observation window no longer classifies, so an 18-month
+    single course is excluded even with no follow-up dates at all. This was
+    impossible under the previous rule and is the main thing that changed.
+
+    ADT_ONGOING_AT_LAST_CONTACT is false here rather than true: with no last
+    contact date the ongoing test cannot fire, so it does not stand in for the
+    dropped guard when follow-up is missing entirely."""
     meds = _meds(_depot_course(1, months=18))
     labelled = classify_adt_intent(meds, follow_up=None)
-    assert _intent(labelled, 1) == INTENT_METASTATIC
-    assert not _excluded(labelled, 1)
-    assert _reason(labelled, 1) == "retained_insufficient_followup"
-    # Assumed, not evidenced -- the audit flag must say so.
+    row = labelled.filter(pl.col("DFCI_MRN") == 1)
+    assert _intent(labelled, 1) == INTENT_LOCALIZED
+    assert _excluded(labelled, 1)
+    assert _reason(labelled, 1) == "excluded_completed_adjuvant_course"
+    # Unknown observation window still reads as not-long-enough on the audit
+    # column; it simply no longer vetoes the label.
+    assert not row["ADJUVANT_OBSERVED_LONG_ENOUGH"][0]
+    # Not metastatic-evidenced either -- absent follow-up is absent evidence.
     assert not labelled["HAS_POSITIVE_METASTATIC_EVIDENCE"][0]
 
 
@@ -419,10 +428,11 @@ def test_relugolix_only_patient_keeps_span_without_an_anchor_drug():
     assert episodes["ADT_SPAN_DAYS"][0] == 360
 
 
-def test_exclusion_requires_all_five_criteria():
+def test_exclusion_requires_all_four_criteria():
     """Each criterion is load-bearing: break any one of an otherwise-excludable
     patient and they must be retained. This is the exclusion framing's core
-    property -- removal takes positive evidence, retention takes none."""
+    property -- removal takes positive evidence, retention takes none. The
+    minimum observation window is not among them and is checked separately."""
     fu_end = ADT_START + timedelta(days=2500)
 
     # Baseline: 24-month single course, stopped, long follow-up -> excluded.
@@ -459,19 +469,58 @@ def test_exclusion_requires_all_five_criteria():
     assert not _excluded(escalated, 1)
     assert _reason(escalated, 1) == "retained_definitive_escalation"
 
-    # Break follow-up: not observed long enough to call the course complete.
-    short_fu = classify_adt_intent(
-        _meds(base), follow_up=_follow_up(1, ADT_START + timedelta(days=800))
+    # Break the stop test: last contact falls inside the ongoing window of the
+    # final fill, so therapy cannot be called complete.
+    last_fill = ADT_START + timedelta(days=90 * (24 // 3))
+    ongoing = classify_adt_intent(
+        _meds(base), follow_up=_follow_up(1, last_fill + timedelta(days=30))
     )
-    assert not _excluded(short_fu, 1)
+    assert not _excluded(ongoing, 1)
+    assert _reason(ongoing, 1) == "retained_adt_ongoing"
+
+    # Short observation, by contrast, does NOT retain: follow-up ends after the
+    # ongoing window but before `min_followup_days`, and the patient is still
+    # excluded. This is the term that was removed. A 6-month course is needed
+    # to fit both conditions -- on a 24-month one the last fill already sits at
+    # day 720, so clearing the 270-day ongoing window puts total follow-up past
+    # 730 by construction.
+    short_course = _depot_course(1, months=6)
+    short_last_fill = ADT_START + timedelta(days=90 * (6 // 3))
+    short_fu = classify_adt_intent(
+        _meds(short_course),
+        follow_up=_follow_up(1, short_last_fill + timedelta(days=280)),
+    )
+    row = short_fu.filter(pl.col("DFCI_MRN") == 1)
+    assert row["FOLLOWUP_DAYS_FROM_ADT"][0] < 730
+    assert not row["ADT_ONGOING_AT_LAST_CONTACT"][0]
+    assert not row["ADJUVANT_OBSERVED_LONG_ENOUGH"][0]
+    assert _excluded(short_fu, 1)
 
 
-def test_nothing_is_excluded_without_follow_up():
-    """Retention is the default, and absent follow-up is absent evidence: no
-    patient may be excluded when observation windows are unknown."""
+def test_exclusion_without_follow_up_rests_on_the_medication_terms():
+    """With follow_up=None the observation window is unknown for everyone, and
+    that no longer blocks exclusion: escalation, span and episode count decide
+    on their own. Both short single courses here are excluded; a long course
+    and an escalated one are still retained."""
     meds = _meds(_depot_course(1, months=24) + _depot_course(2, months=6))
     labelled = classify_adt_intent(meds, follow_up=None)
-    assert not labelled["IS_LOCALIZED_ADJUVANT"].any()
+    assert labelled["IS_LOCALIZED_ADJUVANT"].all()
+    # Nobody was observed long enough; it simply no longer matters.
+    assert not labelled["ADJUVANT_OBSERVED_LONG_ENOUGH"].any()
+
+    # The medication-side terms still bite without any follow-up at all.
+    others = classify_adt_intent(
+        _meds(
+            _depot_course(3, months=48)
+            + _depot_course(4, months=12)
+            + [(4, "DOCETAXEL", ADT_START + timedelta(days=200))]
+        ),
+        follow_up=None,
+    )
+    assert not _excluded(others, 3)
+    assert _reason(others, 3) == "retained_adt_span_too_long"
+    assert not _excluded(others, 4)
+    assert _reason(others, 4) == "retained_definitive_escalation"
 
 
 def test_intent_and_exclusion_flag_agree_on_the_adjuvant_class():
