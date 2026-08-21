@@ -33,10 +33,12 @@ from COMPASS.data_preprocessing.validate_adt_intent import (
     compute_psa_nadir_features,
     compute_met_burden_at_adt,
     load_met_burden_reference,
+    load_stage_max_around_adt,
     load_stage_nearest_adt,
     load_stage_reference,
     report_against_met_burden,
     report_stage_contradictions,
+    report_stage_max,
 )
 
 ADT_START = datetime(2015, 1, 1)
@@ -868,6 +870,128 @@ def test_stage_outside_the_matching_window_is_dropped():
         labelled = pl.DataFrame({"DFCI_MRN": [3], "ADT_FIRST_DATE": [datetime(2015, 1, 1)]})
         assert load_stage_nearest_adt(path, labelled).height == 0
         assert load_stage_nearest_adt(path, labelled, window_days=1000).height == 1
+
+
+def test_max_stage_splits_before_and_after_adt_start():
+    """The headline behaviour: worst stage on each side, kept separate."""
+    with tempfile.TemporaryDirectory() as d:
+        path = _note_level(
+            d,
+            [
+                (1, datetime(2014, 1, 1), 2),
+                (1, datetime(2014, 6, 1), 3),
+                (1, datetime(2015, 6, 1), 4),
+            ],
+        )
+        labelled = pl.DataFrame({"DFCI_MRN": [1], "ADT_FIRST_DATE": [datetime(2015, 1, 1)]})
+        got = load_stage_max_around_adt(path, labelled)
+
+    assert got["MAX_STAGE_BEFORE"][0] == "III"
+    assert got["MAX_STAGE_AFTER"][0] == "IV"
+    assert got["STAGE_N_OBS_BEFORE"][0] == 2
+    assert got["STAGE_N_OBS_AFTER"][0] == 1
+    assert got["STAGE_UPSTAGED_AFTER_ADT"][0] is True
+
+
+def test_max_stage_is_not_windowed_by_default():
+    """A maximum means "worst ever recorded", so a distant stage IV must count.
+
+    Windowing it would report III for this patient and quietly contradict the
+    column name. The nearest-stage loader windows on purpose; this one must
+    not inherit that.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        path = _note_level(
+            d,
+            [
+                (2, datetime(2012, 1, 1), 4),   # ~1100 days pre-ADT
+                (2, datetime(2014, 11, 1), 3),
+            ],
+        )
+        labelled = pl.DataFrame({"DFCI_MRN": [2], "ADT_FIRST_DATE": [datetime(2015, 1, 1)]})
+        assert load_stage_max_around_adt(path, labelled)["MAX_STAGE_BEFORE"][0] == "IV"
+        # Opting into a window is allowed, and then it does truncate.
+        windowed = load_stage_max_around_adt(path, labelled, window_days=365)
+        assert windowed["MAX_STAGE_BEFORE"][0] == "III"
+
+
+def test_max_stage_day_count_marks_first_attainment_not_last():
+    """Among observations tied at the max, the earliest is reported, so an
+    early stage IV is distinguishable from a late restatement of it."""
+    with tempfile.TemporaryDirectory() as d:
+        path = _note_level(
+            d,
+            [
+                (3, datetime(2014, 1, 1), 4),
+                (3, datetime(2014, 12, 1), 4),
+            ],
+        )
+        labelled = pl.DataFrame({"DFCI_MRN": [3], "ADT_FIRST_DATE": [datetime(2015, 1, 1)]})
+        got = load_stage_max_around_adt(path, labelled)
+
+    assert got["MAX_STAGE_BEFORE_DAYS_FROM_ADT"][0] == -365
+
+
+def test_max_stage_on_adt_start_date_counts_as_before():
+    """The stage was on the record when treatment began."""
+    with tempfile.TemporaryDirectory() as d:
+        path = _note_level(d, [(4, datetime(2015, 1, 1), 4)])
+        labelled = pl.DataFrame({"DFCI_MRN": [4], "ADT_FIRST_DATE": [datetime(2015, 1, 1)]})
+        got = load_stage_max_around_adt(path, labelled)
+
+    assert got["MAX_STAGE_BEFORE"][0] == "IV"
+    assert got["STAGE_N_OBS_AFTER"][0] == 0
+    assert got["MAX_STAGE_AFTER"][0] is None
+
+
+def test_max_stage_absent_side_is_null_not_a_floor_value():
+    """No pre-ADT staging note is "unknown", not stage I, and an unknown side
+    must not produce a confident upstaging verdict."""
+    with tempfile.TemporaryDirectory() as d:
+        path = _note_level(d, [(5, datetime(2015, 6, 1), 3)])
+        labelled = pl.DataFrame({"DFCI_MRN": [5], "ADT_FIRST_DATE": [datetime(2015, 1, 1)]})
+        got = load_stage_max_around_adt(path, labelled)
+
+    assert got["MAX_STAGE_BEFORE"][0] is None
+    assert got["IS_MAX_STAGE_IV_BEFORE"][0] is None
+    assert got["STAGE_N_OBS_BEFORE"][0] == 0
+    assert got["MAX_STAGE_AFTER"][0] == "III"
+    assert got["STAGE_UPSTAGED_AFTER_ADT"][0] is None
+
+
+def test_max_stage_empty_input_keeps_schema():
+    """The notebook joins this frame unconditionally, so an empty result still
+    has to carry every column."""
+    with tempfile.TemporaryDirectory() as d:
+        path = _note_level(d, [(9, datetime(2015, 1, 1), 4)])
+        labelled = pl.DataFrame({"DFCI_MRN": [404], "ADT_FIRST_DATE": [datetime(2015, 1, 1)]})
+        got = load_stage_max_around_adt(path, labelled)
+
+    assert got.height == 0
+    for col in ("MAX_STAGE_BEFORE", "MAX_STAGE_AFTER", "STAGE_UPSTAGED_AFTER_ADT"):
+        assert col in got.columns
+
+
+def test_max_stage_report_denominators_are_covered_patients():
+    """A patient with no pre-ADT note must drop out of the pre-ADT
+    denominator rather than count as not-stage-IV."""
+    labelled = pl.DataFrame(
+        {
+            "DFCI_MRN": [1, 2],
+            "ADT_INTENT": ["METASTATIC", "METASTATIC"],
+            "MAX_STAGE_BEFORE_INT": [4, None],
+            "IS_MAX_STAGE_IV_BEFORE": [True, None],
+            "MAX_STAGE_AFTER_INT": [4, 4],
+            "IS_MAX_STAGE_IV_AFTER": [True, True],
+            "STAGE_UPSTAGED_AFTER_ADT": [False, None],
+        }
+    )
+    rep = report_stage_max(labelled)
+
+    assert rep["n"][0] == 2
+    assert rep["n_before"][0] == 1
+    assert rep["pct_iv_before"][0] == 100.0   # 1/1 covered, not 1/2
+    assert rep["n_after"][0] == 2
 
 
 def test_met_burden_counts_only_codes_on_or_before_adt_start():

@@ -715,6 +715,156 @@ def load_stage_nearest_adt(
     ).drop_nulls("CANCER_STAGE")
 
 
+def load_stage_max_around_adt(
+    note_level_path: str,
+    labelled: pl.DataFrame,
+    window_days: int | None = None,
+) -> pl.DataFrame:
+    """Highest stage ever recorded before, and after, ADT start.
+
+    Complements `load_stage_nearest_adt`. Nearest answers "what did the record
+    say at the moment intent was chosen"; max answers "how bad did this patient
+    ever look on each side of that moment". They disagree in the informative
+    cases -- a stage IV note two years pre-ADT followed by an unstaged workup
+    near ADT start gives nearest=null (or a lower stage) but max_before=IV.
+
+    Emits, per patient:
+      * MAX_STAGE_BEFORE / MAX_STAGE_BEFORE_INT / IS_MAX_STAGE_IV_BEFORE
+      * MAX_STAGE_AFTER  / MAX_STAGE_AFTER_INT  / IS_MAX_STAGE_IV_AFTER
+      * STAGE_N_OBS_BEFORE / STAGE_N_OBS_AFTER
+      * MAX_STAGE_BEFORE_DAYS_FROM_ADT / MAX_STAGE_AFTER_DAYS_FROM_ADT --
+        signed days to the *first* observation attaining that max, so an
+        early stage IV is distinguishable from a late one.
+      * STAGE_UPSTAGED_AFTER_ADT -- max after strictly exceeds max before.
+
+    Observations dated exactly on ADT start count as "before": the stage was on
+    the record when treatment began.
+
+    `window_days` is None by default, deliberately. A maximum is a
+    "worst ever recorded" summary, so windowing it would report III for a
+    patient whose stage IV sits just outside the cutoff -- the opposite of what
+    the column claims. Pass an int only if you specifically want a
+    window-limited max, and note it will then disagree with an unwindowed one.
+
+    Patients with no qualifying observation on a side get nulls there, not a
+    floor value: absent staging is not stage I. Coverage on each side is
+    reported separately by STAGE_N_OBS_BEFORE / STAGE_N_OBS_AFTER.
+    """
+    notes = (
+        pl.read_parquet(note_level_path)
+        .filter(pl.col("DERIVED_STAGE_MERGED").is_not_null())
+        .select(
+            _to_int_id(),
+            pl.col("EVENT_DATE").cast(pl.Datetime, strict=False).alias("_STAGE_DT"),
+            pl.col("DERIVED_STAGE_MERGED").cast(pl.Int64).alias("_STAGE_INT"),
+        )
+        .drop_nulls(["_STAGE_DT", "_STAGE_INT"])
+    )
+
+    anchors = labelled.select(
+        pl.col(ID_COL),
+        pl.col("ADT_FIRST_DATE").cast(pl.Datetime, strict=False).alias("_ANCHOR_DT"),
+    ).drop_nulls("_ANCHOR_DT")
+
+    joined = notes.join(anchors, on=ID_COL, how="inner").with_columns(
+        (pl.col("_STAGE_DT") - pl.col("_ANCHOR_DT")).dt.total_days().alias("_SIGNED_DAYS")
+    )
+    if window_days is not None:
+        joined = joined.filter(pl.col("_SIGNED_DAYS").abs() <= window_days)
+
+    out_schema = {
+        ID_COL: pl.Int64,
+        "MAX_STAGE_BEFORE_INT": pl.Int64,
+        "MAX_STAGE_BEFORE": pl.Utf8,
+        "IS_MAX_STAGE_IV_BEFORE": pl.Boolean,
+        "MAX_STAGE_BEFORE_DAYS_FROM_ADT": pl.Int64,
+        "STAGE_N_OBS_BEFORE": pl.UInt32,
+        "MAX_STAGE_AFTER_INT": pl.Int64,
+        "MAX_STAGE_AFTER": pl.Utf8,
+        "IS_MAX_STAGE_IV_AFTER": pl.Boolean,
+        "MAX_STAGE_AFTER_DAYS_FROM_ADT": pl.Int64,
+        "STAGE_N_OBS_AFTER": pl.UInt32,
+        "STAGE_UPSTAGED_AFTER_ADT": pl.Boolean,
+    }
+    if joined.height == 0:
+        return pl.DataFrame(schema=out_schema)
+
+    def _side(frame: pl.DataFrame, suffix: str) -> pl.DataFrame:
+        if frame.height == 0:
+            return pl.DataFrame(
+                schema={
+                    ID_COL: pl.Int64,
+                    f"MAX_STAGE_{suffix}_INT": pl.Int64,
+                    f"MAX_STAGE_{suffix}_DAYS_FROM_ADT": pl.Int64,
+                    f"STAGE_N_OBS_{suffix}": pl.UInt32,
+                }
+            )
+        # Highest stage wins; among observations tied at that max, the earliest
+        # one is reported, so the day count marks when the patient first
+        # reached it rather than the most recent restatement.
+        return (
+            frame.sort(["_STAGE_INT", "_SIGNED_DAYS"], descending=[True, False])
+            .group_by(ID_COL)
+            .agg(
+                pl.col("_STAGE_INT").first().alias(f"MAX_STAGE_{suffix}_INT"),
+                pl.col("_SIGNED_DAYS").first().alias(f"MAX_STAGE_{suffix}_DAYS_FROM_ADT"),
+                pl.len().cast(pl.UInt32).alias(f"STAGE_N_OBS_{suffix}"),
+            )
+        )
+
+    before = _side(joined.filter(pl.col("_SIGNED_DAYS") <= 0), "BEFORE")
+    after = _side(joined.filter(pl.col("_SIGNED_DAYS") > 0), "AFTER")
+
+    out = (
+        joined.select(ID_COL)
+        .unique()
+        .join(before, on=ID_COL, how="left")
+        .join(after, on=ID_COL, how="left")
+        .with_columns(
+            pl.col("STAGE_N_OBS_BEFORE").fill_null(0).cast(pl.UInt32),
+            pl.col("STAGE_N_OBS_AFTER").fill_null(0).cast(pl.UInt32),
+        )
+        .with_columns(
+            pl.col("MAX_STAGE_BEFORE_INT")
+            .replace_strict(_STAGE_INT_TO_ROMAN, default=None)
+            .alias("MAX_STAGE_BEFORE"),
+            pl.col("MAX_STAGE_AFTER_INT")
+            .replace_strict(_STAGE_INT_TO_ROMAN, default=None)
+            .alias("MAX_STAGE_AFTER"),
+            (pl.col("MAX_STAGE_BEFORE_INT") == 4).alias("IS_MAX_STAGE_IV_BEFORE"),
+            (pl.col("MAX_STAGE_AFTER_INT") == 4).alias("IS_MAX_STAGE_IV_AFTER"),
+            # Null on either side means "unknown", not "no upstaging".
+            (pl.col("MAX_STAGE_AFTER_INT") > pl.col("MAX_STAGE_BEFORE_INT")).alias(
+                "STAGE_UPSTAGED_AFTER_ADT"
+            ),
+        )
+    )
+    return out.select(list(out_schema))
+
+
+def report_stage_max(labelled: pl.DataFrame) -> pl.DataFrame:
+    """Max-stage coverage and stage IV rate on each side of ADT start, by class.
+
+    Percentages are over *covered* patients on that side, not over the class:
+    a patient with no pre-ADT staging note is absent from the pre-ADT
+    denominator rather than counted as not-stage-IV.
+    """
+    if "MAX_STAGE_BEFORE_INT" not in labelled.columns:
+        return pl.DataFrame()
+    return (
+        labelled.group_by("ADT_INTENT")
+        .agg(
+            pl.len().cast(pl.UInt32).alias("n"),
+            pl.col("MAX_STAGE_BEFORE_INT").is_not_null().sum().alias("n_before"),
+            (pl.col("IS_MAX_STAGE_IV_BEFORE").mean() * 100).alias("pct_iv_before"),
+            pl.col("MAX_STAGE_AFTER_INT").is_not_null().sum().alias("n_after"),
+            (pl.col("IS_MAX_STAGE_IV_AFTER").mean() * 100).alias("pct_iv_after"),
+            (pl.col("STAGE_UPSTAGED_AFTER_ADT").mean() * 100).alias("pct_upstaged"),
+        )
+        .sort("ADT_INTENT")
+    )
+
+
 def compute_met_burden_at_adt(
     icds: pl.DataFrame,
     labelled: pl.DataFrame,
@@ -820,6 +970,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--stage-note-level-path",
+        default=None,
+        help=(
+            "CANCER_STAGE_NOTE_LEVEL.parquet from PROFILE_data_processing's "
+            "derive_cancer_annotations.ipynb. Dated per-report stage; adds "
+            "both the ADT-anchored nearest stage and the max stage before / "
+            "after ADT start. Preferred over --cancer-stage-path, whose STAGE "
+            "is the earliest note a patient ever had."
+        ),
+    )
+    parser.add_argument(
         "--met-burden-path",
         default=None,
         help=(
@@ -873,6 +1034,17 @@ def main() -> None:
     if args.met_burden_path:
         burden_ref = load_met_burden_reference(args.met_burden_path)
         labelled = labelled.join(burden_ref, on=ID_COL, how="left")
+
+    if args.stage_note_level_path:
+        labelled = labelled.join(
+            load_stage_nearest_adt(args.stage_note_level_path, labelled),
+            on=ID_COL,
+            how="left",
+        ).join(
+            load_stage_max_around_adt(args.stage_note_level_path, labelled),
+            on=ID_COL,
+            how="left",
+        )
 
     print("\n=== Class counts ===")
     print(
@@ -943,6 +1115,19 @@ def main() -> None:
         )
         if stage_bad.height:
             print(stage_bad.head(20))
+
+    if "MAX_STAGE_BEFORE_INT" in labelled.columns:
+        n_before = labelled.filter(pl.col("MAX_STAGE_BEFORE").is_not_null()).height
+        n_after = labelled.filter(pl.col("MAX_STAGE_AFTER").is_not_null()).height
+        print(
+            f"\n=== Max stage around ADT start "
+            f"({n_before:,} pre / {n_after:,} post of {labelled.height:,}) ==="
+        )
+        print(report_stage_max(labelled))
+        print(
+            "  NOTE: pct_iv_before / pct_iv_after are over covered patients on\n"
+            "  that side (n_before / n_after), not over the class."
+        )
 
     if "N_MET_SITES" in labelled.columns:
         n_cov = labelled.filter(pl.col("N_MET_SITES").is_not_null()).height
