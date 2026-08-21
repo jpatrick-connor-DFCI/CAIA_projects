@@ -453,18 +453,43 @@ def classify_adt_intent(
     patient can be labelled LOCALIZED_ADJUVANT, because a short observed course
     cannot then be distinguished from a truncated one.
 
-    Rules fire in order, first match wins:
+    The label is framed as an *exclusion*: the question asked of each patient
+    is "is there positive evidence this was a completed adjuvant course?", and
+    only patients that clear that bar are set aside. Everything else is
+    retained, so the burden of proof sits on removing a patient rather than on
+    keeping one -- the conservative direction when the label feeds a cohort
+    filter.
 
-      1. definitive escalation                          -> METASTATIC
-      3. span > 3 years over at most 2 episodes         -> METASTATIC
-      4. ADT ongoing at last contact and span > 2 years -> METASTATIC
-      5. insufficient follow-up after ADT start         -> INDETERMINATE
-      6. single short course, not ongoing               -> LOCALIZED_ADJUVANT
-      7. anything else                                  -> INDETERMINATE
+    Three columns come out of this:
 
-    Rule 2 (ARPI with sustained ADT) is retired: ARPI exposure no longer
-    affects the label in either direction. The numbering keeps the gap so
-    ADT_INTENT_REASON values stay comparable with previously written files.
+      IS_LOCALIZED_ADJUVANT  bool  -- positive evidence of a completed course
+      ADT_EXCLUSION_REASON   str   -- why a patient was, or was not, excluded
+      ADT_INTENT             str   -- LOCALIZED_ADJUVANT / METASTATIC /
+                                      INDETERMINATE, retained for continuity
+
+    A patient is LOCALIZED_ADJUVANT only when every one of these holds:
+
+      - no definitive escalation (taxane, radium-223, sipuleucel-T,
+        estramustine, mitoxantrone) at any time
+      - ADT span <= `adjuvant_max_span_days` (default 1095, i.e. 36 months)
+      - a single episode -- a restart after a gap > `gap_threshold_days` is
+        salvage for recurrence, not adjuvant therapy
+      - therapy demonstrably stopped: no fill within ONGOING_WINDOW_DAYS of
+        last contact
+      - at least `min_followup_days` (default 730) observed after ADT start,
+        so a truncated course cannot masquerade as a completed one
+
+    Failing any one of them leaves the patient retained. ARPI exposure is
+    recorded (HAS_ARPI, FIRST_ARPI_DATE) but is deliberately not part of the
+    test: ARPIs are approved in non-metastatic CRPC and used in high-risk
+    localized disease, so they neither prove nor disprove adjuvant intent.
+
+    ADT_INTENT sub-divides the retained group into METASTATIC (positive
+    evidence of advanced disease: escalation, sustained ADT over <= 2 episodes,
+    or ongoing ADT past 2 years) and INDETERMINATE (retained, but no positive
+    evidence either way). That split is descriptive only -- both are kept by an
+    exclusion filter, and no downstream filter should depend on the boundary
+    between them.
     """
     prepared = load_medications_for_intent(meds)
     episodes = build_adt_episodes(prepared, gap_threshold_days=gap_threshold_days)
@@ -517,65 +542,76 @@ def classify_adt_intent(
         | (pl.col("FOLLOWUP_DAYS_FROM_ADT") < min_followup_days)
     )
 
-    # ARPI exposure no longer classifies. It neither forces METASTATIC (the
-    # former rule 2) nor blocks LOCALIZED_ADJUVANT (the former ~HAS_ARPI term in
-    # rule 6): ARPIs are approved in non-metastatic CRPC and are increasingly
-    # used in high-risk localized disease, so the drug alone does not identify
-    # the population. HAS_ARPI is still computed and written out for audit.
-    #
-    # Rule numbers are deliberately NOT renumbered -- the retired rule 2 leaves
-    # a gap so ADT_INTENT_REASON stays comparable with previously written files.
-    intent = (
-        pl.when(pl.col("HAS_DEFINITIVE_ESCALATION"))
-        .then(pl.lit(INTENT_METASTATIC))
-        .when(
+    # ---------------------------------------------------------------------
+    # The exclusion test. Framed positively -- each term is a thing that must
+    # be TRUE for a patient to be set aside as a completed adjuvant course --
+    # so that missing or ambiguous evidence retains the patient by default.
+    # ARPI exposure is deliberately absent: it is approved in non-metastatic
+    # CRPC and used in high-risk localized disease, so it neither proves nor
+    # disproves adjuvant intent. It is still recorded for audit.
+    # ---------------------------------------------------------------------
+    fits_adjuvant_duration = pl.col("ADT_SPAN_DAYS") <= adjuvant_max_span_days
+    single_episode = pl.col("ADT_N_EPISODES") <= 1
+    therapy_stopped = ~pl.col("ADT_ONGOING_AT_LAST_CONTACT")
+    no_escalation = ~pl.col("HAS_DEFINITIVE_ESCALATION")
+    observed_long_enough = ~insufficient_followup
+
+    is_localized_adjuvant = (
+        no_escalation
+        & fits_adjuvant_duration
+        & single_episode
+        & therapy_stopped
+        & observed_long_enough
+    ).fill_null(False)
+
+    # Why a patient was kept. Ordered most- to least-decisive so the reason
+    # names the strongest disqualifier rather than whichever is checked first.
+    exclusion_reason = (
+        pl.when(is_localized_adjuvant)
+        .then(pl.lit("excluded_completed_adjuvant_course"))
+        .when(pl.col("HAS_DEFINITIVE_ESCALATION"))
+        .then(pl.lit("retained_definitive_escalation"))
+        .when(~fits_adjuvant_duration)
+        .then(pl.lit("retained_adt_span_too_long"))
+        .when(~single_episode)
+        .then(pl.lit("retained_multiple_episodes"))
+        .when(~therapy_stopped)
+        .then(pl.lit("retained_adt_ongoing"))
+        .when(insufficient_followup)
+        .then(pl.lit("retained_insufficient_followup"))
+        .otherwise(pl.lit("retained_unresolved"))
+        .alias("ADT_EXCLUSION_REASON")
+    )
+
+    # ADT_INTENT is descriptive: it sub-divides the retained group for the
+    # validation reports. An exclusion filter uses IS_LOCALIZED_ADJUVANT and
+    # must not depend on the METASTATIC / INDETERMINATE boundary.
+    has_positive_metastatic_evidence = (
+        pl.col("HAS_DEFINITIVE_ESCALATION")
+        | (
             (pl.col("ADT_SPAN_DAYS") > SUSTAINED_ADT_DAYS)
             & (pl.col("ADT_N_EPISODES") <= 2)
         )
-        .then(pl.lit(INTENT_METASTATIC))
-        .when(
+        | (
             pl.col("ADT_ONGOING_AT_LAST_CONTACT")
             & (pl.col("ADT_SPAN_DAYS") > 730)
         )
-        .then(pl.lit(INTENT_METASTATIC))
-        .when(insufficient_followup)
-        .then(pl.lit(INTENT_INDETERMINATE))
-        .when(
-            (pl.col("ADT_SPAN_DAYS") <= adjuvant_max_span_days)
-            & (pl.col("ADT_N_EPISODES") <= 1)
-            & ~pl.col("ADT_ONGOING_AT_LAST_CONTACT")
-        )
+    ).fill_null(False)
+
+    intent = (
+        pl.when(is_localized_adjuvant)
         .then(pl.lit(INTENT_LOCALIZED))
+        .when(has_positive_metastatic_evidence)
+        .then(pl.lit(INTENT_METASTATIC))
         .otherwise(pl.lit(INTENT_INDETERMINATE))
         .alias("ADT_INTENT")
     )
 
-    reason = (
-        pl.when(pl.col("HAS_DEFINITIVE_ESCALATION"))
-        .then(pl.lit("rule1_definitive_escalation"))
-        .when(
-            (pl.col("ADT_SPAN_DAYS") > SUSTAINED_ADT_DAYS)
-            & (pl.col("ADT_N_EPISODES") <= 2)
-        )
-        .then(pl.lit("rule3_continuous_adt_over_3y"))
-        .when(
-            pl.col("ADT_ONGOING_AT_LAST_CONTACT")
-            & (pl.col("ADT_SPAN_DAYS") > 730)
-        )
-        .then(pl.lit("rule4_ongoing_adt_at_last_contact"))
-        .when(insufficient_followup)
-        .then(pl.lit("rule5_insufficient_followup"))
-        .when(
-            (pl.col("ADT_SPAN_DAYS") <= adjuvant_max_span_days)
-            & (pl.col("ADT_N_EPISODES") <= 1)
-            & ~pl.col("ADT_ONGOING_AT_LAST_CONTACT")
-        )
-        .then(pl.lit("rule6_single_short_course"))
-        .otherwise(pl.lit("rule7_unresolved"))
-        .alias("ADT_INTENT_REASON")
-    )
-
-    return df.with_columns(intent, reason).drop("_days_from_last_adt_to_end")
+    return df.with_columns(
+        is_localized_adjuvant.alias("IS_LOCALIZED_ADJUVANT"),
+        exclusion_reason,
+        intent,
+    ).drop("_days_from_last_adt_to_end")
 
 
 def summarize_intent(labelled: pl.DataFrame) -> pl.DataFrame:

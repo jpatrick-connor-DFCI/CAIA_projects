@@ -257,9 +257,13 @@ def report_gap_sensitivity(
 
 
 def report_contradictions(labelled: pl.DataFrame) -> pl.DataFrame:
-    """Patients labelled adjuvant who nonetheless carry a metastasis code.
+    """Excluded patients who nonetheless carry a metastasis code.
 
-    These are the label's hard errors and the right sample for manual review.
+    Under an exclusion framing these are the errors that actually cost
+    something: a patient dropped from the cohort who had coded metastatic
+    disease. Retained patients without a code are not errors -- retention is
+    the default and needs no evidence -- so only this direction is reported.
+    These are the right sample for manual review.
     """
     if "FIRST_METASTASIS_ICD_DATE" not in labelled.columns:
         return pl.DataFrame()
@@ -268,7 +272,8 @@ def report_contradictions(labelled: pl.DataFrame) -> pl.DataFrame:
         for c in (
             ID_COL,
             "ADT_INTENT",
-            "ADT_INTENT_REASON",
+            "IS_LOCALIZED_ADJUVANT",
+            "ADT_EXCLUSION_REASON",
             "ADT_SPAN_DAYS",
             "ADT_N_EPISODES",
             "FOLLOWUP_DAYS_FROM_ADT",
@@ -277,7 +282,7 @@ def report_contradictions(labelled: pl.DataFrame) -> pl.DataFrame:
         if c in labelled.columns
     ]
     return labelled.filter(
-        (pl.col("ADT_INTENT") == INTENT_LOCALIZED)
+        pl.col("IS_LOCALIZED_ADJUVANT")
         & pl.col("FIRST_METASTASIS_ICD_DATE").is_not_null()
     ).select(cols)
 
@@ -348,9 +353,16 @@ def main() -> None:
         .sort("n_patients", descending=True)
     )
 
-    print("\n=== Reason breakdown ===")
+    print("\n=== Exclusion decision ===")
     print(
-        labelled.group_by(["ADT_INTENT", "ADT_INTENT_REASON"])
+        labelled.group_by("IS_LOCALIZED_ADJUVANT")
+        .agg(pl.len().alias("n_patients"))
+        .sort("IS_LOCALIZED_ADJUVANT")
+    )
+
+    print("\n=== Reason breakdown (why each patient was kept or excluded) ===")
+    print(
+        labelled.group_by(["ADT_EXCLUSION_REASON", "ADT_INTENT"])
         .agg(pl.len().alias("n_patients"))
         .sort("n_patients", descending=True)
     )
@@ -371,7 +383,7 @@ def main() -> None:
 
     survival = report_survival(labelled)
     if survival.height:
-        print("\n=== Survival by class (primary go/no-go) ===")
+        print("\n=== Survival by class (descriptive) ===")
         print(survival)
         met = survival.filter(pl.col("ADT_INTENT") == INTENT_METASTATIC)
         loc = survival.filter(pl.col("ADT_INTENT") == INTENT_LOCALIZED)
@@ -381,6 +393,33 @@ def main() -> None:
                     "\nWARNING: LOCALIZED_ADJUVANT does not show better survival "
                     "than METASTATIC. The label is not separating the "
                     "populations -- do not use it downstream until resolved."
+                )
+
+    # The primary go/no-go under an exclusion framing: the contrast that
+    # matters is between the patients the filter drops and the ones it keeps,
+    # not between the two descriptive sub-classes of the retained group.
+    if "DEATH" in labelled.columns:
+        split = (
+            labelled.group_by("IS_LOCALIZED_ADJUVANT")
+            .agg(
+                pl.len().alias("n_patients"),
+                (pl.col("DEATH").cast(pl.Float64).mean() * 100)
+                .round(1)
+                .alias("pct_died"),
+            )
+            .sort("IS_LOCALIZED_ADJUVANT")
+        )
+        print("\n=== Survival: excluded vs retained (primary go/no-go) ===")
+        print(split)
+        excl = split.filter(pl.col("IS_LOCALIZED_ADJUVANT"))
+        keep = split.filter(~pl.col("IS_LOCALIZED_ADJUVANT"))
+        if excl.height and keep.height:
+            if excl["pct_died"][0] >= keep["pct_died"][0]:
+                print(
+                    "\nWARNING: the excluded (adjuvant) group does not show "
+                    "better survival than the retained group. The exclusion is "
+                    "not removing the population it claims to -- do not use it "
+                    "downstream until resolved."
                 )
 
     print("\n=== Class mix by ADT start year (ARPI-era drift) ===")

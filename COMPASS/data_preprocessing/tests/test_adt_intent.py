@@ -69,7 +69,11 @@ def _intent(labelled: pl.DataFrame, mrn: int) -> str:
 
 
 def _reason(labelled: pl.DataFrame, mrn: int) -> str:
-    return labelled.filter(pl.col("DFCI_MRN") == mrn)["ADT_INTENT_REASON"][0]
+    return labelled.filter(pl.col("DFCI_MRN") == mrn)["ADT_EXCLUSION_REASON"][0]
+
+
+def _excluded(labelled: pl.DataFrame, mrn: int) -> bool:
+    return labelled.filter(pl.col("DFCI_MRN") == mrn)["IS_LOCALIZED_ADJUVANT"][0]
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +91,7 @@ def test_definitive_escalation_is_metastatic():
         meds, follow_up=_follow_up(1, ADT_START + timedelta(days=2000))
     )
     assert _intent(labelled, 1) == INTENT_METASTATIC
-    assert _reason(labelled, 1) == "rule1_definitive_escalation"
+    assert _reason(labelled, 1) == "retained_definitive_escalation"
 
 
 def test_arpi_alone_with_short_adt_does_not_force_metastatic():
@@ -104,9 +108,9 @@ def test_arpi_alone_with_short_adt_does_not_force_metastatic():
 
 
 def test_arpi_never_classifies_in_either_direction():
-    """Rule 2 is retired and rule 6 no longer excludes ARPI patients. A 24-month
+    """ARPI is not part of the exclusion test in either direction. A 24-month
     single course is judged on its duration alone, so adding an ARPI must not
-    change the label -- in the old rules this exact patient was METASTATIC."""
+    change the outcome -- under the old rules this patient was METASTATIC."""
     course = _depot_course(1, months=24)
     fu = _follow_up(1, ADT_START + timedelta(days=2500))
 
@@ -119,7 +123,7 @@ def test_arpi_never_classifies_in_either_direction():
     assert _intent(with_arpi, 1) == _intent(without_arpi, 1)
     assert _reason(with_arpi, 1) == _reason(without_arpi, 1)
     assert _intent(with_arpi, 1) == INTENT_LOCALIZED
-    assert _reason(with_arpi, 1) == "rule6_single_short_course"
+    assert _reason(with_arpi, 1) == "excluded_completed_adjuvant_course"
 
 
 def test_arpi_exposure_still_recorded_as_an_audit_feature():
@@ -137,8 +141,9 @@ def test_arpi_exposure_still_recorded_as_an_audit_feature():
     assert labelled["FIRST_ARPI_DATE"][0] == ADT_START + timedelta(days=400)
 
 
-def test_no_reason_string_mentions_the_retired_rule2():
-    """Rule numbers are not renumbered, so the gap must simply stay empty."""
+def test_every_reason_states_whether_the_patient_was_kept():
+    """ADT_EXCLUSION_REASON must read as a decision, so each value says plainly
+    whether the patient was excluded or retained."""
     meds = _meds(
         _depot_course(1, months=24)
         + [(1, "ENZALUTAMIDE", ADT_START + timedelta(days=400))]
@@ -147,9 +152,14 @@ def test_no_reason_string_mentions_the_retired_rule2():
     labelled = classify_adt_intent(
         meds, follow_up=_follow_up_many([1, 2], ADT_START + timedelta(days=2500))
     )
-    assert not any(
-        "rule2" in r for r in labelled["ADT_INTENT_REASON"].to_list()
+    for r in labelled["ADT_EXCLUSION_REASON"].to_list():
+        assert r.startswith("excluded_") or r.startswith("retained_")
+    # The reason must agree with the boolean it explains.
+    disagree = labelled.filter(
+        pl.col("IS_LOCALIZED_ADJUVANT")
+        != pl.col("ADT_EXCLUSION_REASON").str.starts_with("excluded_")
     )
+    assert disagree.height == 0
 
 
 def test_bone_agent_alone_never_classifies():
@@ -176,7 +186,7 @@ def test_continuous_five_year_adt_is_metastatic():
         meds, follow_up=_follow_up(1, ADT_START + timedelta(days=2200))
     )
     assert _intent(labelled, 1) == INTENT_METASTATIC
-    assert _reason(labelled, 1) == "rule3_continuous_adt_over_3y"
+    assert _reason(labelled, 1) == "retained_adt_span_too_long"
 
 
 def test_short_course_with_full_followup_is_adjuvant():
@@ -186,7 +196,7 @@ def test_short_course_with_full_followup_is_adjuvant():
         meds, follow_up=_follow_up(1, ADT_START + timedelta(days=2500))
     )
     assert _intent(labelled, 1) == INTENT_LOCALIZED
-    assert _reason(labelled, 1) == "rule6_single_short_course"
+    assert _reason(labelled, 1) == "excluded_completed_adjuvant_course"
 
 
 def test_ongoing_adt_at_last_contact_is_metastatic():
@@ -215,7 +225,14 @@ def test_short_course_truncated_by_data_cutoff_is_indeterminate():
         meds, follow_up=_follow_up(1, last_fill + timedelta(days=5))
     )
     assert _intent(labelled, 1) == INTENT_INDETERMINATE
-    assert _reason(labelled, 1) == "rule5_insufficient_followup"
+    # What matters is that the patient is kept, not which disqualifier is
+    # named: cutting follow-up at the last fill trips both the ongoing-therapy
+    # and the insufficient-observation test, and either is a correct reason.
+    assert not _excluded(labelled, 1)
+    assert _reason(labelled, 1) in (
+        "retained_adt_ongoing",
+        "retained_insufficient_followup",
+    )
 
 
 def test_missing_follow_up_cannot_yield_adjuvant():
@@ -223,7 +240,7 @@ def test_missing_follow_up_cannot_yield_adjuvant():
     meds = _meds(_depot_course(1, months=18))
     labelled = classify_adt_intent(meds, follow_up=None)
     assert _intent(labelled, 1) == INTENT_INDETERMINATE
-    assert _reason(labelled, 1) == "rule5_insufficient_followup"
+    assert _reason(labelled, 1) == "retained_insufficient_followup"
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +403,82 @@ def test_relugolix_only_patient_keeps_span_without_an_anchor_drug():
     episodes = build_adt_episodes(load_medications_for_intent(meds))
     assert episodes["ADT_FIRST_DATE"][0] == ADT_START
     assert episodes["ADT_SPAN_DAYS"][0] == 360
+
+
+def test_exclusion_requires_all_five_criteria():
+    """Each criterion is load-bearing: break any one of an otherwise-excludable
+    patient and they must be retained. This is the exclusion framing's core
+    property -- removal takes positive evidence, retention takes none."""
+    fu_end = ADT_START + timedelta(days=2500)
+
+    # Baseline: 24-month single course, stopped, long follow-up -> excluded.
+    base = _depot_course(1, months=24)
+    labelled = classify_adt_intent(_meds(base), follow_up=_follow_up(1, fu_end))
+    assert _excluded(labelled, 1)
+
+    # Break duration: 48 months exceeds the adjuvant bound.
+    long_course = classify_adt_intent(
+        _meds(_depot_course(1, months=48)), follow_up=_follow_up(1, fu_end)
+    )
+    assert not _excluded(long_course, 1)
+    assert _reason(long_course, 1) == "retained_adt_span_too_long"
+
+    # Break episode count: a second course after a >270d gap is salvage.
+    two_ep = classify_adt_intent(
+        _meds(
+            _depot_course(1, months=6)
+            + [
+                (1, "LEUPROLIDE ACETATE", ADT_START + timedelta(days=720 + 90 * i))
+                for i in range(3)
+            ]
+        ),
+        follow_up=_follow_up(1, fu_end),
+    )
+    assert not _excluded(two_ep, 1)
+    assert _reason(two_ep, 1) == "retained_multiple_episodes"
+
+    # Break escalation: a taxane disqualifies regardless of duration.
+    escalated = classify_adt_intent(
+        _meds(base + [(1, "DOCETAXEL", ADT_START + timedelta(days=200))]),
+        follow_up=_follow_up(1, fu_end),
+    )
+    assert not _excluded(escalated, 1)
+    assert _reason(escalated, 1) == "retained_definitive_escalation"
+
+    # Break follow-up: not observed long enough to call the course complete.
+    short_fu = classify_adt_intent(
+        _meds(base), follow_up=_follow_up(1, ADT_START + timedelta(days=800))
+    )
+    assert not _excluded(short_fu, 1)
+
+
+def test_nothing_is_excluded_without_follow_up():
+    """Retention is the default, and absent follow-up is absent evidence: no
+    patient may be excluded when observation windows are unknown."""
+    meds = _meds(_depot_course(1, months=24) + _depot_course(2, months=6))
+    labelled = classify_adt_intent(meds, follow_up=None)
+    assert not labelled["IS_LOCALIZED_ADJUVANT"].any()
+
+
+def test_intent_and_exclusion_flag_agree_on_the_adjuvant_class():
+    """ADT_INTENT is retained for continuity, so LOCALIZED_ADJUVANT must mean
+    exactly IS_LOCALIZED_ADJUVANT -- otherwise the two disagree downstream."""
+    meds = _meds(
+        _depot_course(1, months=24)
+        + _depot_course(2, months=48)
+        + _depot_course(3, months=6)
+        + [(4, "DOCETAXEL", ADT_START)]
+        + _depot_course(4, months=12)
+    )
+    labelled = classify_adt_intent(
+        meds,
+        follow_up=_follow_up_many([1, 2, 3, 4], ADT_START + timedelta(days=2500)),
+    )
+    mismatched = labelled.filter(
+        (pl.col("ADT_INTENT") == INTENT_LOCALIZED)
+        != pl.col("IS_LOCALIZED_ADJUVANT")
+    )
+    assert mismatched.height == 0
 
 
 def test_escalation_tiers_are_disjoint():
