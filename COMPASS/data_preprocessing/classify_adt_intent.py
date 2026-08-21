@@ -142,6 +142,20 @@ ADT_EXPOSURE_MEDS = set(ADT_ANCHOR_MEDS) | GNRH_ANTAGONIST_MEDS
 # as short flare-prophylaxis courses.
 DEPOT_ADT_MEDS = ADT_EXPOSURE_MEDS - ANTIANDROGEN_MEDS
 
+# Drugs that may set ADT_FIRST_DATE. Deliberately identical to ADT_ANCHOR_MEDS
+# -- and NOT to DEPOT_ADT_MEDS -- because ADT_FIRST_DATE is cross-checked
+# against TREATMENT_ANCHOR_DATE, which the longitudinal builder derives from
+# ADT_ANCHOR_MEDS. Any drug in one set and not the other shifts the two dates
+# apart for real patients and trips that check: oral antiandrogens (in the
+# anchor set, out of the depot set) move it earlier via the standard
+# flare-prophylaxis lead-in, relugolix (in the depot set, out of the anchor
+# set) moves it earlier for antagonist-first patients.
+#
+# Duration features stay on DEPOT_ADT_MEDS. That is a separate question --
+# refill cadence, not treatment origin -- and relugolix must keep counting
+# toward span even though it can never set the anchor.
+ADT_FIRST_DATE_MEDS = set(ADT_ANCHOR_MEDS)
+
 ALL_INTENT_MEDS = (
     ADT_EXPOSURE_MEDS
     | DEFINITIVE_METASTATIC_MEDS
@@ -217,6 +231,10 @@ def build_adt_episodes(
 ) -> pl.DataFrame:
     """Per-patient ADT exposure features from the sequence of start dates.
 
+    `ADT_FIRST_DATE` is the earliest start in `ADT_FIRST_DATE_MEDS` (identical
+    to the upstream `ADT_ANCHOR_MEDS`) so it agrees with `TREATMENT_ANCHOR_DATE`;
+    every other feature here is measured over depot agents only.
+
     Episodes are maximal runs of depot starts separated by at most
     `gap_threshold_days`. Because same-day duplicate rows are collapsed
     upstream by `apply_dedup`, `ADT_N_RECORDS` is reported for audit only and
@@ -279,8 +297,19 @@ def build_adt_episodes(
         pl.col("_ep_days").max().alias("ADT_LONGEST_EPISODE_DAYS"),
     )
 
+    # ADT_FIRST_DATE comes from the anchor set, not the depot set, so it lines
+    # up with TREATMENT_ANCHOR_DATE downstream. Everything else here is a
+    # duration feature and stays on depot agents.
+    first_date = (
+        meds.filter(
+            pl.col("NCI_PREFERRED_MED_NM").is_in(sorted(ADT_FIRST_DATE_MEDS))
+        )
+        .group_by(ID_COL)
+        .agg(pl.col("MED_START_DT").min().alias("ADT_FIRST_DATE"))
+    )
+
     per_patient_records = depot.group_by(ID_COL).agg(
-        pl.col("MED_START_DT").min().alias("ADT_FIRST_DATE"),
+        pl.col("MED_START_DT").min().alias("_depot_first"),
         pl.col("MED_START_DT").max().alias("ADT_LAST_DATE"),
         pl.len().cast(pl.UInt32).alias("ADT_N_RECORDS"),
         pl.col("NCI_PREFERRED_MED_NM")
@@ -295,6 +324,14 @@ def build_adt_episodes(
 
     return (
         per_patient_records.join(per_patient_episodes, on=ID_COL, how="left")
+        .join(first_date, on=ID_COL, how="left")
+        # A patient whose only ADT is relugolix has depot records but nothing in
+        # the anchor set. Falling back to their first depot date keeps span
+        # measured over real exposure; such a patient has no TREATMENT_ANCHOR_DATE
+        # upstream either, so no anchor comparison is affected.
+        .with_columns(
+            pl.coalesce("ADT_FIRST_DATE", "_depot_first").alias("ADT_FIRST_DATE")
+        )
         .with_columns(
             (pl.col("ADT_LAST_DATE") - pl.col("ADT_FIRST_DATE"))
             .dt.total_days()

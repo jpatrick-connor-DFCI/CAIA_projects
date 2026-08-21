@@ -14,6 +14,7 @@ import polars as pl
 
 from COMPASS.data_preprocessing.classify_adt_intent import (
     ADT_ANCHOR_MEDS,
+    ADT_FIRST_DATE_MEDS,
     ARPI_METASTATIC_MEDS,
     DEFINITIVE_METASTATIC_MEDS,
     INTENT_INDETERMINATE,
@@ -305,6 +306,42 @@ def test_relugolix_counts_as_adt_exposure_without_mutating_anchor_set():
     )
     episodes = build_adt_episodes(load_medications_for_intent(meds))
     assert episodes.height == 1
+    assert episodes["ADT_SPAN_DAYS"][0] == 360
+
+
+def test_first_date_med_set_matches_the_upstream_anchor_set():
+    """ADT_FIRST_DATE is cross-checked against TREATMENT_ANCHOR_DATE, which the
+    longitudinal builder derives from ADT_ANCHOR_MEDS. If the sets drift apart
+    the two dates diverge for real patients and the anchor guard fires."""
+    assert ADT_FIRST_DATE_MEDS == set(ADT_ANCHOR_MEDS)
+
+
+def test_antiandrogen_lead_in_sets_first_date():
+    """The standard flare-prophylaxis bicalutamide lead-in precedes the first
+    depot injection and is in the anchor set, so it -- not the injection --
+    sets ADT_FIRST_DATE. This is the case that made 30% of patients mismatch."""
+    meds = _meds(
+        [
+            (1, "BICALUTAMIDE", ADT_START - timedelta(days=14)),
+            (1, "LEUPROLIDE ACETATE", ADT_START),
+            (1, "LEUPROLIDE ACETATE", ADT_START + timedelta(days=180)),
+        ]
+    )
+    episodes = build_adt_episodes(load_medications_for_intent(meds))
+    assert episodes["ADT_FIRST_DATE"][0] == ADT_START - timedelta(days=14)
+    # ADT_LAST_DATE stays a depot measurement.
+    assert episodes["ADT_LAST_DATE"][0] == ADT_START + timedelta(days=180)
+
+
+def test_relugolix_only_patient_keeps_span_without_an_anchor_drug():
+    """Relugolix is out of the anchor set, so a relugolix-only patient has no
+    anchor-set record; ADT_FIRST_DATE falls back to their first depot date so
+    duration is still measured over real exposure."""
+    meds = _meds(
+        [(1, "RELUGOLIX", ADT_START + timedelta(days=30 * i)) for i in range(13)]
+    )
+    episodes = build_adt_episodes(load_medications_for_intent(meds))
+    assert episodes["ADT_FIRST_DATE"][0] == ADT_START
     assert episodes["ADT_SPAN_DAYS"][0] == 360
 
 
