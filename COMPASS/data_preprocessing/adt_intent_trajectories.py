@@ -568,6 +568,228 @@ def logrank_by_intent(km_input: pl.DataFrame) -> pl.DataFrame:
 # CLI
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Stage / metastatic-burden distribution plots
+# ---------------------------------------------------------------------------
+# These compare the medication-only label against two external references
+# (see validate_adt_intent.load_stage_nearest_adt / compute_met_burden_at_adt,
+# both anchored on ADT_FIRST_DATE). Every panel is drawn as a WITHIN-CLASS
+# percentage rather than a raw count: the two classes differ in size by design
+# -- most of the cohort is retained -- so raw bars would show cohort
+# composition rather than a distributional difference.
+
+STAGE_PLOT_ORDER = ["I", "II", "III", "IV"]
+# Sequential blue: stage is ordinal, so the palette should read as a ramp
+# rather than as four unrelated categories.
+STAGE_COLORS = {
+    "I": "#c6dbef",
+    "II": "#9ecae1",
+    "III": "#4292c6",
+    "IV": "#08519c",
+}
+
+
+def _class_order_present(df: pl.DataFrame, col: str = INTENT_COL) -> list[str]:
+    """INTENT_ORDER restricted to classes actually present, order preserved."""
+    present = set(df[col].unique().to_list())
+    return [c for c in INTENT_ORDER if c in present]
+
+
+def stage_distribution_by_intent(labelled: pl.DataFrame) -> pl.DataFrame:
+    """Within-class stage distribution, as counts and percentages.
+
+    Restricted to patients with a stage observation in the matching window;
+    `n_in_class` is that covered denominator, not the full class size.
+    """
+    if "CANCER_STAGE" not in labelled.columns:
+        return pl.DataFrame()
+    covered = labelled.filter(pl.col("CANCER_STAGE").is_not_null())
+    if covered.height == 0:
+        return pl.DataFrame()
+    counts = covered.group_by([INTENT_COL, "CANCER_STAGE"]).agg(
+        pl.len().alias("n_patients")
+    )
+    totals = covered.group_by(INTENT_COL).agg(pl.len().alias("n_in_class"))
+    return (
+        counts.join(totals, on=INTENT_COL, how="left")
+        .with_columns(
+            (pl.col("n_patients") / pl.col("n_in_class") * 100).round(1).alias("pct")
+        )
+        .sort([INTENT_COL, "CANCER_STAGE"])
+    )
+
+
+def plot_stage_distribution(ax, labelled: pl.DataFrame) -> None:
+    """Stacked stage composition per class, as % within class."""
+    dist = stage_distribution_by_intent(labelled)
+    if dist.height == 0:
+        ax.text(0.5, 0.5, "no stage coverage", ha="center", va="center",
+                transform=ax.transAxes, color="#888888")
+        ax.set_axis_off()
+        return
+
+    classes = _class_order_present(dist)
+    bottoms = {c: 0.0 for c in classes}
+    for stage in STAGE_PLOT_ORDER:
+        heights = []
+        for cls in classes:
+            row = dist.filter(
+                (pl.col(INTENT_COL) == cls) & (pl.col("CANCER_STAGE") == stage)
+            )
+            heights.append(float(row["pct"][0]) if row.height else 0.0)
+        ax.bar(
+            classes, heights,
+            bottom=[bottoms[c] for c in classes],
+            color=STAGE_COLORS[stage], edgecolor="white", linewidth=0.8,
+            label=f"stage {stage}", zorder=3,
+        )
+        for cls, h in zip(classes, heights):
+            if h >= 6:  # only label a slice tall enough to hold the text
+                ax.text(cls, bottoms[cls] + h / 2, f"{h:.0f}%",
+                        ha="center", va="center", fontsize=8,
+                        color="white" if stage in ("III", "IV") else "#222222",
+                        zorder=4)
+            bottoms[cls] += h
+
+    denoms = {
+        r[INTENT_COL]: r["n_in_class"]
+        for r in dist.unique(subset=[INTENT_COL]).iter_rows(named=True)
+    }
+    ax.set_xticks(range(len(classes)))
+    ax.set_xticklabels([f"{c}\n(n={denoms.get(c, 0):,})" for c in classes], fontsize=9)
+    ax.set_ylabel("% of class with a staged observation")
+    ax.set_ylim(0, 100)
+    ax.set_title("Stage nearest ADT start, by medication-derived label")
+    ax.legend(fontsize=8, frameon=False, bbox_to_anchor=(1.01, 1), loc="upper left")
+    ax.grid(axis="y", alpha=0.25, zorder=0)
+    ax.set_axisbelow(True)
+
+
+def met_burden_distribution_by_intent(
+    labelled: pl.DataFrame, max_sites: int = 4
+) -> pl.DataFrame:
+    """Within-class distribution of N_MET_SITES, top-coded at `max_sites`."""
+    if "N_MET_SITES" not in labelled.columns:
+        return pl.DataFrame()
+    covered = labelled.filter(pl.col("N_MET_SITES").is_not_null())
+    if covered.height == 0:
+        return pl.DataFrame()
+    binned = covered.with_columns(
+        pl.min_horizontal(pl.col("N_MET_SITES"), pl.lit(max_sites)).alias("_n_sites")
+    )
+    counts = binned.group_by([INTENT_COL, "_n_sites"]).agg(pl.len().alias("n_patients"))
+    totals = binned.group_by(INTENT_COL).agg(pl.len().alias("n_in_class"))
+    return (
+        counts.join(totals, on=INTENT_COL, how="left")
+        .with_columns(
+            (pl.col("n_patients") / pl.col("n_in_class") * 100).round(1).alias("pct")
+        )
+        .rename({"_n_sites": "n_met_sites"})
+        .sort([INTENT_COL, "n_met_sites"])
+    )
+
+
+def plot_met_burden_distribution(ax, labelled: pl.DataFrame, max_sites: int = 4) -> None:
+    """Grouped bars: % of each class at 0, 1, ... `max_sites`+ organ groups."""
+    dist = met_burden_distribution_by_intent(labelled, max_sites=max_sites)
+    if dist.height == 0:
+        ax.text(0.5, 0.5, "no met-burden coverage", ha="center", va="center",
+                transform=ax.transAxes, color="#888888")
+        ax.set_axis_off()
+        return
+
+    classes = _class_order_present(dist)
+    levels = list(range(max_sites + 1))
+    width = 0.8 / max(len(classes), 1)
+    for i, cls in enumerate(classes):
+        sub = dist.filter(pl.col(INTENT_COL) == cls)
+        lookup = {int(r["n_met_sites"]): float(r["pct"]) for r in sub.iter_rows(named=True)}
+        heights = [lookup.get(l, 0.0) for l in levels]
+        offsets = [l - 0.4 + width * (i + 0.5) for l in levels]
+        n_cls = int(sub["n_in_class"][0])
+        ax.bar(offsets, heights, width=width,
+               color=INTENT_COLORS.get(cls, "#444444"), alpha=0.85,
+               label=f"{cls} (n={n_cls:,})", zorder=3)
+
+    ax.set_xticks(levels)
+    ax.set_xticklabels([str(l) if l < max_sites else f"{max_sites}+" for l in levels])
+    ax.set_xlabel("distinct metastatic organ groups coded by ADT start")
+    ax.set_ylabel("% of class")
+    ax.set_title("Metastatic burden at ADT start, by label")
+    ax.legend(fontsize=8, frameon=False)
+    ax.grid(axis="y", alpha=0.25, zorder=0)
+    ax.set_axisbelow(True)
+
+
+def plot_met_site_pattern(ax, labelled: pl.DataFrame) -> None:
+    """Per-organ-group involvement rate, as horizontal grouped bars.
+
+    Sorted by the metastatic class's rate so the dominant sites read top-down.
+    Bone-predominant spread is the expected prostate pattern; a liver/brain
+    signal skews toward aggressive-variant biology.
+    """
+    site_cols = [c for c in labelled.columns if c.startswith("MET_SITE_")]
+    covered = (
+        labelled.filter(pl.col("N_MET_SITES").is_not_null())
+        if "N_MET_SITES" in labelled.columns
+        else labelled
+    )
+    if not site_cols or covered.height == 0:
+        ax.text(0.5, 0.5, "no met-site coverage", ha="center", va="center",
+                transform=ax.transAxes, color="#888888")
+        ax.set_axis_off()
+        return
+
+    classes = _class_order_present(covered)
+    rates = {}
+    for cls in classes:
+        sub = covered.filter(pl.col(INTENT_COL) == cls)
+        rates[cls] = {
+            c[len("MET_SITE_"):]: (
+                float(sub[c].cast(pl.Float64).mean() * 100) if sub.height else 0.0
+            )
+            for c in site_cols
+        }
+
+    lead = classes[0] if classes else None
+    sites = sorted(
+        (c[len("MET_SITE_"):] for c in site_cols),
+        key=lambda s: rates[lead][s] if lead else 0.0,
+    )
+    y = list(range(len(sites)))
+    height = 0.8 / max(len(classes), 1)
+    for i, cls in enumerate(classes):
+        offs = [v - 0.4 + height * (i + 0.5) for v in y]
+        ax.barh(offs, [rates[cls][s] for s in sites], height=height,
+                color=INTENT_COLORS.get(cls, "#444444"), alpha=0.85,
+                label=cls, zorder=3)
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(sites)
+    ax.set_xlabel("% of class with the site coded by ADT start")
+    ax.set_title("Metastatic site pattern at ADT start")
+    # Bars run from the left, so the legend sits clear of them on the right at
+    # mid-height rather than overlapping the shortest (bottom) site.
+    ax.legend(fontsize=8, frameon=False, loc="center right")
+    ax.set_xlim(0, max(105 * 0.01, ax.get_xlim()[1] * 1.18))
+    ax.grid(axis="x", alpha=0.25, zorder=0)
+    ax.set_axisbelow(True)
+
+
+def plot_stage_metburden_panel(labelled: pl.DataFrame, figsize=(15, 4.6)):
+    """Three-panel figure: stage mix, burden distribution, site pattern.
+
+    Returns (fig, axes). Caller saves; nothing is written here.
+    """
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    plot_stage_distribution(axes[0], labelled)
+    plot_met_burden_distribution(axes[1], labelled)
+    plot_met_site_pattern(axes[2], labelled)
+    fig.tight_layout()
+    return fig, axes
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Lab trajectories and KM curves stratified by ADT_INTENT."

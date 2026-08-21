@@ -26,6 +26,9 @@ from COMPASS.data_preprocessing.adt_intent_trajectories import (  # noqa: E402
     build_km_input,
     build_lab_trajectory,
     km_series_by_intent,
+    met_burden_distribution_by_intent,
+    plot_stage_metburden_panel,
+    stage_distribution_by_intent,
     load_longitudinal,
     logrank_by_intent,
     summarize_km,
@@ -473,6 +476,72 @@ class TestLogrank(unittest.TestCase):
         out = logrank_by_intent(km)
         self.assertIn("p_value", out.columns)
         self.assertIn("group_a", out.columns)
+
+
+class TestStageMetBurdenPlots(unittest.TestCase):
+    """Stage / met-burden distribution figures."""
+
+    def _frame(self) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                INTENT_COL: ["METASTATIC"] * 3 + ["LOCALIZED_ADJUVANT"] * 2,
+                "CANCER_STAGE": ["IV", "IV", "III", "II", None],
+                "N_MET_SITES": [3, 1, 0, 0, None],
+                "MET_SITE_bone": [1, 1, 0, 0, None],
+                "MET_SITE_liver": [1, 0, 0, 0, None],
+            }
+        )
+
+    def test_distributions_are_within_class_percentages(self):
+        """The classes differ in size by design, so raw counts would show
+        cohort composition rather than a distributional difference."""
+        stage = stage_distribution_by_intent(self._frame())
+        met = stage.filter(pl.col(INTENT_COL) == "METASTATIC")
+        # 3 metastatic patients are staged; 2 of them are IV.
+        self.assertEqual(met["n_in_class"][0], 3)
+        self.assertAlmostEqual(
+            float(met.filter(pl.col("CANCER_STAGE") == "IV")["pct"][0]), 66.7, places=1
+        )
+        # Each class's percentages sum to 100.
+        for cls in stage[INTENT_COL].unique().to_list():
+            total = stage.filter(pl.col(INTENT_COL) == cls)["pct"].sum()
+            self.assertAlmostEqual(float(total), 100.0, places=0)
+
+    def test_uncovered_patients_are_excluded_from_denominators(self):
+        """A null stage / burden is unobserved, not a zero-burden stage I."""
+        stage = stage_distribution_by_intent(self._frame())
+        localized = stage.filter(pl.col(INTENT_COL) == "LOCALIZED_ADJUVANT")
+        # Two localized patients, but only one carries a stage.
+        self.assertEqual(localized["n_in_class"][0], 1)
+
+        burden = met_burden_distribution_by_intent(self._frame())
+        self.assertEqual(
+            int(burden.filter(pl.col(INTENT_COL) == "LOCALIZED_ADJUVANT")["n_in_class"][0]), 1
+        )
+
+    def test_met_burden_top_codes_the_tail(self):
+        """Site counts have a long thin tail; top-coding keeps the axis readable."""
+        frame = pl.DataFrame(
+            {INTENT_COL: ["METASTATIC"] * 2, "N_MET_SITES": [1, 7]}
+        )
+        got = met_burden_distribution_by_intent(frame, max_sites=4)
+        self.assertEqual(sorted(got["n_met_sites"].to_list()), [1, 4])
+
+    def test_panel_renders_with_partial_coverage(self):
+        """Missing columns must degrade to a placeholder panel, not raise."""
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, axes = plot_stage_metburden_panel(self._frame())
+        self.assertEqual(len(axes), 3)
+        plt.close(fig)
+
+        # No stage, no burden at all -- every panel should still draw.
+        bare = pl.DataFrame({INTENT_COL: ["METASTATIC", "LOCALIZED_ADJUVANT"]})
+        fig, axes = plot_stage_metburden_panel(bare)
+        self.assertEqual(len(axes), 3)
+        plt.close(fig)
 
 
 if __name__ == "__main__":

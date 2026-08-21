@@ -31,7 +31,9 @@ from COMPASS.data_preprocessing.classify_adt_intent import (
 from COMPASS.data_preprocessing.validate_adt_intent import (
     compute_first_metastasis_icd_date,
     compute_psa_nadir_features,
+    compute_met_burden_at_adt,
     load_met_burden_reference,
+    load_stage_nearest_adt,
     load_stage_reference,
     report_against_met_burden,
     report_stage_contradictions,
@@ -803,3 +805,104 @@ def test_cross_reference_reports_are_silent_without_the_files():
     labelled = _xref_labelled()
     assert report_against_met_burden(labelled).height == 0
     assert report_stage_contradictions(labelled).height == 0
+
+
+# ---------------------------------------------------------------------------
+# ADT-anchored stage and metastatic burden
+# ---------------------------------------------------------------------------
+
+
+def _note_level(tmpdir, rows):
+    """Write a CANCER_STAGE_NOTE_LEVEL-shaped parquet and return its path."""
+    path = os.path.join(tmpdir, "note_level.parquet")
+    pl.DataFrame(
+        {
+            "DFCI_MRN": [r[0] for r in rows],
+            "EVENT_DATE": [r[1] for r in rows],
+            "DERIVED_STAGE_MERGED": [r[2] for r in rows],
+        }
+    ).write_parquet(path)
+    return path
+
+
+def test_stage_picks_the_observation_nearest_adt_not_the_earliest():
+    """The whole point of the anchored loader.
+
+    The shipped CANCER_STAGE.parquet carries NOTE_STAGE_EARLIEST, which for
+    this patient is stage II from two years before ADT. Stage only ratchets
+    upward, so the earliest note understates disease at treatment start; the
+    nearest one (IV, 61 days before) is what the label must be judged against.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        path = _note_level(
+            d,
+            [
+                (1, datetime(2013, 1, 1), 2),
+                (1, datetime(2014, 11, 1), 4),
+            ],
+        )
+        labelled = pl.DataFrame({"DFCI_MRN": [1], "ADT_FIRST_DATE": [datetime(2015, 1, 1)]})
+        got = load_stage_nearest_adt(path, labelled)
+
+    assert got["CANCER_STAGE"][0] == "IV"
+    assert got["STAGE_DAYS_FROM_ADT"][0] == -61
+
+
+def test_stage_default_excludes_post_adt_observations():
+    """A note written after ADT start can reflect progression under therapy.
+
+    The prescriber could not have known it, so it must not be used to judge
+    the intent decision. prefer="any" opts back in explicitly.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        path = _note_level(d, [(2, datetime(2015, 6, 1), 4)])
+        labelled = pl.DataFrame({"DFCI_MRN": [2], "ADT_FIRST_DATE": [datetime(2015, 1, 1)]})
+        assert load_stage_nearest_adt(path, labelled).height == 0
+        assert load_stage_nearest_adt(path, labelled, prefer="any").height == 1
+
+
+def test_stage_outside_the_matching_window_is_dropped():
+    """A stale observation is worse than no observation."""
+    with tempfile.TemporaryDirectory() as d:
+        path = _note_level(d, [(3, datetime(2012, 10, 1), 3)])
+        labelled = pl.DataFrame({"DFCI_MRN": [3], "ADT_FIRST_DATE": [datetime(2015, 1, 1)]})
+        assert load_stage_nearest_adt(path, labelled).height == 0
+        assert load_stage_nearest_adt(path, labelled, window_days=1000).height == 1
+
+
+def test_met_burden_counts_only_codes_on_or_before_adt_start():
+    """Anchoring is the fix for the shipped file being pre-index on a
+    different project's first_treatment_date."""
+    icds = pl.DataFrame(
+        {
+            "DFCI_MRN": [1, 1, 1],
+            "DIAGNOSIS_ICD10_CD": ["C7951", "C787", "C7931"],
+            "START_DT": ["2014-06-01", "2014-07-01", "2016-01-01"],
+        }
+    )
+    labelled = pl.DataFrame({"DFCI_MRN": [1], "ADT_FIRST_DATE": [datetime(2015, 1, 1)]})
+    got = compute_met_burden_at_adt(icds, labelled)
+
+    # bone + liver counted; the 2016 brain code is after ADT start.
+    assert got["N_MET_SITES"][0] == 2
+    assert got["MET_SITE_bone"][0] == 1
+    assert got["MET_SITE_liver"][0] == 1
+    assert got["MET_SITE_brain"][0] == 0
+
+
+def test_met_burden_emits_every_site_column_even_when_unobserved():
+    """The column set must be fixed, not data-dependent, so downstream
+    selects and plots do not break on a cohort that lacks a rare site."""
+    icds = pl.DataFrame(
+        {"DFCI_MRN": [1], "DIAGNOSIS_ICD10_CD": ["C7951"], "START_DT": ["2014-06-01"]}
+    )
+    labelled = pl.DataFrame(
+        {"DFCI_MRN": [1, 2], "ADT_FIRST_DATE": [datetime(2015, 1, 1)] * 2}
+    )
+    got = compute_met_burden_at_adt(icds, labelled)
+
+    for group in ("brain", "bone", "liver", "lung", "node", "adrenal", "peritoneal", "other"):
+        assert f"MET_SITE_{group}" in got.columns
+    # Patient 2 has no codes at all -> a real zero, since the frame is
+    # zero-filled only across patients this pipeline observes.
+    assert got.filter(pl.col("DFCI_MRN") == 2)["N_MET_SITES"][0] == 0

@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 
 import polars as pl
@@ -372,7 +373,7 @@ def load_stage_reference(path: str) -> pl.DataFrame:
         for col in dummies:
             expr = (
                 pl.when(pl.col(col).cast(pl.Int8, strict=False).fill_null(0) == 1)
-                .then(pl.lit(col.removeprefix("CANCER_STAGE_")))
+                .then(pl.lit(col[len("CANCER_STAGE_") :]))
                 .otherwise(expr)
             )
         stage = stage_df.select(ids, expr.alias("CANCER_STAGE"))
@@ -476,7 +477,7 @@ def report_met_site_pattern(labelled: pl.DataFrame) -> pl.DataFrame:
                 .round(1)
                 .alias("pct_involved")
             )
-            .with_columns(pl.lit(col.removeprefix("MET_SITE_")).alias("met_site"))
+            .with_columns(pl.lit(col[len("MET_SITE_") :]).alias("met_site"))
         )
     return pl.concat(frames).select("met_site", "ADT_INTENT", "pct_involved").sort(
         ["met_site", "ADT_INTENT"]
@@ -512,6 +513,282 @@ def report_stage_contradictions(labelled: pl.DataFrame) -> pl.DataFrame:
     return labelled.filter(
         pl.col("IS_LOCALIZED_ADJUVANT") & pl.col("IS_STAGE_IV").fill_null(False)
     ).select(cols)
+
+# ---------------------------------------------------------------------------
+# C77-C79 -> metastatic organ group
+# ---------------------------------------------------------------------------
+# Vendored verbatim from clinical_text_embedding_project/v2/shared/icd10.py
+# (MET_SITE_GROUPS / _MET_SITE_PREFIX_MAP / met_site_group). Copied rather
+# than imported: that project lives outside this repo and its config.py
+# resolves cluster-only paths at import time. Keeping the definitions
+# byte-identical is what makes MET_SITE_* here comparable to the same column
+# there -- if that mapping changes upstream, this copy must be updated too.
+
+MET_SITE_GROUPS = ["brain", "bone", "liver", "lung", "node", "adrenal", "peritoneal", "other"]
+
+# Unspecified-site secondaries carry no anatomic information -- their presence
+# proxies documentation intensity, not a distinct site -- so they are dropped
+# rather than folded into "other".
+_DROP_UNSPECIFIED_SECONDARY = {"C799"}
+
+# Ordered (undotted prefix, group), longest prefix first so 4-char rules beat
+# the 3-char fallback.
+_MET_SITE_PREFIX_MAP = [
+    ("C7951", "bone"),
+    ("C7952", "bone"),
+    ("C795", "bone"),
+    # C79.40/C79.49 (spinal cord, cranial nerves) deliberately fall through to
+    # "other": CNS but not intracranial-parenchymal.
+    ("C7931", "brain"),
+    ("C7932", "brain"),
+    ("C7970", "adrenal"),
+    ("C7971", "adrenal"),
+    ("C7972", "adrenal"),
+    ("C797", "adrenal"),
+    # C78.2 (pleura) is grouped with lung, per convention in met-burden indices.
+    ("C7800", "lung"),
+    ("C7801", "lung"),
+    ("C7802", "lung"),
+    ("C780", "lung"),
+    ("C782", "lung"),
+    ("C787", "liver"),
+    # ICD-10-CM merges retroperitoneum and peritoneum into C78.6.
+    ("C786", "peritoneal"),
+    ("C77", "node"),
+]
+
+
+def _normalize_icd10_undotted(code):
+    if code is None or code != code:  # NaN check without pandas
+        return None
+    code = str(code).strip().upper()
+    code = re.sub(r"[^A-Z0-9.]", "", code)
+    code = code.replace(".", "")
+    return code or None
+
+
+def _default_met_site_group(code):
+    """Map an ICD-10-CM code to a group in MET_SITE_GROUPS, or None.
+
+    None for: codes outside C77-C79, bare header codes with no 4th character
+    ("C78"), and unspecified-site secondaries. Everything else in C77-C79
+    falls through to "other".
+    """
+    normalized = _normalize_icd10_undotted(code)
+    if normalized is None or len(normalized) < 3:
+        return None
+    if normalized[:3] not in ("C77", "C78", "C79"):
+        return None
+    if len(normalized) < 4:
+        return None
+    if normalized in _DROP_UNSPECIFIED_SECONDARY:
+        return None
+    for prefix, group in _MET_SITE_PREFIX_MAP:
+        if normalized.startswith(prefix):
+            return group
+    return "other"
+
+
+# ---------------------------------------------------------------------------
+# ADT-anchored stage and metastatic burden
+# ---------------------------------------------------------------------------
+# The two loaders above read the embedding project's *pre-aggregated* files,
+# and both are anchored wrong for this pipeline:
+#
+#   * `CANCER_STAGE.parquet`'s STAGE is `NOTE_STAGE_EARLIEST` -- the earliest
+#     staging note a patient ever had (see PROFILE_data_processing/
+#     cancer_annotations.py::derive_cancer_stage). That is the value furthest
+#     in time from ADT start, and since stage only ratchets upward it
+#     systematically understates disease extent at the moment ADT begins.
+#   * `met_burden_df.csv.gz` is pre-index on that project's
+#     `first_treatment_date` -- first treatment for ANY cancer, from its own
+#     cohort build -- not prostate ADT start.
+#
+# The functions below rebuild both from the dated per-record sources against
+# this repo's ADT_FIRST_DATE, which is what the label is actually derived
+# from. They mirror the time-matching approach in
+# PROFILE_data_processing/evaluate_cancer_annotations.ipynb, substituting ADT
+# start for that notebook's sequencing REPORT_DT anchor.
+
+# Stage observations further than this from ADT start describe a different
+# point in the disease course. Matches MAX_DAYS_FROM_ANCHOR in
+# evaluate_cancer_annotations.ipynb.
+STAGE_MATCH_WINDOW_DAYS = 365
+
+_STAGE_INT_TO_ROMAN = {1: "I", 2: "II", 3: "III", 4: "IV"}
+
+
+def _to_int_id(col: str = "DFCI_MRN") -> pl.Expr:
+    return (
+        pl.col(col)
+        .cast(pl.Float64, strict=False)
+        .cast(pl.Int64, strict=False)
+        .alias(ID_COL)
+    )
+
+
+def load_stage_nearest_adt(
+    note_level_path: str,
+    labelled: pl.DataFrame,
+    window_days: int = STAGE_MATCH_WINDOW_DAYS,
+    prefer: str = "before",
+) -> pl.DataFrame:
+    """Stage from the note observation closest in time to ADT start.
+
+    `note_level_path` is CANCER_STAGE_NOTE_LEVEL.parquet (one row per RPT_ID,
+    carrying EVENT_DATE and DERIVED_STAGE_MERGED), written by
+    PROFILE_data_processing/derive_cancer_annotations.ipynb. Unlike the
+    per-patient CANCER_STAGE.parquet, it stays dated and ungrouped, which is
+    what makes "nearest to ADT start" answerable at all.
+
+    `prefer` controls tie-breaking against the anchor:
+      * "before" (default) -- restrict to observations at or before ADT start,
+        so the stage describes disease as it was when treatment intent was
+        decided. This is the honest choice for validating an intent label: a
+        post-ADT staging note can reflect progression *under* treatment, which
+        the prescriber could not have known.
+      * "any" -- nearest in absolute time, before or after. Wider coverage,
+        but admits hindsight.
+
+    Patients whose nearest qualifying observation falls outside `window_days`
+    are dropped rather than matched to a stale value.
+    """
+    if prefer not in ("before", "any"):
+        raise ValueError(f"prefer must be 'before' or 'any', got {prefer!r}")
+
+    notes = (
+        pl.read_parquet(note_level_path)
+        .filter(pl.col("DERIVED_STAGE_MERGED").is_not_null())
+        .select(
+            _to_int_id(),
+            pl.col("EVENT_DATE").cast(pl.Datetime, strict=False).alias("_STAGE_DT"),
+            pl.col("DERIVED_STAGE_MERGED").cast(pl.Int64).alias("_STAGE_INT"),
+        )
+        .drop_nulls(["_STAGE_DT", "_STAGE_INT"])
+    )
+
+    anchors = labelled.select(
+        pl.col(ID_COL),
+        pl.col("ADT_FIRST_DATE").cast(pl.Datetime, strict=False).alias("_ANCHOR_DT"),
+    ).drop_nulls("_ANCHOR_DT")
+
+    joined = notes.join(anchors, on=ID_COL, how="inner").with_columns(
+        (pl.col("_STAGE_DT") - pl.col("_ANCHOR_DT")).dt.total_days().alias("_SIGNED_DAYS")
+    )
+    if prefer == "before":
+        joined = joined.filter(pl.col("_SIGNED_DAYS") <= 0)
+    joined = joined.with_columns(
+        pl.col("_SIGNED_DAYS").abs().alias("_ABS_DAYS")
+    ).filter(pl.col("_ABS_DAYS") <= window_days)
+
+    if joined.height == 0:
+        return pl.DataFrame(
+            schema={
+                ID_COL: pl.Int64,
+                "CANCER_STAGE": pl.Utf8,
+                "IS_STAGE_IV": pl.Boolean,
+                "STAGE_DAYS_FROM_ADT": pl.Int64,
+                "STAGE_N_OBS_IN_WINDOW": pl.UInt32,
+            }
+        )
+
+    # Nearest observation wins; ties break toward the higher stage so a same-day
+    # pair never silently resolves to the more favourable read.
+    nearest = (
+        joined.sort(["_ABS_DAYS", "_STAGE_INT"], descending=[False, True])
+        .group_by(ID_COL)
+        .agg(
+            pl.col("_STAGE_INT").first().alias("_STAGE_INT"),
+            pl.col("_SIGNED_DAYS").first().alias("STAGE_DAYS_FROM_ADT"),
+            pl.len().cast(pl.UInt32).alias("STAGE_N_OBS_IN_WINDOW"),
+        )
+    )
+
+    return nearest.select(
+        ID_COL,
+        pl.col("_STAGE_INT")
+        .replace_strict(_STAGE_INT_TO_ROMAN, default=None)
+        .alias("CANCER_STAGE"),
+        (pl.col("_STAGE_INT") == 4).alias("IS_STAGE_IV"),
+        pl.col("STAGE_DAYS_FROM_ADT"),
+        pl.col("STAGE_N_OBS_IN_WINDOW"),
+    ).drop_nulls("CANCER_STAGE")
+
+
+def compute_met_burden_at_adt(
+    icds: pl.DataFrame,
+    labelled: pl.DataFrame,
+    met_site_group_fn=None,
+) -> pl.DataFrame:
+    """Metastatic organ-group burden coded at or before ADT start.
+
+    Reimplements build_met_burden_df from clinical_text_embedding_project
+    against this repo's ADT_FIRST_DATE instead of that project's
+    `first_treatment_date`, using the same C77-C79 -> organ-group mapping
+    (shared.icd10.met_site_group) so the site definitions stay comparable.
+
+    `icds` is the exploded per-code frame this notebook already loads
+    (prostate_icd_data.csv: DFCI_MRN, DIAGNOSIS_ICD10_CD, START_DT).
+
+    Zero-filled only across patients present in `labelled`, so a 0 means "no
+    qualifying code on or before ADT start" for a patient this pipeline
+    actually observes -- it is never a stand-in for an unobserved patient.
+    """
+    if met_site_group_fn is None:
+        met_site_group_fn = _default_met_site_group
+
+    anchors = labelled.select(
+        pl.col(ID_COL),
+        pl.col("ADT_FIRST_DATE").cast(pl.Datetime, strict=False).alias("_ANCHOR_DT"),
+    ).drop_nulls("_ANCHOR_DT")
+
+    coded = (
+        icds.select(
+            _to_int_id(),
+            pl.col("DIAGNOSIS_ICD10_CD").cast(pl.Utf8).alias("_ICD"),
+            parse_mixed_datetime_expr("START_DT").alias("_ICD_DT"),
+        )
+        .drop_nulls(["_ICD", "_ICD_DT"])
+        .join(anchors, on=ID_COL, how="inner")
+        .filter(pl.col("_ICD_DT") <= pl.col("_ANCHOR_DT"))
+        .with_columns(
+            pl.col("_ICD")
+            .map_elements(met_site_group_fn, return_dtype=pl.Utf8)
+            .alias("_SITE")
+        )
+        .drop_nulls("_SITE")
+        .select(ID_COL, "_SITE")
+        .unique()
+    )
+
+    base = labelled.select(pl.col(ID_COL).unique())
+    site_cols = [f"MET_SITE_{g}" for g in MET_SITE_GROUPS]
+
+    if coded.height == 0:
+        return base.with_columns(
+            [pl.lit(0, dtype=pl.Int32).alias(c) for c in ["N_MET_SITES"] + site_cols]
+        )
+
+    indicators = coded.with_columns(pl.lit(1, dtype=pl.Int32).alias("_present")).pivot(
+        on="_SITE", index=ID_COL, values="_present"
+    )
+    # pivot only emits observed groups; add the rest so the column set is
+    # fixed rather than data-dependent (same guarantee build_met_burden_df makes).
+    for group in MET_SITE_GROUPS:
+        if group not in indicators.columns:
+            indicators = indicators.with_columns(pl.lit(0, dtype=pl.Int32).alias(group))
+    indicators = indicators.select(
+        pl.col(ID_COL),
+        *[pl.col(g).fill_null(0).cast(pl.Int32).alias(f"MET_SITE_{g}") for g in MET_SITE_GROUPS],
+    ).with_columns(
+        pl.sum_horizontal(site_cols).cast(pl.Int32).alias("N_MET_SITES")
+    )
+
+    return (
+        base.join(indicators, on=ID_COL, how="left")
+        .with_columns([pl.col(c).fill_null(0).cast(pl.Int32) for c in ["N_MET_SITES"] + site_cols])
+        .select([ID_COL, "N_MET_SITES"] + site_cols)
+    )
 
 def main() -> None:
     parser = argparse.ArgumentParser(
