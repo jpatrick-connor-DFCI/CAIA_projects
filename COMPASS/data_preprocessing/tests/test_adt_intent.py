@@ -58,6 +58,12 @@ def _follow_up(mrn: int, end: datetime) -> pl.DataFrame:
     ).with_columns(pl.col("FOLLOW_UP_END_DATE").cast(pl.Datetime))
 
 
+def _follow_up_many(mrns: list[int], end: datetime) -> pl.DataFrame:
+    return pl.DataFrame(
+        {"DFCI_MRN": mrns, "FOLLOW_UP_END_DATE": [end] * len(mrns)}
+    ).with_columns(pl.col("FOLLOW_UP_END_DATE").cast(pl.Datetime))
+
+
 def _intent(labelled: pl.DataFrame, mrn: int) -> str:
     return labelled.filter(pl.col("DFCI_MRN") == mrn)["ADT_INTENT"][0]
 
@@ -97,16 +103,53 @@ def test_arpi_alone_with_short_adt_does_not_force_metastatic():
     assert _intent(labelled, 1) != INTENT_METASTATIC
 
 
-def test_arpi_with_sustained_adt_is_metastatic():
+def test_arpi_never_classifies_in_either_direction():
+    """Rule 2 is retired and rule 6 no longer excludes ARPI patients. A 24-month
+    single course is judged on its duration alone, so adding an ARPI must not
+    change the label -- in the old rules this exact patient was METASTATIC."""
+    course = _depot_course(1, months=24)
+    fu = _follow_up(1, ADT_START + timedelta(days=2500))
+
+    without_arpi = classify_adt_intent(_meds(course), follow_up=fu)
+    with_arpi = classify_adt_intent(
+        _meds(course + [(1, "ENZALUTAMIDE", ADT_START + timedelta(days=400))]),
+        follow_up=fu,
+    )
+
+    assert _intent(with_arpi, 1) == _intent(without_arpi, 1)
+    assert _reason(with_arpi, 1) == _reason(without_arpi, 1)
+    assert _intent(with_arpi, 1) == INTENT_LOCALIZED
+    assert _reason(with_arpi, 1) == "rule6_single_short_course"
+
+
+def test_arpi_exposure_still_recorded_as_an_audit_feature():
+    """ARPI stops driving the label but must remain in the output, so a
+    downstream user can re-introduce it or audit the patients it would have
+    reclassified."""
+    labelled = classify_adt_intent(
+        _meds(
+            _depot_course(1, months=24)
+            + [(1, "ENZALUTAMIDE", ADT_START + timedelta(days=400))]
+        ),
+        follow_up=_follow_up(1, ADT_START + timedelta(days=2500)),
+    )
+    assert labelled["HAS_ARPI"][0]
+    assert labelled["FIRST_ARPI_DATE"][0] == ADT_START + timedelta(days=400)
+
+
+def test_no_reason_string_mentions_the_retired_rule2():
+    """Rule numbers are not renumbered, so the gap must simply stay empty."""
     meds = _meds(
         _depot_course(1, months=24)
         + [(1, "ENZALUTAMIDE", ADT_START + timedelta(days=400))]
+        + _depot_course(2, months=48)
     )
     labelled = classify_adt_intent(
-        meds, follow_up=_follow_up(1, ADT_START + timedelta(days=2500))
+        meds, follow_up=_follow_up_many([1, 2], ADT_START + timedelta(days=2500))
     )
-    assert _intent(labelled, 1) == INTENT_METASTATIC
-    assert _reason(labelled, 1) == "rule2_arpi_with_sustained_adt"
+    assert not any(
+        "rule2" in r for r in labelled["ADT_INTENT_REASON"].to_list()
+    )
 
 
 def test_bone_agent_alone_never_classifies():

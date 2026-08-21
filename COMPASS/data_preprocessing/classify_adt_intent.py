@@ -105,10 +105,11 @@ DEFINITIVE_METASTATIC_MEDS = {
 
 # Strong but not definitive. Apalutamide (SPARTAN/TITAN) and darolutamide
 # (ARAMIS) are approved for NON-metastatic CRPC, and since roughly 2023 ARPIs
-# are increasingly used in high-risk localized disease. An ARPI alone therefore
-# never classifies; it must be paired with sustained ADT (rule 2). The
-# validation harness stratifies by calendar year so this era drift is measured
-# rather than assumed away.
+# are increasingly used in high-risk localized disease. Because that drift makes
+# the drug uninformative about metastatic status, ARPI exposure does not
+# classify at all: it is recorded as HAS_ARPI / FIRST_ARPI_DATE for audit and
+# never reads on the label. The validation harness stratifies by calendar year
+# so the era drift is measured rather than assumed away.
 ARPI_METASTATIC_MEDS = {
     "ABIRATERONE ACETATE",
     "ENZALUTAMIDE",
@@ -455,12 +456,15 @@ def classify_adt_intent(
     Rules fire in order, first match wins:
 
       1. definitive escalation                          -> METASTATIC
-      2. ARPI and span > 1 year                         -> METASTATIC
       3. span > 3 years over at most 2 episodes         -> METASTATIC
       4. ADT ongoing at last contact and span > 2 years -> METASTATIC
       5. insufficient follow-up after ADT start         -> INDETERMINATE
-      6. single short course, no escalation, not ongoing-> LOCALIZED_ADJUVANT
+      6. single short course, not ongoing               -> LOCALIZED_ADJUVANT
       7. anything else                                  -> INDETERMINATE
+
+    Rule 2 (ARPI with sustained ADT) is retired: ARPI exposure no longer
+    affects the label in either direction. The numbering keeps the gap so
+    ADT_INTENT_REASON values stay comparable with previously written files.
     """
     prepared = load_medications_for_intent(meds)
     episodes = build_adt_episodes(prepared, gap_threshold_days=gap_threshold_days)
@@ -513,10 +517,16 @@ def classify_adt_intent(
         | (pl.col("FOLLOWUP_DAYS_FROM_ADT") < min_followup_days)
     )
 
+    # ARPI exposure no longer classifies. It neither forces METASTATIC (the
+    # former rule 2) nor blocks LOCALIZED_ADJUVANT (the former ~HAS_ARPI term in
+    # rule 6): ARPIs are approved in non-metastatic CRPC and are increasingly
+    # used in high-risk localized disease, so the drug alone does not identify
+    # the population. HAS_ARPI is still computed and written out for audit.
+    #
+    # Rule numbers are deliberately NOT renumbered -- the retired rule 2 leaves
+    # a gap so ADT_INTENT_REASON stays comparable with previously written files.
     intent = (
         pl.when(pl.col("HAS_DEFINITIVE_ESCALATION"))
-        .then(pl.lit(INTENT_METASTATIC))
-        .when(pl.col("HAS_ARPI") & (pl.col("ADT_SPAN_DAYS") > 365))
         .then(pl.lit(INTENT_METASTATIC))
         .when(
             (pl.col("ADT_SPAN_DAYS") > SUSTAINED_ADT_DAYS)
@@ -533,7 +543,6 @@ def classify_adt_intent(
         .when(
             (pl.col("ADT_SPAN_DAYS") <= adjuvant_max_span_days)
             & (pl.col("ADT_N_EPISODES") <= 1)
-            & ~pl.col("HAS_ARPI")
             & ~pl.col("ADT_ONGOING_AT_LAST_CONTACT")
         )
         .then(pl.lit(INTENT_LOCALIZED))
@@ -544,8 +553,6 @@ def classify_adt_intent(
     reason = (
         pl.when(pl.col("HAS_DEFINITIVE_ESCALATION"))
         .then(pl.lit("rule1_definitive_escalation"))
-        .when(pl.col("HAS_ARPI") & (pl.col("ADT_SPAN_DAYS") > 365))
-        .then(pl.lit("rule2_arpi_with_sustained_adt"))
         .when(
             (pl.col("ADT_SPAN_DAYS") > SUSTAINED_ADT_DAYS)
             & (pl.col("ADT_N_EPISODES") <= 2)
@@ -561,7 +568,6 @@ def classify_adt_intent(
         .when(
             (pl.col("ADT_SPAN_DAYS") <= adjuvant_max_span_days)
             & (pl.col("ADT_N_EPISODES") <= 1)
-            & ~pl.col("HAS_ARPI")
             & ~pl.col("ADT_ONGOING_AT_LAST_CONTACT")
         )
         .then(pl.lit("rule6_single_short_course"))
