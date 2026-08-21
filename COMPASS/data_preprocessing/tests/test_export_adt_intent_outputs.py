@@ -22,6 +22,11 @@ from COMPASS.data_preprocessing.export_adt_intent_outputs import (  # noqa: E402
     resolve_out_dir,
     run,
 )
+from COMPASS.data_preprocessing.adt_intent_trajectories import (  # noqa: E402
+    PSA_LAB_NAME,
+    TESTOSTERONE_LAB_NAME,
+    load_longitudinal,
+)
 
 
 def _meds(n: int = 12) -> pl.DataFrame:
@@ -101,6 +106,84 @@ class TestBuildLabels(unittest.TestCase):
         labelled = build_labels(_meds(), stage_note_level_path="/nope/missing.parquet")
         self.assertIn("ADT_INTENT", labelled.columns)
         self.assertNotIn("MAX_STAGE_BEFORE", labelled.columns)
+
+
+def _longitudinal(d: str, n: int = 12) -> pl.DataFrame:
+    """Stage 2 frame: labs plus the three cohort-only endpoint pairs.
+
+    LAB_NAME must match the module constants exactly -- a case mismatch
+    silently yields an empty trajectory panel rather than an error.
+    """
+    path = str(Path(d) / "longitudinal.csv")
+    rows = []
+    for mrn in range(1, n + 1):
+        plat = 1 if mrn % 3 == 0 else 0
+        for t in (-90.0, 0.0, 90.0, 365.0):
+            for lab, val in ((TESTOSTERONE_LAB_NAME, 400.0 if t < 0 else 15.0),
+                             (PSA_LAB_NAME, 25.0 if t < 0 else 0.4)):
+                rows.append((mrn, t, lab, val, "2015-01-01",
+                             900.0, plat, 800.0, 0, 850.0, 0))
+    cols = ["DFCI_MRN", "t_lab", "LAB_NAME", "LAB_VALUE", "TREATMENT_ANCHOR_DATE",
+            "t_platinum", "PLATINUM", "t_nepc", "NEPC", "t_avpc", "AVPC"]
+    pl.DataFrame({c: [r[i] for r in rows] for i, c in enumerate(cols)}).write_csv(path)
+    return load_longitudinal(path)
+
+
+class TestTimeToEvent(unittest.TestCase):
+    """KM figures and their summary tables."""
+
+    def test_death_km_needs_only_follow_up(self):
+        """Death is computable for every ADT-exposed patient, so it must not
+        depend on the Stage 2 longitudinal file."""
+        with tempfile.TemporaryDirectory() as d:
+            _, out = run(_meds(), follow_up=_follow_up(), longitudinal=None,
+                         fig_root=d, verbose=False)
+            self.assertTrue((out / "km_death.png").exists())
+            self.assertTrue((out / "summary_km_death.csv").exists())
+            surv = pl.read_csv(out / "summary_km_death.csv")
+        # 4 of 12 died (every third patient: 3, 6, 9, 12).
+        self.assertEqual(int(surv["n_events"].sum()), 4)
+
+    def test_cohort_only_endpoints_are_skipped_without_longitudinal(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, out = run(_meds(), follow_up=_follow_up(), longitudinal=None,
+                         fig_root=d, verbose=False)
+            for endpoint in ("platinum", "nepc", "avpc"):
+                self.assertFalse((out / f"km_{endpoint}.png").exists())
+
+    def test_all_four_kms_render_with_longitudinal(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, out = run(_meds(), follow_up=_follow_up(),
+                         longitudinal=_longitudinal(d), fig_root=d, verbose=False)
+            for endpoint in ("death", "platinum", "nepc", "avpc"):
+                self.assertTrue((out / f"km_{endpoint}.png").exists(),
+                                f"km_{endpoint}.png missing")
+
+    def test_km_event_counts_match_the_planted_rate(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, out = run(_meds(), follow_up=_follow_up(),
+                         longitudinal=_longitudinal(d), fig_root=d, verbose=False)
+            plat = pl.read_csv(out / "summary_km_platinum.csv")
+        # Every third patient of 12 has PLATINUM=1.
+        self.assertEqual(int(plat["n_events"].sum()), 4)
+
+    def test_lab_trajectories_render_and_report_coverage(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, out = run(_meds(), follow_up=_follow_up(),
+                         longitudinal=_longitudinal(d), fig_root=d, verbose=False)
+            self.assertTrue((out / "lab_trajectories.png").exists())
+            # Both labs must report coverage; an empty panel from a name
+            # mismatch would otherwise pass unnoticed.
+            for lab in (TESTOSTERONE_LAB_NAME, PSA_LAB_NAME):
+                p = out / f"summary_trajectory_coverage_{lab.lower()}.csv"
+                self.assertTrue(p.exists(), f"{p.name} missing")
+                self.assertGreater(pl.read_csv(p).height, 0)
+
+    def test_trajectories_skipped_without_longitudinal(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, out = run(_meds(), follow_up=_follow_up(), longitudinal=None,
+                         fig_root=d, verbose=False)
+            self.assertFalse((out / "lab_trajectories.png").exists())
 
 
 class TestSurvivalPassthrough(unittest.TestCase):

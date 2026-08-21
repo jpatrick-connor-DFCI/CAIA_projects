@@ -28,9 +28,17 @@ CSV
   summary_by_adt_start_year.csv  ARPI-era drift
   summary_gap_sensitivity.csv    gap-threshold sensitivity
 
+  summary_km_<endpoint>.csv      event counts / median follow-up per KM
+  summary_logrank_<endpoint>.csv pairwise log-rank p-values
+  summary_trajectory_coverage_*.csv  lab coverage per class
+
 PNG
   stage_metburden.png            stage mix, burden distribution, site pattern
   max_stage.png                  max-stage mix, stage IV rate, upstaging
+  km_death.png                   overall survival, all ADT-exposed
+  km_platinum.png / km_nepc.png / km_avpc.png
+                                 cohort-only endpoints; need `longitudinal`
+  lab_trajectories.png           testosterone and PSA around ADT start
 
 A table whose inputs are absent is skipped, not written empty, and the run
 reports which ones were skipped and why.
@@ -56,9 +64,26 @@ from COMPASS.data_preprocessing.classify_adt_intent import (  # noqa: E402
     summarize_intent,
 )
 from COMPASS.data_preprocessing.adt_intent_trajectories import (  # noqa: E402
+    CASTRATE_NG_DL,
+    CASTRATE_STRICT_NG_DL,
+    INTENT_COLORS,
+    KM_ENDPOINTS,
+    PSA_LAB_NAME,
+    PSA_LOG_FLOOR,
+    TESTOSTERONE_LAB_NAME,
+    build_death_km_input,
+    build_km_input,
+    build_lab_trajectory,
+    km_series_by_intent,
+    load_longitudinal,
+    logrank_by_intent,
+    plot_lab_trajectory,
     plot_max_stage_panel,
     plot_stage_metburden_panel,
+    summarize_km,
+    summarize_trajectory_coverage,
 )
+from survival_common.plotting import overlay_km  # noqa: E402
 from COMPASS.data_preprocessing.validate_adt_intent import (  # noqa: E402
     compute_first_metastasis_icd_date,
     compute_met_burden_at_adt,
@@ -207,6 +232,119 @@ def write_tables(labelled: pl.DataFrame, out_dir: Path, meds=None, follow_up=Non
     return log
 
 
+def write_time_to_event(
+    labelled: pl.DataFrame,
+    out_dir: Path,
+    follow_up: pl.DataFrame | None = None,
+    longitudinal: pl.DataFrame | None = None,
+) -> list:
+    """KM figures and their summary tables, one file per endpoint.
+
+    Death is computable for every ADT-exposed patient from patient status
+    alone. The other three endpoints (platinum, NEPC, AVPC) are defined only
+    in the eligible survival cohort, so they need the Stage 2 longitudinal
+    frame and are skipped without it.
+
+    Every KM figure is accompanied by a summary table: a curve built on a
+    handful of events looks just as confident as one built on hundreds, and
+    only the event counts show the difference.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    log: list = []
+
+    def _km_figure(km_input, endpoint, title, ylabel):
+        """One KM panel + its summary/log-rank tables. Returns False if empty."""
+        if km_input.height == 0:
+            log.append(f"  [skip] km_{endpoint}.png -- no {endpoint} data")
+            return False
+        _write(summarize_km(km_input), out_dir, f"summary_km_{endpoint}", log)
+        try:
+            _write(logrank_by_intent(km_input), out_dir, f"summary_logrank_{endpoint}", log)
+        except ModuleNotFoundError:
+            # lifelines absent: the curve is the deliverable, the p-value is not.
+            log.append(f"  [skip] summary_logrank_{endpoint}.csv -- lifelines not installed")
+
+        fig, ax = plt.subplots(figsize=(7.5, 5.5))
+        try:
+            overlay_km(
+                ax, km_series_by_intent(km_input), colors=INTENT_COLORS,
+                title=title, xlabel="Days from first ADT", ylabel=ylabel,
+            )
+        except ModuleNotFoundError:
+            plt.close(fig)
+            log.append(f"  [skip] km_{endpoint}.png -- lifelines not installed")
+            return False
+        ax.grid(alpha=0.2)
+        fig.savefig(out_dir / f"km_{endpoint}.png", dpi=FIGURE_DPI, bbox_inches="tight")
+        plt.close(fig)
+        log.append(f"  wrote km_{endpoint}.png")
+        return True
+
+    # --- death: the full ADT-exposed population ---
+    if follow_up is not None:
+        death_km = build_death_km_input(labelled, follow_up)
+        _km_figure(death_km, "death",
+                   "Overall survival by ADT intent (all ADT-exposed)",
+                   "Survival probability")
+    else:
+        log.append("  [skip] km_death.png -- no follow-up frame")
+
+    # --- cohort-only endpoints ---
+    if longitudinal is None:
+        log.append("  [skip] km_platinum/nepc/avpc -- no longitudinal frame")
+        return log
+
+    for endpoint in [e for e in KM_ENDPOINTS if e != "death"]:
+        km_input = build_km_input(longitudinal, labelled, endpoint)
+        _km_figure(km_input, endpoint, KM_ENDPOINTS[endpoint][2],
+                   "Event-free probability")
+    return log
+
+
+def write_lab_trajectories(
+    labelled: pl.DataFrame,
+    out_dir: Path,
+    longitudinal: pl.DataFrame | None = None,
+) -> list:
+    """Testosterone and PSA trajectories around ADT start, by intent class."""
+    if longitudinal is None:
+        return ["  [skip] lab_trajectories.png -- no longitudinal frame"]
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    log: list = []
+    specs = [
+        (TESTOSTERONE_LAB_NAME, "Testosterone (ng/dL)", False,
+         (CASTRATE_NG_DL, CASTRATE_STRICT_NG_DL)),
+        (PSA_LAB_NAME, "PSA (ng/mL, log scale)", True, ()),
+    ]
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5.5))
+    for ax, (lab, ylabel, log_scale, hlines) in zip(axes, specs):
+        _write(
+            summarize_trajectory_coverage(longitudinal, labelled, lab),
+            out_dir, f"summary_trajectory_coverage_{lab.lower()}", log,
+        )
+        traj = build_lab_trajectory(longitudinal, labelled, lab)
+        if log_scale and traj.height:
+            # Zeros are real below-detection values, but log10(0) is not
+            # plottable -- floor for the axis only, after the median.
+            traj = traj.with_columns(
+                *[pl.col(c).clip(lower_bound=PSA_LOG_FLOOR) for c in ("median", "q1", "q3")]
+            )
+        plot_lab_trajectory(ax, traj, title=f"{lab} around ADT start",
+                            ylabel=ylabel, log_scale=log_scale, hlines=hlines)
+    fig.tight_layout()
+    fig.savefig(out_dir / "lab_trajectories.png", dpi=FIGURE_DPI, bbox_inches="tight")
+    plt.close(fig)
+    log.append("  wrote lab_trajectories.png")
+    return log
+
+
 def write_figures(labelled: pl.DataFrame, out_dir: Path) -> list:
     """Render both panels. Panels with no coverage draw a placeholder."""
     import matplotlib
@@ -231,6 +369,7 @@ def run(
     follow_up: pl.DataFrame | None = None,
     icds: pl.DataFrame | None = None,
     stage_note_level_path: str | Path | None = DEFAULT_STAGE_NOTE_LEVEL_PATH,
+    longitudinal: pl.DataFrame | None = None,
     fig_root: str | Path | None = None,
     gap_threshold_days: int = GAP_THRESHOLD_DAYS,
     verbose: bool = True,
@@ -249,6 +388,10 @@ def run(
     )
     log = write_tables(labelled, out_dir, meds=meds, follow_up=follow_up)
     log += write_figures(labelled, out_dir)
+    log += write_time_to_event(
+        labelled, out_dir, follow_up=follow_up, longitudinal=longitudinal
+    )
+    log += write_lab_trajectories(labelled, out_dir, longitudinal=longitudinal)
 
     if verbose:
         print(f"output dir: {out_dir}")
@@ -272,6 +415,12 @@ def main() -> None:
         "--stage-note-level-path", default=str(DEFAULT_STAGE_NOTE_LEVEL_PATH)
     )
     parser.add_argument(
+        "--longitudinal-path", default=None,
+        help=("Stage 2 longitudinal_prediction_data_adt.csv. Enables the "
+              "platinum/NEPC/AVPC KMs and the lab trajectories; death KM does "
+              "not need it."),
+    )
+    parser.add_argument(
         "--fig-root", default=None,
         help=f"defaults to $COMPASS_FIG_ROOT or {DEFAULT_FIG_ROOT}",
     )
@@ -291,11 +440,22 @@ def main() -> None:
         )
     icds = pl.read_csv(args.icd_path, infer_schema_length=0) if args.icd_path else None
 
+    longitudinal = None
+    if args.longitudinal_path:
+        # load_longitudinal cross-checks TREATMENT_ANCHOR_DATE against each
+        # patient's ADT_FIRST_DATE and refuses the arpi-arm file, whose anchor
+        # is first ARPI/taxane exposure -- same columns, wrong origin.
+        labels_for_check = build_labels(
+            meds, follow_up=follow_up, gap_threshold_days=args.gap_threshold_days
+        )
+        longitudinal = load_longitudinal(args.longitudinal_path, labels=labels_for_check)
+
     run(
         meds,
         follow_up=follow_up,
         icds=icds,
         stage_note_level_path=args.stage_note_level_path,
+        longitudinal=longitudinal,
         fig_root=args.fig_root,
         gap_threshold_days=args.gap_threshold_days,
     )
