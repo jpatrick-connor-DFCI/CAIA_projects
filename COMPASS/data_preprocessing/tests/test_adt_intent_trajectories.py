@@ -26,7 +26,9 @@ from COMPASS.data_preprocessing.adt_intent_trajectories import (  # noqa: E402
     build_km_input,
     build_lab_trajectory,
     km_series_by_intent,
+    max_stage_distribution_by_intent,
     met_burden_distribution_by_intent,
+    plot_max_stage_panel,
     plot_stage_metburden_panel,
     stage_distribution_by_intent,
     load_longitudinal,
@@ -542,6 +544,95 @@ class TestStageMetBurdenPlots(unittest.TestCase):
         fig, axes = plot_stage_metburden_panel(bare)
         self.assertEqual(len(axes), 3)
         plt.close(fig)
+
+
+class TestMaxStagePlots(unittest.TestCase):
+    """Max-stage-around-ADT figures."""
+
+    def _frame(self) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                INTENT_COL: ["METASTATIC"] * 3 + ["LOCALIZED_ADJUVANT"] * 2,
+                # p5 has no pre-ADT note at all -- it must not be read as stage I.
+                "MAX_STAGE_BEFORE": ["IV", "IV", "II", "II", None],
+                "MAX_STAGE_BEFORE_INT": [4, 4, 2, 2, None],
+                "IS_MAX_STAGE_IV_BEFORE": [True, True, False, False, None],
+                "MAX_STAGE_AFTER": ["IV", None, "IV", None, "III"],
+                "MAX_STAGE_AFTER_INT": [4, None, 4, None, 3],
+                "IS_MAX_STAGE_IV_AFTER": [True, None, True, None, False],
+                "STAGE_UPSTAGED_AFTER_ADT": [False, None, True, None, None],
+            }
+        )
+
+    def test_each_side_has_its_own_denominator(self):
+        """A patient unstaged on one side drops out of that side only."""
+        dist = max_stage_distribution_by_intent(self._frame())
+        before = dist.filter(
+            (pl.col("side") == "before") & (pl.col(INTENT_COL) == "METASTATIC")
+        )
+        after = dist.filter(
+            (pl.col("side") == "after") & (pl.col(INTENT_COL) == "METASTATIC")
+        )
+        self.assertEqual(before["n_in_class"][0], 3)   # all 3 staged pre-ADT
+        self.assertEqual(after["n_in_class"][0], 2)    # only 2 staged post-ADT
+
+    def test_missing_side_is_not_counted_as_stage_one(self):
+        """The absent-coverage patient must appear in no "before" row."""
+        dist = max_stage_distribution_by_intent(self._frame())
+        loc_before = dist.filter(
+            (pl.col("side") == "before")
+            & (pl.col(INTENT_COL) == "LOCALIZED_ADJUVANT")
+        )
+        self.assertEqual(int(loc_before["n_patients"].sum()), 1)
+        self.assertNotIn("I", loc_before["MAX_STAGE"].to_list())
+
+    def test_percentages_sum_to_100_within_side_and_class(self):
+        dist = max_stage_distribution_by_intent(self._frame())
+        for side in ("before", "after"):
+            for cls in dist[INTENT_COL].unique().to_list():
+                sub = dist.filter(
+                    (pl.col("side") == side) & (pl.col(INTENT_COL) == cls)
+                )
+                if sub.height:
+                    self.assertAlmostEqual(float(sub["pct"].sum()), 100.0, places=1)
+
+    def test_panel_renders(self):
+        import matplotlib
+        matplotlib.use("Agg")
+        fig, axes = plot_max_stage_panel(self._frame())
+        self.assertEqual(len(axes), 3)
+        fig.clf()
+
+    def test_panel_renders_without_any_max_stage_columns(self):
+        """The notebook calls this whether or not the stage file was loaded,
+        so absent columns must degrade to a placeholder, not raise."""
+        import matplotlib
+        matplotlib.use("Agg")
+        bare = pl.DataFrame({INTENT_COL: ["METASTATIC", "LOCALIZED_ADJUVANT"]})
+        self.assertEqual(max_stage_distribution_by_intent(bare).height, 0)
+        fig, axes = plot_max_stage_panel(bare)
+        self.assertEqual(len(axes), 3)
+        fig.clf()
+
+    def test_panel_renders_when_no_patient_is_staged_on_both_sides(self):
+        """Upstaging is unobservable here; the panel must still render."""
+        import matplotlib
+        matplotlib.use("Agg")
+        one_sided = pl.DataFrame(
+            {
+                INTENT_COL: ["METASTATIC", "LOCALIZED_ADJUVANT"],
+                "MAX_STAGE_BEFORE": ["IV", "II"],
+                "MAX_STAGE_BEFORE_INT": [4, 2],
+                "IS_MAX_STAGE_IV_BEFORE": [True, False],
+                "MAX_STAGE_AFTER": [None, None],
+                "MAX_STAGE_AFTER_INT": [None, None],
+                "IS_MAX_STAGE_IV_AFTER": [None, None],
+                "STAGE_UPSTAGED_AFTER_ADT": [None, None],
+            }
+        )
+        fig, axes = plot_max_stage_panel(one_sided)
+        self.assertEqual(len(axes), 3)
+        fig.clf()
 
 
 if __name__ == "__main__":

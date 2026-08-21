@@ -776,6 +776,254 @@ def plot_met_site_pattern(ax, labelled: pl.DataFrame) -> None:
     ax.set_axisbelow(True)
 
 
+def max_stage_distribution_by_intent(labelled: pl.DataFrame) -> pl.DataFrame:
+    """Within-class max-stage composition on each side of ADT start.
+
+    Long form: one row per (side, class, stage). `n_in_class` is the covered
+    denominator for *that side* -- a patient with no pre-ADT staging note is
+    absent from the "before" denominator rather than counted as stage I, so
+    the two sides generally have different denominators.
+    """
+    if "MAX_STAGE_BEFORE" not in labelled.columns:
+        return pl.DataFrame()
+
+    frames = []
+    for side, col in (("before", "MAX_STAGE_BEFORE"), ("after", "MAX_STAGE_AFTER")):
+        if col not in labelled.columns:
+            continue
+        covered = labelled.filter(pl.col(col).is_not_null())
+        if covered.height == 0:
+            continue
+        counts = covered.group_by([INTENT_COL, col]).agg(pl.len().alias("n_patients"))
+        totals = covered.group_by(INTENT_COL).agg(pl.len().alias("n_in_class"))
+        frames.append(
+            counts.join(totals, on=INTENT_COL, how="left")
+            .rename({col: "MAX_STAGE"})
+            .with_columns(
+                (pl.col("n_patients") / pl.col("n_in_class") * 100).round(1).alias("pct"),
+                pl.lit(side).alias("side"),
+            )
+            .select("side", INTENT_COL, "MAX_STAGE", "n_patients", "n_in_class", "pct")
+        )
+    if not frames:
+        return pl.DataFrame()
+    return pl.concat(frames).sort(["side", INTENT_COL, "MAX_STAGE"])
+
+
+def plot_max_stage_distribution(ax, labelled: pl.DataFrame) -> None:
+    """Stacked max-stage composition, before vs after ADT start, per class.
+
+    Bars are grouped as (class, side) pairs so the pre/post shift within a
+    class is read vertically, side by side.
+    """
+    dist = max_stage_distribution_by_intent(labelled)
+    if dist.height == 0:
+        ax.text(0.5, 0.5, "no max-stage coverage", ha="center", va="center",
+                transform=ax.transAxes, color="#888888")
+        ax.set_axis_off()
+        return
+
+    classes = _class_order_present(dist)
+    sides = [s for s in ("before", "after") if s in set(dist["side"].to_list())]
+    # One slot per (class, side); a small gap between classes keeps the pairing
+    # visually obvious without a second axis.
+    positions, labels_x, keys = [], [], []
+    x = 0.0
+    for cls in classes:
+        for side in sides:
+            positions.append(x)
+            keys.append((cls, side))
+            labels_x.append(side)
+            x += 1.0
+        x += 0.6
+
+    bottoms = {k: 0.0 for k in keys}
+    for stage in STAGE_PLOT_ORDER:
+        heights = []
+        for cls, side in keys:
+            row = dist.filter(
+                (pl.col(INTENT_COL) == cls)
+                & (pl.col("side") == side)
+                & (pl.col("MAX_STAGE") == stage)
+            )
+            heights.append(float(row["pct"][0]) if row.height else 0.0)
+        ax.bar(
+            positions, heights, width=0.82,
+            bottom=[bottoms[k] for k in keys],
+            color=STAGE_COLORS[stage], edgecolor="white", linewidth=0.8,
+            label=f"stage {stage}", zorder=3,
+        )
+        for pos, k, h in zip(positions, keys, heights):
+            if h >= 6:
+                ax.text(pos, bottoms[k] + h / 2, f"{h:.0f}%",
+                        ha="center", va="center", fontsize=7.5,
+                        color="white" if stage in ("III", "IV") else "#222222",
+                        zorder=4)
+            bottoms[k] += h
+
+    denoms = {
+        (r[INTENT_COL], r["side"]): r["n_in_class"]
+        for r in dist.unique(subset=[INTENT_COL, "side"]).iter_rows(named=True)
+    }
+    ax.set_xticks(positions)
+    ax.set_xticklabels(
+        [f"{side}\nn={denoms.get(k, 0):,}" for k, side in zip(keys, labels_x)],
+        fontsize=7.5,
+    )
+    # Class name centred under its pair, via a secondary tick axis -- keeping it
+    # inside the axes means tight_layout can still size the figure.
+    sec = ax.secondary_xaxis("bottom")
+    sec.set_xticks(
+        [
+            sum(p for p, k in zip(positions, keys) if k[0] == cls)
+            / max(1, sum(1 for k in keys if k[0] == cls))
+            for cls in classes
+        ]
+    )
+    sec.set_xticklabels(classes, fontsize=9)
+    sec.tick_params(length=0, pad=22)
+    sec.spines["bottom"].set_visible(False)
+
+    ax.set_ylabel("% of side-covered patients in class")
+    ax.set_ylim(0, 100)
+    ax.set_title("Max stage before vs after ADT start")
+    ax.legend(fontsize=8, frameon=False, bbox_to_anchor=(1.01, 1), loc="upper left")
+    ax.grid(axis="y", alpha=0.25, zorder=0)
+    ax.set_axisbelow(True)
+
+
+def plot_max_stage_iv_rate(ax, labelled: pl.DataFrame) -> None:
+    """Stage IV rate before vs after ADT start, per class, with coverage.
+
+    The single number the label most needs to be right about: a
+    LOCALIZED_ADJUVANT class carrying a high pre-ADT stage IV rate is the
+    label failing.
+    """
+    if "IS_MAX_STAGE_IV_BEFORE" not in labelled.columns:
+        ax.text(0.5, 0.5, "no max-stage coverage", ha="center", va="center",
+                transform=ax.transAxes, color="#888888")
+        ax.set_axis_off()
+        return
+
+    classes = _class_order_present(labelled)
+    sides = [
+        ("before", "IS_MAX_STAGE_IV_BEFORE", "#4a6fa5"),
+        ("after", "IS_MAX_STAGE_IV_AFTER", "#b5651d"),
+    ]
+    width = 0.36
+    xs = list(range(len(classes)))
+    any_data = False
+    for i, (side, col, colour) in enumerate(sides):
+        if col not in labelled.columns:
+            continue
+        rates, ns = [], []
+        for cls in classes:
+            covered = labelled.filter(
+                (pl.col(INTENT_COL) == cls) & pl.col(col).is_not_null()
+            )
+            ns.append(covered.height)
+            rates.append(
+                float(covered[col].mean()) * 100 if covered.height else 0.0
+            )
+        if any(n for n in ns):
+            any_data = True
+        offset = (i - (len(sides) - 1) / 2) * width
+        ax.bar([x + offset for x in xs], rates, width=width,
+               color=colour, label=side, zorder=3)
+        for x, r, n in zip(xs, rates, ns):
+            if not n:
+                # No coverage on this side: say so, rather than drawing a
+                # flat bar that would read as a measured 0%.
+                ax.text(x + offset, 1.5, "no\ncov.", ha="center", va="bottom",
+                        fontsize=7, color="#888888", zorder=4)
+                continue
+            if r == 0:
+                # A real, measured zero needs a visible stub or it looks like
+                # missing data.
+                ax.plot([x + offset - width / 2, x + offset + width / 2],
+                        [0.6, 0.6], color=colour, linewidth=2.5, zorder=4)
+            ax.text(x + offset, r + 1.5, f"{r:.0f}%\nn={n:,}",
+                    ha="center", va="bottom", fontsize=7.5, zorder=4)
+
+    if not any_data:
+        ax.text(0.5, 0.5, "no max-stage coverage", ha="center", va="center",
+                transform=ax.transAxes, color="#888888")
+        ax.set_axis_off()
+        return
+
+    ax.set_xticks(xs)
+    ax.set_xticklabels(classes, fontsize=9)
+    ax.set_ylabel("% stage IV (of side-covered)")
+    ax.set_ylim(0, 118)
+    ax.set_yticks([0, 25, 50, 75, 100])
+    ax.set_title("Stage IV rate, before vs after ADT start")
+    ax.legend(fontsize=8, frameon=False, title="side", title_fontsize=8)
+    ax.grid(axis="y", alpha=0.25, zorder=0)
+    ax.set_axisbelow(True)
+
+
+def plot_stage_upstaging(ax, labelled: pl.DataFrame) -> None:
+    """Share upstaged after ADT start, among patients covered on both sides.
+
+    Denominator is deliberately narrow: upstaging is only observable for a
+    patient with a staging note on each side, so patients missing either side
+    are excluded rather than counted as not-upstaged.
+    """
+    if "STAGE_UPSTAGED_AFTER_ADT" not in labelled.columns:
+        ax.text(0.5, 0.5, "no max-stage coverage", ha="center", va="center",
+                transform=ax.transAxes, color="#888888")
+        ax.set_axis_off()
+        return
+
+    classes = _class_order_present(labelled)
+    rates, ns = [], []
+    for cls in classes:
+        covered = labelled.filter(
+            (pl.col(INTENT_COL) == cls)
+            & pl.col("STAGE_UPSTAGED_AFTER_ADT").is_not_null()
+        )
+        ns.append(covered.height)
+        rates.append(
+            float(covered["STAGE_UPSTAGED_AFTER_ADT"].mean()) * 100
+            if covered.height else 0.0
+        )
+
+    if not any(ns):
+        ax.text(0.5, 0.5, "no patient staged on both sides",
+                ha="center", va="center", transform=ax.transAxes, color="#888888")
+        ax.set_axis_off()
+        return
+
+    ax.bar(range(len(classes)), rates, width=0.55,
+           color=[INTENT_COLORS.get(c, "#777777") for c in classes], zorder=3)
+    for x, r, n in zip(range(len(classes)), rates, ns):
+        ax.text(x, r + 1.5, f"{r:.0f}%\nn={n:,}", ha="center", va="bottom",
+                fontsize=8, zorder=4)
+    ax.set_xticks(range(len(classes)))
+    ax.set_xticklabels(classes, fontsize=9)
+    ax.set_ylabel("% upstaged (of both-sides-covered)")
+    ax.set_ylim(0, 118)
+    ax.set_yticks([0, 25, 50, 75, 100])
+    ax.set_title("Upstaged after ADT start")
+    ax.grid(axis="y", alpha=0.25, zorder=0)
+    ax.set_axisbelow(True)
+
+
+def plot_max_stage_panel(labelled: pl.DataFrame, figsize=(15, 4.6)):
+    """Three-panel figure: max-stage mix, stage IV rate, upstaging.
+
+    Returns (fig, axes). Caller saves; nothing is written here.
+    """
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    plot_max_stage_distribution(axes[0], labelled)
+    plot_max_stage_iv_rate(axes[1], labelled)
+    plot_stage_upstaging(axes[2], labelled)
+    fig.tight_layout()
+    return fig, axes
+
+
 def plot_stage_metburden_panel(labelled: pl.DataFrame, figsize=(15, 4.6)):
     """Three-panel figure: stage mix, burden distribution, site pattern.
 
