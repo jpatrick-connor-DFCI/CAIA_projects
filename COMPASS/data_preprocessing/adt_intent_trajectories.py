@@ -962,64 +962,19 @@ def plot_max_stage_iv_rate(ax, labelled: pl.DataFrame) -> None:
     ax.set_axisbelow(True)
 
 
-def plot_stage_upstaging(ax, labelled: pl.DataFrame) -> None:
-    """Share upstaged after ADT start, among patients covered on both sides.
+def plot_max_stage_panel(labelled: pl.DataFrame, figsize=(10, 4.6)):
+    """Two-panel figure: max-stage mix, stage IV rate.
 
-    Denominator is deliberately narrow: upstaging is only observable for a
-    patient with a staging note on each side, so patients missing either side
-    are excluded rather than counted as not-upstaged.
-    """
-    if "STAGE_UPSTAGED_AFTER_ADT" not in labelled.columns:
-        ax.text(0.5, 0.5, "no max-stage coverage", ha="center", va="center",
-                transform=ax.transAxes, color="#888888")
-        ax.set_axis_off()
-        return
-
-    classes = _class_order_present(labelled)
-    rates, ns = [], []
-    for cls in classes:
-        covered = labelled.filter(
-            (pl.col(INTENT_COL) == cls)
-            & pl.col("STAGE_UPSTAGED_AFTER_ADT").is_not_null()
-        )
-        ns.append(covered.height)
-        rates.append(
-            float(covered["STAGE_UPSTAGED_AFTER_ADT"].mean()) * 100
-            if covered.height else 0.0
-        )
-
-    if not any(ns):
-        ax.text(0.5, 0.5, "no patient staged on both sides",
-                ha="center", va="center", transform=ax.transAxes, color="#888888")
-        ax.set_axis_off()
-        return
-
-    ax.bar(range(len(classes)), rates, width=0.55,
-           color=[INTENT_COLORS.get(c, "#777777") for c in classes], zorder=3)
-    for x, r, n in zip(range(len(classes)), rates, ns):
-        ax.text(x, r + 1.5, f"{r:.0f}%\nn={n:,}", ha="center", va="bottom",
-                fontsize=8, zorder=4)
-    ax.set_xticks(range(len(classes)))
-    ax.set_xticklabels(classes, fontsize=9)
-    ax.set_ylabel("% upstaged (of both-sides-covered)")
-    ax.set_ylim(0, 118)
-    ax.set_yticks([0, 25, 50, 75, 100])
-    ax.set_title("Upstaged after ADT start")
-    ax.grid(axis="y", alpha=0.25, zorder=0)
-    ax.set_axisbelow(True)
-
-
-def plot_max_stage_panel(labelled: pl.DataFrame, figsize=(15, 4.6)):
-    """Three-panel figure: max-stage mix, stage IV rate, upstaging.
+    The upstaged-after-ADT-start bar chart was dropped from this panel;
+    validate_adt_intent still reports upstaging numerically.
 
     Returns (fig, axes). Caller saves; nothing is written here.
     """
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
     plot_max_stage_distribution(axes[0], labelled)
     plot_max_stage_iv_rate(axes[1], labelled)
-    plot_stage_upstaging(axes[2], labelled)
     fig.tight_layout()
     return fig, axes
 

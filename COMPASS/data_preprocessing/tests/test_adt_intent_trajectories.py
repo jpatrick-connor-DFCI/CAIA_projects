@@ -600,7 +600,7 @@ class TestMaxStagePlots(unittest.TestCase):
         import matplotlib
         matplotlib.use("Agg")
         fig, axes = plot_max_stage_panel(self._frame())
-        self.assertEqual(len(axes), 3)
+        self.assertEqual(len(axes), 2)
         fig.clf()
 
     def test_panel_renders_without_any_max_stage_columns(self):
@@ -611,11 +611,12 @@ class TestMaxStagePlots(unittest.TestCase):
         bare = pl.DataFrame({INTENT_COL: ["METASTATIC", "LOCALIZED_ADJUVANT"]})
         self.assertEqual(max_stage_distribution_by_intent(bare).height, 0)
         fig, axes = plot_max_stage_panel(bare)
-        self.assertEqual(len(axes), 3)
+        self.assertEqual(len(axes), 2)
         fig.clf()
 
-    def test_panel_renders_when_no_patient_is_staged_on_both_sides(self):
-        """Upstaging is unobservable here; the panel must still render."""
+    def test_panel_renders_when_no_patient_is_staged_after_adt(self):
+        """The "after" side is empty for every patient, so the stage IV rate
+        has a zero denominator on that side; the panel must still render."""
         import matplotlib
         matplotlib.use("Agg")
         one_sided = pl.DataFrame(
@@ -631,7 +632,7 @@ class TestMaxStagePlots(unittest.TestCase):
             }
         )
         fig, axes = plot_max_stage_panel(one_sided)
-        self.assertEqual(len(axes), 3)
+        self.assertEqual(len(axes), 2)
         fig.clf()
 
 

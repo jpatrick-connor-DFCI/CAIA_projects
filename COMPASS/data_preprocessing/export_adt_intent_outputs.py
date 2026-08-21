@@ -20,7 +20,7 @@ itself. `run()` returns the labelled frame, so a caller that needs the
 per-patient label takes it from the return value rather than from disk.
 
   stage_metburden.png            stage mix, burden distribution, site pattern
-  max_stage.png                  max-stage mix, stage IV rate, upstaging
+  max_stage.png                  max-stage mix, stage IV rate
   km_death.png                   overall survival, all ADT-exposed
   km_platinum.png / km_nepc.png / km_avpc.png
                                  cohort-only endpoints; need `longitudinal`
@@ -215,6 +215,16 @@ def write_time_to_event(
             f"log-rank {r['group_a']} vs {r['group_b']}: p={r['p_value']:.3g}"
             for r in lr.iter_rows(named=True)
         ]
+
+        # The legend and this box both want a free corner. matplotlib's "best"
+        # placement puts the legend bottom-left whenever the curves stay high
+        # -- which is exactly where the annotation sits, and for time-to-
+        # platinum and time-to-NEPC the curves nearly always stay high. Pin the
+        # legend top-right and the annotation bottom-left so they can never
+        # contend, and add headroom above 1.0 so a flat curve does not run
+        # under the legend either.
+        ax.set_ylim(0, 1.28)
+        ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
         ax.text(
             0.02, 0.02, "\n".join(lines), transform=ax.transAxes,
             fontsize=7.5, va="bottom", ha="left",
