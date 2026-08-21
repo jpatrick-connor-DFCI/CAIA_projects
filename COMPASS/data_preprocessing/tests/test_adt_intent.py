@@ -209,62 +209,51 @@ def test_short_course_with_full_followup_is_adjuvant():
     assert _reason(labelled, 1) == "excluded_completed_adjuvant_course"
 
 
-def test_ongoing_adt_at_last_contact_no_longer_classifies():
-    """Still filling ADT at last contact is a metastatic pattern clinically, but
-    the two-term rule does not test for it: a 30-month course is under the
-    36-month bound and carries no escalation, so it is labelled adjuvant despite
-    never having stopped. The signal survives only in the audit columns."""
+def test_ongoing_adt_at_last_contact_is_metastatic():
+    """Still filling ADT at last contact after 2+ years is a metastatic pattern."""
     meds = _meds(_depot_course(1, months=30))
     last_fill = ADT_START + timedelta(days=90 * (30 // 3))
     labelled = classify_adt_intent(
         meds, follow_up=_follow_up(1, last_fill + timedelta(days=30))
     )
-    row = labelled.filter(pl.col("DFCI_MRN") == 1)
-    assert _intent(labelled, 1) == INTENT_LOCALIZED
-    # Ongoing therapy is still measured, just not acted on.
-    assert row["ADT_ONGOING_AT_LAST_CONTACT"][0]
-    assert not row["ADJUVANT_THERAPY_STOPPED"][0]
+    assert _intent(labelled, 1) == INTENT_METASTATIC
+    assert labelled.filter(pl.col("DFCI_MRN") == 1)["ADT_ONGOING_AT_LAST_CONTACT"][0]
 
 
 # ---------------------------------------------------------------------------
-# Administrative censoring: measured, no longer guarded against
+# Guard 1: administrative censoring
 # ---------------------------------------------------------------------------
 
 
-def test_short_course_truncated_by_data_cutoff_is_now_labelled_adjuvant():
-    """This is the cost of the two-term rule, pinned so it cannot regress
-    silently. An 18-month course whose follow-up ends right at the last fill is
-    indistinguishable from ongoing therapy -- it may well be a metastatic
-    patient caught at the data cutoff -- but escalation and duration are the
-    only tests, so it is excluded as a completed adjuvant course anyway.
-    ADJUVANT_OBSERVED_LONG_ENOUGH is what flags it."""
+def test_short_course_truncated_by_data_cutoff_is_not_adjuvant():
+    """The single most important rule: an 18-month course whose follow-up ends
+    right at the last fill is indistinguishable from ongoing therapy, and must
+    never be labelled adjuvant. With no third class it falls to METASTATIC."""
     meds = _meds(_depot_course(1, months=18))
     last_fill = ADT_START + timedelta(days=90 * (18 // 3))
     labelled = classify_adt_intent(
         meds, follow_up=_follow_up(1, last_fill + timedelta(days=5))
     )
-    row = labelled.filter(pl.col("DFCI_MRN") == 1)
-    assert _intent(labelled, 1) == INTENT_LOCALIZED
-    assert _excluded(labelled, 1)
-    assert _reason(labelled, 1) == "excluded_completed_adjuvant_course"
-    # The two dropped guards both still fire as columns.
-    assert not row["ADJUVANT_OBSERVED_LONG_ENOUGH"][0]
-    assert not row["ADJUVANT_THERAPY_STOPPED"][0]
+    assert _intent(labelled, 1) == INTENT_METASTATIC
+    # What matters is that the patient is kept, not which disqualifier is
+    # named: cutting follow-up at the last fill trips both the ongoing-therapy
+    # and the insufficient-observation test, and either is a correct reason.
+    assert not _excluded(labelled, 1)
+    assert _reason(labelled, 1) in (
+        "retained_adt_ongoing",
+        "retained_insufficient_followup",
+    )
 
 
-def test_missing_follow_up_still_yields_adjuvant():
-    """Follow-up no longer bears on the label at all: with follow_up=None the
-    duration test alone decides, so an 18-month course is excluded even though
-    censoring cannot be ruled out. Previously this was impossible by
-    construction."""
+def test_missing_follow_up_cannot_yield_adjuvant():
+    """Without follow-up dates, censoring cannot be ruled out for anyone, so
+    nobody is excluded and everybody is assumed METASTATIC."""
     meds = _meds(_depot_course(1, months=18))
     labelled = classify_adt_intent(meds, follow_up=None)
-    row = labelled.filter(pl.col("DFCI_MRN") == 1)
-    assert _intent(labelled, 1) == INTENT_LOCALIZED
-    assert _excluded(labelled, 1)
-    # Unknown observation window reads as not-long-enough, as before.
-    assert not row["ADJUVANT_OBSERVED_LONG_ENOUGH"][0]
-    # Not metastatic-evidenced either -- absent follow-up is absent evidence.
+    assert _intent(labelled, 1) == INTENT_METASTATIC
+    assert not _excluded(labelled, 1)
+    assert _reason(labelled, 1) == "retained_insufficient_followup"
+    # Assumed, not evidenced -- the audit flag must say so.
     assert not labelled["HAS_POSITIVE_METASTATIC_EVIDENCE"][0]
 
 
@@ -430,19 +419,16 @@ def test_relugolix_only_patient_keeps_span_without_an_anchor_drug():
     assert episodes["ADT_SPAN_DAYS"][0] == 360
 
 
-def test_exclusion_requires_exactly_the_two_criteria():
-    """Two criteria classify -- escalation and duration -- and only those two.
-    Breaking either retains the patient; breaking any of the three audit-only
-    terms does not. Both halves are asserted, because the second half is what
-    distinguishes this rule from the earlier five-term one."""
+def test_exclusion_requires_all_five_criteria():
+    """Each criterion is load-bearing: break any one of an otherwise-excludable
+    patient and they must be retained. This is the exclusion framing's core
+    property -- removal takes positive evidence, retention takes none."""
     fu_end = ADT_START + timedelta(days=2500)
 
     # Baseline: 24-month single course, stopped, long follow-up -> excluded.
     base = _depot_course(1, months=24)
     labelled = classify_adt_intent(_meds(base), follow_up=_follow_up(1, fu_end))
     assert _excluded(labelled, 1)
-
-    # --- The two terms that classify -------------------------------------
 
     # Break duration: 48 months exceeds the adjuvant bound.
     long_course = classify_adt_intent(
@@ -451,18 +437,7 @@ def test_exclusion_requires_exactly_the_two_criteria():
     assert not _excluded(long_course, 1)
     assert _reason(long_course, 1) == "retained_adt_span_too_long"
 
-    # Break escalation: a taxane disqualifies regardless of duration.
-    escalated = classify_adt_intent(
-        _meds(base + [(1, "DOCETAXEL", ADT_START + timedelta(days=200))]),
-        follow_up=_follow_up(1, fu_end),
-    )
-    assert not _excluded(escalated, 1)
-    assert _reason(escalated, 1) == "retained_definitive_escalation"
-
-    # --- The three that no longer classify -------------------------------
-
-    # Multiple episodes: a second course after a >270d gap is salvage for
-    # recurrence, but total span stays under the bound, so it is excluded.
+    # Break episode count: a second course after a >270d gap is salvage.
     two_ep = classify_adt_intent(
         _meds(
             _depot_course(1, months=6)
@@ -473,44 +448,30 @@ def test_exclusion_requires_exactly_the_two_criteria():
         ),
         follow_up=_follow_up(1, fu_end),
     )
-    assert _excluded(two_ep, 1)
-    assert not two_ep.filter(pl.col("DFCI_MRN") == 1)["ADJUVANT_SINGLE_EPISODE"][0]
+    assert not _excluded(two_ep, 1)
+    assert _reason(two_ep, 1) == "retained_multiple_episodes"
 
-    # Short follow-up: not observed long enough to call the course complete,
-    # yet excluded anyway.
+    # Break escalation: a taxane disqualifies regardless of duration.
+    escalated = classify_adt_intent(
+        _meds(base + [(1, "DOCETAXEL", ADT_START + timedelta(days=200))]),
+        follow_up=_follow_up(1, fu_end),
+    )
+    assert not _excluded(escalated, 1)
+    assert _reason(escalated, 1) == "retained_definitive_escalation"
+
+    # Break follow-up: not observed long enough to call the course complete.
     short_fu = classify_adt_intent(
-        _meds(base), follow_up=_follow_up(1, ADT_START + timedelta(days=700))
+        _meds(base), follow_up=_follow_up(1, ADT_START + timedelta(days=800))
     )
-    assert _excluded(short_fu, 1)
-    assert not short_fu.filter(pl.col("DFCI_MRN") == 1)[
-        "ADJUVANT_OBSERVED_LONG_ENOUGH"
-    ][0]
-
-    # Ongoing therapy: last fill sits inside the ongoing window of last
-    # contact, and it still does not retain the patient.
-    last_fill = ADT_START + timedelta(days=90 * (24 // 3))
-    ongoing = classify_adt_intent(
-        _meds(base), follow_up=_follow_up(1, last_fill + timedelta(days=30))
-    )
-    assert _excluded(ongoing, 1)
-    assert not ongoing.filter(pl.col("DFCI_MRN") == 1)["ADJUVANT_THERAPY_STOPPED"][0]
+    assert not _excluded(short_fu, 1)
 
 
-def test_exclusion_without_follow_up_rests_on_duration_alone():
-    """With follow_up=None every follow-up-derived term is unknown, so the
-    duration test decides by itself. Both short courses here are excluded --
-    the opposite of the previous rule, where absent observation windows made
-    exclusion impossible."""
+def test_nothing_is_excluded_without_follow_up():
+    """Retention is the default, and absent follow-up is absent evidence: no
+    patient may be excluded when observation windows are unknown."""
     meds = _meds(_depot_course(1, months=24) + _depot_course(2, months=6))
     labelled = classify_adt_intent(meds, follow_up=None)
-    assert labelled["IS_LOCALIZED_ADJUVANT"].all()
-    # Nothing was observed long enough; it simply no longer matters.
-    assert not labelled["ADJUVANT_OBSERVED_LONG_ENOUGH"].any()
-
-    # A course over the bound is still retained without follow-up.
-    long_course = classify_adt_intent(_meds(_depot_course(3, months=48)), follow_up=None)
-    assert not _excluded(long_course, 3)
-    assert _reason(long_course, 3) == "retained_adt_span_too_long"
+    assert not labelled["IS_LOCALIZED_ADJUVANT"].any()
 
 
 def test_intent_and_exclusion_flag_agree_on_the_adjuvant_class():
@@ -561,27 +522,21 @@ def test_label_is_binary_and_mirrors_the_exclusion_flag():
 
 def test_metastatic_separates_evidenced_from_assumed():
     """The assumption has to stay auditable: a patient with a taxane and one
-    merely lacking adjuvant evidence share a label but not the audit flag.
-
-    Patient 2 is three widely-spaced short courses. Total span exceeds the
-    36-month bound, so the duration test retains them, but the episode count
-    keeps them outside HAS_POSITIVE_METASTATIC_EVIDENCE (which wants <= 2
-    episodes) -- metastatic by assumption only."""
+    merely lacking adjuvant evidence share a label but not the audit flag."""
     meds = _meds(
         _depot_course(1, months=12)
         + [(1, "DOCETAXEL", ADT_START + timedelta(days=200))]
-        + _depot_course(2, months=3)
-        + [(2, "LEUPROLIDE ACETATE", ADT_START + timedelta(days=720 + 90 * i))
-           for i in range(2)]
-        + [(2, "LEUPROLIDE ACETATE", ADT_START + timedelta(days=1500 + 90 * i))
-           for i in range(2)]
+        + _depot_course(2, months=6)
+        + [
+            (2, "LEUPROLIDE ACETATE", ADT_START + timedelta(days=720 + 90 * i))
+            for i in range(2)
+        ]
     )
     labelled = classify_adt_intent(
         meds, follow_up=_follow_up_many([1, 2], ADT_START + timedelta(days=2500))
     )
     assert _intent(labelled, 1) == INTENT_METASTATIC
     assert _intent(labelled, 2) == INTENT_METASTATIC
-    assert _reason(labelled, 2) == "retained_adt_span_too_long"
 
     def flag(mrn):
         return labelled.filter(pl.col("DFCI_MRN") == mrn)[

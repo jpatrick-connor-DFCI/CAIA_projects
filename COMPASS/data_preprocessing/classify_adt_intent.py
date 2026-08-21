@@ -45,18 +45,16 @@ episode. The threshold exceeds the longest depot formulation (6 months) plus a
 realistic refill delay, so a late refill does not fracture continuous therapy,
 while a genuine years-later re-challenge still splits.
 
-One guard keeps that reconstruction honest, and it is load-bearing:
-`apply_dedup` collapses exact duplicate (MRN, drug, date) rows, so record
-counts are NOT administration counts. Duration therefore rests on span and
-gaps; `ADT_N_RECORDS` is reported for audit but never classifies.
+Two guards keep that reconstruction honest, and both are load-bearing:
 
-A second guard used to sit beside it and no longer does. A patient whose first
-ADT falls shortly before the data cutoff looks exactly like one who stopped
-after a short course, and `MIN_FOLLOWUP_DAYS` of required observation after ADT
-start was what kept those two apart. That term is now audit-only
-(`ADJUVANT_OBSERVED_LONG_ENOUGH`), so the adjuvant class does fill with
-recently-treated metastatic patients and the column is the only thing that
-shows it. Check it before using the adjuvant group for anything.
+  1. `apply_dedup` collapses exact duplicate (MRN, drug, date) rows, so record
+     counts are NOT administration counts. Duration therefore rests on span and
+     gaps; `ADT_N_RECORDS` is reported for audit but never classifies.
+  2. A patient whose first ADT falls shortly before the data cutoff looks
+     exactly like one who stopped after a short course. Anyone with less than
+     `MIN_FOLLOWUP_DAYS` of observation after ADT start can never be labelled
+     LOCALIZED_ADJUVANT, and is therefore assumed METASTATIC. Without this the
+     adjuvant class silently fills with recently-treated metastatic patients.
 
 This module is purely additive: it changes no existing constant, cohort rule,
 or pipeline output.
@@ -473,36 +471,22 @@ def classify_adt_intent(
       HAS_POSITIVE_METASTATIC_EVIDENCE  bool -- audit: affirmative evidence,
                                                 as opposed to assumed by default
 
-    A patient is LOCALIZED_ADJUVANT when both of these hold:
+    A patient is LOCALIZED_ADJUVANT only when every one of these holds:
 
       - no definitive escalation (taxane, radium-223, sipuleucel-T,
         estramustine, mitoxantrone) at any time
       - ADT span <= `adjuvant_max_span_days` (default 1095, i.e. 36 months)
+      - a single episode -- a restart after a gap > `gap_threshold_days` is
+        salvage for recurrence, not adjuvant therapy
+      - therapy demonstrably stopped: no fill within ONGOING_WINDOW_DAYS of
+        last contact
+      - at least `min_followup_days` (default 730) observed after ADT start,
+        so a truncated course cannot masquerade as a completed one
 
-    Failing either one leaves the patient retained. ARPI exposure is recorded
-    (HAS_ARPI, FIRST_ARPI_DATE) but is deliberately not part of the test:
-    ARPIs are approved in non-metastatic CRPC and used in high-risk localized
-    disease, so they neither prove nor disprove adjuvant intent.
-
-    Three further terms are computed and emitted but do NOT classify:
-
-      ADJUVANT_SINGLE_EPISODE        a restart after a gap >
-                                     `gap_threshold_days` is salvage for
-                                     recurrence, not adjuvant therapy
-      ADJUVANT_THERAPY_STOPPED       no fill within ONGOING_WINDOW_DAYS of
-                                     last contact
-      ADJUVANT_OBSERVED_LONG_ENOUGH  at least `min_followup_days` (default
-                                     730) observed after ADT start
-
-    Their exclusion from the test is a deliberate loosening and it is not
-    free. Without ADJUVANT_OBSERVED_LONG_ENOUGH a course truncated by the data
-    cutoff is indistinguishable from one that completed, so recently-treated
-    metastatic patients will land in the adjuvant class; without
-    ADJUVANT_THERAPY_STOPPED a patient still on ADT at last contact can be
-    called a completed course. `min_followup_days` therefore no longer
-    constrains the label, though it still defines the emitted column.
-    Cross-tabulate these three against ADT_INTENT to size the effect before
-    trusting the adjuvant group.
+    Failing any one of them leaves the patient retained. ARPI exposure is
+    recorded (HAS_ARPI, FIRST_ARPI_DATE) but is deliberately not part of the
+    test: ARPIs are approved in non-metastatic CRPC and used in high-risk
+    localized disease, so they neither prove nor disprove adjuvant intent.
 
     ADT_INTENT is binary and is exactly this decision under another name:
     LOCALIZED_ADJUVANT where IS_LOCALIZED_ADJUVANT is true, METASTATIC
@@ -571,34 +555,26 @@ def classify_adt_intent(
     # The exclusion test. Framed positively -- each term is a thing that must
     # be TRUE for a patient to be set aside as a completed adjuvant course --
     # so that missing or ambiguous evidence retains the patient by default.
-    #
-    # The test is deliberately limited to two terms: escalation and duration.
-    # Episode count, stop-vs-ongoing and follow-up sufficiency are still
-    # computed, still emitted as columns, and still reported by the validation
-    # harness -- they just no longer veto the label. See the docstring for what
-    # that costs, in particular that a course truncated by the data cutoff is
-    # now indistinguishable from one that completed.
-    #
-    # ARPI exposure remains absent from the test: it is approved in
-    # non-metastatic CRPC and used in high-risk localized disease, so it
-    # neither proves nor disproves adjuvant intent.
+    # ARPI exposure is deliberately absent: it is approved in non-metastatic
+    # CRPC and used in high-risk localized disease, so it neither proves nor
+    # disproves adjuvant intent. It is still recorded for audit.
     # ---------------------------------------------------------------------
     fits_adjuvant_duration = pl.col("ADT_SPAN_DAYS") <= adjuvant_max_span_days
-    no_escalation = ~pl.col("HAS_DEFINITIVE_ESCALATION")
-
-    # Audit-only from here on: retained so the dropped terms stay measurable.
     single_episode = pl.col("ADT_N_EPISODES") <= 1
     therapy_stopped = ~pl.col("ADT_ONGOING_AT_LAST_CONTACT")
+    no_escalation = ~pl.col("HAS_DEFINITIVE_ESCALATION")
     observed_long_enough = ~insufficient_followup
 
-    is_localized_adjuvant = (no_escalation & fits_adjuvant_duration).fill_null(False)
+    is_localized_adjuvant = (
+        no_escalation
+        & fits_adjuvant_duration
+        & single_episode
+        & therapy_stopped
+        & observed_long_enough
+    ).fill_null(False)
 
     # Why a patient was kept. Ordered most- to least-decisive so the reason
     # names the strongest disqualifier rather than whichever is checked first.
-    # Only the two classifying terms can appear as a retention reason now; the
-    # audit-only terms are surfaced through their own columns instead, so a
-    # reason string can never claim a patient was retained for something that
-    # did not in fact retain them.
     exclusion_reason = (
         pl.when(is_localized_adjuvant)
         .then(pl.lit("excluded_completed_adjuvant_course"))
@@ -606,6 +582,12 @@ def classify_adt_intent(
         .then(pl.lit("retained_definitive_escalation"))
         .when(~fits_adjuvant_duration)
         .then(pl.lit("retained_adt_span_too_long"))
+        .when(~single_episode)
+        .then(pl.lit("retained_multiple_episodes"))
+        .when(~therapy_stopped)
+        .then(pl.lit("retained_adt_ongoing"))
+        .when(insufficient_followup)
+        .then(pl.lit("retained_insufficient_followup"))
         .otherwise(pl.lit("retained_unresolved"))
         .alias("ADT_EXCLUSION_REASON")
     )
@@ -638,18 +620,9 @@ def classify_adt_intent(
         )
     ).fill_null(False)
 
-    # The three terms the exclusion test no longer applies, emitted so the
-    # narrowing stays auditable: cross-tabulating these against ADT_INTENT
-    # shows exactly which patients the two-term rule newly admits as
-    # LOCALIZED_ADJUVANT. ADJUVANT_OBSERVED_LONG_ENOUGH is the one to watch --
-    # it is false for every patient whose course may simply be truncated by
-    # the data cutoff.
     return df.with_columns(
         is_localized_adjuvant.alias("IS_LOCALIZED_ADJUVANT"),
         has_positive_metastatic_evidence.alias("HAS_POSITIVE_METASTATIC_EVIDENCE"),
-        single_episode.fill_null(False).alias("ADJUVANT_SINGLE_EPISODE"),
-        therapy_stopped.fill_null(False).alias("ADJUVANT_THERAPY_STOPPED"),
-        observed_long_enough.fill_null(False).alias("ADJUVANT_OBSERVED_LONG_ENOUGH"),
         exclusion_reason,
         intent,
     ).drop("_days_from_last_adt_to_end")
