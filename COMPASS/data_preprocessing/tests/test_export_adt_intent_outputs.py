@@ -1,4 +1,4 @@
-"""Tests for export_adt_intent_outputs.py -- the CSV/figure export wrapper.
+"""Tests for export_adt_intent_outputs.py -- the figure export wrapper.
 
 Synthetic fixtures throughout: every value is planted so the expected output
 is known by construction.
@@ -21,11 +21,15 @@ from COMPASS.data_preprocessing.export_adt_intent_outputs import (  # noqa: E402
     build_labels,
     resolve_out_dir,
     run,
+    write_lab_trajectories,
 )
 from COMPASS.data_preprocessing.adt_intent_trajectories import (  # noqa: E402
     PSA_LAB_NAME,
     TESTOSTERONE_LAB_NAME,
+    build_death_km_input,
+    build_km_input,
     load_longitudinal,
+    summarize_km,
 )
 
 
@@ -139,10 +143,11 @@ class TestTimeToEvent(unittest.TestCase):
             _, out = run(_meds(), follow_up=_follow_up(), longitudinal=None,
                          fig_root=d, verbose=False)
             self.assertTrue((out / "km_death.png").exists())
-            self.assertTrue((out / "summary_km_death.csv").exists())
-            surv = pl.read_csv(out / "summary_km_death.csv")
-        # 4 of 12 died (every third patient: 3, 6, 9, 12).
-        self.assertEqual(int(surv["n_events"].sum()), 4)
+        # 4 of 12 died (every third patient: 3, 6, 9, 12). No summary table is
+        # written any more, so the count is checked at its source.
+        km = build_death_km_input(build_labels(_meds(), follow_up=_follow_up()),
+                                  _follow_up())
+        self.assertEqual(int(summarize_km(km)["n_events"].sum()), 4)
 
     def test_cohort_only_endpoints_are_skipped_without_longitudinal(self):
         with tempfile.TemporaryDirectory() as d:
@@ -160,24 +165,35 @@ class TestTimeToEvent(unittest.TestCase):
                                 f"km_{endpoint}.png missing")
 
     def test_km_event_counts_match_the_planted_rate(self):
+        """The counts now ride on the figure rather than a CSV, so they are
+        checked against the builder the annotation is drawn from."""
         with tempfile.TemporaryDirectory() as d:
-            _, out = run(_meds(), follow_up=_follow_up(),
-                         longitudinal=_longitudinal(d), fig_root=d, verbose=False)
-            plat = pl.read_csv(out / "summary_km_platinum.csv")
+            labelled, out = run(_meds(), follow_up=_follow_up(),
+                                longitudinal=_longitudinal(d), fig_root=d,
+                                verbose=False)
+            self.assertTrue((out / "km_platinum.png").exists())
+            plat = summarize_km(
+                build_km_input(_longitudinal(d), labelled, "platinum")
+            )
         # Every third patient of 12 has PLATINUM=1.
         self.assertEqual(int(plat["n_events"].sum()), 4)
 
     def test_lab_trajectories_render_and_report_coverage(self):
+        """Coverage moved from a CSV to the run log, but it must still be
+        reported: an empty panel from a lab-name mismatch draws nothing and
+        raises nothing, so the log line is the only warning."""
         with tempfile.TemporaryDirectory() as d:
-            _, out = run(_meds(), follow_up=_follow_up(),
-                         longitudinal=_longitudinal(d), fig_root=d, verbose=False)
+            labelled, out = run(_meds(), follow_up=_follow_up(),
+                                longitudinal=_longitudinal(d), fig_root=d,
+                                verbose=False)
             self.assertTrue((out / "lab_trajectories.png").exists())
-            # Both labs must report coverage; an empty panel from a name
-            # mismatch would otherwise pass unnoticed.
-            for lab in (TESTOSTERONE_LAB_NAME, PSA_LAB_NAME):
-                p = out / f"summary_trajectory_coverage_{lab.lower()}.csv"
-                self.assertTrue(p.exists(), f"{p.name} missing")
-                self.assertGreater(pl.read_csv(p).height, 0)
+            log = write_lab_trajectories(
+                labelled, out, longitudinal=_longitudinal(d)
+            )
+        joined = "\n".join(log)
+        for lab in (TESTOSTERONE_LAB_NAME, PSA_LAB_NAME):
+            self.assertIn(f"{lab} coverage:", joined)
+        self.assertNotIn("[warn]", joined)
 
     def test_trajectories_skipped_without_longitudinal(self):
         with tempfile.TemporaryDirectory() as d:
@@ -191,9 +207,9 @@ class TestSurvivalPassthrough(unittest.TestCase):
 
     classify_adt_intent takes follow_up for FOLLOW_UP_END_DATE and does not
     carry DEATH through, so build_labels has to join it on itself. When it
-    didn't, report_survival returned an empty frame and the export silently
-    skipped summary_survival.csv -- losing the primary go/no-go check while
-    reporting success.
+    didn't, every death-based output came back empty while the run still
+    reported success. No survival CSV is written now, so the column itself and
+    the death KM are what guard the join.
     """
 
     def test_death_column_survives_build_labels(self):
@@ -201,55 +217,66 @@ class TestSurvivalPassthrough(unittest.TestCase):
         self.assertIn("DEATH", labelled.columns)
         self.assertEqual(int(labelled["DEATH"].sum()), 4)   # 3, 6, 9, 12
 
-    def test_survival_table_is_written_when_follow_up_has_death(self):
+    def test_death_km_renders_when_follow_up_has_death(self):
+        """The death curve is what the DEATH join now feeds; if the join broke
+        the KM input would be empty and no figure would be written."""
         with tempfile.TemporaryDirectory() as d:
-            _, out = run(_meds(), follow_up=_follow_up(), fig_root=d, verbose=False)
-            path = out / "summary_survival.csv"
-            self.assertTrue(path.exists(), "summary_survival.csv was not written")
-            surv = pl.read_csv(path)
-        self.assertEqual(int(surv["n_patients"].sum()), 12)
-        # 4 of 12 died.
-        self.assertAlmostEqual(float(surv["pct_died"][0]), 33.3, places=1)
+            labelled, out = run(_meds(), follow_up=_follow_up(), fig_root=d,
+                                verbose=False)
+            self.assertTrue((out / "km_death.png").exists())
+        km = build_death_km_input(labelled, _follow_up())
+        self.assertEqual(km.height, 12)
+        self.assertEqual(int(km["event"].sum()), 4)   # 4 of 12 died
 
-    def test_survival_still_skipped_when_follow_up_lacks_death(self):
-        """The skip message is correct when DEATH genuinely isn't available."""
+    def test_death_km_skipped_when_follow_up_is_absent(self):
+        """No follow-up frame means no death curve, and the run says so."""
         with tempfile.TemporaryDirectory() as d:
             _, out = run(_meds(), follow_up=None, fig_root=d, verbose=False)
-            self.assertFalse((out / "summary_survival.csv").exists())
+            self.assertFalse((out / "km_death.png").exists())
 
 
 class TestRun(unittest.TestCase):
-    def test_writes_labels_and_both_figures(self):
+    def test_writes_both_figures_and_returns_the_labels(self):
         with tempfile.TemporaryDirectory() as d:
             labelled, out = run(
                 _meds(), stage_note_level_path=_stage_notes(d),
                 fig_root=d, verbose=False,
             )
-            self.assertTrue((out / "adt_intent_labels.csv").exists())
             self.assertTrue((out / "stage_metburden.png").exists())
             self.assertTrue((out / "max_stage.png").exists())
-            self.assertTrue((out / "summary_stage_max.csv").exists())
+        # The label is returned, never written.
+        self.assertEqual(labelled.height, 12)
 
-    def test_label_csv_round_trips_with_the_max_stage_columns(self):
+    def test_returned_labels_carry_the_max_stage_columns(self):
+        """The returned frame is the only way to reach the label now, so the
+        cross-reference joins have to be present on it."""
         with tempfile.TemporaryDirectory() as d:
-            labelled, out = run(
+            labelled, _ = run(
                 _meds(), stage_note_level_path=_stage_notes(d),
                 fig_root=d, verbose=False,
             )
-            back = pl.read_csv(out / "adt_intent_labels.csv")
-        self.assertEqual(back.height, labelled.height)
         for col in ("MAX_STAGE_BEFORE", "MAX_STAGE_AFTER", "STAGE_UPSTAGED_AFTER_ADT"):
-            self.assertIn(col, back.columns)
+            self.assertIn(col, labelled.columns)
 
-    def test_absent_inputs_skip_tables_rather_than_writing_empty_ones(self):
-        """A header-only CSV would be indistinguishable from "measured,
-        found nothing"."""
+    def test_nothing_is_written_as_csv(self):
+        """The whole point of the export is PNGs; a stray CSV would mean a
+        writer was reintroduced."""
         with tempfile.TemporaryDirectory() as d:
-            _, out = run(_meds(), stage_note_level_path=None, fig_root=d, verbose=False)
-            self.assertFalse((out / "summary_stage_max.csv").exists())
-            self.assertFalse((out / "summary_met_burden.csv").exists())
-            # ...but the label itself and the figures are still produced.
-            self.assertTrue((out / "adt_intent_labels.csv").exists())
+            _, out = run(_meds(), follow_up=_follow_up(),
+                         stage_note_level_path=_stage_notes(d),
+                         longitudinal=_longitudinal(d), fig_root=d, verbose=False)
+            written = sorted(p.name for p in out.iterdir())
+        self.assertEqual([p for p in written if not p.endswith(".png")], [])
+        self.assertGreater(len(written), 0)
+
+    def test_absent_inputs_skip_figures_rather_than_drawing_empty_ones(self):
+        """A missing cross-reference costs its figure, not the run."""
+        with tempfile.TemporaryDirectory() as d:
+            labelled, out = run(_meds(), stage_note_level_path=None,
+                                fig_root=d, verbose=False)
+            # The stage joins are absent...
+            self.assertNotIn("MAX_STAGE_BEFORE", labelled.columns)
+            # ...but the panels that do not need them are still produced.
             self.assertTrue((out / "max_stage.png").exists())
 
     def test_rerun_overwrites_in_place(self):

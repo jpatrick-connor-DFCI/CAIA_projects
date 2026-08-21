@@ -988,7 +988,6 @@ def main() -> None:
             "per-organ-group metastatic indicators as a cross-reference."
         ),
     )
-    parser.add_argument("--output-dir", default=None)
     parser.add_argument("--gap-threshold-days", type=int, default=GAP_THRESHOLD_DAYS)
     args = parser.parse_args()
 
@@ -1191,10 +1190,6 @@ def main() -> None:
     print("\n=== Gap-threshold sensitivity ===")
     print(report_gap_sensitivity(meds, follow_up))
 
-    if args.output_dir:
-        os.makedirs(args.output_dir, exist_ok=True)
-        labelled.write_csv(os.path.join(args.output_dir, "adt_intent_validation.csv"))
-        print(f"\nWrote per-patient validation table to {args.output_dir}")
 
 
 if __name__ == "__main__":

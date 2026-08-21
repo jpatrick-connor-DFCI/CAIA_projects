@@ -1077,7 +1077,6 @@ def main() -> None:
             bin_days=args.bin_days,
             min_patients_per_bin=args.min_patients_per_bin,
         )
-        traj.write_csv(out_dir / f"adt_intent_trajectory_{lab.lower()}.csv")
         if log_scale and traj.height:
             traj = traj.with_columns(
                 *[pl.col(c).clip(lower_bound=PSA_LOG_FLOOR) for c in ("median", "q1", "q3")]
@@ -1104,7 +1103,6 @@ def main() -> None:
             ax.set_title(f"{title} -- no data")
             ax.axis("off")
             continue
-        km_input.write_csv(out_dir / f"adt_intent_km_{endpoint}.csv")
         overlay_km(
             ax, km_series_by_intent(km_input), colors=INTENT_COLORS,
             title=title, xlabel="Days from first ADT",

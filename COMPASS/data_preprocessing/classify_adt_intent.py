@@ -691,7 +691,6 @@ def main() -> None:
             "Without it no patient can be labelled LOCALIZED_ADJUVANT."
         ),
     )
-    parser.add_argument("--output-path", required=True)
     parser.add_argument("--gap-threshold-days", type=int, default=GAP_THRESHOLD_DAYS)
     parser.add_argument("--min-followup-days", type=int, default=MIN_FOLLOWUP_DAYS)
     parser.add_argument(
@@ -732,8 +731,10 @@ def main() -> None:
         adjuvant_max_span_days=args.adjuvant_max_span_days,
     )
 
-    labelled.write_csv(args.output_path)
-    print(f"Wrote {labelled.height} ADT-intent labels to {args.output_path}")
+    # Nothing is written to disk: this CLI reports the class mix so the label
+    # can be sanity-checked from a shell, and callers that need the labels
+    # themselves import `classify_adt_intent` directly.
+    print(f"Classified {labelled.height} ADT-exposed patients")
     print(summarize_intent(labelled))
 
 

@@ -1,7 +1,7 @@
-"""Build the ADT metastatic-filtering label and write its CSVs and figures.
+"""Build the ADT metastatic-filtering label and write its figures.
 
 This is the whole 08_adt_intent analysis as one callable: classify, cross-check
-against stage / coded metastasis, render the figures, write the tables. The
+against stage / coded metastasis, render the figures. The
 notebook is a thin wrapper over `run()` so that the same outputs can be
 regenerated from the command line without opening Jupyter.
 
@@ -15,24 +15,10 @@ COMPASS_FIG_ROOT environment variable or --fig-root.
 
 Outputs
 -------
-CSV
-  adt_intent_labels.csv          one row per patient: the label itself, plus
-                                 every cross-reference column joined on
-  summary_class_counts.csv       class sizes and eligible counts
-  summary_survival.csv           survival by class -- the primary go/no-go
-  summary_stage_nearest.csv      label vs. stage nearest ADT start
-  summary_stage_max.csv          max stage before / after ADT start
-  summary_met_burden.csv         label vs. metastatic organ-group burden
-  summary_met_site_pattern.csv   per-site involvement by class
-  summary_stage_contradictions.csv  excluded patients carrying stage IV
-  summary_by_adt_start_year.csv  ARPI-era drift
-  summary_gap_sensitivity.csv    gap-threshold sensitivity
+PNG only. Nothing is written as CSV -- not the summaries, and not the label
+itself. `run()` returns the labelled frame, so a caller that needs the
+per-patient label takes it from the return value rather than from disk.
 
-  summary_km_<endpoint>.csv      event counts / median follow-up per KM
-  summary_logrank_<endpoint>.csv pairwise log-rank p-values
-  summary_trajectory_coverage_*.csv  lab coverage per class
-
-PNG
   stage_metburden.png            stage mix, burden distribution, site pattern
   max_stage.png                  max-stage mix, stage IV rate, upstaging
   km_death.png                   overall survival, all ADT-exposed
@@ -40,8 +26,13 @@ PNG
                                  cohort-only endpoints; need `longitudinal`
   lab_trajectories.png           testosterone and PSA around ADT start
 
-A table whose inputs are absent is skipped, not written empty, and the run
-reports which ones were skipped and why.
+Because the summary tables are gone, the numbers that qualify a figure travel
+on the figure: each KM panel is annotated with per-class event counts, median
+follow-up and log-rank p-values. Lab coverage, which is the diagnostic for a
+silently-empty trajectory panel, goes to the run log.
+
+A figure whose inputs are absent is skipped, and the run reports which ones
+were skipped and why.
 """
 
 from __future__ import annotations
@@ -61,11 +52,11 @@ from COMPASS.data_preprocessing.classify_adt_intent import (  # noqa: E402
     GAP_THRESHOLD_DAYS,
     ID_COL,
     classify_adt_intent,
-    summarize_intent,
 )
 from COMPASS.data_preprocessing.adt_intent_trajectories import (  # noqa: E402
     CASTRATE_NG_DL,
     CASTRATE_STRICT_NG_DL,
+    INTENT_COL,
     INTENT_COLORS,
     KM_ENDPOINTS,
     PSA_LAB_NAME,
@@ -89,15 +80,6 @@ from COMPASS.data_preprocessing.validate_adt_intent import (  # noqa: E402
     compute_met_burden_at_adt,
     load_stage_max_around_adt,
     load_stage_nearest_adt,
-    report_against_met_burden,
-    report_against_metastasis_icd,
-    report_against_stage,
-    report_by_adt_start_year,
-    report_gap_sensitivity,
-    report_met_site_pattern,
-    report_stage_contradictions,
-    report_stage_max,
-    report_survival,
 )
 
 # Matches FIG_ROOT in COMPASS/survival_analysis/05_figures.Rmd.
@@ -122,21 +104,6 @@ def resolve_out_dir(fig_root: str | Path | None = None) -> Path:
     out = root / OUTPUT_SUBDIR
     out.mkdir(parents=True, exist_ok=True)
     return out
-
-
-def _write(frame: pl.DataFrame | None, out_dir: Path, name: str, log: list) -> None:
-    """Write one table, or record why it was skipped.
-
-    An empty frame means the inputs for that table weren't available. Writing
-    a header-only CSV would be indistinguishable from "measured, found
-    nothing", so skip and say so instead.
-    """
-    if frame is None or frame.height == 0:
-        log.append(f"  [skip] {name}.csv -- no data")
-        return
-    path = out_dir / f"{name}.csv"
-    frame.write_csv(path)
-    log.append(f"  wrote {name}.csv ({frame.height:,} rows)")
 
 
 def build_labels(
@@ -191,47 +158,6 @@ def build_labels(
     return labelled
 
 
-def write_tables(labelled: pl.DataFrame, out_dir: Path, meds=None, follow_up=None) -> list:
-    """Write the label plus every summary table its columns support."""
-    log: list = []
-
-    path = out_dir / "adt_intent_labels.csv"
-    labelled.write_csv(path)
-    log.append(f"  wrote adt_intent_labels.csv ({labelled.height:,} rows)")
-
-    counts = summarize_intent(labelled)
-    _write(counts, out_dir, "summary_class_counts", log)
-    _write(report_survival(labelled), out_dir, "summary_survival", log)
-
-    if "FIRST_METASTASIS_ICD_DATE" in labelled.columns:
-        _write(
-            report_against_metastasis_icd(labelled),
-            out_dir, "summary_metastasis_icd", log,
-        )
-    if "CANCER_STAGE" in labelled.columns:
-        _write(report_against_stage(labelled), out_dir, "summary_stage_nearest", log)
-        _write(
-            report_stage_contradictions(labelled),
-            out_dir, "summary_stage_contradictions", log,
-        )
-    if "MAX_STAGE_BEFORE_INT" in labelled.columns:
-        _write(report_stage_max(labelled), out_dir, "summary_stage_max", log)
-    if "N_MET_SITES" in labelled.columns:
-        _write(report_against_met_burden(labelled), out_dir, "summary_met_burden", log)
-        _write(
-            report_met_site_pattern(labelled),
-            out_dir, "summary_met_site_pattern", log,
-        )
-
-    _write(report_by_adt_start_year(labelled), out_dir, "summary_by_adt_start_year", log)
-    if meds is not None:
-        _write(
-            report_gap_sensitivity(meds, follow_up),
-            out_dir, "summary_gap_sensitivity", log,
-        )
-    return log
-
-
 def write_time_to_event(
     labelled: pl.DataFrame,
     out_dir: Path,
@@ -245,9 +171,10 @@ def write_time_to_event(
     in the eligible survival cohort, so they need the Stage 2 longitudinal
     frame and are skipped without it.
 
-    Every KM figure is accompanied by a summary table: a curve built on a
-    handful of events looks just as confident as one built on hundreds, and
-    only the event counts show the difference.
+    Event counts are annotated onto each panel rather than written alongside
+    it: a curve built on a handful of events looks just as confident as one
+    built on hundreds, and with no summary table the figure has to carry that
+    information itself.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -256,16 +183,12 @@ def write_time_to_event(
     log: list = []
 
     def _km_figure(km_input, endpoint, title, ylabel):
-        """One KM panel + its summary/log-rank tables. Returns False if empty."""
+        """One KM panel. Returns False if there was nothing to draw."""
         if km_input.height == 0:
             log.append(f"  [skip] km_{endpoint}.png -- no {endpoint} data")
             return False
-        _write(summarize_km(km_input), out_dir, f"summary_km_{endpoint}", log)
-        try:
-            _write(logrank_by_intent(km_input), out_dir, f"summary_logrank_{endpoint}", log)
-        except ModuleNotFoundError:
-            # lifelines absent: the curve is the deliverable, the p-value is not.
-            log.append(f"  [skip] summary_logrank_{endpoint}.csv -- lifelines not installed")
+
+        counts = summarize_km(km_input)
 
         fig, ax = plt.subplots(figsize=(7.5, 5.5))
         try:
@@ -278,6 +201,26 @@ def write_time_to_event(
             log.append(f"  [skip] km_{endpoint}.png -- lifelines not installed")
             return False
         ax.grid(alpha=0.2)
+
+        # Event counts, and the log-rank p when lifelines is available. With
+        # no summary CSV these are the only record of how much data each curve
+        # rests on, so they go onto the panel itself.
+        lines = [
+            f"{r[INTENT_COL]}: {r['n_events']}/{r['n_patients']} events "
+            f"({r['pct_event']}%), median {r['median_duration_days']:.0f}d"
+            for r in counts.iter_rows(named=True)
+        ]
+        lr = logrank_by_intent(km_input)
+        lines += [
+            f"log-rank {r['group_a']} vs {r['group_b']}: p={r['p_value']:.3g}"
+            for r in lr.iter_rows(named=True)
+        ]
+        ax.text(
+            0.02, 0.02, "\n".join(lines), transform=ax.transAxes,
+            fontsize=7.5, va="bottom", ha="left",
+            bbox=dict(boxstyle="round", fc="white", ec="0.7", alpha=0.85),
+        )
+
         fig.savefig(out_dir / f"km_{endpoint}.png", dpi=FIGURE_DPI, bbox_inches="tight")
         plt.close(fig)
         log.append(f"  wrote km_{endpoint}.png")
@@ -325,10 +268,18 @@ def write_lab_trajectories(
     ]
     fig, axes = plt.subplots(1, 2, figsize=(15, 5.5))
     for ax, (lab, ylabel, log_scale, hlines) in zip(axes, specs):
-        _write(
-            summarize_trajectory_coverage(longitudinal, labelled, lab),
-            out_dir, f"summary_trajectory_coverage_{lab.lower()}", log,
-        )
+        # Coverage is the diagnostic for a silently-empty panel (a lab-name
+        # mismatch draws nothing and raises nothing), so with the CSV gone it
+        # is logged instead.
+        cov = summarize_trajectory_coverage(longitudinal, labelled, lab)
+        if cov.height == 0:
+            log.append(f"  [warn] {lab}: no coverage -- check the lab name")
+        else:
+            for r in cov.iter_rows(named=True):
+                log.append(f"  {lab} coverage: " + ", ".join(
+                    f"{k}={v}" for k, v in r.items()
+                ))
+
         traj = build_lab_trajectory(longitudinal, labelled, lab)
         if log_scale and traj.height:
             # Zeros are real below-detection values, but log10(0) is not
@@ -374,9 +325,11 @@ def run(
     gap_threshold_days: int = GAP_THRESHOLD_DAYS,
     verbose: bool = True,
 ) -> tuple:
-    """Classify, cross-reference, write every CSV and figure.
+    """Classify, cross-reference, write every figure.
 
-    Returns (labelled, out_dir). This is what the notebook calls.
+    Returns (labelled, out_dir). The labelled frame is returned rather than
+    written: nothing is persisted but PNGs, so a caller that needs the label
+    itself takes it from the return value.
     """
     out_dir = resolve_out_dir(fig_root)
     labelled = build_labels(
@@ -386,8 +339,7 @@ def run(
         stage_note_level_path=stage_note_level_path,
         gap_threshold_days=gap_threshold_days,
     )
-    log = write_tables(labelled, out_dir, meds=meds, follow_up=follow_up)
-    log += write_figures(labelled, out_dir)
+    log = write_figures(labelled, out_dir)
     log += write_time_to_event(
         labelled, out_dir, follow_up=follow_up, longitudinal=longitudinal
     )
