@@ -130,6 +130,22 @@ def build_labels(
         meds, follow_up=follow_up, gap_threshold_days=gap_threshold_days
     )
 
+    # classify_adt_intent consumes follow_up for FOLLOW_UP_END_DATE only and
+    # does not carry DEATH through, so join it on explicitly. Without this the
+    # survival report -- the primary go/no-go -- silently comes back empty.
+    if follow_up is not None and "DEATH" in follow_up.columns:
+        labelled = labelled.join(
+            follow_up.select(
+                pl.col(ID_COL)
+                .cast(pl.Float64, strict=False)
+                .cast(pl.Int64, strict=False)
+                .alias(ID_COL),
+                pl.col("DEATH").cast(pl.Int64, strict=False),
+            ),
+            on=ID_COL,
+            how="left",
+        )
+
     if icds is not None and icds.height:
         labelled = labelled.join(
             compute_first_metastasis_icd_date(icds), on=ID_COL, how="left"

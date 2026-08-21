@@ -42,6 +42,18 @@ def _meds(n: int = 12) -> pl.DataFrame:
     )
 
 
+def _follow_up(n: int = 12) -> pl.DataFrame:
+    """Patient status carrying both FOLLOW_UP_END_DATE and DEATH."""
+    return pl.DataFrame(
+        {
+            "DFCI_MRN": list(range(1, n + 1)),
+            "FOLLOW_UP_END_DATE": [dt.datetime(2019, 1, 1)] * n,
+            # Every third patient died, so pct_died is known by construction.
+            "DEATH": [1 if m % 3 == 0 else 0 for m in range(1, n + 1)],
+        }
+    )
+
+
 def _stage_notes(d: str) -> str:
     path = str(Path(d) / "stage_notes.parquet")
     rows = []
@@ -89,6 +101,38 @@ class TestBuildLabels(unittest.TestCase):
         labelled = build_labels(_meds(), stage_note_level_path="/nope/missing.parquet")
         self.assertIn("ADT_INTENT", labelled.columns)
         self.assertNotIn("MAX_STAGE_BEFORE", labelled.columns)
+
+
+class TestSurvivalPassthrough(unittest.TestCase):
+    """DEATH must survive the classify step.
+
+    classify_adt_intent takes follow_up for FOLLOW_UP_END_DATE and does not
+    carry DEATH through, so build_labels has to join it on itself. When it
+    didn't, report_survival returned an empty frame and the export silently
+    skipped summary_survival.csv -- losing the primary go/no-go check while
+    reporting success.
+    """
+
+    def test_death_column_survives_build_labels(self):
+        labelled = build_labels(_meds(), follow_up=_follow_up())
+        self.assertIn("DEATH", labelled.columns)
+        self.assertEqual(int(labelled["DEATH"].sum()), 4)   # 3, 6, 9, 12
+
+    def test_survival_table_is_written_when_follow_up_has_death(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, out = run(_meds(), follow_up=_follow_up(), fig_root=d, verbose=False)
+            path = out / "summary_survival.csv"
+            self.assertTrue(path.exists(), "summary_survival.csv was not written")
+            surv = pl.read_csv(path)
+        self.assertEqual(int(surv["n_patients"].sum()), 12)
+        # 4 of 12 died.
+        self.assertAlmostEqual(float(surv["pct_died"][0]), 33.3, places=1)
+
+    def test_survival_still_skipped_when_follow_up_lacks_death(self):
+        """The skip message is correct when DEATH genuinely isn't available."""
+        with tempfile.TemporaryDirectory() as d:
+            _, out = run(_meds(), follow_up=None, fig_root=d, verbose=False)
+            self.assertFalse((out / "summary_survival.csv").exists())
 
 
 class TestRun(unittest.TestCase):
