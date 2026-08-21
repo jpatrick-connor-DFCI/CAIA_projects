@@ -81,6 +81,27 @@ MAX_PRED_WINDOW = 260
 SOMATIC_GLEASON_LANDMARKS = (0,)
 SOMATIC_GLEASON_INDEX_ANALYSES = ("gleason", "sequencing", "prs")
 
+# Retrospective medication-derived strata used by the dedicated ADT-intent
+# survival arm.  These are deliberately not entries in _ARM_SPECS: Stage 1 and
+# Stage 2 are still run once for the ordinary ADT cohort, then Stage 3 is
+# restricted to one of these MRN lists.  Treating them as ordinary arms would
+# incorrectly ask compile_COMPASS_cohort_data.py for new treatment anchors.
+ADT_INTENT_MODEL_STRATA = {
+    "metastatic": {
+        "intent": "METASTATIC",
+        "label": "adt_metastatic",
+        "title": "ADT / metastatic",
+    },
+    "localized": {
+        "intent": "LOCALIZED_ADJUVANT",
+        "label": "adt_localized",
+        "title": "ADT / localized-adjuvant",
+    },
+}
+ADT_INTENT_MODEL_ENDPOINTS = ("platinum", "nepc", "avpc")
+ADT_INTENT_LABELS_FILENAME = "adt_intent_labels_model_cohort.csv"
+ADT_INTENT_COUNTS_FILENAME = "adt_intent_endpoint_counts.csv"
+
 
 def _require_adt_index_run(run: dict) -> None:
     anchor = str(run.get("anchor", run.get("label", ""))).lower()
@@ -222,6 +243,231 @@ def make_endpoint_runs(
                 prediction_input_dirs=overrides.get(endpoint),
             )
         )
+    return runs
+
+
+def adt_intent_mrn_list_path(
+    stratum: str,
+    *,
+    data_root: str | Path | None = None,
+) -> Path:
+    """Return the Stage-3 MRN-list path for one medication-derived stratum."""
+    key = str(stratum).lower()
+    if key not in ADT_INTENT_MODEL_STRATA:
+        raise ValueError(
+            f"Unknown ADT-intent stratum: {stratum!r} "
+            f"(expected one of {sorted(ADT_INTENT_MODEL_STRATA)})"
+        )
+    root = _PROFILE_OUTPUT_ROOT if data_root is None else Path(data_root)
+    return root / "mrn_lists" / f"{ADT_INTENT_MODEL_STRATA[key]['label']}_mrns.csv"
+
+
+def build_adt_intent_mrn_lists(
+    *,
+    medications_path: str | Path | None = None,
+    base_cohort_csv: str | Path | None = None,
+    data_root: str | Path | None = None,
+) -> dict[str, Path]:
+    """Classify the modelled ADT cohort and write localized/metastatic MRN lists.
+
+    The classifier uses medication history over the observed follow-up.  These
+    lists therefore define *retrospective strata* and must not be interpreted
+    as metastatic-status predictions available at the landmark.  Platinum is
+    intentionally absent from the classifier, but later treatment escalation
+    and the eventual duration/cessation of ADT contribute to the label.
+
+    The combined audit file retains all classifier fields.  Two narrow MRN
+    files feed ``build_prediction_inputs.py``; a preliminary endpoint-count
+    table makes a sparse localized endpoint visible before model fitting.
+    """
+    import polars as pl
+
+    from COMPASS.data_preprocessing.classify_adt_intent import classify_adt_intent
+    from COMPASS.data_preprocessing.compile_COMPASS_cohort_data import (
+        parse_mixed_datetime_expr,
+    )
+
+    root = _PROFILE_OUTPUT_ROOT if data_root is None else Path(data_root)
+    cohort_path = (
+        root / "prostate_adt_survival_cohort_adt.csv"
+        if base_cohort_csv is None
+        else Path(base_cohort_csv)
+    )
+    meds_path = (
+        PROFILE_SOURCES["MEDICATIONS"]
+        if medications_path is None
+        else Path(medications_path)
+    )
+    if not cohort_path.exists():
+        raise FileNotFoundError(
+            f"ADT survival cohort not found: {cohort_path}. Run Stage 1 first."
+        )
+    if not meds_path.exists():
+        raise FileNotFoundError(f"Medication source not found: {meds_path}")
+
+    cohort = pl.read_csv(cohort_path, infer_schema_length=0).with_columns(
+        pl.col("DFCI_MRN")
+        .cast(pl.Float64, strict=False)
+        .cast(pl.Int64, strict=False)
+        .alias("DFCI_MRN"),
+        parse_mixed_datetime_expr("FOLLOW_UP_END_DATE").alias("FOLLOW_UP_END_DATE"),
+    ).filter(pl.col("DFCI_MRN").is_not_null())
+    cohort_mrns = cohort["DFCI_MRN"].unique().to_list()
+    if not cohort_mrns:
+        raise ValueError(f"ADT survival cohort contains no usable MRNs: {cohort_path}")
+
+    meds = (
+        scan_source(meds_path)
+        .select("DFCI_MRN", "NCI_PREFERRED_MED_NM", "MED_START_DT")
+        .with_columns(
+            pl.col("DFCI_MRN")
+            .cast(pl.Float64, strict=False)
+            .cast(pl.Int64, strict=False)
+            .alias("DFCI_MRN")
+        )
+        .filter(pl.col("DFCI_MRN").is_in(cohort_mrns))
+        .collect()
+    )
+    follow_up = cohort.select("DFCI_MRN", "FOLLOW_UP_END_DATE").unique("DFCI_MRN")
+    labels = classify_adt_intent(meds, follow_up=follow_up).filter(
+        pl.col("DFCI_MRN").is_in(cohort_mrns)
+    )
+
+    missing_labels = set(cohort_mrns) - set(labels["DFCI_MRN"].to_list())
+    if missing_labels:
+        raise ValueError(
+            f"ADT-intent classification omitted {len(missing_labels)} model-cohort MRNs. "
+            "Confirm that every Stage-1 ADT patient has a recognized ADT medication row."
+        )
+
+    mrn_dir = root / "mrn_lists"
+    mrn_dir.mkdir(parents=True, exist_ok=True)
+    labels_path = mrn_dir / ADT_INTENT_LABELS_FILENAME
+    labels.sort("DFCI_MRN").write_csv(labels_path)
+
+    outputs: dict[str, Path] = {"labels": labels_path}
+    for key, spec in ADT_INTENT_MODEL_STRATA.items():
+        path = adt_intent_mrn_list_path(key, data_root=root)
+        subset = labels.filter(pl.col("ADT_INTENT") == spec["intent"]).select(
+            "DFCI_MRN", "ADT_INTENT", "HAS_POSITIVE_METASTATIC_EVIDENCE"
+        ).sort("DFCI_MRN")
+        if subset.height == 0:
+            raise ValueError(f"ADT-intent stratum {spec['intent']} is empty.")
+        subset.write_csv(path)
+        outputs[key] = path
+        print(f"  {spec['title']}: {subset.height:,} patients -> {path}")
+
+    # Preliminary counts precede the PSA/PARPi/landmark filters, but expose an
+    # endpoint with too few events before expensive Cox/XGBoost fitting starts.
+    joined = labels.select("DFCI_MRN", "ADT_INTENT").join(
+        cohort, on="DFCI_MRN", how="inner"
+    )
+    count_rows = []
+    for key, spec in ADT_INTENT_MODEL_STRATA.items():
+        stratum = joined.filter(pl.col("ADT_INTENT") == spec["intent"])
+        for endpoint in ADT_INTENT_MODEL_ENDPOINTS:
+            event_col = _ca.ENDPOINTS[endpoint]["event_col"]
+            duration_col = "TT_" + endpoint.upper()
+            if event_col not in stratum.columns or duration_col not in stratum.columns:
+                count_rows.append(
+                    {
+                        "stratum": key,
+                        "adt_intent": spec["intent"],
+                        "endpoint": endpoint,
+                        "n_patients": stratum.height,
+                        "n_incident_eligible": None,
+                        "n_incident_events": None,
+                    }
+                )
+                continue
+            durations = stratum[duration_col].cast(pl.Float64, strict=False)
+            events = stratum[event_col].cast(pl.Int64, strict=False).fill_null(0)
+            eligible = durations.is_not_null() & durations.gt(0)
+            count_rows.append(
+                {
+                    "stratum": key,
+                    "adt_intent": spec["intent"],
+                    "endpoint": endpoint,
+                    "n_patients": stratum.height,
+                    "n_incident_eligible": int(eligible.sum()),
+                    "n_incident_events": int((eligible & events.eq(1)).sum()),
+                }
+            )
+    counts_path = mrn_dir / ADT_INTENT_COUNTS_FILENAME
+    pl.DataFrame(count_rows).write_csv(counts_path)
+    outputs["counts"] = counts_path
+    print(f"  preliminary endpoint counts -> {counts_path}")
+    print(
+        "  NOTE: ADT_INTENT uses full observed medication history; these are "
+        "retrospective strata, not landmark-available metastatic-status labels."
+    )
+    return outputs
+
+
+def make_adt_intent_endpoint_runs(
+    *,
+    strata=("metastatic", "localized"),
+    endpoints=ADT_INTENT_MODEL_ENDPOINTS,
+    prediction_input_dirs_by_endpoint: dict[str, dict[str, str | Path]] | None = None,
+) -> list[dict]:
+    """Build endpoint-specific Stage-3/model runs within ADT-intent strata."""
+    requested_endpoints = tuple(str(e).lower() for e in endpoints)
+    invalid_endpoints = set(requested_endpoints) - set(ADT_INTENT_MODEL_ENDPOINTS)
+    if invalid_endpoints:
+        raise ValueError(
+            "ADT-intent model arms are registered for platinum, nepc, and avpc; "
+            f"got unsupported endpoints {sorted(invalid_endpoints)}."
+        )
+    overrides = prediction_input_dirs_by_endpoint or {}
+    unknown_overrides = set(overrides) - set(requested_endpoints)
+    if unknown_overrides:
+        raise ValueError(
+            f"Prediction-input overrides supplied for unrequested endpoints: {sorted(unknown_overrides)}"
+        )
+
+    runs: list[dict] = []
+    for raw_stratum in strata:
+        key = str(raw_stratum).lower()
+        if key not in ADT_INTENT_MODEL_STRATA:
+            raise ValueError(
+                f"Unknown ADT-intent stratum: {raw_stratum!r} "
+                f"(expected one of {sorted(ADT_INTENT_MODEL_STRATA)})"
+            )
+        spec = ADT_INTENT_MODEL_STRATA[key]
+        for endpoint in requested_endpoints:
+            suffix = "" if endpoint == "platinum" else f"_{endpoint}"
+            endpoint_overrides = overrides.get(endpoint, {})
+            unknown = set(endpoint_overrides) - set(ADT_INTENT_MODEL_STRATA)
+            if unknown:
+                raise ValueError(
+                    f"Unknown ADT-intent prediction-input override strata: {sorted(unknown)}"
+                )
+            base = make_runs(("adt",), endpoint=endpoint)[0]
+            label = spec["label"]
+            base.update(
+                {
+                    "label": label,
+                    "title": spec["title"],
+                    "intent_stratum": key,
+                    "adt_intent": spec["intent"],
+                    "retrospective_stratification": True,
+                    "restrict_to_mrns": adt_intent_mrn_list_path(key),
+                    "inputs_dir": Path(
+                        endpoint_overrides.get(
+                            key,
+                            base["data_root"]
+                            / "survival_analysis"
+                            / f"prediction_inputs_{label}{suffix}",
+                        )
+                    ).expanduser(),
+                    "output_dir": base["data_root"]
+                    / "survival_analysis"
+                    / f"local_runs_{label}{suffix}",
+                }
+            )
+            base["inputs_dir"].mkdir(parents=True, exist_ok=True)
+            base["output_dir"].mkdir(parents=True, exist_ok=True)
+            runs.append(base)
     return runs
 
 
@@ -523,6 +769,8 @@ def build_somatic_gleason_inputs(run: dict, dry_run: bool = False) -> None:
 
 def cohort_diagnostics(run: dict) -> None:
     print(f"\n========== cohort diagnostics: {run['title']} ==========")
+    endpoint = run.get("endpoint", ENDPOINT)
+    event_col = _ca.ENDPOINTS[endpoint]["event_col"]
     for lm in run["landmarks"]:
         agg_path = run["inputs_dir"] / f"aggregated_landmark{lm}.csv"
         if not agg_path.exists():
@@ -536,19 +784,26 @@ def cohort_diagnostics(run: dict) -> None:
                 None,
             )
 
-        n_plat = int(agg["PLATINUM"].sum())
-        print(f"=== landmark +{lm}d | n_total={len(agg):,} n_PLATINUM={n_plat} ===")
+        if event_col not in agg.columns:
+            print(f"=== landmark +{lm}d | {event_col} absent, skipping ===")
+            continue
+        n_events = int(agg[event_col].sum())
+        print(
+            f"=== landmark +{lm}d | n_total={len(agg):,} "
+            f"n_{event_col}={n_events} ==="
+        )
         for lab_substr in ("Testosterone", "PSA", "Prostate specific Ag"):
             for stat in ("mean", "last", "max", "min"):
                 col = find_col(lab_substr, stat)
                 if col is None:
                     continue
                 for ev in (0, 1):
-                    sub = agg.loc[agg["PLATINUM"] == ev, col].dropna()
+                    sub = agg.loc[agg[event_col] == ev, col].dropna()
                     if sub.empty:
                         continue
                     print(
-                        f"  {lab_substr:>22s} {stat:5s} PLAT={ev}: median={sub.median():>10.2f} "
+                        f"  {lab_substr:>22s} {stat:5s} {event_col}={ev}: "
+                        f"median={sub.median():>10.2f} "
                         f"max={sub.max():>12.2f} n={len(sub):>5}"
                     )
                 break
