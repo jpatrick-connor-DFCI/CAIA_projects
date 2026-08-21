@@ -521,8 +521,30 @@ def classify_adt_intent(
     escalation = compute_escalation_tier(prepared)
     antiandrogen = compute_antiandrogen_pattern(prepared)
 
+    # build_adt_episodes is intentionally depot-only because an oral
+    # antiandrogen has no meaningful depot-course span.  It therefore cannot
+    # also be the patient universe: Stage 1 legitimately anchors some patients
+    # on bicalutamide/flutamide/nilutamide alone.  Start from every recognized
+    # ADT-exposed patient and left-join the duration features.  Missing depot
+    # duration is absence of evidence for a completed adjuvant course, so the
+    # binary classifier conservatively retains these patients as METASTATIC
+    # with ADT_EXCLUSION_REASON=retained_unresolved.
+    adt_patients = (
+        prepared.filter(
+            pl.col("NCI_PREFERRED_MED_NM").is_in(sorted(ADT_EXPOSURE_MEDS))
+        )
+        .group_by(ID_COL)
+        .agg(pl.col("MED_START_DT").min().alias("_ANY_ADT_FIRST_DATE"))
+    )
     df = (
-        episodes.join(escalation, on=ID_COL, how="left")
+        adt_patients.join(episodes, on=ID_COL, how="left")
+        .with_columns(
+            pl.coalesce("ADT_FIRST_DATE", "_ANY_ADT_FIRST_DATE").alias(
+                "ADT_FIRST_DATE"
+            )
+        )
+        .drop("_ANY_ADT_FIRST_DATE")
+        .join(escalation, on=ID_COL, how="left")
         .join(antiandrogen, on=ID_COL, how="left")
         .with_columns(
             pl.col("HAS_DEFINITIVE_ESCALATION").fill_null(False),

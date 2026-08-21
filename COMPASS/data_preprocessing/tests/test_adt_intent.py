@@ -350,6 +350,26 @@ def test_antiandrogen_only_patient_has_no_depot_span():
     assert episodes.height == 0
 
 
+def test_antiandrogen_only_patient_is_retained_as_unresolved_metastatic():
+    """The classifier patient universe is broader than its depot-duration table.
+
+    Stage 1 can anchor on a first-generation antiandrogen alone. Such a patient
+    has no evidence of a completed depot ADT course and therefore follows the
+    classifier's conservative default instead of disappearing from its output.
+    """
+    meds = _meds([(1, "BICALUTAMIDE", ADT_START)])
+    labelled = classify_adt_intent(
+        meds,
+        follow_up=_follow_up(1, ADT_START + timedelta(days=5 * 365)),
+    )
+
+    assert labelled.height == 1
+    assert _intent(labelled, 1) == INTENT_METASTATIC
+    assert _reason(labelled, 1) == "retained_unresolved"
+    assert labelled["ADT_SPAN_DAYS"][0] is None
+    assert not labelled["HAS_POSITIVE_METASTATIC_EVIDENCE"][0]
+
+
 # ---------------------------------------------------------------------------
 # Loader and constants
 # ---------------------------------------------------------------------------

@@ -52,15 +52,18 @@ def test_build_adt_intent_mrn_lists_and_endpoint_counts(monkeypatch, tmp_path):
 
     # MRN 1 has a short, completed, single ADT course. MRN 2 has definitive
     # escalation and is therefore metastatic even though its ADT course is short.
+    # MRN 3 is antiandrogen-only: it has no depot span but must remain in the
+    # conservative unresolved/metastatic group rather than fail the cohort guard.
     pl.DataFrame(
         {
-            "DFCI_MRN": [1, 1, 2, 2, 2],
+            "DFCI_MRN": [1, 1, 2, 2, 2, 3],
             "NCI_PREFERRED_MED_NM": [
                 "LEUPROLIDE ACETATE",
                 "LEUPROLIDE ACETATE",
                 "LEUPROLIDE ACETATE",
                 "LEUPROLIDE ACETATE",
                 "DOCETAXEL",
+                "BICALUTAMIDE",
             ],
             "MED_START_DT": [
                 "2015-01-01",
@@ -68,19 +71,20 @@ def test_build_adt_intent_mrn_lists_and_endpoint_counts(monkeypatch, tmp_path):
                 "2015-01-01",
                 "2015-04-01",
                 "2016-01-01",
+                "2015-01-01",
             ],
         }
     ).write_csv(meds_path)
     pl.DataFrame(
         {
-            "DFCI_MRN": [1, 2],
-            "FOLLOW_UP_END_DATE": ["2020-01-01", "2020-01-01"],
-            "PLATINUM": [0, 1],
-            "TT_PLATINUM": [1826, 500],
-            "NEPC": [0, 1],
-            "TT_NEPC": [1826, 700],
-            "AVPC": [0, 1],
-            "TT_AVPC": [1826, 600],
+            "DFCI_MRN": [1, 2, 3],
+            "FOLLOW_UP_END_DATE": ["2020-01-01"] * 3,
+            "PLATINUM": [0, 1, 0],
+            "TT_PLATINUM": [1826, 500, 1826],
+            "NEPC": [0, 1, 0],
+            "TT_NEPC": [1826, 700, 1826],
+            "AVPC": [0, 1, 0],
+            "TT_AVPC": [1826, 600, 1826],
         }
     ).write_csv(cohort_path)
     monkeypatch.setattr(
@@ -98,9 +102,9 @@ def test_build_adt_intent_mrn_lists_and_endpoint_counts(monkeypatch, tmp_path):
     localized = pl.read_csv(outputs["localized"])
     metastatic = pl.read_csv(outputs["metastatic"])
     assert localized["DFCI_MRN"].to_list() == [1]
-    assert metastatic["DFCI_MRN"].to_list() == [2]
+    assert metastatic["DFCI_MRN"].to_list() == [2, 3]
     assert localized["ADT_INTENT"].to_list() == ["LOCALIZED_ADJUVANT"]
-    assert metastatic["ADT_INTENT"].to_list() == ["METASTATIC"]
+    assert metastatic["ADT_INTENT"].to_list() == ["METASTATIC", "METASTATIC"]
 
     counts = pl.read_csv(outputs["counts"])
     assert counts.height == 6
