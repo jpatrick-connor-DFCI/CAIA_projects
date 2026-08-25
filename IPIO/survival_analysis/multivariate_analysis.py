@@ -108,6 +108,12 @@ from survival_common.cox_runners import (  # noqa: E402
     run_multivariable,
 )
 from survival_common.cox_engine import summarize_auc_timeline  # noqa: E402
+from survival_common.metrics_schema import (  # noqa: E402
+    DEFAULT_COHORT,
+    MODEL_XGBOOST,
+    canonical_identity,
+    order_canonical_first,
+)
 from survival_common.helper import (  # noqa: E402
     assert_disjoint_folds,
     assert_no_test_leakage,
@@ -442,6 +448,7 @@ def fit_final_xgboost_model(
     auc_max_time_units: int | None,
     horizon_grid: np.ndarray,
     canonical_labs: list[str],
+    landmark_day: int,
     args: argparse.Namespace,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Refit on full train_val and evaluate on the held-out test fold.
@@ -542,19 +549,30 @@ def fit_final_xgboost_model(
         brier_t.insert(0, "endpoint", endpoint)
 
     metrics_row = {
-        "endpoint": endpoint,
+        **canonical_identity(
+            model=MODEL_XGBOOST,
+            cohort=getattr(args, "cohort", None),
+            endpoint=endpoint,
+            landmark_days=landmark_day,
+            config="baseline" if getattr(args, "baseline", False) else "both",
+        ),
         "n_train_val": len(train_val),
         "n_test": len(test),
-        "n_train_val_events": int(train_val[event_col].sum()),
-        "n_test_events": int(test[event_col].sum()),
+        "n_events_train_val": int(train_val[event_col].sum()),
+        "n_events_test": int(test[event_col].sum()),
         "n_canonical_labs": len(canonical_labs),
         "n_selected_features": len(feature_cols),
         "n_covariates_with_missing_indicators": len(covariate_cols),
         "final_num_boost_round": final_num_boost_round,
         "best_iteration": best_iteration(model),
-        "c_index": c_index,
-        "mean_auc_t": mean_auc,
-        "integrated_brier": integrated_brier,
+        # XGBoost scores the held-out block only; the train-side twins are
+        # emitted as NaN so readers can assume the canonical columns exist
+        # rather than testing for their presence.
+        "train_val_c_index": float("nan"),
+        "test_c_index": c_index,
+        "train_val_mean_auc_t": float("nan"),
+        "test_mean_auc_t": mean_auc,
+        "test_integrated_brier": integrated_brier,
         "xgb_params": repr(params),
         "horizon_grid": ",".join(
             f"{float(h):g}" for h in np.asarray(horizon_grid, dtype=float).reshape(-1)
@@ -671,10 +689,13 @@ def _run_multivariable_landmark(
             auc_max_time_units=auc_max_time_units,
             horizon_grid=horizon_grid,
             canonical_labs=ctx.canonical_labs,
+            landmark_day=landmark_day,
             args=args,
         )
 
-        for df in (metrics, importance, predictions, auc_t, brier_t, fold_df, cv_df, fold_canonical_labs_df):
+        # `metrics` is excluded: it carries the canonical `landmark_days`
+        # from the shared identity block, not this per-frame `landmark_day`.
+        for df in (importance, predictions, auc_t, brier_t, fold_df, cv_df, fold_canonical_labs_df):
             if not df.empty:
                 df.insert(0, "landmark_day", landmark_day)
 
@@ -746,9 +767,11 @@ def _run_baseline_landmark(
             auc_max_time_units=auc_max_time_units,
             horizon_grid=horizon_grid,
             canonical_labs=[],
+            landmark_day=landmark_day,
             args=args,
         )
-        for df in (metrics, importance, predictions, auc_t, brier_t):
+        # `metrics` excluded -- see the note at the tuned call site above.
+        for df in (importance, predictions, auc_t, brier_t):
             if not df.empty:
                 df.insert(0, "landmark_day", landmark_day)
 
@@ -867,7 +890,9 @@ def run_xgboost(args: argparse.Namespace) -> None:
             )
 
         if out["metrics"]:
-            pd.concat(out["metrics"], ignore_index=True).to_csv(metrics_path, index=False)
+            order_canonical_first(
+                pd.concat(out["metrics"], ignore_index=True)
+            ).to_csv(metrics_path, index=False)
         if out["auc_t"]:
             pd.concat(out["auc_t"], ignore_index=True).to_csv(
                 _per_landmark_path(output_dir, f"{prefix}_auc_t", landmark_day), index=False
@@ -985,6 +1010,16 @@ if __name__ == "__main__":
         help=(
             "Candidate feature subset for non-baseline models: all "
             "(labs + genomic indicators), labs, or genomics."
+        ),
+    )
+    parser.add_argument(
+        "--cohort",
+        default=DEFAULT_COHORT,
+        help=(
+            "Patient-subset label stamped onto the canonical `cohort` metrics "
+            "column. The restriction itself is applied upstream at input-build "
+            "time via --restrict-to-mrns; this only records which subset the "
+            f"fit ran on (default: {DEFAULT_COHORT})."
         ),
     )
     parser.add_argument(

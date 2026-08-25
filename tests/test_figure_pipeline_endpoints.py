@@ -44,7 +44,7 @@ def _extract_function(name: str) -> str:
     """Return one top-level R function definition, by brace balance.
 
     Counting braces rather than stopping at the first ``}`` keeps nested
-    helpers (read_endpoint_performance defines first_numeric) intact.
+    helpers (read_endpoint_performance defines `metric`) intact.
     """
     lines = _pipeline_source().split("\n")
     start = next(
@@ -130,10 +130,7 @@ def test_reads_the_requested_endpoints_row(tmp_path, endpoint, expected_auc):
           test_integrated_brier = c(0.15, 0.19, 0.21)
         ), path)
 
-        got <- read_endpoint_performance(
-          path, {_r_literal(endpoint)},
-          "test_mean_auc_t", "test_c_index", "test_integrated_brier"
-        )
+        got <- read_endpoint_performance(path, {_r_literal(endpoint)})
         cat(sprintf("%.4f\\n", got[["auc"]]))
         """
     )
@@ -149,13 +146,11 @@ def test_absent_endpoint_does_not_fall_back(tmp_path):
 
         path <- file.path(tempdir(), "platinum_only.csv")
         write_csv(tibble(
-          endpoint = "platinum", mean_auc_t = 0.9,
-          c_index = 0.9, integrated_brier = 0.1
+          endpoint = "platinum", test_mean_auc_t = 0.9,
+          test_c_index = 0.9, test_integrated_brier = 0.1
         ), path)
 
-        got <- read_endpoint_performance(
-          path, "nepc", "mean_auc_t", "c_index", "integrated_brier"
-        )
+        got <- read_endpoint_performance(path, "nepc")
         cat(all(is.na(got)), "\\n")
         """
     )
@@ -171,13 +166,11 @@ def test_endpoint_match_is_case_insensitive(tmp_path):
 
         path <- file.path(tempdir(), "upper.csv")
         write_csv(tibble(
-          endpoint = "NEPC", mean_auc_t = 0.5,
-          c_index = 0.5, integrated_brier = 0.2
+          endpoint = "NEPC", test_mean_auc_t = 0.5,
+          test_c_index = 0.5, test_integrated_brier = 0.2
         ), path)
 
-        got <- read_endpoint_performance(
-          path, "nepc", "mean_auc_t", "c_index", "integrated_brier"
-        )
+        got <- read_endpoint_performance(path, "nepc")
         cat(sprintf("%.4f\\n", got[["auc"]]))
         """
     )
@@ -192,7 +185,7 @@ def test_missing_file_returns_na(tmp_path):
         {_extract_function("read_endpoint_performance")}
 
         got <- read_endpoint_performance(
-          file.path(tempdir(), "does_not_exist.csv"), "nepc", "a", "b", "c"
+          file.path(tempdir(), "does_not_exist.csv"), "nepc"
         )
         cat(all(is.na(got)), "\\n")
         """

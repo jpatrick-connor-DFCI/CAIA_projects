@@ -130,7 +130,7 @@ class TestScenarioA_FullyMaterializedGrid:
             quantiles=(0.25, 0.5, 0.75),
             fixed_horizons_by_event={"platinum": horizon_units},
         )
-        deephit_mean_auc = float(metrics_df.loc[0, "mean_auc_t"])
+        deephit_mean_auc = float(metrics_df.loc[0, "test_mean_auc_t"])
 
         assert np.isfinite(cox_mean_auc)
         assert np.isfinite(deephit_mean_auc)
@@ -184,7 +184,7 @@ class TestScenarioB_SparseGrid_ProvesFinding1:
             quantiles=(0.25, 0.5, 0.75),
             fixed_horizons_by_event={"platinum": horizon_units},
         )
-        deephit_mean_auc = float(metrics_df.loc[0, "mean_auc_t"])
+        deephit_mean_auc = float(metrics_df.loc[0, "test_mean_auc_t"])
 
         # cox_engine path: the oracle, integrated over the identical surviving
         # (post-mask) horizon subset DeepHit actually used -- an apples-to-

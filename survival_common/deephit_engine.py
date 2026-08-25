@@ -546,11 +546,18 @@ def compute_metrics(
 
         metric_rows.append(
             {
-                "event": event_name,
+                # Canonical spelling (survival_common.metrics_schema). This
+                # frame is per-cause, so `endpoint` names the cause -- the
+                # column was called `event` before the schema cutover.
+                "endpoint": event_name,
                 "n_test": int(valid.sum()),
-                "n_test_events": int(event[valid].sum()),
-                "c_index": c_index,
-                "mean_auc_t": mean_auc,
+                "n_events_test": int(event[valid].sum()),
+                # DeepHit scores the held-out block only; the train-side twins
+                # are NaN so readers can assume the canonical columns exist.
+                "train_val_c_index": float("nan"),
+                "test_c_index": c_index,
+                "train_val_mean_auc_t": float("nan"),
+                "test_mean_auc_t": mean_auc,
             }
         )
     return pd.DataFrame(metric_rows), pd.DataFrame(auc_rows)
@@ -748,10 +755,13 @@ def cv_run(
                     horizons_by_event=fixed_horizons_by_event,
                 )
                 for _, mrow in metrics_df.iterrows():
-                    event_name = mrow["event"]
-                    row[f"c_index_val__{event_name}"] = float(mrow.get("c_index", np.nan))
+                    # compute_metrics emits the canonical spelling; index
+                    # directly rather than .get() so a future schema drift
+                    # raises instead of quietly filling these with NaN.
+                    event_name = mrow["endpoint"]
+                    row[f"c_index_val__{event_name}"] = float(mrow["test_c_index"])
                     row[f"mean_auc_t_val__{event_name}"] = float(
-                        mrow.get("mean_auc_t", np.nan)
+                        mrow["test_mean_auc_t"]
                     )
                     row[f"integrated_brier_val__{event_name}"] = float(
                         ibs_by_event.get(event_name, np.nan)

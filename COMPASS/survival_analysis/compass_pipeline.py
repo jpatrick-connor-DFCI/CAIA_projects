@@ -29,6 +29,7 @@ for _p in (str(PROJECT_ROOT),):
 from data_preprocessing_common.oncdrs_sources import TABLE_FILES  # noqa: E402
 from data_preprocessing_common.oncdrs_sources import scan_source  # noqa: E402
 from COMPASS.survival_analysis import cox_aggregated as _ca  # noqa: E402
+from survival_common.metrics_schema import DEFAULT_COHORT  # noqa: E402
 
 PYTHON = sys.executable
 
@@ -916,6 +917,11 @@ def model_output_dir(model: str) -> str:
 
 def build_model_command(model, landmark, config_dir, row_output_dir, run):
     overwrite_flag = "--overwrite" if FORCE_RERUN else "--no-overwrite"
+    # Stamped onto the canonical `cohort` metrics column so a metrics CSV names
+    # the patient subset it was fit on. The restriction itself happens upstream
+    # at Stage 3 via --restrict-to-mrns; this only records it. Runs predating
+    # the cohort key fall back to the unrestricted default.
+    cohort_args = ["--cohort", str(run.get("cohort") or DEFAULT_COHORT)]
     if model == "univariate":
         return [
             PYTHON, SURVIVAL_DIR / "univariate_analysis.py",
@@ -934,6 +940,7 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             "--landmark-days", str(landmark),
             "--endpoints", run.get("endpoint", ENDPOINT),
             "--n-folds", str(N_FOLDS),
+            *cohort_args,
             overwrite_flag,
         ]
         if config_dir == "baseline":
@@ -947,6 +954,7 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             "--landmark-day", str(landmark),
             "--config", config_dir,
             "--max-pred-window", str(MAX_PRED_WINDOW),
+            *cohort_args,
             overwrite_flag,
         ]
     if model == "survlatent-ode":
@@ -983,6 +991,7 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             "--landmark-days", str(landmark),
             "--endpoints", run.get("endpoint", ENDPOINT),
             "--n-folds", str(N_FOLDS),
+            *cohort_args,
             overwrite_flag,
         ]
         if config_dir == "baseline":
@@ -1091,6 +1100,34 @@ def run_multivariate_longitudinal(run: dict, dry_run: bool = False):
     return summary
 
 
+# summarize_outputs and summarize_longitudinal_outputs emit a stable, narrower
+# shape than the on-disk metrics schema: the bare metric names below are this
+# summary frame's own columns, not the canonical CSV spellings they read from.
+_SUMMARY_METRIC_FIELDS = (
+    "n_test",
+    "n_test_events",
+    "c_index",
+    "mean_auc_t",
+    "integrated_brier",
+)
+
+
+def _missing_metric_fields(status: str) -> dict:
+    return {**{field: None for field in _SUMMARY_METRIC_FIELDS}, "status": status}
+
+
+def _canonical_metric_fields(row) -> dict:
+    """Map one canonical-schema metrics row onto the summary frame's columns."""
+    return {
+        "n_test": int(row["n_test"]),
+        "n_test_events": int(row["n_events_test"]),
+        "c_index": float(row["test_c_index"]),
+        "mean_auc_t": float(row["test_mean_auc_t"]),
+        "integrated_brier": float(row["test_integrated_brier"]),
+        "status": "ok",
+    }
+
+
 def summarize_outputs(run: dict) -> pd.DataFrame:
     # Reads back whichever endpoint this run modeled; the "endpoint" column it
     # emits is what lets platinum and NEPC summaries be concatenated and
@@ -1101,50 +1138,30 @@ def summarize_outputs(run: dict) -> pd.DataFrame:
         metrics_path = run["output_dir"] / model_output_dir(model) / f"landmark_{landmark}" / config_dir / metrics_filename
         base = {"run": run["label"], "model": model, "landmark": landmark, "config": config_dir, "endpoint": endpoint}
         if not metrics_path.exists():
-            rows.append({**base, "n_test": None, "n_test_events": None, "c_index": None,
-                         "mean_auc_t": None, "integrated_brier": None, "status": "missing"})
+            rows.append({**base, **_missing_metric_fields("missing")})
             continue
         df = pd.read_csv(metrics_path)
         platinum = df.loc[df["endpoint"] == endpoint]
         if platinum.empty:
-            rows.append({**base, "n_test": None, "n_test_events": None, "c_index": None,
-                         "mean_auc_t": None, "integrated_brier": None, "status": f"no {endpoint} row"})
+            rows.append({**base, **_missing_metric_fields(f"no {endpoint} row")})
             continue
-        platinum = platinum.iloc[0]
-        if model == "elastic-net":
-            rows.append({
-                **base,
-                "n_test": int(platinum["n_test"]),
-                "n_test_events": int(platinum["n_events_test"]),
-                "c_index": float(platinum["test_c_index"]),
-                "mean_auc_t": float(platinum["test_mean_auc_t"]),
-                "integrated_brier": float(platinum["test_integrated_brier"]),
-                "status": "ok",
-            })
-        elif model == "xgboost":
-            rows.append({
-                **base,
-                "n_test": int(platinum["n_test"]),
-                "n_test_events": int(platinum["n_test_events"]),
-                "c_index": float(platinum["c_index"]),
-                "mean_auc_t": float(platinum["mean_auc_t"]),
-                "integrated_brier": float(platinum["integrated_brier"]),
-                "status": "ok",
-            })
+        # Elastic-net and XGBoost both write the canonical schema
+        # (survival_common/metrics_schema.py), so one read serves both.
+        rows.append({**base, **_canonical_metric_fields(platinum.iloc[0])})
     return pd.DataFrame(rows).sort_values(["run", "landmark", "model", "config"]).reset_index(drop=True)
 
 
 def summarize_longitudinal_outputs(run: dict) -> pd.DataFrame:
     """Same schema as summarize_outputs, for the longitudinal arms.
 
-    A separate function rather than an extension of summarize_outputs: that
-    one reads Cox/XGBoost's own column names, which don't match
-    dynamic-deephit's ("event" instead of "endpoint") or survlatent-ode's
-    (external repo's eval_model schema, not ours to pin). Both models report a
-    row per cause -- the competing configs report death too, as a secondary
-    diagnostic -- so filtering to the run's cause of interest here keeps the
-    headline comparison against that endpoint's Cox/XGBoost row valid. Frames
-    from both functions share columns and concat cleanly.
+    A separate function rather than an extension of summarize_outputs because
+    of survlatent-ode, whose metrics come from the external repo's eval_model
+    and are not ours to pin to the canonical schema. Dynamic-DeepHit does write
+    the canonical schema and is read the same way as Cox/XGBoost. Both models
+    report a row per cause -- the competing configs report death too, as a
+    secondary diagnostic -- so filtering to the run's cause of interest here
+    keeps the headline comparison against that endpoint's Cox/XGBoost row
+    valid. Frames from both functions share columns and concat cleanly.
     """
     endpoint = run.get("endpoint", ENDPOINT)
     rows = []
@@ -1153,26 +1170,15 @@ def summarize_longitudinal_outputs(run: dict) -> pd.DataFrame:
         metrics_path = run["output_dir"] / model_output_dir(model) / f"landmark_{landmark}" / config_dir / resolved_filename
         base = {"run": run["label"], "model": model, "landmark": landmark, "config": config_dir, "endpoint": endpoint}
         if not metrics_path.exists():
-            rows.append({**base, "n_test": None, "n_test_events": None, "c_index": None,
-                         "mean_auc_t": None, "integrated_brier": None, "status": "missing"})
+            rows.append({**base, **_missing_metric_fields("missing")})
             continue
         df = pd.read_csv(metrics_path)
         if model == "dynamic-deephit":
-            cause = df.loc[df["event"] == endpoint]
+            cause = df.loc[df["endpoint"] == endpoint]
             if cause.empty:
-                rows.append({**base, "n_test": None, "n_test_events": None, "c_index": None,
-                             "mean_auc_t": None, "integrated_brier": None, "status": f"no {endpoint} row"})
+                rows.append({**base, **_missing_metric_fields(f"no {endpoint} row")})
                 continue
-            cause = cause.iloc[0]
-            rows.append({
-                **base,
-                "n_test": int(cause["n_test"]),
-                "n_test_events": int(cause["n_test_events"]),
-                "c_index": float(cause["c_index"]),
-                "mean_auc_t": float(cause["mean_auc_t"]),
-                "integrated_brier": float(cause["integrated_brier"]),
-                "status": "ok",
-            })
+            rows.append({**base, **_canonical_metric_fields(cause.iloc[0])})
         elif model == "survlatent-ode":
             # eval_model's exact column names live in the external repo; try
             # the conventional ones and fall back to a "present but
@@ -1192,8 +1198,7 @@ def summarize_longitudinal_outputs(run: dict) -> pd.DataFrame:
                     "status": "ok",
                 })
             except (StopIteration, IndexError, KeyError, ValueError) as exc:
-                rows.append({**base, "n_test": None, "n_test_events": None, "c_index": None,
-                             "mean_auc_t": None, "integrated_brier": None, "status": f"unparsed ({exc})"})
+                rows.append({**base, **_missing_metric_fields(f"unparsed ({exc})")})
     return pd.DataFrame(rows).sort_values(["run", "landmark", "model", "config"]).reset_index(drop=True)
 
 

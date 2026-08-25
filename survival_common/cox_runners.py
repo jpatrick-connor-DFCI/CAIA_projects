@@ -11,6 +11,12 @@ import pandas as pd
 
 from survival_common.config import CoxProjectConfig
 from survival_common.helper import resolve_auc_max_time_units
+from survival_common.metrics_schema import (
+    DEFAULT_COHORT,
+    MODEL_ELASTIC_NET_COX,
+    canonical_identity,
+    order_canonical_first,
+)
 
 
 UNIVARIATE_KEEP_COLS = [
@@ -116,6 +122,16 @@ def add_common_cox_args(parser: argparse.ArgumentParser, config: CoxProjectConfi
         type=int,
         default=cox.DEFAULT_LANDMARK_DAYS,
         help="Landmark offsets to analyze. Each must have prebuilt inputs in --inputs-dir.",
+    )
+    parser.add_argument(
+        "--cohort",
+        default=DEFAULT_COHORT,
+        help=(
+            "Patient-subset label stamped onto the canonical `cohort` metrics "
+            "column. The restriction itself is applied upstream at input-build "
+            "time via --restrict-to-mrns; this only records which subset the "
+            f"fit ran on (default: {DEFAULT_COHORT})."
+        ),
     )
     parser.add_argument(
         "--overwrite",
@@ -568,7 +584,9 @@ def run_multivariable(config: CoxProjectConfig, cox: Any, args: Namespace) -> No
                 out=out,
             )
 
-        _write_multivariable_landmark_outputs(cox, output_dir, prefix, landmark_day, out)
+        _write_multivariable_landmark_outputs(
+            cox, output_dir, prefix, landmark_day, out, args
+        )
         print(f"\n[done] landmark +{landmark_day}d: saved {metrics_path.name}")
 
     _combine_multivariable_outputs(cox, output_dir, prefix, landmark_days)
@@ -580,6 +598,7 @@ def _write_multivariable_landmark_outputs(
     prefix: str,
     landmark_day: int,
     out: dict[str, list],
+    args: Namespace,
 ) -> None:
     if prefix == "cox_agg_multivariable" and out["canonical_labs_fold_rows"]:
         pd.concat(out["canonical_labs_fold_rows"], ignore_index=True).to_csv(
@@ -603,7 +622,25 @@ def _write_multivariable_landmark_outputs(
             _per_landmark_path(output_dir, f"{prefix}_test_brier", landmark_day), index=False
         )
     if out["metric_rows"]:
-        pd.DataFrame(out["metric_rows"]).to_csv(
+        metrics = pd.DataFrame(
+            [
+                # `endpoint` and `landmark_days` are already on the row; the
+                # identity block restates them so every family stamps the same
+                # five columns from the same helper.
+                {
+                    **row,
+                    **canonical_identity(
+                        model=MODEL_ELASTIC_NET_COX,
+                        cohort=getattr(args, "cohort", None),
+                        endpoint=row["endpoint"],
+                        landmark_days=landmark_day,
+                        config="baseline" if args.baseline else "both",
+                    ),
+                }
+                for row in out["metric_rows"]
+            ]
+        )
+        order_canonical_first(metrics).to_csv(
             _per_landmark_path(output_dir, f"{prefix}_metrics", landmark_day), index=False
         )
 

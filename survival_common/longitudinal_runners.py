@@ -23,6 +23,11 @@ import pandas as pd
 
 from survival_common import cohort, deephit_engine as engine
 from survival_common.helper import assert_no_test_leakage, resolve_auc_max_time_units
+from survival_common.metrics_schema import (
+    DEFAULT_COHORT,
+    MODEL_DYNAMIC_DEEPHIT,
+    order_canonical_first,
+)
 from survival_common.longitudinal_targets import (
     CONFIG_ENDPOINTS,
     LONGITUDINAL_CONFIGS,
@@ -117,6 +122,16 @@ def build_deephit_parser() -> argparse.ArgumentParser:
         help=(
             "Discrete prediction window in input time bins. Must cover the "
             "largest manifest AUC(t) horizon at this landmark."
+        ),
+    )
+    parser.add_argument(
+        "--cohort",
+        default=DEFAULT_COHORT,
+        help=(
+            "Patient-subset label stamped onto the canonical `cohort` metrics "
+            "column. The restriction itself is applied upstream at input-build "
+            "time via --restrict-to-mrns; this only records which subset the "
+            f"fit ran on (default: {DEFAULT_COHORT})."
         ),
     )
     parser.add_argument("--hidden-dim", type=int, default=64)
@@ -405,14 +420,28 @@ def run_deephit(args: Namespace) -> None:
         time_unit_days=time_unit_days,
     )
     metrics = metrics.copy()
-    metrics["integrated_brier"] = metrics["event"].map(
+    metrics["test_integrated_brier"] = metrics["endpoint"].map(
         lambda name: integrated_brier_by_event.get(name, float("nan"))
     )
+    # Canonical identity + train-side counts. `endpoint` is already on the
+    # frame (one row per cause), so only the remaining canonical columns are
+    # stamped here. Per-cause train_val event counts come from the target
+    # label column, where label k marks cause k (0 = censored) in the order
+    # event_names was resolved.
+    train_val_label = pd.to_numeric(train_val_targets["label"], errors="coerce")
+    metrics["n_train_val"] = len(train_val_targets)
+    metrics["n_events_train_val"] = [
+        int((train_val_label == (event_names.index(name) + 1)).sum())
+        for name in metrics["endpoint"]
+    ]
+    metrics["model"] = MODEL_DYNAMIC_DEEPHIT
+    metrics["cohort"] = getattr(args, "cohort", None) or DEFAULT_COHORT
     metrics["selected_hidden_dim"] = final_hidden_dim
     metrics["selected_dropout"] = final_dropout
     metrics["selected_lr"] = final_lr
     metrics["config"] = args.config
     metrics["landmark_days"] = landmark_day
+    metrics = order_canonical_first(metrics)
 
     run_manifest = {
         "inputs_dir": str(args.inputs_dir),

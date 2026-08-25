@@ -83,6 +83,12 @@ from survival_common.cox_runners import (  # noqa: E402
     run_multivariable,
 )
 from survival_common.cox_engine import summarize_auc_timeline  # noqa: E402
+from survival_common.metrics_schema import (  # noqa: E402
+    DEFAULT_COHORT,
+    MODEL_XGBOOST,
+    canonical_identity,
+    order_canonical_first,
+)
 from survival_common.helper import (  # noqa: E402
     assert_disjoint_folds,
     assert_no_test_leakage,
@@ -570,20 +576,30 @@ def run_one_endpoint(
         brier_t.insert(0, "landmark_day", landmark_day)
 
     metrics_row = {
-        "landmark_day": landmark_day,
-        "endpoint": endpoint,
+        **canonical_identity(
+            model=MODEL_XGBOOST,
+            cohort=getattr(args, "cohort", None),
+            endpoint=endpoint,
+            landmark_days=landmark_day,
+            config="baseline" if getattr(args, "baseline", False) else "both",
+        ),
         "n_train_val": len(train_val),
         "n_test": len(test),
-        "n_train_val_events": int(train_val[event_col].sum()),
-        "n_test_events": int(test[event_col].sum()),
+        "n_events_train_val": int(train_val[event_col].sum()),
+        "n_events_test": int(test[event_col].sum()),
         "n_canonical_labs": len(canonical_labs),
         "n_selected_features": len(selected_features),
         "n_covariates_with_missing_indicators": len(covariate_cols),
         "final_num_boost_round": final_num_boost_round,
         "best_iteration": best_iteration(model),
-        "c_index": c_index,
-        "mean_auc_t": mean_auc,
-        "integrated_brier": integrated_brier,
+        # XGBoost scores the held-out block only; the train-side twins are
+        # emitted as NaN so readers can assume the canonical columns exist
+        # rather than testing for their presence.
+        "train_val_c_index": float("nan"),
+        "test_c_index": c_index,
+        "train_val_mean_auc_t": float("nan"),
+        "test_mean_auc_t": mean_auc,
+        "test_integrated_brier": integrated_brier,
         "xgb_params": repr(params),
         "horizon_grid": ",".join(
             f"{float(h):g}" for h in np.asarray(horizon_grid, dtype=float).reshape(-1)
@@ -770,7 +786,9 @@ def run_xgboost(args: argparse.Namespace) -> None:
             if not fold_canonical_labs.empty:
                 all_fold_canonical_labs.append(fold_canonical_labs)
 
-        pd.concat(all_metrics, ignore_index=True).to_csv(metrics_path, index=False)
+        order_canonical_first(
+            pd.concat(all_metrics, ignore_index=True)
+        ).to_csv(metrics_path, index=False)
         pd.concat(all_auc, ignore_index=True).to_csv(
             _per_landmark_path(output_dir, f"{prefix}_auc_t", landmark_day), index=False
         )
@@ -869,6 +887,16 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--val-frac", type=float, default=0.20)
     parser.add_argument("--max-features", type=int, default=None)
+    parser.add_argument(
+        "--cohort",
+        default=DEFAULT_COHORT,
+        help=(
+            "Patient-subset label stamped onto the canonical `cohort` metrics "
+            "column. The restriction itself is applied upstream at input-build "
+            "time via --restrict-to-mrns; this only records which subset the "
+            f"fit ran on (default: {DEFAULT_COHORT})."
+        ),
+    )
     parser.add_argument(
         "--baseline",
         action="store_true",

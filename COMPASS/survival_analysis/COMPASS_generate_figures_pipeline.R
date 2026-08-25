@@ -317,38 +317,42 @@ parse_feature <- function(name) {
   }
 }
 
-# Read held-out discrimination/calibration metrics for one endpoint across model
-# families with slightly different output schemas. Missing optional outputs or
-# columns return NA so figure generation can continue without a torch install.
+# Read held-out discrimination/calibration metrics for one endpoint. Every model
+# family now writes the canonical schema (survival_common/metrics_schema.py), so
+# there are no per-family column candidates to reconcile -- `endpoint`,
+# `test_c_index`, `test_mean_auc_t`, and `test_integrated_brier` are read
+# directly. Missing optional outputs still return NA so figure generation can
+# continue without a torch install.
+#
+# Metrics CSVs written before the schema cutover lack these columns and will
+# read as NA; refit rather than re-adding fallbacks.
 #
 # `endpoint` must match the lowercase key written by cox_aggregated.py's
 # ENDPOINTS map ("platinum" or "nepc"). It is required rather than defaulted:
 # a wrong-but-silent default here yields an all-NA panel that looks like a
 # missing torch install instead of an endpoint mismatch.
-read_endpoint_performance <- function(path, endpoint, auc_cols, cindex_cols, brier_cols) {
+read_endpoint_performance <- function(path, endpoint) {
   missing_metrics <- c(auc = NA_real_, cindex = NA_real_, brier = NA_real_)
   if (!file.exists(path)) return(missing_metrics)
 
   df <- read_csv(path, show_col_types = FALSE)
-  endpoint_col <- intersect(c("endpoint", "event"), names(df))
-  if (length(endpoint_col) == 0) return(missing_metrics)
+  if (!("endpoint" %in% names(df))) return(missing_metrics)
   # `.env` is required: the argument shares its name with the data column, and
   # under dplyr's data masking a bare `endpoint` would resolve to the column,
   # making this an elementwise self-comparison that keeps every row.
   wanted_endpoint <- tolower(endpoint)
   row <- df %>%
-    filter(tolower(as.character(.data[[endpoint_col[1]]])) == .env$wanted_endpoint)
+    filter(tolower(as.character(.data[["endpoint"]])) == .env$wanted_endpoint)
   if (nrow(row) == 0) return(missing_metrics)
 
-  first_numeric <- function(candidates) {
-    column <- intersect(candidates, names(row))
-    if (length(column) == 0) return(NA_real_)
-    suppressWarnings(as.numeric(row[[column[1]]][1]))
+  metric <- function(column) {
+    if (!(column %in% names(row))) return(NA_real_)
+    suppressWarnings(as.numeric(row[[column]][1]))
   }
   c(
-    auc = first_numeric(auc_cols),
-    cindex = first_numeric(cindex_cols),
-    brier = first_numeric(brier_cols)
+    auc = metric("test_mean_auc_t"),
+    cindex = metric("test_c_index"),
+    brier = metric("test_integrated_brier")
   )
 }
 
@@ -948,31 +952,29 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
 
   # Multivariate arms write one metrics row per endpoint carrying the split
-  # sizes. Cox and XGBoost disagree on column naming (n_events_train_val vs
-  # n_train_val_events) and Dynamic-DeepHit reports only the held-out side
-  # keyed by `event`, so accept every spelling and report what is present.
+  # sizes, in the canonical schema every family now shares
+  # (survival_common/metrics_schema.py) -- no per-family spellings to reconcile.
   summarise_multivariate_set <- function(path, arm, landmark) {
     absent <- function(detail)
       tibble(analysis = "Multivariate", arm = arm, landmark_days = landmark,
              n_patients = NA_integer_, n_events = NA_integer_, detail = detail)
     if (is.na(path) || !file.exists(path)) return(absent("results not found"))
     df <- read_csv(path, show_col_types = FALSE)
-    endpoint_col <- intersect(c("endpoint", "event"), names(df))
-    if (length(endpoint_col) == 0) return(absent("no endpoint column"))
+    if (!("endpoint" %in% names(df))) return(absent("no endpoint column"))
     row <- df %>%
-      filter(tolower(as.character(.data[[endpoint_col[1]]])) == .env$ENDPOINT)
+      filter(tolower(as.character(.data[["endpoint"]])) == .env$ENDPOINT)
     if (nrow(row) == 0) return(absent(sprintf("no %s row", ENDPOINT)))
-    pick <- function(candidates) {
-      column <- intersect(candidates, names(row))
-      if (length(column) == 0) return(NA_real_)
-      suppressWarnings(as.numeric(row[[column[1]]][1]))
+    pick <- function(column) {
+      if (!(column %in% names(row))) return(NA_real_)
+      suppressWarnings(as.numeric(row[[column]][1]))
     }
     n_train_val <- pick("n_train_val")
     n_test      <- pick("n_test")
-    e_train_val <- pick(c("n_events_train_val", "n_train_val_events"))
-    e_test      <- pick(c("n_events_test", "n_test_events"))
-    # Total analysis set = train/val + held-out test. Dynamic-DeepHit reports
-    # only the held-out side, so fall back to it alone and say so.
+    e_train_val <- pick("n_events_train_val")
+    e_test      <- pick("n_events_test")
+    # Total analysis set = train/val + held-out test. The train-side columns
+    # are always present under the canonical schema, but a family that cannot
+    # compute them writes NA -- keep reporting the held-out side alone there.
     if (is.finite(n_train_val)) {
       detail <- sprintf("train/val %s + test %s",
                         format(as.integer(n_train_val), big.mark = ","),
@@ -1895,16 +1897,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
   cox_labs <- function(lm) read_endpoint_performance(
     file.path(BASE, "cox", sprintf("landmark_%s", lm), "both", "cox_agg_multivariable_metrics.csv"),
-    ENDPOINT, "test_mean_auc_t", "test_c_index", "test_integrated_brier")
+    ENDPOINT)
   cox_baseline <- function(lm) read_endpoint_performance(
     file.path(BASE, "cox", sprintf("landmark_%s", lm), "baseline", "cox_agg_baseline_metrics.csv"),
-    ENDPOINT, "test_mean_auc_t", "test_c_index", "test_integrated_brier")
+    ENDPOINT)
   xgb_labs <- function(lm) read_endpoint_performance(
     file.path(BASE, "xgboost", sprintf("landmark_%s", lm), "both", "landmark_xgboost_metrics.csv"),
-    ENDPOINT, "mean_auc_t", "c_index", "integrated_brier")
+    ENDPOINT)
   xgb_baseline <- function(lm) read_endpoint_performance(
     file.path(BASE, "xgboost", sprintf("landmark_%s", lm), "baseline", "landmark_xgboost_baseline_metrics.csv"),
-    ENDPOINT, "mean_auc_t", "c_index", "integrated_brier")
+    ENDPOINT)
   # 03b writes one directory per config in _LONGITUDINAL_CONFIGS_BY_ENDPOINT.
   # The cause-only config leads that tuple and is the arm comparable to
   # Cox/XGBoost here, so it is named for the endpoint itself.
@@ -1953,9 +1955,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   dynamic_deephit <- function(lm) {
     path <- DEEPHIT_METRIC_PATHS[[as.character(lm)]]
     if (is.na(path)) return(c(auc = NA_real_, cindex = NA_real_, brier = NA_real_))
-    read_endpoint_performance(
-      path, ENDPOINT, "mean_auc_t", "c_index", "integrated_brier"
-    )
+    read_endpoint_performance(path, ENDPOINT)
   }
 
   # (label, loader, color, is_baseline). Age baselines are the lighter, patterned twins.

@@ -23,21 +23,16 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from survival_common.cox_models import select_best_cv_row
+
 
 def _select_best_row(cv_df: pd.DataFrame, n_folds: int = 5) -> dict:
-    """Verbatim reproduction of cox_models.py's post-fix selection rule."""
-    valid_candidates = cv_df.loc[cv_df["all_folds_valid"]]
-    has_full_auc_t_coverage = valid_candidates["n_valid_auc_t_folds"].eq(int(n_folds))
-    selection_key = "mean_auc_t_cv_mean" if has_full_auc_t_coverage.any() else "cv_mean"
-    return (
-        valid_candidates.sort_values(
-            [selection_key, "cv_mean", "n_valid_folds", "penalizer", "l1_ratio"],
-            ascending=[False, False, False, False, False],
-            na_position="last",
-        )
-        .iloc[0]
-        .to_dict()
-    )
+    """The real selection rule, imported rather than reproduced.
+
+    This test used to reimplement the rule verbatim, which meant a change to
+    cox_models.py would make the two diverge silently instead of failing here.
+    """
+    return select_best_cv_row(cv_df, n_folds=n_folds)
 
 
 def _disagreeing_grid() -> pd.DataFrame:

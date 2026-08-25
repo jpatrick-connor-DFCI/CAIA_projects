@@ -826,17 +826,29 @@ def tune_multivariable_model(
             f"'{endpoint}'. Best observed validity was {best_valid}/{n_folds} folds.\n{diagnostic}"
         )
 
+    best_row = select_best_cv_row(cv_df, n_folds=n_folds)
+    fold_canonical_labs_df = pd.DataFrame(fold_canonical_labs_rows)
+    return fold_df, cv_df, best_row, fold_canonical_labs_df
+
+
+def select_best_cv_row(cv_df: pd.DataFrame, *, n_folds: int) -> dict:
+    """Pick the winning hyperparameter row from a CV summary frame.
+
+    Selects on the same capped, IPCW-weighted mean AUC(t) that is ultimately
+    reported, not the uncapped/unweighted Harrell C (cv_mean) -- otherwise the
+    "best" hyperparameter setting can be tuned to a metric different from the
+    one published for it. Falls back to cv_mean only when no candidate has an
+    estimable IPCW mean for every fold (n_valid_auc_t_folds short of n_folds),
+    since a NaN-sorted candidate can't be meaningfully compared on that key.
+
+    Extracted from tune_multivariable_model so the selection rule can be tested
+    directly; a test that reimplements it would diverge silently instead of
+    failing.
+    """
     valid_candidates = cv_df.loc[cv_df["all_folds_valid"]]
-    # Select on the same capped, IPCW-weighted mean AUC(t) that is ultimately
-    # reported, not the uncapped/unweighted Harrell C (cv_mean) — otherwise the
-    # "best" hyperparameter setting can be tuned to a metric different from the
-    # one published for it (Finding 4). Fall back to cv_mean only when no
-    # candidate has an estimable IPCW mean for every fold (n_valid_auc_t_folds
-    # short of n_folds), since a NaN-sorted candidate can't be meaningfully
-    # compared on that key at all.
     has_full_auc_t_coverage = valid_candidates["n_valid_auc_t_folds"].eq(int(n_folds))
     selection_key = "mean_auc_t_cv_mean" if has_full_auc_t_coverage.any() else "cv_mean"
-    best_row = (
+    return (
         valid_candidates.sort_values(
             # On an exact selection-key/cv_mean/n_valid_folds tie, prefer the
             # MORE regularized setting (larger penalizer/l1_ratio) rather than
@@ -849,8 +861,6 @@ def tune_multivariable_model(
         .iloc[0]
         .to_dict()
     )
-    fold_canonical_labs_df = pd.DataFrame(fold_canonical_labs_rows)
-    return fold_df, cv_df, best_row, fold_canonical_labs_df
 
 
 def fit_final_multivariable_model(
