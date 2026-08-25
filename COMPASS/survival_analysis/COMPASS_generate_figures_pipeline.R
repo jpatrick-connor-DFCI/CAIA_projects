@@ -490,6 +490,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   figure_group <- function(plot_stem) {
     # Checked before the "figure1" prefix so the supplement gets its own
     # directory instead of being swallowed by the main Figure 1 group.
+    # ADT-intent supplement. Checked before the "figure1"/"figure2" prefixes
+    # for the same reason figure1s is: an "adt_intent_" stem is a supplement,
+    # not a member of any numbered figure group.
+    if (startsWith(plot_stem, "adt_intent_")) return("supplement_adt_intent")
     if (startsWith(plot_stem, "figure1s")) return("figure1s_analysis_sets")
     if (startsWith(plot_stem, "figure1") || startsWith(plot_stem, "table1")) return("figure1")
     if (startsWith(plot_stem, "figure2v3")) return("figure2v3_llm")
@@ -2945,6 +2949,283 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         height = 5.5
       )
       if (show) print(combined)
+    }
+  }
+
+  ## ---- Supplement -- localized-adjuvant vs metastatic ADT-intent strata ----
+  ## Reads the CSVs written by COMPASS/survival_analysis/adt_intent_comparison.py.
+  ## That module is read-only over the `local_runs_adt_{localized,metastatic}*`
+  ## trees; nothing here refits a model. Panels are emitted only on the ADT arm,
+  ## since the intent strata are defined by ADT medication history.
+  ADT_INTENT_DIR <- file.path(NEPC_PROJ_PATH, "survival_analysis",
+                              "adt_intent_comparison")
+  adt_intent_table <- function(filename) {
+    path <- file.path(ADT_INTENT_DIR, filename)
+    if (!file.exists(path)) return(NULL)
+    frame <- suppressWarnings(read_csv(path, show_col_types = FALSE))
+    # The module writes empty frames deliberately, to distinguish "no
+    # comparable runs" from "this stage never ran". Treat both as nothing
+    # to plot, but only the missing file is worth a message.
+    if (nrow(frame) == 0) return(NULL)
+    frame
+  }
+
+  if (IS_ADT) {
+    intent_counts <- adt_intent_table("adt_intent_cohort_counts.csv")
+    intent_overlap <- adt_intent_table("adt_intent_cohort_overlap.csv")
+    intent_association <- adt_intent_table("adt_intent_univariate_heterogeneity.csv")
+    intent_association_summary <- adt_intent_table("adt_intent_univariate_summary.csv")
+    intent_performance <- adt_intent_table("adt_intent_performance_delta.csv")
+
+    # Disjointness is already a hard assertion in adt_intent_comparison.py, so
+    # this is a read-side audit rather than a gate: it re-states the check in
+    # the figure log, where a stale CSV from an older run would otherwise be
+    # plotted without comment.
+    if (!is.null(intent_overlap)) {
+      overlapping <- intent_overlap %>% filter(.data$n_overlap > 0)
+      if (nrow(overlapping) > 0) {
+        warning(sprintf(
+          "ADT-intent strata overlap in %d endpoint/landmark cell(s); the comparison CSVs are stale",
+          nrow(overlapping)
+        ))
+      }
+    }
+
+    if (is.null(intent_counts) && is.null(intent_association) &&
+        is.null(intent_performance)) {
+      message(sprintf(
+        "ADT-intent supplement: no comparison tables under %s; run adt_intent_comparison.py first",
+        ADT_INTENT_DIR
+      ))
+    }
+
+    INTENT_PALETTE <- c(localized = "#0b6ba8", metastatic = "#c1272d")
+    INTENT_LABELS <- c(localized = "Localized-adjuvant", metastatic = "Metastatic")
+    landmark_label <- function(landmark) {
+      ifelse(landmark == 0, "0-day", sprintf("+%d-day", landmark))
+    }
+
+    ## Panel 1 -- modelled cohort and event counts per stratum x landmark.
+    if (!is.null(intent_counts)) {
+      counts_endpoint <- intent_counts %>%
+        filter(.data$endpoint == ENDPOINT, .data$status == "ok")
+      if (nrow(counts_endpoint) > 0) {
+        counts_plot <- counts_endpoint %>%
+          mutate(
+            cohort_label = unname(INTENT_LABELS[.data$cohort]),
+            landmark_lab = factor(landmark_label(.data$landmark_days),
+                                  levels = landmark_label(sort(unique(.data$landmark_days)))),
+            sparse = as.logical(.data$sparse_events)
+          )
+        p_counts <- ggplot(counts_plot,
+                           aes(x = .data$landmark_lab, y = .data$n_events,
+                               fill = .data$cohort)) +
+          geom_col(position = position_dodge(width = 0.75), width = 0.68) +
+          geom_text(
+            aes(label = sprintf("%d/%d", .data$n_events, .data$n_patients)),
+            position = position_dodge(width = 0.75),
+            vjust = -0.35, size = 3
+          ) +
+          # Sparse cells are annotated rather than dropped: an underpowered
+          # stratum is a result the reader needs to see, not a missing bar.
+          geom_point(
+            data = ~ dplyr::filter(.x, .data$sparse),
+            aes(y = 0), position = position_dodge(width = 0.75),
+            shape = 8, size = 2, color = "#1a1a1a", show.legend = FALSE
+          ) +
+          scale_fill_manual(values = INTENT_PALETTE, labels = INTENT_LABELS,
+                            name = "ADT intent") +
+          scale_y_continuous(expand = expansion(mult = c(0, 0.14))) +
+          labs(
+            title = sprintf("%s events by ADT-intent stratum", toupper(ENDPOINT)),
+            subtitle = paste0(
+              "Labels are events/patients in the modelled landmark cohort. ",
+              "* marks fewer than 50 events."
+            ),
+            x = "Landmark", y = "Incident events"
+          ) +
+          theme_fig()
+        save_fig(p_counts, fig_dir("supplement_adt_intent"),
+                 sprintf("adt_intent_cohort_counts_%s", ENDPOINT),
+                 width = 8, height = 5)
+        if (show) print(p_counts)
+      }
+    }
+
+    ## Panel 2 -- univariate log-HR concordance between the two strata.
+    ## This is the panel notebook 10 rendered inline and never saved.
+    if (!is.null(intent_association)) {
+      concordance <- intent_association %>%
+        filter(.data$endpoint == ENDPOINT) %>%
+        filter(!is.na(.data$coef_feature_localized),
+               !is.na(.data$coef_feature_metastatic))
+      if (nrow(concordance) > 0) {
+        concordance <- concordance %>%
+          mutate(
+            fdr_either = (!is.na(.data$q_value_localized) & .data$q_value_localized < 0.05) |
+                         (!is.na(.data$q_value_metastatic) & .data$q_value_metastatic < 0.05),
+            landmark_lab = factor(landmark_label(.data$landmark_days),
+                                  levels = landmark_label(sort(unique(.data$landmark_days))))
+          )
+        limit <- max(
+          abs(c(concordance$coef_feature_localized, concordance$coef_feature_metastatic)),
+          na.rm = TRUE
+        ) * 1.08
+        limit <- max(limit, 0.1)
+        # Per-facet concordance statistics come from the summary table rather
+        # than being recomputed here, so the figure and the CSV cannot disagree.
+        concordance_labels <- NULL
+        if (!is.null(intent_association_summary)) {
+          concordance_labels <- intent_association_summary %>%
+            filter(.data$endpoint == ENDPOINT) %>%
+            mutate(
+              landmark_lab = factor(landmark_label(.data$landmark_days),
+                                    levels = levels(concordance$landmark_lab)),
+              label = sprintf("rho = %.2f\n%d/%d same direction",
+                              .data$spearman_log_hr, .data$n_same_direction,
+                              .data$n_features_both)
+            ) %>%
+            filter(!is.na(.data$landmark_lab))
+        }
+
+        p_concordance <- ggplot(
+            concordance,
+            aes(x = .data$coef_feature_localized, y = .data$coef_feature_metastatic)
+          ) +
+          geom_hline(yintercept = 0, linewidth = 0.4, color = "#b0b0b0") +
+          geom_vline(xintercept = 0, linewidth = 0.4, color = "#b0b0b0") +
+          geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+                      linewidth = 0.5, color = "#1a1a1a", alpha = 0.6) +
+          geom_point(aes(color = .data$fdr_either, size = .data$fdr_either,
+                         alpha = .data$fdr_either)) +
+          scale_color_manual(values = c(`FALSE` = "#8a8a8a", `TRUE` = "#6a3d9a"),
+                             labels = c(`FALSE` = "q >= 0.05", `TRUE` = "q < 0.05"),
+                             name = "FDR in either stratum") +
+          scale_size_manual(values = c(`FALSE` = 1.1, `TRUE` = 2.1), guide = "none") +
+          scale_alpha_manual(values = c(`FALSE` = 0.35, `TRUE` = 0.85), guide = "none") +
+          (if (is.null(concordance_labels) || nrow(concordance_labels) == 0) NULL else
+             geom_text(data = concordance_labels,
+                       aes(x = -limit * 0.95, y = limit * 0.95, label = .data$label),
+                       hjust = 0, vjust = 1, size = 3, color = "#52514e",
+                       inherit.aes = FALSE)) +
+          coord_equal(xlim = c(-limit, limit), ylim = c(-limit, limit)) +
+          facet_wrap(~ landmark_lab) +
+          labs(
+            title = sprintf("%s univariate effect concordance across ADT-intent strata",
+                            toupper(ENDPOINT)),
+            subtitle = paste0(
+              "Each point is one feature. The dashed line is equality; ",
+              "distance from it is the between-stratum log-HR difference."
+            ),
+            x = "Localized-adjuvant log HR per SD",
+            y = "Metastatic log HR per SD"
+          ) +
+          theme_fig()
+        save_fig(p_concordance, fig_dir("supplement_adt_intent"),
+                 sprintf("adt_intent_loghr_concordance_%s", ENDPOINT),
+                 width = 11, height = 4.6)
+        if (show) print(p_concordance)
+
+        ## Panel 3 -- the strongest between-stratum heterogeneity signals.
+        heterogeneity <- concordance %>%
+          filter(!is.na(.data$q_heterogeneity)) %>%
+          arrange(.data$q_heterogeneity) %>%
+          group_by(.data$landmark_days) %>%
+          slice_head(n = TOP_N) %>%
+          ungroup()
+        if (nrow(heterogeneity) > 0) {
+          # Within-facet ordering without tidytext: suffix the label with the
+          # facet, order on the shared effect scale, then strip the suffix
+          # back off at the axis. Keeps the dependency list unchanged.
+          p_heterogeneity <- heterogeneity %>%
+            mutate(
+              feature_facet = paste(.data$feature, .data$landmark_lab, sep = "___"),
+              feature_facet = forcats::fct_reorder(.data$feature_facet,
+                                                   .data$delta_log_hr_met_minus_loc)
+            ) %>%
+            ggplot(aes(x = .data$delta_log_hr_met_minus_loc, y = .data$feature_facet,
+                       fill = .data$q_heterogeneity < 0.05)) +
+            geom_vline(xintercept = 0, linewidth = 0.4, color = "#b0b0b0") +
+            geom_col(width = 0.7) +
+            scale_y_discrete(labels = function(x) sub("___.*$", "", x)) +
+            scale_fill_manual(values = c(`FALSE` = "#c4c4c4", `TRUE` = "#6a3d9a"),
+                              labels = c(`FALSE` = "q >= 0.05", `TRUE` = "q < 0.05"),
+                              name = "Heterogeneity FDR") +
+            facet_wrap(~ landmark_lab, scales = "free_y") +
+            labs(
+              title = sprintf("%s: largest between-stratum effect differences",
+                              toupper(ENDPOINT)),
+              subtitle = paste0(
+                "Metastatic minus localized log HR per SD. Positive values are ",
+                "stronger in the metastatic stratum. Approximate Wald test; ",
+                "BH-adjusted within each landmark."
+              ),
+              x = "Delta log HR (metastatic - localized)", y = NULL
+            ) +
+            theme_fig()
+          save_fig(p_heterogeneity, fig_dir("supplement_adt_intent"),
+                   sprintf("adt_intent_heterogeneity_%s", ENDPOINT),
+                   width = 12, height = 6.2)
+          if (show) print(p_heterogeneity)
+        }
+      }
+    }
+
+    ## Panel 4 -- held-out performance deltas, metastatic minus localized.
+    if (!is.null(intent_performance)) {
+      performance_endpoint <- intent_performance %>%
+        filter(.data$endpoint == ENDPOINT)
+      delta_cols <- intersect(
+        c("delta_c_index_met_minus_loc", "delta_mean_auc_t_met_minus_loc",
+          "delta_integrated_brier_met_minus_loc"),
+        names(performance_endpoint)
+      )
+      if (nrow(performance_endpoint) > 0 && length(delta_cols) > 0) {
+        METRIC_LABELS <- c(
+          delta_c_index_met_minus_loc = "C-index",
+          delta_mean_auc_t_met_minus_loc = "Mean AUC(t)",
+          delta_integrated_brier_met_minus_loc = "Integrated Brier"
+        )
+        performance_long <- performance_endpoint %>%
+          select(all_of(c("landmark", "model", "config", delta_cols))) %>%
+          tidyr::pivot_longer(all_of(delta_cols), names_to = "metric",
+                              values_to = "delta") %>%
+          filter(!is.na(.data$delta)) %>%
+          mutate(
+            metric = factor(unname(METRIC_LABELS[.data$metric]),
+                            levels = unname(METRIC_LABELS[delta_cols])),
+            model_config = paste(.data$model, .data$config, sep = " / "),
+            landmark_lab = factor(landmark_label(.data$landmark),
+                                  levels = landmark_label(sort(unique(.data$landmark))))
+          )
+        if (nrow(performance_long) > 0) {
+          p_performance <- ggplot(
+              performance_long,
+              aes(x = .data$delta, y = .data$model_config, fill = .data$delta > 0)
+            ) +
+            geom_vline(xintercept = 0, linewidth = 0.4, color = "#b0b0b0") +
+            geom_col(width = 0.65) +
+            scale_fill_manual(values = c(`FALSE` = "#0b6ba8", `TRUE` = "#c1272d"),
+                              guide = "none") +
+            facet_grid(rows = vars(.data$landmark_lab), cols = vars(.data$metric),
+                       scales = "free_x") +
+            labs(
+              title = sprintf("%s held-out performance: metastatic minus localized",
+                              toupper(ENDPOINT)),
+              subtitle = paste0(
+                "Positive favors metastatic for C-index and AUC(t); negative\n",
+                "favors metastatic for integrated Brier. Test cohorts differ, ",
+                "so these are descriptive contrasts, not paired tests."
+              ),
+              x = "Delta (metastatic - localized)", y = NULL
+            ) +
+            theme_fig()
+          save_fig(p_performance, fig_dir("supplement_adt_intent"),
+                   sprintf("adt_intent_performance_delta_%s", ENDPOINT),
+                   width = 11, height = 6)
+          if (show) print(p_performance)
+        }
+      }
     }
   }
 }

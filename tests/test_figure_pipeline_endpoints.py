@@ -245,3 +245,70 @@ def test_pipeline_parses(tmp_path):
     """The pipeline must remain syntactically valid R."""
     script = f"invisible(parse({_r_literal(str(PIPELINE_R))})); cat('OK\\n')"
     assert _run_r(script, tmp_path).strip() == "OK"
+
+
+# ---- ADT-intent supplemental section -------------------------------------
+#
+# The supplement reads CSVs written by adt_intent_comparison.py. Two things can
+# silently break it: a filename drifting apart between the Python writer and the
+# R reader, and the "adt_intent_" stem falling through figure_group() into a
+# numbered figure group. Both are checked here because neither shows up as an
+# error -- the first yields an empty section, the second files the supplement
+# under Figure 1.
+
+
+def _comparison_module_source() -> str:
+    return (
+        REPO_ROOT / "COMPASS" / "survival_analysis" / "adt_intent_comparison.py"
+    ).read_text()
+
+
+def test_supplement_reads_every_filename_the_module_writes():
+    r_source = _pipeline_source()
+    python_source = _comparison_module_source()
+
+    filenames = re.findall(r'"(adt_intent_[a-z_]+\.csv)"', python_source)
+    assert filenames, "the comparison module declares no output filenames"
+    for filename in filenames:
+        assert filename in r_source, (
+            f"{filename} is written by adt_intent_comparison.py but never read "
+            "by the R supplement"
+        )
+
+
+def test_supplement_stems_route_to_their_own_figure_group():
+    source = _pipeline_source()
+    assert 'if (startsWith(plot_stem, "adt_intent_")) return("supplement_adt_intent")' in source
+
+    # Must be tested before the numbered-prefix branches, or an "adt_intent_"
+    # stem would need only to also start with "figure1" to be misrouted. The
+    # ordering is the guarantee, so assert on position rather than presence.
+    supplement_at = source.index('startsWith(plot_stem, "adt_intent_")')
+    figure1_at = source.index('startsWith(plot_stem, "figure1s")')
+    assert supplement_at < figure1_at
+
+    # supplement_adt_intent is not a numbered group, so it keeps the extra
+    # per-stem directory level and must not be swept by the legacy cleanup.
+    numbered = re.search(r"numbered_figure_groups <- c\((.*?)\)", source, re.S)
+    assert numbered is not None
+    assert "supplement_adt_intent" not in numbered.group(1)
+
+
+def test_supplement_is_gated_to_the_adt_arm():
+    # The intent strata are defined by ADT medication history; running the
+    # section on the ARPI arm would read trees that are never built.
+    source = _pipeline_source()
+    supplement_at = source.index("Supplement -- localized-adjuvant vs metastatic")
+    section = source[supplement_at:]
+    assert "if (IS_ADT) {" in section
+
+
+def test_supplement_never_refits_anything():
+    section_source = _pipeline_source()
+    supplement_at = section_source.index("Supplement -- localized-adjuvant vs metastatic")
+    section = section_source[supplement_at:]
+    for forbidden in ("coxph(", "survfit(", "glmnet("):
+        assert forbidden not in section, (
+            f"the supplement calls {forbidden}; it must only read the "
+            "comparison CSVs"
+        )
