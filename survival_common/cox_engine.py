@@ -216,8 +216,7 @@ def compute_ipcw_auc_t(
     KM censoring-weight estimator, not modeled via a CIF/Aalen-Johansen-based
     estimator. ``deephit_engine.compute_metrics`` uses the identical convention,
     so this is a shared, stated methodological choice across all arms (Cox,
-    XGBoost, DeepHit), not an engine-specific defect -- see REVIEW_FINDINGS.md
-    Finding 2.
+    XGBoost, DeepHit), not an engine-specific defect.
     """
     require_sksurv()
 

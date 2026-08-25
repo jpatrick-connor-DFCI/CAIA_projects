@@ -801,7 +801,7 @@ def load_avpc_nepc_labels(path) -> pl.DataFrame:
     This is a *different, broader* label than ``load_nepc_dx_labels``'s strict
     veto-gated diagnosis: it fires on >=4 Aparicio (AVPC) criteria or any NEPC
     feature from the longitudinal criteria timeline, with NEPC-precedence
-    timing. See COMPASS/survival_analysis/AVPC_NEPC_ENDPOINT_PLAN.md.
+    timing.
 
     NOTE: the union this loader reads (``has_avpc_nepc`` = AVPC or
     NEPC_TIMELINE) is NOT the modeled ``AVPC_NEPC`` endpoint.

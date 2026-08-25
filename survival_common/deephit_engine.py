@@ -446,7 +446,7 @@ def compute_metrics(
     pre-supplied cause-specific ``event_col``, so this bias is consistent in
     direction and magnitude across the Cox, XGBoost, and DeepHit arms wherever
     competing events exist in the cohort (e.g. death without platinum). This is a
-    stated methodological choice, not a defect -- see REVIEW_FINDINGS.md Finding 2.
+    stated methodological choice, not a defect.
     """
     require_lifelines()
     metric_rows = []
