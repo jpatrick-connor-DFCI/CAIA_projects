@@ -3,47 +3,82 @@
 from __future__ import annotations
 
 import polars as pl
-import pytest
 
 from COMPASS.survival_analysis import compass_pipeline as cp
 
 
-def test_make_adt_intent_endpoint_runs_are_separate(monkeypatch, tmp_path):
+def test_cohort_endpoint_runs_cross_every_cohort(monkeypatch, tmp_path):
     monkeypatch.setattr(cp, "_PROFILE_OUTPUT_ROOT", tmp_path)
 
-    runs = cp.make_adt_intent_endpoint_runs(
-        strata=("metastatic", "localized"),
-        endpoints=("platinum", "nepc", "avpc"),
+    runs = cp.make_endpoint_runs(
+        ["adt"],
+        endpoints=("platinum", "nepc", "avpc", "avpc_nepc"),
+        cohorts=("all", "metastatic", "localized"),
     )
 
-    assert len(runs) == 6
-    assert {(r["adt_intent"], r["endpoint"]) for r in runs} == {
-        (intent, endpoint)
-        for intent in ("METASTATIC", "LOCALIZED_ADJUVANT")
-        for endpoint in ("platinum", "nepc", "avpc")
+    # Cohort and endpoint are orthogonal axes: every cohort runs every
+    # endpoint, including the composite avpc_nepc that the retired
+    # ADT-intent factory refused.
+    assert len(runs) == 12
+    assert {(r["cohort"], r["endpoint"]) for r in runs} == {
+        (cohort, endpoint)
+        for cohort in ("all", "metastatic", "localized")
+        for endpoint in ("platinum", "nepc", "avpc", "avpc_nepc")
     }
-    metastatic_platinum = next(
-        r for r in runs
-        if r["adt_intent"] == "METASTATIC" and r["endpoint"] == "platinum"
+    assert len({cp.run_key(r) for r in runs}) == 12
+
+
+def test_cohort_runs_keep_the_established_path_convention(monkeypatch, tmp_path):
+    monkeypatch.setattr(cp, "_PROFILE_OUTPUT_ROOT", tmp_path)
+
+    runs = cp.make_endpoint_runs(
+        ["adt"],
+        endpoints=("platinum", "nepc", "avpc", "avpc_nepc"),
+        cohorts=("all", "metastatic", "localized"),
     )
-    localized_nepc = next(
-        r for r in runs
-        if r["adt_intent"] == "LOCALIZED_ADJUVANT" and r["endpoint"] == "nepc"
-    )
+    by_key = {(r["cohort"], r["endpoint"]): r for r in runs}
+
+    # Directory names are unchanged from the pre-collapse ADT-intent
+    # notebooks, so existing output trees stay addressable.
+    metastatic_platinum = by_key[("metastatic", "platinum")]
     assert metastatic_platinum["inputs_dir"].name == "prediction_inputs_adt_metastatic"
     assert metastatic_platinum["output_dir"].name == "local_runs_adt_metastatic"
+
+    localized_nepc = by_key[("localized", "nepc")]
     assert localized_nepc["inputs_dir"].name == "prediction_inputs_adt_localized_nepc"
     assert localized_nepc["output_dir"].name == "local_runs_adt_localized_nepc"
     assert localized_nepc["restrict_to_mrns"] == (
         tmp_path / "mrn_lists" / "adt_localized_mrns.csv"
     )
+
+    unrestricted = by_key[("all", "platinum")]
+    assert unrestricted["inputs_dir"].name == "prediction_inputs_adt"
+    assert unrestricted["output_dir"].name == "local_runs_adt"
+
     assert all(r["input_csv"].name == "longitudinal_prediction_data_adt.csv" for r in runs)
-    assert all(r["retrospective_stratification"] is True for r in runs)
+    assert {
+        r["cohort"]: r["retrospective_stratification"] for r in runs
+    } == {"all": False, "metastatic": True, "localized": True}
+    assert {r["cohort"]: r["adt_intent"] for r in runs} == {
+        "all": None,
+        "metastatic": "METASTATIC",
+        "localized": "LOCALIZED_ADJUVANT",
+    }
 
 
-def test_adt_intent_runs_reject_composite_endpoint():
-    with pytest.raises(ValueError, match="platinum, nepc, and avpc"):
-        cp.make_adt_intent_endpoint_runs(endpoints=("avpc_nepc",))
+def test_stage2_runs_collapse_to_one_run_per_anchor(monkeypatch, tmp_path):
+    monkeypatch.setattr(cp, "_PROFILE_OUTPUT_ROOT", tmp_path)
+
+    runs = cp.make_endpoint_runs(
+        ["adt"],
+        endpoints=("platinum", "nepc", "avpc", "avpc_nepc"),
+        cohorts=("all", "metastatic", "localized"),
+    )
+
+    # Lab preprocessing is endpoint- and cohort-independent, so it must
+    # see one run per treatment anchor rather than the full 12-way cross.
+    stage2 = cp.stage2_runs(runs)
+    assert [r["anchor"] for r in stage2] == ["adt"]
 
 
 def test_build_adt_intent_mrn_lists_and_endpoint_counts(monkeypatch, tmp_path):
@@ -107,7 +142,15 @@ def test_build_adt_intent_mrn_lists_and_endpoint_counts(monkeypatch, tmp_path):
     assert metastatic["ADT_INTENT"].to_list() == ["METASTATIC", "METASTATIC"]
 
     counts = pl.read_csv(outputs["counts"])
-    assert counts.height == 6
+    # 2 strata x 4 endpoints: the preliminary count table now covers the
+    # composite avpc_nepc endpoint alongside the three original ones.
+    assert counts.height == 8
+    assert set(counts["endpoint"].to_list()) == {
+        "platinum",
+        "nepc",
+        "avpc",
+        "avpc_nepc",
+    }
     localized_platinum = counts.filter(
         (pl.col("stratum") == "localized") & (pl.col("endpoint") == "platinum")
     ).row(0, named=True)

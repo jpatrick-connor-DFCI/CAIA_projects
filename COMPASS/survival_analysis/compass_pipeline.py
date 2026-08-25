@@ -82,24 +82,54 @@ MAX_PRED_WINDOW = 260
 SOMATIC_GLEASON_LANDMARKS = (0,)
 SOMATIC_GLEASON_INDEX_ANALYSES = ("gleason", "sequencing", "prs")
 
-# Retrospective medication-derived strata used by the dedicated ADT-intent
-# survival arm.  These are deliberately not entries in _ARM_SPECS: Stage 1 and
-# Stage 2 are still run once for the ordinary ADT cohort, then Stage 3 is
-# restricted to one of these MRN lists.  Treating them as ordinary arms would
-# incorrectly ask compile_COMPASS_cohort_data.py for new treatment anchors.
-ADT_INTENT_MODEL_STRATA = {
+# A cohort is a patient-subset restriction applied at Stage 3 via
+# --restrict-to-mrns.  "all" is the arm's full Stage-1 survival cohort; the
+# other two are retrospective, medication-derived ADT-intent strata.
+#
+# These are deliberately not entries in _ARM_SPECS: Stage 1 and Stage 2 still
+# run once per treatment anchor, and only Stage 3 onward splits.  Treating a
+# cohort as an ordinary arm would incorrectly ask compile_COMPASS_cohort_data.py
+# for a new treatment anchor.
+#
+# `label_suffix` and `title_suffix` compose onto the arm's, so the directory
+# convention is unchanged: cohort "metastatic" on arm "adt" yields the label
+# "adt_metastatic" and therefore prediction_inputs_adt_metastatic /
+# local_runs_adt_metastatic, exactly as the dedicated ADT-intent factory built
+# them before the cohorts were folded into the main cross.
+COHORT_SPECS = {
+    "all": {
+        "label_suffix": "",
+        "title_suffix": "",
+        "adt_intent": None,
+        "retrospective": False,
+    },
     "metastatic": {
-        "intent": "METASTATIC",
-        "label": "adt_metastatic",
-        "title": "ADT / metastatic",
+        "label_suffix": "_metastatic",
+        "title_suffix": " / metastatic",
+        "adt_intent": "METASTATIC",
+        "retrospective": True,
     },
     "localized": {
-        "intent": "LOCALIZED_ADJUVANT",
-        "label": "adt_localized",
-        "title": "ADT / localized-adjuvant",
+        "label_suffix": "_localized",
+        "title_suffix": " / localized-adjuvant",
+        "adt_intent": "LOCALIZED_ADJUVANT",
+        "retrospective": True,
     },
 }
-ADT_INTENT_MODEL_ENDPOINTS = ("platinum", "nepc", "avpc")
+DEFAULT_COHORTS = ("all", "metastatic", "localized")
+
+# The MRN-list-backed cohorts, as a derived view: this is what
+# build_adt_intent_mrn_lists() writes and what adt_intent_mrn_list_path()
+# resolves.  Keyed the same way it was before the cohort registry existed.
+ADT_INTENT_MODEL_STRATA = {
+    key: {
+        "intent": spec["adt_intent"],
+        "label": f"adt{spec['label_suffix']}",
+        "title": f"ADT{spec['title_suffix']}",
+    }
+    for key, spec in COHORT_SPECS.items()
+    if spec["retrospective"]
+}
 ADT_INTENT_LABELS_FILENAME = "adt_intent_labels_model_cohort.csv"
 ADT_INTENT_COUNTS_FILENAME = "adt_intent_endpoint_counts.csv"
 
@@ -127,12 +157,47 @@ for v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR
     os.environ.setdefault(v, "1")
 
 
+def endpoint_suffix(endpoint: str) -> str:
+    """The directory suffix for one endpoint: "" for platinum, "_<endpoint>" else.
+
+    Platinum keeps the un-suffixed tree for historical continuity. The rule was
+    inlined in four places before this helper; keep it here so a new endpoint
+    cannot pick up a different convention in one of them.
+    """
+    return "" if str(endpoint).lower() == "platinum" else f"_{str(endpoint).lower()}"
+
+
+def run_key(run: dict) -> tuple[str, str, str]:
+    """Stable identity for one run, for keying summary dicts across notebooks."""
+    return (run.get("cohort", DEFAULT_COHORT), run["endpoint"], run["label"])
+
+
+def stage2_runs(runs: list[dict]) -> list[dict]:
+    """One run per treatment anchor -- Stage 2's unit of work.
+
+    Stage 2 (lab preprocessing) is endpoint- and cohort-independent: it runs
+    once per anchor and every endpoint/cohort run reads its output. Encoding
+    that here rather than as a `if run["endpoint"] != "platinum": continue`
+    guard in the notebook keeps it correct as the cross widens -- that guard
+    would have run Stage 2 once per cohort once cohorts were added.
+    """
+    seen: set[str] = set()
+    unique = []
+    for run in runs:
+        if run["anchor"] in seen:
+            continue
+        seen.add(run["anchor"])
+        unique.append(run)
+    return unique
+
+
 def make_runs(
     arms=("adt",),
     *,
     prediction_input_dirs: dict[str, str | Path] | None = None,
     output_suffix: str = "",
     endpoint: str | None = None,
+    cohort: str = "all",
 ) -> list[dict]:
     """Build the merged-profile RUNS list, restricted to ``arms``.
 
@@ -155,8 +220,21 @@ def make_runs(
     patients and must not overwrite the platinum build. With
     ``output_suffix="_nepc"`` a run reads/writes ``prediction_inputs_adt_nepc``
     and ``local_runs_adt_nepc``, leaving the platinum tree untouched.
+
+    ``cohort`` selects a patient-subset restriction from ``COHORT_SPECS``,
+    applied at Stage 3 via ``--restrict-to-mrns``. It composes onto the arm
+    label, so ``cohort="metastatic"`` on arm ``"adt"`` yields the label
+    ``adt_metastatic`` and the trees ``prediction_inputs_adt_metastatic`` /
+    ``local_runs_adt_metastatic``. The default ``"all"`` restricts to the arm's
+    own Stage-1 survival cohort, i.e. no additional subsetting.
     """
     selected_endpoint = ENDPOINT if endpoint is None else str(endpoint).lower()
+    selected_cohort = str(cohort).lower()
+    if selected_cohort not in COHORT_SPECS:
+        raise ValueError(
+            f"Unknown cohort: {cohort!r} (expected one of {sorted(COHORT_SPECS)})"
+        )
+    cohort_spec = COHORT_SPECS[selected_cohort]
     valid_endpoints = set(_ca.ENDPOINTS)
     if selected_endpoint not in valid_endpoints:
         raise ValueError(
@@ -180,23 +258,38 @@ def make_runs(
         if label not in _ARM_SPECS:
             raise ValueError(f"Unknown arm: {label!r} (expected one of {sorted(_ARM_SPECS)})")
         arm_spec = _ARM_SPECS[label]
+        # The cohort composes onto the arm to form the run label, which in turn
+        # names both directory trees. Overrides stay keyed by the ARM, not the
+        # composed label, so a caller overriding "adt" reaches every cohort.
+        run_label = f"{label}{cohort_spec['label_suffix']}"
+        # "all" restricts to the arm's own Stage-1 survival cohort (no extra
+        # subsetting); the retrospective cohorts restrict to their MRN list.
+        restrict_to_mrns = (
+            data_root / f"prostate_{label}_survival_cohort_{label}.csv"
+            if selected_cohort == "all"
+            else adt_intent_mrn_list_path(selected_cohort, data_root=data_root)
+        )
         runs.append({
-            "label": label,
-            "title": arm_spec["title"],
+            "label": run_label,
+            "title": f"{arm_spec['title']}{cohort_spec['title_suffix']}",
             "variant": "profile_data",
             "anchor_col": "none",
             "anchor": arm_spec["anchor"],
             "landmarks": arm_spec["landmarks"],
             "input_csv": data_arpi if arm_spec["anchor"] == "arpi" else data_adt,
-            "restrict_to_mrns": data_root / f"prostate_{label}_survival_cohort_{label}.csv",
+            "restrict_to_mrns": restrict_to_mrns,
             "inputs_dir": Path(
                 prediction_input_dirs.get(
                     label,
-                    survival_output_root / f"prediction_inputs_{label}{output_suffix}",
+                    survival_output_root / f"prediction_inputs_{run_label}{output_suffix}",
                 )
             ).expanduser(),
-            "output_dir": survival_output_root / f"local_runs_{label}{output_suffix}",
+            "output_dir": survival_output_root / f"local_runs_{run_label}{output_suffix}",
             "endpoint": selected_endpoint,
+            "cohort": selected_cohort,
+            "intent_stratum": None if selected_cohort == "all" else selected_cohort,
+            "adt_intent": cohort_spec["adt_intent"],
+            "retrospective_stratification": cohort_spec["retrospective"],
             "data_root": data_root,
             "mrn_lists_dir": mrn_lists_dir,
         })
@@ -225,25 +318,40 @@ def make_endpoint_runs(
     arms=("adt",),
     *,
     endpoints=("platinum", "nepc"),
+    cohorts=DEFAULT_COHORTS,
     prediction_input_dirs_by_endpoint: dict[str, dict[str, str | Path]] | None = None,
 ) -> list[dict]:
-    """Create independent input/output trees for every requested endpoint."""
+    """Create independent input/output trees across cohort x endpoint x arm.
+
+    This is the single run factory. The ADT-intent strata used to have their
+    own parallel factory that could only reach three of the four endpoints and
+    never reached Stage 3b or the figure pipeline; they are now ordinary
+    cohorts in this cross. Directory names are unchanged, so existing trees
+    resolve exactly as before.
+    """
     overrides = prediction_input_dirs_by_endpoint or {}
     unknown = set(overrides) - set(endpoints)
     if unknown:
         raise ValueError(f"Prediction-input overrides supplied for unrequested endpoints: {sorted(unknown)}")
-    runs: list[dict] = []
-    for raw_endpoint in endpoints:
-        endpoint = str(raw_endpoint).lower()
-        suffix = "" if endpoint == "platinum" else f"_{endpoint}"
-        runs.extend(
-            make_runs(
-                arms,
-                endpoint=endpoint,
-                output_suffix=suffix,
-                prediction_input_dirs=overrides.get(endpoint),
-            )
+    unknown_cohorts = {str(c).lower() for c in cohorts} - set(COHORT_SPECS)
+    if unknown_cohorts:
+        raise ValueError(
+            f"Unknown cohorts: {sorted(unknown_cohorts)} "
+            f"(expected a subset of {sorted(COHORT_SPECS)})"
         )
+    runs: list[dict] = []
+    for raw_cohort in cohorts:
+        for raw_endpoint in endpoints:
+            endpoint = str(raw_endpoint).lower()
+            runs.extend(
+                make_runs(
+                    arms,
+                    endpoint=endpoint,
+                    output_suffix=endpoint_suffix(endpoint),
+                    cohort=str(raw_cohort).lower(),
+                    prediction_input_dirs=overrides.get(endpoint),
+                )
+            )
     return runs
 
 
@@ -363,10 +471,13 @@ def build_adt_intent_mrn_lists(
     joined = labels.select("DFCI_MRN", "ADT_INTENT").join(
         cohort, on="DFCI_MRN", how="inner"
     )
+    # All four endpoints: the strata are ordinary cohorts in the main cross now
+    # and run avpc_nepc too, which is the sparsest combination -- these counts
+    # are what surface an event-starved cell before fitting rather than after.
     count_rows = []
     for key, spec in ADT_INTENT_MODEL_STRATA.items():
         stratum = joined.filter(pl.col("ADT_INTENT") == spec["intent"])
-        for endpoint in ADT_INTENT_MODEL_ENDPOINTS:
+        for endpoint in _ca.ENDPOINTS:
             event_col = _ca.ENDPOINTS[endpoint]["event_col"]
             duration_col = "TT_" + endpoint.upper()
             if event_col not in stratum.columns or duration_col not in stratum.columns:
@@ -403,73 +514,6 @@ def build_adt_intent_mrn_lists(
         "retrospective strata, not landmark-available metastatic-status labels."
     )
     return outputs
-
-
-def make_adt_intent_endpoint_runs(
-    *,
-    strata=("metastatic", "localized"),
-    endpoints=ADT_INTENT_MODEL_ENDPOINTS,
-    prediction_input_dirs_by_endpoint: dict[str, dict[str, str | Path]] | None = None,
-) -> list[dict]:
-    """Build endpoint-specific Stage-3/model runs within ADT-intent strata."""
-    requested_endpoints = tuple(str(e).lower() for e in endpoints)
-    invalid_endpoints = set(requested_endpoints) - set(ADT_INTENT_MODEL_ENDPOINTS)
-    if invalid_endpoints:
-        raise ValueError(
-            "ADT-intent model arms are registered for platinum, nepc, and avpc; "
-            f"got unsupported endpoints {sorted(invalid_endpoints)}."
-        )
-    overrides = prediction_input_dirs_by_endpoint or {}
-    unknown_overrides = set(overrides) - set(requested_endpoints)
-    if unknown_overrides:
-        raise ValueError(
-            f"Prediction-input overrides supplied for unrequested endpoints: {sorted(unknown_overrides)}"
-        )
-
-    runs: list[dict] = []
-    for raw_stratum in strata:
-        key = str(raw_stratum).lower()
-        if key not in ADT_INTENT_MODEL_STRATA:
-            raise ValueError(
-                f"Unknown ADT-intent stratum: {raw_stratum!r} "
-                f"(expected one of {sorted(ADT_INTENT_MODEL_STRATA)})"
-            )
-        spec = ADT_INTENT_MODEL_STRATA[key]
-        for endpoint in requested_endpoints:
-            suffix = "" if endpoint == "platinum" else f"_{endpoint}"
-            endpoint_overrides = overrides.get(endpoint, {})
-            unknown = set(endpoint_overrides) - set(ADT_INTENT_MODEL_STRATA)
-            if unknown:
-                raise ValueError(
-                    f"Unknown ADT-intent prediction-input override strata: {sorted(unknown)}"
-                )
-            base = make_runs(("adt",), endpoint=endpoint)[0]
-            label = spec["label"]
-            base.update(
-                {
-                    "label": label,
-                    "title": spec["title"],
-                    "intent_stratum": key,
-                    "adt_intent": spec["intent"],
-                    "retrospective_stratification": True,
-                    "restrict_to_mrns": adt_intent_mrn_list_path(key),
-                    "inputs_dir": Path(
-                        endpoint_overrides.get(
-                            key,
-                            base["data_root"]
-                            / "survival_analysis"
-                            / f"prediction_inputs_{label}{suffix}",
-                        )
-                    ).expanduser(),
-                    "output_dir": base["data_root"]
-                    / "survival_analysis"
-                    / f"local_runs_{label}{suffix}",
-                }
-            )
-            base["inputs_dir"].mkdir(parents=True, exist_ok=True)
-            base["output_dir"].mkdir(parents=True, exist_ok=True)
-            runs.append(base)
-    return runs
 
 
 # ---------------------------------------------------------------------------
