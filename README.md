@@ -14,14 +14,17 @@ diagnosis, and bladder (C67), lung (C34), head-and-neck (C00-C14/C30-C32), or te
 cancer diagnosed strictly after first ADT are excluded. The paired, R-only `05_figures.Rmd` emits
 manuscript figures for both.
 
-**Arm and endpoint are two orthogonal axes.** The *arm* sets time 0 (the index-date anchor); the
-*endpoint* sets the event being modelled. They are selected independently, and the pair is what
-defines a run — see [Arms and endpoints](#arms-and-endpoints).
+**Arm, cohort, and endpoint are three orthogonal axes.** The *arm* sets time 0 (the index-date
+anchor); the *cohort* restricts which patients are modelled; the *endpoint* sets the event being
+modelled. All three are selected independently, and the triple is what defines a run — see
+[Arms, cohorts, and endpoints](#arms-cohorts-and-endpoints).
 
 | Axis | Registry | Declared in | Values |
 | --- | --- | --- | --- |
 | **Arm** (index date / time 0) | `_ARM_SPECS` | `COMPASS/survival_analysis/compass_pipeline.py` | `arpi`, `adt` |
+| **Cohort** (patient subset) | `COHORT_SPECS` | `COMPASS/survival_analysis/compass_pipeline.py` | `all`, `metastatic`, `localized` |
 | **Endpoint** (the event) | `ENDPOINTS` | `COMPASS/survival_analysis/cox_aggregated.py` | `platinum`, `nepc`, `avpc`, `avpc_nepc` |
+| **Landmark** (days after time 0) | `_ARM_SPECS[arm]["landmarks"]` | `COMPASS/survival_analysis/compass_pipeline.py` | `0`, `90`, `180` |
 
 > This README is the canonical reference for editing the pipeline. It documents the directory
 > layout, the data flow, every script's inputs/outputs, the **conventions and invariants that
@@ -305,7 +308,7 @@ cohort.
   (the merge is a no-op by construction, not by convention).
 - `IPIO/data_preprocessing/build_genomic_inputs.py` builds the parallel
   `prediction_inputs/genomic/` landmark-0 arm anchored at IO start (`t_first_treatment`), restricts
-  to patients with an actual somatic sample, attaches dynamic binary `<GENE>_<SV|SNV|AMP|DEL>`
+  to patients with an actual somatic sample, attaches dynamic binary `<GENE>_SNV`
   indicators, and **reuses** the main `split_assignments.csv` so test stays test. It writes both
   genomic provenance files and runner-compatible aliases (`aggregated_landmark0.csv`,
   `pre_treatment_lab_long_landmark0.csv`, `canonical_labs_train_val.csv`, `build_manifest.json`).
@@ -315,7 +318,7 @@ cohort.
 All read prebuilt inputs and the `split` column; none re-derive the split. COMPASS models default to
 the `platinum` endpoint (time to first platinum) and additionally support `nepc`, `avpc`, and
 `avpc_nepc` (time to the corresponding component of the AVPC/NEPC criteria timeline) — see
-[Arms and endpoints](#arms-and-endpoints). `--endpoints` is built from `cox.ENDPOINTS`, so every
+[Arms, cohorts, and endpoints](#arms-cohorts-and-endpoints). `--endpoints` is built from `cox.ENDPOINTS`, so every
 runner gets the choice for free. Both ARPI- and ADT-anchored
 arms use landmarks `[0, 90, 180]`. Metrics: Harrell C-index, IPCW
 mean AUC(t), integrated IPCW Brier — horizons come from `build_manifest.json` so all models share a
@@ -393,12 +396,15 @@ COMPASS PROFILE has four Python stage notebooks sharing `compass_pipeline.py` (t
 `03b`), two read-only Python reporting notebooks (`06`, `07`), one R figure notebook, and one R GAM
 notebook. All operate on the merged `profile_data` run:
 
-- `01_preprocessing.ipynb` — drives preprocessing (schema audit, cohort compile, longitudinal
-  preprocessing, prediction-input build, diagnostics) for whichever arms are selected (`arpi`
-  and/or `adt`, with landmarks 0/90/180), over the common ADT-entry eligible cohort. Each arm gets
-  independent prediction inputs at its own landmark list, and Stage 2 runs
-  `longitudinal_data_processing.py` once per anchor (`--anchor-med-set {arpi,adt}`). Stages 0-2 are
-  endpoint-independent and only need running once; Stage 3 forks per endpoint.
+- `01_preprocessing.ipynb` — drives preprocessing (schema audit, cohort compile, ADT-intent
+  stratum build, longitudinal preprocessing, prediction-input build, diagnostics) for whichever
+  arms are selected (`arpi` and/or `adt`, with landmarks 0/90/180), over the common ADT-entry
+  eligible cohort. Each arm gets independent prediction inputs at its own landmark list, and
+  Stage 2 runs `longitudinal_data_processing.py` once per anchor
+  (`--anchor-med-set {arpi,adt}`) via `cp.stage2_runs(RUNS)`. **Stage 1b** writes the
+  medication-derived ADT-intent MRN lists and their preliminary endpoint counts. Stages 0-2 are
+  independent of both cohort and endpoint and only need running once; Stage 3 forks per
+  (cohort, endpoint).
 - `02_univariate.ipynb` / `03_multivariate.ipynb` — read `01`'s prediction inputs and run
   univariate, elastic-net, and XGBoost models independently of preprocessing
   (`tasks_for_run(run)` builds the per-run task grid from `run["landmarks"]`); either can be
@@ -414,6 +420,12 @@ notebook. All operate on the merged `profile_data` run:
   notebook stays runnable with no torch installed. When enabled, SurvLatent tasks default to the
   bundled editable `survlatent_ode_repo/` checkout through `cp.SURVLATENT_REPO` — see
   `multivariate_longitudinal/README.md`.
+- `adt_intent_comparison.py` — read-only **module**, not a notebook. Contrasts the `localized`
+  and `metastatic` cohort trees: per-stratum cohort/event counts, a cohort-disjointness assertion,
+  a univariate log-HR heterogeneity table (approximate Wald test on the difference of the two
+  log-HRs, BH-adjusted within endpoint x landmark), and held-out performance deltas. Writes five
+  CSVs under `survival_analysis/adt_intent_comparison/`, which the R figure pipeline's
+  supplemental section reads. Run it after `02`/`03`: `python COMPASS/survival_analysis/adt_intent_comparison.py`.
 - `06_abstract_numbers.ipynb` — read-only. Collects the cohort/event/performance counts quoted in
   the abstract and manuscript from already-generated artifacts. Refits nothing.
 - `07_endpoint_comparison.ipynb` — read-only. Compares the `platinum` and `nepc` endpoint runs
@@ -487,6 +499,12 @@ notebook. All operate on the merged `profile_data` run:
     - **LLM-stratified KM sanity check** — new time-to-platinum KM curves stratified by
       `primary_label`/`has_nepc`/`has_avpc`, using the same `platinum_km_inputs()` +
       `overlay_km()` path as the quartile curves. Stems: `km_llm_<scheme>_landmark<D>`.
+    - **ADT-intent supplement** — four panels per endpoint contrasting the localized and
+      metastatic strata: cohort/event counts, univariate log-HR concordance, the largest
+      between-stratum effect differences, and held-out performance deltas. Reads the CSVs written
+      by `adt_intent_comparison.py`; emitted only on the ADT arm, and skipped with a message if
+      those CSVs are absent. Stems: `adt_intent_<panel>_<endpoint>`, routed to
+      `supplement_adt_intent/`.
   - **Output layout:** each arm has its own `FIG_ROOT/ARPI/` or `FIG_ROOT/ADT/` subtree. Non-lab
     figures use `<arm>/<figure>/<plot-stem>/<cohort>_<plot-stem>.png`; per-lab panels
     (longitudinal, km_quartile, distribution) use
@@ -608,6 +626,41 @@ three tiers — REQUIRED (absent *or* all-null raises), EXPECTED (absent raises,
    only from `main()`, never at import. Net effect: `dynamic_deephit.py --help` and
    `survlatent_ode.py --help` both exit 0, and the full test suite imports cleanly, with no torch
    installed and without importing the bundled SurvLatent source.
+8. **The genomic arm is SNV-only.** Both `build_genomic_inputs.py` files pin
+   `--variant-types` to `SNV`, and `build_somatic_gleason_inputs.py` filters the
+   `SOMATIC_FEATURE_MANIFEST.parquet` feature list through the `<GENE>_SNV` regex before use —
+   that was the one path where CNV/SV features entered with no opt-in at all. `GLEASON_SCORE` and
+   the PRS features carry different `feature_kind` values and pass through untouched; only the
+   `somatic_binary` block is filtered. On the consumer side, `cox_aggregated.py` splits the two
+   regexes it needs: `GENOMIC_FEATURE_RE` (`_SNV$`) selects the genomic feature set, and the
+   broader `ANY_VARIANT_RE` (`SV|SNV|AMP|DEL`) excludes every variant column from the `labs`
+   subset — narrowing only the first would have let CNV columns fall *into* the lab arm.
+   `ALL_VARIANT_TYPES` survives for the detection regex, and `genomic_variant_types` stays in the
+   build manifest as provenance.
+
+   > **Caveat.** No `INDEL`/`FRAMESHIFT` suffix exists anywhere in the schema, so whatever
+   > produced `SOMATIC_WIDE_BY_SAMPLE.parquet` folded indels into `_SNV`. "SNV-only" is therefore
+   > **small-variant-only**, not strictly point mutations. Confirm against the panel documentation
+   > before making the stricter claim in a manuscript.
+9. **One canonical metrics schema across model families.** Every `*_metrics_*.csv` — elastic-net
+   Cox, XGBoost, and Dynamic-DeepHit alike — carries the identity block
+   (`model`, `cohort`, `endpoint`, `landmark_days`, `config`), the counts
+   (`n_train_val`, `n_test`, `n_events_train_val`, `n_events_test`), and the performance block
+   (`train_val_c_index`, `test_c_index`, `train_val_mean_auc_t`, `test_mean_auc_t`,
+   `test_integrated_brier`). `survival_common/metrics_schema.py` is the single definition;
+   `order_canonical_first()` raises if a writer omits a column, so drift fails loudly at write
+   time rather than surfacing as an all-NA figure panel. Families that score only the held-out
+   block emit **NaN** train-side twins rather than omitting the columns, so readers can assume the
+   columns exist. Hyperparameter columns (`selected_penalizer`, `xgb_params`,
+   `selected_hidden_dim`, per-horizon `*_auc_h*`) are family-specific and deliberately not
+   unified — "identical columns" means the shared metric block, not the tuning record.
+   `tests/test_metrics_schema_consistency.py` is the regression guard.
+
+   Two things stay outside this schema on purpose: SurvLatent ODE's metrics come from the
+   vendored repo's `eval_model` and are not ours to pin, and the per-family `cv_summary` files
+   have genuinely different shapes (DeepHit is competing-risks and legitimately per-event).
+   `landmark_day` (singular) also remains correct in the per-landmark CV-fold, patient-risk,
+   feature-importance, and run-manifest frames, which are separate files.
 
 ---
 
@@ -624,11 +677,37 @@ three tiers — REQUIRED (absent *or* all-null raises), EXPECTED (absent raises,
   `resources/lab_mappings/OMOP_to_DFCI_lab_ids.csv` by default. Per-project lab inventory outputs
   default to `/data/gusev/USERS/jpconnor/data/CAIA/<project>/unique_lab_ids_w_units.csv`.
 
-## Arms and endpoints
+## Arms, cohorts, and endpoints
 
-A run is an (arm, endpoint) pair. The arm sets time 0; the endpoint sets the event. Selecting a
-different endpoint does **not** fork the cohort assembly — Stages 0-2 are endpoint-independent and
-write one survival cohort carrying every endpoint's columns. Stage 3 is where the fork happens.
+A run is a (arm, cohort, endpoint) triple. The arm sets time 0, the cohort restricts which
+patients are modelled, and the endpoint sets the event. Neither the cohort nor the endpoint forks
+cohort assembly — Stages 0-2 are independent of both and write one survival cohort carrying every
+endpoint's columns. Stage 3 is where the fork happens, crossing
+**3 cohorts x 4 endpoints x 3 landmarks** for the ADT arm.
+
+### Cohorts
+
+| Cohort | Restriction | Label / trees |
+| --- | --- | --- |
+| `all` | none beyond the arm's Stage-1 survival cohort | `adt` -> `prediction_inputs_adt`, `local_runs_adt` |
+| `metastatic` | `ADT_INTENT == METASTATIC` | `adt_metastatic` -> `prediction_inputs_adt_metastatic`, ... |
+| `localized` | `ADT_INTENT == LOCALIZED_ADJUVANT` | `adt_localized` -> `prediction_inputs_adt_localized`, ... |
+
+The two stratified cohorts are the **medication-derived ADT-intent strata**. Stage 1b
+(`cp.build_adt_intent_mrn_lists()`, in notebook `01`) writes one MRN list per stratum plus a
+preliminary incident-endpoint count table under `<data_root>/mrn_lists/`; Stage 3 consumes those
+lists through `--restrict-to-mrns`, which is the single channel by which stratification enters
+the pipeline. `COHORT_SPECS` in `compass_pipeline.py` is the registry.
+
+> **`ADT_INTENT` is retrospective.** It is derived from the full observed ADT course — duration,
+> cessation/restart, and later definitive escalation — so it is *not* a metastatic-status label
+> available prospectively at the landmark. Platinum is excluded from the classifier, but
+> cohort-stratified results still describe patients grouped by how their treatment eventually
+> unfolded. Say so wherever these results are reported.
+
+Localized event counts are thin for the incident endpoints, `avpc_nepc` most of all. Read Stage
+1b's count table before spending modelling time; `adt_intent_comparison.py` flags any cell under
+50 events, and the runners' insufficient-events guards handle the rest.
 
 ### Endpoints
 
@@ -712,21 +791,35 @@ Set the parameter cell of `01`/`02`/`03`/`03b`, then run each top to bottom:
 ```python
 ARMS = ["adt"]
 ENDPOINTS = ("platinum", "nepc", "avpc", "avpc_nepc")  # any subset of cox_aggregated.ENDPOINTS
+COHORTS = ("all", "metastatic", "localized")           # any subset of cp.DEFAULT_COHORTS
 OVERWRITE = False
 
 cp.FORCE_RERUN = OVERWRITE
-RUNS = cp.make_endpoint_runs(ARMS, endpoints=ENDPOINTS)
+RUNS = cp.make_endpoint_runs(ARMS, endpoints=ENDPOINTS, cohorts=COHORTS)
 ```
 
-`make_endpoint_runs(arms, *, endpoints=("platinum", "nepc"), prediction_input_dirs_by_endpoint=None)`
-builds one independent input/output tree per requested endpoint by calling `make_runs` once per
-endpoint under the hood, with `output_suffix` set to `""` for `platinum` and `f"_{endpoint}"` for
-everything else (e.g. `"_nepc"`, `"_avpc"`, `"_avpc_nepc"`). It supports any number of endpoints —
-the tuple can carry all four of `platinum`, `nepc`, `avpc`, `avpc_nepc` in one `RUNS` list, and each
-notebook's `for run in RUNS:` loop iterates every (arm, endpoint) pair produced. Every notebook now
-calls `make_endpoint_runs` directly; the older single-endpoint `cp.make_runs(..., output_suffix=...)`
-call shown in earlier versions of this doc is a lower-level helper `make_endpoint_runs` wraps — no
-notebook calls it directly today.
+With all four endpoints and all three cohorts this is a 12-run `RUNS` list per arm. To iterate
+faster, narrow either tuple — the notebooks' `for run in RUNS:` loops are unchanged either way.
+
+`make_endpoint_runs(arms, *, endpoints=..., cohorts=DEFAULT_COHORTS, prediction_input_dirs_by_endpoint=None)`
+builds one independent input/output tree per requested (cohort, endpoint) pair by calling
+`make_runs` once per pair under the hood, with `output_suffix` set to `""` for `platinum` and
+`f"_{endpoint}"` for everything else (e.g. `"_nepc"`, `"_avpc"`, `"_avpc_nepc"`), and the cohort's
+suffix composed onto the arm label (`""`, `"_metastatic"`, `"_localized"`). Each notebook's
+`for run in RUNS:` loop iterates every (arm, cohort, endpoint) triple produced. Every notebook
+calls `make_endpoint_runs` directly; the single-run `cp.make_runs(..., output_suffix=..., cohort=...)`
+is the lower-level helper it wraps.
+
+Three helpers keep the wider cross from leaking into the notebooks:
+
+- `cp.endpoint_suffix(endpoint)` — the one definition of the suffix rule, which used to be
+  inlined in four places.
+- `cp.run_key(run)` — `(cohort, endpoint, label)`, for summary dicts that must stay unique now
+  that a label alone no longer identifies a run.
+- `cp.stage2_runs(runs)` — one run per treatment anchor. Lab preprocessing is independent of both
+  cohort and endpoint, so notebook `01`'s Stage 2 iterates this rather than filtering `RUNS` by
+  hand; the old `if run["endpoint"] != "platinum": continue` guard would have run Stage 2 once per
+  cohort as soon as cohorts were added.
 
 The suffix pattern suffixes **both** `prediction_inputs_<arm>` and `local_runs_<arm>`. Both are
 required: because each endpoint's incident gate (`--require-nepc` and its `avpc`/`avpc_nepc`
@@ -748,8 +841,9 @@ through as `make_endpoint_runs`'s `prediction_input_dirs_by_endpoint`.
 
 ## Recommended run order
 
-Run each notebook top to bottom; select ARPI/ADT with each Python notebook's `ARMS` setting, and
-the event(s) with its `ENDPOINTS` setting (see [Arms and endpoints](#arms-and-endpoints)):
+Run each notebook top to bottom; select ARPI/ADT with each Python notebook's `ARMS` setting, the
+patient subsets with `COHORTS`, and the event(s) with `ENDPOINTS`
+(see [Arms, cohorts, and endpoints](#arms-cohorts-and-endpoints)):
 
 1. `COMPASS/survival_analysis/01_preprocessing.ipynb`
 2. `COMPASS/survival_analysis/02_univariate.ipynb`
@@ -757,9 +851,12 @@ the event(s) with its `ENDPOINTS` setting (see [Arms and endpoints](#arms-and-en
 4. `COMPASS/survival_analysis/03b_multivariate_longitudinal.ipynb` (optional — requires torch;
    see [Dependencies](#dependencies) and `multivariate_longitudinal/README.md`)
 5. `COMPASS/survival_analysis/GAM/04_gam.ipynb`
-6. `COMPASS/survival_analysis/05_figures.Rmd`
-7. `COMPASS/survival_analysis/06_abstract_numbers.ipynb` (read-only; abstract/manuscript counts)
-8. `COMPASS/survival_analysis/07_endpoint_comparison.ipynb` (read-only; only after steps 1-3 have
+6. `python COMPASS/survival_analysis/adt_intent_comparison.py` (read-only; writes the
+   localized-vs-metastatic tables the figure supplement reads — run **before** step 7, and only
+   after steps 2-3 have been run for both stratified cohorts)
+7. `COMPASS/survival_analysis/05_figures.Rmd`
+8. `COMPASS/survival_analysis/06_abstract_numbers.ipynb` (read-only; abstract/manuscript counts)
+9. `COMPASS/survival_analysis/07_endpoint_comparison.ipynb` (read-only; only after steps 1-3 have
    been run for **all** endpoints being compared)
 
 The notebooks pass `PROFILE_DATA/*.parquet` paths explicitly to the lower-level scripts. Existing
