@@ -4,8 +4,10 @@ Build prediction inputs for the genomic-landmark univariate survival arm.
 Index time = earliest SAMPLE_COLLECTION_DT (per patient, from the raw
 per-sample somatic matrix SOMATIC_WIDE_BY_SAMPLE.parquet).
 Predicts platinum exposure from sample collection forward, with
-features derived from labs measured strictly before t_sample plus 12 binary
-genomic indicators ({TP53, RB1, PTEN} x {SV, DEL, AMP, SNV}).
+features derived from labs measured strictly before t_sample plus binary
+genomic indicators, one per <GENE>_<VARIANT> column detected in the somatic
+matrix (every gene on the panel by default; the arm is SNV-only and
+--variant-types accepts no other value -- pin genes with --genes).
 
 Cohort = longitudinal cohort INTERSECTED with patients that have a genomic
 sample AND have a split label in the existing
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -79,9 +82,77 @@ PROFILE_DATA_ROOT = Path(
 )
 DEFAULT_SOMATIC_PATH = PROFILE_DATA_ROOT / "SOMATIC_WIDE_BY_SAMPLE.parquet"
 DEFAULT_TIME_UNIT_DAYS = 7
-GENOMIC_GENES = ("TP53", "RB1", "PTEN")
-GENOMIC_VARIANT_TYPES = ("SV", "DEL", "AMP", "SNV")
-GENOMIC_FEATURE_COLS = [f"{g}_{v}" for g in GENOMIC_GENES for v in GENOMIC_VARIANT_TYPES]
+# Panel version is carried through as an adjustment covariate: OncoPanel
+# versions cover different gene sets, and sequencing era correlates with both
+# gene coverage and outcome, so an unadjusted genomic effect partly reflects
+# which panel the patient happened to receive.
+PANEL_VERSION_COL = "PANEL_VERSION"
+PANEL_VERSION_FEATURE_PREFIX = "PANEL_VERSION_"
+ALL_VARIANT_TYPES = ("SV", "DEL", "AMP", "SNV")
+# The genomic arm is SNV-only: copy-number and structural calls are the
+# noisier, less comparable half of the panel, so every run is restricted to
+# small variants. This is enforced, not merely defaulted -- --variant-types
+# accepts no other value. ALL_VARIANT_TYPES is retained because the
+# detection regex must still recognize non-SNV columns in order to skip
+# them.
+DEFAULT_VARIANT_TYPES = ("SNV",)
+# Genes are detected from the somatic matrix schema rather than hardcoded --
+# the panel carries far more than the {TP53, RB1, PTEN} trio the earlier
+# 12-feature version pinned, and an SNV-only arm should span the whole panel.
+# Use --genes to pin a specific subset.
+GENE_VARIANT_RE = re.compile(r"^([A-Za-z0-9.\-]+)_(SV|SNV|AMP|DEL)$")
+
+
+def detect_genomic_feature_cols(
+    columns, variant_types=DEFAULT_VARIANT_TYPES, genes=None
+) -> list[str]:
+    """All <GENE>_<VARIANT> columns matching the requested variant types.
+
+    `genes` optionally restricts the gene set; None means every gene present in
+    the somatic matrix. Ordering is gene-major, then ALL_VARIANT_TYPES order,
+    so feature blocks stay stable across runs.
+    """
+    allowed = {v.upper() for v in variant_types}
+    unknown = sorted(allowed - set(ALL_VARIANT_TYPES))
+    if unknown:
+        raise ValueError(
+            f"Unknown variant type(s) {unknown}; expected a subset of "
+            f"{list(ALL_VARIANT_TYPES)}."
+        )
+    gene_filter = {g.upper() for g in genes} if genes else None
+    found: dict[str, set[str]] = {}
+    for col in columns:
+        m = GENE_VARIANT_RE.match(str(col))
+        if not m:
+            continue
+        gene, variant = m.group(1), m.group(2)
+        if variant not in allowed:
+            continue
+        if gene_filter is not None and gene.upper() not in gene_filter:
+            continue
+        found.setdefault(gene, set()).add(variant)
+    if gene_filter is not None:
+        absent = sorted(gene_filter - {g.upper() for g in found})
+        if absent:
+            raise ValueError(
+                f"--genes requested {absent} but the somatic matrix has no "
+                f"matching <GENE>_<{'|'.join(sorted(allowed))}> column(s)."
+            )
+    return [
+        f"{gene}_{variant}"
+        for gene in sorted(found)
+        for variant in ALL_VARIANT_TYPES
+        if variant in found[gene]
+    ]
+
+
+def read_somatic_columns(path: Path) -> list[str]:
+    """Column names of the somatic matrix, without loading the whole table."""
+    if path.suffix.lower() in {".parquet", ".pq"}:
+        import pyarrow.parquet as pq
+
+        return list(pq.ParquetFile(path).schema_arrow.names)
+    return list(pd.read_csv(path, nrows=0).columns)
 
 GENOMIC_OUTPUT_SUBDIR = "genomic"
 GENOMIC_AGGREGATED_FILENAME = "genomic_aggregated.csv"
@@ -90,15 +161,26 @@ GENOMIC_CANONICAL_LABS_FILENAME = "genomic_canonical_labs_train_val.csv"
 GENOMIC_BUILD_MANIFEST_FILENAME = "genomic_build_manifest.json"
 
 
-def load_somatic(path: Path) -> pd.DataFrame:
+def load_somatic(
+    path: Path, feature_cols: list[str], adt_dates: pd.Series
+) -> pd.DataFrame:
     """Load the per-sample somatic matrix and collapse it to one row per patient.
 
     The raw matrix carries one row per (patient, sample, test type), so a
-    patient with several specimens appears several times. The earliest dated
-    sample is used as the index time, and the alteration indicators are OR-ed
-    across that patient's samples: a call made on any specimen is a call.
+    patient with several specimens appears several times. For each patient the
+    specimen collected CLOSEST TO ADT START is selected, and that one sample
+    supplies both the index date and the panel version. Calls are NOT OR-ed
+    across specimens: OR-ing mixes gene sets from different panel versions onto
+    a single index date, so a patient sequenced on v1 then v3 would carry v3's
+    extra genes under a v1 label. Taking one specimen whole keeps the
+    alteration calls, the index date, and PANEL_VERSION mutually consistent.
+
+    `adt_dates` maps patient id -> ADT start date (FIRST_TREATMENT_DATE); it
+    supplies the reference point for "closest". Ties (equal |days from ADT|,
+    e.g. one specimen before and one after) resolve to the EARLIER specimen,
+    which is the one whose calls were actually available at treatment start.
     """
-    needed_cols = [ID_COL, "SAMPLE_COLLECTION_DT", *GENOMIC_FEATURE_COLS]
+    needed_cols = [ID_COL, "SAMPLE_COLLECTION_DT", PANEL_VERSION_COL, *feature_cols]
     if path.suffix.lower() in {".parquet", ".pq"}:
         raw = pd.read_parquet(path, columns=None)
         raw = raw[[c for c in raw.columns if c in needed_cols]]
@@ -111,22 +193,42 @@ def load_somatic(path: Path) -> pd.DataFrame:
     raw = raw.loc[raw[ID_COL].notna()].copy()
     raw[ID_COL] = raw[ID_COL].astype(int)
     raw["SAMPLE_COLLECTION_DT"] = pd.to_datetime(raw["SAMPLE_COLLECTION_DT"], errors="coerce")
-    for col in GENOMIC_FEATURE_COLS:
+    raw[PANEL_VERSION_COL] = raw[PANEL_VERSION_COL].astype("string").str.strip()
+    for col in feature_cols:
         raw[col] = pd.to_numeric(raw[col], errors="coerce").fillna(0).astype(int)
+
+    # A specimen with no collection date cannot be ranked against ADT start.
+    n_no_date = int(raw["SAMPLE_COLLECTION_DT"].isna().sum())
+    if n_no_date:
+        print(f"Dropping {n_no_date:,} somatic rows with no SAMPLE_COLLECTION_DT.")
+        raw = raw.loc[raw["SAMPLE_COLLECTION_DT"].notna()].copy()
 
     n_rows, n_patients = len(raw), raw[ID_COL].nunique()
     if n_rows != n_patients:
         print(
             f"Somatic matrix has {n_rows:,} sample rows for {n_patients:,} patients; "
-            "collapsing to earliest sample date with alterations OR-ed across samples."
+            "selecting the specimen closest to ADT start (panel version taken from "
+            "that same specimen)."
         )
-    collapsed = raw.groupby(ID_COL).agg(
-        {
-            "SAMPLE_COLLECTION_DT": "min",
-            **{col: "max" for col in GENOMIC_FEATURE_COLS},
-        }
+
+    ref = raw[ID_COL].map(pd.to_datetime(adt_dates, errors="coerce"))
+    # Patients with no ADT date fall back to their earliest specimen: with no
+    # reference point every specimen is equidistant, and the earliest is the
+    # pre-existing behaviour.
+    n_no_adt = int(ref.isna().sum())
+    if n_no_adt:
+        print(
+            f"{n_no_adt:,} somatic rows belong to patients with no ADT start date; "
+            "falling back to their earliest specimen."
+        )
+    gap = (raw["SAMPLE_COLLECTION_DT"] - ref).dt.days.abs()
+    raw["_rank_gap"] = gap.fillna(np.inf)
+
+    ordered = raw.sort_values(
+        [ID_COL, "_rank_gap", "SAMPLE_COLLECTION_DT"], kind="mergesort"
     )
-    return collapsed
+    collapsed = ordered.groupby(ID_COL, sort=True).head(1).set_index(ID_COL)
+    return collapsed[["SAMPLE_COLLECTION_DT", PANEL_VERSION_COL, *feature_cols]]
 
 
 def attach_t_sample(df: pd.DataFrame, somatic: pd.DataFrame) -> pd.DataFrame:
@@ -165,8 +267,40 @@ def main(args: argparse.Namespace) -> None:
     df[ID_COL] = df[ID_COL].astype(int)
     print(f"Loaded cohort: {df[ID_COL].nunique()} unique MRNs")
 
-    somatic = load_somatic(Path(args.somatic_path))
-    print(f"Somatic patients: {len(somatic)}")
+    variant_types = tuple(v.upper() for v in args.variant_types)
+    somatic_path = Path(args.somatic_path)
+    feature_cols = detect_genomic_feature_cols(
+        read_somatic_columns(somatic_path), variant_types, args.genes
+    )
+    if not feature_cols:
+        raise ValueError(
+            f"Somatic matrix {somatic_path} has no <GENE>_<"
+            f"{'|'.join(variant_types)}> columns."
+        )
+    n_genes = len({c.rsplit("_", 1)[0] for c in feature_cols})
+
+    # ADT start per patient, the reference point for picking each patient's
+    # specimen. Taken from the longitudinal df, not the somatic matrix.
+    if "FIRST_TREATMENT_DATE" not in df.columns:
+        raise ValueError(
+            f"{args.data} is missing FIRST_TREATMENT_DATE; it is required to pick "
+            "the specimen closest to ADT start."
+        )
+    adt_dates = (
+        df.groupby(ID_COL)["FIRST_TREATMENT_DATE"]
+        .min()
+        .pipe(pd.to_datetime, errors="coerce")
+    )
+
+    somatic = load_somatic(somatic_path, feature_cols, adt_dates)
+    print(
+        f"Somatic patients: {len(somatic)} ({len(feature_cols)} genomic features "
+        f"across {n_genes} genes; variant types = {', '.join(variant_types)})"
+    )
+    version_counts = somatic[PANEL_VERSION_COL].value_counts(dropna=False)
+    print("  panel versions: " + ", ".join(
+        f"{v}={n}" for v, n in version_counts.items()
+    ))
 
     n_before_tsample = df[ID_COL].nunique()
     df = attach_t_sample(df, somatic)
@@ -208,7 +342,7 @@ def main(args: argparse.Namespace) -> None:
     if merged.empty:
         raise ValueError("No patients survived feature+outcome join in the genomic arm.")
 
-    genomics = somatic.loc[somatic.index.intersection(merged.index), GENOMIC_FEATURE_COLS]
+    genomics = somatic.loc[somatic.index.intersection(merged.index), feature_cols]
     # This arm is anchored on t_sample, so every surviving patient has a somatic
     # row by construction; untested patients were dropped by the t_sample join
     # rather than filled. The fill below is a guard, not the missingness policy.
@@ -219,9 +353,28 @@ def main(args: argparse.Namespace) -> None:
             "row despite being anchored on t_sample; the somatic index is inconsistent."
         )
     merged = merged.join(genomics, how="left")
-    for col in GENOMIC_FEATURE_COLS:
+    for col in feature_cols:
         merged[col] = merged[col].fillna(0).astype(int)
-    print(f"Cohort with genomics joined: {len(merged)} patients")
+
+    # Panel version -> reference-coded dummies, used as adjustment covariates
+    # (not tested as features of their own). The most common version is the
+    # dropped reference level, so the remaining columns are contrasts against
+    # the modal panel and the design matrix stays full rank.
+    panel_version = somatic.loc[merged.index, PANEL_VERSION_COL].astype("string")
+    panel_version = panel_version.fillna("unknown")
+    merged[PANEL_VERSION_COL] = panel_version
+    version_order = panel_version.value_counts().index.tolist()
+    reference_version = version_order[0] if version_order else None
+    panel_version_cols: list[str] = []
+    for version in version_order[1:]:
+        col = f"{PANEL_VERSION_FEATURE_PREFIX}{str(version).replace(' ', '_')}"
+        merged[col] = (panel_version == version).astype(int)
+        panel_version_cols.append(col)
+    print(
+        f"Cohort with genomics joined: {len(merged)} patients; "
+        f"panel-version covariates: {len(panel_version_cols)} "
+        f"(reference level = {reference_version})"
+    )
 
     # Reuse main split — drop patients without a label there
     aligned_split = split_assignments.reindex(merged.index)
@@ -304,8 +457,7 @@ def main(args: argparse.Namespace) -> None:
         "somatic_path": str(args.somatic_path),
         "anchor": "t_sample",
         "sample_pick_rule": (
-            "earliest SAMPLE_COLLECTION_DT per DFCI_MRN; alteration indicators "
-            "OR-ed across that patient's samples"
+            "specimen with SAMPLE_COLLECTION_DT closest to ADT start per DFCI_MRN"
         ),
         "min_patient_coverage": float(args.min_patient_coverage),
         "time_unit_days": int(args.time_unit_days),
@@ -321,7 +473,21 @@ def main(args: argparse.Namespace) -> None:
         "auc_time_unit_days": int(args.time_unit_days),
         "auc_horizons": auc_horizons,
         "auc_max_horizon": int(max((h for hs in auc_horizons.values() for h in hs), default=0)),
-        "genomic_features": GENOMIC_FEATURE_COLS,
+        "genomic_variant_types": list(variant_types),
+        "genomic_genes_requested": list(args.genes) if args.genes else "all_in_matrix",
+        "panel_version_col": PANEL_VERSION_COL,
+        "panel_version_reference_level": reference_version,
+        "panel_version_covariates": panel_version_cols,
+        "panel_version_counts": {
+            str(k): int(v) for k, v in panel_version.value_counts().items()
+        },
+        "sample_pick_rule_detail": (
+            "specimen closest to FIRST_TREATMENT_DATE (ADT start); ties resolve to "
+            "the earlier specimen; calls and PANEL_VERSION both taken from that "
+            "one specimen (no OR across specimens)"
+        ),
+        "n_genomic_features": len(feature_cols),
+        "genomic_features": feature_cols,
         "n_patients_total": int(len(merged)),
         "n_patients_train_val": int(len(train_val)),
         "n_patients_test": int(len(test)),
@@ -338,6 +504,27 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", default=str(DATA_PATH / "longitudinal_prediction_data.csv"))
     parser.add_argument("--somatic-path", type=str, default=str(DEFAULT_SOMATIC_PATH))
+    parser.add_argument(
+        "--variant-types",
+        nargs="+",
+        default=list(DEFAULT_VARIANT_TYPES),
+        choices=list(DEFAULT_VARIANT_TYPES),
+        help=(
+            "Which <GENE>_<VARIANT> suffixes to keep as genomic features. The "
+            "genomic arm is standardized to SNV-only, so SNV is the only "
+            "accepted value; the flag is retained so the choice is explicit in "
+            "the build manifest."
+        ),
+    )
+    parser.add_argument(
+        "--genes",
+        nargs="+",
+        default=None,
+        help=(
+            "Restrict genomic features to these genes; default is every gene "
+            "present in the somatic matrix."
+        ),
+    )
     parser.add_argument(
         "--inputs-dir",
         default=str(RESULTS / DEFAULT_OUTPUT_SUBDIR),

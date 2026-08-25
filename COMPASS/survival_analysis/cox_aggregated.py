@@ -8,6 +8,7 @@ context assembly used by the runnable scripts.
 
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,6 +105,11 @@ DEFAULT_AUC_TIME_UNIT_DAYS = 7
 # fraction of train_val patients is dropped, since near-zero-prevalence
 # binary indicators are essentially unfittable and unstable across folds.
 DEFAULT_MIN_GENOMIC_PREVALENCE = 0.025
+# The genomic arm is SNV-only. GENOMIC_FEATURE_RE matches what is testable;
+# ANY_VARIANT_RE matches every variant class so non-SNV columns can be kept
+# out of the lab feature set rather than falling through into it.
+GENOMIC_FEATURE_RE = re.compile(r"^([A-Za-z0-9.\-]+)_(SNV)$")
+ANY_VARIANT_RE = re.compile(r"^([A-Za-z0-9.\-]+)_(SV|SNV|AMP|DEL)$")
 HORIZON_GRID_FILENAME = "cox_agg_horizon_grid.csv"
 CANONICAL_LABS_FOLDS_FILENAME = "cox_agg_canonical_labs_folds.csv"
 
@@ -187,7 +193,25 @@ OUTCOME_METADATA_COLUMNS = {
     "AVPC_N_CRITERIA",
     "NEPC_TIMELINE",
     "NEPC_TIMELINE_DATE",
+    # Panel version is an adjustment covariate, never a tested feature. The raw
+    # string column is listed here; the reference-coded PANEL_VERSION_* dummies
+    # are stripped from the feature universe by outcome_columns() below.
+    "PANEL_VERSION",
 }
+
+PANEL_VERSION_COL = "PANEL_VERSION"
+PANEL_VERSION_FEATURE_PREFIX = "PANEL_VERSION_"
+
+
+def panel_version_covariate_columns(df: pd.DataFrame) -> list[str]:
+    """Reference-coded panel-version dummies written by build_genomic_inputs.py.
+
+    Empty when the inputs predate the panel-version change, so older prebuilt
+    inputs keep working (the fits then just have no version adjustment).
+    """
+    return sorted(
+        c for c in df.columns if str(c).startswith(PANEL_VERSION_FEATURE_PREFIX)
+    )
 
 
 def outcome_columns() -> set[str]:
@@ -197,6 +221,11 @@ def outcome_columns() -> set[str]:
     respected. Callers must use this rather than a module-level set literal.
     """
     return OUTCOME_METADATA_COLUMNS | {AGE_COL}
+
+
+def non_feature_columns(df: pd.DataFrame) -> set[str]:
+    """outcome_columns() plus this frame's panel-version covariate dummies."""
+    return outcome_columns() | set(panel_version_covariate_columns(df))
 
 
 def normalize_endpoints(raw_endpoints: list[str]) -> list[str]:
@@ -454,9 +483,10 @@ def prepare_landmark_context(
     )
 
     feature_set = str(feature_set).lower().replace("-", "_")
-    if feature_set not in {"labs", "somatic_gleason"}:
+    if feature_set not in {"labs", "somatic_gleason", "genomic"}:
         raise ValueError(
-            f"Unsupported feature set {feature_set!r}; expected 'labs' or 'somatic_gleason'."
+            f"Unsupported feature set {feature_set!r}; expected 'labs', "
+            "'somatic_gleason', or 'genomic'."
         )
 
     always_include_feature_cols: tuple[str, ...] = ()
@@ -500,8 +530,35 @@ def prepare_landmark_context(
                 .drop_duplicates()
                 if str(feature) in raw_feature_cols
             )
+    elif feature_set == "genomic":
+        # genomic_aggregated.csv carries <GENE>_SNV indicators alongside the lab
+        # summary features. Scoping genomic_feature_cols here is what arms the
+        # 2.5% prevalence floor in select_feature_columns -- that filter is
+        # guarded on a non-empty tuple, so leaving it empty (as the "labs"
+        # branch does) silently disables the floor and routes the indicators
+        # through the lab n_obs-adjusted univariate model instead of the
+        # static-feature path.
+        excluded = non_feature_columns(merged)
+        raw_feature_cols = [
+            c
+            for c in merged.columns
+            if c not in excluded
+            and (ANY_VARIANT_RE.match(str(c)) is None or GENOMIC_FEATURE_RE.match(str(c)))
+        ]
+        genomic_feature_cols = tuple(
+            c for c in raw_feature_cols if GENOMIC_FEATURE_RE.match(str(c))
+        )
+        always_include_feature_cols = genomic_feature_cols
+        if not genomic_feature_cols:
+            raise ValueError(
+                f"Landmark +{landmark_day} inputs declare no <GENE>_SNV columns; "
+                "the genomic feature set has nothing to test. Confirm "
+                "build_genomic_inputs.py wrote genomic_aggregated.csv here."
+            )
     else:
-        raw_feature_cols = [c for c in merged.columns if c not in outcome_columns()]
+        raw_feature_cols = [
+            c for c in merged.columns if c not in non_feature_columns(merged)
+        ]
     univariate_data = merged.copy()
     split_stratification = "prebuilt"
 

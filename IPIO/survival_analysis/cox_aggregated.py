@@ -144,7 +144,14 @@ def outcome_columns() -> set[str]:
 
 BASELINE_STATIC_FIXED = ("GENDER_MALE", "pd1pdl1", "ctla4")
 BASELINE_STATIC_PREFIX = "CANCER_TYPE_"
-GENOMIC_FEATURE_RE = re.compile(r"^[A-Za-z0-9]+_(SV|SNV|AMP|DEL)$")
+# Two regexes, deliberately. The genomic arm is standardized to SNV-only, so
+# only _SNV columns are testable features (GENOMIC_FEATURE_RE). But any non-SNV
+# variant column present in a previously built input file must still be
+# *recognized* so the "labs" subset can exclude it -- narrowing to _SNV alone
+# would silently reclassify _AMP/_DEL/_SV as lab features rather than dropping
+# them. ANY_VARIANT_RE drives that exclusion.
+GENOMIC_FEATURE_RE = re.compile(r"^([A-Za-z0-9.\-]+)_(SNV)$")
+ANY_VARIANT_RE = re.compile(r"^([A-Za-z0-9.\-]+)_(SV|SNV|AMP|DEL)$")
 DEFAULT_MIN_GENOMIC_PREVALENCE = 0.025
 
 
@@ -155,7 +162,17 @@ def baseline_covariate_columns(df: pd.DataFrame) -> list[str]:
 
 
 def genomic_feature_columns(df: pd.DataFrame) -> list[str]:
+    """Testable genomic features: SNV columns only."""
     return sorted(c for c in df.columns if GENOMIC_FEATURE_RE.match(str(c)))
+
+
+def any_variant_columns(df: pd.DataFrame) -> list[str]:
+    """Every <GENE>_<VARIANT> column, SNV or not.
+
+    Superset of ``genomic_feature_columns``. Used to keep non-SNV variant
+    columns out of the lab feature set rather than letting them fall through.
+    """
+    return sorted(c for c in df.columns if ANY_VARIANT_RE.match(str(c)))
 
 
 def normalize_feature_subset(feature_subset: str) -> str:
@@ -386,15 +403,22 @@ def prepare_landmark_context(
     excluded = outcome_columns() | set(baseline_covariate_columns(merged))
     raw_feature_cols_all = [c for c in merged.columns if c not in excluded]
     genomic_cols = tuple(c for c in genomic_feature_columns(merged) if c in raw_feature_cols_all)
-    genomic_set = set(genomic_cols)
+    # Excluded from the lab set and from "all": every variant column, including
+    # the non-SNV ones the SNV-only arm does not test. Without this, narrowing
+    # genomic_feature_columns to _SNV would push _AMP/_DEL/_SV into the labs
+    # subset instead of dropping them.
+    variant_set = set(any_variant_columns(merged))
     if feature_subset == "genomics":
         raw_feature_cols = list(genomic_cols)
         always_include_feature_cols = genomic_cols
     elif feature_subset == "labs":
-        raw_feature_cols = [c for c in raw_feature_cols_all if c not in genomic_set]
+        raw_feature_cols = [c for c in raw_feature_cols_all if c not in variant_set]
         always_include_feature_cols = ()
     else:
-        raw_feature_cols = raw_feature_cols_all
+        raw_feature_cols = [
+            c for c in raw_feature_cols_all
+            if c not in variant_set or c in set(genomic_cols)
+        ]
         always_include_feature_cols = genomic_cols
     univariate_data = merged.copy()
     split_stratification = "prebuilt"

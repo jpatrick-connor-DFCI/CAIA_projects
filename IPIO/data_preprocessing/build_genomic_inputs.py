@@ -12,7 +12,8 @@ Predicts irAE from treatment start forward (death/censor are right-censoring),
 with features derived from labs measured strictly before each requested
 landmark (identical window to the main cohort's landmarks) plus dynamic
 per-gene x per-variant-type binary indicators (pan-cancer cohort -- all genes
-present in the somatic table, not a fixed 3-gene prostate panel). Genomic
+present in the somatic table, not a fixed 3-gene prostate panel; the arm is
+SNV-only and --variant-types accepts no other value). Genomic
 indicators themselves are static (not landmark-dependent) and are joined
 unchanged at every landmark.
 
@@ -109,11 +110,36 @@ DEFAULT_TIME_UNIT_DAYS = 7
 
 # Pan-cancer cohort: detect all <GENE>_<VARIANT> columns dynamically rather
 # than hardcoding a fixed {TP53,RB1,PTEN} x {SV,DEL,AMP,SNV} prostate panel.
-GENE_VARIANT_RE = re.compile(r"^[A-Za-z0-9]+_(SV|SNV|AMP|DEL)$")
+ALL_VARIANT_TYPES = ("SV", "SNV", "AMP", "DEL")
+# Two capture groups (gene, variant), matching COMPASS. The gene class
+# admits "." and "-" so hyphenated/dotted gene symbols are not silently
+# dropped, and group(2) is the variant -- the single-group form made
+# group(1) return the variant instead of the gene.
+GENE_VARIANT_RE = re.compile(r"^([A-Za-z0-9.\-]+)_(SV|SNV|AMP|DEL)$")
+# The genomic arm is SNV-only: copy-number and structural calls are the
+# noisier, less comparable half of the panel, so every run is restricted to
+# small variants. This is enforced, not merely defaulted -- --variant-types
+# accepts no other value. ALL_VARIANT_TYPES is retained because the
+# detection regex must still recognize non-SNV columns in order to skip
+# them.
+DEFAULT_VARIANT_TYPES = ("SNV",)
 
 
-def detect_genomic_feature_cols(columns) -> list[str]:
-    return sorted(c for c in columns if GENE_VARIANT_RE.match(c))
+def detect_genomic_feature_cols(columns, variant_types=DEFAULT_VARIANT_TYPES) -> list[str]:
+    """All <GENE>_<VARIANT> columns whose variant suffix is in `variant_types`."""
+    allowed = {v.upper() for v in variant_types}
+    unknown = allowed - set(ALL_VARIANT_TYPES)
+    if unknown:
+        raise ValueError(
+            f"Unknown variant type(s) {sorted(unknown)}; expected a subset of "
+            f"{list(ALL_VARIANT_TYPES)}."
+        )
+    out = []
+    for c in columns:
+        m = GENE_VARIANT_RE.match(str(c))
+        if m and m.group(2) in allowed:
+            out.append(c)
+    return sorted(out)
 
 
 GENOMIC_OUTPUT_SUBDIR = "genomic"
@@ -123,17 +149,21 @@ GENOMIC_CANONICAL_LABS_FILENAME = "genomic_canonical_labs_train_val.csv"
 GENOMIC_BUILD_MANIFEST_FILENAME = "genomic_build_manifest.json"
 
 
-def load_somatic(path: Path) -> tuple[pd.DataFrame, list[str]]:
+def load_somatic(
+    path: Path, variant_types=DEFAULT_VARIANT_TYPES
+) -> tuple[pd.DataFrame, list[str]]:
     """Read the somatic table, restricted to ID_COL + whatever <GENE>_<VARIANT>
-    columns are present (pan-cancer -- data-dependent gene set). Reads the full
-    header first to detect the gene-variant columns, then restricts `usecols`
-    to just what's needed. SAMPLE_COLLECTION_DT is not read -- this arm anchors
-    to IO_START (t_first_treatment), not the sequencing date.
+    columns are present for the requested variant types (pan-cancer --
+    data-dependent gene set). Reads the full header first to detect the
+    gene-variant columns, then restricts `usecols` to just what's needed.
+    SAMPLE_COLLECTION_DT is not read -- this arm anchors to IO_START
+    (t_first_treatment), not the sequencing date.
     """
     header = pd.read_csv(path, nrows=0)
-    feature_cols = detect_genomic_feature_cols(header.columns)
+    feature_cols = detect_genomic_feature_cols(header.columns, variant_types)
     if not feature_cols:
-        raise ValueError(f"Somatic CSV {path} has no <GENE>_<SV|SNV|AMP|DEL> columns.")
+        wanted = "|".join(v.upper() for v in variant_types)
+        raise ValueError(f"Somatic CSV {path} has no <GENE>_<{wanted}> columns.")
     needed_cols = [ID_COL, *feature_cols]
     missing = [c for c in needed_cols if c not in header.columns]
     if missing:
@@ -207,8 +237,12 @@ def main(args: argparse.Namespace) -> None:
             df["FIRST_TREATMENT_DATE"] - df["FIRST_RECORD_DATE"]
         ).dt.days.astype(float)
 
-    somatic, genomic_feature_cols = load_somatic(Path(args.somatic_path))
-    print(f"Somatic patients: {len(somatic)} ({len(genomic_feature_cols)} gene-variant features detected)")
+    variant_types = tuple(v.upper() for v in args.variant_types)
+    somatic, genomic_feature_cols = load_somatic(Path(args.somatic_path), variant_types)
+    print(
+        f"Somatic patients: {len(somatic)} ({len(genomic_feature_cols)} gene-variant "
+        f"features detected; variant types = {', '.join(variant_types)})"
+    )
 
     # Anchor to IO_START (t_first_treatment), identical to the main cohort's
     # landmarks -- NOT the sample collection date. Restrict to patients with an
@@ -380,6 +414,7 @@ def main(args: argparse.Namespace) -> None:
         "auc_horizons_by_landmark": auc_horizons_by_landmark,
         "auc_max_horizon": int(max_horizon),
         "landmark_days": [int(d) for d in landmark_days],
+        "genomic_variant_types": list(variant_types),
         "genomic_features": genomic_feature_cols,
         "n_patients_total": int(len(common_mrns)),
         "n_patients_train_val": int(len(train_val_mrns)),
@@ -404,6 +439,18 @@ if __name__ == "__main__":
                         help="Age covariate column name (default AGE_AT_TREATMENTSTART).")
     parser.add_argument("--data", default=str(DATA_PATH / "longitudinal_prediction_data.csv"))
     parser.add_argument("--somatic-path", type=str, default=str(DEFAULT_SOMATIC_PATH))
+    parser.add_argument(
+        "--variant-types",
+        nargs="+",
+        default=list(DEFAULT_VARIANT_TYPES),
+        choices=list(DEFAULT_VARIANT_TYPES),
+        help=(
+            "Which <GENE>_<VARIANT> suffixes to keep as genomic features. The "
+            "genomic arm is standardized to SNV-only, so SNV is the only "
+            "accepted value; the flag is retained so the choice is explicit in "
+            "the build manifest."
+        ),
+    )
     parser.add_argument(
         "--inputs-dir",
         default=str(RESULTS / DEFAULT_OUTPUT_SUBDIR),

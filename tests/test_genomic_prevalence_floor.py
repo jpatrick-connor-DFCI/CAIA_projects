@@ -134,3 +134,67 @@ class TestPrepareLandmarkContextSourceUsesFeatureKind:
         import COMPASS.survival_analysis.cox_aggregated as compass_ca
 
         assert compass_ca.DEFAULT_MIN_GENOMIC_PREVALENCE == 0.025
+
+
+class TestGenomicFeatureSetArmsThePrevalenceFloor:
+    """The 'genomic' feature set must scope genomic_feature_cols.
+
+    genomic_aggregated.csv was previously consumed under feature_set="labs",
+    whose branch leaves genomic_feature_cols empty. Because
+    select_feature_columns guards the floor on `if genomic_feature_cols and
+    ...`, an empty tuple silently disables it -- so no prevalence filtering
+    happened on the COMPASS genomic arm at all.
+    """
+
+    def test_genomic_branch_scopes_and_excludes_non_snv(self):
+        import inspect
+
+        import COMPASS.survival_analysis.cox_aggregated as compass_ca
+
+        source = inspect.getsource(compass_ca.prepare_landmark_context)
+        # The branch must exist and must populate the scoping tuple.
+        assert 'feature_set == "genomic"' in source
+        assert "always_include_feature_cols = genomic_feature_cols" in source
+
+    def test_snv_only_regexes_are_defined(self):
+        import COMPASS.survival_analysis.cox_aggregated as compass_ca
+
+        # Testable set is SNV-only; the broad pattern exists so non-SNV
+        # columns can be excluded rather than falling into the lab set.
+        assert compass_ca.GENOMIC_FEATURE_RE.match("TP53_SNV")
+        assert not compass_ca.GENOMIC_FEATURE_RE.match("PTEN_DEL")
+        assert not compass_ca.GENOMIC_FEATURE_RE.match("AR_AMP")
+        for col in ("TP53_SNV", "PTEN_DEL", "AR_AMP", "TMPRSS2_SV"):
+            assert compass_ca.ANY_VARIANT_RE.match(col)
+        # Hyphenated / dotted gene symbols must not be silently dropped.
+        assert compass_ca.GENOMIC_FEATURE_RE.match("BRCA-2_SNV")
+        assert compass_ca.GENOMIC_FEATURE_RE.match("PIK3.CA_SNV")
+
+
+class TestEmptyGenomicColsDisablesFloor:
+    def test_empty_tuple_admits_below_floor_feature(self):
+        """Regression guard for the silent-disable behavior itself."""
+        import numpy as np
+        import pandas as pd
+
+        from survival_common.cox_models import select_feature_columns
+
+        n = 400
+        rng = np.random.default_rng(0)
+        data = pd.DataFrame({
+            "TP53_SNV": (rng.random(n) < 0.30).astype(int),
+            "RARE_SNV": [1] * 4 + [0] * (n - 4),
+            "ALT_mean": rng.normal(size=n),
+        })
+        cols = list(data.columns)
+        kwargs = dict(min_patient_coverage=0.1, restrict_to_labs=None,
+                      always_include=None, min_genomic_prevalence=0.025)
+
+        unscoped, _ = select_feature_columns(
+            data, cols, genomic_feature_cols=[], **kwargs)
+        scoped, _ = select_feature_columns(
+            data, cols, genomic_feature_cols=["TP53_SNV", "RARE_SNV"], **kwargs)
+
+        assert "RARE_SNV" in unscoped, "empty tuple disables the floor"
+        assert "RARE_SNV" not in scoped, "scoped floor must drop the 1% feature"
+        assert "TP53_SNV" in scoped

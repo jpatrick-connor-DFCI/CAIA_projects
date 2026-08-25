@@ -38,6 +38,7 @@ for _path in (REPO_ROOT, PROJECT_DIR, SURVIVAL_DIR, SCRIPT_DIR):
         sys.path.insert(0, str(_path))
 
 import cox_aggregated as ca  # noqa: E402
+from build_genomic_inputs import GENE_VARIANT_RE  # noqa: E402
 from build_prediction_inputs import (  # noqa: E402
     BUILD_MANIFEST_FILENAME,
     aggregated_filename,
@@ -174,9 +175,31 @@ def load_somatic_features(
     manifest = _read_table(manifest_path)
     if "FEATURE" not in manifest.columns:
         raise ValueError(f"Somatic manifest {manifest_path} is missing 'FEATURE'.")
-    features = manifest["FEATURE"].dropna().astype(str).drop_duplicates().tolist()
-    if not features:
+    declared = manifest["FEATURE"].dropna().astype(str).drop_duplicates().tolist()
+    if not declared:
         raise ValueError(f"Somatic manifest {manifest_path} contains no features.")
+
+    # The genomic arm is standardized to SNV-only. The manifest enumerates every
+    # variant class the panel calls, so copy-number and structural features
+    # would otherwise enter this indexed-analysis path unconditionally -- unlike
+    # build_genomic_inputs.py, this builder has no --variant-types gate.
+    features = []
+    dropped = []
+    for feature in declared:
+        match = GENE_VARIANT_RE.match(feature)
+        (features if match and match.group(2) == "SNV" else dropped).append(feature)
+    if not features:
+        raise ValueError(
+            f"Somatic manifest {manifest_path} declares {len(declared)} features "
+            "but none are <GENE>_SNV columns; the SNV-only genomic arm has "
+            "nothing to test."
+        )
+    if dropped:
+        print(
+            f"[snv-only] dropped {len(dropped)} non-SNV somatic features of "
+            f"{len(declared)} declared; kept {len(features)}. "
+            f"First dropped: {dropped[:5]}"
+        )
 
     somatic = _normalize_mrn(_read_table(somatic_path), source=str(somatic_path))
     missing = [column for column in features if column not in somatic.columns]

@@ -23,6 +23,7 @@ from build_somatic_gleason_inputs import (  # noqa: E402
     closest_observation_to_adt,
     latest_available_by_landmark,
     load_biomarker_prs,
+    load_somatic_features,
 )
 
 
@@ -454,3 +455,49 @@ def test_prs_loader_averages_conflicting_sample_rows_within_mrn():
     assert len(prs) == 2
     assert np.isclose(prs.loc[1, score], 0.4)
     assert np.isclose(prs.loc[2, score], -0.1)
+
+
+def _write_somatic_fixture(tmp_path):
+    """Somatic matrix + manifest declaring a mix of variant classes."""
+    manifest_path = tmp_path / "manifest.csv"
+    somatic_path = tmp_path / "somatic.csv"
+    declared = ["TP53_SNV", "RB1_SNV", "PTEN_DEL", "AR_AMP", "TMPRSS2_SV"]
+    pd.DataFrame({"FEATURE": declared}).to_csv(manifest_path, index=False)
+    pd.DataFrame(
+        {
+            "DFCI_MRN": [1, 2],
+            "SAMPLE_COLLECTION_DT": ["2020-01-01", "2020-02-01"],
+            **{feature: [1, 0] for feature in declared},
+        }
+    ).to_csv(somatic_path, index=False)
+    return somatic_path, manifest_path
+
+
+def test_load_somatic_features_keeps_only_snv(tmp_path):
+    somatic_path, manifest_path = _write_somatic_fixture(tmp_path)
+
+    frame, features = load_somatic_features(somatic_path, manifest_path)
+
+    # The genomic arm is SNV-only: copy-number and structural calls declared by
+    # the manifest must not reach the feature matrix.
+    assert features == ["TP53_SNV", "RB1_SNV"]
+    for dropped in ("PTEN_DEL", "AR_AMP", "TMPRSS2_SV"):
+        assert dropped not in frame.columns
+    assert "TP53_SNV" in frame.columns
+
+
+def test_load_somatic_features_errors_when_manifest_has_no_snv(tmp_path):
+    manifest_path = tmp_path / "manifest.csv"
+    somatic_path = tmp_path / "somatic.csv"
+    pd.DataFrame({"FEATURE": ["PTEN_DEL", "AR_AMP"]}).to_csv(manifest_path, index=False)
+    pd.DataFrame(
+        {
+            "DFCI_MRN": [1],
+            "SAMPLE_COLLECTION_DT": ["2020-01-01"],
+            "PTEN_DEL": [1],
+            "AR_AMP": [0],
+        }
+    ).to_csv(somatic_path, index=False)
+
+    with pytest.raises(ValueError, match="none are <GENE>_SNV"):
+        load_somatic_features(somatic_path, manifest_path)
