@@ -865,6 +865,11 @@ UNIVARIATE_TASK_SPECS = [
     ("univariate", "both", "cox_agg_univariate_nobs_adjusted.csv"),
 ]
 
+PSA_SCALE_SUPPLEMENT_DIR = "cox_psa_scale_supplement"
+PSA_SCALE_SUPPLEMENT_FILENAME = "psa_scale_univariate.csv"
+PSA_RAW_LAB_NAME = "PSA_raw"
+PSA_LOG_LAB_NAME = "PSA_log1p"
+
 MULTIVARIATE_TASK_SPECS = [
     ("elastic-net", "both", "cox_agg_multivariable_metrics.csv"),
     ("elastic-net", "baseline", "cox_agg_baseline_metrics.csv"),
@@ -1076,6 +1081,142 @@ def run_univariate(run: dict, dry_run: bool = False):
     for tag, status, elapsed in summary:
         print(f"  {tag} {status:>20s} {elapsed/60:6.1f} min")
     return summary
+
+
+def build_psa_scale_supplement_data(
+    ctx,
+    *,
+    landmark_day: int,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Recompute matched raw- and log1p-PSA summaries from row-level labs.
+
+    Both scales use the same nonnegative PSA measurements and the same
+    pre-landmark window. Recomputing before aggregation is important because
+    mean(log1p(PSA)) and changes on the log scale cannot be recovered by simply
+    transforming the already-aggregated mean/delta columns.
+    """
+    required = {"DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab"}
+    missing = required - set(ctx.pre_treatment_lab_df.columns)
+    if missing:
+        raise ValueError(
+            "PSA scale supplement is missing pre-landmark lab columns: "
+            f"{sorted(missing)}"
+        )
+
+    psa_long = ctx.pre_treatment_lab_df.copy()
+    psa_long["LAB_NAME"] = psa_long["LAB_NAME"].astype(str).str.strip()
+    psa_long["LAB_VALUE"] = pd.to_numeric(psa_long["LAB_VALUE"], errors="coerce")
+    psa_long = psa_long.loc[
+        psa_long["LAB_NAME"].str.casefold().eq("psa")
+        & psa_long["LAB_VALUE"].ge(0)
+    ].copy()
+    if psa_long.empty:
+        raise ValueError(
+            f"No nonnegative PSA observations are available at landmark +{landmark_day}d."
+        )
+
+    raw_matrix = _ca.build_feature_matrix(
+        psa_long,
+        landmark_offset_days=landmark_day,
+        anchor_col=None,
+    )
+    log_long = psa_long.copy()
+    log_long["LAB_VALUE"] = np.log1p(log_long["LAB_VALUE"])
+    log_matrix = _ca.build_feature_matrix(
+        log_long,
+        landmark_offset_days=landmark_day,
+        anchor_col=None,
+    )
+
+    def relabel(matrix: pd.DataFrame, lab_name: str) -> pd.DataFrame:
+        return matrix.rename(
+            columns={
+                column: f"{lab_name}__{_ca.parse_feature_name(column)[1]}"
+                for column in matrix.columns
+            }
+        )
+
+    raw_matrix = relabel(raw_matrix, PSA_RAW_LAB_NAME)
+    log_matrix = relabel(log_matrix, PSA_LOG_LAB_NAME)
+    supplement_features = raw_matrix.join(log_matrix, how="outer")
+    supplement_data = ctx.univariate_data.join(supplement_features, how="left")
+    feature_cols = [
+        column
+        for column in supplement_features.columns
+        if _ca.parse_feature_name(column)[1] != "n_observations"
+    ]
+    return supplement_data, feature_cols
+
+
+def run_psa_scale_supplement(run: dict) -> pd.DataFrame:
+    """Fit matched raw-vs-log1p PSA univariate Cox models as a supplement."""
+    supplement_root = run["output_dir"] / PSA_SCALE_SUPPLEMENT_DIR
+    combined_path = supplement_root / PSA_SCALE_SUPPLEMENT_FILENAME
+    manifest = _ca._load_build_manifest(run["inputs_dir"])
+    min_patient_coverage = float(manifest["min_patient_coverage"])
+
+    for landmark_day in run["landmarks"]:
+        output_dir = supplement_root / f"landmark_{landmark_day}" / "both"
+        output_path = output_dir / PSA_SCALE_SUPPLEMENT_FILENAME
+        if output_path.exists() and not FORCE_RERUN:
+            print(
+                f"[skip] {run['label']} PSA scale supplement landmark_{landmark_day} "
+                f"-> {output_path.relative_to(run['output_dir'])} exists"
+            )
+            continue
+
+        ctx = _ca.prepare_landmark_context(
+            run["inputs_dir"],
+            landmark_day,
+            min_patient_coverage=min_patient_coverage,
+        )
+        supplement_data, feature_cols = build_psa_scale_supplement_data(
+            ctx,
+            landmark_day=landmark_day,
+        )
+        baseline_covariate_cols = tuple(_ca.panel_version_covariate_columns(ctx.merged))
+        associations = _ca.run_univariate_nobs_adjusted_associations(
+            supplement_data,
+            feature_cols=feature_cols,
+            endpoint=run.get("endpoint", ENDPOINT),
+            min_events_per_feature=_ca.DEFAULT_MIN_EVENTS_PER_FEATURE,
+            fallback_penalizer=0.05,
+            baseline_covariate_cols=baseline_covariate_cols,
+        )
+        associations.insert(0, "landmark_days", landmark_day)
+        associations.insert(1, "cohort", run.get("cohort", DEFAULT_COHORT))
+        associations.insert(
+            5,
+            "psa_scale",
+            associations["lab_name"].map(
+                {PSA_RAW_LAB_NAME: "raw", PSA_LOG_LAB_NAME: "log1p"}
+            ),
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        associations.to_csv(output_path, index=False)
+        print(
+            f"[done] {run['label']} PSA scale supplement landmark_{landmark_day} "
+            f"-> {output_path.relative_to(run['output_dir'])}"
+        )
+
+    frames = []
+    for landmark_day in run["landmarks"]:
+        path = (
+            supplement_root
+            / f"landmark_{landmark_day}"
+            / "both"
+            / PSA_SCALE_SUPPLEMENT_FILENAME
+        )
+        if path.exists():
+            frames.append(pd.read_csv(path, low_memory=False))
+    if not frames:
+        raise FileNotFoundError(
+            f"No PSA scale supplement results were produced under {supplement_root}."
+        )
+    combined = pd.concat(frames, ignore_index=True)
+    combined.to_csv(combined_path, index=False)
+    print(f"[done] combined PSA scale supplement -> {combined_path}")
+    return combined
 
 
 def run_somatic_gleason_univariate(run: dict, dry_run: bool = False):
