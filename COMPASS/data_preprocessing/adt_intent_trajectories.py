@@ -589,10 +589,15 @@ STAGE_COLORS = {
 }
 
 
-def _class_order_present(df: pl.DataFrame, col: str = INTENT_COL) -> list[str]:
-    """INTENT_ORDER restricted to classes actually present, order preserved."""
+def _class_order_present(
+    df: pl.DataFrame,
+    col: str = INTENT_COL,
+    order: list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
+    """Requested class order restricted to values actually present."""
     present = set(df[col].unique().to_list())
-    return [c for c in INTENT_ORDER if c in present]
+    requested = list(order) if order is not None else INTENT_ORDER
+    return [c for c in requested if c in present] + sorted(present - set(requested))
 
 
 def stage_distribution_by_intent(labelled: pl.DataFrame) -> pl.DataFrame:
@@ -776,7 +781,10 @@ def plot_met_site_pattern(ax, labelled: pl.DataFrame) -> None:
     ax.set_axisbelow(True)
 
 
-def max_stage_distribution_by_intent(labelled: pl.DataFrame) -> pl.DataFrame:
+def max_stage_distribution_by_intent(
+    labelled: pl.DataFrame,
+    class_col: str = INTENT_COL,
+) -> pl.DataFrame:
     """Within-class max-stage composition on each side of ADT start.
 
     Long form: one row per (side, class, stage). `n_in_class` is the covered
@@ -794,36 +802,41 @@ def max_stage_distribution_by_intent(labelled: pl.DataFrame) -> pl.DataFrame:
         covered = labelled.filter(pl.col(col).is_not_null())
         if covered.height == 0:
             continue
-        counts = covered.group_by([INTENT_COL, col]).agg(pl.len().alias("n_patients"))
-        totals = covered.group_by(INTENT_COL).agg(pl.len().alias("n_in_class"))
+        counts = covered.group_by([class_col, col]).agg(pl.len().alias("n_patients"))
+        totals = covered.group_by(class_col).agg(pl.len().alias("n_in_class"))
         frames.append(
-            counts.join(totals, on=INTENT_COL, how="left")
+            counts.join(totals, on=class_col, how="left")
             .rename({col: "MAX_STAGE"})
             .with_columns(
                 (pl.col("n_patients") / pl.col("n_in_class") * 100).round(1).alias("pct"),
                 pl.lit(side).alias("side"),
             )
-            .select("side", INTENT_COL, "MAX_STAGE", "n_patients", "n_in_class", "pct")
+            .select("side", class_col, "MAX_STAGE", "n_patients", "n_in_class", "pct")
         )
     if not frames:
         return pl.DataFrame()
-    return pl.concat(frames).sort(["side", INTENT_COL, "MAX_STAGE"])
+    return pl.concat(frames).sort(["side", class_col, "MAX_STAGE"])
 
 
-def plot_max_stage_distribution(ax, labelled: pl.DataFrame) -> None:
+def plot_max_stage_distribution(
+    ax,
+    labelled: pl.DataFrame,
+    class_col: str = INTENT_COL,
+    class_order: list[str] | tuple[str, ...] | None = None,
+) -> None:
     """Stacked max-stage composition, before vs after ADT start, per class.
 
     Bars are grouped as (class, side) pairs so the pre/post shift within a
     class is read vertically, side by side.
     """
-    dist = max_stage_distribution_by_intent(labelled)
+    dist = max_stage_distribution_by_intent(labelled, class_col=class_col)
     if dist.height == 0:
         ax.text(0.5, 0.5, "no max-stage coverage", ha="center", va="center",
                 transform=ax.transAxes, color="#888888")
         ax.set_axis_off()
         return
 
-    classes = _class_order_present(dist)
+    classes = _class_order_present(dist, col=class_col, order=class_order)
     sides = [s for s in ("before", "after") if s in set(dist["side"].to_list())]
     # One slot per (class, side); a small gap between classes keeps the pairing
     # visually obvious without a second axis.
@@ -842,7 +855,7 @@ def plot_max_stage_distribution(ax, labelled: pl.DataFrame) -> None:
         heights = []
         for cls, side in keys:
             row = dist.filter(
-                (pl.col(INTENT_COL) == cls)
+                (pl.col(class_col) == cls)
                 & (pl.col("side") == side)
                 & (pl.col("MAX_STAGE") == stage)
             )
@@ -862,8 +875,8 @@ def plot_max_stage_distribution(ax, labelled: pl.DataFrame) -> None:
             bottoms[k] += h
 
     denoms = {
-        (r[INTENT_COL], r["side"]): r["n_in_class"]
-        for r in dist.unique(subset=[INTENT_COL, "side"]).iter_rows(named=True)
+        (r[class_col], r["side"]): r["n_in_class"]
+        for r in dist.unique(subset=[class_col, "side"]).iter_rows(named=True)
     }
     ax.set_xticks(positions)
     ax.set_xticklabels(
@@ -892,7 +905,12 @@ def plot_max_stage_distribution(ax, labelled: pl.DataFrame) -> None:
     ax.set_axisbelow(True)
 
 
-def plot_max_stage_iv_rate(ax, labelled: pl.DataFrame) -> None:
+def plot_max_stage_iv_rate(
+    ax,
+    labelled: pl.DataFrame,
+    class_col: str = INTENT_COL,
+    class_order: list[str] | tuple[str, ...] | None = None,
+) -> None:
     """Stage IV rate before vs after ADT start, per class, with coverage.
 
     The single number the label most needs to be right about: a
@@ -905,7 +923,7 @@ def plot_max_stage_iv_rate(ax, labelled: pl.DataFrame) -> None:
         ax.set_axis_off()
         return
 
-    classes = _class_order_present(labelled)
+    classes = _class_order_present(labelled, col=class_col, order=class_order)
     sides = [
         ("before", "IS_MAX_STAGE_IV_BEFORE", "#4a6fa5"),
         ("after", "IS_MAX_STAGE_IV_AFTER", "#b5651d"),
@@ -919,7 +937,7 @@ def plot_max_stage_iv_rate(ax, labelled: pl.DataFrame) -> None:
         rates, ns = [], []
         for cls in classes:
             covered = labelled.filter(
-                (pl.col(INTENT_COL) == cls) & pl.col(col).is_not_null()
+                (pl.col(class_col) == cls) & pl.col(col).is_not_null()
             )
             ns.append(covered.height)
             rates.append(
@@ -962,7 +980,12 @@ def plot_max_stage_iv_rate(ax, labelled: pl.DataFrame) -> None:
     ax.set_axisbelow(True)
 
 
-def plot_max_stage_panel(labelled: pl.DataFrame, figsize=(10, 4.6)):
+def plot_max_stage_panel(
+    labelled: pl.DataFrame,
+    figsize=(10, 4.6),
+    class_col: str = INTENT_COL,
+    class_order: list[str] | tuple[str, ...] | None = None,
+):
     """Two-panel figure: max-stage mix, stage IV rate.
 
     The upstaged-after-ADT-start bar chart was dropped from this panel;
@@ -973,8 +996,12 @@ def plot_max_stage_panel(labelled: pl.DataFrame, figsize=(10, 4.6)):
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(1, 2, figsize=figsize)
-    plot_max_stage_distribution(axes[0], labelled)
-    plot_max_stage_iv_rate(axes[1], labelled)
+    plot_max_stage_distribution(
+        axes[0], labelled, class_col=class_col, class_order=class_order
+    )
+    plot_max_stage_iv_rate(
+        axes[1], labelled, class_col=class_col, class_order=class_order
+    )
     fig.tight_layout()
     return fig, axes
 

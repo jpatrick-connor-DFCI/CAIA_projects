@@ -375,12 +375,11 @@ COHORT_LANDMARKS <- list(
 # compass_pipeline.make_endpoint_runs(). The suffix must match the
 # `output_suffix` that make_runs() appends to BOTH prediction_inputs_* and
 # local_runs_*: "" for platinum, "_nepc" for NEPC.
-SUPPORTED_ENDPOINTS <- c("platinum", "nepc", "avpc", "avpc_nepc")
+SUPPORTED_ENDPOINTS <- c("platinum", "nepc", "avpc")
 ENDPOINT_SUFFIXES <- c(
   platinum = "",
   nepc = "_nepc",
-  avpc = "_avpc",
-  avpc_nepc = "_avpc_nepc"
+  avpc = "_avpc"
 )
 # Figure 1/2 are classifier- and platinum-cohort figures (CONSORT, LLM
 # validation, platinum enrichment); their subject is the platinum MRN list
@@ -459,7 +458,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   #   .../CAIA/COMPASS/ADT/
   # Every endpoint nests one level deeper under its cohort arm, so panels that
   # share a plot stem cannot overwrite each other:
-  #   .../CAIA/COMPASS/ADT/{platinum,nepc,avpc,avpc_nepc}/
+  #   .../CAIA/COMPASS/ADT/{platinum,nepc,avpc}/
   # Platinum is nested like the rest rather than keeping the historical
   # un-suffixed path: ENDPOINT_SUFFIX stays "" for platinum because it still
   # names the un-suffixed *data* trees (local_runs_adt, prediction_inputs_adt)

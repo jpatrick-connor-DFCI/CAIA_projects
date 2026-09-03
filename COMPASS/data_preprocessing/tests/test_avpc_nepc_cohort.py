@@ -3,7 +3,7 @@ the cohort-level join/demotion/TT_AVPC_NEPC derivation.
 
 Companion to test_nepc_dx_labels.py. Covers the same load_*_labels contract
 (MRN normalization, undated-positive demotion, non-fatal missing-file path)
-for load_avpc_nepc_labels, plus what's specific to this endpoint: the extra
+for load_avpc_nepc_labels, plus what's specific to this audit label: the extra
 audit/provenance component columns (AVPC, AVPC_DATE, NEPC_TIMELINE,
 NEPC_TIMELINE_DATE, AVPC_N_CRITERIA), the join-miss -> auto_negative_no_evidence
 label_source override that build_survival_cohort applies (this is NOT set by

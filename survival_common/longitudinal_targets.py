@@ -6,7 +6,7 @@ without torch or the external SurvLatent repo. Both models import
 ``LONGITUDINAL_CONFIGS`` / ``resolve_config`` / ``patient_targets`` from here
 and take identical ``--config`` values.
 
-Eight configs, deliberately no "death-alone" config. Each names a primary
+Six configs, deliberately no "death-alone" config. Each names a primary
 cause of interest, optionally paired with death as a competing cause:
 
   platinum            -- n_events=1. Death is never read; a patient who dies
@@ -32,16 +32,9 @@ cause of interest, optionally paired with death as a competing cause:
                          criteria, independent of any NEPC feature). Same
                          cause-specific censoring.
   avpc_competing      -- the competing analogue: label 1 = AVPC, 2 = death.
-  avpc_nepc           -- the platinum config's analogue for the broader
-                         AVPC_NEPC criteria-timeline endpoint (>=3 Aparicio
-                         criteria or any NEPC feature, NEPC-precedence timing;
-                         the union of nepc and avpc above). Same cause-specific
-                         censoring.
-  avpc_nepc_competing -- the competing analogue: label 1 = AVPC_NEPC, 2 = death.
-
-The nepc/avpc/avpc_nepc configs each read a cohort built with their own
-incident gate (``endpoint=nepc`` / ``endpoint=avpc`` / ``endpoint=avpc_nepc``),
-so none is the same patient set as the platinum configs, nor as each other --
+The nepc/avpc configs each read a cohort built with their own incident gate
+(``endpoint=nepc`` / ``endpoint=avpc``), so neither is the same patient set as
+the platinum configs, nor as each other --
 their metrics are not a like-for-like comparison. See the README's "Arms and
 endpoints" section.
 """
@@ -62,8 +55,6 @@ CONFIG_ENDPOINTS: dict[str, str] = {
     "nepc_competing": "nepc",
     "avpc": "avpc",
     "avpc_competing": "avpc",
-    "avpc_nepc": "avpc_nepc",
-    "avpc_nepc_competing": "avpc_nepc",
 }
 
 LONGITUDINAL_CONFIGS: dict[str, dict[str, list[str]]] = {
@@ -97,16 +88,6 @@ LONGITUDINAL_CONFIGS: dict[str, dict[str, list[str]]] = {
         "time_cols": ["t_avpc", "t_death"],
         "event_names": ["avpc", "death"],
     },
-    "avpc_nepc": {
-        "event_cols": ["AVPC_NEPC"],
-        "time_cols": ["t_avpc_nepc"],
-        "event_names": ["avpc_nepc"],
-    },
-    "avpc_nepc_competing": {
-        "event_cols": ["AVPC_NEPC", "DEATH"],
-        "time_cols": ["t_avpc_nepc", "t_death"],
-        "event_names": ["avpc_nepc", "death"],
-    },
 }
 # Fixed cause ordering: a future reorder of any competing config would
 # silently swap which label (1 vs 2) every downstream risk column means. The
@@ -114,7 +95,6 @@ LONGITUDINAL_CONFIGS: dict[str, dict[str, list[str]]] = {
 assert LONGITUDINAL_CONFIGS["competing"]["event_cols"] == ["PLATINUM", "DEATH"]
 assert LONGITUDINAL_CONFIGS["nepc_competing"]["event_cols"] == ["NEPC", "DEATH"]
 assert LONGITUDINAL_CONFIGS["avpc_competing"]["event_cols"] == ["AVPC", "DEATH"]
-assert LONGITUDINAL_CONFIGS["avpc_nepc_competing"]["event_cols"] == ["AVPC_NEPC", "DEATH"]
 # Every config must declare the horizon grid it evaluates on.
 assert set(CONFIG_ENDPOINTS) == set(LONGITUDINAL_CONFIGS)
 

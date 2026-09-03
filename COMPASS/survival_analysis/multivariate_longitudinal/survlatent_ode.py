@@ -75,14 +75,6 @@ EVENT_CONFIGS = {
         "event_col": ["AVPC", "DEATH"],
         "time_to_event_col": ["t_avpc", "t_death"],
     },
-    "avpc_nepc": {
-        "event_col": "AVPC_NEPC",
-        "time_to_event_col": "t_avpc_nepc",
-    },
-    "avpc_nepc_competing": {
-        "event_col": ["AVPC_NEPC", "DEATH"],
-        "time_to_event_col": ["t_avpc_nepc", "t_death"],
-    },
 }
 assert set(EVENT_CONFIGS) == set(LONGITUDINAL_CONFIGS), (
     "EVENT_CONFIGS must stay in lockstep with survival_common.longitudinal_targets."

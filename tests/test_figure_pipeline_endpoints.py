@@ -81,16 +81,17 @@ def test_endpoint_suffixes_match_make_runs():
     body = block.group(1)
     assert re.search(r'platinum\s*=\s*""', body), "platinum suffix must be empty"
     assert re.search(r'nepc\s*=\s*"_nepc"', body), "nepc suffix must be _nepc"
-    assert re.search(r'avpc_nepc\s*=\s*"_avpc_nepc"', body), "avpc_nepc suffix must be _avpc_nepc"
+    assert re.search(r'avpc\s*=\s*"_avpc"', body), "avpc suffix must be _avpc"
 
 
-def test_supported_endpoints_includes_avpc_nepc():
-    """SUPPORTED_ENDPOINTS must list avpc_nepc alongside platinum/nepc."""
+def test_supported_endpoints_excludes_retired_joint_endpoint():
+    """The AVPC/NEPC union is audit metadata, not a figure endpoint."""
     source = _pipeline_source()
     block = re.search(r"SUPPORTED_ENDPOINTS <- c\((.*?)\)", source, re.S)
     assert block, "SUPPORTED_ENDPOINTS not found"
     body = block.group(1)
-    assert '"avpc_nepc"' in body, "avpc_nepc must be a supported endpoint"
+    assert '"avpc_nepc"' not in body
+    assert all(f'"{endpoint}"' in body for endpoint in ("platinum", "nepc", "avpc"))
 
 
 def test_endpoint_filter_is_not_data_masked():
@@ -113,7 +114,7 @@ def test_endpoint_filter_is_not_data_masked():
 
 
 @pytest.mark.parametrize(
-    ("endpoint", "expected_auc"), [("platinum", 0.71), ("nepc", 0.64), ("avpc_nepc", 0.58)]
+    ("endpoint", "expected_auc"), [("platinum", 0.71), ("nepc", 0.64), ("avpc", 0.58)]
 )
 def test_reads_the_requested_endpoints_row(tmp_path, endpoint, expected_auc):
     """A metrics CSV holding all three endpoints must yield the requested one."""
@@ -124,7 +125,7 @@ def test_reads_the_requested_endpoints_row(tmp_path, endpoint, expected_auc):
 
         path <- file.path(tempdir(), "metrics.csv")
         write_csv(tibble(
-          endpoint = c("platinum", "nepc", "avpc_nepc"),
+          endpoint = c("platinum", "nepc", "avpc"),
           test_mean_auc_t = c(0.71, 0.64, 0.58),
           test_c_index = c(0.69, 0.62, 0.57),
           test_integrated_brier = c(0.15, 0.19, 0.21)
@@ -216,7 +217,7 @@ def test_figure_roots_do_not_collide():
 def test_results_trees_are_endpoint_suffixed():
     """BASE and INPUTS_DIR must both carry the endpoint suffix.
 
-    make_runs suffixes both trees, because the NEPC and AVPC_NEPC cohorts are
+    make_runs suffixes both trees, because the NEPC and AVPC cohorts are
     each gated on their own t_* > 0 incident condition and are therefore
     different patient sets from platinum (and from each other).
     """
@@ -228,14 +229,14 @@ def test_results_trees_are_endpoint_suffixed():
 
 
 def test_every_supported_endpoint_nests_uniformly():
-    """avpc and avpc_nepc take the same nesting path as nepc and platinum.
+    """AVPC takes the same nesting path as NEPC and platinum.
 
     The FIG_ROOT expression is generic over ENDPOINT, so no endpoint-specific
     branch should exist (and none is needed) for any supported endpoint.
     """
     source = _pipeline_source()
     assert "FIG_ROOT <- file.path(fig_root, toupper(COHORT), ENDPOINT)" in source
-    for endpoint in ("platinum", "nepc", "avpc", "avpc_nepc"):
+    for endpoint in ("platinum", "nepc", "avpc"):
         assert not re.search(
             rf'FIG_ROOT.*identical\(ENDPOINT, "{endpoint}"\)', source
         ), f"{endpoint} must not be special-cased in the figure root"

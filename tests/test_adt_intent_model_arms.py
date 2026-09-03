@@ -12,20 +12,19 @@ def test_cohort_endpoint_runs_cross_every_cohort(monkeypatch, tmp_path):
 
     runs = cp.make_endpoint_runs(
         ["adt"],
-        endpoints=("platinum", "nepc", "avpc", "avpc_nepc"),
+        endpoints=("platinum", "nepc", "avpc"),
         cohorts=("all", "metastatic", "localized"),
     )
 
-    # Cohort and endpoint are orthogonal axes: every cohort runs every
-    # endpoint, including the composite avpc_nepc that the retired
-    # ADT-intent factory refused.
-    assert len(runs) == 12
+    # Cohort and endpoint are orthogonal axes: every cohort runs every modeled
+    # endpoint.
+    assert len(runs) == 9
     assert {(r["cohort"], r["endpoint"]) for r in runs} == {
         (cohort, endpoint)
         for cohort in ("all", "metastatic", "localized")
-        for endpoint in ("platinum", "nepc", "avpc", "avpc_nepc")
+        for endpoint in ("platinum", "nepc", "avpc")
     }
-    assert len({cp.run_key(r) for r in runs}) == 12
+    assert len({cp.run_key(r) for r in runs}) == 9
 
 
 def test_cohort_runs_keep_the_established_path_convention(monkeypatch, tmp_path):
@@ -33,7 +32,7 @@ def test_cohort_runs_keep_the_established_path_convention(monkeypatch, tmp_path)
 
     runs = cp.make_endpoint_runs(
         ["adt"],
-        endpoints=("platinum", "nepc", "avpc", "avpc_nepc"),
+        endpoints=("platinum", "nepc", "avpc"),
         cohorts=("all", "metastatic", "localized"),
     )
     by_key = {(r["cohort"], r["endpoint"]): r for r in runs}
@@ -71,7 +70,7 @@ def test_stage2_runs_collapse_to_one_run_per_anchor(monkeypatch, tmp_path):
 
     runs = cp.make_endpoint_runs(
         ["adt"],
-        endpoints=("platinum", "nepc", "avpc", "avpc_nepc"),
+        endpoints=("platinum", "nepc", "avpc"),
         cohorts=("all", "metastatic", "localized"),
     )
 
@@ -142,14 +141,12 @@ def test_build_adt_intent_mrn_lists_and_endpoint_counts(monkeypatch, tmp_path):
     assert metastatic["ADT_INTENT"].to_list() == ["METASTATIC", "METASTATIC"]
 
     counts = pl.read_csv(outputs["counts"])
-    # 2 strata x 4 endpoints: the preliminary count table now covers the
-    # composite avpc_nepc endpoint alongside the three original ones.
-    assert counts.height == 8
+    # 2 strata x 3 modeled endpoints.
+    assert counts.height == 6
     assert set(counts["endpoint"].to_list()) == {
         "platinum",
         "nepc",
         "avpc",
-        "avpc_nepc",
     }
     localized_platinum = counts.filter(
         (pl.col("stratum") == "localized") & (pl.col("endpoint") == "platinum")

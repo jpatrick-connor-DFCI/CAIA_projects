@@ -21,6 +21,8 @@ per-patient label takes it from the return value rather than from disk.
 
   stage_metburden.png            stage mix, burden distribution, site pattern
   max_stage.png                  max-stage mix, stage IV rate
+  max_stage_llm.png              same max-stage panel, grouped by the LLM
+                                 primary prostate-subtype label
   km_death.png                   overall survival, all ADT-exposed
   km_platinum.png / km_nepc.png / km_avpc.png
                                  cohort-only endpoints; need `longitudinal`
@@ -94,8 +96,86 @@ DEFAULT_PROFILE_DATA_PATH = os.environ.get(
 DEFAULT_STAGE_NOTE_LEVEL_PATH = (
     Path(DEFAULT_PROFILE_DATA_PATH) / "CANCER_ANNOTATIONS" / "CANCER_STAGE_NOTE_LEVEL.parquet"
 )
+DEFAULT_LLM_LABELS_PATH = Path(
+    os.environ.get(
+        "LLM_NEPC_CLASSIFIER_LABELS_PATH",
+        "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_NEPC_labels/"
+        "LLM_NEPC_classifier_labels.tsv",
+    )
+)
+LLM_LABEL_COL = "LLM_PRIMARY_LABEL"
+LLM_LABEL_ORDER = ("conventional", "biomarker", "avpc", "nepc")
 
 FIGURE_DPI = 200
+
+
+def load_llm_primary_labels(path: str | Path) -> pl.DataFrame:
+    """Load and normalize the classifier's mutually exclusive primary label.
+
+    This mirrors the normalization used by the R figure pipeline: a raw
+    ``biomarker`` label is retained only when the reported biomarker text names
+    BRCA1/2, PTEN, TP53, or RB1; otherwise NEPC and then AVPC take precedence,
+    with conventional as the final fallback.
+    """
+    path = Path(path)
+    labels = pl.read_csv(path, separator="\t", infer_schema_length=0)
+    required = {ID_COL, "primary_label", "has_nepc", "has_avpc"}
+    missing = required - set(labels.columns)
+    if missing:
+        raise ValueError(f"{path} is missing required columns: {sorted(missing)}")
+
+    biomarker_candidates = (
+        "biomarker_genes", "reported_biomarkers", "biomarkers_reported",
+        "reported_biomarker", "biomarkers", "biomarker",
+    )
+    by_lower = {col.lower(): col for col in labels.columns}
+    biomarker_col = next(
+        (by_lower[name] for name in biomarker_candidates if name in by_lower), None
+    )
+    raw = pl.col("primary_label").cast(pl.Utf8).str.strip_chars().str.to_lowercase()
+    labels = labels.with_columns(
+        pl.col(ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False),
+        pl.when(raw.is_in(["", "nan", "na", "null", "none"]))
+        .then(None).otherwise(raw).alias(LLM_LABEL_COL),
+        pl.col("has_nepc").cast(pl.Float64, strict=False).alias("_has_nepc"),
+        pl.col("has_avpc").cast(pl.Float64, strict=False).alias("_has_avpc"),
+    )
+
+    has_raw_biomarker = labels.filter(pl.col(LLM_LABEL_COL) == "biomarker").height > 0
+    if biomarker_col is None and has_raw_biomarker:
+        raise ValueError(
+            f"{path} contains primary_label='biomarker' but has no reported-biomarker column"
+        )
+    qualifying = (
+        pl.col(biomarker_col)
+        .cast(pl.Utf8, strict=False)
+        .str.to_uppercase()
+        .str.contains(r"(^|[^A-Z0-9])(BRCA1|BRCA2|PTEN|TP53|RB1)([^A-Z0-9]|$)")
+        .fill_null(False)
+        if biomarker_col is not None else pl.lit(False)
+    )
+    needs_fallback = (pl.col(LLM_LABEL_COL) == "biomarker") & ~qualifying
+    labels = labels.with_columns(
+        pl.when(needs_fallback & (pl.col("_has_nepc") == 1))
+        .then(pl.lit("nepc"))
+        .when(needs_fallback & (pl.col("_has_avpc") == 1))
+        .then(pl.lit("avpc"))
+        .when(needs_fallback)
+        .then(pl.lit("conventional"))
+        .otherwise(pl.col(LLM_LABEL_COL))
+        .alias(LLM_LABEL_COL)
+    ).filter(
+        pl.col(ID_COL).is_not_null() & pl.col(LLM_LABEL_COL).is_in(LLM_LABEL_ORDER)
+    )
+
+    conflicts = (
+        labels.group_by(ID_COL)
+        .agg(pl.col(LLM_LABEL_COL).n_unique().alias("n_labels"))
+        .filter(pl.col("n_labels") > 1)
+    )
+    if conflicts.height:
+        raise ValueError(f"{path} has conflicting primary labels for {conflicts.height} MRNs")
+    return labels.select(ID_COL, LLM_LABEL_COL).unique(subset=[ID_COL])
 
 
 def resolve_out_dir(fig_root: str | Path | None = None) -> Path:
@@ -111,6 +191,7 @@ def build_labels(
     follow_up: pl.DataFrame | None = None,
     icds: pl.DataFrame | None = None,
     stage_note_level_path: str | Path | None = None,
+    llm_labels_path: str | Path | None = None,
     gap_threshold_days: int = GAP_THRESHOLD_DAYS,
 ) -> pl.DataFrame:
     """Classify, then join on every cross-reference whose input is present.
@@ -153,6 +234,11 @@ def build_labels(
         )
         labelled = labelled.join(
             load_stage_max_around_adt(path, labelled), on=ID_COL, how="left"
+        )
+
+    if llm_labels_path is not None and Path(llm_labels_path).exists():
+        labelled = labelled.join(
+            load_llm_primary_labels(llm_labels_path), on=ID_COL, how="left"
         )
 
     return labelled
@@ -322,6 +408,20 @@ def write_figures(labelled: pl.DataFrame, out_dir: Path) -> list:
         fig.savefig(path, dpi=FIGURE_DPI, bbox_inches="tight")
         plt.close(fig)
         log.append(f"  wrote {name}.png")
+    if LLM_LABEL_COL in labelled.columns:
+        llm_labelled = labelled.filter(pl.col(LLM_LABEL_COL).is_not_null())
+        if llm_labelled.height:
+            fig, _ = plot_max_stage_panel(
+                llm_labelled,
+                figsize=(12, 4.6),
+                class_col=LLM_LABEL_COL,
+                class_order=LLM_LABEL_ORDER,
+            )
+            fig.suptitle("Max stage around ADT start, by LLM primary label", y=1.03)
+            path = out_dir / "max_stage_llm.png"
+            fig.savefig(path, dpi=FIGURE_DPI, bbox_inches="tight")
+            plt.close(fig)
+            log.append("  wrote max_stage_llm.png")
     return log
 
 
@@ -330,6 +430,7 @@ def run(
     follow_up: pl.DataFrame | None = None,
     icds: pl.DataFrame | None = None,
     stage_note_level_path: str | Path | None = DEFAULT_STAGE_NOTE_LEVEL_PATH,
+    llm_labels_path: str | Path | None = DEFAULT_LLM_LABELS_PATH,
     longitudinal: pl.DataFrame | None = None,
     fig_root: str | Path | None = None,
     gap_threshold_days: int = GAP_THRESHOLD_DAYS,
@@ -347,6 +448,7 @@ def run(
         follow_up=follow_up,
         icds=icds,
         stage_note_level_path=stage_note_level_path,
+        llm_labels_path=llm_labels_path,
         gap_threshold_days=gap_threshold_days,
     )
     log = write_figures(labelled, out_dir)
@@ -375,6 +477,11 @@ def main() -> None:
     parser.add_argument("--icd-path", default=None)
     parser.add_argument(
         "--stage-note-level-path", default=str(DEFAULT_STAGE_NOTE_LEVEL_PATH)
+    )
+    parser.add_argument(
+        "--llm-labels-path", default=str(DEFAULT_LLM_LABELS_PATH),
+        help=("LLM_NEPC_classifier_labels.tsv; when present, writes the "
+              "alternate max_stage_llm.png panel"),
     )
     parser.add_argument(
         "--longitudinal-path", default=None,
@@ -417,6 +524,7 @@ def main() -> None:
         follow_up=follow_up,
         icds=icds,
         stage_note_level_path=args.stage_note_level_path,
+        llm_labels_path=args.llm_labels_path,
         longitudinal=longitudinal,
         fig_root=args.fig_root,
         gap_threshold_days=args.gap_threshold_days,

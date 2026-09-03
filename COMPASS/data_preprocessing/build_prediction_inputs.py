@@ -85,7 +85,6 @@ LONGITUDINAL_TIME_TO_EVENT_COLS = ["t_platinum", "t_death"]
 LONGITUDINAL_OPTIONAL_EVENT_COLS = {
     "NEPC": "t_nepc",
     "AVPC": "t_avpc",
-    "AVPC_NEPC": "t_avpc_nepc",
 }
 
 

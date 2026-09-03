@@ -19,7 +19,6 @@ platinum included, so no endpoint's panels can overwrite another's:
 
 `FIG_ROOT/ADT/nepc/<figure>/adt_<plot-stem>.png`
 `FIG_ROOT/ADT/avpc/<figure>/adt_<plot-stem>.png`
-`FIG_ROOT/ADT/avpc_nepc/<figure>/adt_<plot-stem>.png`
 `FIG_ROOT/ADT/platinum/<figure>/adt_<plot-stem>.png`
 
 Note that platinum figures moved out of the old un-suffixed `FIG_ROOT/ADT/`
@@ -78,7 +77,7 @@ FIG_ROOT <- "/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS"
 
 # Endpoints to render. Each needs its own 01/02/03 build; see
 # compass_pipeline.make_endpoint_runs().
-ENDPOINTS <- c("nepc", "avpc", "avpc_nepc", "platinum")
+ENDPOINTS <- c("nepc", "avpc", "platinum")
 
 # Generate lab-specific panels only for PSA and Testosterone.
 # Non-androgen labs remain available to models and aggregate feature plots.
@@ -118,7 +117,7 @@ message("endpoints:   ", paste(ENDPOINTS, collapse = ", "))
 
 Runs the R figure-generation pipeline for ADT by default, once per endpoint.
 Each endpoint's outputs go to `FIG_ROOT/ADT/<endpoint>/`, i.e. `ADT/nepc/`,
-`ADT/avpc/`, `ADT/avpc_nepc/`, and `ADT/platinum/`.
+`ADT/avpc/`, and `ADT/platinum/`.
 Set `COHORTS <- c("arpi", "adt")` to opt into both arms, or narrow `ENDPOINTS`
 to render a single endpoint.
 

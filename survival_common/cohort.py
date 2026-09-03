@@ -35,21 +35,19 @@ MIN_DELTA_OBS = 2
 OPTIONAL_LONGITUDINAL_CAUSES = {
     "NEPC": "t_nepc",
     "AVPC": "t_avpc",
-    "AVPC_NEPC": "t_avpc_nepc",
 }
 
 # Optional per-patient endpoints make_outcome_df derives generically, as
 # {endpoint_key: (event_col, duration_col, date_col)}. Each is independently
 # present or absent in the input (an upstream cohort can carry NEPC, AVPC,
-# AVPC_NEPC, any combination, or none) -- presence is detected per-key, not
+# either, or neither) -- presence is detected per-key, not
 # via a single shared flag. `platinum` is not in this registry: it has its
 # own bespoke, always-present derivation path feeding t_either/EITHER below.
-# `nepc` and `avpc` are the two components of the `avpc_nepc` union endpoint,
-# all three sourced from the same AVPC/NEPC criteria-timeline labels file.
+# `nepc` and `avpc` are independently modeled components sourced from the same
+# AVPC/NEPC criteria-timeline labels file.
 OPTIONAL_ENDPOINT_SPECS = {
     "nepc": ("NEPC", "t_nepc", "NEPC_DATE"),
     "avpc": ("AVPC", "t_avpc", "AVPC_DATE"),
-    "avpc_nepc": ("AVPC_NEPC", "t_avpc_nepc", "AVPC_NEPC_DATE"),
 }
 
 
@@ -182,8 +180,8 @@ def make_outcome_df(
         "NEPC_DATE_SOURCE",
         "NEPC_DATE_PRECISION",
         "NEPC_LABEL_SOURCE",
-        # AVPC_NEPC endpoint. Absent unless the cohort was built with the LLM
-        # annotations mounted; every use below is guarded on presence.
+        # Joint AVPC_NEPC audit fields. The joint label is not a model endpoint,
+        # but keeping it here prevents cohort metadata from becoming features.
         "AVPC_NEPC_DATE",
         "AVPC_NEPC",
         "t_avpc_nepc",
@@ -275,7 +273,7 @@ def make_outcome_df(
         pat["t_platinum"].fillna(pat["t_last_contact"]),
     )
 
-    # Optional endpoints (NEPC, AVPC_NEPC, ...), each derived exactly like
+    # Optional endpoints (NEPC and AVPC), each derived exactly like
     # platinum but only when the upstream cohort carried it. ``has_optional``
     # gates every endpoint-touching block below per key, so an input missing
     # one or both optional endpoints flows through unchanged for the rest.
@@ -395,7 +393,7 @@ def make_outcome_df(
         conditions["t_either notna"] = pat["t_either"].notna()
         conditions["t_either > 0"] = pat["t_either"].gt(0)
     else:
-        # Incident semantics for optional endpoints (NEPC, AVPC_NEPC, ...):
+        # Incident semantics for optional endpoints (NEPC and AVPC):
         # only that endpoint's own timing joins the endpoint-specific gate. In
         # particular, pre-anchor platinum exposure is irrelevant here.
         _, duration_col, _ = OPTIONAL_ENDPOINT_SPECS[endpoint]

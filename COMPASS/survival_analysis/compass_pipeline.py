@@ -471,9 +471,8 @@ def build_adt_intent_mrn_lists(
     joined = labels.select("DFCI_MRN", "ADT_INTENT").join(
         cohort, on="DFCI_MRN", how="inner"
     )
-    # All four endpoints: the strata are ordinary cohorts in the main cross now
-    # and run avpc_nepc too, which is the sparsest combination -- these counts
-    # are what surface an event-starved cell before fitting rather than after.
+    # Every modeled endpoint: these counts surface an event-starved cell before
+    # fitting rather than after.
     count_rows = []
     for key, spec in ADT_INTENT_MODEL_STRATA.items():
         stratum = joined.filter(pl.col("ADT_INTENT") == spec["intent"])
@@ -887,7 +886,6 @@ _LONGITUDINAL_CONFIGS_BY_ENDPOINT = {
     "platinum": ("platinum", "competing"),
     "nepc": ("nepc", "nepc_competing"),
     "avpc": ("avpc", "avpc_competing"),
-    "avpc_nepc": ("avpc_nepc", "avpc_nepc_competing"),
 }
 
 # SurvLatent ODE needs the bundled external checkout and its own conda env

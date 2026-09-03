@@ -1,5 +1,5 @@
 ---
-title: "COMPASS endpoint comparison (platinum / NEPC / AVPC / AVPC-NEPC)"
+title: "COMPASS endpoint comparison (platinum / NEPC / AVPC)"
 output:
   html_document:
     toc: true
@@ -8,14 +8,14 @@ output:
 ---
 
 Cross-endpoint comparison for the ADT anchor. Where `05_figures.Rmd` renders
-one endpoint's figures at a time, this document puts all four side by side:
+one endpoint's figures at a time, this document puts all three side by side:
 event counts, event-positive overlap, pre-anchor events, time to event,
 univariate significance overlap, the PSA/Testosterone log-HR panel, and
 held-out prediction accuracy per landmark.
 
 **Read-only.** It refits nothing and reads the artifacts written by
 `01_preprocessing.ipynb`, `02_univariate.ipynb`, and `03_multivariate.ipynb`
-run with `ENDPOINTS = ("platinum", "nepc", "avpc", "avpc_nepc")`. Missing
+run with `ENDPOINTS = ("platinum", "nepc", "avpc")`. Missing
 artifacts are reported in the closing section rather than aborting the knit,
 so a partially complete run still renders every section it can.
 
@@ -29,16 +29,14 @@ Any metric difference across endpoints therefore confounds *event* with
 *cohort*.
 
 **Sections 2-4 read the Stage 1 cohort, not the per-endpoint trees.** Stage 1
-carries all four endpoints' event/duration columns for one common patient set,
+carries all three modeled endpoints' event/duration columns for one common patient set,
 before any endpoint-specific gating. That is the only place where the overlap
 and pre-anchor questions are answerable: a Venn built from the gated trees
 cannot see a pre-anchor event, because the gate already removed it.
 
-**NEPC, AVPC and AVPC_NEPC are nested by construction.** `AVPC_NEPC` is
-"first of AVPC (>=3 Aparicio criteria) or any NEPC criterion", so its
-event set is close to the union of the other two and its overlap statistics
-are definitionally high, not empirically interesting. The pairs worth reading
-are platinum vs each of the three.
+**NEPC and AVPC come from the same criteria timeline but are modeled
+separately.** The former captures any NEPC feature; the latter captures the
+Aparicio-criteria endpoint. Joint AVPC/NEPC fields are audit metadata only.
 
 ## Setup
 
@@ -82,9 +80,7 @@ ENDPOINT_SPECS <- list(
   nepc       = list(event_col = "NEPC",       duration_col = "t_nepc",
                     stage1_duration_col = "TT_NEPC",      label = "NEPC"),
   avpc       = list(event_col = "AVPC",       duration_col = "t_avpc",
-                    stage1_duration_col = "TT_AVPC",      label = "AVPC"),
-  avpc_nepc  = list(event_col = "AVPC_NEPC",  duration_col = "t_avpc_nepc",
-                    stage1_duration_col = "TT_AVPC_NEPC", label = "AVPC/NEPC")
+                    stage1_duration_col = "TT_AVPC",      label = "AVPC")
 )
 ENDPOINTS <- names(ENDPOINT_SPECS)
 
@@ -100,11 +96,10 @@ ENDPOINT_LABELS <- vapply(ENDPOINT_SPECS, `[[`, character(1), "label")
 ENDPOINT_COLORS <- c(
   platinum  = "#2a78d6",
   nepc      = "#eb6834",
-  avpc      = "#22a884",
-  avpc_nepc = "#7b52ab"
+  avpc      = "#22a884"
 )
 
-# Stage 1 cohort: all four endpoints' columns on one common patient set,
+# Stage 1 cohort: all three modeled endpoints' columns on one common patient set,
 # before any per-endpoint landmark/validity gating.
 COHORT_PATH <- file.path(NEPC_PROJ_PATH,
                          sprintf("prostate_%s_survival_cohort_%s.csv", ARM, ARM))
@@ -900,7 +895,7 @@ if (length(MISSING) > 0) {
   cat(sprintf("%d artifact(s) were not found:\n\n", length(unique(MISSING))))
   for (item in unique(MISSING)) cat("  ", item, "\n", sep = "")
   cat("\nRun 01/02/03 for the corresponding endpoint with",
-      "ENDPOINTS = (\"platinum\", \"nepc\", \"avpc\", \"avpc_nepc\").\n")
+      "ENDPOINTS = (\"platinum\", \"nepc\", \"avpc\").\n")
 } else {
   cat("All expected artifacts were found.\n")
 }

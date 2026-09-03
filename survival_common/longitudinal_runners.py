@@ -84,10 +84,9 @@ def add_common_longitudinal_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "Cause of interest, optionally with death as a competing cause: "
             "platinum / competing (platinum+death), nepc / nepc_competing "
-            "(nepc+death), avpc / avpc_competing (avpc+death), or avpc_nepc / "
-            "avpc_nepc_competing (avpc_nepc+death). The cause-only configs "
+            "(nepc+death), or avpc / avpc_competing (avpc+death). The cause-only configs "
             "censor at death and are the ones comparable to Cox/XGBoost for the "
-            "same endpoint. The nepc/avpc/avpc_nepc configs need inputs built "
+            "same endpoint. The nepc/avpc configs need inputs built "
             "with the matching --endpoint."
         ),
     )

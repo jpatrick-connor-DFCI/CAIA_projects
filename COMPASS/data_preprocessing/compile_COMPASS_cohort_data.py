@@ -124,7 +124,7 @@ NEPC_DX_LABELS_PATH = os.path.join(
 #   has_nepc_timeline/nepc_timeline_date -> "nepc" endpoint (NEPC-only)
 #   has_avpc/avpc_date                   -> "avpc" endpoint (AVPC-only, >=3
 #                                            Aparicio criteria)
-#   has_avpc_nepc/avpc_nepc_date         -> "avpc_nepc" endpoint (the union)
+#   has_avpc_nepc/avpc_nepc_date         -> joint audit fields (not an endpoint)
 # All three endpoints read this same file by default.
 AVPC_NEPC_LABELS_PATH = os.path.join(
     LLM_ANNOTATIONS_PATH, 'LLM_avpc_nepc_timeline/avpc_nepc_labels.parquet'
@@ -690,7 +690,7 @@ def load_nepc_dx_labels(path) -> pl.DataFrame:
 
     Written by LLM_clinical_annotations tasks/longitudinal_NEPC/
     build_avpc_nepc_labels.py as one row per patient (the same file
-    --avpc-nepc-labels reads for the broader "avpc_nepc" union endpoint). Only
+    --avpc-nepc-labels reads for the broader joint audit label). Only
     the NEPC-component columns are kept here -- this is the NEPC-only timeline
     signal, not the AVPC-or-NEPC union:
 
@@ -860,7 +860,7 @@ def load_avpc_nepc_labels(path) -> pl.DataFrame:
         print(
             f"[avpc_nepc] labels not found at {path}; emitting null AVPC_NEPC "
             "columns. The platinum and nepc endpoints are unaffected; the "
-            "avpc_nepc endpoint cannot be modelled from this cohort."
+            "joint AVPC_NEPC audit fields will be unavailable."
         )
         return empty
 
@@ -1440,8 +1440,8 @@ def main():
         default=AVPC_NEPC_LABELS_PATH,
         help="Broader per-patient AVPC/NEPC criteria-timeline labels "
              "(avpc_nepc_labels.parquet from LLM_clinical_annotations "
-             "tasks/longitudinal_NEPC), supplying: AVPC_NEPC/AVPC_NEPC_DATE "
-             "for the 'avpc_nepc' endpoint (the union of AVPC and NEPC, with "
+             "tasks/longitudinal_NEPC), supplying AVPC_NEPC/AVPC_NEPC_DATE "
+             "as joint audit fields (the union of AVPC and NEPC, with "
              "NEPC-precedence timing), and AVPC/AVPC_DATE for the 'avpc' "
              "endpoint (the timeline's AVPC-only component, "
              "has_avpc/avpc_date -- >=4 Aparicio criteria, independent of any "

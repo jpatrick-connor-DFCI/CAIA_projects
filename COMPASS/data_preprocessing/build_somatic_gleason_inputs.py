@@ -550,7 +550,6 @@ def _rebase_endpoint_from_index(
         "platinum": ("PLATINUM", "PLATINUM_DATE", "t_platinum"),
         "nepc": ("NEPC", "NEPC_DATE", "t_nepc"),
         "avpc": ("AVPC", "AVPC_DATE", "t_avpc"),
-        "avpc_nepc": ("AVPC_NEPC", "AVPC_NEPC_DATE", "t_avpc_nepc"),
     }
     if endpoint not in endpoint_cfg:
         raise ValueError(f"Unknown endpoint {endpoint!r}; expected one of {sorted(endpoint_cfg)}")
@@ -584,8 +583,8 @@ def _materialize_absolute_followup_dates(
 ) -> pd.DataFrame:
     """Restore absolute dates dropped from aggregated landmark inputs.
 
-    Every endpoint duration COMPASS emits -- ``t_platinum``, ``t_nepc``,
-    ``t_avpc``, ``t_avpc_nepc``, ``t_last_contact`` -- is days from ADT start.
+    Every modeled endpoint duration COMPASS emits -- ``t_platinum``,
+    ``t_nepc``, ``t_avpc``, ``t_last_contact`` -- is days from ADT start.
     Therefore adding one back to the ADT anchor exactly reconstructs the
     absolute event/censoring date needed for observation-date rebasing.
 
@@ -605,7 +604,6 @@ def _materialize_absolute_followup_dates(
         "PLATINUM_DATE": "t_platinum",
         "NEPC_DATE": "t_nepc",
         "AVPC_DATE": "t_avpc",
-        "AVPC_NEPC_DATE": "t_avpc_nepc",
         "LAST_CONTACT_DATE": "t_last_contact",
     }
     for date_col, duration_col in duration_by_date.items():

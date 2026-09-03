@@ -196,7 +196,6 @@ def test_nepc_indexed_feature_sets_ignore_pre_anchor_platinum():
         ("platinum", "PLATINUM", "t_platinum"),
         ("nepc", "NEPC", "t_nepc"),
         ("avpc", "AVPC", "t_avpc"),
-        ("avpc_nepc", "AVPC_NEPC", "t_avpc_nepc"),
     ],
 )
 def test_every_endpoint_rebases_from_dropped_date_columns(

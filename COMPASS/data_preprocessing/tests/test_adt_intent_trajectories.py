@@ -603,6 +603,24 @@ class TestMaxStagePlots(unittest.TestCase):
         self.assertEqual(len(axes), 2)
         fig.clf()
 
+    def test_panel_accepts_an_alternate_class_column(self):
+        import matplotlib
+        matplotlib.use("Agg")
+        frame = self._frame().with_columns(
+            pl.Series("LLM_PRIMARY_LABEL", ["nepc", "nepc", "avpc", "biomarker", "conventional"])
+        )
+        dist = max_stage_distribution_by_intent(
+            frame, class_col="LLM_PRIMARY_LABEL"
+        )
+        self.assertIn("LLM_PRIMARY_LABEL", dist.columns)
+        fig, axes = plot_max_stage_panel(
+            frame,
+            class_col="LLM_PRIMARY_LABEL",
+            class_order=("conventional", "biomarker", "avpc", "nepc"),
+        )
+        self.assertEqual(len(axes), 2)
+        fig.clf()
+
     def test_panel_renders_without_any_max_stage_columns(self):
         """The notebook calls this whether or not the stage file was loaded,
         so absent columns must degrade to a placeholder, not raise."""

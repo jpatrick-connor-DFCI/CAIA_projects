@@ -17,8 +17,10 @@ import polars as pl
 sys.path.insert(0, str(Path(__file__).resolve().parents[2].parent))
 
 from COMPASS.data_preprocessing.export_adt_intent_outputs import (  # noqa: E402
+    LLM_LABEL_COL,
     OUTPUT_SUBDIR,
     build_labels,
+    load_llm_primary_labels,
     resolve_out_dir,
     run,
     write_lab_trajectories,
@@ -78,6 +80,30 @@ def _stage_notes(d: str) -> str:
         }
     ).write_parquet(path)
     return path
+
+
+def _llm_labels(d: str) -> str:
+    path = str(Path(d) / "LLM_NEPC_classifier_labels.tsv")
+    pl.DataFrame(
+        {
+            "DFCI_MRN": list(range(1, 13)),
+            "primary_label": ["conventional", "biomarker", "biomarker"]
+            + ["nepc"] * 9,
+            "has_nepc": [0, 0, 1] + [1] * 9,
+            "has_avpc": [0] * 12,
+            "reported_biomarkers": [None, "BRCA2", "KRAS"] + [None] * 9,
+        }
+    ).write_csv(path, separator="\t")
+    return path
+
+
+class TestLlmPrimaryLabels(unittest.TestCase):
+    def test_biomarker_normalization_matches_figure_pipeline(self):
+        with tempfile.TemporaryDirectory() as d:
+            got = load_llm_primary_labels(_llm_labels(d)).sort("DFCI_MRN")
+        self.assertEqual(got[LLM_LABEL_COL][:3].to_list(), [
+            "conventional", "biomarker", "nepc"
+        ])
 
 
 class TestResolveOutDir(unittest.TestCase):
@@ -257,6 +283,15 @@ class TestRun(unittest.TestCase):
             )
         for col in ("MAX_STAGE_BEFORE", "MAX_STAGE_AFTER", "STAGE_UPSTAGED_AFTER_ADT"):
             self.assertIn(col, labelled.columns)
+
+    def test_llm_labels_write_an_alternate_max_stage_figure(self):
+        with tempfile.TemporaryDirectory() as d:
+            labelled, out = run(
+                _meds(), stage_note_level_path=_stage_notes(d),
+                llm_labels_path=_llm_labels(d), fig_root=d, verbose=False,
+            )
+            self.assertIn(LLM_LABEL_COL, labelled.columns)
+            self.assertTrue((out / "max_stage_llm.png").exists())
 
     def test_nothing_is_written_as_csv(self):
         """The whole point of the export is PNGs; a stray CSV would mean a

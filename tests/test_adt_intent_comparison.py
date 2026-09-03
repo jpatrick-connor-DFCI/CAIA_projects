@@ -213,9 +213,9 @@ def test_build_comparison_writes_every_table(tmp_path):
 
 def test_module_covers_every_pipeline_endpoint():
     # The retired notebook hard-coded three endpoints and silently omitted
-    # avpc_nepc; the module takes its default from the pipeline's registry.
+    # all modeled endpoints; the module takes its default from the pipeline registry.
     assert aic.DEFAULT_ENDPOINTS == tuple(ca.ENDPOINTS)
-    assert "avpc_nepc" in aic.DEFAULT_ENDPOINTS
+    assert aic.DEFAULT_ENDPOINTS == ("platinum", "nepc", "avpc")
 
 
 def test_comparison_module_is_read_only():
