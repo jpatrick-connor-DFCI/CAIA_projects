@@ -119,13 +119,15 @@ Runs the R figure-generation pipeline for ADT by default, once per endpoint.
 Each endpoint's outputs go to `FIG_ROOT/ADT/<endpoint>/`, i.e. `ADT/nepc/`,
 `ADT/avpc/`, and `ADT/platinum/`.
 Set `COHORTS <- c("arpi", "adt")` to opt into both arms, or narrow `ENDPOINTS`
-to render a single endpoint.
+to render a single endpoint. `COHORTS` accepts any run label in
+`SUPPORTED_COHORTS`, so a patient subset or exclusion arm is rendered by naming
+its tree, e.g. `c("adt_llm_metastatic", "adt_llm_metastatic_noprecastrate")`.
 
 ```{r render-figures}
 for (COHORT in COHORTS) {
   for (ENDPOINT in ENDPOINTS) {
     message(sprintf("\n========== R figures: %s / %s ==========",
-                    COHORT_LABELS[[COHORT]], toupper(ENDPOINT)))
+                    cohort_display(COHORT), toupper(ENDPOINT)))
     generate_figures(
       COHORT,
       nepc_proj_path = NEPC_PROJ_PATH,
@@ -143,7 +145,7 @@ for (COHORT in COHORTS) {
       stop("Expected multivariate supplement was not generated: ", supplement_path)
     message("multivariate supplement: ", supplement_path)
     message(sprintf("\nCompleted R figures for %s / %s.",
-                    COHORT_LABELS[[COHORT]], toupper(ENDPOINT)))
+                    cohort_display(COHORT), toupper(ENDPOINT)))
   }
 }
 ```

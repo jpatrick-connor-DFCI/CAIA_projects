@@ -77,6 +77,7 @@ def _base_args(output_dir: Path, data_path: Path, **overrides) -> argparse.Names
         age_col=AGE_COL,
         data=str(data_path),
         restrict_to_mrns=None,
+        exclude_mrns=None,
         anchor_col="none",
         min_psa_count=0,
         exclude_parpi=False,

@@ -14,6 +14,7 @@ def test_cohort_endpoint_runs_cross_every_cohort(monkeypatch, tmp_path):
         ["adt"],
         endpoints=("platinum", "nepc", "avpc"),
         cohorts=("all", "metastatic", "localized"),
+        exclusions=("none",),
     )
 
     # Cohort and endpoint are orthogonal axes: every cohort runs every modeled
@@ -34,6 +35,7 @@ def test_cohort_runs_keep_the_established_path_convention(monkeypatch, tmp_path)
         ["adt"],
         endpoints=("platinum", "nepc", "avpc"),
         cohorts=("all", "metastatic", "localized"),
+        exclusions=("none",),
     )
     by_key = {(r["cohort"], r["endpoint"]): r for r in runs}
 
@@ -72,6 +74,7 @@ def test_stage2_runs_collapse_to_one_run_per_anchor(monkeypatch, tmp_path):
         ["adt"],
         endpoints=("platinum", "nepc", "avpc"),
         cohorts=("all", "metastatic", "localized"),
+        exclusions=("none",),
     )
 
     # Lab preprocessing is endpoint- and cohort-independent, so it must

@@ -486,6 +486,27 @@ def main(args: argparse.Namespace) -> None:
             f"retained ({len(mrn_subset)} requested in {args.restrict_to_mrns})"
         )
 
+    # Optional exclusion list, applied AFTER --restrict-to-mrns and before the
+    # landmark build for the same reason: the split, canonical lab set, and
+    # feature selection must all be derived on the final patient set. The two
+    # lists are separate arguments so a cohort definition stays independent of
+    # any exclusion rule layered on top of it.
+    exclude_mrns = getattr(args, "exclude_mrns", None)
+    if exclude_mrns:
+        excluded = load_mrn_subset(Path(exclude_mrns), ID_COL)
+        n_before = df[ID_COL].nunique()
+        df = df.loc[~df[ID_COL].isin(excluded)].copy()
+        n_after = df[ID_COL].nunique()
+        if n_after == 0:
+            raise ValueError(
+                f"--exclude-mrns {exclude_mrns}: excluding the "
+                f"{len(excluded)} listed MRNs left no patients in the cohort."
+            )
+        print(
+            f"  [exclude-mrns] {n_before - n_after} of {n_before} MRNs excluded, "
+            f"{n_after} retained ({len(excluded)} listed in {exclude_mrns})"
+        )
+
     broad_psa_counts = None
     if args.min_psa_count > 0:
         print(f"Computing broad PSA prevalence counts from RAW_TEST_CODE in {data_path} ...")
@@ -842,6 +863,11 @@ def main(args: argparse.Namespace) -> None:
             float(args.max_followup_days) if args.max_followup_days is not None else None
         ),
         "restrict_to_mrns": str(args.restrict_to_mrns) if args.restrict_to_mrns else None,
+        "exclude_mrns": (
+            str(getattr(args, "exclude_mrns", None))
+            if getattr(args, "exclude_mrns", None)
+            else None
+        ),
         "endpoint": endpoint,
         # Retained for older readers of the manifest.
         "require_nepc": endpoint == "nepc",
@@ -898,6 +924,15 @@ if __name__ == "__main__":
             "Optional CSV with a DFCI_MRN (or --id-col) column. When set, the raw "
             "cohort is filtered to this MRN subset before the landmark/split build, "
             "so association testing runs on only those patients."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-mrns",
+        default=None,
+        help=(
+            "Optional CSV with a DFCI_MRN (or --id-col) column. When set, these "
+            "MRNs are REMOVED from the cohort after --restrict-to-mrns is "
+            "applied, before the landmark/split build."
         ),
     )
     parser.add_argument(

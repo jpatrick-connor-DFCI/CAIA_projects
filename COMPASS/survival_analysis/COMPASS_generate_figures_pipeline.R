@@ -357,15 +357,80 @@ read_endpoint_performance <- function(path, endpoint) {
 }
 
 
-SUPPORTED_COHORTS <- c("arpi", "adt")
-# Notebook default: render ADT only. Call generate_figures("arpi", ...) directly
-# to opt into the supported ARPI figure set.
-COHORTS <- c("adt")
-COHORT_LABELS <- c(
-  arpi = "ARPI",
-  adt = "ADT"
+# `cohort` here is the composed RUN LABEL that names the data trees, matching
+# compass_pipeline.make_runs(): <arm><cohort suffix><exclusion suffix>. It is a
+# superset of the treatment arm, which is why the arm is recovered from it
+# below rather than assumed.
+COHORT_ARMS <- c("arpi", "adt")
+# Patient-subset suffixes that make_runs() appends to the arm. "" is the arm's
+# own full survival cohort.
+COHORT_SUBSET_SUFFIXES <- c(
+  "",
+  "_metastatic", "_localized",              # medication-derived ADT intent
+  "_llm_metastatic", "_llm_nonmetastatic"   # LLM stage-pipeline metastatic status
 )
-# Both cohort arms use the same 0-, 90-, and 180-day landmarks.
+# Orthogonal exclusion suffixes, likewise appended by make_runs().
+COHORT_EXCLUSION_SUFFIXES <- c("", "_noprecastrate")
+
+SUPPORTED_COHORTS <- as.vector(outer(
+  as.vector(outer(COHORT_ARMS, COHORT_SUBSET_SUFFIXES, paste0)),
+  COHORT_EXCLUSION_SUFFIXES, paste0
+))
+# Notebook default: render the unrestricted ADT arm only. Pass any other
+# SUPPORTED_COHORTS value to generate_figures() to render that tree.
+COHORTS <- c("adt")
+
+# Keyed by suffix, parallel to COHORT_SUBSET_SUFFIXES / _EXCLUSION_SUFFIXES.
+# Positional rather than named because R cannot use "" as a name, and the
+# un-suffixed entry is exactly the one that carries no title text.
+COHORT_SUBSET_LABELS <- c(
+  "",                        # ""
+  " / metastatic",           # _metastatic
+  " / localized-adjuvant",   # _localized
+  " / LLM metastatic",       # _llm_metastatic
+  " / LLM non-metastatic"    # _llm_nonmetastatic
+)
+COHORT_EXCLUSION_LABELS <- c(
+  "",                          # ""
+  " / no pre-ADT castrate"     # _noprecastrate
+)
+stopifnot(
+  length(COHORT_SUBSET_LABELS) == length(COHORT_SUBSET_SUFFIXES),
+  length(COHORT_EXCLUSION_LABELS) == length(COHORT_EXCLUSION_SUFFIXES)
+)
+
+# The treatment arm a run label belongs to; the arm alone drives the anchor
+# label, the longitudinal CSV, and the landmarks, none of which a patient
+# subset or an exclusion changes.
+cohort_arm <- function(cohort) {
+  hits <- COHORT_ARMS[startsWith(cohort, COHORT_ARMS)]
+  if (!length(hits))
+    stop(sprintf("Cannot determine treatment arm for cohort=%s", cohort))
+  # Longest match, so a future arm that prefixes another is unambiguous.
+  hits[which.max(nchar(hits))]
+}
+
+# Display title for a run label, composed the same way its directory name is.
+cohort_display <- function(cohort) {
+  arm <- cohort_arm(cohort)
+  rest <- substring(cohort, nchar(arm) + 1L)
+  exclusion_label <- ""
+  for (i in seq_along(COHORT_EXCLUSION_SUFFIXES)) {
+    suffix <- COHORT_EXCLUSION_SUFFIXES[i]
+    if (nzchar(suffix) && endsWith(rest, suffix)) {
+      exclusion_label <- COHORT_EXCLUSION_LABELS[i]
+      rest <- substring(rest, 1L, nchar(rest) - nchar(suffix))
+      break
+    }
+  }
+  i <- match(rest, COHORT_SUBSET_SUFFIXES)
+  if (is.na(i))
+    stop(sprintf("Unrecognized cohort subset suffix '%s' in cohort=%s", rest, cohort))
+  paste0(toupper(arm), COHORT_SUBSET_LABELS[i], exclusion_label)
+}
+
+# Every cohort arm uses the same 0-, 90-, and 180-day landmarks, and a patient
+# subset does not change them.
 COHORT_LANDMARKS <- list(
   arpi = c(0, 90, 180),
   adt = c(0, 90, 180)
@@ -430,12 +495,15 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       length(plot_non_androgen_lab_figures) != 1 ||
       is.na(plot_non_androgen_lab_figures))
     stop("plot_non_androgen_lab_figures must be one non-missing logical value")
-  COHORT_DISPLAY <- unname(COHORT_LABELS[[COHORT]])
+  COHORT_DISPLAY <- cohort_display(COHORT)
   ENDPOINT_DISPLAY <- toupper(ENDPOINT)
   message(sprintf("Generating figures for cohort: %s, endpoint: %s",
                   COHORT_DISPLAY, ENDPOINT_DISPLAY))
 
-  IS_ADT <- identical(COHORT, "adt")
+  # The arm, not the full run label: every restricted cohort of the ADT arm is
+  # still anchored on ADT initiation and still reads the ADT longitudinal CSV.
+  COHORT_ARM <- cohort_arm(COHORT)
+  IS_ADT <- identical(COHORT_ARM, "adt")
   ANCHOR_LABEL <- if (IS_ADT) "ADT initiation" else "ARPI/chemo initiation"
 
   # Both trees are endpoint-suffixed, matching make_runs(): the NEPC cohort is
@@ -554,7 +622,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     file.path(FIG_ROOT, plot_stem)
   }
 
-  LANDMARKS <- COHORT_LANDMARKS[[COHORT]]
+  LANDMARKS <- COHORT_LANDMARKS[[COHORT_ARM]]
   TOP_N <- 15
 
   LLM_LABEL_PATH <- file.path(NEPC_PROJ_PATH, "LLM_NEPC_labels")
@@ -2572,8 +2640,18 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # describe exactly the modeled population. Returns NULL if none are found (caller
   # then skips the figure). Mirrors _aggregated_landmark_mrns() in
   # the earlier figure implementation.
+  #
+  # Pre-anchor platinum exposure is dropped here regardless of endpoint. The
+  # platinum endpoint already gates on `t_platinum > 0` in make_outcome_df, so
+  # its aggregated CSVs carry no such patient; the NEPC/AVPC endpoints
+  # deliberately do not ("pre-anchor platinum exposure is irrelevant here" in
+  # survival_common/cohort.py), so without this filter their trajectory panels
+  # would plot patients whose platinum came before the landmark -- patients whose
+  # PLATINUM==1 stratum label describes history rather than an incident event.
+  # Durations in the aggregated CSVs are already landmark-rebased, so
+  # `t_platinum <= 0` is exactly that pre-landmark exposure.
   aggregated_landmark_mrns <- function(id_col = "DFCI_MRN") {
-    mrns <- character(0); found <- character(0)
+    mrns <- character(0); found <- character(0); n_pre_anchor_total <- 0L
     for (lm in LANDMARKS) {
       p <- file.path(INPUTS_DIR, sprintf("aggregated_landmark%s.csv", lm))
       if (!file.exists(p)) next
@@ -2582,14 +2660,37 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       if (is.na(col)) {
         message(sprintf("  [warn] %s has no %s/DFCI_MRN column; skipping", basename(p), id_col)); next
       }
-      ids <- read_csv(p, col_select = all_of(col), show_col_types = FALSE)[[1]]
+      wanted <- c(col, if ("t_platinum" %in% hdr) "t_platinum", if ("PLATINUM" %in% hdr) "PLATINUM")
+      frame <- read_csv(p, col_select = all_of(wanted), show_col_types = FALSE)
+      n_raw <- length(unique(frame[[col]][!is.na(frame[[col]])]))
+      if (all(c("t_platinum", "PLATINUM") %in% names(frame))) {
+        pre_anchor <- suppressWarnings(as.numeric(frame$PLATINUM)) %in% 1 &
+          !is.na(suppressWarnings(as.numeric(frame$t_platinum))) &
+          suppressWarnings(as.numeric(frame$t_platinum)) <= 0
+        n_pre <- length(unique(frame[[col]][pre_anchor & !is.na(frame[[col]])]))
+        n_pre_anchor_total <- n_pre_anchor_total + n_pre
+        if (n_pre > 0)
+          message(sprintf("  %s: dropped %d patient(s) with platinum at or before the landmark",
+                          basename(p), n_pre))
+        frame <- frame[!pre_anchor, , drop = FALSE]
+      } else {
+        message(sprintf(
+          "  [warn] %s lacks t_platinum/PLATINUM; cannot exclude pre-landmark platinum exposure",
+          basename(p)))
+      }
+      ids <- frame[[col]]
       ids <- unique(ids[!is.na(ids)])
       mrns <- union(mrns, as.character(ids))
-      found <- c(found, sprintf("%s (%d)", basename(p), length(ids)))
+      found <- c(found, sprintf("%s (%d of %d)", basename(p), length(ids), n_raw))
     }
     if (!length(found)) return(NULL)
     message(sprintf("  aggregated-landmark cohort: %s unique MRNs from %s",
                     format(length(mrns), big.mark=","), paste(found, collapse=", ")))
+    if (n_pre_anchor_total > 0)
+      message(sprintf(
+        "  excluded pre-landmark platinum exposure across landmarks (%d landmark-level drops)",
+        n_pre_anchor_total))
+    if (!length(mrns)) return(NULL)
     mrns
   }
 
@@ -2887,11 +2988,30 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         GAM_FITTED = suppressWarnings(as.numeric(GAM_FITTED))
       ) %>%
       filter(!is.na(LAB_GROUP))
-    aggregated_status <- read_csv(
+    # t_platinum joins the read so pre-landmark platinum exposure can be
+    # dropped here too: the NEPC/AVPC endpoints keep those patients in their
+    # aggregated CSVs (see aggregated_landmark_mrns above), and plotting them
+    # would label a patient "Platinum" for treatment that preceded the anchor.
+    agg_raw <- read_csv(
       agg_path,
-      col_select = any_of(c("DFCI_MRN", "PLATINUM")),
+      col_select = any_of(c("DFCI_MRN", "PLATINUM", "t_platinum")),
       show_col_types = FALSE
-    ) %>%
+    )
+    agg_platinum <- suppressWarnings(as.numeric(agg_raw$PLATINUM))
+    agg_t_platinum <- if ("t_platinum" %in% names(agg_raw)) {
+      suppressWarnings(as.numeric(agg_raw$t_platinum))
+    } else {
+      message(sprintf(
+        "  [warn] %s lacks t_platinum; GAM panels cannot exclude pre-landmark platinum exposure",
+        basename(agg_path)))
+      rep(NA_real_, nrow(agg_raw))
+    }
+    agg_pre_anchor <- agg_platinum %in% 1 & !is.na(agg_t_platinum) & agg_t_platinum <= 0
+    if (any(agg_pre_anchor))
+      message(sprintf(
+        "  GAM trajectories: dropped %d patient(s) with platinum at or before landmark %d",
+        length(unique(agg_raw$DFCI_MRN[agg_pre_anchor])), landmark))
+    aggregated_status <- agg_raw[!agg_pre_anchor, , drop = FALSE] %>%
       transmute(
         DFCI_MRN = as.character(DFCI_MRN),
         stratum = if_else(
@@ -2900,6 +3020,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         )
       ) %>%
       distinct(DFCI_MRN, .keep_all = TRUE)
+
+    # Every GAM stratum is restricted to the same platinum-eligible cohort, so
+    # the NEPC panel and the platinum panel describe one patient set.
+    eligible_gam_mrns <- aggregated_status$DFCI_MRN
+    gam_curves <- gam_curves %>% filter(DFCI_MRN %in% eligible_gam_mrns)
 
     nepc_status <- if (is.null(llm_classifier_labels)) {
       NULL

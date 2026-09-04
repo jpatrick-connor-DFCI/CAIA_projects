@@ -84,7 +84,15 @@ SOMATIC_GLEASON_INDEX_ANALYSES = ("gleason", "sequencing", "prs")
 
 # A cohort is a patient-subset restriction applied at Stage 3 via
 # --restrict-to-mrns.  "all" is the arm's full Stage-1 survival cohort; the
-# other two are retrospective, medication-derived ADT-intent strata.
+# others restrict to a precomputed MRN list.
+#
+# Two independent label sources produce those lists, distinguished by `source`:
+#   "adt_intent" -- retrospective, medication-derived ADT-intent strata, written
+#                   by build_adt_intent_mrn_lists().
+#   "llm_met"    -- LLM-adjudicated metastatic status from the met_diagnosis
+#                   pipeline, written by build_llm_met_mrn_lists().
+# `source` (not `retrospective`) keys the per-source registries below, so the
+# two families stay separable even though both are retrospective labels.
 #
 # These are deliberately not entries in _ARM_SPECS: Stage 1 and Stage 2 still
 # run once per treatment anchor, and only Stage 3 onward splits.  Treating a
@@ -102,21 +110,46 @@ COHORT_SPECS = {
         "title_suffix": "",
         "adt_intent": None,
         "retrospective": False,
+        "source": None,
     },
     "metastatic": {
         "label_suffix": "_metastatic",
         "title_suffix": " / metastatic",
         "adt_intent": "METASTATIC",
         "retrospective": True,
+        "source": "adt_intent",
     },
     "localized": {
         "label_suffix": "_localized",
         "title_suffix": " / localized-adjuvant",
         "adt_intent": "LOCALIZED_ADJUVANT",
         "retrospective": True,
+        "source": "adt_intent",
+    },
+    "llm_metastatic": {
+        "label_suffix": "_llm_metastatic",
+        "title_suffix": " / LLM metastatic",
+        "adt_intent": None,
+        "retrospective": True,
+        "source": "llm_met",
+        "llm_metastatic": True,
+    },
+    "llm_nonmetastatic": {
+        "label_suffix": "_llm_nonmetastatic",
+        "title_suffix": " / LLM non-metastatic",
+        "adt_intent": None,
+        "retrospective": True,
+        "source": "llm_met",
+        "llm_metastatic": False,
     },
 }
-DEFAULT_COHORTS = ("all", "metastatic", "localized")
+DEFAULT_COHORTS = (
+    "all",
+    "metastatic",
+    "localized",
+    "llm_metastatic",
+    "llm_nonmetastatic",
+)
 
 # The MRN-list-backed cohorts, as a derived view: this is what
 # build_adt_intent_mrn_lists() writes and what adt_intent_mrn_list_path()
@@ -128,10 +161,68 @@ ADT_INTENT_MODEL_STRATA = {
         "title": f"ADT{spec['title_suffix']}",
     }
     for key, spec in COHORT_SPECS.items()
-    if spec["retrospective"]
+    if spec["source"] == "adt_intent"
 }
 ADT_INTENT_LABELS_FILENAME = "adt_intent_labels_model_cohort.csv"
 ADT_INTENT_COUNTS_FILENAME = "adt_intent_endpoint_counts.csv"
+
+# The LLM-metastatic counterpart of ADT_INTENT_MODEL_STRATA.
+LLM_MET_MODEL_STRATA = {
+    key: {
+        "metastatic": spec["llm_metastatic"],
+        "label": f"adt{spec['label_suffix']}",
+        "title": f"ADT{spec['title_suffix']}",
+    }
+    for key, spec in COHORT_SPECS.items()
+    if spec["source"] == "llm_met"
+}
+LLM_MET_LABELS_FILENAME = "llm_met_labels_model_cohort.csv"
+
+# The met_diagnosis pipeline's adjudicated output: ONE row per patient, with a
+# boolean has_metastatic_disease and the first documented metastasis date.
+#
+# This is a purpose-built prostate-metastatic task, not the generic cancer_stage
+# extraction. It is the better source for this cohort split because it (a) is
+# already prostate-specific, so no primary-site filtering is needed here, (b)
+# runs a deterministic veto gate that rejects negated and hedged mentions and
+# excludes regional pelvic nodal (N1) disease, which the stage extraction's
+# metastatic_sites would have counted as metastatic, and (c) materializes
+# patients with no qualifying evidence as explicit negatives, so the negative
+# stratum is a real label rather than an absence.
+LLM_MET_LABELS_PATH = Path(
+    os.environ.get(
+        "LLM_MET_LABELS_PATH",
+        "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_met_diagnosis/"
+        "met_dx_labels.parquet",
+    )
+)
+
+# ---------------------------------------------------------------------------
+# Pre-ADT castrate exclusion
+# ---------------------------------------------------------------------------
+#
+# An orthogonal axis, not a cohort: it composes onto ANY cohort, so the run
+# cross is cohort x endpoint x exclusion.  Patients with a castrate
+# testosterone (< 50 ng/dL) recorded strictly BEFORE the ADT anchor are
+# assumed to have been androgen-deprived elsewhere first, making their ADT
+# start date a transfer-of-care artifact rather than a treatment origin.
+CASTRATE_TESTOSTERONE_NG_DL = 50.0
+TESTOSTERONE_LAB_NAME = "Testosterone"
+
+EXCLUSION_SPECS = {
+    "none": {
+        "label_suffix": "",
+        "title_suffix": "",
+        "exclude_pre_adt_castrate": False,
+    },
+    "pre_adt_castrate": {
+        "label_suffix": "_noprecastrate",
+        "title_suffix": " / no pre-ADT castrate",
+        "exclude_pre_adt_castrate": True,
+    },
+}
+DEFAULT_EXCLUSIONS = ("none", "pre_adt_castrate")
+PRE_ADT_CASTRATE_MRNS_FILENAME = "pre_adt_castrate_mrns.csv"
 
 
 def _require_adt_index_run(run: dict) -> None:
@@ -180,14 +271,33 @@ def stage2_runs(runs: list[dict]) -> list[dict]:
     that here rather than as a `if run["endpoint"] != "platinum": continue`
     guard in the notebook keeps it correct as the cross widens -- that guard
     would have run Stage 2 once per cohort once cohorts were added.
+
+    The representative run per anchor must be a cohort=="all", exclusion=="none"
+    run: preprocess_labs() passes ``restrict_to_mrns`` as --survival-cohort-csv,
+    so picking a restricted run would silently build the anchor's shared lab
+    table from that cohort's MRNs alone.  Selecting on the run's own fields
+    rather than on list order keeps this correct when a caller requests a
+    subset of cohorts (e.g. cohorts=("llm_metastatic",)) whose first entry is
+    not the unrestricted one.
     """
     seen: set[str] = set()
     unique = []
     for run in runs:
         if run["anchor"] in seen:
             continue
+        if run.get("cohort", DEFAULT_COHORT) != "all":
+            continue
+        if run.get("exclusion", "none") != "none":
+            continue
         seen.add(run["anchor"])
         unique.append(run)
+    missing = {run["anchor"] for run in runs} - seen
+    if missing:
+        raise ValueError(
+            f"No cohort='all', exclusion='none' run for anchor(s) {sorted(missing)}; "
+            "Stage 2 builds the anchor's shared lab table and must not be driven "
+            "by a restricted cohort. Include the 'all' cohort when running Stage 2."
+        )
     return unique
 
 
@@ -198,6 +308,7 @@ def make_runs(
     output_suffix: str = "",
     endpoint: str | None = None,
     cohort: str = "all",
+    exclusion: str = "none",
 ) -> list[dict]:
     """Build the merged-profile RUNS list, restricted to ``arms``.
 
@@ -227,6 +338,14 @@ def make_runs(
     ``adt_metastatic`` and the trees ``prediction_inputs_adt_metastatic`` /
     ``local_runs_adt_metastatic``. The default ``"all"`` restricts to the arm's
     own Stage-1 survival cohort, i.e. no additional subsetting.
+
+    ``exclusion`` selects an orthogonal patient-exclusion rule from
+    ``EXCLUSION_SPECS`` and composes onto the cohort label in turn, so
+    ``cohort="llm_metastatic", exclusion="pre_adt_castrate"`` yields
+    ``adt_llm_metastatic_noprecastrate``. It is carried on the run as
+    ``exclude_mrns`` (a path, or None) rather than folded into
+    ``restrict_to_mrns``: the two lists are intersected at Stage 3, so a
+    cohort's own MRN list stays a pure cohort definition.
     """
     selected_endpoint = ENDPOINT if endpoint is None else str(endpoint).lower()
     selected_cohort = str(cohort).lower()
@@ -235,6 +354,13 @@ def make_runs(
             f"Unknown cohort: {cohort!r} (expected one of {sorted(COHORT_SPECS)})"
         )
     cohort_spec = COHORT_SPECS[selected_cohort]
+    selected_exclusion = str(exclusion).lower()
+    if selected_exclusion not in EXCLUSION_SPECS:
+        raise ValueError(
+            f"Unknown exclusion: {exclusion!r} "
+            f"(expected one of {sorted(EXCLUSION_SPECS)})"
+        )
+    exclusion_spec = EXCLUSION_SPECS[selected_exclusion]
     valid_endpoints = set(_ca.ENDPOINTS)
     if selected_endpoint not in valid_endpoints:
         raise ValueError(
@@ -261,23 +387,35 @@ def make_runs(
         # The cohort composes onto the arm to form the run label, which in turn
         # names both directory trees. Overrides stay keyed by the ARM, not the
         # composed label, so a caller overriding "adt" reaches every cohort.
-        run_label = f"{label}{cohort_spec['label_suffix']}"
+        run_label = (
+            f"{label}{cohort_spec['label_suffix']}{exclusion_spec['label_suffix']}"
+        )
         # "all" restricts to the arm's own Stage-1 survival cohort (no extra
-        # subsetting); the retrospective cohorts restrict to their MRN list.
-        restrict_to_mrns = (
-            data_root / f"prostate_{label}_survival_cohort_{label}.csv"
-            if selected_cohort == "all"
-            else adt_intent_mrn_list_path(selected_cohort, data_root=data_root)
+        # subsetting); the retrospective cohorts restrict to their MRN list,
+        # resolved by the cohort's label source.
+        restrict_to_mrns = cohort_mrn_list_path(
+            selected_cohort, arm=label, data_root=data_root
+        )
+        # The exclusion is a separate list intersected at Stage 3, so the
+        # cohort list above stays a pure cohort definition.
+        exclude_mrns = (
+            pre_adt_castrate_mrn_list_path(data_root=data_root)
+            if exclusion_spec["exclude_pre_adt_castrate"]
+            else None
         )
         runs.append({
             "label": run_label,
-            "title": f"{arm_spec['title']}{cohort_spec['title_suffix']}",
+            "title": (
+                f"{arm_spec['title']}{cohort_spec['title_suffix']}"
+                f"{exclusion_spec['title_suffix']}"
+            ),
             "variant": "profile_data",
             "anchor_col": "none",
             "anchor": arm_spec["anchor"],
             "landmarks": arm_spec["landmarks"],
             "input_csv": data_arpi if arm_spec["anchor"] == "arpi" else data_adt,
             "restrict_to_mrns": restrict_to_mrns,
+            "exclude_mrns": exclude_mrns,
             "inputs_dir": Path(
                 prediction_input_dirs.get(
                     label,
@@ -287,9 +425,14 @@ def make_runs(
             "output_dir": survival_output_root / f"local_runs_{run_label}{output_suffix}",
             "endpoint": selected_endpoint,
             "cohort": selected_cohort,
-            "intent_stratum": None if selected_cohort == "all" else selected_cohort,
+            "intent_stratum": (
+                selected_cohort if cohort_spec["source"] == "adt_intent" else None
+            ),
             "adt_intent": cohort_spec["adt_intent"],
+            "cohort_source": cohort_spec["source"],
             "retrospective_stratification": cohort_spec["retrospective"],
+            "exclusion": selected_exclusion,
+            "exclude_pre_adt_castrate": exclusion_spec["exclude_pre_adt_castrate"],
             "data_root": data_root,
             "mrn_lists_dir": mrn_lists_dir,
         })
@@ -319,15 +462,18 @@ def make_endpoint_runs(
     *,
     endpoints=("platinum", "nepc"),
     cohorts=DEFAULT_COHORTS,
+    exclusions=DEFAULT_EXCLUSIONS,
     prediction_input_dirs_by_endpoint: dict[str, dict[str, str | Path]] | None = None,
 ) -> list[dict]:
-    """Create independent input/output trees across cohort x endpoint x arm.
+    """Create independent trees across cohort x endpoint x exclusion x arm.
 
     This is the single run factory. The ADT-intent strata used to have their
     own parallel factory that could only reach three of the four endpoints and
     never reached Stage 3b or the figure pipeline; they are now ordinary
     cohorts in this cross. Directory names are unchanged, so existing trees
-    resolve exactly as before.
+    resolve exactly as before -- ``exclusions=("none",)`` reproduces the
+    pre-exclusion cross byte-for-byte, since "none" contributes an empty label
+    suffix.
     """
     overrides = prediction_input_dirs_by_endpoint or {}
     unknown = set(overrides) - set(endpoints)
@@ -339,19 +485,27 @@ def make_endpoint_runs(
             f"Unknown cohorts: {sorted(unknown_cohorts)} "
             f"(expected a subset of {sorted(COHORT_SPECS)})"
         )
+    unknown_exclusions = {str(e).lower() for e in exclusions} - set(EXCLUSION_SPECS)
+    if unknown_exclusions:
+        raise ValueError(
+            f"Unknown exclusions: {sorted(unknown_exclusions)} "
+            f"(expected a subset of {sorted(EXCLUSION_SPECS)})"
+        )
     runs: list[dict] = []
     for raw_cohort in cohorts:
         for raw_endpoint in endpoints:
             endpoint = str(raw_endpoint).lower()
-            runs.extend(
-                make_runs(
-                    arms,
-                    endpoint=endpoint,
-                    output_suffix=endpoint_suffix(endpoint),
-                    cohort=str(raw_cohort).lower(),
-                    prediction_input_dirs=overrides.get(endpoint),
+            for raw_exclusion in exclusions:
+                runs.extend(
+                    make_runs(
+                        arms,
+                        endpoint=endpoint,
+                        output_suffix=endpoint_suffix(endpoint),
+                        cohort=str(raw_cohort).lower(),
+                        exclusion=str(raw_exclusion).lower(),
+                        prediction_input_dirs=overrides.get(endpoint),
+                    )
                 )
-            )
     return runs
 
 
@@ -369,6 +523,59 @@ def adt_intent_mrn_list_path(
         )
     root = _PROFILE_OUTPUT_ROOT if data_root is None else Path(data_root)
     return root / "mrn_lists" / f"{ADT_INTENT_MODEL_STRATA[key]['label']}_mrns.csv"
+
+
+def llm_met_mrn_list_path(
+    stratum: str,
+    *,
+    data_root: str | Path | None = None,
+) -> Path:
+    """Return the Stage-3 MRN-list path for one LLM-metastatic stratum."""
+    key = str(stratum).lower()
+    if key not in LLM_MET_MODEL_STRATA:
+        raise ValueError(
+            f"Unknown LLM-metastatic stratum: {stratum!r} "
+            f"(expected one of {sorted(LLM_MET_MODEL_STRATA)})"
+        )
+    root = _PROFILE_OUTPUT_ROOT if data_root is None else Path(data_root)
+    return root / "mrn_lists" / f"{LLM_MET_MODEL_STRATA[key]['label']}_mrns.csv"
+
+
+def pre_adt_castrate_mrn_list_path(*, data_root: str | Path | None = None) -> Path:
+    """Return the MRN list of patients castrate BEFORE the ADT anchor.
+
+    This is an EXCLUSION list -- Stage 3 removes these MRNs -- not a cohort.
+    """
+    root = _PROFILE_OUTPUT_ROOT if data_root is None else Path(data_root)
+    return root / "mrn_lists" / PRE_ADT_CASTRATE_MRNS_FILENAME
+
+
+def cohort_mrn_list_path(
+    cohort: str,
+    *,
+    arm: str = "adt",
+    data_root: str | Path | None = None,
+) -> Path:
+    """Resolve one cohort's Stage-3 ``--restrict-to-mrns`` path.
+
+    Dispatches on the cohort's label ``source`` so make_runs() does not have to
+    know which family a cohort belongs to: "all" falls back to the arm's own
+    Stage-1 survival cohort CSV (i.e. no extra subsetting).
+    """
+    key = str(cohort).lower()
+    if key not in COHORT_SPECS:
+        raise ValueError(
+            f"Unknown cohort: {cohort!r} (expected one of {sorted(COHORT_SPECS)})"
+        )
+    root = _PROFILE_OUTPUT_ROOT if data_root is None else Path(data_root)
+    source = COHORT_SPECS[key]["source"]
+    if source is None:
+        return root / f"prostate_{arm}_survival_cohort_{arm}.csv"
+    if source == "adt_intent":
+        return adt_intent_mrn_list_path(key, data_root=root)
+    if source == "llm_met":
+        return llm_met_mrn_list_path(key, data_root=root)
+    raise ValueError(f"Cohort {cohort!r} has an unrecognized label source: {source!r}")
 
 
 def build_adt_intent_mrn_lists(
@@ -513,6 +720,273 @@ def build_adt_intent_mrn_lists(
         "retrospective strata, not landmark-available metastatic-status labels."
     )
     return outputs
+
+
+def build_llm_met_mrn_lists(
+    *,
+    met_labels_path: str | Path | None = None,
+    base_cohort_csv: str | Path | None = None,
+    data_root: str | Path | None = None,
+    require_full_cohort_coverage: bool = True,
+) -> dict[str, Path]:
+    """Split the modelled ADT cohort on the met_diagnosis LLM label.
+
+    Reads met_dx_labels.parquet -- one adjudicated row per patient, carrying a
+    boolean ``has_metastatic_disease`` and the first documented metastasis date.
+    No site or primary filtering happens here: the upstream task is already
+    prostate-specific, applies a deterministic veto gate for negation and
+    hedging, and excludes regional pelvic nodal (N1) disease by definition.
+
+    The upstream label is a whole-record adjudication, so like the ADT-intent
+    strata this is a *retrospective* stratum, not a landmark-available label --
+    ``first_metastasis_date`` is carried into the audit file so a future
+    baseline-only variant can be cut without re-running the LLM.
+
+    Patients absent from the labels file are an error by default rather than a
+    silent negative: the upstream task materializes its own auto-negatives, so
+    absence means the ADT cohort and the labelled cohort disagree (typically a
+    ``--mrns``-limited LLM run, which writes no auto-negatives at all). Pass
+    ``require_full_cohort_coverage=False`` to treat them as unlabelled and drop
+    them from BOTH strata, which shrinks the modelled population.
+    """
+    import polars as pl
+
+    root = _PROFILE_OUTPUT_ROOT if data_root is None else Path(data_root)
+    cohort_path = (
+        root / "prostate_adt_survival_cohort_adt.csv"
+        if base_cohort_csv is None
+        else Path(base_cohort_csv)
+    )
+    labels_path_in = (
+        LLM_MET_LABELS_PATH if met_labels_path is None else Path(met_labels_path)
+    )
+    if not cohort_path.exists():
+        raise FileNotFoundError(
+            f"ADT survival cohort not found: {cohort_path}. Run Stage 1 first."
+        )
+    if not labels_path_in.exists():
+        raise FileNotFoundError(
+            f"LLM metastatic labels not found: {labels_path_in}. Run the "
+            "met_diagnosis pipeline (build_met_dx_labels.py) first, or set "
+            "LLM_MET_LABELS_PATH."
+        )
+
+    cohort = pl.read_csv(cohort_path, infer_schema_length=0).with_columns(
+        pl.col("DFCI_MRN")
+        .cast(pl.Float64, strict=False)
+        .cast(pl.Int64, strict=False)
+        .alias("DFCI_MRN"),
+    ).filter(pl.col("DFCI_MRN").is_not_null())
+    cohort_mrns = cohort["DFCI_MRN"].unique().to_list()
+    if not cohort_mrns:
+        raise ValueError(f"ADT survival cohort contains no usable MRNs: {cohort_path}")
+
+    met = pl.read_parquet(labels_path_in)
+    required = {"DFCI_MRN", "has_metastatic_disease"}
+    missing_cols = required - set(met.columns)
+    if missing_cols:
+        raise ValueError(
+            f"{labels_path_in} is missing column(s) {sorted(missing_cols)}; expected "
+            "the met_diagnosis LABEL_COLUMNS schema."
+        )
+    carried = [
+        col
+        for col in ("first_metastasis_date", "date_source", "met_site", "label_source")
+        if col in met.columns
+    ]
+    met = (
+        met.with_columns(
+            pl.col("DFCI_MRN")
+            .cast(pl.Float64, strict=False)
+            .cast(pl.Int64, strict=False)
+            .alias("DFCI_MRN"),
+            # Written as a real boolean, but a CSV round-trip upstream would
+            # make it a string; normalize before it decides the split.
+            pl.col("has_metastatic_disease")
+            .cast(pl.Boolean, strict=False)
+            .alias("LLM_METASTATIC"),
+        )
+        .filter(pl.col("DFCI_MRN").is_not_null())
+        .select("DFCI_MRN", "LLM_METASTATIC", *carried)
+    )
+
+    # One row per patient upstream, but a resumed/appended run could duplicate a
+    # patient. Collapsing on the positive label keeps the split deterministic
+    # instead of letting row order decide it.
+    duplicated = met.height - met["DFCI_MRN"].n_unique()
+    if duplicated:
+        print(
+            f"  WARNING: {duplicated:,} duplicate MRN row(s) in {labels_path_in}; "
+            "collapsing to one row per patient (any positive wins)."
+        )
+        met = (
+            met.sort("LLM_METASTATIC", descending=True, nulls_last=True)
+            .unique(subset=["DFCI_MRN"], keep="first")
+        )
+
+    unlabelled = met.filter(pl.col("LLM_METASTATIC").is_null())
+    if unlabelled.height:
+        # A null verdict is not a negative: the upstream task writes False for
+        # patients it adjudicated negative and for its own auto-negatives.
+        print(
+            f"  WARNING: {unlabelled.height:,} patient(s) in {labels_path_in} have a "
+            "null has_metastatic_disease; dropping them from both strata."
+        )
+        met = met.filter(pl.col("LLM_METASTATIC").is_not_null())
+
+    labels = (
+        cohort.select("DFCI_MRN")
+        .unique()
+        .join(met, on="DFCI_MRN", how="left")
+        .sort("DFCI_MRN")
+    )
+    missing = labels.filter(pl.col("LLM_METASTATIC").is_null())
+    if missing.height:
+        if require_full_cohort_coverage:
+            raise ValueError(
+                f"{missing.height:,} of {labels.height:,} ADT-cohort patients have no "
+                f"metastatic label in {labels_path_in}. The met_diagnosis task "
+                "materializes explicit auto-negatives, so this usually means the LLM "
+                "run was --mrns-limited and does not cover this cohort. Re-run it "
+                "over the full ADT cohort, or pass require_full_cohort_coverage=False "
+                "to drop these patients from both strata."
+            )
+        print(
+            f"  WARNING: dropping {missing.height:,} ADT-cohort patient(s) with no "
+            "metastatic label; they appear in neither stratum."
+        )
+        labels = labels.filter(pl.col("LLM_METASTATIC").is_not_null())
+
+    mrn_dir = root / "mrn_lists"
+    mrn_dir.mkdir(parents=True, exist_ok=True)
+    labels_path = mrn_dir / LLM_MET_LABELS_FILENAME
+    labels.write_csv(labels_path)
+    print(
+        f"  LLM metastatic labels: {labels.height:,} of {len(cohort_mrns):,} ADT "
+        f"patients labelled -> {labels_path}"
+    )
+    if "label_source" in labels.columns:
+        for source, count in (
+            labels.group_by("label_source").len().sort("label_source").iter_rows()
+        ):
+            print(f"    label_source={source}: {count:,}")
+
+    outputs: dict[str, Path] = {"labels": labels_path}
+    for key, spec in LLM_MET_MODEL_STRATA.items():
+        path = llm_met_mrn_list_path(key, data_root=root)
+        subset = labels.filter(pl.col("LLM_METASTATIC") == spec["metastatic"])
+        subset.write_csv(path)
+        outputs[key] = path
+        print(f"  {spec['title']}: {subset.height:,} patients -> {path}")
+        # The two strata partition the labelled cohort, so one side being empty
+        # is a legitimate (if notable) result rather than proof of a broken
+        # join. Write the file regardless and let Stage 3's --restrict-to-mrns
+        # raise: failing here would also withhold the non-empty stratum.
+        if subset.height == 0:
+            print(
+                f"  WARNING: LLM-metastatic stratum {key!r} is empty; its Stage-3 runs "
+                "will fail on an empty --restrict-to-mrns list. Confirm the met "
+                "labels cover this cohort."
+            )
+
+    print(
+        "  NOTE: has_metastatic_disease adjudicates the full observed record; this "
+        "is a retrospective stratum, not a landmark-available metastatic-status "
+        "label."
+    )
+    return outputs
+
+def build_pre_adt_castrate_mrn_list(
+    *,
+    longitudinal_csv: str | Path | None = None,
+    data_root: str | Path | None = None,
+    threshold_ng_dl: float = CASTRATE_TESTOSTERONE_NG_DL,
+) -> Path:
+    """Write the MRN list of patients castrate BEFORE their ADT anchor.
+
+    Patients with a testosterone below ``threshold_ng_dl`` recorded strictly
+    before the ADT anchor are assumed to have been androgen-deprived elsewhere
+    first, which makes their recorded ADT start a transfer-of-care artifact
+    rather than a treatment origin -- their "time zero" is already mid-course.
+
+    Reads longitudinal_prediction_data_adt.csv, whose LAB_VALUE is already
+    unit-standardized to ng/dL and whose t_lab is signed days from the
+    treatment anchor, so no separate lab load or date arithmetic is needed.
+    Below-detection results were imputed to 0 upstream and therefore count as
+    castrate, which is the intended reading of a "< 3 ng/dL" result.
+
+    The output is an EXCLUSION list: Stage 3 removes these MRNs via
+    --exclude-mrns. It is cohort-independent, so it is built once and reused by
+    every cohort's exclusion arm.
+    """
+    import polars as pl
+
+    root = _PROFILE_OUTPUT_ROOT if data_root is None else Path(data_root)
+    data_path = (
+        root / "longitudinal_prediction_data_adt.csv"
+        if longitudinal_csv is None
+        else Path(longitudinal_csv)
+    )
+    if not data_path.exists():
+        raise FileNotFoundError(
+            f"Longitudinal prediction data not found: {data_path}. Run Stage 2 first."
+        )
+
+    labs = (
+        pl.scan_csv(data_path, infer_schema_length=0)
+        .select("DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab")
+        .with_columns(
+            pl.col("DFCI_MRN")
+            .cast(pl.Float64, strict=False)
+            .cast(pl.Int64, strict=False)
+            .alias("DFCI_MRN"),
+            pl.col("LAB_VALUE").cast(pl.Float64, strict=False).alias("LAB_VALUE"),
+            pl.col("t_lab").cast(pl.Float64, strict=False).alias("t_lab"),
+        )
+        .filter(
+            pl.col("DFCI_MRN").is_not_null()
+            & pl.col("LAB_NAME").eq(TESTOSTERONE_LAB_NAME)
+            & pl.col("LAB_VALUE").is_not_null()
+            & pl.col("t_lab").is_not_null()
+        )
+        .collect()
+    )
+
+    n_patients_with_testosterone = labs.filter(pl.col("t_lab").lt(0))[
+        "DFCI_MRN"
+    ].n_unique()
+
+    # Strictly before the anchor: a same-day result (t_lab == 0) may already
+    # reflect the first ADT dose, so it is not evidence of PRIOR treatment.
+    castrate = (
+        labs.filter(
+            pl.col("t_lab").lt(0) & pl.col("LAB_VALUE").lt(threshold_ng_dl)
+        )
+        .group_by("DFCI_MRN")
+        .agg(
+            pl.col("LAB_VALUE").min().alias("MIN_PRE_ADT_TESTOSTERONE"),
+            pl.col("t_lab").max().alias("T_LAB_NEAREST_PRE_ADT"),
+            pl.len().alias("N_CASTRATE_RESULTS_PRE_ADT"),
+        )
+        .sort("DFCI_MRN")
+    )
+
+    mrn_dir = root / "mrn_lists"
+    mrn_dir.mkdir(parents=True, exist_ok=True)
+    path = pre_adt_castrate_mrn_list_path(data_root=root)
+    castrate.write_csv(path)
+
+    print(
+        f"  pre-ADT castrate (<{threshold_ng_dl:g} ng/dL): {castrate.height:,} of "
+        f"{n_patients_with_testosterone:,} patients with any pre-ADT testosterone "
+        f"result flagged for exclusion -> {path}"
+    )
+    if castrate.height == 0:
+        print(
+            "  WARNING: no patients flagged; --exclude-mrns will fail on an empty "
+            "list. Confirm testosterone results exist before the ADT anchor."
+        )
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -783,6 +1257,8 @@ def build_prediction_inputs(run: dict, dry_run: bool = False) -> None:
     ]
     if run.get("restrict_to_mrns"):
         cmd += ["--restrict-to-mrns", run["restrict_to_mrns"]]
+    if run.get("exclude_mrns"):
+        cmd += ["--exclude-mrns", run["exclude_mrns"]]
     # The builder applies only this endpoint's validity gate. Thus pre-anchor
     # platinum does not remove NEPC patients, and prevalent NEPC does not remove
     # platinum patients.
