@@ -98,10 +98,49 @@ def test_patients_outside_the_adt_cohort_are_ignored(tmp_path):
     assert pl.read_csv(out["llm_metastatic"]).height == 0
 
 
-def test_an_unlabelled_cohort_patient_raises_and_names_the_limited_run(tmp_path):
+def test_an_unlabelled_cohort_patient_is_dropped_not_called_negative(tmp_path, capsys):
     """The upstream task writes its own auto-negatives, so a missing patient
-    means the LLM run did not cover this cohort -- NOT that they are negative.
-    Folding them into the negative stratum would silently mislabel them."""
+    means the labels file does not cover this cohort -- NOT that they are
+    negative. Folding them into llm_nonmetastatic would assert a negative the
+    LLM never made, so they are dropped from both strata instead."""
+    _write_cohort(tmp_path, [1, 2])
+    labels = _write_met_labels(
+        tmp_path / "met_dx_labels.parquet",
+        [(1, True, "2019-04-02", "adjudicated")],
+    )
+
+    out = cp.build_llm_met_mrn_lists(met_labels_path=labels, data_root=tmp_path)
+
+    met = set(pl.read_csv(out["llm_metastatic"])["DFCI_MRN"].to_list())
+    non = set(pl.read_csv(out["llm_nonmetastatic"])["DFCI_MRN"].to_list())
+    assert met == {1}
+    # Patient 2 is unlabelled, so they appear in NEITHER stratum.
+    assert non == set()
+
+
+def test_the_dropped_count_and_coverage_fraction_are_printed(tmp_path, capsys):
+    """Dropping is the default, so the shortfall has to stay visible: the LLM
+    strata cover fewer patients than the ADT-intent strata, and their Ns are
+    therefore not directly comparable."""
+    _write_cohort(tmp_path, [1, 2, 3, 4])
+    labels = _write_met_labels(
+        tmp_path / "met_dx_labels.parquet",
+        [
+            (1, True, "2019-04-02", "adjudicated"),
+            (2, False, None, "adjudicated"),
+            (3, False, None, "auto_negative_no_evidence"),
+        ],
+    )
+
+    cp.build_llm_met_mrn_lists(met_labels_path=labels, data_root=tmp_path)
+
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "1 of 4" in out
+    assert "25.0%" in out
+
+
+def test_a_coverage_gap_can_be_made_fatal(tmp_path):
     _write_cohort(tmp_path, [1, 2])
     labels = _write_met_labels(
         tmp_path / "met_dx_labels.parquet",
@@ -109,28 +148,11 @@ def test_an_unlabelled_cohort_patient_raises_and_names_the_limited_run(tmp_path)
     )
 
     with pytest.raises(ValueError, match="mrns-limited"):
-        cp.build_llm_met_mrn_lists(met_labels_path=labels, data_root=tmp_path)
-
-
-def test_unlabelled_patients_can_be_dropped_from_both_strata(tmp_path, capsys):
-    _write_cohort(tmp_path, [1, 2])
-    labels = _write_met_labels(
-        tmp_path / "met_dx_labels.parquet",
-        [(1, True, "2019-04-02", "adjudicated")],
-    )
-
-    out = cp.build_llm_met_mrn_lists(
-        met_labels_path=labels,
-        data_root=tmp_path,
-        require_full_cohort_coverage=False,
-    )
-
-    met = set(pl.read_csv(out["llm_metastatic"])["DFCI_MRN"].to_list())
-    non = set(pl.read_csv(out["llm_nonmetastatic"])["DFCI_MRN"].to_list())
-    assert met == {1}
-    # Patient 2 is unlabelled, so they appear in NEITHER stratum.
-    assert non == set()
-    assert "WARNING" in capsys.readouterr().out
+        cp.build_llm_met_mrn_lists(
+            met_labels_path=labels,
+            data_root=tmp_path,
+            require_full_cohort_coverage=True,
+        )
 
 
 def test_a_null_verdict_is_not_treated_as_a_negative(tmp_path, capsys):
@@ -143,11 +165,7 @@ def test_a_null_verdict_is_not_treated_as_a_negative(tmp_path, capsys):
         ],
     )
 
-    out = cp.build_llm_met_mrn_lists(
-        met_labels_path=labels,
-        data_root=tmp_path,
-        require_full_cohort_coverage=False,
-    )
+    out = cp.build_llm_met_mrn_lists(met_labels_path=labels, data_root=tmp_path)
 
     assert set(pl.read_csv(out["llm_metastatic"])["DFCI_MRN"].to_list()) == {1}
     assert pl.read_csv(out["llm_nonmetastatic"]).height == 0

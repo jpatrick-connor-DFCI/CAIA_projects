@@ -727,7 +727,7 @@ def build_llm_met_mrn_lists(
     met_labels_path: str | Path | None = None,
     base_cohort_csv: str | Path | None = None,
     data_root: str | Path | None = None,
-    require_full_cohort_coverage: bool = True,
+    require_full_cohort_coverage: bool = False,
 ) -> dict[str, Path]:
     """Split the modelled ADT cohort on the met_diagnosis LLM label.
 
@@ -742,12 +742,15 @@ def build_llm_met_mrn_lists(
     ``first_metastasis_date`` is carried into the audit file so a future
     baseline-only variant can be cut without re-running the LLM.
 
-    Patients absent from the labels file are an error by default rather than a
-    silent negative: the upstream task materializes its own auto-negatives, so
-    absence means the ADT cohort and the labelled cohort disagree (typically a
-    ``--mrns``-limited LLM run, which writes no auto-negatives at all). Pass
-    ``require_full_cohort_coverage=False`` to treat them as unlabelled and drop
-    them from BOTH strata, which shrinks the modelled population.
+    Patients absent from the labels file are treated as UNLABELLED, not as
+    negatives, and are dropped from both strata with a printed count -- the
+    upstream task materializes its own auto-negatives, so absence means the ADT
+    cohort and the labelled cohort disagree (a ``--mrns``-limited LLM run, or a
+    cohort rebuilt after the LLM run). Folding them into ``llm_nonmetastatic``
+    would assert a negative the LLM never made. Dropping them means the two LLM
+    strata together cover slightly fewer patients than the ADT-intent strata do,
+    so their Ns are not directly comparable; the coverage fraction is printed.
+    Pass ``require_full_cohort_coverage=True`` to make the gap fatal instead.
     """
     import polars as pl
 
@@ -852,8 +855,10 @@ def build_llm_met_mrn_lists(
                 "to drop these patients from both strata."
             )
         print(
-            f"  WARNING: dropping {missing.height:,} ADT-cohort patient(s) with no "
-            "metastatic label; they appear in neither stratum."
+            f"  WARNING: {missing.height:,} of {labels.height:,} ADT-cohort patients "
+            f"({missing.height / labels.height:.1%}) have no metastatic label in "
+            f"{labels_path_in}; dropping them -- they appear in NEITHER stratum, so "
+            "the LLM strata cover fewer patients than the ADT-intent strata do."
         )
         labels = labels.filter(pl.col("LLM_METASTATIC").is_not_null())
 
