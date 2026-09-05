@@ -143,10 +143,13 @@ COHORT_SPECS = {
         "llm_metastatic": False,
     },
 }
+# The localized-adjuvant cohort is deliberately absent: its spec stays in
+# COHORT_SPECS (build_adt_intent_mrn_lists writes both intent strata from one
+# pass, and the audit table needs it), but it is no longer modelled. Add
+# "localized" back to a notebook's COHORTS to reinstate those runs.
 DEFAULT_COHORTS = (
     "all",
     "metastatic",
-    "localized",
     "llm_metastatic",
     "llm_nonmetastatic",
 )

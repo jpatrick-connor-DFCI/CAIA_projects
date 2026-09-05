@@ -1,14 +1,21 @@
 ---
-title: "Generate COMPASS figures (NEPC, AVPC, AVPC/NEPC, and platinum endpoints)"
+title: "Generate COMPASS figures (NEPC and platinum endpoints)"
 output:
   html_document:
     toc: true
     toc_depth: 2
 ---
 
-Canonical R figure workflow using tidyverse/ggplot2. **Knit** renders the
-**ADT** cohort for the **NEPC**, **AVPC**, **AVPC/NEPC**, and **platinum**
-endpoints by default. ARPI remains available by explicit request.
+Canonical R figure workflow using tidyverse/ggplot2. **Knit** renders every
+modelled **ADT** cohort -- the full arm, the ADT-intent metastatic stratum, and
+the two LLM metastatic strata, each with and without the pre-ADT castrate
+exclusion -- for the **NEPC** and **platinum** endpoints. ARPI remains
+available by explicit request.
+
+The AVPC endpoint and the localized-adjuvant cohort are retired; no such trees
+are built. AVPC survives elsewhere as a *phenotype label* (`has_avpc`,
+`primary_label`) in Figure 2's classifier validation, which is a different
+thing from the retired survival endpoint.
 
 The document reads the merged `profile_data` run under `.../CAIA/COMPASS`
 and writes to `figures/CAIA/COMPASS`.
@@ -18,8 +25,11 @@ figure directory. Every endpoint nests one level below its cohort arm --
 platinum included, so no endpoint's panels can overwrite another's:
 
 `FIG_ROOT/ADT/nepc/<figure>/adt_<plot-stem>.png`
-`FIG_ROOT/ADT/avpc/<figure>/adt_<plot-stem>.png`
 `FIG_ROOT/ADT/platinum/<figure>/adt_<plot-stem>.png`
+`FIG_ROOT/ADT_LLM_METASTATIC/nepc/<figure>/adt_llm_metastatic_<plot-stem>.png`
+
+The cohort directory is the run label upper-cased, so each of the eight run
+labels gets its own tree and no two cohorts can overwrite each other.
 
 Note that platinum figures moved out of the old un-suffixed `FIG_ROOT/ADT/`
 path; references to that location need updating. For example,
@@ -44,8 +54,8 @@ These analyses exist for the ADT arm at landmark 0 only, and a missing
 
 All figure-generation logic lives in `COMPASS_generate_figures_pipeline.R` as
 `generate_figures(cohort, endpoint, ...)`. This document just sources that file
-and calls it for each cohort in `COHORTS` (defaults to `c("adt")`) crossed with
-each endpoint in `ENDPOINTS` (defaults to all four).
+and calls it for each cohort in `COHORTS` crossed with each endpoint in
+`ENDPOINTS`.
 
 Figure 4 also includes a supplemental held-out comparison of elastic-net Cox,
 XGBoost, and Dynamic-DeepHit across mean AUC(t), C-index, and integrated Brier
@@ -76,8 +86,25 @@ NEPC_PROJ_PATH <- "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS"
 FIG_ROOT <- "/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS"
 
 # Endpoints to render. Each needs its own 01/02/03 build; see
-# compass_pipeline.make_endpoint_runs().
-ENDPOINTS <- c("nepc", "avpc", "platinum")
+# compass_pipeline.make_endpoint_runs(). Must be a subset of the pipeline's
+# SUPPORTED_ENDPOINTS -- naming a retired endpoint here fails in the
+# ENDPOINT_SUFFIXES lookup below rather than at generate_figures().
+ENDPOINTS <- c("nepc", "platinum")
+
+# Cohorts to render: every modelled ADT run label, matching the notebooks'
+# COHORTS x EXCLUSIONS cross in compass_pipeline.DEFAULT_COHORTS /
+# DEFAULT_EXCLUSIONS. Narrow this to iterate on a single tree.
+COHORTS <- c(
+  "adt",                    "adt_noprecastrate",
+  "adt_metastatic",         "adt_metastatic_noprecastrate",
+  "adt_llm_metastatic",     "adt_llm_metastatic_noprecastrate",
+  "adt_llm_nonmetastatic",  "adt_llm_nonmetastatic_noprecastrate"
+)
+
+stopifnot(
+  all(ENDPOINTS %in% SUPPORTED_ENDPOINTS),
+  all(COHORTS %in% SUPPORTED_COHORTS)
+)
 
 # Generate lab-specific panels only for PSA and Testosterone.
 # Non-androgen labs remain available to models and aggregate feature plots.
@@ -95,57 +122,94 @@ for (required_path in c(
       stop(required_path, " not found -- run 01_preprocessing.ipynb first.")
 }
 
-# Each endpoint reads its own prediction-inputs tree. Check them up front so a
-# missing NEPC build fails here rather than partway through the platinum pass.
+# Each cohort x endpoint reads its own prediction-inputs tree. Check them all up
+# front and report EVERY missing one together: with 8 cohorts x 2 endpoints,
+# stopping at the first would mean 16 edit-rerun cycles to discover an
+# incomplete 01_preprocessing pass.
+missing_trees <- character(0)
 for (COHORT in COHORTS) {
   for (ENDPOINT in ENDPOINTS) {
     suffix <- unname(ENDPOINT_SUFFIXES[[ENDPOINT]])
     inputs_dir <- file.path(NEPC_PROJ_PATH, "survival_analysis",
                             paste0("prediction_inputs_", COHORT, suffix))
     if (!dir.exists(inputs_dir))
-      stop(inputs_dir, " not found -- run 01_preprocessing.ipynb for endpoint ",
-           ENDPOINT, " first.")
+      missing_trees <- c(missing_trees, inputs_dir)
   }
 }
+if (length(missing_trees))
+  stop(length(missing_trees), " of ", length(COHORTS) * length(ENDPOINTS),
+       " prediction-input trees are missing -- run 01_preprocessing.ipynb for ",
+       "every cohort x endpoint first:\n  ",
+       paste(missing_trees, collapse = "\n  "))
 
 message("data root:   ", NEPC_PROJ_PATH)
 message("figure root: ", FIG_ROOT)
 message("endpoints:   ", paste(ENDPOINTS, collapse = ", "))
+message("cohorts:     ", paste(COHORTS, collapse = ", "))
+message(sprintf("renders:     %d cohort x endpoint figure sets",
+                length(COHORTS) * length(ENDPOINTS)))
 ```
 
 ## Render ADT figures
 
-Runs the R figure-generation pipeline for ADT by default, once per endpoint.
-Each endpoint's outputs go to `FIG_ROOT/ADT/<endpoint>/`, i.e. `ADT/nepc/`,
-`ADT/avpc/`, and `ADT/platinum/`.
-Set `COHORTS <- c("arpi", "adt")` to opt into both arms, or narrow `ENDPOINTS`
-to render a single endpoint. `COHORTS` accepts any run label in
-`SUPPORTED_COHORTS`, so a patient subset or exclusion arm is rendered by naming
-its tree, e.g. `c("adt_llm_metastatic", "adt_llm_metastatic_noprecastrate")`.
+Runs the R figure-generation pipeline once per cohort x endpoint -- 8 cohorts x
+2 endpoints = 16 figure sets. Outputs go to `FIG_ROOT/<COHORT>/<endpoint>/`,
+e.g. `ADT/platinum/`, `ADT_LLM_METASTATIC/nepc/`.
+
+Narrow `COHORTS` or `ENDPOINTS` above to iterate on a single tree. `COHORTS`
+accepts any run label in `SUPPORTED_COHORTS`, so the ARPI arm is rendered by
+naming its labels, and a retired tree that still exists on disk (an
+`adt_localized` or `_avpc` build) can be re-rendered by naming it explicitly.
+
+Each cohort is rendered independently, and a failure in one is reported and
+skipped rather than abandoning the other 15 -- a single cohort with too few
+events should not cost the whole knit. Any failures are re-reported at the end
+and the chunk then fails, so a partial render cannot pass silently.
 
 ```{r render-figures}
+render_failures <- character(0)
+
 for (COHORT in COHORTS) {
   for (ENDPOINT in ENDPOINTS) {
-    message(sprintf("\n========== R figures: %s / %s ==========",
-                    cohort_display(COHORT), toupper(ENDPOINT)))
-    generate_figures(
-      COHORT,
-      nepc_proj_path = NEPC_PROJ_PATH,
-      fig_root = FIG_ROOT,
-      endpoint = ENDPOINT,
-      plot_non_androgen_distributions = PLOT_NON_ANDROGEN_DISTRIBUTIONS,
-      plot_non_androgen_lab_figures = PLOT_NON_ANDROGEN_LAB_FIGURES
-    )
-    endpoint_fig_root <- file.path(FIG_ROOT, toupper(COHORT), ENDPOINT)
-    supplement_path <- file.path(
-      endpoint_fig_root, "figure4",
-      paste0(COHORT, "_figure4s_multivariate_all_models.png")
-    )
-    if (!file.exists(supplement_path))
-      stop("Expected multivariate supplement was not generated: ", supplement_path)
-    message("multivariate supplement: ", supplement_path)
-    message(sprintf("\nCompleted R figures for %s / %s.",
-                    cohort_display(COHORT), toupper(ENDPOINT)))
+    label <- sprintf("%s / %s", cohort_display(COHORT), toupper(ENDPOINT))
+    message(sprintf("\n========== R figures: %s ==========", label))
+    ok <- tryCatch({
+      generate_figures(
+        COHORT,
+        nepc_proj_path = NEPC_PROJ_PATH,
+        fig_root = FIG_ROOT,
+        endpoint = ENDPOINT,
+        plot_non_androgen_distributions = PLOT_NON_ANDROGEN_DISTRIBUTIONS,
+        plot_non_androgen_lab_figures = PLOT_NON_ANDROGEN_LAB_FIGURES
+      )
+      endpoint_fig_root <- file.path(FIG_ROOT, toupper(COHORT), ENDPOINT)
+      supplement_path <- file.path(
+        endpoint_fig_root, "figure4",
+        paste0(COHORT, "_figure4s_multivariate_all_models.png")
+      )
+      # The supplement is the last artifact generate_figures() writes, so its
+      # absence means the pass did not complete even when nothing threw.
+      if (!file.exists(supplement_path))
+        stop("expected multivariate supplement was not generated: ",
+             supplement_path)
+      message("multivariate supplement: ", supplement_path)
+      TRUE
+    }, error = function(e) {
+      message(sprintf("FAILED %s: %s", label, conditionMessage(e)))
+      FALSE
+    })
+    if (ok) {
+      message(sprintf("\nCompleted R figures for %s.", label))
+    } else {
+      render_failures <- c(render_failures, label)
+    }
   }
 }
+
+n_total <- length(COHORTS) * length(ENDPOINTS)
+message(sprintf("\n%d of %d figure sets rendered.",
+                n_total - length(render_failures), n_total))
+if (length(render_failures))
+  stop(length(render_failures), " of ", n_total, " figure sets failed:\n  ",
+       paste(render_failures, collapse = "\n  "))
 ```

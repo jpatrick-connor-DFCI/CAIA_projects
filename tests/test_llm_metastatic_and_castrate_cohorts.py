@@ -309,18 +309,21 @@ def test_the_castrate_threshold_is_strict(tmp_path):
 def test_exclusion_is_orthogonal_to_cohort_and_endpoint(monkeypatch, tmp_path):
     monkeypatch.setattr(cp, "_PROFILE_OUTPUT_ROOT", tmp_path)
 
+    endpoints = ("platinum", "nepc")
     runs = cp.make_endpoint_runs(
         ["adt"],
-        endpoints=("platinum", "nepc", "avpc"),
+        endpoints=endpoints,
         cohorts=cp.DEFAULT_COHORTS,
         exclusions=cp.DEFAULT_EXCLUSIONS,
     )
 
-    assert len(runs) == 5 * 3 * 2
+    assert len(runs) == len(cp.DEFAULT_COHORTS) * len(endpoints) * len(
+        cp.DEFAULT_EXCLUSIONS
+    )
     assert {(r["cohort"], r["endpoint"], r["exclusion"]) for r in runs} == {
         (cohort, endpoint, exclusion)
         for cohort in cp.DEFAULT_COHORTS
-        for endpoint in ("platinum", "nepc", "avpc")
+        for endpoint in endpoints
         for exclusion in cp.DEFAULT_EXCLUSIONS
     }
     # Every cell needs its own tree, or one run overwrites another's outputs.
@@ -361,7 +364,12 @@ def test_excluded_runs_carry_the_exclusion_list_and_keep_their_cohort_list(
 
 def test_legacy_cross_labels_are_unchanged(monkeypatch, tmp_path):
     """Existing output trees stay addressable: the exclusion axis contributes an
-    empty suffix at "none", so the pre-exclusion cross is reproduced exactly."""
+    empty suffix at "none", so the pre-exclusion cross is reproduced exactly.
+
+    Names "localized" explicitly. It is no longer in DEFAULT_COHORTS, but its
+    spec is retained so already-generated trees stay reachable -- that is
+    exactly what this test pins.
+    """
     monkeypatch.setattr(cp, "_PROFILE_OUTPUT_ROOT", tmp_path)
 
     runs = cp.make_endpoint_runs(

@@ -364,10 +364,13 @@ read_endpoint_performance <- function(path, endpoint) {
 COHORT_ARMS <- c("arpi", "adt")
 # Patient-subset suffixes that make_runs() appends to the arm. "" is the arm's
 # own full survival cohort.
+# "_localized" is retired: the localized-adjuvant cohort is no longer modelled,
+# so no such tree is generated. Re-add it here AND to the notebook COHORTS if
+# those runs are ever reinstated.
 COHORT_SUBSET_SUFFIXES <- c(
   "",
-  "_metastatic", "_localized",              # medication-derived ADT intent
-  "_llm_metastatic", "_llm_nonmetastatic"   # LLM stage-pipeline metastatic status
+  "_metastatic",                            # medication-derived ADT intent
+  "_llm_metastatic", "_llm_nonmetastatic"   # met_diagnosis LLM metastatic status
 )
 # Orthogonal exclusion suffixes, likewise appended by make_runs().
 COHORT_EXCLUSION_SUFFIXES <- c("", "_noprecastrate")
@@ -386,7 +389,6 @@ COHORTS <- c("adt")
 COHORT_SUBSET_LABELS <- c(
   "",                        # ""
   " / metastatic",           # _metastatic
-  " / localized-adjuvant",   # _localized
   " / LLM metastatic",       # _llm_metastatic
   " / LLM non-metastatic"    # _llm_nonmetastatic
 )
@@ -440,11 +442,11 @@ COHORT_LANDMARKS <- list(
 # compass_pipeline.make_endpoint_runs(). The suffix must match the
 # `output_suffix` that make_runs() appends to BOTH prediction_inputs_* and
 # local_runs_*: "" for platinum, "_nepc" for NEPC.
-SUPPORTED_ENDPOINTS <- c("platinum", "nepc", "avpc")
+# "avpc" is retired alongside the localized cohort; no _avpc tree is generated.
+SUPPORTED_ENDPOINTS <- c("platinum", "nepc")
 ENDPOINT_SUFFIXES <- c(
   platinum = "",
-  nepc = "_nepc",
-  avpc = "_avpc"
+  nepc = "_nepc"
 )
 # Figure 1/2 are classifier- and platinum-cohort figures (CONSORT, LLM
 # validation, platinum enrichment); their subject is the platinum MRN list

@@ -81,17 +81,23 @@ def test_endpoint_suffixes_match_make_runs():
     body = block.group(1)
     assert re.search(r'platinum\s*=\s*""', body), "platinum suffix must be empty"
     assert re.search(r'nepc\s*=\s*"_nepc"', body), "nepc suffix must be _nepc"
-    assert re.search(r'avpc\s*=\s*"_avpc"', body), "avpc suffix must be _avpc"
+    # AVPC is retired: no _avpc tree is generated, so the R side must not offer
+    # an endpoint whose data trees do not exist.
+    assert "avpc" not in body
 
 
-def test_supported_endpoints_excludes_retired_joint_endpoint():
-    """The AVPC/NEPC union is audit metadata, not a figure endpoint."""
+def test_supported_endpoints_excludes_retired_endpoints():
+    """The AVPC/NEPC union is audit metadata, not a figure endpoint. Standalone
+    AVPC is likewise retired, so R must offer exactly the modelled endpoints --
+    accepting one whose trees are never built yields empty figures, not an
+    error."""
     source = _pipeline_source()
     block = re.search(r"SUPPORTED_ENDPOINTS <- c\((.*?)\)", source, re.S)
     assert block, "SUPPORTED_ENDPOINTS not found"
     body = block.group(1)
     assert '"avpc_nepc"' not in body
-    assert all(f'"{endpoint}"' in body for endpoint in ("platinum", "nepc", "avpc"))
+    assert '"avpc"' not in body
+    assert all(f'"{endpoint}"' in body for endpoint in ("platinum", "nepc"))
 
 
 def test_endpoint_filter_is_not_data_masked():
@@ -114,10 +120,15 @@ def test_endpoint_filter_is_not_data_masked():
 
 
 @pytest.mark.parametrize(
-    ("endpoint", "expected_auc"), [("platinum", 0.71), ("nepc", 0.64), ("avpc", 0.58)]
+    ("endpoint", "expected_auc"), [("platinum", 0.71), ("nepc", 0.64)]
 )
 def test_reads_the_requested_endpoints_row(tmp_path, endpoint, expected_auc):
-    """A metrics CSV holding all three endpoints must yield the requested one."""
+    """A metrics CSV holding several endpoints must yield the requested one.
+
+    The fixture still carries an avpc row even though that endpoint is retired:
+    historical metrics files contain it, and the filter must skip past it
+    rather than be confused by an unrecognized endpoint.
+    """
     script = textwrap.dedent(
         f"""
         suppressPackageStartupMessages({{library(dplyr); library(readr)}})
@@ -236,6 +247,8 @@ def test_every_supported_endpoint_nests_uniformly():
     """
     source = _pipeline_source()
     assert "FIG_ROOT <- file.path(fig_root, toupper(COHORT), ENDPOINT)" in source
+    # avpc stays in this list though it is retired: the guarantee is that the
+    # expression is generic over ENDPOINT, so reinstating it needs no branch.
     for endpoint in ("platinum", "nepc", "avpc"):
         assert not re.search(
             rf'FIG_ROOT.*identical\(ENDPOINT, "{endpoint}"\)', source
@@ -313,3 +326,80 @@ def test_supplement_never_refits_anything():
             f"the supplement calls {forbidden}; it must only read the "
             "comparison CSVs"
         )
+
+
+# ---- 05_figures.Rmd render cross -----------------------------------------
+#
+# The Rmd names its COHORTS and ENDPOINTS as literal vectors, so it is the one
+# place that can drift out of the Python run cross without any import failing:
+# a retired endpoint left here dies in the ENDPOINT_SUFFIXES lookup, and a
+# missing cohort silently renders fewer figure sets than there are runs.
+
+FIGURES_RMD = REPO_ROOT / "COMPASS" / "survival_analysis" / "05_figures.Rmd"
+
+
+def _rmd_vector(name: str) -> list[str]:
+    body = re.search(rf"^{name} <- c\((.*?)\n\)", FIGURES_RMD.read_text(), re.S | re.M)
+    assert body, f"{name} not found in 05_figures.Rmd"
+    return re.findall(r'"([^"]*)"', body.group(1))
+
+
+def _python_run_labels() -> set[str]:
+    import contextlib
+    import io
+    import tempfile
+
+    from COMPASS.survival_analysis import compass_pipeline as cp
+
+    original = cp._PROFILE_OUTPUT_ROOT
+    try:
+        cp._PROFILE_OUTPUT_ROOT = Path(tempfile.mkdtemp())
+        with contextlib.redirect_stdout(io.StringIO()):
+            runs = cp.make_endpoint_runs(
+                ["adt"],
+                endpoints=("platinum", "nepc"),
+                cohorts=cp.DEFAULT_COHORTS,
+                exclusions=cp.DEFAULT_EXCLUSIONS,
+            )
+    finally:
+        cp._PROFILE_OUTPUT_ROOT = original
+    return {run["label"] for run in runs}
+
+
+def test_the_figures_rmd_renders_every_modelled_run():
+    """Every Python run label must get a figure set.
+
+    A run whose trees are built but never rendered is invisible: nothing errors,
+    the knit just produces fewer figures than there are cohorts.
+    """
+    assert _python_run_labels() == set(_rmd_vector("COHORTS"))
+
+
+def test_the_figures_rmd_names_no_retired_endpoint():
+    """A retired endpoint here fails at the ENDPOINT_SUFFIXES lookup in setup,
+    before a single figure is drawn."""
+    source = _pipeline_source()
+    block = re.search(r"SUPPORTED_ENDPOINTS <- c\((.*?)\)", source, re.S)
+    supported = set(re.findall(r'"([^"]*)"', block.group(1)))
+
+    rmd = FIGURES_RMD.read_text()
+    endpoints = re.findall(
+        r'"([^"]*)"', re.search(r"^ENDPOINTS <- c\((.*?)\)", rmd, re.S | re.M).group(1)
+    )
+    assert set(endpoints) <= supported, (
+        f"05_figures.Rmd requests endpoints the pipeline does not support: "
+        f"{sorted(set(endpoints) - supported)}"
+    )
+
+
+def test_a_failed_cohort_does_not_abandon_the_rest():
+    """With 16 figure sets, one cohort's failure must not discard the other 15
+    -- but the chunk must still fail overall so a partial render is visible."""
+    rmd = FIGURES_RMD.read_text()
+    render = rmd[rmd.index("```{r render-figures}"):]
+    assert "tryCatch(" in render, "per-cohort rendering must be fault-isolated"
+    assert "render_failures" in render
+    # The summary stop() must come after the loop, not inside it.
+    assert render.index("render_failures <- c(render_failures") < render.index(
+        'stop(length(render_failures)'
+    )
