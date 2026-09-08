@@ -44,11 +44,22 @@ from COMPASS.survival_analysis import cox_aggregated as _ca  # noqa: E402
 
 ID_COL = "DFCI_MRN"
 
-# The two retrospective cohorts this module contrasts. Ordering is fixed:
-# every delta below is metastatic minus localized.
+# The two retrospective ADT-intent cohorts this module contrasts. Ordering is
+# fixed: every delta below is metastatic minus localized.
+#
+# These are COHORT_SPECS keys. The column suffixes derived from them
+# ("coef_feature_metastatic", ...) are read by the R supplemental section, so
+# the suffix is pinned separately and stays "metastatic" across the key rename.
 LOCALIZED = "localized"
-METASTATIC = "metastatic"
+METASTATIC = "metastatic_adt"
 COMPARED_COHORTS = (LOCALIZED, METASTATIC)
+# Column-suffix aliases, decoupled from the cohort keys above.
+LOCALIZED_SUFFIX = "localized"
+METASTATIC_SUFFIX = "metastatic"
+COHORT_COLUMN_SUFFIXES = {
+    LOCALIZED: LOCALIZED_SUFFIX,
+    METASTATIC: METASTATIC_SUFFIX,
+}
 
 DEFAULT_ENDPOINTS = tuple(_ca.ENDPOINTS)
 DEFAULT_LANDMARKS = (0, 90, 180)
@@ -232,31 +243,32 @@ def compare_univariate(
         sides[METASTATIC],
         on=keys,
         how="outer",
-        suffixes=(f"_{LOCALIZED}", f"_{METASTATIC}"),
+        suffixes=(f"_{LOCALIZED_SUFFIX}", f"_{METASTATIC_SUFFIX}"),
         indicator="merge_side",
     )
     for col in ("coef_feature", "hazard_ratio_per_sd", "ci_lower", "ci_upper",
                 "p_value", "q_value"):
         for cohort in COMPARED_COHORTS:
-            name = f"{col}_{cohort}"
+            name = f"{col}_{COHORT_COLUMN_SUFFIXES[cohort]}"
             if name in comparison:
                 comparison[name] = pd.to_numeric(comparison[name], errors="coerce")
 
     comparison["delta_log_hr_met_minus_loc"] = (
-        comparison[f"coef_feature_{METASTATIC}"] - comparison[f"coef_feature_{LOCALIZED}"]
+        comparison[f"coef_feature_{METASTATIC_SUFFIX}"] - comparison[f"coef_feature_{LOCALIZED_SUFFIX}"]
     )
     comparison["hr_ratio_met_vs_loc"] = np.exp(comparison["delta_log_hr_met_minus_loc"])
     comparison["same_direction"] = (
-        np.sign(comparison[f"coef_feature_{METASTATIC}"])
-        == np.sign(comparison[f"coef_feature_{LOCALIZED}"])
+        np.sign(comparison[f"coef_feature_{METASTATIC_SUFFIX}"])
+        == np.sign(comparison[f"coef_feature_{LOCALIZED_SUFFIX}"])
     )
     for cohort in COMPARED_COHORTS:
-        lo = comparison[f"ci_lower_{cohort}"]
-        hi = comparison[f"ci_upper_{cohort}"]
-        comparison[f"se_log_hr_{cohort}"] = (np.log(hi) - np.log(lo)) / (2 * 1.96)
+        suffix = COHORT_COLUMN_SUFFIXES[cohort]
+        lo = comparison[f"ci_lower_{suffix}"]
+        hi = comparison[f"ci_upper_{suffix}"]
+        comparison[f"se_log_hr_{suffix}"] = (np.log(hi) - np.log(lo)) / (2 * 1.96)
     se_delta = np.sqrt(
-        comparison[f"se_log_hr_{LOCALIZED}"] ** 2
-        + comparison[f"se_log_hr_{METASTATIC}"] ** 2
+        comparison[f"se_log_hr_{LOCALIZED_SUFFIX}"] ** 2
+        + comparison[f"se_log_hr_{METASTATIC_SUFFIX}"] ** 2
     )
     comparison["z_heterogeneity"] = comparison["delta_log_hr_met_minus_loc"] / se_delta
     comparison["p_heterogeneity"] = comparison["z_heterogeneity"].abs().map(
@@ -266,7 +278,8 @@ def compare_univariate(
         ["endpoint", "landmark_days"], group_keys=False
     )["p_heterogeneity"].transform(bh_adjust)
     for cohort in COMPARED_COHORTS:
-        comparison[f"fdr_{cohort}"] = comparison[f"q_value_{cohort}"].lt(0.05)
+        suffix = COHORT_COLUMN_SUFFIXES[cohort]
+        comparison[f"fdr_{suffix}"] = comparison[f"q_value_{suffix}"].lt(0.05)
 
     summary_rows = []
     for (endpoint, landmark), group in comparison.groupby(["endpoint", "landmark_days"]):
@@ -274,7 +287,7 @@ def compare_univariate(
         spearman = np.nan
         if len(both) > 1:
             spearman = both[
-                [f"coef_feature_{LOCALIZED}", f"coef_feature_{METASTATIC}"]
+                [f"coef_feature_{LOCALIZED_SUFFIX}", f"coef_feature_{METASTATIC_SUFFIX}"]
             ].corr(method="spearman").iloc[0, 1]
         summary_rows.append({
             "endpoint": endpoint,
@@ -282,8 +295,8 @@ def compare_univariate(
             "n_features_both": len(both),
             "n_same_direction": int(both["same_direction"].fillna(False).sum()),
             "spearman_log_hr": spearman,
-            f"n_fdr_{LOCALIZED}": int(group[f"fdr_{LOCALIZED}"].sum()),
-            f"n_fdr_{METASTATIC}": int(group[f"fdr_{METASTATIC}"].sum()),
+            f"n_fdr_{LOCALIZED_SUFFIX}": int(group[f"fdr_{LOCALIZED_SUFFIX}"].sum()),
+            f"n_fdr_{METASTATIC_SUFFIX}": int(group[f"fdr_{METASTATIC_SUFFIX}"].sum()),
             "n_heterogeneity_fdr": int(group["q_heterogeneity"].lt(0.05).sum()),
         })
     return comparison.sort_values("p_heterogeneity"), pd.DataFrame(summary_rows)
@@ -332,7 +345,7 @@ def compare_performance(
     pivot.columns = [f"{metric}_{cohort}" for metric, cohort in pivot.columns]
     pivot = pivot.reset_index()
     for metric in ("c_index", "mean_auc_t", "integrated_brier"):
-        loc, met = f"{metric}_{LOCALIZED}", f"{metric}_{METASTATIC}"
+        loc, met = f"{metric}_{LOCALIZED_SUFFIX}", f"{metric}_{METASTATIC_SUFFIX}"
         if loc in pivot and met in pivot:
             pivot[f"delta_{metric}_met_minus_loc"] = pivot[met] - pivot[loc]
     return pivot

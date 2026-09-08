@@ -13,7 +13,7 @@ def test_cohort_endpoint_runs_cross_every_cohort(monkeypatch, tmp_path):
     runs = cp.make_endpoint_runs(
         ["adt"],
         endpoints=("platinum", "nepc", "avpc"),
-        cohorts=("all", "metastatic", "localized"),
+        cohorts=("all", "metastatic_adt", "localized"),
         exclusions=("none",),
     )
 
@@ -22,7 +22,7 @@ def test_cohort_endpoint_runs_cross_every_cohort(monkeypatch, tmp_path):
     assert len(runs) == 9
     assert {(r["cohort"], r["endpoint"]) for r in runs} == {
         (cohort, endpoint)
-        for cohort in ("all", "metastatic", "localized")
+        for cohort in ("all", "metastatic_adt", "localized")
         for endpoint in ("platinum", "nepc", "avpc")
     }
     assert len({cp.run_key(r) for r in runs}) == 9
@@ -34,16 +34,16 @@ def test_cohort_runs_keep_the_established_path_convention(monkeypatch, tmp_path)
     runs = cp.make_endpoint_runs(
         ["adt"],
         endpoints=("platinum", "nepc", "avpc"),
-        cohorts=("all", "metastatic", "localized"),
+        cohorts=("all", "metastatic_adt", "localized"),
         exclusions=("none",),
     )
     by_key = {(r["cohort"], r["endpoint"]): r for r in runs}
 
     # Directory names are unchanged from the pre-collapse ADT-intent
     # notebooks, so existing output trees stay addressable.
-    metastatic_platinum = by_key[("metastatic", "platinum")]
-    assert metastatic_platinum["inputs_dir"].name == "prediction_inputs_adt_metastatic"
-    assert metastatic_platinum["output_dir"].name == "local_runs_adt_metastatic"
+    metastatic_platinum = by_key[("metastatic_adt", "platinum")]
+    assert metastatic_platinum["inputs_dir"].name == "prediction_inputs_adt_metastatic_adt"
+    assert metastatic_platinum["output_dir"].name == "local_runs_adt_metastatic_adt"
 
     localized_nepc = by_key[("localized", "nepc")]
     assert localized_nepc["inputs_dir"].name == "prediction_inputs_adt_localized_nepc"
@@ -59,10 +59,10 @@ def test_cohort_runs_keep_the_established_path_convention(monkeypatch, tmp_path)
     assert all(r["input_csv"].name == "longitudinal_prediction_data_adt.csv" for r in runs)
     assert {
         r["cohort"]: r["retrospective_stratification"] for r in runs
-    } == {"all": False, "metastatic": True, "localized": True}
+    } == {"all": False, "metastatic_adt": True, "localized": True}
     assert {r["cohort"]: r["adt_intent"] for r in runs} == {
         "all": None,
-        "metastatic": "METASTATIC",
+        "metastatic_adt": "METASTATIC",
         "localized": "LOCALIZED_ADJUVANT",
     }
 
@@ -73,7 +73,7 @@ def test_stage2_runs_collapse_to_one_run_per_anchor(monkeypatch, tmp_path):
     runs = cp.make_endpoint_runs(
         ["adt"],
         endpoints=("platinum", "nepc", "avpc"),
-        cohorts=("all", "metastatic", "localized"),
+        cohorts=("all", "metastatic_adt", "localized"),
         exclusions=("none",),
     )
 
@@ -137,7 +137,7 @@ def test_build_adt_intent_mrn_lists_and_endpoint_counts(monkeypatch, tmp_path):
     )
 
     localized = pl.read_csv(outputs["localized"])
-    metastatic = pl.read_csv(outputs["metastatic"])
+    metastatic = pl.read_csv(outputs["metastatic_adt"])
     assert localized["DFCI_MRN"].to_list() == [1]
     assert metastatic["DFCI_MRN"].to_list() == [2, 3]
     assert localized["ADT_INTENT"].to_list() == ["LOCALIZED_ADJUVANT"]
@@ -155,7 +155,7 @@ def test_build_adt_intent_mrn_lists_and_endpoint_counts(monkeypatch, tmp_path):
         (pl.col("stratum") == "localized") & (pl.col("endpoint") == "platinum")
     ).row(0, named=True)
     metastatic_avpc = counts.filter(
-        (pl.col("stratum") == "metastatic") & (pl.col("endpoint") == "avpc")
+        (pl.col("stratum") == "metastatic_adt") & (pl.col("endpoint") == "avpc")
     ).row(0, named=True)
     assert localized_platinum["n_incident_events"] == 0
     assert metastatic_avpc["n_incident_events"] == 1

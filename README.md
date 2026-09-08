@@ -690,10 +690,14 @@ endpoint's columns. Stage 3 is where the fork happens, crossing
 | Cohort | Restriction | Label / trees |
 | --- | --- | --- |
 | `all` | none beyond the arm's Stage-1 survival cohort | `adt` -> `prediction_inputs_adt`, `local_runs_adt` |
-| `metastatic` | `ADT_INTENT == METASTATIC` | `adt_metastatic` -> `prediction_inputs_adt_metastatic`, ... |
-| `localized` | `ADT_INTENT == LOCALIZED_ADJUVANT` | `adt_localized` -> `prediction_inputs_adt_localized`, ... |
+| `metastatic_adt` | `ADT_INTENT == METASTATIC` | `adt_metastatic_adt` -> `prediction_inputs_adt_metastatic_adt`, ... |
+| `metastatic_llm` | LLM `has_metastatic_disease == true` | `adt_metastatic_llm` -> `prediction_inputs_adt_metastatic_llm`, ... |
+| `localized` | `ADT_INTENT == LOCALIZED_ADJUVANT` (retired, not in `DEFAULT_COHORTS`) | `adt_localized` -> ... |
+| `nonmetastatic_llm` | LLM `has_metastatic_disease == false` (retired, not in `DEFAULT_COHORTS`) | `adt_nonmetastatic_llm` -> ... |
 
-The two stratified cohorts are the **medication-derived ADT-intent strata**. Stage 1b
+The modelled stratified cohorts come from two independent label sources: `metastatic_adt` is a
+**medication-derived ADT-intent stratum**, and `metastatic_llm` is the **LLM-adjudicated
+metastatic status** from the `met_diagnosis` pipeline. Stage 1b
 (`cp.build_adt_intent_mrn_lists()`, in notebook `01`) writes one MRN list per stratum plus a
 preliminary incident-endpoint count table under `<data_root>/mrn_lists/`; Stage 3 consumes those
 lists through `--restrict-to-mrns`, which is the single channel by which stratification enters
@@ -786,22 +790,24 @@ Set the parameter cell of `01`/`02`/`03`/`03b`, then run each top to bottom:
 
 ```python
 ARMS = ["adt"]
-ENDPOINTS = ("platinum", "nepc", "avpc")  # any subset of cox_aggregated.ENDPOINTS
-COHORTS = ("all", "metastatic", "localized")           # any subset of cp.DEFAULT_COHORTS
+ENDPOINTS = ("platinum", "nepc")   # any subset of cox_aggregated.ENDPOINTS
+COHORTS = ("all", "metastatic_adt", "metastatic_llm")   # any subset of cp.DEFAULT_COHORTS
+EXCLUSIONS = ("none", "pre_adt_castrate")
 OVERWRITE = False
 
 cp.FORCE_RERUN = OVERWRITE
-RUNS = cp.make_endpoint_runs(ARMS, endpoints=ENDPOINTS, cohorts=COHORTS)
+RUNS = cp.make_endpoint_runs(ARMS, endpoints=ENDPOINTS, cohorts=COHORTS, exclusions=EXCLUSIONS)
 ```
 
-With all three endpoints and all three cohorts this is a 9-run `RUNS` list per arm. To iterate
-faster, narrow either tuple — the notebooks' `for run in RUNS:` loops are unchanged either way.
+This is the notebook default: 2 endpoints x 3 cohorts x 2 exclusions = a 12-run `RUNS` list per
+arm. To iterate faster, narrow any tuple — the notebooks' `for run in RUNS:` loops are unchanged
+either way.
 
 `make_endpoint_runs(arms, *, endpoints=..., cohorts=DEFAULT_COHORTS, prediction_input_dirs_by_endpoint=None)`
 builds one independent input/output tree per requested (cohort, endpoint) pair by calling
 `make_runs` once per pair under the hood, with `output_suffix` set to `""` for `platinum` and
 `f"_{endpoint}"` for everything else (e.g. `"_nepc"`, `"_avpc"`), and the cohort's
-suffix composed onto the arm label (`""`, `"_metastatic"`, `"_localized"`). Each notebook's
+suffix composed onto the arm label (`""`, `"_metastatic_adt"`, `"_metastatic_llm"`). Each notebook's
 `for run in RUNS:` loop iterates every (arm, cohort, endpoint) triple produced. Every notebook
 calls `make_endpoint_runs` directly; the single-run `cp.make_runs(..., output_suffix=..., cohort=...)`
 is the lower-level helper it wraps.

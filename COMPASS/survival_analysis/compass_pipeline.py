@@ -100,9 +100,9 @@ SOMATIC_GLEASON_INDEX_ANALYSES = ("gleason", "sequencing", "prs")
 # for a new treatment anchor.
 #
 # `label_suffix` and `title_suffix` compose onto the arm's, so the directory
-# convention is unchanged: cohort "metastatic" on arm "adt" yields the label
-# "adt_metastatic" and therefore prediction_inputs_adt_metastatic /
-# local_runs_adt_metastatic, exactly as the dedicated ADT-intent factory built
+# convention is unchanged: cohort "metastatic_adt" on arm "adt" yields the label
+# "adt_metastatic_adt" and therefore prediction_inputs_adt_metastatic_adt /
+# local_runs_adt_metastatic_adt, exactly as the dedicated ADT-intent factory built
 # them before the cohorts were folded into the main cross.
 COHORT_SPECS = {
     "all": {
@@ -112,9 +112,9 @@ COHORT_SPECS = {
         "retrospective": False,
         "source": None,
     },
-    "metastatic": {
-        "label_suffix": "_metastatic",
-        "title_suffix": " / metastatic",
+    "metastatic_adt": {
+        "label_suffix": "_metastatic_adt",
+        "title_suffix": " / metastatic (ADT intent)",
         "adt_intent": "METASTATIC",
         "retrospective": True,
         "source": "adt_intent",
@@ -126,32 +126,32 @@ COHORT_SPECS = {
         "retrospective": True,
         "source": "adt_intent",
     },
-    "llm_metastatic": {
-        "label_suffix": "_llm_metastatic",
-        "title_suffix": " / LLM metastatic",
+    "metastatic_llm": {
+        "label_suffix": "_metastatic_llm",
+        "title_suffix": " / metastatic (LLM)",
         "adt_intent": None,
         "retrospective": True,
         "source": "llm_met",
         "llm_metastatic": True,
     },
-    "llm_nonmetastatic": {
-        "label_suffix": "_llm_nonmetastatic",
-        "title_suffix": " / LLM non-metastatic",
+    "nonmetastatic_llm": {
+        "label_suffix": "_nonmetastatic_llm",
+        "title_suffix": " / non-metastatic (LLM)",
         "adt_intent": None,
         "retrospective": True,
         "source": "llm_met",
         "llm_metastatic": False,
     },
 }
-# The localized-adjuvant cohort is deliberately absent: its spec stays in
-# COHORT_SPECS (build_adt_intent_mrn_lists writes both intent strata from one
-# pass, and the audit table needs it), but it is no longer modelled. Add
-# "localized" back to a notebook's COHORTS to reinstate those runs.
+# The localized-adjuvant and LLM non-metastatic cohorts are deliberately absent
+# from DEFAULT_COHORTS: their specs stay in COHORT_SPECS (each label source
+# writes both of its strata in one pass, and the audit tables need them), but
+# neither is modelled. Add "localized" or "nonmetastatic_llm" back to a
+# notebook's COHORTS to reinstate those runs.
 DEFAULT_COHORTS = (
     "all",
-    "metastatic",
-    "llm_metastatic",
-    "llm_nonmetastatic",
+    "metastatic_adt",
+    "metastatic_llm",
 )
 
 # The MRN-list-backed cohorts, as a derived view: this is what
@@ -280,7 +280,7 @@ def stage2_runs(runs: list[dict]) -> list[dict]:
     so picking a restricted run would silently build the anchor's shared lab
     table from that cohort's MRNs alone.  Selecting on the run's own fields
     rather than on list order keeps this correct when a caller requests a
-    subset of cohorts (e.g. cohorts=("llm_metastatic",)) whose first entry is
+    subset of cohorts (e.g. cohorts=("metastatic_llm",)) whose first entry is
     not the unrestricted one.
     """
     seen: set[str] = set()
@@ -337,15 +337,15 @@ def make_runs(
 
     ``cohort`` selects a patient-subset restriction from ``COHORT_SPECS``,
     applied at Stage 3 via ``--restrict-to-mrns``. It composes onto the arm
-    label, so ``cohort="metastatic"`` on arm ``"adt"`` yields the label
-    ``adt_metastatic`` and the trees ``prediction_inputs_adt_metastatic`` /
-    ``local_runs_adt_metastatic``. The default ``"all"`` restricts to the arm's
+    label, so ``cohort="metastatic_adt"`` on arm ``"adt"`` yields the label
+    ``adt_metastatic_adt`` and the trees ``prediction_inputs_adt_metastatic_adt`` /
+    ``local_runs_adt_metastatic_adt``. The default ``"all"`` restricts to the arm's
     own Stage-1 survival cohort, i.e. no additional subsetting.
 
     ``exclusion`` selects an orthogonal patient-exclusion rule from
     ``EXCLUSION_SPECS`` and composes onto the cohort label in turn, so
-    ``cohort="llm_metastatic", exclusion="pre_adt_castrate"`` yields
-    ``adt_llm_metastatic_noprecastrate``. It is carried on the run as
+    ``cohort="metastatic_llm", exclusion="pre_adt_castrate"`` yields
+    ``adt_metastatic_llm_noprecastrate``. It is carried on the run as
     ``exclude_mrns`` (a path, or None) rather than folded into
     ``restrict_to_mrns``: the two lists are intersected at Stage 3, so a
     cohort's own MRN list stays a pure cohort definition.
@@ -749,7 +749,7 @@ def build_llm_met_mrn_lists(
     negatives, and are dropped from both strata with a printed count -- the
     upstream task materializes its own auto-negatives, so absence means the ADT
     cohort and the labelled cohort disagree (a ``--mrns``-limited LLM run, or a
-    cohort rebuilt after the LLM run). Folding them into ``llm_nonmetastatic``
+    cohort rebuilt after the LLM run). Folding them into ``nonmetastatic_llm``
     would assert a negative the LLM never made. Dropping them means the two LLM
     strata together cover slightly fewer patients than the ADT-intent strata do,
     so their Ns are not directly comparable; the coverage fraction is printed.

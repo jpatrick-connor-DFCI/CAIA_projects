@@ -78,12 +78,12 @@ class TestCanonicalSchemaHelpers:
     def test_identity_preserves_an_explicit_cohort(self):
         identity = canonical_identity(
             model="xgboost",
-            cohort="metastatic",
+            cohort="metastatic_adt",
             endpoint="platinum",
             landmark_days=0,
             config="baseline",
         )
-        assert identity["cohort"] == "metastatic"
+        assert identity["cohort"] == "metastatic_adt"
         assert identity["config"] == "baseline"
 
     def test_missing_columns_are_reported_in_schema_order(self):

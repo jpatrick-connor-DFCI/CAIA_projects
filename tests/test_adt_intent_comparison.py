@@ -61,7 +61,7 @@ def test_cohort_counts_flag_sparse_event_cells(tmp_path):
     # 2 events is far below the sparse threshold; 100 is comfortably above it.
     _write_inputs(tmp_path, "localized", "platinum", 0,
                   mrns=range(40), events=[1] * 2 + [0] * 38)
-    _write_inputs(tmp_path, "metastatic", "platinum", 0,
+    _write_inputs(tmp_path, "metastatic_adt", "platinum", 0,
                   mrns=range(1000, 1200), events=[1] * 100 + [0] * 100)
 
     counts, cohort_ids = aic.collect_cohort_counts(
@@ -71,12 +71,12 @@ def test_cohort_counts_flag_sparse_event_cells(tmp_path):
     by_cohort = counts.set_index("cohort")
     assert by_cohort.loc["localized", "n_events"] == 2
     assert bool(by_cohort.loc["localized", "sparse_events"]) is True
-    assert by_cohort.loc["metastatic", "n_events"] == 100
-    assert bool(by_cohort.loc["metastatic", "sparse_events"]) is False
+    assert by_cohort.loc["metastatic_adt", "n_events"] == 100
+    assert bool(by_cohort.loc["metastatic_adt", "sparse_events"]) is False
     assert set(counts["status"]) == {"ok"}
     assert set(cohort_ids) == {
         ("localized", "platinum", 0),
-        ("metastatic", "platinum", 0),
+        ("metastatic_adt", "platinum", 0),
     }
 
 
@@ -87,7 +87,7 @@ def test_missing_input_tree_is_recorded_not_raised(tmp_path):
         endpoints=("platinum",), landmarks=(0,), data_root=tmp_path
     )
 
-    metastatic = counts.loc[counts["cohort"].eq("metastatic")].iloc[0]
+    metastatic = counts.loc[counts["cohort"].eq("metastatic_adt")].iloc[0]
     assert metastatic["status"] == "missing"
 
 
@@ -96,7 +96,7 @@ def test_overlapping_cohorts_are_rejected(tmp_path):
     # means the stratification broke upstream, so the build must not proceed.
     shared = range(50)
     _write_inputs(tmp_path, "localized", "platinum", 0, mrns=shared, events=[0] * 50)
-    _write_inputs(tmp_path, "metastatic", "platinum", 0, mrns=shared, events=[1] * 50)
+    _write_inputs(tmp_path, "metastatic_adt", "platinum", 0, mrns=shared, events=[1] * 50)
 
     with pytest.raises(AssertionError, match="cohorts overlap"):
         aic.build_comparison(
@@ -112,7 +112,7 @@ def test_heterogeneity_matches_a_hand_computed_wald_test(tmp_path):
     coef_met, se_met = 0.80, 0.10
     _write_univariate(tmp_path, "localized", "platinum", 0,
                       features=["LAB1_mean"], coefs=[coef_loc], ses=[se_loc])
-    _write_univariate(tmp_path, "metastatic", "platinum", 0,
+    _write_univariate(tmp_path, "metastatic_adt", "platinum", 0,
                       features=["LAB1_mean"], coefs=[coef_met], ses=[se_met])
 
     comparison, summary = aic.compare_univariate(
@@ -138,7 +138,7 @@ def test_heterogeneity_is_bh_adjusted_within_each_endpoint_landmark(tmp_path):
     features = [f"LAB{i}_mean" for i in range(10)]
     _write_univariate(tmp_path, "localized", "platinum", 0,
                       features=features, coefs=[0.0] * 10, ses=[0.1] * 10)
-    _write_univariate(tmp_path, "metastatic", "platinum", 0,
+    _write_univariate(tmp_path, "metastatic_adt", "platinum", 0,
                       features=features,
                       coefs=np.linspace(0.0, 0.9, 10), ses=[0.1] * 10)
 
@@ -160,7 +160,7 @@ def test_features_present_in_only_one_cohort_survive_the_join(tmp_path):
     _write_univariate(tmp_path, "localized", "platinum", 0,
                       features=["SHARED_mean", "LOC_ONLY_mean"],
                       coefs=[0.1, 0.2], ses=[0.1, 0.1])
-    _write_univariate(tmp_path, "metastatic", "platinum", 0,
+    _write_univariate(tmp_path, "metastatic_adt", "platinum", 0,
                       features=["SHARED_mean", "MET_ONLY_mean"],
                       coefs=[0.3, 0.4], ses=[0.1, 0.1])
 
@@ -178,11 +178,11 @@ def test_features_present_in_only_one_cohort_survive_the_join(tmp_path):
 def test_build_comparison_writes_every_table(tmp_path):
     _write_inputs(tmp_path, "localized", "platinum", 0,
                   mrns=range(30), events=[1] * 5 + [0] * 25)
-    _write_inputs(tmp_path, "metastatic", "platinum", 0,
+    _write_inputs(tmp_path, "metastatic_adt", "platinum", 0,
                   mrns=range(1000, 1060), events=[1] * 20 + [0] * 40)
     _write_univariate(tmp_path, "localized", "platinum", 0,
                       features=["LAB1_mean"], coefs=[0.1], ses=[0.1])
-    _write_univariate(tmp_path, "metastatic", "platinum", 0,
+    _write_univariate(tmp_path, "metastatic_adt", "platinum", 0,
                       features=["LAB1_mean"], coefs=[0.5], ses=[0.1])
 
     written = aic.build_comparison(

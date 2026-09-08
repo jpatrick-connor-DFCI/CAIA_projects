@@ -364,13 +364,14 @@ read_endpoint_performance <- function(path, endpoint) {
 COHORT_ARMS <- c("arpi", "adt")
 # Patient-subset suffixes that make_runs() appends to the arm. "" is the arm's
 # own full survival cohort.
-# "_localized" is retired: the localized-adjuvant cohort is no longer modelled,
-# so no such tree is generated. Re-add it here AND to the notebook COHORTS if
-# those runs are ever reinstated.
+# "_localized" and "_nonmetastatic_llm" are retired: neither the
+# localized-adjuvant nor the LLM non-metastatic cohort is modelled, so no such
+# tree is generated. Re-add them here AND to the notebook COHORTS if those runs
+# are ever reinstated.
 COHORT_SUBSET_SUFFIXES <- c(
   "",
-  "_metastatic",                            # medication-derived ADT intent
-  "_llm_metastatic", "_llm_nonmetastatic"   # met_diagnosis LLM metastatic status
+  "_metastatic_adt",   # medication-derived ADT intent
+  "_metastatic_llm"    # met_diagnosis LLM metastatic status
 )
 # Orthogonal exclusion suffixes, likewise appended by make_runs().
 COHORT_EXCLUSION_SUFFIXES <- c("", "_noprecastrate")
@@ -387,10 +388,9 @@ COHORTS <- c("adt")
 # Positional rather than named because R cannot use "" as a name, and the
 # un-suffixed entry is exactly the one that carries no title text.
 COHORT_SUBSET_LABELS <- c(
-  "",                        # ""
-  " / metastatic",           # _metastatic
-  " / LLM metastatic",       # _llm_metastatic
-  " / LLM non-metastatic"    # _llm_nonmetastatic
+  "",                              # ""
+  " / metastatic (ADT intent)",    # _metastatic_adt
+  " / metastatic (LLM)"            # _metastatic_llm
 )
 COHORT_EXCLUSION_LABELS <- c(
   "",                          # ""
@@ -3125,8 +3125,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       ))
     }
 
-    INTENT_PALETTE <- c(localized = "#0b6ba8", metastatic = "#c1272d")
-    INTENT_LABELS <- c(localized = "Localized-adjuvant", metastatic = "Metastatic")
+    # Keyed by the `cohort` values adt_intent_comparison.py writes, i.e. the
+    # COHORT_SPECS keys -- "metastatic_adt", not the "metastatic" column suffix.
+    INTENT_PALETTE <- c(localized = "#0b6ba8", metastatic_adt = "#c1272d")
+    INTENT_LABELS <- c(localized = "Localized-adjuvant", metastatic_adt = "Metastatic")
     landmark_label <- function(landmark) {
       ifelse(landmark == 0, "0-day", sprintf("+%d-day", landmark))
     }

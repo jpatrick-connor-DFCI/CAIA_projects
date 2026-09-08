@@ -26,7 +26,7 @@ platinum included, so no endpoint's panels can overwrite another's:
 
 `FIG_ROOT/ADT/nepc/<figure>/adt_<plot-stem>.png`
 `FIG_ROOT/ADT/platinum/<figure>/adt_<plot-stem>.png`
-`FIG_ROOT/ADT_LLM_METASTATIC/nepc/<figure>/adt_llm_metastatic_<plot-stem>.png`
+`FIG_ROOT/ADT_METASTATIC_LLM/nepc/<figure>/adt_metastatic_llm_<plot-stem>.png`
 
 The cohort directory is the run label upper-cased, so each of the eight run
 labels gets its own tree and no two cohorts can overwrite each other.
@@ -95,10 +95,9 @@ ENDPOINTS <- c("nepc", "platinum")
 # COHORTS x EXCLUSIONS cross in compass_pipeline.DEFAULT_COHORTS /
 # DEFAULT_EXCLUSIONS. Narrow this to iterate on a single tree.
 COHORTS <- c(
-  "adt",                    "adt_noprecastrate",
-  "adt_metastatic",         "adt_metastatic_noprecastrate",
-  "adt_llm_metastatic",     "adt_llm_metastatic_noprecastrate",
-  "adt_llm_nonmetastatic",  "adt_llm_nonmetastatic_noprecastrate"
+  "adt",                 "adt_noprecastrate",
+  "adt_metastatic_adt",  "adt_metastatic_adt_noprecastrate",
+  "adt_metastatic_llm",  "adt_metastatic_llm_noprecastrate"
 )
 
 stopifnot(
@@ -154,7 +153,7 @@ message(sprintf("renders:     %d cohort x endpoint figure sets",
 
 Runs the R figure-generation pipeline once per cohort x endpoint -- 8 cohorts x
 2 endpoints = 16 figure sets. Outputs go to `FIG_ROOT/<COHORT>/<endpoint>/`,
-e.g. `ADT/platinum/`, `ADT_LLM_METASTATIC/nepc/`.
+e.g. `ADT/platinum/`, `ADT_METASTATIC_LLM/nepc/`.
 
 Narrow `COHORTS` or `ENDPOINTS` above to iterate on a single tree. `COHORTS`
 accepts any run label in `SUPPORTED_COHORTS`, so the ARPI arm is rendered by

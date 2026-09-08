@@ -57,8 +57,8 @@ def test_the_boolean_label_splits_the_cohort_into_two_strata(tmp_path):
 
     out = cp.build_llm_met_mrn_lists(met_labels_path=labels, data_root=tmp_path)
 
-    met = set(pl.read_csv(out["llm_metastatic"])["DFCI_MRN"].to_list())
-    non = set(pl.read_csv(out["llm_nonmetastatic"])["DFCI_MRN"].to_list())
+    met = set(pl.read_csv(out["metastatic_llm"])["DFCI_MRN"].to_list())
+    non = set(pl.read_csv(out["nonmetastatic_llm"])["DFCI_MRN"].to_list())
     assert met == {1}
     assert non == {2, 3}
     # The two strata partition the labelled cohort exactly.
@@ -95,13 +95,13 @@ def test_patients_outside_the_adt_cohort_are_ignored(tmp_path):
     out = cp.build_llm_met_mrn_lists(met_labels_path=labels, data_root=tmp_path)
 
     assert set(pl.read_csv(out["labels"])["DFCI_MRN"].to_list()) == {1}
-    assert pl.read_csv(out["llm_metastatic"]).height == 0
+    assert pl.read_csv(out["metastatic_llm"]).height == 0
 
 
 def test_an_unlabelled_cohort_patient_is_dropped_not_called_negative(tmp_path, capsys):
     """The upstream task writes its own auto-negatives, so a missing patient
     means the labels file does not cover this cohort -- NOT that they are
-    negative. Folding them into llm_nonmetastatic would assert a negative the
+    negative. Folding them into nonmetastatic_llm would assert a negative the
     LLM never made, so they are dropped from both strata instead."""
     _write_cohort(tmp_path, [1, 2])
     labels = _write_met_labels(
@@ -111,8 +111,8 @@ def test_an_unlabelled_cohort_patient_is_dropped_not_called_negative(tmp_path, c
 
     out = cp.build_llm_met_mrn_lists(met_labels_path=labels, data_root=tmp_path)
 
-    met = set(pl.read_csv(out["llm_metastatic"])["DFCI_MRN"].to_list())
-    non = set(pl.read_csv(out["llm_nonmetastatic"])["DFCI_MRN"].to_list())
+    met = set(pl.read_csv(out["metastatic_llm"])["DFCI_MRN"].to_list())
+    non = set(pl.read_csv(out["nonmetastatic_llm"])["DFCI_MRN"].to_list())
     assert met == {1}
     # Patient 2 is unlabelled, so they appear in NEITHER stratum.
     assert non == set()
@@ -167,8 +167,8 @@ def test_a_null_verdict_is_not_treated_as_a_negative(tmp_path, capsys):
 
     out = cp.build_llm_met_mrn_lists(met_labels_path=labels, data_root=tmp_path)
 
-    assert set(pl.read_csv(out["llm_metastatic"])["DFCI_MRN"].to_list()) == {1}
-    assert pl.read_csv(out["llm_nonmetastatic"]).height == 0
+    assert set(pl.read_csv(out["metastatic_llm"])["DFCI_MRN"].to_list()) == {1}
+    assert pl.read_csv(out["nonmetastatic_llm"]).height == 0
     assert "null has_metastatic_disease" in capsys.readouterr().out
 
 
@@ -186,8 +186,8 @@ def test_a_duplicated_patient_collapses_to_one_positive_row(tmp_path, capsys):
 
     out = cp.build_llm_met_mrn_lists(met_labels_path=labels, data_root=tmp_path)
 
-    assert set(pl.read_csv(out["llm_metastatic"])["DFCI_MRN"].to_list()) == {1}
-    assert pl.read_csv(out["llm_nonmetastatic"]).height == 0
+    assert set(pl.read_csv(out["metastatic_llm"])["DFCI_MRN"].to_list()) == {1}
+    assert pl.read_csv(out["nonmetastatic_llm"]).height == 0
     assert pl.read_csv(out["labels"]).height == 1
     assert "duplicate MRN" in capsys.readouterr().out
 
@@ -203,9 +203,9 @@ def test_an_empty_stratum_still_writes_both_lists(tmp_path, capsys):
 
     out = cp.build_llm_met_mrn_lists(met_labels_path=labels, data_root=tmp_path)
 
-    assert set(pl.read_csv(out["llm_metastatic"])["DFCI_MRN"].to_list()) == {1}
-    assert out["llm_nonmetastatic"].exists()
-    assert pl.read_csv(out["llm_nonmetastatic"]).height == 0
+    assert set(pl.read_csv(out["metastatic_llm"])["DFCI_MRN"].to_list()) == {1}
+    assert out["nonmetastatic_llm"].exists()
+    assert pl.read_csv(out["nonmetastatic_llm"]).height == 0
     assert "WARNING" in capsys.readouterr().out
 
 
@@ -339,14 +339,14 @@ def test_excluded_runs_carry_the_exclusion_list_and_keep_their_cohort_list(
     runs = cp.make_endpoint_runs(
         ["adt"],
         endpoints=("platinum",),
-        cohorts=("llm_metastatic",),
+        cohorts=("metastatic_llm",),
         exclusions=("none", "pre_adt_castrate"),
     )
     by_exclusion = {r["exclusion"]: r for r in runs}
 
     # The exclusion is a SEPARATE list: it must not displace the cohort's own
     # restrict list, or the excluded arm would silently run on every patient.
-    cohort_list = tmp_path / "mrn_lists" / "adt_llm_metastatic_mrns.csv"
+    cohort_list = tmp_path / "mrn_lists" / "adt_metastatic_llm_mrns.csv"
     assert by_exclusion["none"]["restrict_to_mrns"] == cohort_list
     assert by_exclusion["pre_adt_castrate"]["restrict_to_mrns"] == cohort_list
 
@@ -355,10 +355,10 @@ def test_excluded_runs_carry_the_exclusion_list_and_keep_their_cohort_list(
         tmp_path / "mrn_lists" / "pre_adt_castrate_mrns.csv"
     )
 
-    assert by_exclusion["pre_adt_castrate"]["label"] == "adt_llm_metastatic_noprecastrate"
+    assert by_exclusion["pre_adt_castrate"]["label"] == "adt_metastatic_llm_noprecastrate"
     assert (
         by_exclusion["pre_adt_castrate"]["output_dir"].name
-        == "local_runs_adt_llm_metastatic_noprecastrate"
+        == "local_runs_adt_metastatic_llm_noprecastrate"
     )
 
 
@@ -375,11 +375,11 @@ def test_legacy_cross_labels_are_unchanged(monkeypatch, tmp_path):
     runs = cp.make_endpoint_runs(
         ["adt"],
         endpoints=("platinum", "nepc"),
-        cohorts=("all", "metastatic", "localized"),
+        cohorts=("all", "metastatic_adt", "localized"),
         exclusions=("none",),
     )
 
-    assert {r["label"] for r in runs} == {"adt", "adt_metastatic", "adt_localized"}
+    assert {r["label"] for r in runs} == {"adt", "adt_metastatic_adt", "adt_localized"}
     assert all(r["exclude_mrns"] is None for r in runs)
 
 
