@@ -79,7 +79,7 @@ COMPASS/
     ├── univariate_analysis.py            # ENTRY: univariate Cox associations
     ├── multivariate_analysis.py          # ENTRY: elastic-net Cox or XGBoost survival:cox
     ├── COMPASS_generate_figures_pipeline.R # sole figure-generation implementation
-    ├── 01_preprocessing.ipynb            # schema audit, cohort compile, preprocessing, diagnostics
+    ├── 01_preprocessing.ipynb            # cohort compile, preprocessing, diagnostics
     ├── 02_univariate.ipynb               # univariate arms + nominal-significance filter
     ├── 03_multivariate.ipynb             # elastic-net + XGBoost + summary tables
     ├── 03b_multivariate_longitudinal.ipynb # Dynamic-DeepHit (torch, optional; SurvLatent ODE off by default)
@@ -396,7 +396,7 @@ COMPASS PROFILE has four Python stage notebooks sharing `compass_pipeline.py` (t
 `03b`), two read-only Python reporting notebooks (`06`, `07`), one R figure notebook, and one R GAM
 notebook. All operate on the merged `profile_data` run:
 
-- `01_preprocessing.ipynb` — drives preprocessing (schema audit, cohort compile, ADT-intent
+- `01_preprocessing.ipynb` — drives preprocessing (cohort compile, ADT-intent
   stratum build, longitudinal preprocessing, prediction-input build, diagnostics) for whichever
   arms are selected (`arpi` and/or `adt`, with landmarks 0/90/180), over the common ADT-entry
   eligible cohort. Each arm gets independent prediction inputs at its own landmark list, and
@@ -570,11 +570,8 @@ merged parquets:
 The upstream `COLUMN_MAP` requests both the old and new spellings and coalesces them via
 `ALIAS_MAP`, since release schemas differ across the seven pulls.
 
-The second code cell of `01_preprocessing.ipynb` runs a **schema audit**
-(`compass_pipeline.audit_schema`) that guards this. It scans all five tables and checks columns in
-three tiers — REQUIRED (absent *or* all-null raises), EXPECTED (absent raises, all-null warns — for legitimately sparse columns like
-`HYBRID_DEATH_DT` and `LABS.TEXT_RESULT`), OPTIONAL (warns either way) — and raises a single
-`RuntimeError` listing every problem. Run it before anything else; an all-null
+There is no automated guard for this: a renamed or null-filled column surfaces as an empty
+cohort or a silently-dropped feature further down the pipeline. An all-null
 `NCI_PREFERRED_MED_NM` means going back to the upstream compile, not debugging COMPASS.
 
 ---
@@ -830,7 +827,7 @@ analogues) changes which patients survive the landmark filter, and that filter r
 tree — not just its own output tree. With the suffix set, `prediction_inputs_adt/` and
 `local_runs_adt/` (the unsuffixed `platinum` tree) are never touched by an `nepc` or `avpc` run.
 
-Stages 0-2 of `01` (schema audit, cohort compile, lab preprocessing) only need running once; they
+Stages 1-2 of `01` (cohort compile, lab preprocessing) only need running once; they
 are shared across all endpoints. Re-run Stage 3 onward per endpoint — `RUNS` already contains one
 entry per (arm, endpoint) pair, so the existing `for run in RUNS:` loops handle this.
 
