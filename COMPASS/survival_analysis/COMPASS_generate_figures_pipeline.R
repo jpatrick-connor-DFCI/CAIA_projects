@@ -130,6 +130,8 @@ normalize_classifier_primary_labels <- function(primary_label, reported_biomarke
 
 clear_read_cache <- function() {
   rm(list = ls(.read_cache, all.names = TRUE), envir = .read_cache)
+  rm(list = ls(.processed_read_cache, all.names = TRUE),
+     envir = .processed_read_cache)
   invisible(NULL)
 }
 
@@ -201,6 +203,44 @@ LONGITUDINAL_COL_TYPES <- cols(
   LAB_VALUE = col_double(),
   t_lab     = col_double()
 )
+
+# Expensive transformations of the arm-level longitudinal file are invariant
+# across cohort/endpoint cells.  Keep processed products beside the raw-read
+# cache so a two-endpoint render does not repeatedly convert dates, split the
+# patient/lab tables, or classify every lab row.
+.processed_read_cache <- new.env(parent = emptyenv())
+
+cached_profile_patient_and_labs <- function(path, id_col = "DFCI_MRN") {
+  resolved <- tryCatch(normalizePath(path, mustWork = TRUE),
+                       error = function(e) path)
+  key <- paste0("profile-split:", resolved, ":", id_col)
+  if (exists(key, envir = .processed_read_cache, inherits = FALSE))
+    return(.processed_read_cache[[key]])
+
+  df <- cached_read_csv(path, show_col_types = FALSE,
+                        col_types = LONGITUDINAL_COL_TYPES)
+  date_cols <- c("DIAGNOSIS_DATE", "TREATMENT_ANCHOR_DATE", "PLATINUM_DATE",
+                 "LAST_CONTACT_DATE", "LAB_DATE", "FIRST_RECORD_DATE")
+  for (col in intersect(date_cols, names(df)))
+    df[[col]] <- suppressWarnings(as.Date(df[[col]]))
+  if (all(c("DIAGNOSIS_DATE", "TREATMENT_ANCHOR_DATE") %in% names(df)))
+    df$t_dx_to_anchor <- as.numeric(df$TREATMENT_ANCHOR_DATE - df$DIAGNOSIS_DATE)
+
+  patient_level <- c(id_col, "AGE_AT_TREATMENTSTART", "FIRST_RECORD_DATE", "DIAGNOSIS_DATE",
+                     "TREATMENT_ANCHOR_DATE", "LAST_CONTACT_DATE", "DEATH",
+                     "PLATINUM_MEDICATION", "PLATINUM_DATE", "PLATINUM",
+                     "t_diagnosis", "t_first_treatment", "t_platinum",
+                     "t_last_contact", "t_death", "t_dx_to_anchor")
+  patient_df <- df %>%
+    select(all_of(intersect(patient_level, names(df)))) %>%
+    distinct(.data[[id_col]], .keep_all = TRUE)
+  lab_cols <- intersect(c(id_col, "LAB_NAME", "LAB_VALUE", "LAB_UNIT", "LAB_DATE", "t_lab"),
+                        names(df))
+  labs_df <- df %>% filter(!is.na(LAB_NAME)) %>% select(all_of(lab_cols))
+  value <- list(patient_df = patient_df, labs_df = labs_df)
+  .processed_read_cache[[key]] <- value
+  value
+}
 
 load_llm_strata <- function(llm_annotations_path) {
   path <- file.path(llm_annotations_path, "LLM_NEPC_classifier_labels.tsv")
@@ -393,6 +433,37 @@ CATEGORY_COLORS <- c(
   "Other"         = "#95a5a6"
 )
 NS_COLOR <- "#d5d8dc"
+
+cached_canonical_longitudinal <- function(path) {
+  resolved <- tryCatch(normalizePath(path, mustWork = TRUE),
+                       error = function(e) path)
+  key <- paste0("canonical-longitudinal:", resolved)
+  if (exists(key, envir = .processed_read_cache, inherits = FALSE))
+    return(.processed_read_cache[[key]])
+
+  df <- cached_read_csv(path, show_col_types = FALSE,
+                        col_types = LONGITUDINAL_COL_TYPES)
+  needed <- c("LAB_NAME", "LAB_VALUE", "t_lab", "DFCI_MRN")
+  missing <- setdiff(needed, names(df))
+  if (length(missing))
+    stop("canonical longitudinal data missing columns: ", paste(missing, collapse = ", "))
+
+  raw_names <- tolower(as.character(df$LAB_NAME))
+  canonical_lookup <- setNames(names(CATEGORY_MAP), tolower(names(CATEGORY_MAP)))
+  lab_group <- unname(canonical_lookup[raw_names])
+  psa_alias <- !is.na(raw_names) & grepl("prostate specific ag", raw_names, fixed = TRUE)
+  lab_group[psa_alias] <- "PSA"
+  keep <- !is.na(lab_group)
+  value <- df[keep, , drop = FALSE]
+  value$LAB_GROUP <- lab_group[keep]
+  value <- value %>%
+    mutate(t_lab = suppressWarnings(as.numeric(t_lab)),
+           t_rel = t_lab,
+           LAB_VALUE = suppressWarnings(as.numeric(LAB_VALUE))) %>%
+    drop_na(t_rel, LAB_VALUE)
+  .processed_read_cache[[key]] <- value
+  value
+}
 
 assign_category <- function(lab_name) {
   out <- unname(CATEGORY_MAP[lab_name])
@@ -611,7 +682,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                              cohorts = SUPPORTED_COHORTS, show = FALSE,
                              llm_annotations_path = DEFAULT_LLM_ANNOTATIONS_PATH,
                              plot_non_androgen_distributions = FALSE,
-                             plot_non_androgen_lab_figures = FALSE) {
+                             plot_non_androgen_lab_figures = FALSE,
+                             save_dpi = SAVE_DPI,
+                             output_mode = c("all", "composite", "panels"),
+                             overwrite = TRUE) {
   # Rscript opens `Rplots.pdf` when any plot is drawn without an explicit device.
   # All intended outputs below use ggsave(), so route any incidental drawing to a
   # temporary null PDF device during non-interactive runs.
@@ -633,6 +707,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     stop(sprintf("Unknown endpoint=%s; expected one of %s",
                  ENDPOINT, paste(SUPPORTED_ENDPOINTS, collapse = ", ")))
   ENDPOINT_SUFFIX <- unname(ENDPOINT_SUFFIXES[[ENDPOINT]])
+  output_mode <- match.arg(output_mode)
+  if (!is.numeric(save_dpi) || length(save_dpi) != 1L || is.na(save_dpi) || save_dpi <= 0)
+    stop("save_dpi must be one positive number")
+  if (!is.logical(overwrite) || length(overwrite) != 1L || is.na(overwrite))
+    stop("overwrite must be one non-missing logical value")
   # Figures 1-2 describe the platinum-labelled cohort itself and are identical
   # across endpoints; emit them only on the platinum pass so a NEPC run does
   # not rewrite them with byte-identical output.
@@ -654,6 +733,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # still anchored on ADT initiation and still reads the ADT longitudinal CSV.
   COHORT_ARM <- cohort_arm(COHORT)
   IS_ADT <- identical(COHORT_ARM, "adt")
+  IS_CANONICAL_ADT <- identical(COHORT, "adt")
   ANCHOR_LABEL <- if (IS_ADT) "ADT initiation" else "ARPI/chemo initiation"
 
   # Both trees are endpoint-suffixed, matching make_runs(): the NEPC cohort is
@@ -699,6 +779,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # Leaf identity for this run: which of the 12 cohort x endpoint cells a file
   # represents. Endpoint leads so a directory listing groups by endpoint first.
   COHORT_LEAF <- paste0(ENDPOINT, "__", cohort_leaf_slug(COHORT))
+  created_outputs <- character(0)
+  record_output <- function(path) {
+    created_outputs <<- unique(c(created_outputs, path))
+    invisible(path)
+  }
   # Canonical-lab names sorted longest-first so e.g. "Direct bilirubin" is
   # matched before "Total bilirubin" would ever partially collide, and so a
   # lab-specific stem is never mis-routed to a shorter substring match.
@@ -793,22 +878,17 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # subtree, not per cohort subtree: wiping the whole cohort here would drop
   # the sibling endpoint's links, which this run did not regenerate.
   rebuild_cohort_view <- function() {
-    src_root <- file.path(FIG_ROOT, "by_figure")
-    if (!dir.exists(src_root)) return(invisible(NULL))
     cohort_slug <- cohort_leaf_slug(COHORT)
     view_root <- file.path(FIG_ROOT, "by_cohort", cohort_slug, ENDPOINT)
     unlink(view_root, recursive = TRUE, force = TRUE)
 
-    # Files this cell owns: leaf basename is COHORT_LEAF (endpoint + cohort),
-    # optionally with a trailing _data suffix on the supplement CSV.
-    all_files <- list.files(src_root, recursive = TRUE, full.names = TRUE,
-                            all.files = FALSE, include.dirs = FALSE)
-    if (!length(all_files)) return(invisible(NULL))
-    stems <- tools::file_path_sans_ext(basename(all_files))
-    mine <- all_files[stems == COHORT_LEAF |
-                      startsWith(stems, paste0(COHORT_LEAF, "_"))]
+    # save_fig()/write_table1() already know exactly which artifacts belong to
+    # this cell. Using that list avoids a recursive scan of the growing figure
+    # tree after every cohort/endpoint pass (particularly costly on NFS).
+    mine <- created_outputs[file.exists(created_outputs)]
     if (!length(mine)) return(invisible(NULL))
 
+    src_root <- file.path(FIG_ROOT, "by_figure")
     n_linked <- 0L
     for (src in mine) {
       rel <- substring(src, nchar(src_root) + 2L)          # <group>/<stem>/<file>
@@ -860,8 +940,40 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                 format(sum(!llm_classifier_labels$is_platinum), big.mark = ",")))
   }
 
-  # save_fig: write one high-resolution PNG directly to its figure group.
+  composite_stems <- c(
+    "figure1_cohort_overview",
+    sprintf("figure1s_analysis_sets_%s", ENDPOINT),
+    "figure2v3_llm_subtype_platinum",
+    "figure4_multivariate_performance"
+  )
+  component_stems <- c(
+    "figure1a_consort", "figure1b_km", "figure1c_span", "figure1c_dx_to_tx",
+    "figure1c_time_to_platinum",
+    sprintf("figure1s_analysis_sets_univariate_%s", ENDPOINT),
+    sprintf("figure1s_analysis_sets_multivariate_%s", ENDPOINT),
+    "figure2v3_confusion_matrix", "figure2v3_metric_bar",
+    "figure2v3_subtype_landscape", "figure2v3_enrichment"
+  )
+  is_component_stem <- function(stem) {
+    stem %in% component_stems ||
+      startsWith(stem, "figure4a_discrimination_") ||
+      (startsWith(stem, "figure4b_importance_") &&
+         grepl("_landmark(0|90)$", stem))
+  }
+  should_save_figure <- function(stem) {
+    if (identical(output_mode, "all")) return(TRUE)
+    if (stem %in% composite_stems) return(identical(output_mode, "composite"))
+    if (is_component_stem(stem)) return(identical(output_mode, "panels"))
+    TRUE
+  }
+
+  # save_fig: write one PNG directly to its figure group. In incremental mode,
+  # existing requested files are retained and still registered in the view.
   save_fig <- function(plot, out_dir, stem, width, height, prefix = COHORT_LEAF) {
+    if (!should_save_figure(stem)) {
+      message("skipped by output_mode=", output_mode, ": ", stem)
+      return(invisible(plot))
+    }
     # `out_dir` is retained for call-site compatibility. The directory already
     # encodes group/stem/endpoint, so the filename carries only the cohort
     # identity -- that is what makes one leaf directory a six-way comparison.
@@ -870,12 +982,17 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     output_stem <- prefix
 
     png_out <- file.path(output_dir, paste0(output_stem, ".png"))
+    record_output(png_out)
+    if (!overwrite && file.exists(png_out)) {
+      message("kept existing ", png_out)
+      return(invisible(plot))
+    }
     if (HAS_RAGG) {
       ggsave(png_out, plot = plot, width = width, height = height, units = "in",
-             dpi = SAVE_DPI, bg = "white", device = ragg::agg_png)
+             dpi = save_dpi, bg = "white", device = ragg::agg_png)
     } else {
       ggsave(png_out, plot = plot, width = width, height = height, units = "in",
-             dpi = SAVE_DPI, bg = "white", type = "cairo")
+             dpi = save_dpi, bg = "white", type = "cairo")
     }
     message("wrote ", png_out)
 
@@ -885,27 +1002,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   COHORT_LABEL <- "PROFILE"
 
   load_profile_patient_and_labs <- function(path, id_col = "DFCI_MRN") {
-    df <- cached_read_csv(path, show_col_types = FALSE,
-                          col_types = LONGITUDINAL_COL_TYPES)
-    date_cols <- c("DIAGNOSIS_DATE", "TREATMENT_ANCHOR_DATE", "PLATINUM_DATE",
-                   "LAST_CONTACT_DATE", "LAB_DATE", "FIRST_RECORD_DATE")
-    for (col in intersect(date_cols, names(df)))
-      df[[col]] <- suppressWarnings(as.Date(df[[col]]))
-    if (all(c("DIAGNOSIS_DATE", "TREATMENT_ANCHOR_DATE") %in% names(df)))
-      df$t_dx_to_anchor <- as.numeric(df$TREATMENT_ANCHOR_DATE - df$DIAGNOSIS_DATE)
-
-    patient_level <- c(id_col, "AGE_AT_TREATMENTSTART", "FIRST_RECORD_DATE", "DIAGNOSIS_DATE",
-                       "TREATMENT_ANCHOR_DATE", "LAST_CONTACT_DATE", "DEATH",
-                       "PLATINUM_MEDICATION", "PLATINUM_DATE", "PLATINUM",
-                       "t_diagnosis", "t_first_treatment", "t_platinum",
-                       "t_last_contact", "t_death", "t_dx_to_anchor")
-    pat_cols <- intersect(patient_level, names(df))
-    patient_df <- df %>% select(all_of(pat_cols)) %>%
-      distinct(.data[[id_col]], .keep_all = TRUE)
-    lab_cols <- intersect(c(id_col, "LAB_NAME", "LAB_VALUE", "LAB_UNIT", "LAB_DATE", "t_lab"),
-                          names(df))
-    labs_df <- df %>% filter(!is.na(LAB_NAME)) %>% select(all_of(lab_cols))
-    list(patient_df = patient_df, labs_df = labs_df)
+    cached_profile_patient_and_labs(path, id_col)
   }
 
   restrict_to_base_landmark_cohort <- function(patient_df, labs_df, inputs_dir,
@@ -1128,8 +1225,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
     out_base <- file.path(output_dir, COHORT_LEAF)
     csv <- paste0(out_base, ".csv"); md_p <- paste0(out_base, ".md")
-    write_csv(table1, csv)
-    writeLines(to_markdown_table(table1), md_p)
+    record_output(csv); record_output(md_p)
+    if (overwrite || !file.exists(csv)) write_csv(table1, csv)
+    if (overwrite || !file.exists(md_p)) writeLines(to_markdown_table(table1), md_p)
     c(csv, md_p)
   }
 
@@ -1440,14 +1538,15 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # Figure 2 validates the LLM classifier against manual annotations and
   # measures platinum enrichment. Its subject is the label set and the platinum
   # MRN list, neither of which depends on the modelled endpoint, so it is
-  # emitted once from the platinum pass rather than duplicated per endpoint.
-  if (IS_ADT && !EMIT_ENDPOINT_INDEPENDENT)
+  # emitted once from the canonical ADT/platinum pass rather than duplicated
+  # across endpoint and restricted-cohort cells.
+  if (IS_ADT && (!EMIT_ENDPOINT_INDEPENDENT || !IS_CANONICAL_ADT))
     message(sprintf(paste0("Figure 2 v3: classifier/platinum-enrichment figures are ",
-                           "endpoint-independent and are emitted from the %s pass -- skipping ",
-                           "for endpoint=%s."),
-                    ENDPOINT_INDEPENDENT_FIGURES_ENDPOINT, ENDPOINT))
+                           "global and are emitted only from cohort=adt, endpoint=%s -- skipping ",
+                           "for cohort=%s, endpoint=%s."),
+                    ENDPOINT_INDEPENDENT_FIGURES_ENDPOINT, COHORT, ENDPOINT))
 
-  if (IS_ADT && EMIT_ENDPOINT_INDEPENDENT) {
+  if (IS_CANONICAL_ADT && EMIT_ENDPOINT_INDEPENDENT) {
   ## ---- Figure 2 v3 -- classifier labels over every ADT-exposed patient ----
   # The only Figure 2 variant retained. Earlier variants (v0: unrestricted
   # LLM_v3_labels.tsv; v1: those labels narrowed to the ADT landmark-0
@@ -1716,11 +1815,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
     save_fig(pC_v3, OUT_DIR_V3, "figure2v3_enrichment", 4.5, 5.5)
 
-    left_v3  <- (render_confusion_panel(metrics_v3) + render_metric_bar_panel(metrics_v3)) /
-               render_enrichment_panel(enrichment_v3)
-    right_v3 <- render_landscape_panel(
-      label_distributions_v3, n_pos, n_neg,
-      "Panel B — subtype landscape (classifier labels, all ADT)")
+    # Reuse the already-built panels; constructing them again here made the
+    # composite repeat their data work before rasterization.
+    left_v3  <- (pA1_v3 + pA2_v3) / pC_v3
+    right_v3 <- pB_v3 +
+      labs(title = "Panel B — subtype landscape (classifier labels, all ADT)")
     full_caption_v3 <- sprintf(paste0(
       "(A) NEPC-vs-rest classifier (LLM_NEPC_classifier_labels.tsv) vs Baca-lab manual ",
       "annotation (N=%s evaluable among %s ADT-exposed patients, %s manual-NEPC+). (B) Subtype landscape, platinum+ (n=%s) vs ",
@@ -2448,7 +2547,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     output_dir_for_stem(supplement_stem),
     paste0(COHORT_LEAF, "_data.csv")
   )
-  write_csv(multivariate_supplement_data, supplement_csv)
+  record_output(supplement_csv)
+  if (overwrite || !file.exists(supplement_csv))
+    write_csv(multivariate_supplement_data, supplement_csv)
   message("wrote ", supplement_csv)
   if (show) print(p_supplement)
 
@@ -2613,12 +2714,23 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
             legend.position = c(0.02, 0.02), legend.justification = c(0, 0))
   }
 
+  aggregated_landmark_cache <- new.env(parent = emptyenv())
   load_aggregated_landmark <- function(landmark) {
+    key <- as.character(landmark)
+    if (exists(key, envir = aggregated_landmark_cache, inherits = FALSE)) {
+      value <- aggregated_landmark_cache[[key]]
+      if (inherits(value, "missing_aggregated")) return(NULL)
+      return(value)
+    }
     path <- file.path(INPUTS_DIR, sprintf("aggregated_landmark%s.csv", landmark))
     if (!file.exists(path)) {
-      message(sprintf("skipped landmark %s -- %s not found", landmark, path)); return(NULL)
+      message(sprintf("skipped landmark %s -- %s not found", landmark, path))
+      aggregated_landmark_cache[[key]] <- structure(list(), class = "missing_aggregated")
+      return(NULL)
     }
-    read_csv(path, show_col_types = FALSE, guess_max = 100000)
+    value <- read_csv(path, show_col_types = FALSE, guess_max = 100000)
+    aggregated_landmark_cache[[key]] <- value
+    value
   }
 
   FIG5_LANDMARKS <- LANDMARKS
@@ -2870,14 +2982,15 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     mrns <- character(0); found <- character(0); n_pre_anchor_total <- 0L
     for (lm in LANDMARKS) {
       p <- file.path(INPUTS_DIR, sprintf("aggregated_landmark%s.csv", lm))
-      if (!file.exists(p)) next
-      hdr <- names(read_csv(p, n_max = 0, show_col_types = FALSE))
+      frame <- load_aggregated_landmark(lm)
+      if (is.null(frame)) next
+      hdr <- names(frame)
       col <- if (id_col %in% hdr) id_col else if ("DFCI_MRN" %in% hdr) "DFCI_MRN" else NA
       if (is.na(col)) {
         message(sprintf("  [warn] %s has no %s/DFCI_MRN column; skipping", basename(p), id_col)); next
       }
       wanted <- c(col, if ("t_platinum" %in% hdr) "t_platinum", if ("PLATINUM" %in% hdr) "PLATINUM")
-      frame <- read_csv(p, col_select = all_of(wanted), show_col_types = FALSE)
+      frame <- frame %>% select(all_of(wanted))
       n_raw <- length(unique(frame[[col]][!is.na(frame[[col]])]))
       if (all(c("t_platinum", "PLATINUM") %in% names(frame))) {
         pre_anchor <- suppressWarnings(as.numeric(frame$PLATINUM)) %in% 1 &
@@ -2914,10 +3027,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (!file.exists(LONGITUDINAL_CSV)) {
       message(sprintf("Figure 7: skipped -- %s not found", LONGITUDINAL_CSV)); return(NULL)
     }
-    # Same path and args as load_profile_patient_and_labs() above, so this is a
-    # cache hit rather than a second parse of the largest file in the pipeline.
-    df <- cached_read_csv(LONGITUDINAL_CSV, show_col_types = FALSE,
-                          col_types = LONGITUDINAL_COL_TYPES)
+    # Canonical classification/numeric cleanup is cached at arm level.
+    df <- tryCatch(cached_canonical_longitudinal(LONGITUDINAL_CSV),
+                   error = function(e) {
+                     message("Figure 7: skipped -- ", conditionMessage(e)); NULL
+                   })
+    if (is.null(df)) return(NULL)
     needed <- c("LAB_NAME","LAB_VALUE","t_lab","DFCI_MRN")
     missing <- setdiff(needed, names(df))
     if (length(missing)) {
@@ -2927,7 +3042,6 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     message(sprintf("Figure 7 loader: %s rows / %s patients in CSV",
                     format(nrow(df), big.mark=","),
                     format(length(unique(df$DFCI_MRN)), big.mark=",")))
-    df <- df %>% filter(is_canonical_lab(LAB_NAME))
     if (nrow(df) == 0) { message("Figure 7: skipped -- no canonical-lab rows"); return(NULL) }
 
     # Restrict to patients present in the aggregated landmark CSVs so the trajectory
@@ -2949,17 +3063,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       return(NULL)
     }
 
-    df <- df %>% mutate(
-      t_lab = suppressWarnings(as.numeric(t_lab)),
-      t_rel = t_lab,
-      LAB_VALUE = suppressWarnings(as.numeric(LAB_VALUE))
-    ) %>% drop_na(t_rel, LAB_VALUE)
     if (nrow(df) == 0) { message("Figure 7: skipped -- all t_lab/LAB_VALUE NaN"); return(NULL) }
 
     df$t_platinum_rel <- if (all(c("t_platinum","PLATINUM") %in% names(df)))
       suppressWarnings(as.numeric(df$t_platinum)) else NA_real_
-    df$LAB_GROUP <- vapply(df$LAB_NAME, match_canonical_lab_name, character(1))
-    df <- df %>% filter(!is.na(LAB_GROUP))
     df
   }
 
@@ -3223,11 +3330,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     # dropped here too: the NEPC/AVPC endpoints keep those patients in their
     # aggregated CSVs (see aggregated_landmark_mrns above), and plotting them
     # would label a patient "Platinum" for treatment that preceded the anchor.
-    agg_raw <- read_csv(
-      agg_path,
-      col_select = any_of(c("DFCI_MRN", "PLATINUM", "t_platinum")),
-      show_col_types = FALSE
-    )
+    agg_raw <- load_aggregated_landmark(landmark) %>%
+      select(any_of(c("DFCI_MRN", "PLATINUM", "t_platinum")))
     agg_platinum <- suppressWarnings(as.numeric(agg_raw$PLATINUM))
     agg_t_platinum <- if ("t_platinum" %in% names(agg_raw)) {
       suppressWarnings(as.numeric(agg_raw$t_platinum))
@@ -3310,8 +3414,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   ## ---- Supplement -- localized-adjuvant vs metastatic ADT-intent strata ----
   ## Reads the CSVs written by COMPASS/survival_analysis/adt_intent_comparison.py.
   ## That module is read-only over the `local_runs_adt_{localized,metastatic}*`
-  ## trees; nothing here refits a model. Panels are emitted only on the ADT arm,
-  ## since the intent strata are defined by ADT medication history.
+  ## trees; nothing here refits a model. These global comparisons are emitted
+  ## only by the canonical ADT cell, since restricted cohorts do not alter them.
   ADT_INTENT_DIR <- file.path(NEPC_PROJ_PATH, "survival_analysis",
                               "adt_intent_comparison")
   adt_intent_table <- function(filename) {
@@ -3325,7 +3429,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     frame
   }
 
-  if (IS_ADT) {
+  if (IS_CANONICAL_ADT) {
     intent_counts <- adt_intent_table("adt_intent_cohort_counts.csv")
     intent_overlap <- adt_intent_table("adt_intent_cohort_overlap.csv")
     intent_association <- adt_intent_table("adt_intent_univariate_heterogeneity.csv")

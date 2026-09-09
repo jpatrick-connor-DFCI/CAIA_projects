@@ -50,8 +50,8 @@ leaf-naming convention. There is no `R/` language subdirectory.
 
 Figure 2 v3 (LLM classifier validation and platinum enrichment over every
 ADT-exposed patient) describes the label set and the platinum MRN list rather
-than a modelled endpoint, so it is emitted once from the platinum pass and
-skipped for the other endpoints. It is the only Figure 2 variant retained;
+than a modelled endpoint or restricted cohort, so it is emitted once from the
+canonical `adt` / platinum pass and skipped for the other cells. It is the only Figure 2 variant retained;
 the earlier v0/v1/v2 variants have been removed.
 
 Figure 3b adds the somatic, Gleason, and PRS univariate associations as their
@@ -121,6 +121,32 @@ stopifnot(
 PLOT_NON_ANDROGEN_DISTRIBUTIONS <- FALSE
 PLOT_NON_ANDROGEN_LAB_FIGURES <- FALSE
 
+# Rendering profile. The default is optimized for iterative work: 300 dpi,
+# composites instead of duplicate component+composite PNGs, and existing
+# artifacts are retained. Set COMPASS_RENDER_PROFILE=publication for the
+# original 600-dpi, all-panels, forced-regeneration behavior.
+RENDER_PROFILE <- tolower(Sys.getenv("COMPASS_RENDER_PROFILE", "fast"))
+if (!RENDER_PROFILE %in% c("fast", "publication"))
+  stop("COMPASS_RENDER_PROFILE must be 'fast' or 'publication'")
+RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 300
+RENDER_OUTPUT_MODE <- if (RENDER_PROFILE == "publication") "all" else "composite"
+overwrite_value <- tolower(Sys.getenv(
+  "COMPASS_RENDER_OVERWRITE",
+  if (RENDER_PROFILE == "publication") "true" else "false"
+))
+if (!overwrite_value %in% c("true", "false", "1", "0", "yes", "no"))
+  stop("COMPASS_RENDER_OVERWRITE must be true or false")
+RENDER_OVERWRITE <- overwrite_value %in% c("true", "1", "yes")
+
+# Parallelize by endpoint rather than by cohort. Each worker therefore retains
+# its processed longitudinal cache while it renders all six cohorts, and only
+# two copies of the large arm-level table can be resident at once.
+RENDER_WORKERS <- suppressWarnings(as.integer(
+  Sys.getenv("COMPASS_RENDER_WORKERS", "2")
+))
+if (is.na(RENDER_WORKERS) || RENDER_WORKERS < 1L)
+  stop("COMPASS_RENDER_WORKERS must be a positive integer")
+
 # Fail early with a useful message rather than deep inside generate_figures().
 for (required_path in c(
     file.path(NEPC_PROJ_PATH, "LLM_NEPC_labels"),
@@ -158,6 +184,9 @@ message("endpoints:   ", paste(ENDPOINTS, collapse = ", "))
 message("cohorts:     ", paste(COHORTS, collapse = ", "))
 message(sprintf("renders:     %d cohort x endpoint figure sets",
                 length(COHORTS) * length(ENDPOINTS)))
+message(sprintf("profile:     %s (%d dpi, output=%s, overwrite=%s, workers=%d)",
+                RENDER_PROFILE, RENDER_DPI, RENDER_OUTPUT_MODE,
+                RENDER_OVERWRITE, RENDER_WORKERS))
 ```
 
 ## Render ADT figures
@@ -177,10 +206,9 @@ events should not cost the whole knit. Any failures are re-reported at the end
 and the chunk then fails, so a partial render cannot pass silently.
 
 ```{r render-figures}
-render_failures <- character(0)
-
-for (COHORT in COHORTS) {
-  for (ENDPOINT in ENDPOINTS) {
+render_endpoint <- function(ENDPOINT) {
+  endpoint_failures <- character(0)
+  for (COHORT in COHORTS) {
     label <- sprintf("%s / %s", cohort_display(COHORT), toupper(ENDPOINT))
     message(sprintf("\n========== R figures: %s ==========", label))
     ok <- tryCatch({
@@ -190,7 +218,10 @@ for (COHORT in COHORTS) {
         fig_root = FIG_ROOT,
         endpoint = ENDPOINT,
         plot_non_androgen_distributions = PLOT_NON_ANDROGEN_DISTRIBUTIONS,
-        plot_non_androgen_lab_figures = PLOT_NON_ANDROGEN_LAB_FIGURES
+        plot_non_androgen_lab_figures = PLOT_NON_ANDROGEN_LAB_FIGURES,
+        save_dpi = RENDER_DPI,
+        output_mode = RENDER_OUTPUT_MODE,
+        overwrite = RENDER_OVERWRITE
       )
       supplement_stem <- "figure4s_multivariate_all_models"
       supplement_path <- file.path(
@@ -212,10 +243,32 @@ for (COHORT in COHORTS) {
     if (ok) {
       message(sprintf("\nCompleted R figures for %s.", label))
     } else {
-      render_failures <- c(render_failures, label)
+      endpoint_failures <- c(endpoint_failures, label)
     }
   }
+  endpoint_failures
 }
+
+n_workers <- min(RENDER_WORKERS, length(ENDPOINTS))
+if (n_workers > 1L && .Platform$OS.type != "windows") {
+  endpoint_results <- parallel::mclapply(
+    ENDPOINTS, render_endpoint, mc.cores = n_workers, mc.preschedule = TRUE
+  )
+} else {
+  if (n_workers > 1L)
+    message("Parallel fork rendering is unavailable on Windows; using one worker.")
+  endpoint_results <- lapply(ENDPOINTS, render_endpoint)
+}
+worker_errors <- vapply(endpoint_results, inherits, logical(1), what = "try-error")
+render_failures <- unlist(endpoint_results[!worker_errors], use.names = FALSE)
+if (any(worker_errors))
+  render_failures <- c(
+    render_failures,
+    unlist(lapply(ENDPOINTS[worker_errors], function(endpoint) {
+      sprintf("%s / %s (worker failed)",
+              vapply(COHORTS, cohort_display, character(1)), toupper(endpoint))
+    }), use.names = FALSE)
+  )
 
 n_total <- length(COHORTS) * length(ENDPOINTS)
 message(sprintf("\n%d of %d figure sets rendered.",
