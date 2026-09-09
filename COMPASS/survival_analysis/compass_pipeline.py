@@ -1639,7 +1639,7 @@ def _canonical_metric_fields(row) -> dict:
 def summarize_outputs(run: dict) -> pd.DataFrame:
     # Reads back whichever endpoint this run modeled; the "endpoint" column it
     # emits is what lets platinum and NEPC summaries be concatenated and
-    # compared side by side (see 07_endpoint_comparison.ipynb).
+    # compared side by side (see 07_cohort_comparison.ipynb).
     endpoint = run.get("endpoint", ENDPOINT)
     rows = []
     for model, landmark, config_dir, metrics_filename in tasks_for_run(run, MULTIVARIATE_TASK_SPECS):

@@ -85,7 +85,7 @@ COMPASS/
     ├── 03b_multivariate_longitudinal.ipynb # Dynamic-DeepHit (torch, optional; SurvLatent ODE off by default)
     ├── 05_figures.Rmd                    # R figures from merged profile_data outputs
     ├── 06_abstract_numbers.ipynb         # read-only: abstract/manuscript counts from built artifacts
-    ├── 07_endpoint_comparison.ipynb      # read-only: platinum vs nepc endpoint comparison
+    ├── 07_cohort_comparison.ipynb        # read-only: 6 cohorts x 2 endpoints, landmark +180d
     ├── multivariate_longitudinal/
     │   ├── dynamic_deephit.py            # ENTRY: thin CLI over survival_common/deephit_engine.py
     │   ├── survlatent_ode.py             # ENTRY: adapter around the bundled editable checkout
@@ -132,7 +132,7 @@ reporting notebooks: they read already-generated artifacts and refit nothing.
         ├──► 05_figures.Rmd (R; 2 cohort arms: arpi, adt)
         │    figures/
         │
-        ▼  07_endpoint_comparison.ipynb (read-only; platinum vs nepc)
+        ▼  07_cohort_comparison.ipynb (read-only; 6 cohorts x 2 endpoints)
 ```
 
 Everything above `build_prediction_inputs.py` is endpoint-independent and shared: one survival
@@ -428,12 +428,13 @@ notebook. All operate on the merged `profile_data` run:
   supplemental section reads. Run it after `02`/`03`: `python COMPASS/survival_analysis/adt_intent_comparison.py`.
 - `06_abstract_numbers.ipynb` — read-only. Collects the cohort/event/performance counts quoted in
   the abstract and manuscript from already-generated artifacts. Refits nothing.
-- `07_endpoint_comparison.ipynb` — read-only. Compares the `platinum` and `nepc` endpoint runs
-  side by side: cohort and event counts per landmark (including how many diagnoses the incident
-  gate removed as prevalent, and a loud warning when an endpoint has too few events to interpret),
-  NEPC date/label provenance breakdowns, held-out performance pivots with `nepc - platinum`
-  deltas, univariate association overlap flagged shared / platinum-only / nepc-only, and overlaid
-  KM curves. Requires `01`-`03` to have been run for **both** endpoints; missing artifacts are
+- `07_cohort_comparison.ipynb` — read-only. Compares the 6 patient cohorts (3 cohorts `all` /
+  `metastatic_adt` / `metastatic_llm` x 2 exclusions `none` / `pre_adt_castrate`) against both
+  endpoints at the **+180d landmark only**: cohort and event counts (including how many diagnoses
+  the incident gate removed as prevalent, and a loud warning when a cell has too few events to
+  interpret), PSA and testosterone pre/post-treatment distributions stratified by event, univariate
+  PSA/testosterone associations as a hazard-ratio forest plot across every cohort x endpoint cell,
+  and the cascade effect of narrowing `all` -> metastatic -> +noprecastrate. Requires `01`-`03` to have been run for **both** endpoints; missing artifacts are
   collected and reported rather than raising. Its header restates the two caveats that govern
   reading it — the cohorts are not the same patients, and the strict NEPC label is narrower than
   the Figure 2 classifier definition.
@@ -505,13 +506,48 @@ notebook. All operate on the merged `profile_data` run:
       by `adt_intent_comparison.py`; emitted only on the ADT arm, and skipped with a message if
       those CSVs are absent. Stems: `adt_intent_<panel>_<endpoint>`, routed to
       `supplement_adt_intent/`.
-  - **Output layout:** each arm has its own `FIG_ROOT/ARPI/` or `FIG_ROOT/ADT/` subtree. Non-lab
-    figures use `<arm>/<figure>/<plot-stem>/<cohort>_<plot-stem>.png`; per-lab panels
-    (longitudinal, km_quartile, distribution) use
-    `<arm>/labs/<lab_category>/<lab_name>/<panel_type>/<cohort>_<stem>.png`. A lab-aware branch in
-    `figure_group()` uses `assign_category()` for CBC/CMP/LFT/Vitals/Androgen axis/Other. Any
-    plot stem `figure_group()` can't route still raises
-    `stop("Unmapped figure output stem")`.
+  - **Output layout:** the tree is **figure-major**, so comparing one panel across cohorts is a
+    single directory listing rather than six paths differing mid-string. Each arm keeps its own
+    `FIG_ROOT/ARPI/` or `FIG_ROOT/ADT/` subtree (the two arms are separate deliverables and are
+    never compared panel-to-panel), but the patient-subset and exclusion axes move **out** of the
+    directory name and into the leaf filename:
+
+    ```
+    <arm>/by_figure/<group>/<plot-stem>/<endpoint>__<subset>__<exclusion>.png
+    ```
+
+    so one leaf holds all twelve cohort x endpoint panels, endpoint first so they sort into two
+    contiguous six-cohort blocks:
+
+    ```
+    ADT/by_figure/figure3/figure3_univariate_landmark180/
+        nepc__all__incl.png                 nepc__all__noprecastrate.png
+        nepc__metastatic_adt__incl.png      nepc__metastatic_adt__noprecastrate.png
+        nepc__metastatic_llm__incl.png      nepc__metastatic_llm__noprecastrate.png
+        platinum__all__incl.png             platinum__all__noprecastrate.png
+        platinum__metastatic_adt__incl.png  platinum__metastatic_adt__noprecastrate.png
+        platinum__metastatic_llm__incl.png  platinum__metastatic_llm__noprecastrate.png
+    ```
+
+    `__` separates axes uniformly; single underscores live inside a slug. `incl` names the
+    no-exclusion case (rather than an empty suffix) so every filename has the same shape and each
+    subset's two variants sort adjacently. Per-lab panels keep their category/lab nesting, since
+    ~40 labs x 4 strata would otherwise flood one directory:
+    `<arm>/by_figure/labs/<lab_category>/<lab_name>/<panel_type>/<endpoint>__<subset>__<exclusion>.png`.
+    A lab-aware branch in `figure_group()` uses `assign_category()` for
+    CBC/CMP/LFT/Vitals/Androgen axis/Other. Any plot stem `figure_group()` can't route still
+    raises `stop("Unmapped figure output stem")`.
+
+    `generate_figures()` also refreshes a **cohort-major view** of symlinks for the cell it just
+    rendered, for the other access pattern ("everything for one cohort", e.g. assembling a
+    manuscript): `<arm>/by_cohort/<subset>__<exclusion>/<endpoint>/<group>/<plot-stem>.png`. Real
+    files live only under `by_figure/`; `by_cohort/` is a view, rebuilt per run and scoped to that
+    run's own **cohort x endpoint** cell, so regenerating one cohort never disturbs another's --
+    and re-rendering one endpoint does not drop the sibling endpoint's links, which that run did
+    not regenerate. On filesystems without
+    symlink support it falls back to copying. Note that the pipeline no longer prunes anything on
+    startup: the old legacy-subdirectory cleanup would delete the endpoint level under this
+    layout, so stale trees are removed by hand.
   `02_univariate.ipynb`'s final section loads all shared-landmark univariate results for both
   `arpi` and `adt`, filters each to nominal `p_value < 0.05`, displays every hit, and exports a
   separate `cox/nominally_significant_univariate_results.csv` beneath each arm's run directory.
@@ -854,8 +890,8 @@ patient subsets with `COHORTS`, and the event(s) with `ENDPOINTS`
    after steps 2-3 have been run for both stratified cohorts)
 7. `COMPASS/survival_analysis/05_figures.Rmd`
 8. `COMPASS/survival_analysis/06_abstract_numbers.ipynb` (read-only; abstract/manuscript counts)
-9. `COMPASS/survival_analysis/07_endpoint_comparison.ipynb` (read-only; only after steps 1-3 have
-   been run for **all** endpoints being compared)
+9. `COMPASS/survival_analysis/07_cohort_comparison.ipynb` (read-only; only after steps 1-3 have
+   been run for **all** cohorts and endpoints being compared)
 
 The notebooks pass `PROFILE_DATA/*.parquet` paths explicitly to the lower-level scripts. Existing
 hand-curated `LLM_NEPC_labels/` inputs remain under the shared `COMPASS` data root.

@@ -431,6 +431,57 @@ cohort_display <- function(cohort) {
   paste0(toupper(arm), COHORT_SUBSET_LABELS[i], exclusion_label)
 }
 
+# Directory-safe slugs for the two cohort axes a run label composes, so the
+# figure tree can nest by axis instead of by the flattened run label. The
+# composite label (e.g. "adt_metastatic_llm_noprecastrate") is fine for naming
+# DATA trees, where it matches the Python pipeline one-to-one, but it is the
+# wrong key for FIGURES: comparing one panel across cohorts should be a single
+# directory listing, not twelve paths differing mid-string.
+#
+#   cohort_subset_slug("adt")                          -> "all"
+#   cohort_subset_slug("adt_metastatic_llm_noprecastrate") -> "metastatic_llm"
+#   cohort_exclusion_slug("adt")                       -> "incl"
+#   cohort_exclusion_slug("adt_..._noprecastrate")     -> "noprecastrate"
+#
+# The no-exclusion case is "incl" rather than "" so every leaf filename has the
+# same shape and the two variants of a subset sort adjacently.
+COHORT_SUBSET_SLUGS <- c("all", "metastatic_adt", "metastatic_llm")
+stopifnot(length(COHORT_SUBSET_SLUGS) == length(COHORT_SUBSET_SUFFIXES))
+
+# Splits a run label into (subset suffix, exclusion suffix) using the same
+# longest-arm-match rule as cohort_arm(), so a future arm that prefixes another
+# stays unambiguous. Errors on an unrecognized subset rather than silently
+# routing figures to a wrong or invented directory.
+cohort_axes <- function(cohort) {
+  arm <- cohort_arm(cohort)
+  rest <- substring(cohort, nchar(arm) + 1L)
+  exclusion <- ""
+  for (suffix in COHORT_EXCLUSION_SUFFIXES) {
+    if (nzchar(suffix) && endsWith(rest, suffix)) {
+      exclusion <- suffix
+      rest <- substring(rest, 1L, nchar(rest) - nchar(suffix))
+      break
+    }
+  }
+  i <- match(rest, COHORT_SUBSET_SUFFIXES)
+  if (is.na(i))
+    stop(sprintf("Unrecognized cohort subset suffix '%s' in cohort=%s", rest, cohort))
+  list(arm = arm, subset = COHORT_SUBSET_SLUGS[i], exclusion = exclusion)
+}
+
+cohort_subset_slug <- function(cohort) cohort_axes(cohort)$subset
+
+cohort_exclusion_slug <- function(cohort) {
+  ex <- cohort_axes(cohort)$exclusion
+  if (nzchar(ex)) sub("^_", "", ex) else "incl"
+}
+
+# The leaf filename identity for a run: "<subset>__<exclusion>". Double
+# underscore separates the two AXES; single underscores live inside a slug.
+cohort_leaf_slug <- function(cohort) {
+  paste0(cohort_subset_slug(cohort), "__", cohort_exclusion_slug(cohort))
+}
+
 # Every cohort arm uses the same 0-, 90-, and 180-day landmarks, and a patient
 # subset does not change them.
 COHORT_LANDMARKS <- list(
@@ -523,17 +574,34 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     NEPC_PROJ_PATH, "mrn_lists", "icd_prostate_mrn_flags.csv"
   )
 
-  # Keep the two requested deliverables physically separate:
-  #   .../CAIA/COMPASS/ARPI/
-  #   .../CAIA/COMPASS/ADT/
-  # Every endpoint nests one level deeper under its cohort arm, so panels that
-  # share a plot stem cannot overwrite each other:
-  #   .../CAIA/COMPASS/ADT/{platinum,nepc,avpc}/
-  # Platinum is nested like the rest rather than keeping the historical
-  # un-suffixed path: ENDPOINT_SUFFIX stays "" for platinum because it still
-  # names the un-suffixed *data* trees (local_runs_adt, prediction_inputs_adt)
-  # that the Python pipeline writes, but the figure path uses ENDPOINT itself.
-  FIG_ROOT <- file.path(fig_root, toupper(COHORT), ENDPOINT)
+  # Figure tree is FIGURE-MAJOR, not cohort-major, so that comparing one panel
+  # across cohorts is a single directory listing:
+  #
+  #   <fig_root>/ADT/by_figure/<group>/<stem>/<endpoint>__<subset>__<exclusion>.png
+  #
+  # e.g. all twelve cohort x endpoint panels in one directory, endpoint first so
+  # they sort into two contiguous six-cohort blocks:
+  #   ADT/by_figure/figure3/figure3_univariate_landmark180/
+  #       nepc__all__incl.png                 nepc__all__noprecastrate.png
+  #       nepc__metastatic_adt__incl.png      nepc__metastatic_adt__noprecastrate.png
+  #       nepc__metastatic_llm__incl.png      nepc__metastatic_llm__noprecastrate.png
+  #       platinum__all__incl.png             platinum__all__noprecastrate.png
+  #       platinum__metastatic_adt__incl.png  platinum__metastatic_adt__noprecastrate.png
+  #       platinum__metastatic_llm__incl.png  platinum__metastatic_llm__noprecastrate.png
+  #
+  # The two treatment arms stay physically separate (ARPI vs ADT are different
+  # deliverables and are never compared panel-to-panel), but endpoint, patient
+  # subset and exclusion all move OUT of the directory name and into the leaf
+  # filename, because those are exactly the axes you compare across. `__`
+  # separates AXES uniformly; single underscores live inside a slug.
+  # ENDPOINT_SUFFIX stays "" for platinum because it still names the
+  # un-suffixed *data* trees (local_runs_adt, prediction_inputs_adt) the Python
+  # pipeline writes; the figure path uses ENDPOINT itself.
+  COHORT_ARM_DIR <- toupper(cohort_arm(COHORT))
+  FIG_ROOT <- file.path(fig_root, COHORT_ARM_DIR)
+  # Leaf identity for this run: which of the 12 cohort x endpoint cells a file
+  # represents. Endpoint leads so a directory listing groups by endpoint first.
+  COHORT_LEAF <- paste0(ENDPOINT, "__", cohort_leaf_slug(COHORT))
   # Canonical-lab names sorted longest-first so e.g. "Direct bilirubin" is
   # matched before "Total bilirubin" would ever partially collide, and so a
   # lab-specific stem is never mis-routed to a shorter substring match.
@@ -550,12 +618,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     }
     NA_character_
   }
-  # Flat layout within each numbered figure directory:
-  #   <fig_root>/<ARPI|ADT>/<figure>/<cohort>_<plot-stem>.png
-  # Per-lab panels (all-lab longitudinal/KM-quartile/distribution plots) are
-  # nested one level deeper by CATEGORY_MAP category so ~40 labs x 4 strata
-  # stay navigable instead of dumping ~160+ files into one flat directory:
-  #   FIG_ROOT/labs/<category>/<lab>/{longitudinal,km_quartile,distribution}/<cohort>_<stem>.png
+  # Layout, every output:
+  #   FIG_ROOT/by_figure/<group>/<stem>/<endpoint>__<subset>__<exclusion>.png
+  # Per-lab panels keep their category/lab nesting for the same reason as
+  # before -- ~40 labs x 4 strata would otherwise dump 160+ entries into one
+  # directory -- and still bottom out at <= 12 files per leaf:
+  #   FIG_ROOT/by_figure/labs/<category>/<lab>/longitudinal/<endpoint>__<subset>__<exclusion>.png
   figure_group <- function(plot_stem) {
     # Checked before the "figure1" prefix so the supplement gets its own
     # directory instead of being swallowed by the main Figure 1 group.
@@ -592,36 +660,83 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     }
     stop(sprintf("Unmapped figure output stem: %s", plot_stem))
   }
+  # Every stem routes to .../by_figure/<group>/<stem>/, whose leaf holds one
+  # file per cohort x endpoint cell. Uniform for numbered and supplemental
+  # groups alike: the per-stem level is what keeps sibling panels in a group
+  # from sharing a leaf, and COHORT_LEAF (endpoint + subset + exclusion) is
+  # what keeps the twelve cells within a stem from colliding.
   output_dir_for_stem <- function(plot_stem) {
-    group <- figure_group(plot_stem)
-    # Numbered figure groups are flat. Preserve the existing extra stem level
-    # for supplemental lab/KM groups, which can contain hundreds of outputs.
-    if (grepl("^figure[0-9]", group)) return(file.path(FIG_ROOT, group))
-    file.path(FIG_ROOT, group, plot_stem)
+    file.path(FIG_ROOT, "by_figure", figure_group(plot_stem), plot_stem)
   }
-  # Remove only the legacy per-panel directories under numbered figure groups.
-  # Flat files already in those groups are retained and overwritten normally.
-  numbered_figure_groups <- c(
-    "figure1", "figure1s_analysis_sets", "figure2v3_llm", "figure3", "figure3b", "figure4"
-  )
-  for (group in numbered_figure_groups) {
-    group_dir <- file.path(FIG_ROOT, group)
-    if (!dir.exists(group_dir)) next
-    legacy_subdirs <- list.dirs(group_dir, recursive = FALSE, full.names = TRUE)
-    if (length(legacy_subdirs) > 0) {
-      unlink(legacy_subdirs, recursive = TRUE, force = TRUE)
-      message(sprintf(
-        "removed %d legacy panel subdirector%s from %s",
-        length(legacy_subdirs),
-        ifelse(length(legacy_subdirs) == 1, "y", "ies"),
-        group_dir
-      ))
-    }
-  }
-  # Compatibility value passed by existing save_fig call sites; actual output
-  # routing is determined from each exact `stem` inside save_fig/write_table1.
+
+  # NOTE: the previous legacy-subdirectory cleanup that ran here has been
+  # removed deliberately. It unlinked every subdirectory under each numbered
+  # figure group on every run, which under this layout would delete the
+  # endpoint level -- i.e. the current run's own outputs, and every other
+  # cohort's. Regenerating a cohort must never remove another cohort's files;
+  # stale trees are cleaned by hand instead.
+
+  # Compatibility shim: call sites still pass an `out_dir`, but actual routing
+  # is derived from each exact `stem` inside save_fig/write_table1. Kept so the
+  # 30+ existing call sites need no edit.
   fig_dir <- function(plot_stem) {
     file.path(FIG_ROOT, plot_stem)
+  }
+
+  # A cohort-major VIEW over the same files, for the other access pattern:
+  # "show me everything for one cohort" (assembling a manuscript for the
+  # primary cohort). Real files live only under by_figure/; these are symlinks,
+  # rebuilt for this run's cohort x endpoint cell at the end of
+  # generate_figures().
+  #
+  #   FIG_ROOT/by_cohort/<subset>__<exclusion>/<endpoint>/<group>/<stem>.<ext>
+  #
+  # Only this run's own cell is touched, so regenerating one cohort or endpoint
+  # never disturbs another's links. Note the view is rebuilt per ENDPOINT
+  # subtree, not per cohort subtree: wiping the whole cohort here would drop
+  # the sibling endpoint's links, which this run did not regenerate.
+  rebuild_cohort_view <- function() {
+    src_root <- file.path(FIG_ROOT, "by_figure")
+    if (!dir.exists(src_root)) return(invisible(NULL))
+    cohort_slug <- cohort_leaf_slug(COHORT)
+    view_root <- file.path(FIG_ROOT, "by_cohort", cohort_slug, ENDPOINT)
+    unlink(view_root, recursive = TRUE, force = TRUE)
+
+    # Files this cell owns: leaf basename is COHORT_LEAF (endpoint + cohort),
+    # optionally with a trailing _data suffix on the supplement CSV.
+    all_files <- list.files(src_root, recursive = TRUE, full.names = TRUE,
+                            all.files = FALSE, include.dirs = FALSE)
+    if (!length(all_files)) return(invisible(NULL))
+    stems <- tools::file_path_sans_ext(basename(all_files))
+    mine <- all_files[stems == COHORT_LEAF |
+                      startsWith(stems, paste0(COHORT_LEAF, "_"))]
+    if (!length(mine)) return(invisible(NULL))
+
+    n_linked <- 0L
+    for (src in mine) {
+      rel <- substring(src, nchar(src_root) + 2L)          # <group>/<stem>/<file>
+      parts <- strsplit(rel, .Platform$file.sep, fixed = TRUE)[[1]]
+      if (length(parts) < 2L) next
+      stem  <- parts[length(parts) - 1L]
+      group <- paste(parts[seq_len(length(parts) - 2L)],
+                     collapse = .Platform$file.sep)
+      ext <- tools::file_ext(src)
+      # Reunite the stem with its extension; the cell is implied by the
+      # subtree, so the link is named for the panel instead.
+      suffix <- sub(paste0("^", COHORT_LEAF), "", tools::file_path_sans_ext(basename(src)))
+      link_name <- paste0(stem, suffix, if (nzchar(ext)) paste0(".", ext) else "")
+      dest_dir <- file.path(view_root, group)
+      dir.create(dest_dir, recursive = TRUE, showWarnings = FALSE)
+      dest <- file.path(dest_dir, link_name)
+      ok <- suppressWarnings(file.symlink(normalizePath(src), dest))
+      # Filesystems without symlink support (some network mounts) fall back to
+      # copying, so the view still exists rather than silently being empty.
+      if (!isTRUE(ok)) ok <- file.copy(src, dest, overwrite = TRUE)
+      if (isTRUE(ok)) n_linked <- n_linked + 1L
+    }
+    message(sprintf("by_cohort view: %d entr%s under %s",
+                    n_linked, ifelse(n_linked == 1L, "y", "ies"), view_root))
+    invisible(NULL)
   }
 
   LANDMARKS <- COHORT_LANDMARKS[[COHORT_ARM]]
@@ -648,13 +763,13 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
 
   # save_fig: write one high-resolution PNG directly to its figure group.
-  save_fig <- function(plot, out_dir, stem, width, height, prefix = COHORT) {
-    # `out_dir` is retained for call-site compatibility. The filename already
-    # contains the cohort and exact stem, so an extra per-panel directory adds
-    # nesting without adding disambiguation.
+  save_fig <- function(plot, out_dir, stem, width, height, prefix = COHORT_LEAF) {
+    # `out_dir` is retained for call-site compatibility. The directory already
+    # encodes group/stem/endpoint, so the filename carries only the cohort
+    # identity -- that is what makes one leaf directory a six-way comparison.
     output_dir <- output_dir_for_stem(stem)
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
-    output_stem <- paste0(prefix, "_", stem)
+    output_stem <- prefix
 
     png_out <- file.path(output_dir, paste0(output_stem, ".png"))
     if (HAS_RAGG) {
@@ -912,7 +1027,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     stem <- basename(out_base)
     output_dir <- output_dir_for_stem(stem)
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
-    out_base <- file.path(output_dir, paste0(COHORT, "_", stem))
+    out_base <- file.path(output_dir, COHORT_LEAF)
     csv <- paste0(out_base, ".csv"); md_p <- paste0(out_base, ".md")
     write_csv(table1, csv)
     writeLines(to_markdown_table(table1), md_p)
@@ -2232,7 +2347,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   save_fig(p_supplement, OUT_DIR, supplement_stem, width = 13, height = 5.5)
   supplement_csv <- file.path(
     output_dir_for_stem(supplement_stem),
-    paste0(COHORT, "_", supplement_stem, "_data.csv")
+    paste0(COHORT_LEAF, "_data.csv")
   )
   write_csv(multivariate_supplement_data, supplement_csv)
   message("wrote ", supplement_csv)
@@ -2755,9 +2870,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
   ## ---- Figure 7b: group mean +/- 95% CI, binned by time from treatment anchor ----
   BIN_WIDTH_DAYS <- 60
-  # Asymmetric window: 1 year of pre-landmark history, 2 years of follow-up.
-  PRE_DAYS  <- 365   # days BEFORE the treatment anchor
-  POST_DAYS <- 730   # days AFTER the treatment anchor
+  # Asymmetric window: 5 years of pre-anchor history, 10 years of follow-up.
+  PRE_DAYS  <- 5  * 365.25   # days BEFORE the treatment anchor
+  POST_DAYS <- 10 * 365.25   # days AFTER the treatment anchor
+
+  # At 60-day bins this window spans ~92 bins, and the far tails are thin: few
+  # patients have 10y of post-anchor follow-up, so those bins average over a
+  # handful of MRNs and the CI ribbon widens accordingly. MIN_BIN_PATIENTS drops
+  # bins that cannot support a mean at all rather than drawing a spike through
+  # one patient. Raise it to trade tail reach for stability.
+  MIN_BIN_PATIENTS <- 3
 
   # bin_group_ci: bins a lab-group's rows into 60-day windows and computes a
   # per-bin group mean +/- 95% CI, grouped by an arbitrary `stratum_col`
@@ -2804,6 +2926,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     patient_bin %>% group_by(t_bin, stratum) %>%
       summarise(n = n_distinct(DFCI_MRN), mean = mean(LAB_VALUE),
                 sem = if (n() > 1) sd(LAB_VALUE) / sqrt(n()) else 0, .groups = "drop") %>%
+      filter(n >= MIN_BIN_PATIENTS) %>%
       mutate(t_mid = mids[as.character(t_bin)],
              ci_lo = mean - 1.96 * sem, ci_hi = mean + 1.96 * sem)
   }
@@ -2824,7 +2947,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       geom_line(linewidth = 0.8) + geom_point(size = 1.6) +
       scale_color_manual(values = stratum_colors, labels = stratum_legend, name = NULL) +
       scale_fill_manual(values = stratum_colors, guide = "none") +
-      labs(x = sprintf("Days from %s (binned, 60d windows)", ANCHOR_LABEL),
+      scale_x_continuous(
+        breaks = seq(-PRE_DAYS, POST_DAYS, by = 365.25),
+        labels = function(d) sprintf("%g", round(d / 365.25))
+      ) +
+      labs(x = sprintf("Years from %s (binned, 60d windows)", ANCHOR_LABEL),
            y = sprintf("%s (mean +/- 95%% CI)", lab_group), title = title) +
       theme_fig() +
       theme(plot.title = element_text(face = "bold", size = 11))
@@ -3356,4 +3483,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       }
     }
   }
+
+  # Refresh this cohort's slice of the cohort-major view over what was written.
+  rebuild_cohort_view()
 }
