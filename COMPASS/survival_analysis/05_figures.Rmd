@@ -20,22 +20,33 @@ thing from the retired survival endpoint.
 The document reads the merged `profile_data` run under `.../CAIA/COMPASS`
 and writes to `figures/CAIA/COMPASS`.
 
-Outputs are split by cohort arm, then by endpoint, then flattened within each
-figure directory. Every endpoint nests one level below its cohort arm --
-platinum included, so no endpoint's panels can overwrite another's:
+The figure tree is **figure-major**, so comparing one panel across cohorts is a
+single directory listing rather than twelve paths differing mid-string. Each
+treatment arm keeps its own subtree, but endpoint, patient subset and exclusion
+all live in the leaf filename:
 
-`FIG_ROOT/ADT/nepc/<figure>/adt_<plot-stem>.png`
-`FIG_ROOT/ADT/platinum/<figure>/adt_<plot-stem>.png`
-`FIG_ROOT/ADT_METASTATIC_LLM/nepc/<figure>/adt_metastatic_llm_<plot-stem>.png`
+`FIG_ROOT/<ARM>/by_figure/<group>/<plot-stem>/<endpoint>__<subset>__<exclusion>.png`
 
-The cohort directory is the run label upper-cased, so each of the eight run
-labels gets its own tree and no two cohorts can overwrite each other.
+so one leaf holds all twelve cohort x endpoint panels, endpoint first so they
+sort into two contiguous six-cohort blocks:
 
-Note that platinum figures moved out of the old un-suffixed `FIG_ROOT/ADT/`
-path; references to that location need updating. For example,
-`figure1/adt_figure1a_consort.png` is written directly in `platinum/figure1/`.
-Plot PDFs are not generated. Tables remain CSV/Markdown and use the same flat
-figure/cohort-prefix convention. There is no `R/` language subdirectory.
+```
+ADT/by_figure/figure3/figure3_univariate_landmark180/
+    nepc__all__incl.png                 nepc__all__noprecastrate.png
+    nepc__metastatic_adt__incl.png      nepc__metastatic_adt__noprecastrate.png
+    nepc__metastatic_llm__incl.png      nepc__metastatic_llm__noprecastrate.png
+    platinum__all__incl.png             platinum__all__noprecastrate.png
+    platinum__metastatic_adt__incl.png  platinum__metastatic_adt__noprecastrate.png
+    platinum__metastatic_llm__incl.png  platinum__metastatic_llm__noprecastrate.png
+```
+
+`generate_figures()` also refreshes a cohort-major view of symlinks for the
+cell it just rendered, for the "everything for one cohort" case:
+`FIG_ROOT/<ARM>/by_cohort/<subset>__<exclusion>/<endpoint>/<group>/<plot-stem>.png`.
+Real files live only under `by_figure/`.
+
+Plot PDFs are not generated. Tables remain CSV/Markdown and follow the same
+leaf-naming convention. There is no `R/` language subdirectory.
 
 Figure 2 v3 (LLM classifier validation and platinum enrichment over every
 ADT-exposed patient) describes the label set and the platinum MRN list rather
@@ -122,8 +133,8 @@ for (required_path in c(
 }
 
 # Each cohort x endpoint reads its own prediction-inputs tree. Check them all up
-# front and report EVERY missing one together: with 8 cohorts x 2 endpoints,
-# stopping at the first would mean 16 edit-rerun cycles to discover an
+# front and report EVERY missing one together: with 6 cohorts x 2 endpoints,
+# stopping at the first would mean 12 edit-rerun cycles to discover an
 # incomplete 01_preprocessing pass.
 missing_trees <- character(0)
 for (COHORT in COHORTS) {
@@ -151,9 +162,9 @@ message(sprintf("renders:     %d cohort x endpoint figure sets",
 
 ## Render ADT figures
 
-Runs the R figure-generation pipeline once per cohort x endpoint -- 8 cohorts x
-2 endpoints = 16 figure sets. Outputs go to `FIG_ROOT/<COHORT>/<endpoint>/`,
-e.g. `ADT/platinum/`, `ADT_METASTATIC_LLM/nepc/`.
+Runs the R figure-generation pipeline once per cohort x endpoint -- 6 cohorts x
+2 endpoints = 12 figure sets. Outputs go to `FIG_ROOT/<ARM>/by_figure/`, with
+each run writing one `<endpoint>__<subset>__<exclusion>` leaf per plot stem.
 
 Narrow `COHORTS` or `ENDPOINTS` above to iterate on a single tree. `COHORTS`
 accepts any run label in `SUPPORTED_COHORTS`, so the ARPI arm is rendered by
@@ -161,7 +172,7 @@ naming its labels, and a retired tree that still exists on disk (an
 `adt_localized` or `_avpc` build) can be re-rendered by naming it explicitly.
 
 Each cohort is rendered independently, and a failure in one is reported and
-skipped rather than abandoning the other 15 -- a single cohort with too few
+skipped rather than abandoning the other 11 -- a single cohort with too few
 events should not cost the whole knit. Any failures are re-reported at the end
 and the chunk then fails, so a partial render cannot pass silently.
 
@@ -181,10 +192,11 @@ for (COHORT in COHORTS) {
         plot_non_androgen_distributions = PLOT_NON_ANDROGEN_DISTRIBUTIONS,
         plot_non_androgen_lab_figures = PLOT_NON_ANDROGEN_LAB_FIGURES
       )
-      endpoint_fig_root <- file.path(FIG_ROOT, toupper(COHORT), ENDPOINT)
+      supplement_stem <- "figure4s_multivariate_all_models"
       supplement_path <- file.path(
-        endpoint_fig_root, "figure4",
-        paste0(COHORT, "_figure4s_multivariate_all_models.png")
+        FIG_ROOT, toupper(cohort_arm(COHORT)), "by_figure", "figure4",
+        supplement_stem,
+        sprintf("%s__%s.png", ENDPOINT, cohort_leaf_slug(COHORT))
       )
       # The supplement is the last artifact generate_figures() writes, so its
       # absence means the pass did not complete even when nothing threw.

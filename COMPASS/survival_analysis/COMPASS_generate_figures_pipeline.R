@@ -105,13 +105,110 @@ normalize_classifier_primary_labels <- function(primary_label, reported_biomarke
 # primary labels using the reported biomarker field. Returns NULL with a
 # message if the file is absent, so every downstream stratified-plot loop can
 # skip cleanly rather than erroring.
+# ---------------------------------------------------------------------------
+# Loop-invariant read cache.
+#
+# 05_figures.Rmd calls generate_figures() once per cohort x endpoint -- 6 x 2 =
+# 12 passes. Several inputs do not vary across that loop at all (the LLM label
+# set, the platinum MRN list, the ICD flag table) and one varies only with the
+# treatment arm (the longitudinal labs CSV, by far the largest file the
+# pipeline reads). Without a cache the longitudinal table alone is parsed 24
+# times per knit: twice per pass, once for the patient/lab split and again for
+# the Figure 7 canonical-lab loader, neither of which knows about the other.
+#
+# cached_read_csv() memoizes on the resolved path plus the readr arguments that
+# affect the RESULT (col_select, col_types, n_max), so a header-only probe and
+# a full read of the same file stay distinct entries. Values are returned as-is
+# rather than copied: every consumer below treats them as read-only, and dplyr
+# verbs copy on modify anyway.
+#
+# Correctness note: the cache lives for the R session, so a knit that
+# regenerates an input mid-run would serve a stale frame. That does not happen
+# here -- 01/02/03 finish before this document is knit -- but clear_read_cache()
+# exists for interactive use after rebuilding inputs.
+.read_cache <- new.env(parent = emptyenv())
+
+clear_read_cache <- function() {
+  rm(list = ls(.read_cache, all.names = TRUE), envir = .read_cache)
+  invisible(NULL)
+}
+
+read_cache_stats <- function() as.list(.read_cache[[".stats"]])
+
+cached_read_csv <- function(path, ...) {
+  args <- list(...)
+  # normalizePath so two spellings of one file share an entry; falls back to
+  # the literal path when the file is absent (the caller handles that).
+  resolved <- tryCatch(normalizePath(path, mustWork = TRUE),
+                       error = function(e) path)
+  key <- paste0(resolved, "|",
+                paste(names(args), vapply(args, function(a)
+                  paste(format(a), collapse = ","), character(1)),
+                  sep = "=", collapse = "|"))
+  if (!is.null(.read_cache[[key]])) {
+    st <- .read_cache[[".stats"]]; st$hits <- st$hits + 1L
+    .read_cache[[".stats"]] <- st
+    return(.read_cache[[key]])
+  }
+  value <- read_csv(path, ...)
+  .read_cache[[key]] <- value
+  st <- .read_cache[[".stats"]]
+  if (is.null(st)) st <- list(hits = 0L, misses = 0L)
+  st$misses <- st$misses + 1L
+  .read_cache[[".stats"]] <- st
+  value
+}
+
+# TSV twin of cached_read_csv, for the LLM classifier label table.
+cached_read_tsv <- function(path, ...) {
+  args <- list(...)
+  resolved <- tryCatch(normalizePath(path, mustWork = TRUE),
+                       error = function(e) path)
+  key <- paste0("tsv:", resolved, "|",
+                paste(names(args), vapply(args, function(a)
+                  paste(format(a), collapse = ","), character(1)),
+                  sep = "=", collapse = "|"))
+  if (!is.null(.read_cache[[key]])) {
+    st <- .read_cache[[".stats"]]; st$hits <- st$hits + 1L
+    .read_cache[[".stats"]] <- st
+    return(.read_cache[[key]])
+  }
+  value <- read_tsv(path, ...)
+  .read_cache[[key]] <- value
+  st <- .read_cache[[".stats"]]
+  if (is.null(st)) st <- list(hits = 0L, misses = 0L)
+  st$misses <- st$misses + 1L
+  .read_cache[[".stats"]] <- st
+  value
+}
+
+# Column spec for the longitudinal labs CSV. read_csv() with only
+# show_col_types = FALSE still INFERS types -- that flag silences the report,
+# it does not skip the work -- and guess_max = 100000 makes it scan 100k rows
+# to do so. Naming the handful of columns the figures actually use skips the
+# inference pass entirely; anything unnamed still gets guessed, so this stays
+# correct if the upstream schema grows a column.
+#
+# BEHAVIOR CHANGE, deliberate: DFCI_MRN is pinned to character. Left to guess,
+# readr types an all-numeric MRN column as double, and a 12345 -> 12345.0
+# round-trip then breaks the joins and %in% set operations downstream (several
+# call sites already defend with as.character(DFCI_MRN), which is the symptom).
+# Pinning it here makes the ID a string at the source, matching how every other
+# MRN list in this pipeline is read.
+LONGITUDINAL_COL_TYPES <- cols(
+  DFCI_MRN  = col_character(),
+  LAB_NAME  = col_character(),
+  LAB_VALUE = col_double(),
+  t_lab     = col_double()
+)
+
 load_llm_strata <- function(llm_annotations_path) {
   path <- file.path(llm_annotations_path, "LLM_NEPC_classifier_labels.tsv")
   if (!file.exists(path)) {
     message(sprintf("load_llm_strata: %s not found -- skipping LLM-strata plots", path))
     return(NULL)
   }
-  strata <- read_tsv(path, show_col_types = FALSE)
+  strata <- cached_read_tsv(path, show_col_types = FALSE)
   required <- c("DFCI_MRN", "primary_label", "has_nepc", "has_avpc")
   missing <- setdiff(required, names(strata))
   if (length(missing) > 0) {
@@ -743,10 +840,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   TOP_N <- 15
 
   LLM_LABEL_PATH <- file.path(NEPC_PROJ_PATH, "LLM_NEPC_labels")
-  manual_annotations <- read_csv(file.path(LLM_LABEL_PATH, "baca_lab_annotations.csv"),
-                                 show_col_types = FALSE)
-  platinum_mrns <- read_csv(file.path(NEPC_PROJ_PATH, "mrn_lists/platinum_MRN_list.csv"),
-                            show_col_types = FALSE)
+  # Cohort- and endpoint-invariant: read once per session, not once per pass.
+  manual_annotations <- cached_read_csv(file.path(LLM_LABEL_PATH, "baca_lab_annotations.csv"),
+                                        show_col_types = FALSE)
+  platinum_mrns <- cached_read_csv(file.path(NEPC_PROJ_PATH, "mrn_lists/platinum_MRN_list.csv"),
+                                   show_col_types = FALSE)
   platinum_set <- unique(platinum_mrns$DFCI_MRN)
 
   # Classifier-derived labels (primary_label/has_nepc/has_avpc). The sole label
@@ -787,7 +885,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   COHORT_LABEL <- "PROFILE"
 
   load_profile_patient_and_labs <- function(path, id_col = "DFCI_MRN") {
-    df <- read_csv(path, show_col_types = FALSE, guess_max = 100000)
+    df <- cached_read_csv(path, show_col_types = FALSE,
+                          col_types = LONGITUDINAL_COL_TYPES)
     date_cols <- c("DIAGNOSIS_DATE", "TREATMENT_ANCHOR_DATE", "PLATINUM_DATE",
                    "LAST_CONTACT_DATE", "LAB_DATE", "FIRST_RECORD_DATE")
     for (col in intersect(date_cols, names(df)))
@@ -856,7 +955,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       "HAS_5_OR_MORE_PSA_TESTS",
       "ELIGIBLE"
     )
-    flags <- read_csv(path, show_col_types = FALSE)
+    flags <- cached_read_csv(path, show_col_types = FALSE)
     missing <- setdiff(required, names(flags))
     if (length(missing) > 0)
       stop(sprintf("%s is missing required columns: %s",
@@ -2815,7 +2914,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (!file.exists(LONGITUDINAL_CSV)) {
       message(sprintf("Figure 7: skipped -- %s not found", LONGITUDINAL_CSV)); return(NULL)
     }
-    df <- read_csv(LONGITUDINAL_CSV, show_col_types = FALSE, guess_max = 100000)
+    # Same path and args as load_profile_patient_and_labs() above, so this is a
+    # cache hit rather than a second parse of the largest file in the pipeline.
+    df <- cached_read_csv(LONGITUDINAL_CSV, show_col_types = FALSE,
+                          col_types = LONGITUDINAL_COL_TYPES)
     needed <- c("LAB_NAME","LAB_VALUE","t_lab","DFCI_MRN")
     missing <- setdiff(needed, names(df))
     if (length(missing)) {
