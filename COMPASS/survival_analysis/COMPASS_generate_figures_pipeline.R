@@ -2909,8 +2909,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # bin. Both the direct summaries and the R-fitted GAMs consume this table, so
   # patients with dense testing do not dominate either visualization.
   patient_bin_trajectory <- function(df, lab_group, stratum_col = "plat_group",
-                                     stratum_values = NULL) {
+                                     stratum_values = NULL, log_scale = FALSE) {
     sub <- df %>% filter(LAB_GROUP == lab_group, t_rel >= -PRE_DAYS, t_rel <= POST_DAYS)
+    if (isTRUE(log_scale)) {
+      # Transform measurements before patient/bin aggregation. This makes both
+      # the observed summaries and GAM fits genuinely operate in log space,
+      # rather than merely applying a logarithmic display axis afterward.
+      sub <- sub %>%
+        filter(is.finite(LAB_VALUE), LAB_VALUE >= 0) %>%
+        mutate(LAB_VALUE = log1p(LAB_VALUE))
+    }
     if (!is.null(stratum_values)) {
       required_lookup_cols <- c("DFCI_MRN", "stratum")
       missing_lookup_cols <- setdiff(required_lookup_cols, names(stratum_values))
@@ -2950,23 +2958,29 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
 
   # Per-bin group mean +/- 95% CI.
-  bin_group_ci <- function(df, lab_group, stratum_col = "plat_group", stratum_values = NULL) {
-    patient_bin <- patient_bin_trajectory(df, lab_group, stratum_col, stratum_values)
+  bin_group_ci <- function(df, lab_group, stratum_col = "plat_group",
+                           stratum_values = NULL, log_scale = FALSE) {
+    patient_bin <- patient_bin_trajectory(
+      df, lab_group, stratum_col, stratum_values, log_scale = log_scale
+    )
     if (is.null(patient_bin) || nrow(patient_bin) == 0) return(NULL)
     patient_bin %>% group_by(t_bin, t_mid, stratum) %>%
       summarise(n = n_distinct(DFCI_MRN), mean = mean(LAB_VALUE),
                 sem = if (n() > 1) sd(LAB_VALUE) / sqrt(n()) else 0, .groups = "drop") %>%
       filter(n >= MIN_BIN_PATIENTS) %>%
       mutate(ci_lo = mean - 1.96 * sem, ci_hi = mean + 1.96 * sem,
-             # PSA and testosterone cannot be negative; normal-approximation
-             # intervals near zero otherwise draw biologically impossible tails.
-             ci_lo = if (lab_group %in% ANDROGEN) pmax(0, ci_lo) else ci_lo)
+             # Log1p values (and raw androgen values) cannot be negative;
+             # normal-approximation intervals can otherwise cross below zero.
+             ci_lo = if (isTRUE(log_scale) || lab_group %in% ANDROGEN)
+               pmax(0, ci_lo) else ci_lo)
   }
 
   plot_group_ci_panel <- function(df, lab_group, title, stratum_col = "plat_group",
                                   stratum_values = NULL, stratum_legend = NULL,
-                                  stratum_colors = NULL) {
-    binned <- bin_group_ci(df, lab_group, stratum_col, stratum_values)
+                                  stratum_colors = NULL, log_scale = FALSE) {
+    binned <- bin_group_ci(
+      df, lab_group, stratum_col, stratum_values, log_scale = log_scale
+    )
     if (is.null(binned) || nrow(binned) == 0)
       return(ggplot() + annotate("text", x = 0, y = 0, label = "(no data)", color = "#7f8c8d") +
                theme_void() + labs(title = title))
@@ -2985,7 +2999,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       ) +
       labs(x = sprintf("Years from %s (binned, %dd windows)",
                        ANCHOR_LABEL, BIN_WIDTH_DAYS),
-           y = sprintf("%s (mean +/- 95%% CI)", lab_group), title = title,
+           y = sprintf("%s%s (mean +/- 95%% CI)",
+                       if (isTRUE(log_scale)) "log1p(" else "",
+                       if (isTRUE(log_scale)) paste0(lab_group, ")") else lab_group),
+           title = title,
            caption = sprintf("Only bins with at least %d patients in a stratum are shown.",
                              MIN_BIN_PATIENTS)) +
       theme_fig() +
@@ -3018,39 +3035,48 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       n_pat <- group_df %>% filter(LAB_GROUP == lab_group) %>% summarise(n = n_distinct(DFCI_MRN)) %>% pull(n)
       slug <- lab_stem_slug(lab_group)
 
-      # Platinum-status stratum (existing behavior, now over every lab).
-      ttl <- sprintf("%s -- %s cohort, group mean +/- 95%% CI vs. days from %s (n=%s patients)",
-                     lab_group, COHORT_DISPLAY, ANCHOR_LABEL,
-                     format(n_pat, big.mark = ","))
-      p <- plot_group_ci_panel(group_df, lab_group, ttl)
-      save_fig(p, OUT_DIR, sprintf("longitudinal_platinum_%s", slug),
-               width = 9.5, height = 5.5, force_overwrite = TRUE)
-      if (show) print(p)
+      for (log_scale in c(FALSE, TRUE)) {
+        scale_suffix <- if (log_scale) "_log" else ""
+        scale_title <- if (log_scale) " (log1p scale)" else ""
 
-      if (is.null(llm_lookup)) next
-      for (scheme_name in names(FIGURE_LLM_STRATA)) {
-        scheme <- FIGURE_LLM_STRATA[[scheme_name]]
-        stratum_values <- llm_lookup %>%
-          transmute(DFCI_MRN, stratum = as.character(.data[[scheme$col]]))
-        if (!is.null(scheme$labels))
-          stratum_values$stratum <- scheme$labels[match(stratum_values$stratum, as.character(scheme$levels))]
-        stratum_values <- stratum_values %>% filter(!is.na(stratum))
-        n_labeled <- length(intersect(unique(stratum_values$DFCI_MRN),
-                                      group_df$DFCI_MRN[group_df$LAB_GROUP == lab_group]))
-        message(sprintf("longitudinal_%s_%s: %d / %d cohort patients labeled",
-                        scheme_name, slug, n_labeled, n_pat))
-        stratum_legend <- if (!is.null(scheme$labels)) setNames(scheme$labels, scheme$labels) else NULL
-        stratum_colors <- setNames(KM_PALETTE[seq_along(scheme$levels)],
-                                   if (!is.null(scheme$labels)) scheme$labels else as.character(scheme$levels))
-        ttl_s <- sprintf("%s by %s -- %s cohort, days from %s (n labeled=%d/%d)",
-                         lab_group, scheme_name, COHORT_DISPLAY, ANCHOR_LABEL,
-                         n_labeled, n_pat)
-        p_s <- plot_group_ci_panel(group_df, lab_group, ttl_s, stratum_col = scheme$col,
-                                   stratum_values = stratum_values, stratum_legend = stratum_legend,
-                                   stratum_colors = stratum_colors)
-        save_fig(p_s, OUT_DIR, sprintf("longitudinal_%s_%s", scheme_name, slug),
+        # Platinum-status stratum (existing behavior, now over every lab).
+        ttl <- sprintf("%s%s -- %s cohort, group mean +/- 95%% CI vs. days from %s (n=%s patients)",
+                       lab_group, scale_title, COHORT_DISPLAY, ANCHOR_LABEL,
+                       format(n_pat, big.mark = ","))
+        p <- plot_group_ci_panel(group_df, lab_group, ttl, log_scale = log_scale)
+        save_fig(p, OUT_DIR, sprintf("longitudinal_platinum_%s%s", slug, scale_suffix),
                  width = 9.5, height = 5.5, force_overwrite = TRUE)
-        if (show) print(p_s)
+        if (show) print(p)
+
+        if (!is.null(llm_lookup)) {
+          for (scheme_name in names(FIGURE_LLM_STRATA)) {
+            scheme <- FIGURE_LLM_STRATA[[scheme_name]]
+            stratum_values <- llm_lookup %>%
+              transmute(DFCI_MRN, stratum = as.character(.data[[scheme$col]]))
+            if (!is.null(scheme$labels))
+              stratum_values$stratum <- scheme$labels[match(stratum_values$stratum, as.character(scheme$levels))]
+            stratum_values <- stratum_values %>% filter(!is.na(stratum))
+            n_labeled <- length(intersect(unique(stratum_values$DFCI_MRN),
+                                          group_df$DFCI_MRN[group_df$LAB_GROUP == lab_group]))
+            message(sprintf("longitudinal_%s_%s%s: %d / %d cohort patients labeled",
+                            scheme_name, slug, scale_suffix, n_labeled, n_pat))
+            stratum_legend <- if (!is.null(scheme$labels)) setNames(scheme$labels, scheme$labels) else NULL
+            stratum_colors <- setNames(KM_PALETTE[seq_along(scheme$levels)],
+                                       if (!is.null(scheme$labels)) scheme$labels else as.character(scheme$levels))
+            ttl_s <- sprintf("%s by %s%s -- %s cohort, days from %s (n labeled=%d/%d)",
+                             lab_group, scheme_name, scale_title, COHORT_DISPLAY, ANCHOR_LABEL,
+                             n_labeled, n_pat)
+            p_s <- plot_group_ci_panel(
+              group_df, lab_group, ttl_s, stratum_col = scheme$col,
+              stratum_values = stratum_values, stratum_legend = stratum_legend,
+              stratum_colors = stratum_colors, log_scale = log_scale
+            )
+            save_fig(p_s, OUT_DIR,
+                     sprintf("longitudinal_%s_%s%s", scheme_name, slug, scale_suffix),
+                     width = 9.5, height = 5.5, force_overwrite = TRUE)
+            if (show) print(p_s)
+          }
+        }
       }
     }
   }
@@ -3062,7 +3088,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # penalty by fast REML; select=TRUE adds shrinkage so unsupported nonlinear
   # structure can collapse toward zero effective degrees of freedom.
   # -----------------------------------------------------------------------
-  fit_plotting_gam <- function(patient_bins, lab_group) {
+  fit_plotting_gam <- function(patient_bins, lab_group, log_scale = FALSE) {
     if (!requireNamespace("mgcv", quietly = TRUE))
       stop("mgcv is required for R-fitted trajectory GAM figures")
     predictions <- list(); diagnostics <- list()
@@ -3091,8 +3117,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         fit = as.numeric(pred$fit),
         ci_lo = as.numeric(pred$fit - 1.96 * pred$se.fit),
         ci_hi = as.numeric(pred$fit + 1.96 * pred$se.fit),
-        ci_lo = if (lab_group %in% ANDROGEN) pmax(0, ci_lo) else ci_lo,
-        fit = if (lab_group %in% ANDROGEN) pmax(0, fit) else fit
+        ci_lo = if (isTRUE(log_scale) || lab_group %in% ANDROGEN)
+          pmax(0, ci_lo) else ci_lo,
+        fit = if (isTRUE(log_scale) || lab_group %in% ANDROGEN)
+          pmax(0, fit) else fit
       )
       diagnostics[[level]] <- tibble(
         stratum = level, n_patients = n_distinct(d$DFCI_MRN),
@@ -3105,12 +3133,15 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
   plot_group_gam_panel <- function(df, lab_group, title,
                                    stratum_col = "plat_group", stratum_values = NULL,
-                                   stratum_legend = NULL, stratum_colors = NULL) {
-    patient_bins <- patient_bin_trajectory(df, lab_group, stratum_col, stratum_values)
+                                   stratum_legend = NULL, stratum_colors = NULL,
+                                   log_scale = FALSE) {
+    patient_bins <- patient_bin_trajectory(
+      df, lab_group, stratum_col, stratum_values, log_scale = log_scale
+    )
     if (is.null(patient_bins) || nrow(patient_bins) == 0)
       return(ggplot() + annotate("text", x = 0, y = 0, label = "(no data)") +
                theme_void() + labs(title = title))
-    result <- fit_plotting_gam(patient_bins, lab_group)
+    result <- fit_plotting_gam(patient_bins, lab_group, log_scale = log_scale)
     if (nrow(result$predictions) == 0)
       return(ggplot() + annotate("text", x = 0, y = 0,
                                  label = "(insufficient data for GAM)") +
@@ -3140,10 +3171,14 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       ) +
       labs(
         x = sprintf("Years from %s", ANCHOR_LABEL),
-        y = sprintf("GAM-smoothed %s", lab_group), title = title,
+        y = sprintf("GAM-smoothed %s", if (isTRUE(log_scale))
+                    paste0("log1p(", lab_group, ")") else lab_group),
+        title = title,
         subtitle = diagnostics_text,
         caption = paste0(
-          "R/mgcv GAM on patient-level 180-day bin means; smoothness selected by fREML with shrinkage. ",
+          "R/mgcv GAM on patient-level 180-day bin means",
+          if (isTRUE(log_scale)) " after log1p transformation" else "",
+          "; smoothness selected by fREML with shrinkage. ",
           "Points are observed bin means (n >= ", MIN_BIN_PATIENTS, ")."
         )
       ) +
@@ -3156,34 +3191,42 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   if (!is.null(canonical_long_df)) {
     for (lab_group in labs_present) {
       slug <- lab_stem_slug(lab_group)
-      p_gam <- plot_group_gam_panel(
-        group_df, lab_group,
-        sprintf("%s — R-fitted GAM by platinum status, %s cohort",
-                lab_group, COHORT_DISPLAY)
-      )
-      save_fig(p_gam, OUT_DIR, sprintf("gam_longitudinal_platinum_%s", slug),
-               width = 9.5, height = 5.5, force_overwrite = TRUE)
-      if (show) print(p_gam)
-
-      if (!is.null(llm_lookup)) {
-        scheme <- FIGURE_LLM_STRATA[["has_nepc"]]
-        nepc_values <- llm_lookup %>%
-          transmute(DFCI_MRN, stratum = as.character(.data[[scheme$col]]))
-        nepc_values$stratum <- scheme$labels[
-          match(nepc_values$stratum, as.character(scheme$levels))
-        ]
-        nepc_values <- nepc_values %>% filter(!is.na(stratum))
-        p_gam_nepc <- plot_group_gam_panel(
+      for (log_scale in c(FALSE, TRUE)) {
+        scale_suffix <- if (log_scale) "_log" else ""
+        scale_title <- if (log_scale) " (log1p scale)" else ""
+        p_gam <- plot_group_gam_panel(
           group_df, lab_group,
-          sprintf("%s — R-fitted GAM by NEPC status, %s cohort",
-                  lab_group, COHORT_DISPLAY),
-          stratum_col = scheme$col, stratum_values = nepc_values,
-          stratum_legend = setNames(scheme$labels, scheme$labels),
-          stratum_colors = setNames(KM_PALETTE[seq_along(scheme$levels)], scheme$labels)
+          sprintf("%s%s — R-fitted GAM by platinum status, %s cohort",
+                  lab_group, scale_title, COHORT_DISPLAY),
+          log_scale = log_scale
         )
-        save_fig(p_gam_nepc, OUT_DIR, sprintf("gam_longitudinal_has_nepc_%s", slug),
+        save_fig(p_gam, OUT_DIR,
+                 sprintf("gam_longitudinal_platinum_%s%s", slug, scale_suffix),
                  width = 9.5, height = 5.5, force_overwrite = TRUE)
-        if (show) print(p_gam_nepc)
+        if (show) print(p_gam)
+
+        if (!is.null(llm_lookup)) {
+          scheme <- FIGURE_LLM_STRATA[["has_nepc"]]
+          nepc_values <- llm_lookup %>%
+            transmute(DFCI_MRN, stratum = as.character(.data[[scheme$col]]))
+          nepc_values$stratum <- scheme$labels[
+            match(nepc_values$stratum, as.character(scheme$levels))
+          ]
+          nepc_values <- nepc_values %>% filter(!is.na(stratum))
+          p_gam_nepc <- plot_group_gam_panel(
+            group_df, lab_group,
+            sprintf("%s%s — R-fitted GAM by NEPC status, %s cohort",
+                    lab_group, scale_title, COHORT_DISPLAY),
+            stratum_col = scheme$col, stratum_values = nepc_values,
+            stratum_legend = setNames(scheme$labels, scheme$labels),
+            stratum_colors = setNames(KM_PALETTE[seq_along(scheme$levels)], scheme$labels),
+            log_scale = log_scale
+          )
+          save_fig(p_gam_nepc, OUT_DIR,
+                   sprintf("gam_longitudinal_has_nepc_%s%s", slug, scale_suffix),
+                   width = 9.5, height = 5.5, force_overwrite = TRUE)
+          if (show) print(p_gam_nepc)
+        }
       }
     }
   }

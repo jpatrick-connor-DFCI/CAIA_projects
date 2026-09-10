@@ -60,6 +60,9 @@ analysis. Each run removes legacy `nepc__*.png` lab leaves for its cohort.
 Longitudinal summaries use 180-day bins with day 0 as a hard boundary. A
 second trajectory set is fit directly during plotting with `mgcv::bam`;
 fREML and shrinkage select smoothness without depending on Python GAM outputs.
+Both figure sets are emitted on the original scale and in log space. The log
+versions transform each lab measurement with `log1p` before patient/bin
+aggregation or GAM fitting and use an `_log` filename suffix.
 
 Figure 3b adds the somatic, Gleason, and PRS univariate associations as their
 own plots, one per index analysis. Each is built on its own cohort and index

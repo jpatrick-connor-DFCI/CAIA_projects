@@ -54,8 +54,8 @@ def test_figure_strata_are_limited_to_binary_nepc():
 
 def test_descriptive_longitudinal_titles_name_the_cohort():
     source = PIPELINE_R.read_text()
-    assert "lab_group, COHORT_DISPLAY, ANCHOR_LABEL" in source
-    assert "scheme_name, COHORT_DISPLAY, ANCHOR_LABEL" in source
+    assert "lab_group, scale_title, COHORT_DISPLAY, ANCHOR_LABEL" in source
+    assert "scheme_name, scale_title, COHORT_DISPLAY, ANCHOR_LABEL" in source
 
 
 def test_by_figure_is_the_only_output_layout():
@@ -84,5 +84,20 @@ def test_plotting_gams_are_fit_in_r_with_reml_tuning():
     assert 'method = "fREML"' in block
     assert "select = TRUE" in block
     assert "patient_bin_trajectory" in block
-    assert 'sprintf("gam_longitudinal_platinum_%s"' in block
-    assert 'sprintf("gam_longitudinal_has_nepc_%s"' in block
+    assert 'sprintf("gam_longitudinal_platinum_%s%s"' in block
+    assert 'sprintf("gam_longitudinal_has_nepc_%s%s"' in block
+
+
+def test_longitudinal_and_gam_figures_also_emit_log_space_versions():
+    source = PIPELINE_R.read_text()
+    start = source.index("patient_bin_trajectory <- function")
+    end = source.index("Retired precomputed feature-extraction GAM figures", start)
+    block = source[start:end]
+    assert "log_scale = FALSE" in block
+    assert "mutate(LAB_VALUE = log1p(LAB_VALUE))" in block
+    assert 'scale_suffix <- if (log_scale) "_log" else ""' in block
+    assert 'sprintf("longitudinal_platinum_%s%s"' in block
+    assert 'sprintf("longitudinal_%s_%s%s"' in block
+    assert 'sprintf("gam_longitudinal_platinum_%s%s"' in block
+    assert 'sprintf("gam_longitudinal_has_nepc_%s%s"' in block
+    assert 'paste0("log1p(", lab_group, ")")' in block
