@@ -3,7 +3,7 @@
 #
 # Required packages (install once on the cluster):
 #   install.packages(c("tidyverse", "survival", "survminer", "broom",
-#                       "ggrepel", "patchwork", "jsonlite", "scales"))
+#                       "ggrepel", "patchwork", "jsonlite", "scales", "mgcv"))
 #   # optional: install.packages(c("ggpattern", "ragg"))
 #   #   ggpattern -> striped baseline bars in Fig 4a
 #   #   ragg      -> crisper high-DPI PNG device (falls back to default if absent)
@@ -794,6 +794,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     generated_dirs <- list.dirs(figure_tree, recursive = TRUE, full.names = TRUE)
     retired_dirs <- generated_dirs[
       grepl("avpc|primary_label", basename(generated_dirs), ignore.case = TRUE) |
+        grepl("^gam_trajectory_", basename(generated_dirs)) |
         basename(generated_dirs) %in% c(
           "figure2v3_confusion_matrix",
           "figure2v3_confusion_has_nepc",
@@ -858,7 +859,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       if (!is.na(lab)) return(file.path("labs", assign_category(lab), lab, "distribution"))
       return("androgen_distributions")
     }
-    if (startsWith(plot_stem, "gam_trajectory_")) {
+    if (startsWith(plot_stem, "gam_trajectory_") ||
+        startsWith(plot_stem, "gam_longitudinal_")) {
       lab <- match_lab_in_stem(plot_stem)
       if (!is.na(lab)) return(file.path("labs", assign_category(lab), lab, "gam_trajectory"))
       return("gam_trajectories")
@@ -2882,12 +2884,20 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                     length(unique(canonical_long_df$LAB_GROUP))))
 
   ## ---- Figure 7b: group mean +/- 95% CI, binned by time from treatment anchor ----
-  BIN_WIDTH_DAYS <- 60
+  BIN_WIDTH_DAYS <- 180
   # Asymmetric window: 5 years of pre-anchor history, 10 years of follow-up.
   PRE_DAYS  <- 5  * 365.25   # days BEFORE the treatment anchor
   POST_DAYS <- 10 * 365.25   # days AFTER the treatment anchor
 
-  # At 60-day bins this window spans ~92 bins, and the far tails are thin: few
+  # Anchor every bin on day 0 so no summary mixes pre- and post-ADT labs. The
+  # outermost bins absorb the fractional-year remainder.
+  anchored_bin_edges <- function(pre_days, post_days, width_days) {
+    pre <- -rev(unique(c(seq(0, pre_days, by = width_days), pre_days)))
+    post <- unique(c(seq(0, post_days, by = width_days), post_days))
+    sort(unique(c(pre, post)))
+  }
+
+  # At 180-day bins this window spans ~31 bins, and the far tails are thin: few
   # patients have 10y of post-anchor follow-up, so those bins average over a
   # handful of MRNs and the CI ribbon widens accordingly. MIN_BIN_PATIENTS drops
   # bins that cannot support a mean at all rather than drawing a spike through
@@ -2895,20 +2905,18 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # tails do not turn a handful of observations into large apparent swings.
   MIN_BIN_PATIENTS <- 10
 
-  # bin_group_ci: bins a lab-group's rows into 60-day windows and computes a
-  # per-bin group mean +/- 95% CI, grouped by an arbitrary `stratum_col`
-  # (platinum status by default; has_nepc for the classifier view).
-  # `stratum_values` supplies the DFCI_MRN ->
-  # stratum lookup when stratum_col isn't already a column on df (i.e. every
-  # LLM scheme; PLATINUM is already a df column so it's looked up in-place).
-  bin_group_ci <- function(df, lab_group, stratum_col = "plat_group", stratum_values = NULL) {
+  # Collapse repeated measurements to one value per patient/stratum/180-day
+  # bin. Both the direct summaries and the R-fitted GAMs consume this table, so
+  # patients with dense testing do not dominate either visualization.
+  patient_bin_trajectory <- function(df, lab_group, stratum_col = "plat_group",
+                                     stratum_values = NULL) {
     sub <- df %>% filter(LAB_GROUP == lab_group, t_rel >= -PRE_DAYS, t_rel <= POST_DAYS)
     if (!is.null(stratum_values)) {
       required_lookup_cols <- c("DFCI_MRN", "stratum")
       missing_lookup_cols <- setdiff(required_lookup_cols, names(stratum_values))
       if (length(missing_lookup_cols) > 0) {
         stop(sprintf(
-          "bin_group_ci: stratum_values is missing required column(s): %s",
+          "patient_bin_trajectory: stratum_values is missing required column(s): %s",
           paste(missing_lookup_cols, collapse = ", ")
         ))
       }
@@ -2925,24 +2933,31 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       )
     }
     if (nrow(sub) == 0) return(NULL)
-    edges <- seq(-PRE_DAYS, POST_DAYS, by = BIN_WIDTH_DAYS)
+    edges <- anchored_bin_edges(PRE_DAYS, POST_DAYS, BIN_WIDTH_DAYS)
     sub <- sub %>% mutate(
-      t_bin = cut(t_rel, breaks = edges, include.lowest = TRUE),
+      # right=FALSE makes day 0 the start of the first post-anchor bin.
+      t_bin = cut(t_rel, breaks = edges, include.lowest = TRUE, right = FALSE),
       stratum = as.character(stratum)
     )
     sub <- sub %>% filter(!is.na(stratum))
     if (nrow(sub) == 0) return(NULL)
     mids <- (head(edges, -1) + tail(edges, -1)) / 2
     names(mids) <- levels(sub$t_bin)
-    patient_bin <- sub %>% drop_na(LAB_VALUE, t_bin) %>%
+    sub %>% drop_na(LAB_VALUE, t_bin) %>%
       group_by(DFCI_MRN, t_bin, stratum) %>%
-      summarise(LAB_VALUE = mean(LAB_VALUE), .groups = "drop")
-    patient_bin %>% group_by(t_bin, stratum) %>%
+      summarise(LAB_VALUE = mean(LAB_VALUE), .groups = "drop") %>%
+      mutate(t_mid = unname(mids[as.character(t_bin)]))
+  }
+
+  # Per-bin group mean +/- 95% CI.
+  bin_group_ci <- function(df, lab_group, stratum_col = "plat_group", stratum_values = NULL) {
+    patient_bin <- patient_bin_trajectory(df, lab_group, stratum_col, stratum_values)
+    if (is.null(patient_bin) || nrow(patient_bin) == 0) return(NULL)
+    patient_bin %>% group_by(t_bin, t_mid, stratum) %>%
       summarise(n = n_distinct(DFCI_MRN), mean = mean(LAB_VALUE),
                 sem = if (n() > 1) sd(LAB_VALUE) / sqrt(n()) else 0, .groups = "drop") %>%
       filter(n >= MIN_BIN_PATIENTS) %>%
-      mutate(t_mid = mids[as.character(t_bin)],
-             ci_lo = mean - 1.96 * sem, ci_hi = mean + 1.96 * sem,
+      mutate(ci_lo = mean - 1.96 * sem, ci_hi = mean + 1.96 * sem,
              # PSA and testosterone cannot be negative; normal-approximation
              # intervals near zero otherwise draw biologically impossible tails.
              ci_lo = if (lab_group %in% ANDROGEN) pmax(0, ci_lo) else ci_lo)
@@ -2968,7 +2983,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         breaks = seq(-PRE_DAYS, POST_DAYS, by = 365.25),
         labels = function(d) sprintf("%g", round(d / 365.25))
       ) +
-      labs(x = sprintf("Years from %s (binned, 60d windows)", ANCHOR_LABEL),
+      labs(x = sprintf("Years from %s (binned, %dd windows)",
+                       ANCHOR_LABEL, BIN_WIDTH_DAYS),
            y = sprintf("%s (mean +/- 95%% CI)", lab_group), title = title,
            caption = sprintf("Only bins with at least %d patients in a stratum are shown.",
                              MIN_BIN_PATIENTS)) +
@@ -3040,6 +3056,143 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
 
   # -----------------------------------------------------------------------
+  # Full-window plotting GAMs, fit directly in R. These are descriptive
+  # smooths and are independent of the GAM feature/model pipeline. One patient
+  # contributes at most one value per 180-day bin. mgcv selects the smoothing
+  # penalty by fast REML; select=TRUE adds shrinkage so unsupported nonlinear
+  # structure can collapse toward zero effective degrees of freedom.
+  # -----------------------------------------------------------------------
+  fit_plotting_gam <- function(patient_bins, lab_group) {
+    if (!requireNamespace("mgcv", quietly = TRUE))
+      stop("mgcv is required for R-fitted trajectory GAM figures")
+    predictions <- list(); diagnostics <- list()
+    for (level in sort(unique(patient_bins$stratum))) {
+      d <- patient_bins %>%
+        filter(stratum == level, is.finite(LAB_VALUE), is.finite(t_mid)) %>%
+        mutate(t_years = t_mid / 365.25)
+      n_times <- n_distinct(d$t_mid)
+      if (nrow(d) < 20L || n_times < 4L) {
+        message(sprintf("  plotting GAM %s / %s skipped: %d patient-bin rows across %d bins",
+                        lab_group, level, nrow(d), n_times))
+        next
+      }
+      # k is an upper bound on wiggliness; fREML selects the effective
+      # smoothness within that basis and the extra select penalty can shrink it.
+      k_use <- min(15L, n_times - 1L)
+      fit <- mgcv::bam(
+        LAB_VALUE ~ s(t_years, bs = "tp", k = k_use),
+        data = d, method = "fREML", select = TRUE, discrete = TRUE
+      )
+      grid <- tibble(t_years = seq(min(d$t_years), max(d$t_years), length.out = 240L))
+      pred <- predict(fit, newdata = grid, se.fit = TRUE, type = "response")
+      edf <- tryCatch(sum(summary(fit)$s.table[, "edf"]), error = function(e) NA_real_)
+      predictions[[level]] <- grid %>% transmute(
+        stratum = level, t_mid = t_years * 365.25,
+        fit = as.numeric(pred$fit),
+        ci_lo = as.numeric(pred$fit - 1.96 * pred$se.fit),
+        ci_hi = as.numeric(pred$fit + 1.96 * pred$se.fit),
+        ci_lo = if (lab_group %in% ANDROGEN) pmax(0, ci_lo) else ci_lo,
+        fit = if (lab_group %in% ANDROGEN) pmax(0, fit) else fit
+      )
+      diagnostics[[level]] <- tibble(
+        stratum = level, n_patients = n_distinct(d$DFCI_MRN),
+        n_patient_bins = nrow(d), k = k_use, edf = edf,
+        reml_score = unname(fit$gcv.ubre)
+      )
+    }
+    list(predictions = bind_rows(predictions), diagnostics = bind_rows(diagnostics))
+  }
+
+  plot_group_gam_panel <- function(df, lab_group, title,
+                                   stratum_col = "plat_group", stratum_values = NULL,
+                                   stratum_legend = NULL, stratum_colors = NULL) {
+    patient_bins <- patient_bin_trajectory(df, lab_group, stratum_col, stratum_values)
+    if (is.null(patient_bins) || nrow(patient_bins) == 0)
+      return(ggplot() + annotate("text", x = 0, y = 0, label = "(no data)") +
+               theme_void() + labs(title = title))
+    result <- fit_plotting_gam(patient_bins, lab_group)
+    if (nrow(result$predictions) == 0)
+      return(ggplot() + annotate("text", x = 0, y = 0,
+                                 label = "(insufficient data for GAM)") +
+               theme_void() + labs(title = title))
+    observed <- patient_bins %>%
+      group_by(t_mid, stratum) %>%
+      summarise(n = n_distinct(DFCI_MRN), mean = mean(LAB_VALUE), .groups = "drop") %>%
+      filter(n >= MIN_BIN_PATIENTS)
+    if (is.null(stratum_legend)) stratum_legend <- c(`0` = "Non-platinum", `1` = "Platinum")
+    if (is.null(stratum_colors)) stratum_colors <- setNames(PLAT_COLORS, c("0", "1"))
+    diagnostics_text <- result$diagnostics %>%
+      mutate(label = sprintf("%s: n=%s, EDF=%.1f", stratum,
+                             format(n_patients, big.mark = ","), edf)) %>%
+      pull(label) %>% paste(collapse = "   |   ")
+    ggplot(result$predictions, aes(t_mid, fit, color = stratum, fill = stratum)) +
+      geom_vline(xintercept = 0, color = "#2c3e50", linetype = "dotted",
+                 linewidth = 1, alpha = 0.6) +
+      geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi), alpha = 0.18, color = NA) +
+      geom_line(linewidth = 1) +
+      geom_point(data = observed, aes(t_mid, mean, color = stratum),
+                 inherit.aes = FALSE, size = 1.6, alpha = 0.65) +
+      scale_color_manual(values = stratum_colors, labels = stratum_legend, name = NULL) +
+      scale_fill_manual(values = stratum_colors, guide = "none") +
+      scale_x_continuous(
+        breaks = seq(-PRE_DAYS, POST_DAYS, by = 365.25),
+        labels = function(d) sprintf("%g", round(d / 365.25))
+      ) +
+      labs(
+        x = sprintf("Years from %s", ANCHOR_LABEL),
+        y = sprintf("GAM-smoothed %s", lab_group), title = title,
+        subtitle = diagnostics_text,
+        caption = paste0(
+          "R/mgcv GAM on patient-level 180-day bin means; smoothness selected by fREML with shrinkage. ",
+          "Points are observed bin means (n >= ", MIN_BIN_PATIENTS, ")."
+        )
+      ) +
+      theme_fig() +
+      theme(plot.title = element_text(face = "bold", size = 11),
+            plot.subtitle = element_text(size = 8.5),
+            plot.caption = element_text(size = 7.5, color = COLOR_NEUTRAL_INK))
+  }
+
+  if (!is.null(canonical_long_df)) {
+    for (lab_group in labs_present) {
+      slug <- lab_stem_slug(lab_group)
+      p_gam <- plot_group_gam_panel(
+        group_df, lab_group,
+        sprintf("%s — R-fitted GAM by platinum status, %s cohort",
+                lab_group, COHORT_DISPLAY)
+      )
+      save_fig(p_gam, OUT_DIR, sprintf("gam_longitudinal_platinum_%s", slug),
+               width = 9.5, height = 5.5, force_overwrite = TRUE)
+      if (show) print(p_gam)
+
+      if (!is.null(llm_lookup)) {
+        scheme <- FIGURE_LLM_STRATA[["has_nepc"]]
+        nepc_values <- llm_lookup %>%
+          transmute(DFCI_MRN, stratum = as.character(.data[[scheme$col]]))
+        nepc_values$stratum <- scheme$labels[
+          match(nepc_values$stratum, as.character(scheme$levels))
+        ]
+        nepc_values <- nepc_values %>% filter(!is.na(stratum))
+        p_gam_nepc <- plot_group_gam_panel(
+          group_df, lab_group,
+          sprintf("%s — R-fitted GAM by NEPC status, %s cohort",
+                  lab_group, COHORT_DISPLAY),
+          stratum_col = scheme$col, stratum_values = nepc_values,
+          stratum_legend = setNames(scheme$labels, scheme$labels),
+          stratum_colors = setNames(KM_PALETTE[seq_along(scheme$levels)], scheme$labels)
+        )
+        save_fig(p_gam_nepc, OUT_DIR, sprintf("gam_longitudinal_has_nepc_%s", slug),
+                 width = 9.5, height = 5.5, force_overwrite = TRUE)
+        if (show) print(p_gam_nepc)
+      }
+    }
+  }
+
+  # -----------------------------------------------------------------------
+  # Retired precomputed feature-extraction GAM figures. Kept unreachable for
+  # one release so old output schemas remain documented; plotting now uses the
+  # full-window R fits above rather than Python/Stage-A curve files.
+  if (FALSE) {
   # GAM-smoothed trajectories by platinum exposure and classifier NEPC call.
   # gam_trajectory_features.R writes one fitted value per patient x lab x
   # trailing-window grid point. Bands below summarize between-patient
@@ -3224,6 +3377,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       if (show) print(combined)
     }
   }
+  } # retired precomputed GAM figure block
   }
 
   ## ---- Supplement -- localized-adjuvant vs metastatic ADT-intent strata ----

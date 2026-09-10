@@ -1,8 +1,8 @@
 """Longitudinal figure cohort and endpoint scoping regressions.
 
 Descriptive longitudinal panels use the exact base-landmark cohort and are
-endpoint-independent. GAM panels remain landmark/endpoint-specific and still
-exclude platinum exposure at or before each landmark.
+endpoint-independent. Plotting GAMs are fit directly in R to the same
+zero-anchored patient-bin trajectories.
 """
 
 from pathlib import Path
@@ -37,7 +37,7 @@ def test_every_lab_figure_family_is_platinum_only():
     assert "plot_km_androgen_quartile" in block
     assert "plot_androgen_dist_by_platinum" in block
     assert "load_canonical_longitudinal" in block
-    assert "plot_gam_curve_panel" in block
+    assert "plot_group_gam_panel" in block
     assert 'retired_lab_leaf <- paste0("nepc__", cohort_leaf_slug(COHORT), ".png")' in source
 
 
@@ -67,16 +67,22 @@ def test_by_figure_is_the_only_output_layout():
     assert "file.symlink" not in source
 
 
-def test_gam_block_also_filters_pre_anchor_platinum():
-    """The GAM strata re-read aggregated CSVs and need the same exclusion."""
+def test_longitudinal_bins_are_180_days_and_zero_anchored():
     source = PIPELINE_R.read_text()
-    start = source.index("agg_raw <- load_aggregated_landmark(")
-    block = source[start : start + 2000]
-    assert '"t_platinum"' in block, "GAM read must select t_platinum"
-    assert "agg_pre_anchor" in block, "GAM block must compute the pre-anchor mask"
-    assert (
-        "agg_raw[!agg_pre_anchor, , drop = FALSE]" in block
-    ), "GAM strata must be built from the filtered frame"
-    assert (
-        "gam_curves %>% filter(DFCI_MRN %in% eligible_gam_mrns)" in source
-    ), "GAM curves must be restricted to the platinum-eligible cohort"
+    assert "BIN_WIDTH_DAYS <- 180" in source
+    assert "anchored_bin_edges <- function" in source
+    assert "right = FALSE" in source
+    assert "patient_bin_trajectory" in source
+
+
+def test_plotting_gams_are_fit_in_r_with_reml_tuning():
+    source = PIPELINE_R.read_text()
+    start = source.index("fit_plotting_gam <- function")
+    end = source.index("Retired precomputed feature-extraction GAM figures", start)
+    block = source[start:end]
+    assert "mgcv::bam(" in block
+    assert 'method = "fREML"' in block
+    assert "select = TRUE" in block
+    assert "patient_bin_trajectory" in block
+    assert 'sprintf("gam_longitudinal_platinum_%s"' in block
+    assert 'sprintf("gam_longitudinal_has_nepc_%s"' in block

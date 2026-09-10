@@ -57,6 +57,9 @@ pass. Their KM curves model time-to-platinum, their distributions split on
 platinum status, and their trajectories are descriptive platinum/classifier
 strata; a second NEPC-labelled copy would not represent a different endpoint
 analysis. Each run removes legacy `nepc__*.png` lab leaves for its cohort.
+Longitudinal summaries use 180-day bins with day 0 as a hard boundary. A
+second trajectory set is fit directly during plotting with `mgcv::bam`;
+fREML and shrinkage select smoothness without depending on Python GAM outputs.
 
 Figure 3b adds the somatic, Gleason, and PRS univariate associations as their
 own plots, one per index analysis. Each is built on its own cohort and index
