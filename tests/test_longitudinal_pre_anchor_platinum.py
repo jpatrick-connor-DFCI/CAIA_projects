@@ -52,10 +52,14 @@ def test_figure_strata_are_limited_to_binary_nepc():
     assert '"figure2v3_nepc_validation"' in source
 
 
-def test_descriptive_longitudinal_titles_name_the_cohort():
+def test_longitudinal_and_gam_titles_only_show_cohort_and_counts():
     source = PIPELINE_R.read_text()
-    assert "lab_group, scale_title, COHORT_DISPLAY, ANCHOR_LABEL" in source
-    assert "scheme_name, scale_title, COHORT_DISPLAY, ANCHOR_LABEL" in source
+    assert 'ttl <- sprintf("%s (n=%s)", COHORT_DISPLAY' in source
+    assert 'ttl_s <- sprintf("%s (n=%s/%s labeled)", COHORT_DISPLAY' in source
+    assert 'sprintf("%s (n=%s)", COHORT_DISPLAY' in source
+    assert 'sprintf("%s (n=%s/%s labeled)", COHORT_DISPLAY' in source
+    assert "R-fitted GAM by platinum status" not in source
+    assert "group mean +/- 95%% CI vs. days" not in source
 
 
 def test_by_figure_is_the_only_output_layout():
@@ -70,6 +74,8 @@ def test_by_figure_is_the_only_output_layout():
 def test_longitudinal_bins_are_180_days_and_zero_anchored():
     source = PIPELINE_R.read_text()
     assert "BIN_WIDTH_DAYS <- 180" in source
+    assert "PRE_DAYS  <- 1 * 365.25" in source
+    assert "POST_DAYS <- 5 * 365.25" in source
     assert "anchored_bin_edges <- function" in source
     assert "right = FALSE" in source
     assert "patient_bin_trajectory" in source
@@ -124,7 +130,8 @@ def test_pre_adt_coverage_emits_three_complementary_figures():
     assert '"pre_adt_coverage_counts_psa_testosterone"' in source
     assert '"pre_adt_coverage_by_bin_psa_testosterone"' in source
     assert "Within 180 days before ADT" in source
-    assert "pre_edges <- anchored_bin_edges(PRE_DAYS, 0, BIN_WIDTH_DAYS)" in source
+    assert "COVERAGE_PRE_DAYS <- 5 * 365.25" in source
+    assert "pre_edges <- anchored_bin_edges(COVERAGE_PRE_DAYS, 0, BIN_WIDTH_DAYS)" in source
 
 
 def test_output_artifact_names_drop_redundant_parent_tokens():

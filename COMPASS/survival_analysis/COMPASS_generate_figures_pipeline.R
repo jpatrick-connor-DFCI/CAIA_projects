@@ -2959,9 +2959,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
   ## ---- Figure 7b: group mean +/- 95% CI, binned by time from treatment anchor ----
   BIN_WIDTH_DAYS <- 180
-  # Asymmetric window: 5 years of pre-anchor history, 10 years of follow-up.
-  PRE_DAYS  <- 5  * 365.25   # days BEFORE the treatment anchor
-  POST_DAYS <- 10 * 365.25   # days AFTER the treatment anchor
+  # Trajectory display/modeling window. The separate coverage diagnostics
+  # retain five years of pre-ADT history to explain support near the boundary.
+  PRE_DAYS  <- 1 * 365.25   # days BEFORE the treatment anchor
+  POST_DAYS <- 5 * 365.25   # days AFTER the treatment anchor
+  COVERAGE_PRE_DAYS <- 5 * 365.25
 
   # Anchor every bin on day 0 so no summary mixes pre- and post-ADT labs. The
   # outermost bins absorb the fractional-year remainder.
@@ -2971,12 +2973,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     sort(unique(c(pre, post)))
   }
 
-  # At 180-day bins this window spans ~31 bins, and the far tails are thin: few
-  # patients have 10y of post-anchor follow-up, so those bins average over a
-  # handful of MRNs and the CI ribbon widens accordingly. MIN_BIN_PATIENTS drops
-  # bins that cannot support a mean at all rather than drawing a spike through
-  # one patient. Require ten patients within each stratum/bin so rare subtype
-  # tails do not turn a handful of observations into large apparent swings.
+  # Require ten patients within each stratum/bin so rare subtype tails do not
+  # turn a handful of observations into large apparent swings.
   MIN_BIN_PATIENTS <- 10
 
   # Collapse repeated measurements to one value per patient/stratum/180-day
@@ -3149,7 +3147,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       }
 
       pre_lab_summary <- canonical_long_df %>%
-        filter(LAB_GROUP %in% coverage_labs, t_rel >= -PRE_DAYS, t_rel < 0) %>%
+        filter(LAB_GROUP %in% coverage_labs,
+               t_rel >= -COVERAGE_PRE_DAYS, t_rel < 0) %>%
         group_by(DFCI_MRN = as.character(DFCI_MRN), LAB_GROUP) %>%
         summarise(
           n_pre = n(),
@@ -3267,7 +3266,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       # 3) Availability in each zero-anchored 180-day bin. The denominator is
       # fixed within a stratum, so falling lines reflect thinning observation
       # coverage rather than changing cohort composition.
-      pre_edges <- anchored_bin_edges(PRE_DAYS, 0, BIN_WIDTH_DAYS)
+      pre_edges <- anchored_bin_edges(COVERAGE_PRE_DAYS, 0, BIN_WIDTH_DAYS)
       pre_bin_factor <- cut(
         numeric(0), breaks = pre_edges, include.lowest = TRUE, right = FALSE
       )
@@ -3277,7 +3276,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       pre_bin_denominators <- coverage_strata %>%
         count(stratification, stratum, name = "n_patients")
       pre_bin_counts <- canonical_long_df %>%
-        filter(LAB_GROUP %in% coverage_labs, t_rel >= -PRE_DAYS, t_rel < 0) %>%
+        filter(LAB_GROUP %in% coverage_labs,
+               t_rel >= -COVERAGE_PRE_DAYS, t_rel < 0) %>%
         transmute(
           DFCI_MRN = as.character(DFCI_MRN), LAB_GROUP,
           t_bin = as.character(cut(
@@ -3330,16 +3330,18 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     }
 
     for (lab_group in labs_present) {
-      n_pat <- group_df %>% filter(LAB_GROUP == lab_group) %>% summarise(n = n_distinct(DFCI_MRN)) %>% pull(n)
+      lab_window_mrns <- group_df %>%
+        filter(LAB_GROUP == lab_group, t_rel >= -PRE_DAYS, t_rel <= POST_DAYS) %>%
+        distinct(DFCI_MRN) %>%
+        pull(DFCI_MRN)
+      n_pat <- length(lab_window_mrns)
       slug <- lab_stem_slug(lab_group)
 
       for (log_scale in c(FALSE, TRUE)) {
         scale_suffix <- if (log_scale) "_log" else ""
-        scale_title <- if (log_scale) " (log1p scale)" else ""
 
         # Platinum-status stratum (existing behavior, now over every lab).
-        ttl <- sprintf("%s%s -- %s cohort, group mean +/- 95%% CI vs. days from %s (n=%s patients)",
-                       lab_group, scale_title, COHORT_DISPLAY, ANCHOR_LABEL,
+        ttl <- sprintf("%s (n=%s)", COHORT_DISPLAY,
                        format(n_pat, big.mark = ","))
         p <- plot_group_ci_panel(group_df, lab_group, ttl, log_scale = log_scale)
         save_fig(p, OUT_DIR, sprintf("longitudinal_platinum_%s%s", slug, scale_suffix),
@@ -3355,15 +3357,15 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
               stratum_values$stratum <- scheme$labels[match(stratum_values$stratum, as.character(scheme$levels))]
             stratum_values <- stratum_values %>% filter(!is.na(stratum))
             n_labeled <- length(intersect(unique(stratum_values$DFCI_MRN),
-                                          group_df$DFCI_MRN[group_df$LAB_GROUP == lab_group]))
+                                          lab_window_mrns))
             message(sprintf("longitudinal_%s_%s%s: %d / %d cohort patients labeled",
                             scheme_name, slug, scale_suffix, n_labeled, n_pat))
             stratum_legend <- if (!is.null(scheme$labels)) setNames(scheme$labels, scheme$labels) else NULL
             stratum_colors <- setNames(KM_PALETTE[seq_along(scheme$levels)],
                                        if (!is.null(scheme$labels)) scheme$labels else as.character(scheme$levels))
-            ttl_s <- sprintf("%s by %s%s -- %s cohort, days from %s (n labeled=%d/%d)",
-                             lab_group, scheme_name, scale_title, COHORT_DISPLAY, ANCHOR_LABEL,
-                             n_labeled, n_pat)
+            ttl_s <- sprintf("%s (n=%s/%s labeled)", COHORT_DISPLAY,
+                             format(n_labeled, big.mark = ","),
+                             format(n_pat, big.mark = ","))
             p_s <- plot_group_ci_panel(
               group_df, lab_group, ttl_s, stratum_col = scheme$col,
               stratum_values = stratum_values, stratum_legend = stratum_legend,
@@ -3380,7 +3382,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
 
   # -----------------------------------------------------------------------
-  # Full-window plotting GAMs, fit directly in R. These are descriptive
+  # Windowed plotting GAMs, fit directly in R. These are descriptive
   # smooths and are independent of the GAM feature/model pipeline. One patient
   # contributes at most one value per 180-day bin. mgcv selects the smoothing
   # penalty by fast REML; select=TRUE adds shrinkage so unsupported nonlinear
@@ -3489,13 +3491,17 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   if (!is.null(canonical_long_df)) {
     for (lab_group in labs_present) {
       slug <- lab_stem_slug(lab_group)
+      lab_window_mrns <- group_df %>%
+        filter(LAB_GROUP == lab_group, t_rel >= -PRE_DAYS, t_rel <= POST_DAYS) %>%
+        distinct(DFCI_MRN) %>%
+        pull(DFCI_MRN)
+      n_pat <- length(lab_window_mrns)
       for (log_scale in c(FALSE, TRUE)) {
         scale_suffix <- if (log_scale) "_log" else ""
-        scale_title <- if (log_scale) " (log1p scale)" else ""
         p_gam <- plot_group_gam_panel(
           group_df, lab_group,
-          sprintf("%s%s — R-fitted GAM by platinum status, %s cohort",
-                  lab_group, scale_title, COHORT_DISPLAY),
+          sprintf("%s (n=%s)", COHORT_DISPLAY,
+                  format(n_pat, big.mark = ",")),
           log_scale = log_scale
         )
         save_fig(p_gam, OUT_DIR,
@@ -3511,10 +3517,13 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
             match(nepc_values$stratum, as.character(scheme$levels))
           ]
           nepc_values <- nepc_values %>% filter(!is.na(stratum))
+          n_labeled <- length(intersect(unique(nepc_values$DFCI_MRN),
+                                        lab_window_mrns))
           p_gam_nepc <- plot_group_gam_panel(
             group_df, lab_group,
-            sprintf("%s%s — R-fitted GAM by NEPC status, %s cohort",
-                    lab_group, scale_title, COHORT_DISPLAY),
+            sprintf("%s (n=%s/%s labeled)", COHORT_DISPLAY,
+                    format(n_labeled, big.mark = ","),
+                    format(n_pat, big.mark = ",")),
             stratum_col = scheme$col, stratum_values = nepc_values,
             stratum_legend = setNames(scheme$labels, scheme$labels),
             stratum_colors = setNames(KM_PALETTE[seq_along(scheme$levels)], scheme$labels),
@@ -3532,7 +3541,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # -----------------------------------------------------------------------
   # Retired precomputed feature-extraction GAM figures. Kept unreachable for
   # one release so old output schemas remain documented; plotting now uses the
-  # full-window R fits above rather than Python/Stage-A curve files.
+  # one-year-pre/five-year-post R fits above rather than Python/Stage-A curves.
   if (FALSE) {
   # GAM-smoothed trajectories by platinum exposure and classifier NEPC call.
   # gam_trajectory_features.R writes one fitted value per patient x lab x

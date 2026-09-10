@@ -62,18 +62,24 @@ pass. Their KM curves model time-to-platinum, their distributions split on
 platinum status, and their trajectories are descriptive platinum/classifier
 strata; a second NEPC-labelled copy would not represent a different endpoint
 analysis. Each run removes legacy `nepc__*.png` lab leaves for its cohort.
-Longitudinal summaries use 180-day bins with day 0 as a hard boundary. A
-second trajectory set is fit directly during plotting with `mgcv::bam`;
+Longitudinal summaries use 180-day bins from one year before through five
+years after the treatment anchor, with day 0 as a hard boundary. A second
+trajectory set is fit directly during plotting with `mgcv::bam`;
 fREML and shrinkage select smoothness without depending on Python GAM outputs.
 Both figure sets are emitted on the original scale and in log space. The log
 versions transform each lab measurement with `log1p` before patient/bin
 aggregation or GAM fitting and use an `_log` filename suffix.
+Trajectory and GAM titles contain only the cohort definition and contributing
+patient count; the lab, scale, and stratum remain identified by the axes,
+legend, and artifact path.
 For the ADT arm, three additional PSA/testosterone diagnostics quantify the
 pre-ADT data supporting those trajectories: any and recent measurement
 coverage, patient-level five-year measurement-count categories (including
 zero), and zero-anchored 180-day-bin availability. Platinum panels use the
 entire analysis-cohort stratum as their denominator; NEPC panels use all
-classifier-labeled cohort patients, including those with no androgen lab.
+classifier-labeled cohort patients, including those with no androgen lab. The
+coverage diagnostics retain their five-year pre-ADT lookback independently of
+the shorter trajectory window.
 
 Figure 3b adds the somatic, Gleason, and PRS univariate associations as their
 own plots, one per index analysis. Each is built on its own cohort and index
