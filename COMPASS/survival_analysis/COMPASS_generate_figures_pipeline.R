@@ -687,8 +687,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                              plot_gam_trajectories = TRUE,
                              save_dpi = SAVE_DPI,
                              save_pdf = FALSE,
-                             output_mode = c("all", "composite", "panels"),
-                             overwrite = TRUE) {
+                             output_mode = c("all", "composite", "panels")) {
   # Rscript opens `Rplots.pdf` when any plot is drawn without an explicit device.
   # All intended outputs below use ggsave(), so route any incidental drawing to a
   # temporary null PDF device during non-interactive runs.
@@ -715,8 +714,6 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     stop("save_dpi must be one positive number")
   if (!is.logical(save_pdf) || length(save_pdf) != 1L || is.na(save_pdf))
     stop("save_pdf must be one non-missing logical value")
-  if (!is.logical(overwrite) || length(overwrite) != 1L || is.na(overwrite))
-    stop("overwrite must be one non-missing logical value")
   # Endpoint-independent figures describe the platinum-labelled cohort itself.
   # Emit them only on the platinum pass so a NEPC run does not create a second,
   # misleadingly endpoint-labelled copy.
@@ -785,59 +782,6 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # pipeline writes; the figure path uses ENDPOINT itself.
   COHORT_ARM_DIR <- toupper(cohort_arm(COHORT))
   FIG_ROOT <- file.path(fig_root, COHORT_ARM_DIR)
-  # by_figure is the sole supported output layout. Remove retired cohort-major
-  # mirrors for every arm, including arms omitted from the current render.
-  # unlink() is scoped to generated figure trees and is safe when concurrent
-  # endpoint workers race.
-  legacy_cohort_roots <- file.path(fig_root, toupper(COHORT_ARMS), "by_cohort")
-  for (legacy_cohort_root in legacy_cohort_roots[dir.exists(legacy_cohort_roots)]) {
-    unlink(legacy_cohort_root, recursive = TRUE, force = TRUE)
-    message("removed retired cohort-major figure tree: ", legacy_cohort_root)
-  }
-  # Retire figure families based on AVPC or the multi-class primary label. The
-  # fields remain available internally to normalize the classifier source, but
-  # only NEPC and platinum stratifications are rendered.
-  figure_tree <- file.path(FIG_ROOT, "by_figure")
-  if (!save_pdf && dir.exists(figure_tree)) {
-    stale_pdfs <- list.files(
-      figure_tree, pattern = "[.]pdf$", recursive = TRUE, full.names = TRUE
-    )
-    if (length(stale_pdfs)) {
-      unlink(stale_pdfs, force = TRUE)
-      message(sprintf("removed %d stale PDF figure(s); PNG-only mode is active",
-                      length(stale_pdfs)))
-    }
-  }
-  if (dir.exists(figure_tree)) {
-    generated_dirs <- list.dirs(figure_tree, recursive = TRUE, full.names = TRUE)
-    retired_dirs <- generated_dirs[
-      grepl("avpc|primary_label", basename(generated_dirs), ignore.case = TRUE) |
-        grepl("^gam_trajectory_", basename(generated_dirs)) |
-        basename(generated_dirs) %in% c(
-          "figure1s_analysis_sets", "km_llm", "distribution", "km_quartile",
-          "counts_psa", "counts_psa_testosterone",
-          "pre_adt_coverage_counts_psa_testosterone",
-          "s_multivariate_all_models", "figure4s_multivariate_all_models"
-        ) |
-        (grepl("figure3", generated_dirs, fixed = TRUE) &
-           grepl("significance", basename(generated_dirs), fixed = TRUE)) |
-        (grepl("figure3b", generated_dirs, fixed = TRUE) &
-           grepl("gleason|prs", basename(generated_dirs), ignore.case = TRUE)) |
-        basename(generated_dirs) %in% c(
-          "figure2v3_confusion_matrix",
-          "figure2v3_confusion_has_nepc",
-          "figure2v3_metric_bar",
-          "figure2v3_subtype_landscape",
-          "figure2v3_enrichment",
-          "figure2v3_llm_subtype_platinum"
-        )
-    ]
-    if (length(retired_dirs)) {
-      unlink(retired_dirs, recursive = TRUE, force = TRUE)
-      message(sprintf("removed %d retired figure director%s",
-                      length(retired_dirs), ifelse(length(retired_dirs) == 1L, "y", "ies")))
-    }
-  }
   # Leaf identity for this run: which of the 12 cohort x endpoint cells a file
   # represents. Endpoint leads so a directory listing groups by endpoint first.
   COHORT_LEAF <- paste0(ENDPOINT, "__", cohort_leaf_slug(COHORT))
@@ -944,30 +888,6 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (!nzchar(artifact_name)) "figure" else artifact_name
   }
 
-  legacy_output_dir_for_stem <- function(plot_stem) {
-    file.path(FIG_ROOT, "by_figure", figure_group(plot_stem), plot_stem)
-  }
-
-  # Delete only the current cohort cell from the old redundant path. Other
-  # cohort leaves are preserved until their own regeneration pass migrates
-  # them, which keeps concurrent/incremental renders safe.
-  remove_legacy_artifacts <- function(plot_stem, filenames) {
-    old_dir <- legacy_output_dir_for_stem(plot_stem)
-    new_dir <- output_dir_for_stem(plot_stem)
-    if (identical(old_dir, new_dir) || !dir.exists(old_dir)) return(invisible(NULL))
-    old_paths <- file.path(old_dir, filenames)
-    existing <- old_paths[file.exists(old_paths)]
-    if (length(existing)) {
-      unlink(existing, force = TRUE)
-      message(sprintf("removed %d redundant-name artifact(s) from %s",
-                      length(existing), old_dir))
-    }
-    remaining <- list.files(old_dir, all.files = TRUE, no.. = TRUE)
-    if (length(remaining) == 0L)
-      unlink(old_dir, recursive = TRUE, force = TRUE)
-    invisible(NULL)
-  }
-
   # Every stem routes to .../by_figure/<group>/<trimmed-artifact-name>/, whose leaf holds one
   # file per cohort x endpoint cell. Uniform for numbered and supplemental
   # groups alike: the per-artifact level is what keeps sibling panels in a group
@@ -978,12 +898,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     file.path(FIG_ROOT, "by_figure", group, artifact_name_for_stem(plot_stem, group))
   }
 
-  # NOTE: the previous legacy-subdirectory cleanup that ran here has been
-  # removed deliberately. It unlinked every subdirectory under each numbered
-  # figure group on every run, which under this layout would delete the
-  # endpoint level -- i.e. the current run's own outputs, and every other
-  # cohort's. Regenerating a cohort must never remove another cohort's files;
-  # stale trees are cleaned by hand instead.
+  # Treat the output root as caller-managed for a full regeneration. Do not
+  # discover, retain, migrate, or clean artifacts from earlier renders here.
 
   # Compatibility shim: call sites still pass an `out_dir`, but actual routing
   # is derived from each exact `stem` inside save_fig/write_table1. Kept so the
@@ -1041,10 +957,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     TRUE
   }
 
-  # save_fig: always write/retain PNG; optionally add a vector PDF alongside it.
-  # In incremental mode, each requested format is checked independently.
-  save_fig <- function(plot, out_dir, stem, width, height, prefix = COHORT_LEAF,
-                       force_overwrite = FALSE) {
+  # Always regenerate the requested PNG and optional vector PDF. Output roots
+  # are assumed to be prepared by the caller; no old-artifact discovery or
+  # incremental existence checks occur here.
+  save_fig <- function(plot, out_dir, stem, width, height, prefix = COHORT_LEAF) {
     if (!should_save_figure(stem)) {
       message("skipped by output_mode=", output_mode, ": ", stem)
       return(invisible(plot))
@@ -1058,29 +974,18 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
     png_out <- file.path(output_dir, paste0(output_stem, ".png"))
     pdf_out <- file.path(output_dir, paste0(output_stem, ".pdf"))
-    remove_legacy_artifacts(stem, paste0(output_stem, c(".png", ".pdf")))
-    if (!save_pdf && file.exists(pdf_out)) unlink(pdf_out, force = TRUE)
-
-    write_png <- overwrite || force_overwrite || !file.exists(png_out)
-    write_pdf <- save_pdf && (overwrite || force_overwrite || !file.exists(pdf_out))
-    if (write_png) {
-      if (HAS_RAGG) {
-        ggsave(png_out, plot = plot, width = width, height = height, units = "in",
-               dpi = save_dpi, bg = "white", device = ragg::agg_png)
-      } else {
-        ggsave(png_out, plot = plot, width = width, height = height, units = "in",
-               dpi = save_dpi, bg = "white", type = "cairo")
-      }
-      message("wrote ", png_out)
+    if (HAS_RAGG) {
+      ggsave(png_out, plot = plot, width = width, height = height, units = "in",
+             dpi = save_dpi, bg = "white", device = ragg::agg_png)
     } else {
-      message("kept existing ", png_out)
+      ggsave(png_out, plot = plot, width = width, height = height, units = "in",
+             dpi = save_dpi, bg = "white", type = "cairo")
     }
-    if (write_pdf) {
+    message("wrote ", png_out)
+    if (save_pdf) {
       ggsave(pdf_out, plot = plot, width = width, height = height, units = "in",
              bg = "white", device = grDevices::cairo_pdf)
       message("wrote ", pdf_out)
-    } else if (save_pdf) {
-      message("kept existing ", pdf_out)
     }
 
     invisible(plot)
@@ -1316,13 +1221,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     stem <- basename(out_base)
     output_dir <- output_dir_for_stem(stem)
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
-    remove_legacy_artifacts(
-      stem, paste0(COHORT_LEAF, c(".csv", ".md"))
-    )
     out_base <- file.path(output_dir, COHORT_LEAF)
     csv <- paste0(out_base, ".csv"); md_p <- paste0(out_base, ".md")
-    if (overwrite || !file.exists(csv)) write_csv(table1, csv)
-    if (overwrite || !file.exists(md_p)) writeLines(to_markdown_table(table1), md_p)
+    write_csv(table1, csv)
+    writeLines(to_markdown_table(table1), md_p)
     c(csv, md_p)
   }
 
@@ -1754,10 +1656,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     pA2_v3 <- render_metric_bar_panel(metrics_v3) +
       labs(title = "Panel B — NEPC classifier metrics", caption = caption_a_v3) +
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
-    save_fig(pA1_v3, OUT_DIR_V3, "figure2v3_confusion_matrix", 4.2, 4.2,
-             force_overwrite = TRUE)
-    save_fig(pA2_v3, OUT_DIR_V3, "figure2v3_metric_bar", 5.0, 4.2,
-             force_overwrite = TRUE)
+    save_fig(pA1_v3, OUT_DIR_V3, "figure2v3_confusion_matrix", 4.2, 4.2)
+    save_fig(pA2_v3, OUT_DIR_V3, "figure2v3_metric_bar", 5.0, 4.2)
 
     # Reuse the already-built panels; constructing them again here made the
     # composite repeat their data work before rasterization. Panel-specific
@@ -1781,8 +1681,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                       plot.caption = element_text(size = 8.2, color = COLOR_NEUTRAL_INK,
                                                   lineheight = 1.05, hjust = 0.5),
                       plot.margin = margin(8, 10, 12, 10)))
-    save_fig(fig2v3, OUT_DIR_V3, "figure2v3_nepc_validation", 10, 5,
-             force_overwrite = TRUE)
+    save_fig(fig2v3, OUT_DIR_V3, "figure2v3_nepc_validation", 10, 5)
     if (show) print(fig2v3)
   }
   }
@@ -2217,6 +2116,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   xgb_baseline <- function(lm) read_endpoint_performance(
     file.path(BASE, "xgboost", sprintf("landmark_%s", lm), "baseline", "landmark_xgboost_baseline_metrics.csv"),
     ENDPOINT)
+  # Retained with the disabled all-model supplement below. Keep its recursive
+  # input discovery unreachable too; otherwise every active figure cell scans
+  # the Dynamic-DeepHit tree for a figure that is never emitted.
+  if (FALSE) {
   # 03b writes one directory per config in _LONGITUDINAL_CONFIGS_BY_ENDPOINT.
   # The cause-only config leads that tuple and is the arm comparable to
   # Cox/XGBoost here, so it is named for the endpoint itself.
@@ -2267,6 +2170,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (is.na(path)) return(c(auc = NA_real_, cindex = NA_real_, brier = NA_real_))
     read_endpoint_performance(path, ENDPOINT)
   }
+  } # retired Dynamic-DeepHit discovery
 
   # (label, loader, color, is_baseline). Age baselines are the lighter, patterned twins.
   DISCRIMINATION_SERIES <- tibble::tribble(
@@ -2485,9 +2389,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     output_dir_for_stem(supplement_stem),
     paste0(COHORT_LEAF, "_data.csv")
   )
-  remove_legacy_artifacts(supplement_stem, paste0(COHORT_LEAF, "_data.csv"))
-  if (overwrite || !file.exists(supplement_csv))
-    write_csv(multivariate_supplement_data, supplement_csv)
+  write_csv(multivariate_supplement_data, supplement_csv)
   message("wrote ", supplement_csv)
   if (show) print(p_supplement)
   }
@@ -2594,21 +2496,6 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # time-to-platinum, distributions split on PLATINUM, and trajectory panels
   # are descriptive platinum/classifier strata. They are not survival-endpoint
   # comparisons and therefore belong only to the canonical platinum pass.
-  # Clean legacy NEPC-labelled lab leaves for this cohort regardless of which
-  # endpoint was requested, so a narrowed platinum-only rerun also repairs an
-  # existing output tree.
-  labs_output_root <- file.path(FIG_ROOT, "by_figure", "labs")
-  retired_lab_leaf <- paste0("nepc__", cohort_leaf_slug(COHORT), ".png")
-  retired_lab_outputs <- if (dir.exists(labs_output_root)) {
-    candidates <- list.files(labs_output_root, recursive = TRUE, full.names = TRUE)
-    candidates[basename(candidates) == retired_lab_leaf]
-  } else character(0)
-  if (length(retired_lab_outputs)) {
-    unlink(retired_lab_outputs, force = TRUE)
-    message(sprintf("Per-lab figures: removed %d legacy NEPC-labelled file(s)",
-                    length(retired_lab_outputs)))
-  }
-
   if (!EMIT_ENDPOINT_INDEPENDENT) {
     message(sprintf("Per-lab figures: emitted only on the %s endpoint pass; skipping %s",
                     ENDPOINT_INDEPENDENT_FIGURES_ENDPOINT, ENDPOINT))
@@ -3244,7 +3131,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
               legend.position = "top")
       save_fig(
         p_coverage_any, OUT_DIR, "pre_adt_coverage_any_psa_testosterone",
-        width = 11, height = 7.2, force_overwrite = TRUE
+        width = 11, height = 7.2
       )
       if (show) print(p_coverage_any)
 
@@ -3290,7 +3177,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
               legend.position = "top")
       save_fig(
         p_coverage_counts, OUT_DIR, "pre_adt_coverage_counts_psa_testosterone",
-        width = 11, height = 7.2, force_overwrite = TRUE
+        width = 11, height = 7.2
       )
       if (show) print(p_coverage_counts)
       }
@@ -3356,7 +3243,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         theme(legend.position = "top")
       save_fig(
         p_coverage_bins, OUT_DIR, "pre_adt_coverage_by_bin_psa_testosterone",
-        width = 11, height = 7.2, force_overwrite = TRUE
+        width = 11, height = 7.2
       )
       if (show) print(p_coverage_bins)
     }
@@ -3377,7 +3264,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                        format(n_pat, big.mark = ","))
         p <- plot_group_ci_panel(group_df, lab_group, ttl, log_scale = log_scale)
         save_fig(p, OUT_DIR, sprintf("longitudinal_platinum_%s%s", slug, scale_suffix),
-                 width = 9.5, height = 5.5, force_overwrite = TRUE)
+                 width = 9.5, height = 5.5)
         if (show) print(p)
 
         if (!is.null(llm_lookup)) {
@@ -3405,7 +3292,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
             )
             save_fig(p_s, OUT_DIR,
                      sprintf("longitudinal_%s_%s%s", scheme_name, slug, scale_suffix),
-                     width = 9.5, height = 5.5, force_overwrite = TRUE)
+                     width = 9.5, height = 5.5)
             if (show) print(p_s)
           }
         }
@@ -3540,7 +3427,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         )
         save_fig(p_gam, OUT_DIR,
                  sprintf("gam_longitudinal_platinum_%s%s", slug, scale_suffix),
-                 width = 9.5, height = 5.5, force_overwrite = TRUE)
+                 width = 9.5, height = 5.5)
         if (show) print(p_gam)
 
         if (!is.null(llm_lookup)) {
@@ -3565,7 +3452,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
           )
           save_fig(p_gam_nepc, OUT_DIR,
                    sprintf("gam_longitudinal_has_nepc_%s%s", slug, scale_suffix),
-                   width = 9.5, height = 5.5, force_overwrite = TRUE)
+                   width = 9.5, height = 5.5)
           if (show) print(p_gam_nepc)
         }
       }

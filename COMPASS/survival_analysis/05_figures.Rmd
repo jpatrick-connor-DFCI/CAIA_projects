@@ -45,14 +45,13 @@ ADT/by_figure/figure3/univariate_landmark180/
     platinum__metastatic_llm__incl.png  platinum__metastatic_llm__noprecastrate.png
 ```
 
-`by_figure/` is the sole output tree. The generator removes the retired
-`by_cohort/` mirror left by older runs so downloads cannot dereference its
-symlinks into duplicate files.
+`by_figure/` is the sole output tree. The generator assumes a full regeneration
+and does not inspect or clean output artifacts left by older runs.
 
 PNG is the default and always-rendered figure format. Set
 `COMPASS_RENDER_PDF=true` to additionally write a vector PDF beside every PNG;
-when false, stale PDFs are removed. Tables remain CSV/Markdown and follow the
-same leaf-naming convention. There is no `R/` language subdirectory.
+tables remain CSV/Markdown and follow the same leaf-naming convention. There is
+no `R/` language subdirectory.
 
 Figure 2 v3 validates the binary `has_nepc` classifier call over every
 ADT-exposed patient. It is emitted once from the canonical `adt` / platinum
@@ -63,8 +62,7 @@ All outputs under `by_figure/labs/` are likewise emitted only by the platinum
 pass. Lab outputs are limited to longitudinal summaries; R-fitted GAM panels
 remain available but are toggled off by default. The distribution and
 quartile-KM families are retired. A second NEPC-labelled copy would not
-represent a different endpoint analysis. Each run removes legacy
-`nepc__*.png` lab leaves for its cohort.
+represent a different endpoint analysis.
 Longitudinal summaries use 180-day bins from one year before through five
 years after the treatment anchor, with day 0 as a hard boundary. A second
 trajectory set can be fit directly during plotting with `mgcv::bam` when
@@ -148,24 +146,15 @@ PLOT_NON_ANDROGEN_LAB_FIGURES <- FALSE
 # comparatively expensive trajectory fits during the default figure knit.
 PLOT_GAM_TRAJECTORIES <- FALSE
 
-# Rendering profile. The default is optimized for iterative work: 300 dpi,
-# composites instead of duplicate component+composite PNGs, and existing
-# artifacts are retained. Longitudinal lab panels are always refreshed because
-# their cohort membership and binning rules can change without changing their
-# paths. Set COMPASS_RENDER_PROFILE=publication for the original 600-dpi,
-# all-panels, forced-regeneration behavior.
+# Rendering profile. The default is optimized for iterative work: 200 dpi and
+# composites instead of duplicate component+composite PNGs. Every requested
+# artifact is regenerated. Set COMPASS_RENDER_PROFILE=publication for the
+# original 600-dpi, all-panels behavior.
 RENDER_PROFILE <- tolower(Sys.getenv("COMPASS_RENDER_PROFILE", "fast"))
 if (!RENDER_PROFILE %in% c("fast", "publication"))
   stop("COMPASS_RENDER_PROFILE must be 'fast' or 'publication'")
-RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 300
+RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 200
 RENDER_OUTPUT_MODE <- if (RENDER_PROFILE == "publication") "all" else "composite"
-overwrite_value <- tolower(Sys.getenv(
-  "COMPASS_RENDER_OVERWRITE",
-  if (RENDER_PROFILE == "publication") "true" else "false"
-))
-if (!overwrite_value %in% c("true", "false", "1", "0", "yes", "no"))
-  stop("COMPASS_RENDER_OVERWRITE must be true or false")
-RENDER_OVERWRITE <- overwrite_value %in% c("true", "1", "yes")
 
 pdf_value <- tolower(Sys.getenv("COMPASS_RENDER_PDF", "false"))
 if (!pdf_value %in% c("true", "false", "1", "0", "yes", "no"))
@@ -250,9 +239,9 @@ message("endpoints:   ", paste(ENDPOINTS, collapse = ", "))
 message("cohorts:     ", paste(COHORTS, collapse = ", "))
 message(sprintf("renders:     %d cohort x endpoint figure sets",
                 length(COHORTS) * length(ENDPOINTS)))
-message(sprintf("profile:     %s (%d dpi, output=%s, overwrite=%s, pdf=%s, workers=%d)",
+message(sprintf("profile:     %s (%d dpi, output=%s, pdf=%s, workers=%d)",
                 RENDER_PROFILE, RENDER_DPI, RENDER_OUTPUT_MODE,
-                RENDER_OVERWRITE, RENDER_PDF, RENDER_WORKERS))
+                RENDER_PDF, RENDER_WORKERS))
 ```
 
 ## Render ADT figures
@@ -287,18 +276,8 @@ render_cell <- function(COHORT, ENDPOINT) {
       plot_gam_trajectories = PLOT_GAM_TRAJECTORIES,
       save_dpi = RENDER_DPI,
       save_pdf = RENDER_PDF,
-      output_mode = RENDER_OUTPUT_MODE,
-      overwrite = RENDER_OVERWRITE
+      output_mode = RENDER_OUTPUT_MODE
     )
-    completion_path <- file.path(
-      FIG_ROOT, toupper(cohort_arm(COHORT)), "by_figure", "figure4",
-      "multivariate_performance",
-      sprintf("%s__%s.png", ENDPOINT, cohort_leaf_slug(COHORT))
-    )
-    # Confirm that the core composite was emitted even when nothing threw.
-    if (!file.exists(completion_path))
-      stop("expected multivariate figure was not generated: ", completion_path)
-    message("multivariate figure: ", completion_path)
     TRUE
   }, error = function(e) {
     message(sprintf("FAILED %s: %s", label, conditionMessage(e)))

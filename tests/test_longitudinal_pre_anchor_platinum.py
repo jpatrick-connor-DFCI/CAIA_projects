@@ -26,20 +26,18 @@ def test_descriptive_longitudinal_is_endpoint_independent_and_fresh():
     source = PIPELINE_R.read_text()
     assert "if (!EMIT_ENDPOINT_INDEPENDENT) {" in source
     assert "canonical_long_df <- load_canonical_longitudinal()" in source
-    assert "Per-lab figures: removed %d legacy NEPC-labelled file(s)" in source
-    assert source.count("force_overwrite = TRUE") >= 2
+    assert "R-fitted GAM trajectories: disabled; skipping" in source
 
 
 def test_retained_lab_figure_families_are_platinum_only():
     source = PIPELINE_R.read_text()
-    gate = source.index("if (!EMIT_ENDPOINT_INDEPENDENT) {", source.index("labs_output_root"))
+    gate = source.index("if (!EMIT_ENDPOINT_INDEPENDENT) {", source.index("save_fig(fig4"))
     supplement = source.index("Supplement -- localized-adjuvant vs metastatic", gate)
     block = source[gate:supplement]
     assert "load_canonical_longitudinal" in block
     assert "plot_group_gam_panel" in block
     assert "Retired: per-lab quartile KM figures" in block
     assert "Retired: per-lab distribution figures" in block
-    assert 'retired_lab_leaf <- paste0("nepc__", cohort_leaf_slug(COHORT), ".png")' in source
 
 
 def test_figure_strata_are_limited_to_binary_nepc():
@@ -66,8 +64,7 @@ def test_longitudinal_and_gam_titles_only_show_cohort_and_counts():
 def test_by_figure_is_the_only_output_layout():
     source = PIPELINE_R.read_text()
     assert 'file.path(FIG_ROOT, "by_figure"' in source
-    assert 'legacy_cohort_roots <- file.path(fig_root, toupper(COHORT_ARMS), "by_cohort")' in source
-    assert "unlink(legacy_cohort_root, recursive = TRUE, force = TRUE)" in source
+    assert "legacy_cohort_roots" not in source
     assert "rebuild_cohort_view" not in source
     assert "file.symlink" not in source
 
@@ -145,17 +142,22 @@ def test_pre_adt_coverage_emits_two_complementary_figures():
     assert "pre_edges <- anchored_bin_edges(COVERAGE_PRE_DAYS, 0, BIN_WIDTH_DAYS)" in source
 
 
-def test_requested_figure_families_are_retired_and_cleaned():
+def test_requested_figure_families_remain_retired_without_output_cleanup():
     source = PIPELINE_R.read_text()
-    assert '"figure1s_analysis_sets", "km_llm", "distribution", "km_quartile"' in source
-    assert '"s_multivariate_all_models", "figure4s_multivariate_all_models"' in source
-    assert 'grepl("significance", basename(generated_dirs)' in source
-    assert 'grepl("gleason|prs", basename(generated_dirs)' in source
     assert "Retired: Figure 1 analysis-set-size supplement" in source
     assert "Retired: supplemental all-model comparison" in source
     assert 'SG_ANALYSES  <- "sequencing"' in source
     assert "figure3_univariate_%s_significance_landmark%d" not in source
     assert "plot_volcano_panel_by_significance(sub" not in source
+
+
+def test_retired_deephit_supplement_does_not_scan_inputs():
+    source = PIPELINE_R.read_text()
+    resolver = source.index("resolve_dynamic_deephit_metrics <- function")
+    preceding_gate = source.rfind("if (FALSE) {", 0, resolver)
+    main_series = source.index("DISCRIMINATION_SERIES <-", resolver)
+    assert preceding_gate != -1
+    assert source.index("} # retired Dynamic-DeepHit discovery", resolver) < main_series
 
 
 def test_output_artifact_names_drop_redundant_parent_tokens():
@@ -166,7 +168,7 @@ def test_output_artifact_names_drop_redundant_parent_tokens():
     assert 'gam_trajectory = "^gam_(trajectory|longitudinal)_?"' in source
     assert "lab_slug <- lab_stem_slug(lab)" in source
     assert "artifact_name_for_stem(plot_stem, group)" in source
-    assert "remove_legacy_artifacts <- function" in source
+    assert "remove_legacy_artifacts" not in source
 
 
 def test_figure_notebook_defaults_to_two_cell_workers():
@@ -191,8 +193,24 @@ def test_png_is_default_and_pdf_is_opt_in():
     pipeline = PIPELINE_R.read_text()
     notebook = FIGURES_RMD.read_text()
     assert "save_pdf = FALSE" in pipeline
-    assert "write_png <- overwrite || force_overwrite || !file.exists(png_out)" in pipeline
-    assert "write_pdf <- save_pdf &&" in pipeline
-    assert "removed %d stale PDF figure(s); PNG-only mode is active" in pipeline
+    assert 'ggsave(png_out, plot = plot' in pipeline
+    assert "if (save_pdf) {" in pipeline
+    assert "kept existing" not in pipeline
     assert 'Sys.getenv("COMPASS_RENDER_PDF", "false")' in notebook
     assert "save_pdf = RENDER_PDF" in notebook
+    assert 'RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 200' in notebook
+
+
+def test_render_does_not_discover_or_reuse_existing_outputs():
+    pipeline = PIPELINE_R.read_text()
+    notebook = FIGURES_RMD.read_text()
+    setup = pipeline[pipeline.index("COHORT_ARM_DIR <-"):pipeline.index("COHORT_LEAF <-")]
+    save = pipeline[pipeline.index("save_fig <- function"):pipeline.index("COHORT_LABEL <-")]
+    assert "list.files(" not in setup
+    assert "list.dirs(" not in setup
+    assert "dir.exists(" not in setup
+    assert "file.exists(" not in save
+    assert "remove_legacy" not in save
+    assert "overwrite" not in save
+    assert "COMPASS_RENDER_OVERWRITE" not in notebook
+    assert "completion_path" not in notebook
