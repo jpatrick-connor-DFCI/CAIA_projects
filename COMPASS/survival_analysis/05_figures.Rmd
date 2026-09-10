@@ -49,8 +49,10 @@ ADT/by_figure/figure3/univariate_landmark180/
 `by_cohort/` mirror left by older runs so downloads cannot dereference its
 symlinks into duplicate files.
 
-Plot PDFs are not generated. Tables remain CSV/Markdown and follow the same
-leaf-naming convention. There is no `R/` language subdirectory.
+PNG is the default and always-rendered figure format. Set
+`COMPASS_RENDER_PDF=true` to additionally write a vector PDF beside every PNG;
+when false, stale PDFs are removed. Tables remain CSV/Markdown and follow the
+same leaf-naming convention. There is no `R/` language subdirectory.
 
 Figure 2 v3 validates the binary `has_nepc` classifier call over every
 ADT-exposed patient. It is emitted once from the canonical `adt` / platinum
@@ -58,10 +60,10 @@ pass and skipped for the other cells. AVPC confusion, multi-class subtype, and
 AVPC/NEPC enrichment panels are not generated.
 
 All outputs under `by_figure/labs/` are likewise emitted only by the platinum
-pass. Their KM curves model time-to-platinum, their distributions split on
-platinum status, and their trajectories are descriptive platinum/classifier
-strata; a second NEPC-labelled copy would not represent a different endpoint
-analysis. Each run removes legacy `nepc__*.png` lab leaves for its cohort.
+pass. Lab outputs are limited to longitudinal summaries and R-fitted GAMs;
+the distribution and quartile-KM families are retired. A second NEPC-labelled
+copy would not represent a different endpoint analysis. Each run removes
+legacy `nepc__*.png` lab leaves for its cohort.
 Longitudinal summaries use 180-day bins from one year before through five
 years after the treatment anchor, with day 0 as a hard boundary. A second
 trajectory set is fit directly during plotting with `mgcv::bam`;
@@ -72,22 +74,17 @@ aggregation or GAM fitting and use an `_log` filename suffix.
 Trajectory and GAM titles contain only the cohort definition and contributing
 patient count; the lab, scale, and stratum remain identified by the axes,
 legend, and artifact path.
-For the ADT arm, three additional PSA/testosterone diagnostics quantify the
-pre-ADT data supporting those trajectories: any and recent measurement
-coverage, patient-level five-year measurement-count categories (including
-zero), and zero-anchored 180-day-bin availability. Platinum panels use the
+For the ADT arm, two additional PSA/testosterone diagnostics quantify the
+pre-ADT data supporting those trajectories: any/recent measurement coverage
+and zero-anchored 180-day-bin availability. Platinum panels use the
 entire analysis-cohort stratum as their denominator; NEPC panels use all
 classifier-labeled cohort patients, including those with no androgen lab. The
 coverage diagnostics retain their five-year pre-ADT lookback independently of
 the shorter trajectory window.
 
-Figure 3b adds the somatic, Gleason, and PRS univariate associations as their
-own plots, one per index analysis. Each is built on its own cohort and index
-date (sequencing = specimen collection, Gleason = the score date nearest ADT
-start, PRS = ADT start), so they are not merged into the Figure 3 lab
-volcanoes. Gleason is drawn as a forest plot because it contributes a single
-continuous feature; sequencing and PRS get a volcano plus a top-hits forest.
-These analyses exist for the ADT arm at landmark 0 only, and a missing
+Figure 3b is limited to sequencing-based somatic associations, shown as a
+volcano plus a top-hits forest. PRS and Gleason panels are retired. The
+sequencing analysis exists for the ADT arm at landmark 0 only, and a missing
 `cox_somatic_gleason/` tree is reported and skipped.
 
 All figure-generation logic lives in `COMPASS_generate_figures_pipeline.R` as
@@ -95,10 +92,8 @@ All figure-generation logic lives in `COMPASS_generate_figures_pipeline.R` as
 and calls it for each cohort in `COHORTS` crossed with each endpoint in
 `ENDPOINTS`.
 
-Figure 4 also includes a supplemental held-out comparison of elastic-net Cox,
-XGBoost, and Dynamic-DeepHit across mean AUC(t), C-index, and integrated Brier
-score. Missing `03b_multivariate_longitudinal.ipynb` outputs are reported in
-the figure and its data CSV rather than suppressing the supplement.
+The Figure 1 analysis-set supplement, Figure 3 significance-only variants,
+Figure 4 all-model supplement, and LLM-stratified KM family are retired.
 
 Run `01_preprocessing.ipynb` to completion first; this document only reads
 that merged-profile run's outputs.
@@ -167,6 +162,11 @@ if (!overwrite_value %in% c("true", "false", "1", "0", "yes", "no"))
   stop("COMPASS_RENDER_OVERWRITE must be true or false")
 RENDER_OVERWRITE <- overwrite_value %in% c("true", "1", "yes")
 
+pdf_value <- tolower(Sys.getenv("COMPASS_RENDER_PDF", "false"))
+if (!pdf_value %in% c("true", "false", "1", "0", "yes", "no"))
+  stop("COMPASS_RENDER_PDF must be true or false")
+RENDER_PDF <- pdf_value %in% c("true", "1", "yes")
+
 # Parallelize the cohort x endpoint cells directly so the full render can use
 # more than the two endpoint slots. Override this default through
 # COMPASS_RENDER_WORKERS when a lower-memory run is needed.
@@ -207,15 +207,46 @@ if (length(missing_trees))
        "every cohort x endpoint first:\n  ",
        paste(missing_trees, collapse = "\n  "))
 
+# Populate arm-level caches before parallel::mclapply forks. On Unix, workers
+# then inherit these large read-only objects through copy-on-write memory
+# instead of parsing the longitudinal CSV independently up to 12 times.
+# Sequential/Windows renders benefit from the same warm caches.
+shared_longitudinal_csv <- file.path(
+  NEPC_PROJ_PATH, "longitudinal_prediction_data_adt.csv"
+)
+preload_started <- proc.time()[["elapsed"]]
+invisible(cached_profile_patient_and_labs(shared_longitudinal_csv, "DFCI_MRN"))
+invisible(cached_canonical_longitudinal(shared_longitudinal_csv))
+
+# These sources are smaller, but every cell reads them. Warm their raw caches
+# as well so forked workers do no repeated shared-input I/O.
+invisible(cached_read_csv(
+  file.path(NEPC_PROJ_PATH, "LLM_NEPC_labels", "baca_lab_annotations.csv"),
+  show_col_types = FALSE
+))
+invisible(cached_read_csv(
+  file.path(NEPC_PROJ_PATH, "mrn_lists", "platinum_MRN_list.csv"),
+  show_col_types = FALSE
+))
+invisible(cached_read_csv(
+  file.path(NEPC_PROJ_PATH, "mrn_lists", "icd_prostate_mrn_flags.csv"),
+  show_col_types = FALSE
+))
+invisible(load_llm_strata(DEFAULT_LLM_ANNOTATIONS_PATH))
+message(sprintf(
+  "shared inputs preloaded once in %.1f seconds; forking workers from warm cache",
+  proc.time()[["elapsed"]] - preload_started
+))
+
 message("data root:   ", NEPC_PROJ_PATH)
 message("figure root: ", FIG_ROOT)
 message("endpoints:   ", paste(ENDPOINTS, collapse = ", "))
 message("cohorts:     ", paste(COHORTS, collapse = ", "))
 message(sprintf("renders:     %d cohort x endpoint figure sets",
                 length(COHORTS) * length(ENDPOINTS)))
-message(sprintf("profile:     %s (%d dpi, output=%s, overwrite=%s, workers=%d)",
+message(sprintf("profile:     %s (%d dpi, output=%s, overwrite=%s, pdf=%s, workers=%d)",
                 RENDER_PROFILE, RENDER_DPI, RENDER_OUTPUT_MODE,
-                RENDER_OVERWRITE, RENDER_WORKERS))
+                RENDER_OVERWRITE, RENDER_PDF, RENDER_WORKERS))
 ```
 
 ## Render ADT figures
@@ -237,6 +268,7 @@ a partial render cannot pass silently.
 ```{r render-figures}
 render_cell <- function(COHORT, ENDPOINT) {
   label <- sprintf("%s / %s", cohort_display(COHORT), toupper(ENDPOINT))
+  cell_started <- proc.time()[["elapsed"]]
   message(sprintf("\n========== R figures: %s ==========", label))
   ok <- tryCatch({
     generate_figures(
@@ -247,27 +279,27 @@ render_cell <- function(COHORT, ENDPOINT) {
       plot_non_androgen_distributions = PLOT_NON_ANDROGEN_DISTRIBUTIONS,
       plot_non_androgen_lab_figures = PLOT_NON_ANDROGEN_LAB_FIGURES,
       save_dpi = RENDER_DPI,
+      save_pdf = RENDER_PDF,
       output_mode = RENDER_OUTPUT_MODE,
       overwrite = RENDER_OVERWRITE
     )
-    supplement_path <- file.path(
+    completion_path <- file.path(
       FIG_ROOT, toupper(cohort_arm(COHORT)), "by_figure", "figure4",
-      "s_multivariate_all_models",
+      "multivariate_performance",
       sprintf("%s__%s.png", ENDPOINT, cohort_leaf_slug(COHORT))
     )
-    # The supplement is the last artifact generate_figures() writes, so its
-    # absence means the pass did not complete even when nothing threw.
-    if (!file.exists(supplement_path))
-      stop("expected multivariate supplement was not generated: ",
-           supplement_path)
-    message("multivariate supplement: ", supplement_path)
+    # Confirm that the core composite was emitted even when nothing threw.
+    if (!file.exists(completion_path))
+      stop("expected multivariate figure was not generated: ", completion_path)
+    message("multivariate figure: ", completion_path)
     TRUE
   }, error = function(e) {
     message(sprintf("FAILED %s: %s", label, conditionMessage(e)))
     FALSE
   })
   if (ok) {
-    message(sprintf("\nCompleted R figures for %s.", label))
+    message(sprintf("\nCompleted R figures for %s in %.1f seconds.", label,
+                    proc.time()[["elapsed"]] - cell_started))
     character(0)
   } else {
     label

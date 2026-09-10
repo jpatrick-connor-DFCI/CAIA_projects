@@ -685,6 +685,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                              plot_non_androgen_distributions = FALSE,
                              plot_non_androgen_lab_figures = FALSE,
                              save_dpi = SAVE_DPI,
+                             save_pdf = FALSE,
                              output_mode = c("all", "composite", "panels"),
                              overwrite = TRUE) {
   # Rscript opens `Rplots.pdf` when any plot is drawn without an explicit device.
@@ -711,6 +712,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   output_mode <- match.arg(output_mode)
   if (!is.numeric(save_dpi) || length(save_dpi) != 1L || is.na(save_dpi) || save_dpi <= 0)
     stop("save_dpi must be one positive number")
+  if (!is.logical(save_pdf) || length(save_pdf) != 1L || is.na(save_pdf))
+    stop("save_pdf must be one non-missing logical value")
   if (!is.logical(overwrite) || length(overwrite) != 1L || is.na(overwrite))
     stop("overwrite must be one non-missing logical value")
   # Endpoint-independent figures describe the platinum-labelled cohort itself.
@@ -790,11 +793,31 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # fields remain available internally to normalize the classifier source, but
   # only NEPC and platinum stratifications are rendered.
   figure_tree <- file.path(FIG_ROOT, "by_figure")
+  if (!save_pdf && dir.exists(figure_tree)) {
+    stale_pdfs <- list.files(
+      figure_tree, pattern = "[.]pdf$", recursive = TRUE, full.names = TRUE
+    )
+    if (length(stale_pdfs)) {
+      unlink(stale_pdfs, force = TRUE)
+      message(sprintf("removed %d stale PDF figure(s); PNG-only mode is active",
+                      length(stale_pdfs)))
+    }
+  }
   if (dir.exists(figure_tree)) {
     generated_dirs <- list.dirs(figure_tree, recursive = TRUE, full.names = TRUE)
     retired_dirs <- generated_dirs[
       grepl("avpc|primary_label", basename(generated_dirs), ignore.case = TRUE) |
         grepl("^gam_trajectory_", basename(generated_dirs)) |
+        basename(generated_dirs) %in% c(
+          "figure1s_analysis_sets", "km_llm", "distribution", "km_quartile",
+          "counts_psa", "counts_psa_testosterone",
+          "pre_adt_coverage_counts_psa_testosterone",
+          "s_multivariate_all_models", "figure4s_multivariate_all_models"
+        ) |
+        (grepl("figure3", generated_dirs, fixed = TRUE) &
+           grepl("significance", basename(generated_dirs), fixed = TRUE)) |
+        (grepl("figure3b", generated_dirs, fixed = TRUE) &
+           grepl("gleason|prs", basename(generated_dirs), ignore.case = TRUE)) |
         basename(generated_dirs) %in% c(
           "figure2v3_confusion_matrix",
           "figure2v3_confusion_has_nepc",
@@ -806,7 +829,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     ]
     if (length(retired_dirs)) {
       unlink(retired_dirs, recursive = TRUE, force = TRUE)
-      message(sprintf("removed %d retired AVPC/primary-label figure director%s",
+      message(sprintf("removed %d retired figure director%s",
                       length(retired_dirs), ifelse(length(retired_dirs) == 1L, "y", "ies")))
     }
   }
@@ -1013,8 +1036,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     TRUE
   }
 
-  # save_fig: write one PNG directly to its figure group. In incremental mode,
-  # existing requested files are retained and still registered in the view.
+  # save_fig: always write/retain PNG; optionally add a vector PDF alongside it.
+  # In incremental mode, each requested format is checked independently.
   save_fig <- function(plot, out_dir, stem, width, height, prefix = COHORT_LEAF,
                        force_overwrite = FALSE) {
     if (!should_save_figure(stem)) {
@@ -1029,19 +1052,31 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     output_stem <- prefix
 
     png_out <- file.path(output_dir, paste0(output_stem, ".png"))
-    remove_legacy_artifacts(stem, paste0(output_stem, ".png"))
-    if (!overwrite && !force_overwrite && file.exists(png_out)) {
-      message("kept existing ", png_out)
-      return(invisible(plot))
-    }
-    if (HAS_RAGG) {
-      ggsave(png_out, plot = plot, width = width, height = height, units = "in",
-             dpi = save_dpi, bg = "white", device = ragg::agg_png)
+    pdf_out <- file.path(output_dir, paste0(output_stem, ".pdf"))
+    remove_legacy_artifacts(stem, paste0(output_stem, c(".png", ".pdf")))
+    if (!save_pdf && file.exists(pdf_out)) unlink(pdf_out, force = TRUE)
+
+    write_png <- overwrite || force_overwrite || !file.exists(png_out)
+    write_pdf <- save_pdf && (overwrite || force_overwrite || !file.exists(pdf_out))
+    if (write_png) {
+      if (HAS_RAGG) {
+        ggsave(png_out, plot = plot, width = width, height = height, units = "in",
+               dpi = save_dpi, bg = "white", device = ragg::agg_png)
+      } else {
+        ggsave(png_out, plot = plot, width = width, height = height, units = "in",
+               dpi = save_dpi, bg = "white", type = "cairo")
+      }
+      message("wrote ", png_out)
     } else {
-      ggsave(png_out, plot = plot, width = width, height = height, units = "in",
-             dpi = save_dpi, bg = "white", type = "cairo")
+      message("kept existing ", png_out)
     }
-    message("wrote ", png_out)
+    if (write_pdf) {
+      ggsave(pdf_out, plot = plot, width = width, height = height, units = "in",
+             bg = "white", device = grDevices::cairo_pdf)
+      message("wrote ", pdf_out)
+    } else if (save_pdf) {
+      message("kept existing ", pdf_out)
+    }
 
     invisible(plot)
   }
@@ -1351,6 +1386,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   save_fig(fig1, OUT_DIR, "figure1_cohort_overview", 16, 12)
   if (show) print(fig1)
 
+  # Retired: Figure 1 analysis-set-size supplement.
+  if (FALSE) {
   ## ---- Figure 1 supplement -- final analysis-set sizes per arm x landmark ----
   # Every downstream model is fit on its own patient set: the univariate lab
   # screen keeps whoever has that feature at the landmark, the somatic/Gleason
@@ -1591,6 +1628,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       tag_levels = "A")
   save_fig(fig1s, SUPP_OUT_DIR, sprintf("figure1s_analysis_sets_%s", ENDPOINT), 9.0, 8.0)
   if (show) print(fig1s)
+  }
 
   if (!IS_ADT)
     message(paste0("Figure 2 v3: emitted once from the ADT pass over the ADT-exposed ",
@@ -1967,26 +2005,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (show) print(p)
   }
 
-  # Significance-only-colored variant (no lab-category coloring). Populate
-  # HIGHLIGHT_LABS with lab_name values (e.g. c("Hemoglobin", "Albumin")) to
-  # pick out specific labs; empty means no highlighting is applied yet.
-  HIGHLIGHT_LABS <- character(0)
-  for (pn in panels) {
-    lm <- pn[[1]]; title <- pn[[2]]
-    sub <- uni %>% filter(landmark_days == lm)
-    if (nrow(sub) == 0) {
-      p <- ggplot() + annotate("text", x = 0, y = 0,
-                               label = sprintf("(no data for landmark = %dd)", lm),
-                               color = "#7f8c8d") + theme_void()
-    } else {
-      p <- plot_volcano_panel_by_significance(sub, title, highlight_labs = HIGHLIGHT_LABS)
-    }
-    save_fig(p, OUT_DIR, sprintf("figure3_univariate_%s_significance_landmark%d", ENDPOINT, lm),
-             width = 7.5, height = 6)
-    if (show) print(p)
-  }
-
-  ## ---- Figure 3b -- somatic, Gleason, and PRS univariate associations ----
+  ## ---- Figure 3b -- sequencing-based somatic univariate associations ----
   # Separate plots from the lab volcanoes above: these come from
   # build_somatic_gleason_inputs.py / run_somatic_gleason_univariate(), which
   # build three DIFFERENT cohorts with three different index dates
@@ -2000,17 +2019,13 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   OUT_DIR <- fig_dir("figure3b_somatic_gleason")
 
   SG_LANDMARK  <- 0L
-  SG_ANALYSES  <- c("gleason", "sequencing", "prs")
+  SG_ANALYSES  <- "sequencing"
   SG_LABELS <- c(
-    gleason    = "Gleason score",
-    sequencing = "Somatic alterations",
-    prs        = "Polygenic risk scores"
+    sequencing = "Somatic alterations"
   )
   # Each analysis' prediction time origin, from build_somatic_gleason_inputs.py.
   SG_ORIGINS <- c(
-    gleason    = "Gleason score date nearest ADT start",
-    sequencing = "sequencing specimen collection date",
-    prs        = "ADT start"
+    sequencing = "sequencing specimen collection date"
   )
   SG_TOP_N <- 25   # forest plots show at most this many features, ranked by p
 
@@ -2143,7 +2158,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
 
   if (!IS_ADT) {
-    message(paste0("Figure 3b: the sequencing/Gleason/PRS index dates are defined ",
+    message(paste0("Figure 3b: the sequencing index date is defined ",
                    "relative to ADT start, so these analyses are built for the ADT ",
                    "arm only -- skipping for the ARPI pass."))
   } else {
@@ -2323,6 +2338,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (show) print(p)
   }
 
+  # Retired: supplemental all-model comparison.
+  if (FALSE) {
   # Supplemental held-out comparison across every directly comparable
   # multivariate lab model. Dynamic-DeepHit's cause-only configuration censors
   # death, matching the Cox/XGBoost endpoint; the competing-risk configuration
@@ -2468,6 +2485,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     write_csv(multivariate_supplement_data, supplement_csv)
   message("wrote ", supplement_csv)
   if (show) print(p_supplement)
+  }
 
   OUT_DIR <- fig_dir("figure4_multivariate")
 
@@ -2711,7 +2729,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                  size = 2.6, color = "#5d6d7e", family = "mono")
   }
 
-  for (lab in LAB_FIGURE_LABS) {
+  # Retired: per-lab quartile KM figures.
+  if (FALSE) for (lab in LAB_FIGURE_LABS) {
     for (landmark in FIG5_LANDMARKS) {
       agg <- load_aggregated_landmark(landmark)
       if (is.null(agg)) {
@@ -2733,6 +2752,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     }
   }
 
+  # Retired: LLM-stratified KM figures.
+  if (FALSE) {
   ## ---- LLM-stratified KM curves: time-to-platinum by has_nepc -----------
   ## ---- (platinum_km_inputs) + overlay_km as the quartile curves above.    ----
   if (is.null(llm_classifier_labels)) {
@@ -2796,6 +2817,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         if (show) print(p)
       }
     }
+  }
   }
 
   FIG6_LANDMARKS <- LANDMARKS
@@ -2863,7 +2885,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (plot_non_androgen_distributions) "androgen + non-androgen" else "androgen only",
     length(FIG6_LABS)
   ))
-  for (variant in FIG6_SCALE_VARIANTS) {
+  # Retired: per-lab distribution figures.
+  if (FALSE) for (variant in FIG6_SCALE_VARIANTS) {
     use_log <- variant[[1]]; out_stem <- variant[[2]]
     for (lab in FIG6_LABS) {
       for (landmark in FIG6_LANDMARKS) {
@@ -3220,6 +3243,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       )
       if (show) print(p_coverage_any)
 
+      # Retired: patient-level count-burden figure. The patient table remains
+      # the input to the retained any/recent coverage diagnostic.
+      if (FALSE) {
       # 2) Patient-level test burden, including the zero-count category that
       # disappears from ordinary longitudinal plots.
       coverage_counts <- coverage_patient %>%
@@ -3262,6 +3288,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         width = 11, height = 7.2, force_overwrite = TRUE
       )
       if (show) print(p_coverage_counts)
+      }
 
       # 3) Availability in each zero-anchored 180-day bin. The denominator is
       # fixed within a stratum, so falling lines reflect thinning observation
