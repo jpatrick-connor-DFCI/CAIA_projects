@@ -685,6 +685,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                              plot_non_androgen_distributions = FALSE,
                              plot_non_androgen_lab_figures = FALSE,
                              plot_gam_trajectories = TRUE,
+                             plot_adt_intent_supplement = TRUE,
                              save_dpi = SAVE_DPI,
                              save_pdf = FALSE,
                              output_mode = c("all", "composite", "panels")) {
@@ -730,6 +731,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       length(plot_gam_trajectories) != 1 ||
       is.na(plot_gam_trajectories))
     stop("plot_gam_trajectories must be one non-missing logical value")
+  if (!is.logical(plot_adt_intent_supplement) ||
+      length(plot_adt_intent_supplement) != 1 ||
+      is.na(plot_adt_intent_supplement))
+    stop("plot_adt_intent_supplement must be one non-missing logical value")
   COHORT_DISPLAY <- cohort_display(COHORT)
   ENDPOINT_DISPLAY <- toupper(ENDPOINT)
   message(sprintf("Generating figures for cohort: %s, endpoint: %s",
@@ -3669,7 +3674,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     frame
   }
 
-  if (IS_CANONICAL_ADT) {
+  if (IS_CANONICAL_ADT && !plot_adt_intent_supplement)
+    message("ADT-intent supplement: disabled; skipping")
+
+  if (IS_CANONICAL_ADT && plot_adt_intent_supplement) {
     intent_counts <- adt_intent_table("adt_intent_cohort_counts.csv")
     intent_overlap <- adt_intent_table("adt_intent_cohort_overlap.csv")
     intent_association <- adt_intent_table("adt_intent_univariate_heterogeneity.csv")

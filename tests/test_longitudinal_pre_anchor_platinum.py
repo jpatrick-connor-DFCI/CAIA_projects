@@ -102,6 +102,16 @@ def test_figure_notebook_toggles_gam_fitting_off_without_removing_it():
     assert "mgcv::bam(" in pipeline
 
 
+def test_figure_notebook_toggles_adt_intent_supplement_off_without_removing_it():
+    notebook = FIGURES_RMD.read_text()
+    pipeline = PIPELINE_R.read_text()
+    assert "PLOT_ADT_INTENT_SUPPLEMENT <- FALSE" in notebook
+    assert "plot_adt_intent_supplement = PLOT_ADT_INTENT_SUPPLEMENT" in notebook
+    assert "plot_adt_intent_supplement = TRUE" in pipeline
+    assert "IS_CANONICAL_ADT && plot_adt_intent_supplement" in pipeline
+    assert "Supplement -- localized-adjuvant vs metastatic ADT-intent strata" in pipeline
+
+
 def test_longitudinal_and_gam_figures_also_emit_log_space_versions():
     source = PIPELINE_R.read_text()
     start = source.index("patient_bin_trajectory <- function")
@@ -177,6 +187,7 @@ def test_figure_notebook_defaults_to_two_cell_workers():
     assert "render_grid <- tidyr::crossing(COHORT = COHORTS, ENDPOINT = ENDPOINTS)" in source
     assert "n_workers <- min(RENDER_WORKERS, nrow(render_grid))" in source
     assert "mc.cores = n_workers" in source
+    assert "mc.preschedule = FALSE" in source
 
 
 def test_figure_notebook_preloads_shared_data_before_forking():

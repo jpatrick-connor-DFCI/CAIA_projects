@@ -145,6 +145,9 @@ PLOT_NON_ANDROGEN_LAB_FIGURES <- FALSE
 # Keep the R/mgcv fitting implementation available without running its
 # comparatively expensive trajectory fits during the default figure knit.
 PLOT_GAM_TRAJECTORIES <- FALSE
+# The ADT-intent comparison supplement runs after Figure 4 in the canonical ADT
+# cell. Keep its implementation available without extending the primary render.
+PLOT_ADT_INTENT_SUPPLEMENT <- FALSE
 
 # Rendering profile. The default is optimized for iterative work: 200 dpi and
 # composites instead of duplicate component+composite PNGs. Every requested
@@ -274,6 +277,7 @@ render_cell <- function(COHORT, ENDPOINT) {
       plot_non_androgen_distributions = PLOT_NON_ANDROGEN_DISTRIBUTIONS,
       plot_non_androgen_lab_figures = PLOT_NON_ANDROGEN_LAB_FIGURES,
       plot_gam_trajectories = PLOT_GAM_TRAJECTORIES,
+      plot_adt_intent_supplement = PLOT_ADT_INTENT_SUPPLEMENT,
       save_dpi = RENDER_DPI,
       save_pdf = RENDER_PDF,
       output_mode = RENDER_OUTPUT_MODE
@@ -298,9 +302,12 @@ render_one <- function(i) {
 }
 n_workers <- min(RENDER_WORKERS, nrow(render_grid))
 if (n_workers > 1L && .Platform$OS.type != "windows") {
+  # Platinum cells emit the additional longitudinal panels and are much slower
+  # than NEPC cells. Dynamic scheduling prevents one prescheduled fork from
+  # receiving every heavy platinum cell while the NEPC fork finishes early.
   render_results <- parallel::mclapply(
     seq_len(nrow(render_grid)), render_one,
-    mc.cores = n_workers, mc.preschedule = TRUE
+    mc.cores = n_workers, mc.preschedule = FALSE
   )
 } else {
   if (n_workers > 1L)
