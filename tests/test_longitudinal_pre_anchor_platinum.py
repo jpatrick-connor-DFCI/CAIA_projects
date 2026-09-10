@@ -101,3 +101,38 @@ def test_longitudinal_and_gam_figures_also_emit_log_space_versions():
     assert 'sprintf("gam_longitudinal_platinum_%s%s"' in block
     assert 'sprintf("gam_longitudinal_has_nepc_%s%s"' in block
     assert 'paste0("log1p(", lab_group, ")")' in block
+
+
+def test_pre_adt_androgen_coverage_keeps_zero_measurement_patients():
+    source = PIPELINE_R.read_text()
+    start = source.index("Pre-ADT PSA/testosterone coverage diagnostics")
+    end = source.index("for (lab_group in labs_present)", start)
+    block = source[start:end]
+    assert "crossing(" in block
+    assert "coverage_strata" in block
+    assert "LAB_GROUP = coverage_labs" in block
+    assert "n_pre = coalesce(as.integer(n_pre), 0L)" in block
+    assert "n_pre_180 = coalesce(as.integer(n_pre_180), 0L)" in block
+    assert 'n_pre == 0 ~ "0"' in block
+    assert "n_patients = n()" in block
+
+
+def test_pre_adt_coverage_emits_three_complementary_figures():
+    source = PIPELINE_R.read_text()
+    assert 'return("androgen_pre_adt_coverage")' in source
+    assert '"pre_adt_coverage_any_psa_testosterone"' in source
+    assert '"pre_adt_coverage_counts_psa_testosterone"' in source
+    assert '"pre_adt_coverage_by_bin_psa_testosterone"' in source
+    assert "Within 180 days before ADT" in source
+    assert "pre_edges <- anchored_bin_edges(PRE_DAYS, 0, BIN_WIDTH_DAYS)" in source
+
+
+def test_output_artifact_names_drop_redundant_parent_tokens():
+    source = PIPELINE_R.read_text()
+    assert "artifact_name_for_stem <- function" in source
+    assert 'figure3 = "^figure3_?"' in source
+    assert 'longitudinal = "^(androgen_)?longitudinal_?"' in source
+    assert 'gam_trajectory = "^gam_(trajectory|longitudinal)_?"' in source
+    assert "lab_slug <- lab_stem_slug(lab)" in source
+    assert "artifact_name_for_stem(plot_stem, group)" in source
+    assert "remove_legacy_artifacts <- function" in source

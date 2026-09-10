@@ -755,11 +755,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # Figure tree is FIGURE-MAJOR, not cohort-major, so that comparing one panel
   # across cohorts is a single directory listing:
   #
-  #   <fig_root>/ADT/by_figure/<group>/<stem>/<endpoint>__<subset>__<exclusion>.png
+  #   <fig_root>/ADT/by_figure/<group>/<trimmed-name>/<endpoint>__<subset>__<exclusion>.png
   #
   # e.g. all twelve cohort x endpoint panels in one directory, endpoint first so
   # they sort into two contiguous six-cohort blocks:
-  #   ADT/by_figure/figure3/figure3_univariate_landmark180/
+  #   ADT/by_figure/figure3/univariate_landmark180/
   #       nepc__all__incl.png                 nepc__all__noprecastrate.png
   #       nepc__metastatic_adt__incl.png      nepc__metastatic_adt__noprecastrate.png
   #       nepc__metastatic_llm__incl.png      nepc__metastatic_llm__noprecastrate.png
@@ -830,7 +830,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     NA_character_
   }
   # Layout, every output:
-  #   FIG_ROOT/by_figure/<group>/<stem>/<endpoint>__<subset>__<exclusion>.png
+  #   FIG_ROOT/by_figure/<group>/<trimmed-name>/<endpoint>__<subset>__<exclusion>.png
   # Per-lab panels keep their category/lab nesting for the same reason as
   # before -- ~40 labs x 4 strata would otherwise dump 160+ entries into one
   # directory -- and still bottom out at <= 12 files per leaf:
@@ -859,6 +859,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       if (!is.na(lab)) return(file.path("labs", assign_category(lab), lab, "distribution"))
       return("androgen_distributions")
     }
+    if (startsWith(plot_stem, "pre_adt_coverage_"))
+      return("androgen_pre_adt_coverage")
     if (startsWith(plot_stem, "gam_trajectory_") ||
         startsWith(plot_stem, "gam_longitudinal_")) {
       lab <- match_lab_in_stem(plot_stem)
@@ -872,13 +874,80 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     }
     stop(sprintf("Unmapped figure output stem: %s", plot_stem))
   }
-  # Every stem routes to .../by_figure/<group>/<stem>/, whose leaf holds one
+  # Remove information already carried by parent folders from the artifact
+  # directory name. Internal stems remain unchanged because figure routing and
+  # output-mode selection depend on them. Examples:
+  #   figure3/figure3_univariate_nepc_landmark0 -> figure3/univariate_nepc_landmark0
+  #   labs/.../PSA/longitudinal/longitudinal_platinum_psa_log -> .../platinum_log
+  artifact_name_for_stem <- function(plot_stem, group = figure_group(plot_stem)) {
+    group_leaf <- basename(group)
+    prefix_pattern <- switch(
+      group_leaf,
+      figure1 = "^figure1_?",
+      figure1s_analysis_sets = "^figure1s_analysis_sets_?",
+      figure2v3_llm = "^figure2v3_?",
+      figure3 = "^figure3_?",
+      figure3b = "^figure3b_?",
+      figure4 = "^figure4_?",
+      km_llm = "^km_llm_?",
+      KM_curves = "^km_?",
+      km_quartile = "^km_quartile_?",
+      distribution = "^(androgen_)?dist(ribution)?_?",
+      longitudinal = "^(androgen_)?longitudinal_?",
+      gam_trajectory = "^gam_(trajectory|longitudinal)_?",
+      androgen_pre_adt_coverage = "^pre_adt_coverage_?",
+      NULL
+    )
+    artifact_name <- plot_stem
+    if (!is.null(prefix_pattern))
+      artifact_name <- sub(prefix_pattern, "", artifact_name, perl = TRUE)
+
+    # Per-lab paths already name the lab two levels above the artifact. Remove
+    # that exact slug token as well, retaining endpoint, scale, and landmark.
+    lab <- match_lab_in_stem(plot_stem)
+    if (!is.na(lab)) {
+      lab_slug <- lab_stem_slug(lab)
+      artifact_name <- gsub(
+        paste0("(^|_)", lab_slug, "(_|$)"), "_", artifact_name, perl = TRUE
+      )
+    }
+    artifact_name <- gsub("_+", "_", artifact_name)
+    artifact_name <- sub("^_", "", sub("_$", "", artifact_name))
+    if (!nzchar(artifact_name)) "figure" else artifact_name
+  }
+
+  legacy_output_dir_for_stem <- function(plot_stem) {
+    file.path(FIG_ROOT, "by_figure", figure_group(plot_stem), plot_stem)
+  }
+
+  # Delete only the current cohort cell from the old redundant path. Other
+  # cohort leaves are preserved until their own regeneration pass migrates
+  # them, which keeps concurrent/incremental renders safe.
+  remove_legacy_artifacts <- function(plot_stem, filenames) {
+    old_dir <- legacy_output_dir_for_stem(plot_stem)
+    new_dir <- output_dir_for_stem(plot_stem)
+    if (identical(old_dir, new_dir) || !dir.exists(old_dir)) return(invisible(NULL))
+    old_paths <- file.path(old_dir, filenames)
+    existing <- old_paths[file.exists(old_paths)]
+    if (length(existing)) {
+      unlink(existing, force = TRUE)
+      message(sprintf("removed %d redundant-name artifact(s) from %s",
+                      length(existing), old_dir))
+    }
+    remaining <- list.files(old_dir, all.files = TRUE, no.. = TRUE)
+    if (length(remaining) == 0L)
+      unlink(old_dir, recursive = TRUE, force = TRUE)
+    invisible(NULL)
+  }
+
+  # Every stem routes to .../by_figure/<group>/<trimmed-artifact-name>/, whose leaf holds one
   # file per cohort x endpoint cell. Uniform for numbered and supplemental
-  # groups alike: the per-stem level is what keeps sibling panels in a group
+  # groups alike: the per-artifact level is what keeps sibling panels in a group
   # from sharing a leaf, and COHORT_LEAF (endpoint + subset + exclusion) is
   # what keeps the twelve cells within a stem from colliding.
   output_dir_for_stem <- function(plot_stem) {
-    file.path(FIG_ROOT, "by_figure", figure_group(plot_stem), plot_stem)
+    group <- figure_group(plot_stem)
+    file.path(FIG_ROOT, "by_figure", group, artifact_name_for_stem(plot_stem, group))
   }
 
   # NOTE: the previous legacy-subdirectory cleanup that ran here has been
@@ -953,13 +1022,14 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       return(invisible(plot))
     }
     # `out_dir` is retained for call-site compatibility. The directory already
-    # encodes group/stem/endpoint, so the filename carries only the cohort
+    # encodes group/artifact/endpoint, so the filename carries only the cohort
     # identity -- that is what makes one leaf directory a six-way comparison.
     output_dir <- output_dir_for_stem(stem)
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
     output_stem <- prefix
 
     png_out <- file.path(output_dir, paste0(output_stem, ".png"))
+    remove_legacy_artifacts(stem, paste0(output_stem, ".png"))
     if (!overwrite && !force_overwrite && file.exists(png_out)) {
       message("kept existing ", png_out)
       return(invisible(plot))
@@ -1206,6 +1276,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     stem <- basename(out_base)
     output_dir <- output_dir_for_stem(stem)
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+    remove_legacy_artifacts(
+      stem, paste0(COHORT_LEAF, c(".csv", ".md"))
+    )
     out_base <- file.path(output_dir, COHORT_LEAF)
     csv <- paste0(out_base, ".csv"); md_p <- paste0(out_base, ".md")
     if (overwrite || !file.exists(csv)) write_csv(table1, csv)
@@ -2390,6 +2463,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     output_dir_for_stem(supplement_stem),
     paste0(COHORT_LEAF, "_data.csv")
   )
+  remove_legacy_artifacts(supplement_stem, paste0(COHORT_LEAF, "_data.csv"))
   if (overwrite || !file.exists(supplement_csv))
     write_csv(multivariate_supplement_data, supplement_csv)
   message("wrote ", supplement_csv)
@@ -3029,6 +3103,230 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       llm_lookup <- llm_classifier_labels %>%
         filter(as.character(DFCI_MRN) %in% cohort_mrns_long) %>%
         mutate(DFCI_MRN = as.character(DFCI_MRN))
+    }
+
+    # ---------------------------------------------------------------------
+    # Pre-ADT PSA/testosterone coverage diagnostics. Unlike trajectory plots,
+    # these explicitly retain patients with zero measurements in the
+    # denominator. This distinguishes sparse testing from a low lab value and
+    # makes the thin pre-anchor positive-stratum trajectories interpretable.
+    # ---------------------------------------------------------------------
+    if (IS_ADT && any(canonical_long_df$LAB_GROUP %in% ANDROGEN)) {
+      coverage_labs <- intersect(ANDROGEN, unique(canonical_long_df$LAB_GROUP))
+      cohort_mrns_long <- unique(as.character(patient_df[[ID_COL]]))
+      cohort_mrns_long <- cohort_mrns_long[
+        !is.na(cohort_mrns_long) & nzchar(cohort_mrns_long)
+      ]
+
+      platinum_value <- if ("PLATINUM" %in% names(patient_df)) {
+        coalesce(suppressWarnings(as.numeric(patient_df$PLATINUM)), 0)
+      } else {
+        as.numeric(as.character(patient_df[[ID_COL]]) %in% as.character(platinum_set))
+      }
+      platinum_strata <- tibble(
+        DFCI_MRN = as.character(patient_df[[ID_COL]]),
+        stratification = "Platinum status",
+        stratum = if_else(platinum_value == 1, "Platinum", "Non-platinum")
+      ) %>%
+        filter(DFCI_MRN %in% cohort_mrns_long) %>%
+        distinct(DFCI_MRN, stratification, .keep_all = TRUE)
+
+      coverage_strata <- platinum_strata
+      if (!is.null(llm_lookup)) {
+        nepc_strata <- llm_lookup %>%
+          transmute(
+            DFCI_MRN = as.character(DFCI_MRN),
+            stratification = "NEPC status",
+            stratum = case_when(
+              suppressWarnings(as.numeric(has_nepc)) == 0 ~ "has_nepc=0",
+              suppressWarnings(as.numeric(has_nepc)) == 1 ~ "has_nepc=1",
+              TRUE ~ NA_character_
+            )
+          ) %>%
+          filter(!is.na(stratum)) %>%
+          distinct(DFCI_MRN, stratification, .keep_all = TRUE)
+        coverage_strata <- bind_rows(coverage_strata, nepc_strata)
+      }
+
+      pre_lab_summary <- canonical_long_df %>%
+        filter(LAB_GROUP %in% coverage_labs, t_rel >= -PRE_DAYS, t_rel < 0) %>%
+        group_by(DFCI_MRN = as.character(DFCI_MRN), LAB_GROUP) %>%
+        summarise(
+          n_pre = n(),
+          n_pre_180 = sum(t_rel >= -BIN_WIDTH_DAYS),
+          .groups = "drop"
+        )
+      coverage_patient <- crossing(
+        coverage_strata,
+        LAB_GROUP = coverage_labs
+      ) %>%
+        left_join(pre_lab_summary, by = c("DFCI_MRN", "LAB_GROUP")) %>%
+        mutate(
+          n_pre = coalesce(as.integer(n_pre), 0L),
+          n_pre_180 = coalesce(as.integer(n_pre_180), 0L)
+        )
+
+      coverage_colors <- c(
+        "Non-platinum" = PLAT_COLORS[["0"]],
+        "Platinum" = PLAT_COLORS[["1"]],
+        "has_nepc=0" = KM_PALETTE[[1]],
+        "has_nepc=1" = KM_PALETTE[[2]]
+      )
+
+      # 1) Direct answer: how many patients have any pre-ADT result, and how
+      # many have one close enough to ADT initiation to characterize baseline?
+      coverage_any <- coverage_patient %>%
+        transmute(
+          stratification, stratum, LAB_GROUP,
+          `Any in prior 5 years` = n_pre > 0,
+          `Within 180 days before ADT` = n_pre_180 > 0
+        ) %>%
+        pivot_longer(
+          cols = c(`Any in prior 5 years`, `Within 180 days before ADT`),
+          names_to = "window", values_to = "covered"
+        ) %>%
+        group_by(stratification, stratum, LAB_GROUP, window) %>%
+        summarise(n_patients = n(), n_covered = sum(covered), .groups = "drop") %>%
+        mutate(ci = map2(n_covered, n_patients, wilson_ci)) %>%
+        unnest_wider(ci)
+      p_coverage_any <- ggplot(
+        coverage_any,
+        aes(stratum, phat, fill = window, group = window)
+      ) +
+        geom_col(position = position_dodge(width = 0.78), width = 0.68) +
+        geom_errorbar(
+          aes(ymin = lo, ymax = hi),
+          position = position_dodge(width = 0.78), width = 0.18, linewidth = 0.45
+        ) +
+        geom_text(
+          aes(label = sprintf("%d/%d", n_covered, n_patients)),
+          position = position_dodge(width = 0.78), vjust = -0.45, size = 2.7
+        ) +
+        facet_grid(LAB_GROUP ~ stratification, scales = "free_x", space = "free_x") +
+        scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+        coord_cartesian(ylim = c(0, 1.08), clip = "off") +
+        scale_fill_manual(values = c("#4863a0", "#d9903d"), name = NULL) +
+        labs(
+          x = NULL, y = "Patients with at least one measurement",
+          title = sprintf("Pre-ADT PSA and testosterone coverage — %s cohort", COHORT_DISPLAY),
+          subtitle = "Bars use the full stratum denominator; error bars are 95% Wilson intervals.",
+          caption = "NEPC panels include classifier-labeled patients only. Day 0 is excluded."
+        ) +
+        theme_fig() +
+        theme(axis.text.x = element_text(angle = 20, hjust = 1),
+              legend.position = "top")
+      save_fig(
+        p_coverage_any, OUT_DIR, "pre_adt_coverage_any_psa_testosterone",
+        width = 11, height = 7.2, force_overwrite = TRUE
+      )
+      if (show) print(p_coverage_any)
+
+      # 2) Patient-level test burden, including the zero-count category that
+      # disappears from ordinary longitudinal plots.
+      coverage_counts <- coverage_patient %>%
+        mutate(
+          count_group = case_when(
+            n_pre == 0 ~ "0",
+            n_pre == 1 ~ "1",
+            n_pre <= 3 ~ "2-3",
+            n_pre <= 9 ~ "4-9",
+            TRUE ~ "10+"
+          ),
+          count_group = factor(count_group, levels = c("0", "1", "2-3", "4-9", "10+"))
+        ) %>%
+        count(stratification, stratum, LAB_GROUP, count_group, name = "n") %>%
+        group_by(stratification, stratum, LAB_GROUP) %>%
+        mutate(fraction = n / sum(n)) %>%
+        ungroup()
+      p_coverage_counts <- ggplot(
+        coverage_counts, aes(stratum, fraction, fill = count_group)
+      ) +
+        geom_col(width = 0.7, color = "white", linewidth = 0.2) +
+        facet_grid(LAB_GROUP ~ stratification, scales = "free_x", space = "free_x") +
+        scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+        scale_fill_manual(
+          values = c("0" = "#d73027", "1" = "#fc8d59", "2-3" = "#fee08b",
+                     "4-9" = "#91cf60", "10+" = "#1a9850"),
+          name = "Measurements in prior 5 years"
+        ) +
+        labs(
+          x = NULL, y = "Patients",
+          title = sprintf("Pre-ADT androgen-lab measurement burden — %s cohort", COHORT_DISPLAY),
+          subtitle = "Each bar includes patients with no pre-ADT PSA or testosterone measurement.",
+          caption = "NEPC panels include classifier-labeled patients only."
+        ) +
+        theme_fig() +
+        theme(axis.text.x = element_text(angle = 20, hjust = 1),
+              legend.position = "top")
+      save_fig(
+        p_coverage_counts, OUT_DIR, "pre_adt_coverage_counts_psa_testosterone",
+        width = 11, height = 7.2, force_overwrite = TRUE
+      )
+      if (show) print(p_coverage_counts)
+
+      # 3) Availability in each zero-anchored 180-day bin. The denominator is
+      # fixed within a stratum, so falling lines reflect thinning observation
+      # coverage rather than changing cohort composition.
+      pre_edges <- anchored_bin_edges(PRE_DAYS, 0, BIN_WIDTH_DAYS)
+      pre_bin_factor <- cut(
+        numeric(0), breaks = pre_edges, include.lowest = TRUE, right = FALSE
+      )
+      pre_bin_levels <- levels(pre_bin_factor)
+      pre_bin_mids <- (head(pre_edges, -1) + tail(pre_edges, -1)) / 2
+      names(pre_bin_mids) <- pre_bin_levels
+      pre_bin_denominators <- coverage_strata %>%
+        count(stratification, stratum, name = "n_patients")
+      pre_bin_counts <- canonical_long_df %>%
+        filter(LAB_GROUP %in% coverage_labs, t_rel >= -PRE_DAYS, t_rel < 0) %>%
+        transmute(
+          DFCI_MRN = as.character(DFCI_MRN), LAB_GROUP,
+          t_bin = as.character(cut(
+            t_rel, breaks = pre_edges, include.lowest = TRUE, right = FALSE
+          ))
+        ) %>%
+        inner_join(coverage_strata, by = "DFCI_MRN") %>%
+        distinct(DFCI_MRN, LAB_GROUP, t_bin, stratification, stratum) %>%
+        count(stratification, stratum, LAB_GROUP, t_bin, name = "n_covered")
+      coverage_by_bin <- crossing(
+        pre_bin_denominators,
+        LAB_GROUP = coverage_labs,
+        t_bin = pre_bin_levels
+      ) %>%
+        left_join(
+          pre_bin_counts,
+          by = c("stratification", "stratum", "LAB_GROUP", "t_bin")
+        ) %>%
+        mutate(
+          n_covered = coalesce(n_covered, 0L),
+          fraction = n_covered / n_patients,
+          t_years = unname(pre_bin_mids[t_bin]) / 365.25
+        )
+      p_coverage_bins <- ggplot(
+        coverage_by_bin,
+        aes(t_years, fraction, color = stratum, group = stratum)
+      ) +
+        geom_vline(xintercept = 0, color = "#2c3e50", linetype = "dotted",
+                   linewidth = 0.8, alpha = 0.7) +
+        geom_line(linewidth = 0.9) +
+        geom_point(size = 1.7) +
+        facet_grid(LAB_GROUP ~ stratification) +
+        scale_color_manual(values = coverage_colors, name = NULL) +
+        scale_x_continuous(breaks = seq(-5, 0, by = 1), limits = c(-5, 0)) +
+        scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+        labs(
+          x = "Years before ADT initiation (180-day bins)",
+          y = "Patients with a measurement in bin",
+          title = sprintf("Pre-ADT lab availability over time — %s cohort", COHORT_DISPLAY),
+          subtitle = "The denominator is fixed to all patients in each platinum or labeled NEPC stratum.",
+          caption = "Each patient contributes at most once per bin. Day 0 begins the post-ADT period."
+        ) +
+        theme_fig() +
+        theme(legend.position = "top")
+      save_fig(
+        p_coverage_bins, OUT_DIR, "pre_adt_coverage_by_bin_psa_testosterone",
+        width = 11, height = 7.2, force_overwrite = TRUE
+      )
+      if (show) print(p_coverage_bins)
     }
 
     for (lab_group in labs_present) {

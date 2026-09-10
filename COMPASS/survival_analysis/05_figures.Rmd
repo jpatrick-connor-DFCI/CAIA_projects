@@ -25,13 +25,18 @@ single directory listing rather than twelve paths differing mid-string. Each
 treatment arm keeps its own subtree, but endpoint, patient subset and exclusion
 all live in the leaf filename:
 
-`FIG_ROOT/<ARM>/by_figure/<group>/<plot-stem>/<endpoint>__<subset>__<exclusion>.png`
+`FIG_ROOT/<ARM>/by_figure/<group>/<trimmed-artifact-name>/<endpoint>__<subset>__<exclusion>.png`
+
+Artifact names omit information already supplied by their parent folders. For
+example, a `figure3_` prefix is removed inside `figure3/`, and a PSA
+longitudinal artifact omits both `longitudinal_` and `_psa` inside
+`labs/Androgen axis/PSA/longitudinal/`.
 
 so one leaf holds all twelve cohort x endpoint panels, endpoint first so they
 sort into two contiguous six-cohort blocks:
 
 ```
-ADT/by_figure/figure3/figure3_univariate_landmark180/
+ADT/by_figure/figure3/univariate_landmark180/
     nepc__all__incl.png                 nepc__all__noprecastrate.png
     nepc__metastatic_adt__incl.png      nepc__metastatic_adt__noprecastrate.png
     nepc__metastatic_llm__incl.png      nepc__metastatic_llm__noprecastrate.png
@@ -63,6 +68,12 @@ fREML and shrinkage select smoothness without depending on Python GAM outputs.
 Both figure sets are emitted on the original scale and in log space. The log
 versions transform each lab measurement with `log1p` before patient/bin
 aggregation or GAM fitting and use an `_log` filename suffix.
+For the ADT arm, three additional PSA/testosterone diagnostics quantify the
+pre-ADT data supporting those trajectories: any and recent measurement
+coverage, patient-level five-year measurement-count categories (including
+zero), and zero-anchored 180-day-bin availability. Platinum panels use the
+entire analysis-cohort stratum as their denominator; NEPC panels use all
+classifier-labeled cohort patients, including those with no androgen lab.
 
 Figure 3b adds the somatic, Gleason, and PRS univariate associations as their
 own plots, one per index analysis. Each is built on its own cohort and index
