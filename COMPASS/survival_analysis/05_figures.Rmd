@@ -60,17 +60,19 @@ pass and skipped for the other cells. AVPC confusion, multi-class subtype, and
 AVPC/NEPC enrichment panels are not generated.
 
 All outputs under `by_figure/labs/` are likewise emitted only by the platinum
-pass. Lab outputs are limited to longitudinal summaries and R-fitted GAMs;
-the distribution and quartile-KM families are retired. A second NEPC-labelled
-copy would not represent a different endpoint analysis. Each run removes
-legacy `nepc__*.png` lab leaves for its cohort.
+pass. Lab outputs are limited to longitudinal summaries; R-fitted GAM panels
+remain available but are toggled off by default. The distribution and
+quartile-KM families are retired. A second NEPC-labelled copy would not
+represent a different endpoint analysis. Each run removes legacy
+`nepc__*.png` lab leaves for its cohort.
 Longitudinal summaries use 180-day bins from one year before through five
 years after the treatment anchor, with day 0 as a hard boundary. A second
-trajectory set is fit directly during plotting with `mgcv::bam`;
-fREML and shrinkage select smoothness without depending on Python GAM outputs.
-Both figure sets are emitted on the original scale and in log space. The log
-versions transform each lab measurement with `log1p` before patient/bin
-aggregation or GAM fitting and use an `_log` filename suffix.
+trajectory set can be fit directly during plotting with `mgcv::bam` when
+`PLOT_GAM_TRAJECTORIES` is enabled; fREML and shrinkage select smoothness
+without depending on Python GAM outputs. Both implementations support the
+original scale and log space. The log versions transform each lab measurement
+with `log1p` before patient/bin aggregation or GAM fitting and use an `_log`
+filename suffix.
 Trajectory and GAM titles contain only the cohort definition and contributing
 patient count; the lab, scale, and stratum remain identified by the axes,
 legend, and artifact path.
@@ -142,6 +144,9 @@ stopifnot(
 # Non-androgen labs remain available to models and aggregate feature plots.
 PLOT_NON_ANDROGEN_DISTRIBUTIONS <- FALSE
 PLOT_NON_ANDROGEN_LAB_FIGURES <- FALSE
+# Keep the R/mgcv fitting implementation available without running its
+# comparatively expensive trajectory fits during the default figure knit.
+PLOT_GAM_TRAJECTORIES <- FALSE
 
 # Rendering profile. The default is optimized for iterative work: 300 dpi,
 # composites instead of duplicate component+composite PNGs, and existing
@@ -167,11 +172,12 @@ if (!pdf_value %in% c("true", "false", "1", "0", "yes", "no"))
   stop("COMPASS_RENDER_PDF must be true or false")
 RENDER_PDF <- pdf_value %in% c("true", "1", "yes")
 
-# Parallelize the cohort x endpoint cells directly so the full render can use
-# more than the two endpoint slots. Override this default through
-# COMPASS_RENDER_WORKERS when a lower-memory run is needed.
+# Parallelize cohort x endpoint cells, but keep the default conservative: each
+# render holds large plotting data and GAM fits, so launching all twelve cells
+# together can exhaust memory and make the knit appear to freeze. Increase the
+# worker count explicitly only on a host with enough RAM.
 RENDER_WORKERS <- suppressWarnings(as.integer(
-  Sys.getenv("COMPASS_RENDER_WORKERS", "12")
+  Sys.getenv("COMPASS_RENDER_WORKERS", "2")
 ))
 if (is.na(RENDER_WORKERS) || RENDER_WORKERS < 1L)
   stop("COMPASS_RENDER_WORKERS must be a positive integer")
@@ -260,10 +266,10 @@ accepts any run label in `SUPPORTED_COHORTS`, so the ARPI arm is rendered by
 naming its labels, and a retired tree that still exists on disk (an
 `adt_localized` or `_avpc` build) can be re-rendered by naming it explicitly.
 
-Each cohort x endpoint cell is rendered independently, with up to twelve cells
-running concurrently. A failure in one is reported rather than abandoning the
-other 11. Any failures are re-reported at the end and the chunk then fails, so
-a partial render cannot pass silently.
+Each cohort x endpoint cell is rendered independently, with two cells running
+concurrently by default. A failure in one is reported rather than abandoning
+the other 11. Any failures are re-reported at the end and the chunk then fails,
+so a partial render cannot pass silently.
 
 ```{r render-figures}
 render_cell <- function(COHORT, ENDPOINT) {
@@ -278,6 +284,7 @@ render_cell <- function(COHORT, ENDPOINT) {
       endpoint = ENDPOINT,
       plot_non_androgen_distributions = PLOT_NON_ANDROGEN_DISTRIBUTIONS,
       plot_non_androgen_lab_figures = PLOT_NON_ANDROGEN_LAB_FIGURES,
+      plot_gam_trajectories = PLOT_GAM_TRAJECTORIES,
       save_dpi = RENDER_DPI,
       save_pdf = RENDER_PDF,
       output_mode = RENDER_OUTPUT_MODE,

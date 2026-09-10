@@ -95,6 +95,16 @@ def test_plotting_gams_are_fit_in_r_with_reml_tuning():
     assert 'sprintf("gam_longitudinal_has_nepc_%s%s"' in block
 
 
+def test_figure_notebook_toggles_gam_fitting_off_without_removing_it():
+    notebook = FIGURES_RMD.read_text()
+    pipeline = PIPELINE_R.read_text()
+    assert "PLOT_GAM_TRAJECTORIES <- FALSE" in notebook
+    assert "plot_gam_trajectories = PLOT_GAM_TRAJECTORIES" in notebook
+    assert "plot_gam_trajectories = TRUE" in pipeline
+    assert "if (!plot_gam_trajectories)" in pipeline
+    assert "mgcv::bam(" in pipeline
+
+
 def test_longitudinal_and_gam_figures_also_emit_log_space_versions():
     source = PIPELINE_R.read_text()
     start = source.index("patient_bin_trajectory <- function")
@@ -159,9 +169,9 @@ def test_output_artifact_names_drop_redundant_parent_tokens():
     assert "remove_legacy_artifacts <- function" in source
 
 
-def test_figure_notebook_uses_twelve_cell_workers():
+def test_figure_notebook_defaults_to_two_cell_workers():
     source = FIGURES_RMD.read_text()
-    assert 'Sys.getenv("COMPASS_RENDER_WORKERS", "12")' in source
+    assert 'Sys.getenv("COMPASS_RENDER_WORKERS", "2")' in source
     assert "render_grid <- tidyr::crossing(COHORT = COHORTS, ENDPOINT = ENDPOINTS)" in source
     assert "n_workers <- min(RENDER_WORKERS, nrow(render_grid))" in source
     assert "mc.cores = n_workers" in source

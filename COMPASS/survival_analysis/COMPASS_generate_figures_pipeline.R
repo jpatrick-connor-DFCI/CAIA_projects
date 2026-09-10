@@ -684,6 +684,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                              llm_annotations_path = DEFAULT_LLM_ANNOTATIONS_PATH,
                              plot_non_androgen_distributions = FALSE,
                              plot_non_androgen_lab_figures = FALSE,
+                             plot_gam_trajectories = TRUE,
                              save_dpi = SAVE_DPI,
                              save_pdf = FALSE,
                              output_mode = c("all", "composite", "panels"),
@@ -728,6 +729,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       length(plot_non_androgen_lab_figures) != 1 ||
       is.na(plot_non_androgen_lab_figures))
     stop("plot_non_androgen_lab_figures must be one non-missing logical value")
+  if (!is.logical(plot_gam_trajectories) ||
+      length(plot_gam_trajectories) != 1 ||
+      is.na(plot_gam_trajectories))
+    stop("plot_gam_trajectories must be one non-missing logical value")
   COHORT_DISPLAY <- cohort_display(COHORT)
   ENDPOINT_DISPLAY <- toupper(ENDPOINT)
   message(sprintf("Generating figures for cohort: %s, endpoint: %s",
@@ -3515,7 +3520,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
             plot.caption = element_text(size = 7.5, color = COLOR_NEUTRAL_INK))
   }
 
-  if (!is.null(canonical_long_df)) {
+  if (!plot_gam_trajectories) {
+    message("R-fitted GAM trajectories: disabled; skipping")
+  } else if (!is.null(canonical_long_df)) {
     for (lab_group in labs_present) {
       slug <- lab_stem_slug(lab_group)
       lab_window_mrns <- group_df %>%
