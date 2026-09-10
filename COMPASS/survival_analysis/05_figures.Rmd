@@ -13,9 +13,9 @@ exclusion -- for the **NEPC** and **platinum** endpoints. ARPI remains
 available by explicit request.
 
 The AVPC endpoint and the localized-adjuvant cohort are retired; no such trees
-are built. AVPC survives elsewhere as a *phenotype label* (`has_avpc`,
-`primary_label`) in Figure 2's classifier validation, which is a different
-thing from the retired survival endpoint.
+are built. AVPC and multi-class `primary_label` fields may be read while
+normalizing classifier inputs, but no figures are generated from them. Figure
+stratifications are limited to platinum and binary NEPC status.
 
 The document reads the merged `profile_data` run under `.../CAIA/COMPASS`
 and writes to `figures/CAIA/COMPASS`.
@@ -40,19 +40,23 @@ ADT/by_figure/figure3/figure3_univariate_landmark180/
     platinum__metastatic_llm__incl.png  platinum__metastatic_llm__noprecastrate.png
 ```
 
-`generate_figures()` also refreshes a cohort-major view of symlinks for the
-cell it just rendered, for the "everything for one cohort" case:
-`FIG_ROOT/<ARM>/by_cohort/<subset>__<exclusion>/<endpoint>/<group>/<plot-stem>.png`.
-Real files live only under `by_figure/`.
+`by_figure/` is the sole output tree. The generator removes the retired
+`by_cohort/` mirror left by older runs so downloads cannot dereference its
+symlinks into duplicate files.
 
 Plot PDFs are not generated. Tables remain CSV/Markdown and follow the same
 leaf-naming convention. There is no `R/` language subdirectory.
 
-Figure 2 v3 (LLM classifier validation and platinum enrichment over every
-ADT-exposed patient) describes the label set and the platinum MRN list rather
-than a modelled endpoint or restricted cohort, so it is emitted once from the
-canonical `adt` / platinum pass and skipped for the other cells. It is the only Figure 2 variant retained;
-the earlier v0/v1/v2 variants have been removed.
+Figure 2 v3 validates the binary `has_nepc` classifier call over every
+ADT-exposed patient. It is emitted once from the canonical `adt` / platinum
+pass and skipped for the other cells. AVPC confusion, multi-class subtype, and
+AVPC/NEPC enrichment panels are not generated.
+
+All outputs under `by_figure/labs/` are likewise emitted only by the platinum
+pass. Their KM curves model time-to-platinum, their distributions split on
+platinum status, and their trajectories are descriptive platinum/classifier
+strata; a second NEPC-labelled copy would not represent a different endpoint
+analysis. Each run removes legacy `nepc__*.png` lab leaves for its cohort.
 
 Figure 3b adds the somatic, Gleason, and PRS univariate associations as their
 own plots, one per index analysis. Each is built on its own cohort and index
@@ -123,8 +127,10 @@ PLOT_NON_ANDROGEN_LAB_FIGURES <- FALSE
 
 # Rendering profile. The default is optimized for iterative work: 300 dpi,
 # composites instead of duplicate component+composite PNGs, and existing
-# artifacts are retained. Set COMPASS_RENDER_PROFILE=publication for the
-# original 600-dpi, all-panels, forced-regeneration behavior.
+# artifacts are retained. Longitudinal lab panels are always refreshed because
+# their cohort membership and binning rules can change without changing their
+# paths. Set COMPASS_RENDER_PROFILE=publication for the original 600-dpi,
+# all-panels, forced-regeneration behavior.
 RENDER_PROFILE <- tolower(Sys.getenv("COMPASS_RENDER_PROFILE", "fast"))
 if (!RENDER_PROFILE %in% c("fast", "publication"))
   stop("COMPASS_RENDER_PROFILE must be 'fast' or 'publication'")

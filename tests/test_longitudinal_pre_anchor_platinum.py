@@ -1,165 +1,76 @@
-"""Longitudinal trajectory panels must exclude pre-anchor platinum exposure.
+"""Longitudinal figure cohort and endpoint scoping regressions.
 
-The platinum endpoint gates its cohort on ``t_platinum > 0`` in
-``survival_common.cohort.make_outcome_df``, so its ``aggregated_landmark*.csv``
-files carry no patient treated with platinum before the landmark. The NEPC and
-AVPC endpoints deliberately skip that gate ("pre-anchor platinum exposure is
-irrelevant here"), so their aggregated CSVs *do* retain such patients.
-
-``aggregated_landmark_mrns`` in COMPASS_generate_figures_pipeline.R is the sole
-cohort gate for the Figure 7 trajectory panels, and the GAM block re-reads the
-same CSVs for its own strata. Both must drop pre-anchor platinum patients, or a
-NEPC/AVPC longitudinal figure plots patients whose PLATINUM==1 label describes
-treatment history rather than an incident post-landmark event -- and the
-"Platinum" trace stops matching the prediction/univariate/multivariate cohort.
-
-Durations in these CSVs are already landmark-rebased, so ``t_platinum <= 0`` is
-exactly the pre-landmark exposure to exclude.
+Descriptive longitudinal panels use the exact base-landmark cohort and are
+endpoint-independent. GAM panels remain landmark/endpoint-specific and still
+exclude platinum exposure at or before each landmark.
 """
 
-from __future__ import annotations
-
-import shutil
-import subprocess
-import textwrap
 from pathlib import Path
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_R = (
     REPO_ROOT / "COMPASS" / "survival_analysis" / "COMPASS_generate_figures_pipeline.R"
 )
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("Rscript") is None, reason="Rscript is not available"
-)
+
+def test_descriptive_longitudinal_uses_exact_base_cohort():
+    source = PIPELINE_R.read_text()
+    assert "cohort_mrns <- unique(as.character(patient_df[[ID_COL]]))" in source
+    assert "aggregated_landmark_mrns <- function" not in source
+    assert "restricted to exact base-landmark cohort" in source
 
 
-def _extract_nested_function(name: str) -> str:
-    """Return a function defined at any indent level, by brace balance.
-
-    ``aggregated_landmark_mrns`` lives inside ``generate_figures``, so the
-    column-0 extractor in test_figure_pipeline_endpoints.py does not reach it.
-    """
-    lines = PIPELINE_R.read_text().split("\n")
-    start = next(
-        i
-        for i, line in enumerate(lines)
-        if line.strip().startswith(f"{name} <- function")
-    )
-    depth = 0
-    for i in range(start, len(lines)):
-        depth += lines[i].count("{") - lines[i].count("}")
-        if depth == 0 and i > start:
-            return textwrap.dedent("\n".join(lines[start : i + 1]))
-    raise AssertionError(f"unterminated function: {name}")
+def test_descriptive_longitudinal_is_endpoint_independent_and_fresh():
+    source = PIPELINE_R.read_text()
+    assert "if (!EMIT_ENDPOINT_INDEPENDENT) {" in source
+    assert "canonical_long_df <- load_canonical_longitudinal()" in source
+    assert "Per-lab figures: removed %d legacy NEPC-labelled file(s)" in source
+    assert source.count("force_overwrite = TRUE") >= 2
 
 
-def _run_r(script: str, tmp_path: Path) -> str:
-    path = tmp_path / "check.R"
-    path.write_text(script)
-    result = subprocess.run(
-        ["Rscript", str(path)], capture_output=True, text=True, cwd=tmp_path
-    )
-    if result.returncode != 0:
-        pytest.fail(f"Rscript failed:\n{result.stdout}\n{result.stderr}")
-    return result.stdout
+def test_every_lab_figure_family_is_platinum_only():
+    source = PIPELINE_R.read_text()
+    gate = source.index("if (!EMIT_ENDPOINT_INDEPENDENT) {", source.index("labs_output_root"))
+    supplement = source.index("Supplement -- localized-adjuvant vs metastatic", gate)
+    block = source[gate:supplement]
+    assert "plot_km_androgen_quartile" in block
+    assert "plot_androgen_dist_by_platinum" in block
+    assert "load_canonical_longitudinal" in block
+    assert "plot_gam_curve_panel" in block
+    assert 'retired_lab_leaf <- paste0("nepc__", cohort_leaf_slug(COHORT), ".png")' in source
 
 
-def _harness(body: str, landmarks: str = "c(0)") -> str:
-    return textwrap.dedent(
-        """
-        suppressPackageStartupMessages({{library(dplyr); library(readr)}})
-        {fn}
-        INPUTS_DIR <- tempdir()
-        LANDMARKS <- {landmarks}
-        unlink(list.files(INPUTS_DIR, "aggregated_landmark", full.names = TRUE))
-        {body}
-        """
-    ).format(
-        fn=_extract_nested_function("aggregated_landmark_mrns"),
-        landmarks=landmarks,
-        body=textwrap.dedent(body),
-    )
+def test_figure_strata_are_limited_to_binary_nepc():
+    source = PIPELINE_R.read_text()
+    assert 'FIGURE_LLM_STRATA <- LLM_STRATA["has_nepc"]' in source
+    assert "for (scheme_name in names(FIGURE_LLM_STRATA))" in source
+    assert "for (scheme_name in names(LLM_STRATA))" not in source
+    assert 'save_fig(p_has_avpc_v3' not in source
+    assert 'save_fig(pB_v3' not in source
+    assert 'save_fig(pC_v3' not in source
+    assert '"figure2v3_nepc_validation"' in source
 
 
-def test_drops_platinum_at_or_before_the_landmark(tmp_path):
-    """t_platinum <= 0 is pre-landmark exposure and must not reach the figure.
-
-    p2's platinum predates the anchor and p4's lands exactly on it; both are
-    excluded. p1 (incident platinum) and p3 (never platinum) are kept.
-    """
-    script = _harness(
-        """
-        write_csv(tibble(
-          DFCI_MRN   = c("p1", "p2", "p3", "p4"),
-          PLATINUM   = c(1, 1, 0, 1),
-          t_platinum = c(200, -30, 500, 0)
-        ), file.path(INPUTS_DIR, "aggregated_landmark0.csv"))
-        cat(paste(sort(aggregated_landmark_mrns("DFCI_MRN")), collapse = ","), "\\n")
-        """
-    )
-    assert _run_r(script, tmp_path).strip() == "p1,p3"
+def test_descriptive_longitudinal_titles_name_the_cohort():
+    source = PIPELINE_R.read_text()
+    assert "lab_group, COHORT_DISPLAY, ANCHOR_LABEL" in source
+    assert "scheme_name, COHORT_DISPLAY, ANCHOR_LABEL" in source
 
 
-def test_exclusion_holds_across_every_landmark(tmp_path):
-    """The union over landmarks must not re-admit a patient excluded elsewhere.
-
-    p2 is pre-anchor at both landmarks. Were the filter applied to only one
-    CSV, the union would let p2 back into the plotted cohort.
-    """
-    script = _harness(
-        """
-        write_csv(tibble(
-          DFCI_MRN   = c("p1", "p2", "p3"),
-          PLATINUM   = c(1, 1, 0),
-          t_platinum = c(200, -30, 500)
-        ), file.path(INPUTS_DIR, "aggregated_landmark0.csv"))
-        write_csv(tibble(
-          DFCI_MRN   = c("p1", "p2", "p5"),
-          PLATINUM   = c(1, 1, 1),
-          t_platinum = c(110, -120, 300)
-        ), file.path(INPUTS_DIR, "aggregated_landmark90.csv"))
-        cat(paste(sort(aggregated_landmark_mrns("DFCI_MRN")), collapse = ","), "\\n")
-        """,
-        landmarks="c(0, 90)",
-    )
-    assert _run_r(script, tmp_path).strip() == "p1,p3,p5"
-
-
-def test_missing_timing_columns_keep_the_cohort(tmp_path):
-    """An aggregated CSV without t_platinum must warn, not silently empty out."""
-    script = _harness(
-        """
-        write_csv(tibble(DFCI_MRN = c("a", "b"), PLATINUM = c(1, 0)),
-                  file.path(INPUTS_DIR, "aggregated_landmark0.csv"))
-        cat(paste(sort(aggregated_landmark_mrns("DFCI_MRN")), collapse = ","), "\\n")
-        """
-    )
-    assert _run_r(script, tmp_path).strip() == "a,b"
-
-
-def test_fully_excluded_cohort_returns_null(tmp_path):
-    """No eligible patient must return NULL so the caller skips the figure.
-
-    Returning an empty vector instead would filter the trajectory frame to zero
-    rows and emit an empty panel.
-    """
-    script = _harness(
-        """
-        write_csv(tibble(DFCI_MRN = "x", PLATINUM = 1, t_platinum = -5),
-                  file.path(INPUTS_DIR, "aggregated_landmark0.csv"))
-        cat(is.null(aggregated_landmark_mrns("DFCI_MRN")), "\\n")
-        """
-    )
-    assert _run_r(script, tmp_path).strip() == "TRUE"
+def test_by_figure_is_the_only_output_layout():
+    source = PIPELINE_R.read_text()
+    assert 'file.path(FIG_ROOT, "by_figure"' in source
+    assert 'legacy_cohort_roots <- file.path(fig_root, toupper(COHORT_ARMS), "by_cohort")' in source
+    assert "unlink(legacy_cohort_root, recursive = TRUE, force = TRUE)" in source
+    assert "rebuild_cohort_view" not in source
+    assert "file.symlink" not in source
 
 
 def test_gam_block_also_filters_pre_anchor_platinum():
-    """The GAM strata re-read the aggregated CSVs and need the same exclusion."""
+    """The GAM strata re-read aggregated CSVs and need the same exclusion."""
     source = PIPELINE_R.read_text()
-    start = source.index("agg_raw <- read_csv(")
+    start = source.index("agg_raw <- load_aggregated_landmark(")
     block = source[start : start + 2000]
     assert '"t_platinum"' in block, "GAM read must select t_platinum"
     assert "agg_pre_anchor" in block, "GAM block must compute the pre-anchor mask"
