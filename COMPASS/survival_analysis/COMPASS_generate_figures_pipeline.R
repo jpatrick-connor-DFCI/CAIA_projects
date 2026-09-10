@@ -957,8 +957,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   is_component_stem <- function(stem) {
     stem %in% component_stems ||
       startsWith(stem, "figure4a_discrimination_") ||
-      (startsWith(stem, "figure4b_importance_") &&
-         grepl("_landmark(0|90)$", stem))
+      startsWith(stem, "figure4b_importance_")
   }
   should_save_figure <- function(stem) {
     if (identical(output_mode, "all")) return(TRUE)
@@ -1154,10 +1153,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   overlay_hist <- function(series, xlab, title, bins = 50, xlim_max = NULL,
                            use_count = FALSE, axis_text_size = NULL) {
     v <- suppressWarnings(as.numeric(series)); v <- v[is.finite(v)]
-    if (!is.null(xlim_max)) v <- v[v <= xlim_max]
+    n_total <- length(v)
+    if (!is.null(xlim_max)) v <- v[v >= 0 & v <= xlim_max]
     if (!length(v)) return(ggplot() + annotate("text", x = 0, y = 0, label = "(no data)") +
                              theme_void() + labs(title = title))
-    lab <- sprintf("%s (n=%s)", COHORT_LABEL, format(length(v), big.mark = ","))
+    lab <- if (length(v) == n_total) {
+      sprintf("%s (n=%s)", COHORT_LABEL, format(n_total, big.mark = ","))
+    } else {
+      sprintf("%s (n=%s; %s shown)", COHORT_LABEL,
+              format(n_total, big.mark = ","), format(length(v), big.mark = ","))
+    }
     ylab <- if (use_count) "Count" else "Density"
     p <- ggplot(tibble(v = v), aes(v))
     if (use_count) {
@@ -1261,10 +1266,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   span_series <- record_span_days(labs_df, ID_COL)
   km_inputs <- platinum_km_inputs(patient_df)
   event_rows <- km_inputs$row_id[km_inputs$event == 1]
+  dx_to_anchor <- suppressWarnings(as.numeric(patient_df$t_dx_to_anchor))
+  dx_to_anchor_finite <- dx_to_anchor[is.finite(dx_to_anchor) & dx_to_anchor >= 0]
+  dx_to_anchor_cap <- if (length(dx_to_anchor_finite)) {
+    as.numeric(quantile(dx_to_anchor_finite, 0.99, names = FALSE))
+  } else NULL
   timing_panels <- list(
     overlay_hist(span_series, "Record span (days)", "Per-patient lab record span", 50),
-    overlay_hist(patient_df$t_dx_to_anchor, sprintf("Days: diagnosis → %s", ANCHOR_LABEL),
-                 sprintf("Diagnosis → %s", ANCHOR_LABEL), 50),
+    overlay_hist(dx_to_anchor, sprintf("Days: diagnosis → %s", ANCHOR_LABEL),
+                 sprintf("Diagnosis → %s (through 99th percentile)", ANCHOR_LABEL), 50,
+                 xlim_max = dx_to_anchor_cap),
     overlay_hist(patient_df$t_platinum[event_rows],
                  sprintf("Days from %s to platinum", ANCHOR_LABEL),
                  "Time to platinum", 40,
@@ -1816,9 +1827,15 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     save_fig(pC_v3, OUT_DIR_V3, "figure2v3_enrichment", 4.5, 5.5)
 
     # Reuse the already-built panels; constructing them again here made the
-    # composite repeat their data work before rasterization.
-    left_v3  <- (pA1_v3 + pA2_v3) / pC_v3
-    right_v3 <- pB_v3 +
+    # composite repeat their data work before rasterization. Panel-specific
+    # captions are useful in standalone files but collide inside patchwork, so
+    # the composite carries one shared caption only.
+    without_caption <- function(p) {
+      p + labs(caption = NULL) + theme(plot.caption = element_blank())
+    }
+    left_v3  <- (without_caption(pA1_v3) + without_caption(pA2_v3)) /
+                without_caption(pC_v3)
+    right_v3 <- without_caption(pB_v3) +
       labs(title = "Panel B — subtype landscape (classifier labels, all ADT)")
     full_caption_v3 <- sprintf(paste0(
       "(A) NEPC-vs-rest classifier (LLM_NEPC_classifier_labels.tsv) vs Baca-lab manual ",
@@ -1834,9 +1851,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       plot_layout(widths = c(2, 1.3)) +
       plot_annotation(
         title = "Figure 2 v3 — LLM classifier-derived prostate subtypes (all ADT-exposed patients)",
-        caption = str_wrap(full_caption_v3, 130),
+        caption = str_wrap(full_caption_v3, 110),
         theme = theme(plot.title = element_text(face = "bold", size = 13),
-                      plot.caption = element_text(size = 8.5, color = COLOR_NEUTRAL_INK)))
+                      plot.caption = element_text(size = 8.2, color = COLOR_NEUTRAL_INK,
+                                                  lineheight = 1.05, hjust = 0.5),
+                      plot.margin = margin(8, 10, 12, 10)))
     save_fig(fig2v3, OUT_DIR_V3, "figure2v3_llm_subtype_platinum", 15, 9)
     if (show) print(fig2v3)
   }
@@ -1928,11 +1947,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       scale_fill_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL) +
       scale_size_manual(values = c(`TRUE` = 3.2 * 1.5, `FALSE` = 2.1 * 1.5), guide = "none") +
       coord_cartesian(xlim = PANEL_XLIM, ylim = c(-0.2, max(y_max * 1.10, 5))) +
-      labs(x = "Cox log HR per SD", y = expression(-log[10](p)), title = title) +
-      annotate("text", x = PANEL_XLIM[2], y = 0, label = footer, hjust = 1, vjust = 0,
-               size = 4.4, color = "#5d6d7e", family = "mono") +
+      labs(x = "Cox log HR per SD", y = expression(-log[10](p)), title = title,
+           caption = str_wrap(footer, 88)) +
       theme_fig() +
       theme(plot.title = element_text(face = "bold", size = 18.75),
+            plot.caption = element_text(size = 9, color = "#5d6d7e", family = "mono",
+                                        hjust = 0, lineheight = 1.05),
             axis.title = element_text(size = 16.5),
             axis.text  = element_text(size = 14.25),
             legend.text = element_text(size = 13.5),
@@ -2010,11 +2030,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       scale_color_manual(values = point_colors, breaks = names(point_colors), name = NULL,
                          guide = guide_legend(override.aes = list(size = 4.5, alpha = 1))) +
       coord_cartesian(xlim = PANEL_XLIM, ylim = c(-0.2, max(y_max * 1.10, 5))) +
-      labs(x = "Cox log HR per SD", y = expression(-log[10](p)), title = title) +
-      annotate("text", x = PANEL_XLIM[2], y = 0, label = footer, hjust = 1, vjust = 0,
-               size = 4.4, color = "#5d6d7e", family = "mono") +
+      labs(x = "Cox log HR per SD", y = expression(-log[10](p)), title = title,
+           caption = footer) +
       theme_fig() +
       theme(plot.title = element_text(face = "bold", size = 18.75),
+            plot.caption = element_text(size = 9, color = "#5d6d7e", family = "mono",
+                                        hjust = 0),
             axis.title = element_text(size = 16.5),
             axis.text  = element_text(size = 14.25),
             legend.text = element_text(size = 13.5),
@@ -2449,9 +2470,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
   multivariate_supplement_data <- multivariate_supplement_data %>%
     mutate(
-      metrics_status = if_else(
-        is.finite(mean_auc_t) | is.finite(c_index) | is.finite(integrated_brier),
-        "available", "missing"
+      metrics_status = case_when(
+        is.finite(mean_auc_t) & is.finite(c_index) & is.finite(integrated_brier) ~ "available",
+        is.finite(mean_auc_t) | is.finite(c_index) | is.finite(integrated_brier) ~ "partial",
+        TRUE ~ "missing"
       ),
       source_path = if_else(
         model == "Dynamic-DeepHit",
@@ -2460,7 +2482,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       )
     )
   deephit_landmarks_found <- multivariate_supplement_data %>%
-    filter(model == "Dynamic-DeepHit", metrics_status == "available") %>%
+    filter(model == "Dynamic-DeepHit", metrics_status != "missing") %>%
     pull(landmark_days)
   deephit_status <- if (length(deephit_landmarks_found) > 0) {
     sprintf(
@@ -2495,6 +2517,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         levels = sprintf(
           "%s%d days", ifelse(LANDMARKS > 0, "+", ""), LANDMARKS
         )
+      ),
+      # Nearby model estimates otherwise print directly on top of each other.
+      label_vjust = case_when(
+        model == "Elastic-Net Cox"  ~ -2.2,
+        model == "XGBoost Survival" ~  1.7,
+        TRUE                         ~ -0.6
       )
     )
 
@@ -2516,12 +2544,14 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     geom_line(linewidth = 0.9, na.rm = TRUE) +
     geom_point(size = 2.7, na.rm = TRUE) +
     geom_text(
-      aes(label = ifelse(is.finite(value), sprintf("%.3f", value), "")),
-      vjust = -0.8, size = 2.5, show.legend = FALSE, na.rm = TRUE
+      aes(label = ifelse(is.finite(value), sprintf("%.3f", value), ""),
+          vjust = label_vjust),
+      size = 2.5, show.legend = FALSE, na.rm = TRUE
     ) +
     facet_wrap(~metric, scales = "free_y", nrow = 1) +
     scale_color_manual(values = supplement_colors, drop = FALSE, name = NULL) +
-    scale_y_continuous(labels = label_number(accuracy = 0.01), expand = expansion(mult = c(0.08, 0.2))) +
+    scale_y_continuous(labels = label_number(accuracy = 0.001),
+                       expand = expansion(mult = c(0.14, 0.24))) +
     labs(
       title = "Supplementary Figure — Held-out multivariate model performance",
       subtitle = paste(
@@ -2530,7 +2560,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         deephit_status
       ),
       x = NULL, y = NULL,
-      caption = "Higher AUC(t)/C-index and lower integrated Brier score indicate better performance."
+      caption = paste0(
+        "Higher AUC(t)/C-index and lower integrated Brier score indicate better performance. ",
+        "Gaps indicate unavailable metrics."
+      )
     ) +
     theme_fig() +
     theme(
@@ -2634,8 +2667,13 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   disc_row <- render_discrimination_panel("auc", "Test Mean AUC(t)", show_legend = TRUE) |
               render_discrimination_panel("cindex", "Test C-index", show_legend = FALSE)
 
-  imp_grid <- (importance_panels[["cox_0"]] | importance_panels[["cox_90"]]) /
-              (importance_panels[["xgb_0"]] | importance_panels[["xgb_90"]])
+  # Include every landmark in the composite. The previous hard-coded 2x2 grid
+  # silently omitted day 180 even though its standalone panels were written.
+  imp_grid <- wrap_plots(
+    importance_panels[c("cox_0", "cox_90", "cox_180",
+                        "xgb_0", "xgb_90", "xgb_180")],
+    ncol = 3, byrow = TRUE
+  )
 
   fig4 <- disc_row / imp_grid +
     plot_layout(heights = c(1, 2)) +
@@ -2643,7 +2681,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       title = "Figure 4 \u2014 Multivariate model performance (labs vs. age baseline)",
       theme = theme(plot.title = element_text(face = "bold", size = 13)))
   save_fig(fig4, fig_dir("figure4_multivariate"), "figure4_multivariate_performance",
-           width = 15, height = 13)
+           width = 18, height = 13)
   if (show) print(fig4)
 
   OUT_DIR <- fig_dir("androgen_supplements")
@@ -3087,8 +3125,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # patients have 10y of post-anchor follow-up, so those bins average over a
   # handful of MRNs and the CI ribbon widens accordingly. MIN_BIN_PATIENTS drops
   # bins that cannot support a mean at all rather than drawing a spike through
-  # one patient. Raise it to trade tail reach for stability.
-  MIN_BIN_PATIENTS <- 3
+  # one patient. Require ten patients within each stratum/bin so rare subtype
+  # tails do not turn a handful of observations into large apparent swings.
+  MIN_BIN_PATIENTS <- 10
 
   # bin_group_ci: bins a lab-group's rows into 60-day windows and computes a
   # per-bin group mean +/- 95% CI, grouped by an arbitrary `stratum_col`
@@ -3137,7 +3176,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                 sem = if (n() > 1) sd(LAB_VALUE) / sqrt(n()) else 0, .groups = "drop") %>%
       filter(n >= MIN_BIN_PATIENTS) %>%
       mutate(t_mid = mids[as.character(t_bin)],
-             ci_lo = mean - 1.96 * sem, ci_hi = mean + 1.96 * sem)
+             ci_lo = mean - 1.96 * sem, ci_hi = mean + 1.96 * sem,
+             # PSA and testosterone cannot be negative; normal-approximation
+             # intervals near zero otherwise draw biologically impossible tails.
+             ci_lo = if (lab_group %in% ANDROGEN) pmax(0, ci_lo) else ci_lo)
   }
 
   plot_group_ci_panel <- function(df, lab_group, title, stratum_col = "plat_group",
@@ -3161,9 +3203,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         labels = function(d) sprintf("%g", round(d / 365.25))
       ) +
       labs(x = sprintf("Years from %s (binned, 60d windows)", ANCHOR_LABEL),
-           y = sprintf("%s (mean +/- 95%% CI)", lab_group), title = title) +
+           y = sprintf("%s (mean +/- 95%% CI)", lab_group), title = title,
+           caption = sprintf("Only bins with at least %d patients in a stratum are shown.",
+                             MIN_BIN_PATIENTS)) +
       theme_fig() +
-      theme(plot.title = element_text(face = "bold", size = 11))
+      theme(plot.title = element_text(face = "bold", size = 11),
+            plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0))
   }
 
   if (is.null(canonical_long_df)) {
