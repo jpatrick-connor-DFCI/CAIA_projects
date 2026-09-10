@@ -167,11 +167,11 @@ if (!overwrite_value %in% c("true", "false", "1", "0", "yes", "no"))
   stop("COMPASS_RENDER_OVERWRITE must be true or false")
 RENDER_OVERWRITE <- overwrite_value %in% c("true", "1", "yes")
 
-# Parallelize by endpoint rather than by cohort. Each worker therefore retains
-# its processed longitudinal cache while it renders all six cohorts, and only
-# two copies of the large arm-level table can be resident at once.
+# Parallelize the cohort x endpoint cells directly so the full render can use
+# more than the two endpoint slots. Override this default through
+# COMPASS_RENDER_WORKERS when a lower-memory run is needed.
 RENDER_WORKERS <- suppressWarnings(as.integer(
-  Sys.getenv("COMPASS_RENDER_WORKERS", "2")
+  Sys.getenv("COMPASS_RENDER_WORKERS", "12")
 ))
 if (is.na(RENDER_WORKERS) || RENDER_WORKERS < 1L)
   stop("COMPASS_RENDER_WORKERS must be a positive integer")
@@ -229,73 +229,74 @@ accepts any run label in `SUPPORTED_COHORTS`, so the ARPI arm is rendered by
 naming its labels, and a retired tree that still exists on disk (an
 `adt_localized` or `_avpc` build) can be re-rendered by naming it explicitly.
 
-Each cohort is rendered independently, and a failure in one is reported and
-skipped rather than abandoning the other 11 -- a single cohort with too few
-events should not cost the whole knit. Any failures are re-reported at the end
-and the chunk then fails, so a partial render cannot pass silently.
+Each cohort x endpoint cell is rendered independently, with up to twelve cells
+running concurrently. A failure in one is reported rather than abandoning the
+other 11. Any failures are re-reported at the end and the chunk then fails, so
+a partial render cannot pass silently.
 
 ```{r render-figures}
-render_endpoint <- function(ENDPOINT) {
-  endpoint_failures <- character(0)
-  for (COHORT in COHORTS) {
-    label <- sprintf("%s / %s", cohort_display(COHORT), toupper(ENDPOINT))
-    message(sprintf("\n========== R figures: %s ==========", label))
-    ok <- tryCatch({
-      generate_figures(
-        COHORT,
-        nepc_proj_path = NEPC_PROJ_PATH,
-        fig_root = FIG_ROOT,
-        endpoint = ENDPOINT,
-        plot_non_androgen_distributions = PLOT_NON_ANDROGEN_DISTRIBUTIONS,
-        plot_non_androgen_lab_figures = PLOT_NON_ANDROGEN_LAB_FIGURES,
-        save_dpi = RENDER_DPI,
-        output_mode = RENDER_OUTPUT_MODE,
-        overwrite = RENDER_OVERWRITE
-      )
-      supplement_stem <- "figure4s_multivariate_all_models"
-      supplement_path <- file.path(
-        FIG_ROOT, toupper(cohort_arm(COHORT)), "by_figure", "figure4",
-        supplement_stem,
-        sprintf("%s__%s.png", ENDPOINT, cohort_leaf_slug(COHORT))
-      )
-      # The supplement is the last artifact generate_figures() writes, so its
-      # absence means the pass did not complete even when nothing threw.
-      if (!file.exists(supplement_path))
-        stop("expected multivariate supplement was not generated: ",
-             supplement_path)
-      message("multivariate supplement: ", supplement_path)
-      TRUE
-    }, error = function(e) {
-      message(sprintf("FAILED %s: %s", label, conditionMessage(e)))
-      FALSE
-    })
-    if (ok) {
-      message(sprintf("\nCompleted R figures for %s.", label))
-    } else {
-      endpoint_failures <- c(endpoint_failures, label)
-    }
+render_cell <- function(COHORT, ENDPOINT) {
+  label <- sprintf("%s / %s", cohort_display(COHORT), toupper(ENDPOINT))
+  message(sprintf("\n========== R figures: %s ==========", label))
+  ok <- tryCatch({
+    generate_figures(
+      COHORT,
+      nepc_proj_path = NEPC_PROJ_PATH,
+      fig_root = FIG_ROOT,
+      endpoint = ENDPOINT,
+      plot_non_androgen_distributions = PLOT_NON_ANDROGEN_DISTRIBUTIONS,
+      plot_non_androgen_lab_figures = PLOT_NON_ANDROGEN_LAB_FIGURES,
+      save_dpi = RENDER_DPI,
+      output_mode = RENDER_OUTPUT_MODE,
+      overwrite = RENDER_OVERWRITE
+    )
+    supplement_path <- file.path(
+      FIG_ROOT, toupper(cohort_arm(COHORT)), "by_figure", "figure4",
+      "s_multivariate_all_models",
+      sprintf("%s__%s.png", ENDPOINT, cohort_leaf_slug(COHORT))
+    )
+    # The supplement is the last artifact generate_figures() writes, so its
+    # absence means the pass did not complete even when nothing threw.
+    if (!file.exists(supplement_path))
+      stop("expected multivariate supplement was not generated: ",
+           supplement_path)
+    message("multivariate supplement: ", supplement_path)
+    TRUE
+  }, error = function(e) {
+    message(sprintf("FAILED %s: %s", label, conditionMessage(e)))
+    FALSE
+  })
+  if (ok) {
+    message(sprintf("\nCompleted R figures for %s.", label))
+    character(0)
+  } else {
+    label
   }
-  endpoint_failures
 }
 
-n_workers <- min(RENDER_WORKERS, length(ENDPOINTS))
+render_grid <- tidyr::crossing(COHORT = COHORTS, ENDPOINT = ENDPOINTS)
+render_one <- function(i) {
+  render_cell(render_grid$COHORT[[i]], render_grid$ENDPOINT[[i]])
+}
+n_workers <- min(RENDER_WORKERS, nrow(render_grid))
 if (n_workers > 1L && .Platform$OS.type != "windows") {
-  endpoint_results <- parallel::mclapply(
-    ENDPOINTS, render_endpoint, mc.cores = n_workers, mc.preschedule = TRUE
+  render_results <- parallel::mclapply(
+    seq_len(nrow(render_grid)), render_one,
+    mc.cores = n_workers, mc.preschedule = TRUE
   )
 } else {
   if (n_workers > 1L)
     message("Parallel fork rendering is unavailable on Windows; using one worker.")
-  endpoint_results <- lapply(ENDPOINTS, render_endpoint)
+  render_results <- lapply(seq_len(nrow(render_grid)), render_one)
 }
-worker_errors <- vapply(endpoint_results, inherits, logical(1), what = "try-error")
-render_failures <- unlist(endpoint_results[!worker_errors], use.names = FALSE)
+worker_errors <- vapply(render_results, inherits, logical(1), what = "try-error")
+render_failures <- unlist(render_results[!worker_errors], use.names = FALSE)
 if (any(worker_errors))
   render_failures <- c(
     render_failures,
-    unlist(lapply(ENDPOINTS[worker_errors], function(endpoint) {
-      sprintf("%s / %s (worker failed)",
-              vapply(COHORTS, cohort_display, character(1)), toupper(endpoint))
+    unlist(lapply(which(worker_errors), function(i) {
+      sprintf("%s / %s (worker failed)", cohort_display(render_grid$COHORT[[i]]),
+              toupper(render_grid$ENDPOINT[[i]]))
     }), use.names = FALSE)
   )
 

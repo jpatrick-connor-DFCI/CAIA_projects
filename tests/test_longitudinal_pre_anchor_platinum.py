@@ -12,6 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_R = (
     REPO_ROOT / "COMPASS" / "survival_analysis" / "COMPASS_generate_figures_pipeline.R"
 )
+FIGURES_RMD = REPO_ROOT / "COMPASS" / "survival_analysis" / "05_figures.Rmd"
 
 
 def test_descriptive_longitudinal_uses_exact_base_cohort():
@@ -143,3 +144,11 @@ def test_output_artifact_names_drop_redundant_parent_tokens():
     assert "lab_slug <- lab_stem_slug(lab)" in source
     assert "artifact_name_for_stem(plot_stem, group)" in source
     assert "remove_legacy_artifacts <- function" in source
+
+
+def test_figure_notebook_uses_twelve_cell_workers():
+    source = FIGURES_RMD.read_text()
+    assert 'Sys.getenv("COMPASS_RENDER_WORKERS", "12")' in source
+    assert "render_grid <- tidyr::crossing(COHORT = COHORTS, ENDPOINT = ENDPOINTS)" in source
+    assert "n_workers <- min(RENDER_WORKERS, nrow(render_grid))" in source
+    assert "mc.cores = n_workers" in source
