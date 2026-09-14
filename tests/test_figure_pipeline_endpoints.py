@@ -206,23 +206,12 @@ def test_missing_file_returns_na(tmp_path):
 
 
 def test_figure_roots_do_not_collide():
-    """Every endpoint nests one level below its cohort arm -- platinum included.
-
-    All endpoints share every plot stem, so any two sharing a FIG_ROOT would
-    overwrite each other's panels. Platinum used to keep the un-suffixed
-    cohort root; it is now nested like the rest, so the figure path must be
-    driven by ENDPOINT itself rather than by ENDPOINT_SUFFIX (which stays ""
-    for platinum because it still names the un-suffixed *data* trees).
-    """
+    """Arm, tier, artifact and endpoint/subset/exclusion identify each panel."""
     source = _pipeline_source()
-    assert "FIG_ROOT <- file.path(fig_root, toupper(COHORT), ENDPOINT)" in source, (
-        "every endpoint's figure root must nest under <cohort>/<endpoint>"
-    )
-    assert not re.search(
-        r'if \(!identical\(ENDPOINT_SUFFIX, ""\)\) \{\s*\n\s*'
-        r"FIG_ROOT <- file\.path\(FIG_ROOT, ENDPOINT\)",
-        source,
-    ), "platinum must no longer be special-cased out of the nesting"
+    assert "COHORT_ARM_DIR <- toupper(cohort_arm(COHORT))" in source
+    assert "FIG_ROOT <- file.path(fig_root, COHORT_ARM_DIR)" in source
+    assert 'COHORT_LEAF <- paste0(ENDPOINT, "__", cohort_leaf_slug(COHORT))' in source
+    assert 'file.path(FIG_ROOT, "by_figure", tier, group, artifact_name_for_stem(plot_stem, group))' in source
 
 
 def test_results_trees_are_endpoint_suffixed():
@@ -239,20 +228,17 @@ def test_results_trees_are_endpoint_suffixed():
         )
 
 
-def test_every_supported_endpoint_nests_uniformly():
-    """AVPC takes the same nesting path as NEPC and platinum.
-
-    The FIG_ROOT expression is generic over ENDPOINT, so no endpoint-specific
-    branch should exist (and none is needed) for any supported endpoint.
-    """
-    source = _pipeline_source()
-    assert "FIG_ROOT <- file.path(fig_root, toupper(COHORT), ENDPOINT)" in source
-    # avpc stays in this list though it is retired: the guarantee is that the
-    # expression is generic over ENDPOINT, so reinstating it needs no branch.
-    for endpoint in ("platinum", "nepc", "avpc"):
-        assert not re.search(
-            rf'FIG_ROOT.*identical\(ENDPOINT, "{endpoint}"\)', source
-        ), f"{endpoint} must not be special-cased in the figure root"
+def test_every_supported_endpoint_nests_uniformly(tmp_path):
+    """The primary platinum cohort goes to main; NEPC and variants to supplements."""
+    script = _extract_function("figure_output_tier") + "\n" + textwrap.dedent("""
+        stopifnot(
+          figure_output_tier("adt", "platinum", "figure3_test") == "main",
+          figure_output_tier("adt", "nepc", "figure3_test") == "supplements",
+          figure_output_tier("adt_metastatic_adt", "platinum", "figure3_test") == "supplements",
+          figure_output_tier("arpi", "platinum", "figure3_test") == "supplements")
+        cat("OK")
+    """)
+    assert _run_r(script, tmp_path).strip() == "OK"
 
 
 def test_pipeline_parses(tmp_path):
@@ -301,11 +287,9 @@ def test_supplement_stems_route_to_their_own_figure_group():
     figure1_at = source.index('startsWith(plot_stem, "figure1s")')
     assert supplement_at < figure1_at
 
-    # supplement_adt_intent is not a numbered group, so it keeps the extra
-    # per-stem directory level and must not be swept by the legacy cleanup.
-    numbered = re.search(r"numbered_figure_groups <- c\((.*?)\)", source, re.S)
-    assert numbered is not None
-    assert "supplement_adt_intent" not in numbered.group(1)
+    # All groups retain the artifact level; no numbered-group cleanup remains.
+    assert 'file.path(FIG_ROOT, "by_figure", tier, group, artifact_name_for_stem(plot_stem, group))' in source
+    assert "numbered_figure_groups" not in source
 
 
 def test_supplement_is_gated_to_the_adt_arm():
@@ -314,7 +298,7 @@ def test_supplement_is_gated_to_the_adt_arm():
     source = _pipeline_source()
     supplement_at = source.index("Supplement -- localized-adjuvant vs metastatic")
     section = source[supplement_at:]
-    assert "if (IS_ADT) {" in section
+    assert "if (IS_CANONICAL_ADT && plot_adt_intent_supplement) {" in section
 
 
 def test_supplement_never_refits_anything():
@@ -390,13 +374,12 @@ def test_the_figures_rmd_names_no_retired_endpoint():
 
 
 def test_a_failed_cohort_does_not_abandon_the_rest():
-    """With 16 figure sets, one cohort's failure must not discard the other 15
-    -- but the chunk must still fail overall so a partial render is visible."""
+    """A failed cell does not discard the rest; the final summary still fails."""
     rmd = FIGURES_RMD.read_text()
     render = rmd[rmd.index("```{r render-figures}"):]
     assert "tryCatch(" in render, "per-cohort rendering must be fault-isolated"
     assert "render_failures" in render
     # The summary stop() must come after the loop, not inside it.
-    assert render.index("render_failures <- c(render_failures") < render.index(
+    assert render.index("render_failures <- unlist(render_results[!worker_errors]") < render.index(
         'stop(length(render_failures)'
     )

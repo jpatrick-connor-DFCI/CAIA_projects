@@ -1,5 +1,5 @@
 ---
-title: "Generate COMPASS figures (NEPC and platinum endpoints)"
+title: "COMPASS platinum figures and supplementary analyses"
 output:
   html_document:
     toc: true
@@ -19,33 +19,30 @@ limited to platinum and binary NEPC status.
 The document reads the merged `profile_data` run under `.../CAIA/COMPASS`
 and writes to `figures/CAIA/COMPASS`.
 
-The figure tree is **figure-major**, so comparing one panel across cohorts is a
-single directory listing rather than twelve paths differing mid-string. Each
-treatment arm keeps its own subtree, but endpoint, patient subset and exclusion
-all live in the leaf filename:
+Platinum predictions for the full ADT cohort with pre-ADT castrate patients
+included are the **main figures**. NEPC results, alternative cohort definitions,
+NEPC-label validation, and ADT/LLM/regex diagnostics are **supplements**.
+All cohort configurations remain selectable; the default stays `COHORTS <- c("adt")`.
 
-`FIG_ROOT/<ARM>/by_figure/<group>/<trimmed-artifact-name>/<endpoint>__<subset>__<exclusion>.png`
+Outputs are grouped by figure and individual subpanel:
 
-Artifact names omit information already supplied by their parent folders. For
-example, a `figure3_` prefix is removed inside `figure3/`, and a PSA
-longitudinal artifact omits both `longitudinal_` and `_psa` inside
-`labs/Androgen axis/PSA/longitudinal/`.
+`FIG_ROOT/<ARM>/by_figure/<main|supplements>/<group>/<artifact>/<endpoint>__<subset>__<exclusion>.png`
 
-When all six ADT cohort options are selected, one leaf holds twelve cohort x
-endpoint panels, endpoint first so they sort into two six-cohort blocks.
-The default run writes only the two `all__incl` panels:
+For example:
 
 ```
-ADT/by_figure/figure3/univariate_landmark180/
-    nepc__all__incl.png                 nepc__all__noprecastrate.png
-    nepc__metastatic_adt__incl.png      nepc__metastatic_adt__noprecastrate.png
-    nepc__metastatic_llm__incl.png      nepc__metastatic_llm__noprecastrate.png
-    platinum__all__incl.png             platinum__all__noprecastrate.png
-    platinum__metastatic_adt__incl.png  platinum__metastatic_adt__noprecastrate.png
-    platinum__metastatic_llm__incl.png  platinum__metastatic_llm__noprecastrate.png
+ADT/by_figure/main/figure3/univariate_landmark180/platinum__all__incl.png
+ADT/by_figure/supplements/figure3/univariate_landmark180/nepc__all__incl.png
+ADT/by_figure/supplements/figure3/univariate_landmark180/platinum__metastatic_adt__incl.png
+ADT/by_figure/supplements/metastatic_labels/coverage/platinum__all__incl.png
 ```
 
-`by_figure/` is the sole output tree. Existing figures at the exact
+Artifact names omit their parent figure prefix and lab name. Completed panels
+from the preceding `by_figure/<group>/<artifact>/` layout are copied to the new
+main/supplement folders when the exact cohort/endpoint leaf matches, avoiding
+unnecessary rendering. Originals are retained. Overwrite regenerates instead.
+
+Existing figures at the exact
 cohort/endpoint output paths are skipped by default. Set
 `COMPASS_RENDER_OVERWRITE=true` (or `RENDER_OVERWRITE <- TRUE` below) to regenerate
 them after changing inputs, styling, or DPI. Unrelated older outputs are left
@@ -80,10 +77,10 @@ labels, with 95% Wilson intervals and a one-sided Fisher test. B/C use all
 classifier-labeled ADT-exposed patients, independently of manual chart review.
 AVPC confusion panels remain retired.
 
-All outputs under `by_figure/labs/` are likewise emitted only by the platinum
-pass. Lab outputs are limited to longitudinal summaries; R-fitted GAM panels
+All lab outputs under `by_figure/<main|supplements>/labs/` are likewise emitted only by the platinum
+pass. Lab outputs include longitudinal summaries and time-to-platinum tertile curves; R-fitted GAM panels
 remain available but are toggled off by default. The distribution and
-quartile-KM families are retired. A second NEPC-labelled copy would not
+quartile-KM families remain retired; the restored curves use all three tertiles. A second NEPC-labelled copy would not
 represent a different endpoint analysis.
 Longitudinal summaries use 180-day bins from one year before through five
 years after the treatment anchor, with day 0 as a hard boundary. A second
@@ -110,13 +107,73 @@ existing Cox results for the selected endpoint. PRS panels remain retired.
 These analyses exist for the ADT arm at landmark 0 only; a missing
 `cox_somatic_gleason/` result is reported and skipped independently.
 
-All figure-generation logic lives in `COMPASS_generate_figures_pipeline.R` as
-`generate_figures(cohort, endpoint, ...)`. This document just sources that file
-and calls it for each cohort in `COHORTS` crossed with each endpoint in
-`ENDPOINTS`.
+The platinum pass now writes PSA and testosterone **tertile KM curves** at
+each selected landmark, using the pre-landmark mean in `aggregated_landmark*.csv`.
+Only incident, observed outcomes enter the split. Equal lab values stay in one
+group; a distribution that cannot form three nonempty value-based groups is
+reported and skipped. Legends show each group's patient and event counts.
+
+Figure 3b also writes platinum KM curves for every significant mutation feature
+(Cox q < 0.05), comparing carriers with non-carriers among patients with a known
+binary call. These curves start at the sequencing specimen date. Gleason KM
+curves start at the selected score date, grouping scores as ≤6, 7, 8, 9, and 10.
+Both read the existing indexed `somatic_gleason/<analysis>/aggregated_landmark0.csv`
+inputs. They do not mix those clocks with ADT-relative durations. Mutation
+selection and KM visualization use the same cohort, so the panels are descriptive.
+
+Two additional cohort forests show **PSA/testosterone for platinum** and
+**PSA/testosterone for NEPC**. Each has mean, minimum, maximum, and last-value
+rows; delta and observation counts are excluded. `COHORT_FOREST_CONFIG` controls
+the landmark (180 days by default) and available cohorts. These summaries read
+existing results from all six ADT configurations without enabling six full
+figure renders. The forest section of `07_cohort_comparison.ipynb` uses the same
+`cohort_forest_figures.R` renderer and output paths.
+
+The local ADT figure review prompted wrapped titles/captions, external legends,
+clearer background points, fewer overlapping volcano labels, and axes that
+retain all plotted estimates. Run once with **`COMPASS_RENDER_OVERWRITE=true`**
+to replace existing panels with the revised styling; then return it to `false`
+for normal resume behavior. The downloaded PNGs contain no patient-level KM
+inputs, so the new survival curves require the corresponding analysis inputs.
+
+`05_figures.Rmd` now also renders the ADT filtering diagnostics as separate
+supplemental subpanels. These use the canonical ADT platinum time-zero analysis
+cohort, including pre-ADT castrate patients, so counts are comparable across
+ADT intent and LLM metastatic status. This differs from the older
+`08_adt_intent.ipynb` all-ADT-exposed population.
+
+Regex stage is collapsed to **I–III = local** and **IV = metastatic**. Missing
+or invalid stages remain unclassified. The primary comparison uses the nearest
+stage within 365 days before/on ADT; maximum stage before/on ADT and maximum
+stage after ADT are separate retrospective comparisons. Each compares ADT
+intent with regex and LLM metastatic status with regex; an additional panel
+compares ADT with LLM. Heatmaps report counts, row percentages, paired coverage,
+and agreement. A coverage panel retains missing labels. No method is designated
+a gold standard. ADT intent and the LLM metastatic label both use full observed
+history, so these are descriptive comparisons rather than baseline validation.
+
+The same supplement includes ICD site burden, site patterns, death/platinum/NEPC
+KM curves, and PSA/testosterone trajectories for each label definition, where
+inputs are available. It reuses cached longitudinal data, saves only individual
+subpanels, and shares progress tracking and the overwrite switch. The older
+localized-adjuvant versus metastatic **model-result** comparison remains
+available via `PLOT_ADT_INTENT_SUPPLEMENT`; it needs precomputed comparison CSVs.
+
+`PLOT_METASTATIC_LABEL_SUPPLEMENT` defaults to `TRUE`. Its Python bridge needs
+Polars, the existing `mrn_lists/adt_intent_labels_model_cohort.csv`, dated regex
+stage parquet, and `LLM_met_diagnosis/met_dx_labels.parquet`. Set
+`COMPASS_FIGURE_PYTHON`, `COMPASS_REGEX_STAGE_PATH`, or `LLM_MET_LABELS_PATH` to
+use other installations/paths. It does not use the NEPC subtype classifier as
+a metastatic-status label. Missing required sources produce a warning and skip
+this supplement; other figures continue.
+
+The main workflow calls `generate_figures()` in
+`COMPASS_generate_figures_pipeline.R`. Supplement rendering lives in
+`metastatic_figure_supplements.R`; `prepare_metastatic_figure_labels.py` joins
+small label/stage inputs without reading the longitudinal lab file.
 
 The Figure 1 analysis-set supplement, Figure 3 significance-only variants,
-Figure 4 all-model supplement, and LLM-stratified KM family are retired.
+Figure 4 all-model supplement, and subtype-stratified KM family are retired.
 
 Run `01_preprocessing.ipynb` to completion first; this document only reads
 that merged-profile run's outputs.
@@ -160,6 +217,13 @@ ADT_COHORT_OPTIONS <- c(
   "adt_metastatic_llm",  "adt_metastatic_llm_noprecastrate"
 )
 COHORTS <- c("adt")  # all ADT patients; pre-ADT castrate patients included
+# This small, read-only summary compares available results from all six ADT
+# configurations without enabling the expensive full render for each variant.
+COHORT_FOREST_CONFIG <- list(
+  script = file.path(dirname(pipeline_path), "cohort_forest_figures.R"),
+  cohorts = ADT_COHORT_OPTIONS,
+  landmark = 180L
+)
 
 stopifnot(
   all(ENDPOINTS %in% SUPPORTED_ENDPOINTS),
@@ -176,6 +240,22 @@ PLOT_GAM_TRAJECTORIES <- FALSE
 # The ADT-intent comparison supplement runs after Figure 4 in the canonical ADT
 # cell. Keep its implementation available without extending the primary render.
 PLOT_ADT_INTENT_SUPPLEMENT <- FALSE
+
+# Merge the ADT filtering diagnostics into this workflow. Uses the medication
+# intent labels already built by compass_pipeline; no model refits are needed.
+PLOT_METASTATIC_LABEL_SUPPLEMENT <- TRUE
+METASTATIC_SUPPLEMENT <- list(
+  python = Sys.getenv("COMPASS_FIGURE_PYTHON", "python3"),
+  script = file.path(dirname(pipeline_path), "prepare_metastatic_figure_labels.py"),
+  r_script = file.path(dirname(pipeline_path), "metastatic_figure_supplements.R"),
+  intent = file.path(NEPC_PROJ_PATH, "mrn_lists", "adt_intent_labels_model_cohort.csv"),
+  stage = Sys.getenv("COMPASS_REGEX_STAGE_PATH", file.path(
+    Sys.getenv("PROFILE_DATA_PATH", "/data/gusev/USERS/jpconnor/data/PROFILE_DATA"),
+    "CANCER_ANNOTATIONS", "CANCER_STAGE_NOTE_LEVEL.parquet")),
+  llm = Sys.getenv("LLM_MET_LABELS_PATH",
+    "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_met_diagnosis/met_dx_labels.parquet"),
+  icd = file.path(NEPC_PROJ_PATH, "prostate_icd_data.csv")
+)
 
 # Rendering profile. Both profiles save individual subpanels only, at 200 dpi
 # by default. Use COMPASS_RENDER_PROFILE=publication for 600-dpi subpanels and
@@ -297,14 +377,13 @@ message(sprintf("profile:     %s (%d dpi, output=%s, pdf=%s, overwrite=%s, worke
 
 Runs the R figure-generation pipeline once per selected cohort x endpoint.
 The default is 1 cohort x 2 endpoints = 2 figure sets. Outputs go to
-`FIG_ROOT/<ARM>/by_figure/`, with
+`FIG_ROOT/<ARM>/by_figure/<main|supplements>/`, with
 each run writing one `<endpoint>__<subset>__<exclusion>` leaf per plot stem.
 
 Set `COHORTS <- ADT_COHORT_OPTIONS` to render all six ADT configurations,
 or select individual cohort labels and endpoints above. `COHORTS`
 accepts any run label in `SUPPORTED_COHORTS`, so the ARPI arm is rendered by
-naming its labels, and a retired tree that still exists on disk (an
-`adt_localized` or `_avpc` build) can be re-rendered by naming it explicitly.
+naming its supported labels. Retired cohort and endpoint labels are rejected.
 
 Each cohort x endpoint cell is rendered independently, with two cells running
 concurrently by default. A failure in one is reported rather than abandoning
@@ -347,7 +426,9 @@ render_cell <- function(COHORT, ENDPOINT, cell_index) {
       save_pdf = RENDER_PDF,
       output_mode = RENDER_OUTPUT_MODE,
       progress = progress,
-      overwrite = RENDER_OVERWRITE
+      overwrite = RENDER_OVERWRITE,
+      metastatic_supplement = if (PLOT_METASTATIC_LABEL_SUPPLEMENT) METASTATIC_SUPPLEMENT else NULL,
+      cohort_forest_config = COHORT_FOREST_CONFIG
     )
     TRUE
   }, error = function(e) {

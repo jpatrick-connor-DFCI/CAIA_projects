@@ -18,7 +18,7 @@ local({
   on.exit(unlink(root, recursive = TRUE))
   env <- new.env(parent = globalenv())
   for (expr in expressions) {
-    for (name in c("figure_file_complete", "save_fig")) {
+    for (name in c("figure_file_complete", "reuse_previous_figure_layout", "prepare_figure_text", "save_fig")) {
       assignment <- find_assignment(expr, name)
       if (!is.null(assignment)) eval(assignment, env)
     }
@@ -66,6 +66,15 @@ local({
   save(plot, prefix = "platinum__all__incl")
   stopifnot(length(env$saves) == 4L)
 
+  # Main/supplement reorganization reuses only the same leaf and artifact.
+  old <- file.path(root, "by_figure", "figure3", "test", "platinum__all__incl.png")
+  dir.create(dirname(old), recursive = TRUE)
+  file.copy(png, old)
+  new <- file.path(root, "by_figure", "main", "figure3", "test", "platinum__all__incl.png")
+  stopifnot(env$reuse_previous_figure_layout(new), identical(bytes(new), bytes(old)),
+    !env$reuse_previous_figure_layout(sub("platinum__", "nepc__", new)),
+    !env$reuse_previous_figure_layout(new))
+
   # Empty/truncated images regenerate; an intact PDF is retained.
   writeBin(raw(), png)
   stopifnot(!env$figure_file_complete(png))
@@ -97,5 +106,27 @@ local({
   stopifnot(inherits(failure, "error"), identical(bytes(png), png_bytes),
             tail(env$events, 1) == "panel_start",
             !any(startsWith(list.files(dirname(png), all.files = TRUE), ".compass-render-")))
+})
+# Exercise the actual routing: PSA and testosterone share the new supplement
+# group, so their lab tokens must remain in the artifact name.
+local({
+  env <- new.env(parent = globalenv())
+  for (expr in expressions) {
+    for (name in c("figure_output_tier", "figure_group", "artifact_name_for_stem",
+                   "output_dir_for_stem", "lab_stem_slug", "match_lab_in_stem")) {
+      assignment <- find_assignment(expr, name)
+      if (!is.null(assignment)) eval(assignment, env)
+    }
+  }
+  sys.source("COMPASS/survival_analysis/metastatic_figure_supplements.R", env)
+  env$FIG_ROOT <- tempdir()
+  env$COHORT <- "adt"
+  env$ENDPOINT <- "platinum"
+  env$LAB_SLUG_TO_NAME <- c(psa = "PSA", testosterone = "Testosterone")
+  stems <- env$metastatic_supplement_stems()
+  paths <- vapply(stems, env$output_dir_for_stem, character(1))
+  stopifnot(!anyDuplicated(paths), all(grepl("/supplements/metastatic_labels/", paths)),
+    endsWith(paths[["adt_labels_adt_trajectory_psa"]], "/adt_trajectory_psa"),
+    endsWith(paths[["adt_labels_adt_trajectory_testosterone"]], "/adt_trajectory_testosterone"))
 })
 cat("Figure resume checks passed: skip, formats, endpoint isolation, truncation, overwrite, failed saves.\n")

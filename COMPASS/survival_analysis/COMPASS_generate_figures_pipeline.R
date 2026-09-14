@@ -37,10 +37,105 @@ theme_fig <- function(base_size = 11) {
       axis.ticks        = element_line(linewidth = 0.5),
       plot.background    = element_rect(fill = "white", color = NA),
       panel.background   = element_rect(fill = "white", color = NA),
-      plot.margin        = margin(6, 8, 6, 6)
+      legend.position    = "bottom",
+      legend.box         = "horizontal",
+      legend.key.width   = grid::unit(14, "pt"),
+      plot.margin        = margin(12, 16, 12, 12)
     )
 }
 theme_set(theme_fig())
+
+# Keep equal measurements together; never divide tied values by patient order.
+figure_tertiles <- function(values) {
+  values <- suppressWarnings(as.numeric(values))
+  valid <- is.finite(values)
+  result <- rep(NA_character_, length(values))
+  if (sum(valid) < 3L) return(result)
+  cuts <- as.numeric(quantile(values[valid], c(1/3, 2/3), names = FALSE))
+  if (cuts[1] >= cuts[2]) return(result)
+  result[valid] <- as.character(cut(values[valid], c(-Inf, cuts, Inf),
+    labels = c("Low tertile", "Middle tertile", "High tertile"), right = TRUE))
+  if (length(unique(result[valid])) != 3L) result[] <- NA_character_
+  attr(result, "cutpoints") <- cuts
+  result
+}
+
+figure_gleason_groups <- function(values) {
+  x <- suppressWarnings(as.numeric(values))
+  valid <- is.finite(x) & x == floor(x) & x >= 2 & x <= 10
+  out <- rep(NA_character_, length(x))
+  out[valid] <- ifelse(x[valid] <= 6, "Gleason ≤6", paste("Gleason", x[valid]))
+  out
+}
+
+significant_mutation_features <- function(results) {
+  if (!all(c("feature", "q_value") %in% names(results))) return(character())
+  selected <- !is.na(results$q_value) & results$q_value < .05 &
+    grepl("_(SNV|SV|AMP|DEL)$", as.character(results$feature))
+  unique(as.character(results$feature[selected]))
+}
+
+# Input durations are already rebased by the landmark/index builders. In
+# particular, do not combine index-relative t_platinum with ADT-relative t_death.
+figure_platinum_strata <- function(frame, groups) {
+  stopifnot(length(groups) == nrow(frame))
+  if (anyDuplicated(frame$DFCI_MRN)) stop("KM input must have one row per patient")
+  time <- suppressWarnings(as.numeric(frame$t_platinum))
+  event <- suppressWarnings(as.numeric(frame$PLATINUM))
+  keep <- is.finite(time) & time > 0 & event %in% c(0, 1) & !is.na(groups)
+  tibble(DFCI_MRN = as.character(frame$DFCI_MRN[keep]), time = time[keep],
+         event = event[keep], stratum = as.character(groups[keep]))
+}
+
+plot_stratified_platinum <- function(d, title, origin, group_order = unique(d$stratum),
+                                     note = NULL) {
+  if (!nrow(d) || length(unique(d$stratum)) < 2L) return(NULL)
+  group_order <- group_order[group_order %in% d$stratum]
+  d$stratum <- factor(d$stratum, levels = group_order)
+  curves <- bind_rows(lapply(group_order, function(group) {
+    z <- d[d$stratum == group, ]
+    fit <- survival::survfit(survival::Surv(time, event) ~ 1, data = z)
+    tibble(stratum = group, time = c(0, fit$time), survival = c(1, fit$surv),
+           lower = c(1, fit$lower), upper = c(1, fit$upper))
+  }))
+  counts <- d %>% group_by(stratum, .drop = TRUE) %>%
+    summarise(n = n(), events = sum(event), .groups = "drop")
+  legend_labels <- setNames(sprintf("%s (n=%s; events=%s)", counts$stratum,
+                                    counts$n, counts$events), as.character(counts$stratum))
+  colors <- setNames(c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00")[seq_along(group_order)], group_order)
+  logrank <- tryCatch({
+    test <- survival::survdiff(survival::Surv(time, event) ~ stratum, data = d)
+    pchisq(test$chisq, length(test$n) - 1, lower.tail = FALSE)
+  }, error = function(e) NA_real_)
+  ggplot(curves, aes(time, survival, color = stratum, fill = stratum)) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = .08, color = NA,
+                show.legend = FALSE, na.rm = TRUE) +
+    geom_step(linewidth = .85) +
+    scale_color_manual(values = colors, breaks = group_order, labels = legend_labels, name = NULL) +
+    scale_fill_manual(values = colors, guide = "none") +
+    coord_cartesian(ylim = c(0, 1.02)) +
+    labs(x = paste("Days from", origin), y = "Platinum-free probability", title = title,
+         subtitle = if (is.finite(logrank)) sprintf("Log-rank p = %.3g", logrank) else "Log-rank p unavailable",
+         caption = note) + theme_fig() +
+    guides(color = guide_legend(ncol = 1)) +
+    theme(legend.position = "bottom", legend.text = element_text(size = 10))
+}
+
+prepare_figure_text <- function(plot, width) {
+  if (!inherits(plot, "ggplot")) return(plot)
+  # Wrap outside-panel text against the output width, without changing labels
+  # embedded in the data. plot alignment gives captions the full device width.
+  widths <- c(title = floor(width * 8), subtitle = floor(width * 10), caption = floor(width * 12))
+  for (field in names(widths)) {
+    value <- plot$labels[[field]]
+    if (is.character(value) && length(value) == 1L)
+      plot$labels[[field]] <- paste(vapply(strsplit(value, "\n", fixed = TRUE)[[1]],
+        function(line) paste(strwrap(line, width = widths[[field]]), collapse = "\n"), character(1)), collapse = "\n")
+  }
+  plot + theme(plot.title.position = "plot", plot.caption.position = "plot",
+               plot.margin = margin(12, 16, 12, 12))
+}
+
 
 # Colorblind-safe categorical palette (fixed assignment), shared by the
 # Figure 2 (LLM subtype / platinum enrichment) panels:
@@ -222,7 +317,7 @@ FIGURE_PATIENT_COLS <- c(
   "DFCI_MRN", "AGE_AT_TREATMENTSTART", "FIRST_RECORD_DATE", "DIAGNOSIS_DATE",
   "TREATMENT_ANCHOR_DATE", "LAST_CONTACT_DATE", "DEATH", "PLATINUM_MEDICATION",
   "PLATINUM_DATE", "PLATINUM", "t_diagnosis", "t_first_treatment", "t_platinum",
-  "t_last_contact", "t_death", "t_dx_to_anchor"
+  "t_last_contact", "t_death", "t_dx_to_anchor", "NEPC", "t_nepc"
 )
 FIGURE_LAB_COLS <- c("DFCI_MRN", "LAB_NAME", "LAB_VALUE", "LAB_UNIT", "LAB_DATE", "t_lab")
 cached_figure_longitudinal <- function(path, id_col = "DFCI_MRN") {
@@ -479,7 +574,7 @@ CATEGORY_COLORS <- c(
   "Vitals"        = "#5d6d7e",
   "Other"         = "#95a5a6"
 )
-NS_COLOR <- "#d5d8dc"
+NS_COLOR <- "#9ba4ae"
 
 cached_canonical_longitudinal <- function(path, labs = names(CATEGORY_MAP)) {
   resolved <- tryCatch(normalizePath(path, mustWork = TRUE),
@@ -825,6 +920,29 @@ new_figure_progress <- function(labels,
   list(update = update, snapshot = snapshot, close = close)
 }
 
+reuse_previous_figure_layout <- function(destination) {
+  if (figure_file_complete(destination)) return(invisible(FALSE))
+  previous <- sub("/by_figure/(main|supplements)/", "/by_figure/", destination)
+  if (identical(previous, destination) || !figure_file_complete(previous))
+    return(invisible(FALSE))
+  dir.create(dirname(destination), recursive = TRUE, showWarnings = FALSE)
+  temporary <- tempfile(".compass-copy-", tmpdir = dirname(destination),
+                        fileext = paste0(".", tools::file_ext(destination)))
+  on.exit(unlink(temporary))
+  if (!file.copy(previous, temporary, overwrite = TRUE) || !figure_file_complete(temporary) ||
+      !file.rename(temporary, destination)) stop("Could not reuse previous figure: ", previous)
+  message("reused completed figure in new layout: ", destination)
+  invisible(TRUE)
+}
+
+figure_output_tier <- function(cohort, endpoint, plot_stem) {
+  supplemental <- cohort != "adt" || endpoint != "platinum" ||
+    grepl("^(adt_intent_|adt_labels_|cohort_forest_|figure1s|pre_adt_coverage_)", plot_stem) ||
+    grepl("nepc", plot_stem, ignore.case = TRUE) ||
+    plot_stem %in% c("figure2v3_confusion_matrix", "figure2v3_metric_bar")
+  if (supplemental) "supplements" else "main"
+}
+
 # Render the full COMPASS figure set for one cohort arm and one survival
 # endpoint. Mirrors the body of the former figure notebook's per-cohort cells
 # (Figures 1-7 + Table 1), so the R Markdown document can call it once per
@@ -841,7 +959,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                              save_pdf = FALSE,
                              output_mode = "panels",
                              progress = NULL,
-                             overwrite = FALSE) {
+                             overwrite = FALSE,
+                             metastatic_supplement = NULL,
+                             cohort_forest_config = NULL) {
   if (!is.null(progress) && !is.function(progress))
     stop("progress must be NULL or a function(event, detail)")
   notify_progress <- function(event, detail) {
@@ -923,29 +1043,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     NEPC_PROJ_PATH, "mrn_lists", "icd_prostate_mrn_flags.csv"
   )
 
-  # Figure tree is FIGURE-MAJOR, not cohort-major, so that comparing one panel
-  # across cohorts is a single directory listing:
-  #
-  #   <fig_root>/ADT/by_figure/<group>/<trimmed-name>/<endpoint>__<subset>__<exclusion>.png
-  #
-  # e.g. all twelve cohort x endpoint panels in one directory, endpoint first so
-  # they sort into two contiguous six-cohort blocks:
-  #   ADT/by_figure/figure3/univariate_landmark180/
-  #       nepc__all__incl.png                 nepc__all__noprecastrate.png
-  #       nepc__metastatic_adt__incl.png      nepc__metastatic_adt__noprecastrate.png
-  #       nepc__metastatic_llm__incl.png      nepc__metastatic_llm__noprecastrate.png
-  #       platinum__all__incl.png             platinum__all__noprecastrate.png
-  #       platinum__metastatic_adt__incl.png  platinum__metastatic_adt__noprecastrate.png
-  #       platinum__metastatic_llm__incl.png  platinum__metastatic_llm__noprecastrate.png
-  #
-  # The two treatment arms stay physically separate (ARPI vs ADT are different
-  # deliverables and are never compared panel-to-panel), but endpoint, patient
-  # subset and exclusion all move OUT of the directory name and into the leaf
-  # filename, because those are exactly the axes you compare across. `__`
-  # separates AXES uniformly; single underscores live inside a slug.
-  # ENDPOINT_SUFFIX stays "" for platinum because it still names the
-  # un-suffixed *data* trees (local_runs_adt, prediction_inputs_adt) the Python
-  # pipeline writes; the figure path uses ENDPOINT itself.
+  # Canonical ADT platinum panels are main figures; NEPC, cohort variations,
+  # and diagnostic families are supplements. Each subpanel keeps its own
+  # artifact directory and endpoint/subset/exclusion leaf to avoid collisions.
   COHORT_ARM_DIR <- toupper(cohort_arm(COHORT))
   FIG_ROOT <- file.path(fig_root, COHORT_ARM_DIR)
   # Leaf identity for this run: which of the 12 cohort x endpoint cells a file
@@ -968,7 +1068,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     NA_character_
   }
   # Layout, every output:
-  #   FIG_ROOT/by_figure/<group>/<trimmed-name>/<endpoint>__<subset>__<exclusion>.png
+  #   FIG_ROOT/by_figure/<main|supplements>/<group>/<trimmed-name>/<endpoint>__<subset>__<exclusion>.png
   # Per-lab panels keep their category/lab nesting for the same reason as
   # before -- ~40 labs x 4 strata would otherwise dump 160+ entries into one
   # directory -- and still bottom out at <= 12 files per leaf:
@@ -980,6 +1080,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     # for the same reason figure1s is: an "adt_intent_" stem is a supplement,
     # not a member of any numbered figure group.
     if (startsWith(plot_stem, "adt_intent_")) return("supplement_adt_intent")
+    if (startsWith(plot_stem, "adt_labels_")) return("metastatic_labels")
+    if (startsWith(plot_stem, "cohort_forest_")) return("cohort_comparison")
     if (startsWith(plot_stem, "figure1s")) return("figure1s_analysis_sets")
     if (startsWith(plot_stem, "figure1") || startsWith(plot_stem, "table1")) return("figure1")
     if (startsWith(plot_stem, "figure2v3")) return("figure2v3_llm")
@@ -987,6 +1089,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (startsWith(plot_stem, "figure3")) return("figure3")
     if (startsWith(plot_stem, "figure4")) return("figure4")
     if (startsWith(plot_stem, "km_llm_")) return("km_llm")
+    if (startsWith(plot_stem, "km_tertile_")) {
+      lab <- match_lab_in_stem(plot_stem)
+      if (!is.na(lab)) return(file.path("labs", assign_category(lab), lab, "km_tertile"))
+    }
     if (startsWith(plot_stem, "km_quartile_")) {
       lab <- match_lab_in_stem(plot_stem)
       if (!is.na(lab)) return(file.path("labs", assign_category(lab), lab, "km_quartile"))
@@ -1030,10 +1136,13 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       km_llm = "^km_llm_?",
       KM_curves = "^km_?",
       km_quartile = "^km_quartile_?",
+      km_tertile = "^km_tertile_?",
       distribution = "^(androgen_)?dist(ribution)?_?",
       longitudinal = "^(androgen_)?longitudinal_?",
       gam_trajectory = "^gam_(trajectory|longitudinal)_?",
       androgen_pre_adt_coverage = "^pre_adt_coverage_?",
+      metastatic_labels = "^adt_labels_?",
+      cohort_comparison = "^cohort_forest_?",
       NULL
     )
     artifact_name <- plot_stem
@@ -1043,7 +1152,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     # Per-lab paths already name the lab two levels above the artifact. Remove
     # that exact slug token as well, retaining endpoint, scale, and landmark.
     lab <- match_lab_in_stem(plot_stem)
-    if (!is.na(lab)) {
+    if (!is.na(lab) && group != "metastatic_labels") {
       lab_slug <- lab_stem_slug(lab)
       artifact_name <- gsub(
         paste0("(^|_)", lab_slug, "(_|$)"), "_", artifact_name, perl = TRUE
@@ -1054,17 +1163,18 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (!nzchar(artifact_name)) "figure" else artifact_name
   }
 
-  # Every stem routes to .../by_figure/<group>/<trimmed-artifact-name>/, whose leaf holds one
+  # Every stem routes to .../by_figure/<main|supplements>/<group>/<trimmed-artifact-name>/, whose leaf holds one
   # file per cohort x endpoint cell. Uniform for numbered and supplemental
   # groups alike: the per-artifact level is what keeps sibling panels in a group
   # from sharing a leaf, and COHORT_LEAF (endpoint + subset + exclusion) is
   # what keeps the twelve cells within a stem from colliding.
   output_dir_for_stem <- function(plot_stem) {
     group <- figure_group(plot_stem)
-    file.path(FIG_ROOT, "by_figure", group, artifact_name_for_stem(plot_stem, group))
+    tier <- figure_output_tier(COHORT, ENDPOINT, plot_stem)
+    file.path(FIG_ROOT, "by_figure", tier, group, artifact_name_for_stem(plot_stem, group))
   }
 
-  # Preserve the output layout. save_fig checks only the exact requested
+  # save_fig checks only the exact requested
   # destinations; unrelated artifacts are never migrated or cleaned.
 
   # Compatibility shim: call sites still pass an `out_dir`, but actual routing
@@ -1098,8 +1208,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                 format(sum(!llm_classifier_labels$is_platinum), big.mark = ",")))
   }
 
-  # Inspect the exact current cohort/endpoint paths; unrelated older artifacts
-  # are never reused. Only render missing/incomplete formats unless overwritten.
+  # Reuse the same artifact/cohort/endpoint from the preceding figure-major
+  # layout, then render only missing formats. Overwrite always regenerates.
   save_fig <- function(plot, out_dir, stem, width, height, prefix = COHORT_LEAF) {
     save_started <- proc.time()[["elapsed"]]
     # `out_dir` is retained for call-site compatibility. The directory already
@@ -1110,6 +1220,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
     png_out <- file.path(output_dir, paste0(output_stem, ".png"))
     pdf_out <- file.path(output_dir, paste0(output_stem, ".pdf"))
+    if (!overwrite) {
+      reuse_previous_figure_layout(png_out)
+      if (save_pdf) reuse_previous_figure_layout(pdf_out)
+    }
     need_png <- overwrite || !figure_file_complete(png_out)
     need_pdf <- save_pdf && (overwrite || !figure_file_complete(pdf_out))
     if (!need_png && !need_pdf) {
@@ -1143,6 +1257,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         stop("Could not publish figure ", destination)
       message("wrote ", destination)
     }
+    plot <- prepare_figure_text(plot, width)
     if (need_png) write_format(png_out)
     if (need_pdf) write_format(pdf_out, pdf = TRUE)
 
@@ -1292,7 +1407,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                      ylab = "Platinum-free probability", title = "Platinum-free survival",
                      ggtheme = theme_fig())
     gg$plot + coord_cartesian(ylim = c(0, 1.02)) +
-      annotate("text", x = Inf, y = Inf, label = lab, hjust = 1.05, vjust = 1.5, size = 3)
+      labs(subtitle = lab)
   }
 
   overlay_hist <- function(series, xlab, title, bins = 50, xlim_max = NULL,
@@ -1319,7 +1434,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     }
     p <- p +
       labs(x = xlab, y = ylab, title = title) +
-      annotate("text", x = Inf, y = Inf, label = lab, hjust = 1.05, vjust = 1.5, size = 3)
+      labs(subtitle = lab)
     if (!is.null(xlim_max)) p <- p + coord_cartesian(xlim = c(0, xlim_max))
     if (!is.null(axis_text_size))
       p <- p + theme(axis.title = element_text(size = axis_text_size + 1.5),
@@ -1787,11 +1902,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
               axis.title.x = element_blank(),
               axis.title.y = element_text(size = 16),
               axis.text  = element_text(size = 14),
-              legend.position = c(0.98, 0.98), legend.justification = c(1, 1))
+              legend.position = "bottom", legend.justification = "center")
     }
 
     render_enrichment_panel <- function(enrichment) {
-      panel_title <- "Panel C — platinum enrichment among aggressive variants"
+      panel_title <- "Platinum enrichment among aggressive variants"
       if (enrichment$n_aggressive == 0 || enrichment$n_conventional == 0)
         return(ggplot() + annotate("text", x = 0, y = 0,
                                   label = "(both aggressive and conventional patients required)") +
@@ -1890,14 +2005,14 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                             format(length(adt_exposed_mrns_v3), big.mark = ","),
                             format(n_total_v3, big.mark = ","), format(n_nepc_manual_v3, big.mark = ","))
     pA1_v3 <- render_confusion_panel(
-      metrics_v3, "NEPC", "has_nepc=1", "Panel A1 — NEPC confusion matrix"
+      metrics_v3, "NEPC", "NEPC", "NEPC classifier agreement"
     ) + labs(caption = caption_a_v3) +
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
     pA2_v3 <- render_metric_bar_panel(metrics_v3) +
-      labs(title = "Panel A2 — NEPC classifier metrics", caption = caption_a_v3) +
+      labs(title = "NEPC classifier metrics", caption = caption_a_v3) +
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
-    save_fig(pA1_v3, OUT_DIR_V3, "figure2v3_confusion_matrix", 4.2, 4.2)
-    save_fig(pA2_v3, OUT_DIR_V3, "figure2v3_metric_bar", 5.0, 4.2)
+    save_fig(pA1_v3, OUT_DIR_V3, "figure2v3_confusion_matrix", 5.8, 5.4)
+    save_fig(pA2_v3, OUT_DIR_V3, "figure2v3_metric_bar", 6.2, 5.0)
     if (show) print(pA1_v3)
     if (show) print(pA2_v3)
 
@@ -1929,7 +2044,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                             format(n_pos, big.mark = ","), format(n_neg, big.mark = ","))
     pB_v3 <- render_landscape_panel(
         label_distributions_v3, n_pos, n_neg,
-        "Panel B — subtype landscape by platinum status (classifier labels, all ADT)") +
+        "Subtype landscape by platinum status") +
       labs(caption = str_wrap(caption_b_v3, 85)) +
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
     save_fig(pB_v3, OUT_DIR_V3, "figure2v3_subtype_landscape", 6.5, 8)
@@ -1943,7 +2058,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                             enrichment_v3$OR, enrichment_v3$p_value)
     pC_v3 <- render_enrichment_panel(enrichment_v3) + labs(caption = str_wrap(caption_c_v3, 58)) +
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-    save_fig(pC_v3, OUT_DIR_V3, "figure2v3_enrichment", 4.5, 5.5)
+    save_fig(pC_v3, OUT_DIR_V3, "figure2v3_enrichment", 6.0, 5.8)
     if (show) print(pB_v3)
     if (show) print(pC_v3)
   }
@@ -1965,7 +2080,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   labels_for_panel <- function(sub, top_k, always_label) {
     sig <- sub %>% filter(sig)
     if (nrow(sig) == 0) return(sig[0, ])
-    androgen_rows <- sig %>% filter(category == "Androgen axis")
+    # Label the mean and strongest other statistic per androgen lab. All
+    # observations remain plotted, without ten near-identical labels piling up.
+    androgen_rows <- sig %>% filter(category == "Androgen axis") %>%
+      arrange(desc(feature_stat == "mean"), p_value) %>%
+      group_by(lab_name) %>% slice_head(n = 2L) %>% ungroup()
     non_andro <- sig %>% filter(category != "Androgen axis") %>%
       arrange(p_value) %>% distinct(lab_name, .keep_all = TRUE)
     always_sig <- non_andro %>% filter(lab_name %in% always_label)
@@ -2014,37 +2133,40 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                  linewidth = 0.6, alpha = 0.7) +
       { if (!is.na(q_y)) geom_hline(yintercept = q_y, color = "black",
                                     linetype = "dotted", linewidth = 0.9) } +
-      geom_point(data = ns, aes(coef_feature, y), size = 1.6 * 1.5, color = NS_COLOR, alpha = 0.45) +
+      geom_point(data = ns, aes(coef_feature, y), size = 1.6 * 1.5, color = NS_COLOR, alpha = 0.7) +
       geom_point(data = sigd %>% filter(!capped),
                  aes(coef_feature, y, color = category, size = is_hero),
-                 shape = 21, fill = NA, stroke = 0.9) +
+                 shape = 21, fill = NA, stroke = 0.9, show.legend = FALSE) +
       geom_point(data = sigd %>% filter(!capped),
                  aes(coef_feature, y, fill = category, size = is_hero),
                  shape = 21, color = "white", stroke = 0.6, alpha = 0.92) +
       geom_point(data = sigd %>% filter(capped),
                  aes(coef_feature, y, fill = category), shape = 24,
-                 size = 3.4 * 1.5, color = "white", stroke = 0.6, alpha = 0.92) +
+                 size = 3.4 * 1.5, color = "white", stroke = 0.6, alpha = 0.92, show.legend = FALSE) +
       ggrepel::geom_text_repel(
         data = sub,
         aes(coef_feature, pmin(neglog10p, Y_MAX_CAP), label = repel_label, color = category),
-        size = 4.5, fontface = "bold", segment.color = "#95a5a6", segment.size = 0.3,
+        size = 3.2, fontface = "plain", segment.color = "#95a5a6", segment.size = 0.3,
         max.overlaps = Inf, min.segment.length = 0, box.padding = 0.55,
-        point.padding = 0.45, force = 1.5, max.time = 2, seed = 0,
+        point.padding = 0.8, point.size = 4, force = 2, max.time = 4, max.iter = 100000, seed = 0,
+        nudge_x = ifelse(sub$coef_feature < 0, -0.35, 0.35), nudge_y = 0.35,
         show.legend = FALSE) +
       scale_color_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL) +
       scale_fill_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL) +
+      guides(color = "none", fill = guide_legend(nrow = 2, override.aes = list(shape = 21, size = 3, alpha = 1))) +
       scale_size_manual(values = c(`TRUE` = 3.2 * 1.5, `FALSE` = 2.1 * 1.5), guide = "none") +
-      coord_cartesian(xlim = PANEL_XLIM, ylim = c(-0.2, max(y_max * 1.10, 5))) +
+      coord_cartesian(xlim = range(c(PANEL_XLIM, sub$coef_feature), finite = TRUE) * 1.08,
+                      ylim = c(-0.2, max(y_max * 1.20, 5))) +
       labs(x = "Cox log HR per SD", y = expression(-log[10](p)), title = title,
            caption = str_wrap(footer, 88)) +
       theme_fig() +
-      theme(plot.title = element_text(face = "bold", size = 18.75),
-            plot.caption = element_text(size = 9, color = "#5d6d7e", family = "mono",
+      theme(plot.title = element_text(face = "bold", size = 14),
+            plot.caption = element_text(size = 9, color = "#5d6d7e", family = "sans",
                                         hjust = 0, lineheight = 1.05),
-            axis.title = element_text(size = 16.5),
-            axis.text  = element_text(size = 14.25),
-            legend.text = element_text(size = 13.5),
-            legend.position = c(0.02, 0.98), legend.justification = c(0, 1))
+            axis.title = element_text(size = 12),
+            axis.text  = element_text(size = 10),
+            legend.text = element_text(size = 10),
+            legend.position = "bottom", legend.justification = "center")
     p
   }
 
@@ -2095,7 +2217,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                  linewidth = 0.6, alpha = 0.7) +
       { if (!is.na(q_y)) geom_hline(yintercept = q_y, color = "black",
                                     linetype = "dotted", linewidth = 0.9) } +
-      geom_point(data = ns, aes(coef_feature, y), size = 1.6 * 1.5, color = NS_COLOR, alpha = 0.45) +
+      geom_point(data = ns, aes(coef_feature, y), size = 1.6 * 1.5, color = NS_COLOR, alpha = 0.7) +
       geom_point(data = sigd %>% filter(!capped),
                  aes(coef_feature, y), shape = 21, fill = SIG_COLOR, color = "white",
                  size = 2.1 * 1.5, stroke = 0.6, alpha = 0.92) +
@@ -2111,23 +2233,25 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       ggrepel::geom_text_repel(
         data = sub,
         aes(coef_feature, pmin(neglog10p, Y_MAX_CAP), label = repel_label, color = point_group),
-        size = 4.5, fontface = "bold", segment.color = "#95a5a6", segment.size = 0.3,
+        size = 3.2, fontface = "plain", segment.color = "#95a5a6", segment.size = 0.3,
         max.overlaps = Inf, min.segment.length = 0, box.padding = 0.55,
-        point.padding = 0.45, force = 1.5, max.time = 2, seed = 0,
+        point.padding = 0.8, point.size = 4, force = 2, max.time = 4, max.iter = 100000, seed = 0,
+        nudge_x = ifelse(sub$coef_feature < 0, -0.35, 0.35), nudge_y = 0.35,
         show.legend = FALSE) +
       scale_color_manual(values = point_colors, breaks = names(point_colors), name = NULL,
                          guide = guide_legend(override.aes = list(size = 4.5, alpha = 1))) +
-      coord_cartesian(xlim = PANEL_XLIM, ylim = c(-0.2, max(y_max * 1.10, 5))) +
+      coord_cartesian(xlim = range(c(PANEL_XLIM, sub$coef_feature), finite = TRUE) * 1.08,
+                      ylim = c(-0.2, max(y_max * 1.20, 5))) +
       labs(x = "Cox log HR per SD", y = expression(-log[10](p)), title = title,
            caption = footer) +
       theme_fig() +
-      theme(plot.title = element_text(face = "bold", size = 18.75),
-            plot.caption = element_text(size = 9, color = "#5d6d7e", family = "mono",
+      theme(plot.title = element_text(face = "bold", size = 14),
+            plot.caption = element_text(size = 9, color = "#5d6d7e", family = "sans",
                                         hjust = 0),
-            axis.title = element_text(size = 16.5),
-            axis.text  = element_text(size = 14.25),
-            legend.text = element_text(size = 13.5),
-            legend.position = c(0.02, 0.98), legend.justification = c(0, 1))
+            axis.title = element_text(size = 12),
+            axis.text  = element_text(size = 10),
+            legend.text = element_text(size = 10),
+            legend.position = "bottom", legend.justification = "center")
     p
   }
 
@@ -2169,7 +2293,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       p <- plot_volcano_panel(sub, title)
     }
     save_fig(p, OUT_DIR, sprintf("figure3_univariate_%s_landmark%d", ENDPOINT, lm),
-             width = 7.5, height = 6)
+             width = 9, height = 7)
     if (show) print(p)
   }
 
@@ -2276,7 +2400,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       theme(plot.title = element_text(face = "bold", size = 14),
             plot.subtitle = element_text(size = 10, color = COLOR_NEUTRAL_INK),
             plot.caption = element_text(size = 9, color = COLOR_NEUTRAL_INK, hjust = 0),
-            axis.text.y = element_text(size = 9),
+            axis.text.y = element_text(size = 10),
             legend.position = "top")
   }
 
@@ -2308,16 +2432,17 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       geom_vline(xintercept = 0, color = "grey", linewidth = 0.7) +
       { if (!is.na(q_y)) geom_hline(yintercept = q_y, color = "black",
                                     linetype = "dotted", linewidth = 0.9) } +
-      geom_point(data = ~ dplyr::filter(.x, !sig), color = NS_COLOR, size = 2.2, alpha = 0.55) +
+      geom_point(data = ~ dplyr::filter(.x, !sig), color = NS_COLOR, size = 2.2, alpha = 0.7) +
       geom_point(data = ~ dplyr::filter(.x, sig & !capped), shape = 21,
                  fill = SIG_COLOR, color = "white", size = 3.0, stroke = 0.6, alpha = 0.92) +
       geom_point(data = ~ dplyr::filter(.x, sig & capped), shape = 24,
                  fill = SIG_COLOR, color = "white", size = 4.0, stroke = 0.6, alpha = 0.92) +
       ggrepel::geom_text_repel(
-        aes(label = repel_label), size = 3.6, fontface = "bold",
+        aes(label = repel_label), size = 3.2,
         segment.color = "#95a5a6", segment.size = 0.3, max.overlaps = Inf,
-        min.segment.length = 0, box.padding = 0.5, point.padding = 0.4,
-        force = 1.5, max.time = 2, seed = 0) +
+        min.segment.length = 0, box.padding = 0.5, point.padding = 0.8,
+        point.size = 4, nudge_x = ifelse(d$coef_feature < 0, -1, 1) * x_span * .08,
+        nudge_y = .25, force = 2, max.time = 4, max.iter = 100000, seed = 0) +
       coord_cartesian(xlim = c(-x_span, x_span)) +
       labs(x = "Cox log HR per SD", y = expression(-log[10](p)),
            title = title, subtitle = subtitle,
@@ -2335,35 +2460,78 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   } else {
     for (analysis in SG_ANALYSES) {
       sub <- load_sg(analysis)
-      if (is.null(sub)) next
-      subtitle <- sprintf("%s endpoint  ·  time origin: %s  ·  n=%s patients",
-                          toupper(ENDPOINT), SG_ORIGINS[[analysis]],
-                          format(max(sub$n_patients_used, na.rm = TRUE), big.mark = ","))
-      title <- sprintf("%s — univariate Cox", SG_LABELS[[analysis]])
+      if (is.null(sub) && !(analysis == "gleason" && ENDPOINT == "platinum")) next
+      if (!is.null(sub)) {
+        subtitle <- sprintf("%s endpoint  ·  time origin: %s  ·  n=%s patients",
+                            toupper(ENDPOINT), SG_ORIGINS[[analysis]],
+                            format(max(sub$n_patients_used, na.rm = TRUE), big.mark = ","))
+        title <- sprintf("%s — univariate Cox", SG_LABELS[[analysis]])
 
-      # Gleason contributes a single continuous feature, so a volcano would be
-      # one point; a forest shows the effect size and its CI instead. The
-      # many-feature analyses get a volcano plus a forest of the top hits.
-      if (identical(analysis, "gleason") || nrow(sub) < 10) {
-        p <- plot_sg_forest(sub, title, subtitle)
-        save_fig(p, OUT_DIR,
-                 sprintf("figure3b_%s_%s_forest_landmark%d", analysis, ENDPOINT, SG_LANDMARK),
-                 width = 7.5, height = max(3.0, 0.32 * nrow(sub) + 2.4))
-        if (show) print(p)
-      } else {
-        p <- plot_sg_volcano(sub, title, subtitle)
-        save_fig(p, OUT_DIR,
-                 sprintf("figure3b_%s_%s_volcano_landmark%d", analysis, ENDPOINT, SG_LANDMARK),
-                 width = 7.5, height = 6)
-        if (show) print(p)
+        # Gleason contributes a single continuous feature, so a volcano would be
+        # one point; a forest shows the effect size and its CI instead. The
+        # many-feature analyses get a volcano plus a forest of the top hits.
+        if (identical(analysis, "gleason") || nrow(sub) < 10) {
+          p <- plot_sg_forest(sub, title, subtitle)
+          save_fig(p, OUT_DIR,
+                   sprintf("figure3b_%s_%s_forest_landmark%d", analysis, ENDPOINT, SG_LANDMARK),
+                   width = 9, height = max(4.3, 0.36 * nrow(sub) + 2.8))
+          if (show) print(p)
+        } else {
+          p <- plot_sg_volcano(sub, title, subtitle)
+          save_fig(p, OUT_DIR,
+                   sprintf("figure3b_%s_%s_volcano_landmark%d", analysis, ENDPOINT, SG_LANDMARK),
+                   width = 7.5, height = 6)
+          if (show) print(p)
 
-        p_forest <- plot_sg_forest(sub, sprintf("%s — top associations", SG_LABELS[[analysis]]),
-                                   subtitle)
-        n_shown <- min(SG_TOP_N, nrow(sub))
-        save_fig(p_forest, OUT_DIR,
-                 sprintf("figure3b_%s_%s_forest_landmark%d", analysis, ENDPOINT, SG_LANDMARK),
-                 width = 8.5, height = max(3.0, 0.32 * n_shown + 2.4))
-        if (show) print(p_forest)
+          p_forest <- plot_sg_forest(sub, sprintf("%s — top associations", SG_LABELS[[analysis]]),
+                                     subtitle)
+          n_shown <- min(SG_TOP_N, nrow(sub))
+          save_fig(p_forest, OUT_DIR,
+                   sprintf("figure3b_%s_%s_forest_landmark%d", analysis, ENDPOINT, SG_LANDMARK),
+                   width = 9, height = max(4.3, 0.36 * n_shown + 2.8))
+          if (show) print(p_forest)
+        }
+      }
+      if (ENDPOINT == "platinum") {
+        index_path <- file.path(INPUTS_DIR, "somatic_gleason", analysis, "aggregated_landmark0.csv")
+        if (!file.exists(index_path)) {
+          message("Indexed platinum KM skipped: ", index_path, " is missing")
+          next
+        }
+        # Match the displayed significant alterations exactly; untested or
+        # missing calls never enter the non-carrier group.
+        features <- if (analysis == "gleason") "GLEASON_SCORE" else
+          significant_mutation_features(sub)
+        if (!length(features)) { message("No significant mutation carriers to plot for ", COHORT); next }
+        indexed <- read_csv(index_path, show_col_types = FALSE,
+          col_select = any_of(c("DFCI_MRN", "t_platinum", "PLATINUM", features)),
+          col_types = cols(.default = col_double(), DFCI_MRN = col_character()))
+        for (feature in features) {
+          if (!feature %in% names(indexed)) { warning("Indexed KM: missing feature ", feature); next }
+          values <- suppressWarnings(as.numeric(indexed[[feature]]))
+          if (analysis == "gleason") {
+            groups <- figure_gleason_groups(values)
+            group_order <- c("Gleason ≤6", "Gleason 7", "Gleason 8", "Gleason 9", "Gleason 10")
+            title_km <- "Gleason score: time to platinum"
+            note <- "Scores ≤6 are combined; higher scores shown individually. Missing scores excluded. Shading: 95% CI."
+          } else {
+            if (any(!is.na(values) & !values %in% c(0, 1))) {
+              warning("Carrier KM skipped: ", feature, " is not a binary mutation call")
+              next
+            }
+            groups <- ifelse(is.na(values), NA_character_, ifelse(values == 1, "Carrier", "Non-carrier"))
+            group_order <- c("Non-carrier", "Carrier")
+            title_km <- paste(gsub("_", " ", feature), "carrier status: time to platinum")
+            note <- "Descriptive: variant selected using this cohort's Cox q<0.05. Missing calls excluded. Shading: 95% CI."
+          }
+          d <- figure_platinum_strata(indexed, groups)
+          p_km <- plot_stratified_platinum(d, title_km, SG_ORIGINS[[analysis]], group_order,
+                                          paste(COHORT_DISPLAY, note))
+          if (is.null(p_km)) { message("Indexed KM skipped: fewer than two observed groups for ", feature); next }
+          stem <- sprintf("figure3b_%s_platinum_km_%s_landmark0", analysis, lab_stem_slug(feature))
+          save_fig(p_km, OUT_DIR, stem, 8.5, if (analysis == "gleason") 7.5 else 6.5)
+          if (show) print(p_km)
+        }
       }
     }
   }
@@ -2487,12 +2655,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         scale_linetype_manual(values = c(`TRUE` = "dashed", `FALSE` = "solid"), guide = "none")
     }
     p +
-      geom_text(aes(fill = name, label = ifelse(is.finite(value), sprintf("%.3f", value), "")),
+      geom_text(aes(label = ifelse(is.finite(value), sprintf("%.3f", value), "")),
                 position = position_dodge(width = 0.85), vjust = -0.4, size = 2.5,
                 show.legend = FALSE) +
       geom_hline(yintercept = 0.5, color = "grey", linetype = "dotted", linewidth = 0.9) +
       scale_fill_manual(values = SERIES_COLORS, name = NULL, drop = FALSE) +
-      coord_cartesian(ylim = c(0.45, ymax)) +
+      coord_cartesian(ylim = c(0, max(1.04, ymax))) +
       labs(x = NULL, y = ylabel) +
       theme_fig() +
       guides(fill = guide_legend(ncol = 2, byrow = TRUE)) +
@@ -2715,7 +2883,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       labs(x = xlabel, y = NULL, title = title) +
       theme_fig() +
       theme(plot.title = element_text(face = "bold", size = 11),
-            axis.text.y = element_text(size = 8.5))
+            axis.text.y = element_text(size = 10))
     if (kind == "cox") p <- p + geom_vline(xintercept = 0, color = "black", linewidth = 0.5)
     p
   }
@@ -2812,7 +2980,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       labs(x = xlabel, y = ylabel, title = title) +
       theme_fig() +
       theme(plot.title = element_text(face = "bold", size = 10),
-            legend.position = c(0.02, 0.02), legend.justification = c(0, 0))
+            legend.position = "bottom", legend.justification = "center")
   }
 
   aggregated_landmark_cache <- new.env(parent = emptyenv())
@@ -2829,7 +2997,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       aggregated_landmark_cache[[key]] <- structure(list(), class = "missing_aggregated")
       return(NULL)
     }
-    value <- read_csv(path, show_col_types = FALSE, guess_max = 100000)
+    value <- read_csv(path, show_col_types = FALSE,
+      col_select = c(any_of(c("DFCI_MRN", "t_platinum", "PLATINUM")),
+        matches("^(PSA|Testosterone|Prostate specific Ag).*__mean$", ignore.case = TRUE)),
+      col_types = cols(.default = col_double(), DFCI_MRN = col_character()))
     aggregated_landmark_cache[[key]] <- value
     value
   }
@@ -2865,7 +3036,41 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     pval <- 1 - pchisq(sd$chisq, length(sd$n) - 1)
     ann <- sprintf("%s\nlog-rank p = %.3g", ann, pval)
     p + annotate("text", x = Inf, y = 0, label = ann, hjust = 1.05, vjust = 0,
-                 size = 2.6, color = "#5d6d7e", family = "mono")
+                 size = 2.6, color = "#5d6d7e", family = "sans")
+  }
+
+  # Three value-based groups, using the same incident risk set and pre-landmark
+  # mean features as the fitted models. Only PSA/testosterone are requested.
+  notify_progress("stage", "Time to platinum: PSA/testosterone tertiles")
+  for (landmark in LANDMARKS) {
+    agg <- load_aggregated_landmark(landmark)
+    if (is.null(agg)) next
+    if (!all(c("DFCI_MRN", "t_platinum", "PLATINUM") %in% names(agg))) {
+      warning("Tertile KM skipped: missing platinum outcomes at landmark ", landmark)
+      next
+    }
+    eligible <- is.finite(agg$t_platinum) & agg$t_platinum > 0 & agg$PLATINUM %in% c(0, 1)
+    agg <- agg[eligible, , drop = FALSE]
+    for (lab in ANDROGEN) {
+      column <- resolve_mean_col(names(agg), lab)
+      if (is.na(column)) { message("Tertile KM: missing ", lab, " mean at landmark ", landmark); next }
+      groups <- figure_tertiles(agg[[column]])
+      if (all(is.na(groups))) {
+        message("Tertile KM: ", lab, " at landmark ", landmark,
+                " cannot form three nonempty groups without splitting tied values; skipped")
+        next
+      }
+      d <- figure_platinum_strata(agg, groups)
+      cuts <- attr(groups, "cutpoints")
+      note <- sprintf("%s. Pre-landmark mean; cutpoints %.4g and %.4g. Equal values stay together. Shading: 95%% CI.",
+                      COHORT_DISPLAY, cuts[1], cuts[2])
+      p <- plot_stratified_platinum(d, paste(lab, "tertiles: time to platinum"),
+        sprintf("the +%d-day treatment landmark", landmark),
+        c("Low tertile", "Middle tertile", "High tertile"), note)
+      if (is.null(p)) next
+      save_fig(p, OUT_DIR, sprintf("km_tertile_%s_landmark%d", lab_stem_slug(lab), landmark), 8, 6.5)
+      if (show) print(p)
+    }
   }
 
   # Retired: per-lab quartile KM figures.
@@ -2945,7 +3150,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         }
       }
       p + annotate("text", x = Inf, y = 0, label = ann, hjust = 1.05, vjust = 0,
-                   size = 2.6, color = "#5d6d7e", family = "mono")
+                   size = 2.6, color = "#5d6d7e", family = "sans")
     }
 
     for (scheme_name in names(FIGURE_LLM_STRATA)) {
@@ -3006,7 +3211,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       coord_cartesian(xlim = c(lo, hi)) +
       labs(x = xlab, y = "Density", title = ttl) +
       annotate("text", x = Inf, y = Inf, label = ann_lines, hjust = 1.05, vjust = 1.5,
-               size = 2.6, color = "#5d6d7e", family = "mono") +
+               size = 2.6, color = "#5d6d7e", family = "sans") +
       theme_fig() +
       theme(plot.title = element_text(face = "bold", size = 10),
             legend.position = c(0.98, 0.72), legend.justification = c(1, 1))
@@ -3362,12 +3567,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
           position = position_dodge(width = 0.78), width = 0.18, linewidth = 0.45
         ) +
         geom_text(
-          aes(label = sprintf("%d/%d", n_covered, n_patients)),
+          aes(y = hi + .025, label = sprintf("%d/%d", n_covered, n_patients)),
           position = position_dodge(width = 0.78), vjust = -0.45, size = 2.7
         ) +
         facet_grid(LAB_GROUP ~ stratification, scales = "free_x", space = "free_x") +
-        scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
-        coord_cartesian(ylim = c(0, 1.08), clip = "off") +
+        scale_y_continuous(labels = percent_format(accuracy = 1), breaks = seq(0, 1, .25)) +
+        coord_cartesian(ylim = c(0, 1.12), clip = "off") +
         scale_fill_manual(values = c("#4863a0", "#d9903d"), name = NULL) +
         labs(
           x = NULL, y = "Patients with at least one measurement",
@@ -3898,6 +4103,42 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     }
   }
   } # retired precomputed GAM figure block
+  }
+
+  if (IS_CANONICAL_ADT && !is.null(cohort_forest_config)) {
+    notify_progress("stage", "PSA/testosterone forest across ADT cohorts")
+    sys.source(cohort_forest_config$script, envir = environment())
+    landmark <- cohort_forest_config$landmark
+    forest <- load_cohort_forest(NEPC_PROJ_PATH, cohort_forest_config$cohorts, ENDPOINT, landmark)
+    if (nrow(forest)) {
+      p_forest <- plot_cohort_forest(forest, ENDPOINT, landmark)
+      save_fig(p_forest, OUT_DIR, sprintf("cohort_forest_%s_landmark%d", ENDPOINT, landmark),
+               12, max(6, 3 * length(unique(forest$feature_stat))))
+      if (show) print(p_forest)
+    } else message("Cohort forest: no PSA/testosterone estimates available for ", ENDPOINT)
+  }
+
+  ## ---- Unified ADT/LLM metastatic/regex-stage diagnostics ----
+  if (IS_CANONICAL_ADT && EMIT_ENDPOINT_INDEPENDENT && !is.null(metastatic_supplement)) {
+    sys.source(metastatic_supplement$r_script, envir = environment())
+    stems <- metastatic_supplement_stems()
+    complete <- vapply(stems, function(stem) {
+      base <- file.path(output_dir_for_stem(stem), COHORT_LEAF)
+      figure_file_complete(paste0(base, ".png")) &&
+        (!save_pdf || figure_file_complete(paste0(base, ".pdf")))
+    }, logical(1))
+    if (!overwrite && all(complete)) {
+      for (stem in stems) notify_progress("panel_skipped", stem)
+      message("Metastatic-label supplement: all subpanels complete; skipping preparation")
+    } else {
+      render_metastatic_supplements(
+        metastatic_supplement, patient_df,
+        cached_canonical_longitudinal(LONGITUDINAL_CSV, labs = LAB_FIGURE_LABS),
+        save_panel = function(plot, stem, width, height)
+          save_fig(plot, fig_dir("metastatic_labels"), stem, width, height),
+        notify = notify_progress, show = show
+      )
+    }
   }
 
   ## ---- Supplement -- localized-adjuvant vs metastatic ADT-intent strata ----
