@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 
 import polars as pl
 import pytest
@@ -60,7 +59,12 @@ def test_empty_stage_and_llm_sources_preserve_unclassified_patients():
 
 
 @pytest.mark.skipif(shutil.which("Rscript") is None, reason="R required")
-def test_bridge_r_comparisons_and_standalone_diagnostics(tmp_path):
+def test_r_comparisons_and_standalone_diagnostics(tmp_path):
+    check = subprocess.run(["Rscript", "-e",
+        'cat(requireNamespace("arrow", quietly=TRUE) || requireNamespace("nanoparquet", quietly=TRUE))'],
+        text=True, capture_output=True)
+    if check.stdout.strip() != "TRUE":
+        pytest.skip("R Parquet reader required")
     intent, notes, llm = fixture_inputs()
     # Enough labelled patients for both lab trajectories, plus a patient with
     # no intent label to exercise explicit missing-label coverage.
@@ -88,8 +92,7 @@ def test_bridge_r_comparisons_and_standalone_diagnostics(tmp_path):
         figure_output_tier("adt", "platinum", "longitudinal_has_nepc_psa") == "supplements",
         figure_output_tier("adt", "platinum", "figure2v3_enrichment") == "main")
       root <- {json.dumps(str(tmp_path))}
-      config <- list(python = {json.dumps(sys.executable)},
-        script = {json.dumps(str(SCRIPTS / "prepare_metastatic_figure_labels.py"))},
+      config <- list(prepare_script = {json.dumps(str(SCRIPTS / "prepare_metastatic_figure_labels.R"))},
         intent = file.path(root, "intent.csv"), stage = file.path(root, "stage.parquet"),
         llm = file.path(root, "llm.parquet"), icd = file.path(root, "icd.csv"))
       patients <- readr::read_csv(config$intent, show_col_types = FALSE) %>%

@@ -1,4 +1,7 @@
-"""Small label bridge for 05_figures.Rmd; never reads longitudinal lab data.
+"""Legacy label reference retained for regression tests.
+
+05_figures.Rmd now sources prepare_metastatic_figure_labels.R directly and
+never calls this Python module.
 
 Reuse the pipeline's medication-derived ADT intent labels, and compare them
 with the metastatic-diagnosis LLM task and dated regex stages. Stage I–III is

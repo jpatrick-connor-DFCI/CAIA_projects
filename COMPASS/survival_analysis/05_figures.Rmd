@@ -159,17 +159,20 @@ subpanels, and shares progress tracking and the overwrite switch. The older
 localized-adjuvant versus metastatic **model-result** comparison remains
 available via `PLOT_ADT_INTENT_SUPPLEMENT`; it needs precomputed comparison CSVs.
 
-`PLOT_METASTATIC_LABEL_SUPPLEMENT` defaults to `TRUE`. Its Python bridge needs
-Polars, the existing `mrn_lists/adt_intent_labels_model_cohort.csv`, dated regex
-stage parquet, and `LLM_met_diagnosis/met_dx_labels.parquet`. Set
-`COMPASS_FIGURE_PYTHON`, `COMPASS_REGEX_STAGE_PATH`, or `LLM_MET_LABELS_PATH` to
-use other installations/paths. It does not use the NEPC subtype classifier as
-a metastatic-status label. Missing required sources produce a warning and skip
+`PLOT_METASTATIC_LABEL_SUPPLEMENT` defaults to `TRUE`. Preparation runs entirely
+in R, using `arrow` or `nanoparquet` for the Parquet inputs and the existing
+`mrn_lists/adt_intent_labels_model_cohort.csv`, dated regex stage parquet, and
+`LLM_met_diagnosis/met_dx_labels.parquet`. Set
+`COMPASS_REGEX_STAGE_PATH` or `LLM_MET_LABELS_PATH` to use other input paths.
+If neither R Parquet reader is installed, run `install.packages("nanoparquet")`
+once in the R environment used for knitting. No Python interpreter is called.
+The NEPC subtype classifier is not used as a metastatic-status label.
+Missing required sources produce a warning and skip
 this supplement; other figures continue.
 
 The main workflow calls `generate_figures()` in
 `COMPASS_generate_figures_pipeline.R`. Supplement rendering lives in
-`metastatic_figure_supplements.R`; `prepare_metastatic_figure_labels.py` joins
+`metastatic_figure_supplements.R`; `prepare_metastatic_figure_labels.R` joins
 small label/stage inputs without reading the longitudinal lab file.
 
 The Figure 1 analysis-set supplement, Figure 3 significance-only variants,
@@ -245,8 +248,7 @@ PLOT_ADT_INTENT_SUPPLEMENT <- FALSE
 # intent labels already built by compass_pipeline; no model refits are needed.
 PLOT_METASTATIC_LABEL_SUPPLEMENT <- TRUE
 METASTATIC_SUPPLEMENT <- list(
-  python = Sys.getenv("COMPASS_FIGURE_PYTHON", "python3"),
-  script = file.path(dirname(pipeline_path), "prepare_metastatic_figure_labels.py"),
+  prepare_script = file.path(dirname(pipeline_path), "prepare_metastatic_figure_labels.R"),
   r_script = file.path(dirname(pipeline_path), "metastatic_figure_supplements.R"),
   intent = file.path(NEPC_PROJ_PATH, "mrn_lists", "adt_intent_labels_model_cohort.csv"),
   stage = Sys.getenv("COMPASS_REGEX_STAGE_PATH", file.path(
@@ -286,6 +288,20 @@ RENDER_WORKERS <- suppressWarnings(as.integer(
 ))
 if (is.na(RENDER_WORKERS) || RENDER_WORKERS < 1L)
   stop("COMPASS_RENDER_WORKERS must be a positive integer")
+
+# Check the R Parquet reader before expensive reads/forking, only when this
+# supplement needs rendering. Completed figures do not need source readers.
+if (PLOT_METASTATIC_LABEL_SUPPLEMENT && "adt" %in% COHORTS && "platinum" %in% ENDPOINTS &&
+    all(file.exists(unlist(METASTATIC_SUPPLEMENT[c("intent", "stage", "llm")])))) {
+  source(METASTATIC_SUPPLEMENT$r_script)
+  bases <- file.path(FIG_ROOT, "ADT", "by_figure", "supplements", "metastatic_labels",
+                     sub("^adt_labels_", "", metastatic_supplement_stems()), "platinum__all__incl")
+  outputs <- c(paste0(bases, ".png"), if (RENDER_PDF) paste0(bases, ".pdf"))
+  if (RENDER_OVERWRITE || !all(vapply(outputs, figure_file_complete, logical(1)))) {
+    source(METASTATIC_SUPPLEMENT$prepare_script)
+    metastatic_parquet_backend()
+  }
+}
 
 # Fail early with a useful message rather than deep inside generate_figures().
 for (required_path in c(
@@ -405,7 +421,9 @@ count as one completed subpanel after both requested files are available.
 render_cell <- function(COHORT, ENDPOINT, cell_index) {
   label <- sprintf("%s / %s", cohort_display(COHORT), toupper(ENDPOINT))
   cell_started <- proc.time()[["elapsed"]]
+  current_stage <- "initialization"
   progress <- function(event, detail = "") {
+    if (event == "stage" && nzchar(detail)) current_stage <<- detail
     figure_progress$update(cell_index, event, detail)
     invisible(NULL)
   }
@@ -432,8 +450,12 @@ render_cell <- function(COHORT, ENDPOINT, cell_index) {
     )
     TRUE
   }, error = function(e) {
-    failure_detail <<- conditionMessage(e)
-    message(sprintf("FAILED %s: %s", label, conditionMessage(e)))
+    failure_detail <<- sprintf("%s [%s]: %s", label, current_stage, conditionMessage(e))
+    failed_call <- conditionCall(e)
+    if (!is.null(failed_call))
+      failure_detail <<- paste0(failure_detail, "\n    Call: ",
+                               paste(deparse(failed_call), collapse = " "))
+    message("FAILED ", failure_detail)
     FALSE
   })
   if (ok) {
@@ -443,7 +465,7 @@ render_cell <- function(COHORT, ENDPOINT, cell_index) {
     character(0)
   } else {
     progress("failed", failure_detail)
-    label
+    failure_detail
   }
 }
 

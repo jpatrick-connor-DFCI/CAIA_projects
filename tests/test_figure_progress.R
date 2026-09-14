@@ -68,6 +68,9 @@ for (workers in if (.Platform$OS.type == "windows") 1L else c(1L, 2L)) {
   }, error = identity)
   stopifnot(inherits(failure, "error"),
             grepl("1 of 4 figure sets failed", conditionMessage(failure), fixed = TRUE),
+            grepl("adt_test / PLATINUM [synthetic inputs]: synthetic device failure",
+                  conditionMessage(failure), fixed = TRUE),
+            grepl("Call:", conditionMessage(failure), fixed = TRUE),
             env$progress_summary$finished == 4L,
             env$progress_summary$successful == 3L,
             env$progress_summary$failed == 1L,
