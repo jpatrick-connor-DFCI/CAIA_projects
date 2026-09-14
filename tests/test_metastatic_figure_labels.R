@@ -37,6 +37,30 @@ stopifnot(identical(as.numeric(burden$N_MET_SITES), c(2,0,1,1,0,0)),
 stopifnot(identical(metastatic_icd_site(c("C7931","C7949","C782","C786","C7972","C78","C799","C61")),
                     c("brain","other","lung","peritoneal","adrenal",NA,NA,NA)))
 
+# Intent history can predate the model's post-diagnosis treatment anchor.
+# Recompute every dated label/ICD window by ID, even with shuffled anchor rows.
+anchors <- tibble(DFCI_MRN=c(7,3,1,2,4,5,6),
+  TREATMENT_ANCHOR_DATE=as.Date(c(rep("2020-03-01",3),rep("2020-01-01",3),NA)))
+more_notes <- bind_rows(notes, tibble(DFCI_MRN=7, EVENT_DATE="2020-02-01", DERIVED_STAGE_MERGED=4))
+more_llm <- bind_rows(llm, tibble(DFCI_MRN=7, has_metastatic_disease=TRUE))
+aligned <- build_metastatic_labels(intent, more_notes, more_llm, anchors)
+patient3 <- aligned[aligned$DFCI_MRN=="3",]
+patient7 <- aligned[aligned$DFCI_MRN=="7",]
+stopifnot(identical(aligned$DFCI_MRN,as.character(anchors$DFCI_MRN)),
+          patient3$REGEX_LABEL=="Metastatic", is.na(patient3$REGEX_MAX_AFTER),
+          patient3$ANCHOR_DELTA_DAYS==60,
+          as.Date(patient3$ADT_FIRST_DATE)==as.Date("2020-01-01"),
+          as.Date(patient3$ANALYSIS_ANCHOR_DATE)==as.Date("2020-03-01"),
+          patient3$ADT_LABEL=="Metastatic", patient3$LLM_LABEL=="Local",
+          is.na(patient7$ADT_LABEL), patient7$LLM_LABEL=="Metastatic",
+          patient7$REGEX_LABEL=="Metastatic",
+          is.na(aligned$REGEX_MAX_BEFORE[aligned$DFCI_MRN=="6"]))
+aligned_burden <- metastatic_burden_at_adt(icds,aligned)
+stopifnot(aligned_burden$N_MET_SITES[aligned_burden$DFCI_MRN=="1"]==3,
+          is.na(aligned_burden$N_MET_SITES[aligned_burden$DFCI_MRN=="6"]))
+failure <- tryCatch(build_metastatic_labels(intent,notes,llm,bind_rows(anchors,anchors[1,])),error=identity)
+stopifnot(inherits(failure,"error"), grepl("one row per patient",conditionMessage(failure)))
+
 # Prove that the active R workflow has no external Python execution/configuration.
 active <- paste(readLines("COMPASS/survival_analysis/05_figures.Rmd"),
                 collapse="\n")

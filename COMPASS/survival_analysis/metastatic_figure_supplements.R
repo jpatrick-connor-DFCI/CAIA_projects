@@ -40,14 +40,13 @@ render_metastatic_supplements <- function(config, patient_df, labs, save_panel,
   }
   prep <- new.env(parent = environment())
   sys.source(config$prepare_script, envir = prep)
-  labels <- prep$prepare_metastatic_figure_labels(config)
-  labels <- patient_df %>% select(DFCI_MRN) %>% mutate(DFCI_MRN = as.character(DFCI_MRN)) %>%
-    left_join(labels, by = "DFCI_MRN")
-  if ("TREATMENT_ANCHOR_DATE" %in% names(patient_df)) {
-    difference <- abs(as.numeric(as.Date(patient_df$TREATMENT_ANCHOR_DATE) - as.Date(labels$ADT_FIRST_DATE)))
-    if (any(difference > 1, na.rm = TRUE))
-      stop("Metastatic supplement: longitudinal ADT anchors disagree with intent-label ADT_FIRST_DATE")
-  }
+  labels <- prep$prepare_metastatic_figure_labels(config, analysis_anchors = patient_df)
+  comparable <- !is.na(labels$ANCHOR_DELTA_DAYS)
+  different <- comparable & labels$ANCHOR_DELTA_DAYS != 0
+  message(sprintf(paste0("Metastatic supplement: stage/ICD windows use longitudinal TREATMENT_ANCHOR_DATE; ",
+                         "%d of %d comparable intent dates differ. Original dates retained; ",
+                         "%d patients lack an analysis anchor."),
+                  sum(different), sum(comparable), sum(is.na(labels$ANALYSIS_ANCHOR_DATE))))
   names_pretty <- c(ADT_LABEL = "ADT intent", LLM_LABEL = "LLM metastatic status",
                     REGEX_LABEL = "Regex stage nearest before ADT (365 days)",
                     REGEX_MAX_BEFORE = "Regex maximum stage before ADT",
@@ -55,6 +54,7 @@ render_metastatic_supplements <- function(config, patient_df, labs, save_panel,
   colors <- c(Local = "#0b6ba8", Metastatic = "#c1272d", Unclassified = "#999999")
   caption <- paste("Canonical ADT analysis cohort; pre-ADT castrate patients included.",
                    "Regex I–III = local; IV = metastatic. ADT/LLM labels use full observed history.",
+                   "Stage/ICD windows use the longitudinal analysis ADT date.",
                    "Agreement is descriptive; definitions and observation windows differ.", sep = "\n")
   emit <- function(plot, name, width = 8, height = 5.5) {
     save_panel(plot, paste0("adt_labels_", name), width, height)

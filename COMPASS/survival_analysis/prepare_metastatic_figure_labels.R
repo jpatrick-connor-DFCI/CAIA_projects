@@ -46,11 +46,26 @@ metastatic_collapse_stage <- function(values) {
   ifelse(is.na(stage), NA_character_, ifelse(stage == 4L, "Metastatic", "Local"))
 }
 
-build_metastatic_labels <- function(intent, notes, llm) {
+build_metastatic_labels <- function(intent, notes, llm, analysis_anchors = NULL) {
   intent <- metastatic_normalize_id(intent) %>%
     transmute(DFCI_MRN, ADT_FIRST_DATE = metastatic_datetime(ADT_FIRST_DATE),
       ADT_LABEL = unname(c(LOCALIZED_ADJUVANT = "Local", METASTATIC = "Metastatic")[as.character(ADT_INTENT)]))
   if (anyDuplicated(intent$DFCI_MRN)) stop("ADT intent input must contain exactly one row per patient")
+  if (is.null(analysis_anchors)) {
+    # Standalone use without an analysis cohort retains the intent-file clock.
+    intent <- intent %>% mutate(ANALYSIS_ANCHOR_DATE = ADT_FIRST_DATE)
+  } else {
+    if (!all(c("DFCI_MRN", "TREATMENT_ANCHOR_DATE") %in% names(analysis_anchors)))
+      stop("Metastatic supplement requires patient DFCI_MRN and TREATMENT_ANCHOR_DATE")
+    anchors <- metastatic_normalize_id(analysis_anchors) %>%
+      transmute(DFCI_MRN, ANALYSIS_ANCHOR_DATE = metastatic_datetime(TREATMENT_ANCHOR_DATE))
+    if (anyDuplicated(anchors$DFCI_MRN)) stop("Analysis anchors must contain exactly one row per patient")
+    # Match by patient ID, never row order. Preserve patients without an intent
+    # label so their independent LLM and regex evidence is still represented.
+    intent <- anchors %>% left_join(intent, by = "DFCI_MRN")
+  }
+  intent <- intent %>% mutate(ANCHOR_DELTA_DAYS = as.numeric(
+    as.Date(ANALYSIS_ANCHOR_DATE, tz = "UTC") - as.Date(ADT_FIRST_DATE, tz = "UTC")))
   llm <- metastatic_normalize_id(llm) %>%
     mutate(.verdict = tolower(as.character(has_metastatic_disease))) %>%
     group_by(DFCI_MRN) %>% summarise(LLM_LABEL = case_when(
@@ -61,8 +76,8 @@ build_metastatic_labels <- function(intent, notes, llm) {
     transmute(DFCI_MRN, .date = metastatic_datetime(EVENT_DATE),
               .stage = metastatic_stage_number(DERIVED_STAGE_MERGED)) %>%
     filter(!is.na(.date), !is.na(.stage)) %>%
-    inner_join(intent %>% select(DFCI_MRN, ADT_FIRST_DATE), by = "DFCI_MRN") %>%
-    mutate(.days = trunc(as.numeric(difftime(.date, ADT_FIRST_DATE, units = "days"))))
+    inner_join(intent %>% select(DFCI_MRN, ANALYSIS_ANCHOR_DATE), by = "DFCI_MRN") %>%
+    mutate(.days = trunc(as.numeric(difftime(.date, ANALYSIS_ANCHOR_DATE, units = "days"))))
   before <- notes %>% filter(.days <= 0)
   nearest <- before %>% filter(.days >= -365) %>% arrange(desc(.days), desc(.stage)) %>%
     distinct(DFCI_MRN, .keep_all = TRUE) %>% transmute(DFCI_MRN, REGEX_STAGE = .stage)
@@ -75,7 +90,8 @@ build_metastatic_labels <- function(intent, notes, llm) {
     mutate(REGEX_LABEL = metastatic_collapse_stage(REGEX_STAGE),
            REGEX_MAX_BEFORE = metastatic_collapse_stage(REGEX_MAX_BEFORE_STAGE),
            REGEX_MAX_AFTER = metastatic_collapse_stage(REGEX_MAX_AFTER_STAGE)) %>%
-    select(DFCI_MRN, ADT_FIRST_DATE, ADT_LABEL, LLM_LABEL, REGEX_LABEL, REGEX_MAX_BEFORE, REGEX_MAX_AFTER)
+    select(DFCI_MRN, ADT_FIRST_DATE, ANALYSIS_ANCHOR_DATE, ANCHOR_DELTA_DAYS,
+           ADT_LABEL, LLM_LABEL, REGEX_LABEL, REGEX_MAX_BEFORE, REGEX_MAX_AFTER)
 }
 
 metastatic_icd_site <- function(values) {
@@ -93,24 +109,27 @@ metastatic_icd_site <- function(values) {
 
 metastatic_burden_at_adt <- function(icds, labels) {
   groups <- c("brain", "bone", "liver", "lung", "node", "adrenal", "peritoneal", "other")
-  anchors <- labels %>% select(DFCI_MRN, ADT_FIRST_DATE) %>% filter(!is.na(ADT_FIRST_DATE))
+  anchors <- labels %>% select(DFCI_MRN, ANALYSIS_ANCHOR_DATE) %>% filter(!is.na(ANALYSIS_ANCHOR_DATE))
   coded <- metastatic_normalize_id(icds) %>% inner_join(anchors, by = "DFCI_MRN") %>%
     mutate(.date = metastatic_datetime(START_DT), .site = metastatic_icd_site(DIAGNOSIS_ICD10_CD)) %>%
-    filter(!is.na(.date), !is.na(.site), .date <= ADT_FIRST_DATE) %>% distinct(DFCI_MRN, .site)
+    filter(!is.na(.date), !is.na(.site), .date <= ANALYSIS_ANCHOR_DATE) %>% distinct(DFCI_MRN, .site)
   base <- labels %>% distinct(DFCI_MRN)
   for (group in groups)
     base[[paste0("MET_SITE_", group)]] <- as.integer(base$DFCI_MRN %in% coded$DFCI_MRN[coded$.site == group])
+  # With no analysis date, "before ADT" is unknown rather than zero burden.
+  unavailable <- !base$DFCI_MRN %in% anchors$DFCI_MRN
+  for (column in paste0("MET_SITE_", groups)) base[[column]][unavailable] <- NA_integer_
   base$N_MET_SITES <- rowSums(base[paste0("MET_SITE_", groups)])
   base
 }
 
-prepare_metastatic_figure_labels <- function(config) {
+prepare_metastatic_figure_labels <- function(config, analysis_anchors = NULL) {
   intent <- readr::read_csv(config$intent, show_col_types = FALSE,
     col_select = all_of(c("DFCI_MRN", "ADT_FIRST_DATE", "ADT_INTENT")),
     col_types = readr::cols(.default = readr::col_character()))
   notes <- read_metastatic_parquet(config$stage, c("DFCI_MRN", "EVENT_DATE", "DERIVED_STAGE_MERGED"))
   llm <- read_metastatic_parquet(config$llm, c("DFCI_MRN", "has_metastatic_disease"))
-  labels <- build_metastatic_labels(intent, notes, llm)
+  labels <- build_metastatic_labels(intent, notes, llm, analysis_anchors)
   if (!is.null(config$icd) && file.exists(config$icd)) {
     icds <- readr::read_csv(config$icd, show_col_types = FALSE,
       col_select = all_of(c("DFCI_MRN", "DIAGNOSIS_ICD10_CD", "START_DT")),

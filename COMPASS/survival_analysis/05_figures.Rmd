@@ -142,6 +142,14 @@ cohort, including pre-ADT castrate patients, so counts are comparable across
 ADT intent and LLM metastatic status. This differs from the older
 `08_adt_intent.ipynb` all-ADT-exposed population.
 
+All dated stage/ICD windows use that cohort's longitudinal
+`TREATMENT_ANCHOR_DATE`, matching its survival and lab clocks. The intent
+classifier's `ADT_FIRST_DATE` can differ because it uses medication history
+while the longitudinal anchor is restricted to on/after diagnosis. Preparation
+retains both dates, reports the number of differences, and recomputes the
+stage/ICD windows using the analysis date. It preserves the supplied ADT/LLM
+labels. Missing analysis dates leave dated stage/ICD results unclassified.
+
 Regex stage is collapsed to **I–III = local** and **IV = metastatic**. Missing
 or invalid stages remain unclassified. The primary comparison uses the nearest
 stage within 365 days before/on ADT; maximum stage before/on ADT and maximum

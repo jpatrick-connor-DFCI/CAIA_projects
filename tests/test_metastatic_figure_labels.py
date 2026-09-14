@@ -96,7 +96,9 @@ def test_r_comparisons_and_standalone_diagnostics(tmp_path):
         intent = file.path(root, "intent.csv"), stage = file.path(root, "stage.parquet"),
         llm = file.path(root, "llm.parquet"), icd = file.path(root, "icd.csv"))
       patients <- readr::read_csv(config$intent, show_col_types = FALSE) %>%
-        transmute(DFCI_MRN = as.character(DFCI_MRN), t_death = 400 + row_number(),
+        transmute(DFCI_MRN = as.character(DFCI_MRN),
+          TREATMENT_ANCHOR_DATE = if_else(as.numeric(DFCI_MRN) %% 10 == 1,
+            as.Date("2020-03-01"), as.Date("2020-01-01")), t_death = 400 + row_number(),
           t_platinum = 100 + row_number(), t_nepc = 200 + row_number(),
           t_last_contact = 1000, DEATH = row_number() %% 2,
           PLATINUM = row_number() %% 2, NEPC = row_number() %% 2)
@@ -110,6 +112,7 @@ def test_r_comparisons_and_standalone_diagnostics(tmp_path):
                  dpi = 100, device = ragg::agg_png)
         }}, notify = function(...) NULL)
       stopifnot(setequal(saved, metastatic_supplement_stems()), !anyDuplicated(saved))
+      stopifnot(sum(labels$ANCHOR_DELTA_DAYS != 0, na.rm=TRUE)==6)
       result <- metastatic_pair_counts(labels, "ADT_LABEL", "REGEX_LABEL")
       stopifnot(result$paired == 24, result$missing == 12, result$agreement == .5,
                 sum(result$counts$n) == 24)
