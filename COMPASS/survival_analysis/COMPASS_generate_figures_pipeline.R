@@ -724,6 +724,74 @@ ENDPOINT_SUFFIXES <- c(
 # endpoint rather than duplicated per endpoint.
 ENDPOINT_INDEPENDENT_FIGURES_ENDPOINT <- "platinum"
 
+# Each worker owns one small status file. Atomic replacement lets concurrent
+# workers report a shared total without racing on a shared counter. These are
+# session-temporary progress records, never figure-output completion markers.
+new_figure_progress <- function(labels,
+                                report = function(line) cat(line, "\n", file = stderr())) {
+  stopifnot(is.character(labels), length(labels) > 0L, !anyNA(labels),
+            is.function(report))
+  progress_dir <- tempfile("compass-figure-progress-")
+  if (!dir.create(progress_dir)) stop("Could not create figure progress directory")
+  paths <- file.path(progress_dir, sprintf("cell-%03d.rds", seq_along(labels)))
+  started <- Sys.time()
+  for (path in paths)
+    saveRDS(list(status = "queued", detail = "queued", panels = character()), path,
+            compress = FALSE)
+
+  snapshot <- function() {
+    states <- lapply(paths, readRDS)
+    statuses <- vapply(states, function(x) x$status, character(1))
+    list(
+      total = length(labels),
+      finished = sum(statuses %in% c("complete", "failed")),
+      successful = sum(statuses == "complete"),
+      failed = sum(statuses == "failed"),
+      panels = sum(vapply(states, function(x) length(x$panels), integer(1))),
+      elapsed = as.numeric(difftime(Sys.time(), started, units = "secs")),
+      states = states
+    )
+  }
+  display <- function(detail) {
+    s <- snapshot()
+    filled <- floor(20 * s$finished / s$total)
+    bar <- paste0(strrep("=", filled), strrep("-", 20 - filled))
+    seconds <- floor(s$elapsed)
+    clock <- sprintf("%02d:%02d:%02d", seconds %/% 3600,
+                     (seconds %% 3600) %/% 60, seconds %% 60)
+    report(sprintf(
+      "[%s] %d/%d sets finished (%3.0f%%) | %d subpanels saved | %d failed | %s elapsed | %s",
+      bar, s$finished, s$total, 100 * s$finished / s$total,
+      s$panels, s$failed, clock, gsub("[\r\n]+", " ", detail)
+    ))
+    invisible(s)
+  }
+  update <- function(i, event, detail = "") {
+    stopifnot(length(i) == 1L, !is.na(i), i %in% seq_along(paths))
+    event <- match.arg(event, c("start", "stage", "panel_start", "panel_done",
+                               "complete", "failed"))
+    state <- readRDS(paths[[i]])
+    state$status <- if (event %in% c("complete", "failed")) event else "running"
+    state$detail <- detail
+    if (event == "panel_done") state$panels <- unique(c(state$panels, detail))
+    pending <- paste0(paths[[i]], ".", Sys.getpid(), ".tmp")
+    saveRDS(state, pending, compress = FALSE)
+    if (!file.rename(pending, paths[[i]]))
+      stop("Could not publish figure progress for ", labels[[i]])
+    verb <- switch(event, start = "starting", stage = "preparing",
+                   panel_start = "rendering", panel_done = "saved",
+                   complete = "complete", failed = "FAILED")
+    display(sprintf("%s: %s %s", labels[[i]], verb, detail))
+  }
+  close <- function() {
+    # Only this tracker's newly created temporary directory is removed.
+    unlink(progress_dir, recursive = TRUE)
+    invisible(NULL)
+  }
+  display("starting figure generation")
+  list(update = update, snapshot = snapshot, close = close)
+}
+
 # Render the full COMPASS figure set for one cohort arm and one survival
 # endpoint. Mirrors the body of the former figure notebook's per-cohort cells
 # (Figures 1-7 + Table 1), so the R Markdown document can call it once per
@@ -738,7 +806,14 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                              plot_adt_intent_supplement = TRUE,
                              save_dpi = SAVE_DPI,
                              save_pdf = FALSE,
-                             output_mode = "panels") {
+                             output_mode = "panels",
+                             progress = NULL) {
+  if (!is.null(progress) && !is.function(progress))
+    stop("progress must be NULL or a function(event, detail)")
+  notify_progress <- function(event, detail) {
+    if (!is.null(progress)) progress(event, detail)
+    invisible(NULL)
+  }
   # Rscript opens `Rplots.pdf` when any plot is drawn without an explicit device.
   # All intended outputs below use ggsave(), so route any incidental drawing to a
   # temporary null PDF device during non-interactive runs.
@@ -992,7 +1067,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # incremental existence checks occur here.
   save_fig <- function(plot, out_dir, stem, width, height, prefix = COHORT_LEAF) {
     save_started <- proc.time()[["elapsed"]]
-    message("rendering ", stem, " ...")
+    if (is.null(progress)) message("rendering ", stem, " ...")
+    notify_progress("panel_start", stem)
     # `out_dir` is retained for call-site compatibility. The directory already
     # encodes group/artifact/endpoint, so the filename carries only the cohort
     # identity -- that is what makes one leaf directory a six-way comparison.
@@ -1018,6 +1094,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
     message(sprintf("rendered %s in %.1f seconds", stem,
                     proc.time()[["elapsed"]] - save_started))
+    notify_progress("panel_done", stem)
     invisible(plot)
   }
 
@@ -1252,6 +1329,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   OUT_DIR <- fig_dir("figure1_cohort")
   ID_COL <- "DFCI_MRN"
 
+  notify_progress("stage", "Figure 1: cohort inputs")
   message(sprintf("Loading cohort-specific attrition counts from %s ...", INPUTS_DIR))
   attrition <- load_attrition(INPUTS_DIR)
   message(sprintf("Loading ICD prostate MRN workflow flags from %s ...",
@@ -1559,6 +1637,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                     ENDPOINT_INDEPENDENT_FIGURES_ENDPOINT, COHORT, ENDPOINT))
 
   if (IS_CANONICAL_ADT && EMIT_ENDPOINT_INDEPENDENT) {
+  notify_progress("stage", "Figure 2: classifier validation")
   ## ---- Figure 2 v3 -- classifier labels over every ADT-exposed patient ----
   # The only Figure 2 variant retained. Earlier variants (v0: unrestricted
   # LLM_v3_labels.tsv; v1: those labels narrowed to the ADT landmark-0
@@ -1852,6 +1931,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
 
   OUT_DIR <- fig_dir("figure3_univariate")
+  notify_progress("stage", "Figure 3: lab associations")
 
   load_uni <- function(landmark) {
     path <- file.path(BASE, "cox", sprintf("landmark_%s", landmark), "both",
@@ -1893,6 +1973,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
 
   ## ---- Figure 3b -- sequencing-based somatic univariate associations ----
+  notify_progress("stage", "Figure 3b: somatic associations")
   # Separate plots from the lab volcanoes above: these come from
   # build_somatic_gleason_inputs.py / run_somatic_gleason_univariate(), which
   # build three DIFFERENT cohorts with three different index dates
@@ -2086,6 +2167,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
   OUT_DIR <- fig_dir("figure4_multivariate")
   HAS_GGPATTERN <- requireNamespace("ggpattern", quietly = TRUE)
+  notify_progress("stage", "Figure 4: model performance and importance")
 
   cox_labs <- function(lm) read_endpoint_performance(
     file.path(BASE, "cox", sprintf("landmark_%s", lm), "both", "cox_agg_multivariable_metrics.csv"),
@@ -2462,6 +2544,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                     ENDPOINT_INDEPENDENT_FIGURES_ENDPOINT, ENDPOINT))
   } else {
   OUT_DIR <- fig_dir("androgen_supplements")
+  notify_progress("stage", "Lab trajectories and pre-ADT coverage")
   # All canonical labs in CATEGORY_MAP (CBC/CMP/LFT/Vitals/Androgen axis/Other),
   # generalizing what used to be the PSA/Testosterone-only ANDROGEN_LABS list.
   ALL_LABS <- names(CATEGORY_MAP)
