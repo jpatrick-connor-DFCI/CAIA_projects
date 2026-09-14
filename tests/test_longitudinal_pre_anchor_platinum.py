@@ -31,7 +31,7 @@ def test_descriptive_longitudinal_is_endpoint_independent_and_fresh():
 
 def test_retained_lab_figure_families_are_platinum_only():
     source = PIPELINE_R.read_text()
-    gate = source.index("if (!EMIT_ENDPOINT_INDEPENDENT) {", source.index("save_fig(fig4"))
+    gate = source.index("if (!EMIT_ENDPOINT_INDEPENDENT) {", source.index("IMPORTANCE_MODEL_ROWS <-"))
     supplement = source.index("Supplement -- localized-adjuvant vs metastatic", gate)
     block = source[gate:supplement]
     assert "load_canonical_longitudinal" in block
@@ -48,7 +48,8 @@ def test_figure_strata_are_limited_to_binary_nepc():
     assert 'save_fig(p_has_avpc_v3' not in source
     assert 'save_fig(pB_v3' not in source
     assert 'save_fig(pC_v3' not in source
-    assert '"figure2v3_nepc_validation"' in source
+    assert '"figure2v3_confusion_matrix"' in source
+    assert '"figure2v3_metric_bar"' in source
 
 
 def test_longitudinal_and_gam_titles_only_show_cohort_and_counts():
@@ -195,7 +196,8 @@ def test_figure_notebook_preloads_shared_data_before_forking():
     preload = source.index("invisible(cached_profile_patient_and_labs(")
     fork = source.index("parallel::mclapply(")
     assert preload < fork
-    assert "invisible(cached_canonical_longitudinal(shared_longitudinal_csv))" in source
+    assert "invisible(cached_canonical_longitudinal(" in source
+    assert "labs = if (PLOT_NON_ANDROGEN_LAB_FIGURES) names(CATEGORY_MAP) else ANDROGEN" in source
     assert "forking workers from warm cache" in source
     assert 'cell_started <- proc.time()[["elapsed"]]' in source
 

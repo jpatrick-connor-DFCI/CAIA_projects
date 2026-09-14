@@ -3,7 +3,7 @@
 #
 # Required packages (install once on the cluster):
 #   install.packages(c("tidyverse", "survival", "survminer", "broom",
-#                       "ggrepel", "patchwork", "jsonlite", "scales", "mgcv"))
+#                       "ggrepel", "jsonlite", "scales", "mgcv"))
 #   # optional: install.packages(c("ggpattern", "ragg"))
 #   #   ggpattern -> striped baseline bars in Fig 4a
 #   #   ragg      -> crisper high-DPI PNG device (falls back to default if absent)
@@ -13,7 +13,6 @@ suppressPackageStartupMessages({
   library(survminer)
   library(broom)
   library(ggrepel)
-  library(patchwork)
   library(jsonlite)
   library(scales)
 })
@@ -138,6 +137,14 @@ clear_read_cache <- function() {
 
 read_cache_stats <- function() as.list(.read_cache[[".stats"]])
 
+# Once processed plotting tables are warm, the full CSV is redundant. Release
+# raw frames before forking; preserve processed products and read counters.
+clear_raw_read_cache <- function() {
+  keys <- setdiff(ls(.read_cache, all.names = TRUE), ".stats")
+  rm(list = keys, envir = .read_cache)
+  invisible(NULL)
+}
+
 cached_read_csv <- function(path, ...) {
   args <- list(...)
   # normalizePath so two spellings of one file share an entry; falls back to
@@ -153,7 +160,10 @@ cached_read_csv <- function(path, ...) {
     .read_cache[[".stats"]] <- st
     return(.read_cache[[key]])
   }
-  value <- read_csv(path, ...)
+  # Inject explicitly quoted tidyselect expressions at the readr call site.
+  # This lets their syntax participate in the key without evaluating any_of()
+  # outside a selection context or reading the CSV header on every cache hit.
+  value <- do.call(read_csv, c(list(file = path), args))
   .read_cache[[key]] <- value
   st <- .read_cache[[".stats"]]
   if (is.null(st)) st <- list(hits = 0L, misses = 0L)
@@ -205,6 +215,35 @@ LONGITUDINAL_COL_TYPES <- cols(
   t_lab     = col_double()
 )
 
+# Do not parse/store upstream feature columns that no figure consumes. This
+# table has one row per measurement, so even patient metadata is repeated
+# millions of times. Both processed loaders must use the same read-cache key.
+FIGURE_PATIENT_COLS <- c(
+  "DFCI_MRN", "AGE_AT_TREATMENTSTART", "FIRST_RECORD_DATE", "DIAGNOSIS_DATE",
+  "TREATMENT_ANCHOR_DATE", "LAST_CONTACT_DATE", "DEATH", "PLATINUM_MEDICATION",
+  "PLATINUM_DATE", "PLATINUM", "t_diagnosis", "t_first_treatment", "t_platinum",
+  "t_last_contact", "t_death", "t_dx_to_anchor"
+)
+FIGURE_LAB_COLS <- c("DFCI_MRN", "LAB_NAME", "LAB_VALUE", "LAB_UNIT", "LAB_DATE", "t_lab")
+cached_figure_longitudinal <- function(path, id_col = "DFCI_MRN") {
+  selected <- rlang::expr(any_of(!!unique(c(id_col, FIGURE_PATIENT_COLS, FIGURE_LAB_COLS))))
+  cached_read_csv(
+    path, show_col_types = FALSE, col_types = LONGITUDINAL_COL_TYPES,
+    col_select = selected,
+    # Materialize in the parent; no deferred vroom parsing in forked workers.
+    lazy = FALSE, num_threads = 1L
+  )
+}
+
+# Parse each distinct date string once. as.Date.character otherwise repeats
+# strptime for every measurement, including all copies of patient-level dates.
+figure_dates <- function(x) {
+  if (inherits(x, "Date")) return(x)
+  if (!is.character(x)) return(suppressWarnings(as.Date(x)))
+  values <- unique(x)
+  suppressWarnings(as.Date(values))[match(x, values)]
+}
+
 # Expensive transformations of the arm-level longitudinal file are invariant
 # across cohort/endpoint cells.  Keep processed products beside the raw-read
 # cache so a two-endpoint render does not repeatedly convert dates, split the
@@ -218,26 +257,33 @@ cached_profile_patient_and_labs <- function(path, id_col = "DFCI_MRN") {
   if (exists(key, envir = .processed_read_cache, inherits = FALSE))
     return(.processed_read_cache[[key]])
 
-  df <- cached_read_csv(path, show_col_types = FALSE,
-                        col_types = LONGITUDINAL_COL_TYPES)
-  date_cols <- c("DIAGNOSIS_DATE", "TREATMENT_ANCHOR_DATE", "PLATINUM_DATE",
-                 "LAST_CONTACT_DATE", "LAB_DATE", "FIRST_RECORD_DATE")
-  for (col in intersect(date_cols, names(df)))
-    df[[col]] <- suppressWarnings(as.Date(df[[col]]))
-  if (all(c("DIAGNOSIS_DATE", "TREATMENT_ANCHOR_DATE") %in% names(df)))
-    df$t_dx_to_anchor <- as.numeric(df$TREATMENT_ANCHOR_DATE - df$DIAGNOSIS_DATE)
-
-  patient_level <- c(id_col, "AGE_AT_TREATMENTSTART", "FIRST_RECORD_DATE", "DIAGNOSIS_DATE",
-                     "TREATMENT_ANCHOR_DATE", "LAST_CONTACT_DATE", "DEATH",
-                     "PLATINUM_MEDICATION", "PLATINUM_DATE", "PLATINUM",
-                     "t_diagnosis", "t_first_treatment", "t_platinum",
-                     "t_last_contact", "t_death", "t_dx_to_anchor")
+  df <- cached_figure_longitudinal(path, id_col)
+  patient_level <- unique(c(id_col, FIGURE_PATIENT_COLS))
   patient_df <- df %>%
-    select(all_of(intersect(patient_level, names(df)))) %>%
+    select(any_of(patient_level)) %>%
     distinct(.data[[id_col]], .keep_all = TRUE)
-  lab_cols <- intersect(c(id_col, "LAB_NAME", "LAB_VALUE", "LAB_UNIT", "LAB_DATE", "t_lab"),
-                        names(df))
-  labs_df <- df %>% filter(!is.na(LAB_NAME)) %>% select(all_of(lab_cols))
+  date_cols <- c("DIAGNOSIS_DATE", "TREATMENT_ANCHOR_DATE", "PLATINUM_DATE",
+                 "LAST_CONTACT_DATE", "FIRST_RECORD_DATE")
+  for (col in intersect(date_cols, names(patient_df)))
+    patient_df[[col]] <- figure_dates(patient_df[[col]])
+  if (all(c("DIAGNOSIS_DATE", "TREATMENT_ANCHOR_DATE") %in% names(patient_df)))
+    patient_df$t_dx_to_anchor <- as.numeric(
+      patient_df$TREATMENT_ANCHOR_DATE - patient_df$DIAGNOSIS_DATE
+    )
+
+  labs_df <- df %>% select(any_of(c(id_col, FIGURE_LAB_COLS))) %>%
+    filter(!is.na(LAB_NAME))
+  labs_df$LAB_DATE <- figure_dates(labs_df$LAB_DATE)
+  # Figure 1 needs only counts/spans. Aggregate once for the arm, then filter
+  # patients per cell instead of copying and regrouping every lab row 12 times.
+  lab_summary <- labs_df %>% group_by(.data[[id_col]]) %>%
+    summarise(
+      lab_rows = n(),
+      record_span_days = as.numeric(max(LAB_DATE, na.rm = TRUE) -
+                                     min(LAB_DATE, na.rm = TRUE)),
+      .groups = "drop"
+    )
+  patient_df <- patient_df %>% left_join(lab_summary, by = id_col)
   value <- list(patient_df = patient_df, labs_df = labs_df)
   .processed_read_cache[[key]] <- value
   value
@@ -435,27 +481,31 @@ CATEGORY_COLORS <- c(
 )
 NS_COLOR <- "#d5d8dc"
 
-cached_canonical_longitudinal <- function(path) {
+cached_canonical_longitudinal <- function(path, labs = names(CATEGORY_MAP)) {
   resolved <- tryCatch(normalizePath(path, mustWork = TRUE),
                        error = function(e) path)
-  key <- paste0("canonical-longitudinal:", resolved)
+  key <- paste0("canonical-longitudinal:", resolved, ":", paste(sort(unique(labs)), collapse = "|"))
   if (exists(key, envir = .processed_read_cache, inherits = FALSE))
     return(.processed_read_cache[[key]])
 
-  df <- cached_read_csv(path, show_col_types = FALSE,
-                        col_types = LONGITUDINAL_COL_TYPES)
+  df <- cached_figure_longitudinal(path)
   needed <- c("LAB_NAME", "LAB_VALUE", "t_lab", "DFCI_MRN")
   missing <- setdiff(needed, names(df))
   if (length(missing))
     stop("canonical longitudinal data missing columns: ", paste(missing, collapse = ", "))
 
-  raw_names <- tolower(as.character(df$LAB_NAME))
+  # Classify distinct names, not every row of the measurement table.
+  distinct_names <- unique(as.character(df$LAB_NAME))
+  raw_names <- tolower(distinct_names)
   canonical_lookup <- setNames(names(CATEGORY_MAP), tolower(names(CATEGORY_MAP)))
   lab_group <- unname(canonical_lookup[raw_names])
   psa_alias <- !is.na(raw_names) & grepl("prostate specific ag", raw_names, fixed = TRUE)
   lab_group[psa_alias] <- "PSA"
-  keep <- !is.na(lab_group)
-  value <- df[keep, , drop = FALSE]
+  lab_group <- lab_group[match(df$LAB_NAME, distinct_names)]
+  keep <- !is.na(lab_group) & lab_group %in% labs
+  # Strip repeated patient metadata BEFORE row filtering, joins and binning.
+  value <- df %>% select(any_of(c(needed, "PLATINUM", "t_platinum")))
+  value <- value[keep, , drop = FALSE]
   value$LAB_GROUP <- lab_group[keep]
   value <- value %>%
     mutate(t_lab = suppressWarnings(as.numeric(t_lab)),
@@ -688,7 +738,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                              plot_adt_intent_supplement = TRUE,
                              save_dpi = SAVE_DPI,
                              save_pdf = FALSE,
-                             output_mode = c("all", "composite", "panels")) {
+                             output_mode = "panels") {
   # Rscript opens `Rplots.pdf` when any plot is drawn without an explicit device.
   # All intended outputs below use ggsave(), so route any incidental drawing to a
   # temporary null PDF device during non-interactive runs.
@@ -937,39 +987,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                 format(sum(!llm_classifier_labels$is_platinum), big.mark = ",")))
   }
 
-  composite_stems <- c(
-    "figure1_cohort_overview",
-    sprintf("figure1s_analysis_sets_%s", ENDPOINT),
-    "figure2v3_nepc_validation",
-    "figure4_multivariate_performance"
-  )
-  component_stems <- c(
-    "figure1a_consort", "figure1b_km", "figure1c_span", "figure1c_dx_to_tx",
-    "figure1c_time_to_platinum",
-    sprintf("figure1s_analysis_sets_univariate_%s", ENDPOINT),
-    sprintf("figure1s_analysis_sets_multivariate_%s", ENDPOINT),
-    "figure2v3_confusion_matrix", "figure2v3_metric_bar"
-  )
-  is_component_stem <- function(stem) {
-    stem %in% component_stems ||
-      startsWith(stem, "figure4a_discrimination_") ||
-      startsWith(stem, "figure4b_importance_")
-  }
-  should_save_figure <- function(stem) {
-    if (identical(output_mode, "all")) return(TRUE)
-    if (stem %in% composite_stems) return(identical(output_mode, "composite"))
-    if (is_component_stem(stem)) return(identical(output_mode, "panels"))
-    TRUE
-  }
-
   # Always regenerate the requested PNG and optional vector PDF. Output roots
   # are assumed to be prepared by the caller; no old-artifact discovery or
   # incremental existence checks occur here.
   save_fig <- function(plot, out_dir, stem, width, height, prefix = COHORT_LEAF) {
-    if (!should_save_figure(stem)) {
-      message("skipped by output_mode=", output_mode, ": ", stem)
-      return(invisible(plot))
-    }
+    save_started <- proc.time()[["elapsed"]]
+    message("rendering ", stem, " ...")
     # `out_dir` is retained for call-site compatibility. The directory already
     # encodes group/artifact/endpoint, so the filename carries only the cohort
     # identity -- that is what makes one leaf directory a six-way comparison.
@@ -993,6 +1016,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       message("wrote ", pdf_out)
     }
 
+    message(sprintf("rendered %s in %.1f seconds", stem,
+                    proc.time()[["elapsed"]] - save_started))
     invisible(plot)
   }
 
@@ -1002,7 +1027,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     cached_profile_patient_and_labs(path, id_col)
   }
 
-  restrict_to_base_landmark_cohort <- function(patient_df, labs_df, inputs_dir,
+  restrict_to_base_landmark_cohort <- function(patient_df, inputs_dir,
                                                id_col, landmark) {
     availability_path <- file.path(inputs_dir, "landmark_mrn_availability.csv")
     if (!file.exists(availability_path))
@@ -1014,16 +1039,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     cohort_ids <- suppressWarnings(as.numeric(availability[[id_col]][eligible]))
     cohort_ids <- unique(cohort_ids[is.finite(cohort_ids)])
     patient_ids <- suppressWarnings(as.numeric(patient_df[[id_col]]))
-    lab_ids <- suppressWarnings(as.numeric(labs_df[[id_col]]))
-    list(patient_df = patient_df[patient_ids %in% cohort_ids, , drop = FALSE],
-         labs_df = labs_df[lab_ids %in% cohort_ids, , drop = FALSE])
-  }
-
-  record_span_days <- function(labs_df, id_col, date_col = "LAB_DATE") {
-    labs_df %>% group_by(.data[[id_col]]) %>%
-      summarise(record_span_days = as.numeric(max(.data[[date_col]], na.rm = TRUE) -
-                                              min(.data[[date_col]], na.rm = TRUE)),
-                .groups = "drop") %>% pull(record_span_days)
+    patient_df[patient_ids %in% cohort_ids, , drop = FALSE]
   }
 
   load_attrition <- function(inputs_dir) {
@@ -1247,20 +1263,22 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   if (IS_ADT && base_landmark != 0L)
     stop("Figure 2/2v2 require the ADT time-0 cohort, but the earliest available landmark is ",
          base_landmark)
-  split <- restrict_to_base_landmark_cohort(split$patient_df, split$labs_df, INPUTS_DIR,
-                                            ID_COL, base_landmark)
-  patient_df <- split$patient_df; labs_df <- split$labs_df
+  patient_df <- restrict_to_base_landmark_cohort(split$patient_df, INPUTS_DIR,
+                                                ID_COL, base_landmark)
   expected_n <- as.integer(attrition[["eligible_by_landmark"]][[as.character(base_landmark)]])
   stopifnot(nrow(patient_df) == expected_n)
   message(sprintf("  selected base-landmark cohort: patients=%s  labs=%s",
-                  format(nrow(patient_df), big.mark = ","), format(nrow(labs_df), big.mark = ",")))
+                  format(nrow(patient_df), big.mark = ","),
+                  format(sum(patient_df$lab_rows, na.rm = TRUE), big.mark = ",")))
 
   pA <- render_consort_panel(icd_prostate_mrn_flags)
   save_fig(pA, OUT_DIR, "figure1a_consort", 7.5, 8.0)
+  if (show) print(pA)
   pB <- render_km_panel(patient_df)
   save_fig(pB, OUT_DIR, "figure1b_km", 6.5, 4.8)
+  if (show) print(pB)
 
-  span_series <- record_span_days(labs_df, ID_COL)
+  span_series <- patient_df$record_span_days
   km_inputs <- platinum_km_inputs(patient_df)
   event_rows <- km_inputs$row_id[km_inputs$event == 1]
   dx_to_anchor <- suppressWarnings(as.numeric(patient_df$t_dx_to_anchor))
@@ -1289,14 +1307,6 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   for (p in write_table1(table1, file.path(OUT_DIR, "table1_baseline_characteristics")))
     message(sprintf("wrote %s", p))
   if (show) print(table1)
-
-  fig1 <- (pA | pB) / wrap_plots(timing_panels, nrow = 1) +
-    plot_layout(heights = c(1.25, 1)) +
-    plot_annotation(title = sprintf("Figure 1 — COMPASS cohort overview (%s, %s endpoint)",
-                                    COHORT_DISPLAY, ENDPOINT),
-                    tag_levels = "A")
-  save_fig(fig1, OUT_DIR, "figure1_cohort_overview", 16, 12)
-  if (show) print(fig1)
 
   # Retired: Figure 1 analysis-set-size supplement.
   if (FALSE) {
@@ -1529,17 +1539,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   save_fig(supp_mv_panel, SUPP_OUT_DIR,
            sprintf("figure1s_analysis_sets_multivariate_%s", ENDPOINT), 7.0, 4.2)
 
-  fig1s <- supp_uni_panel / supp_mv_panel +
-    plot_layout(heights = c(1, 1.15)) +
-    plot_annotation(
-      title = sprintf(paste0("Figure 1 supplement — final analysis-set sizes ",
-                             "(%s, %s endpoint)"), COHORT_DISPLAY, ENDPOINT),
-      subtitle = paste0("Each tile: patients analysed (events). Univariate cells are the ",
-                        "best-covered feature's\ncomplete-case set; multivariate cells pool ",
-                        "the train/validation and held-out test splits."),
-      tag_levels = "A")
-  save_fig(fig1s, SUPP_OUT_DIR, sprintf("figure1s_analysis_sets_%s", ENDPOINT), 9.0, 8.0)
-  if (show) print(fig1s)
+  if (show) print(supp_uni_panel)
+  if (show) print(supp_mv_panel)
   }
 
   if (!IS_ADT)
@@ -1663,31 +1664,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
     save_fig(pA1_v3, OUT_DIR_V3, "figure2v3_confusion_matrix", 4.2, 4.2)
     save_fig(pA2_v3, OUT_DIR_V3, "figure2v3_metric_bar", 5.0, 4.2)
-
-    # Reuse the already-built panels; constructing them again here made the
-    # composite repeat their data work before rasterization. Panel-specific
-    # captions are useful in standalone files but collide inside patchwork, so
-    # the composite carries one shared caption only.
-    without_caption <- function(p) {
-      p + labs(caption = NULL) + theme(plot.caption = element_blank())
-    }
-    full_caption_v3 <- sprintf(paste0(
-      "Binary has_nepc classifier call (LLM_NEPC_classifier_labels.tsv) vs Baca-lab manual ",
-      "NEPC annotation (N=%s evaluable among %s ADT-exposed patients, %s manual-NEPC+). ",
-      "Universe is every ICD prostate patient with ADT exposure, not just the landmark-0 ",
-      "prediction cohort."),
-      format(n_total_v3, big.mark = ","), format(length(adt_exposed_mrns_v3), big.mark = ","),
-      format(n_nepc_manual_v3, big.mark = ","))
-    fig2v3 <- (without_caption(pA1_v3) | without_caption(pA2_v3)) +
-      plot_annotation(
-        title = "Figure 2 v3 — NEPC classifier validation (all ADT-exposed patients)",
-        caption = str_wrap(full_caption_v3, 110),
-        theme = theme(plot.title = element_text(face = "bold", size = 13),
-                      plot.caption = element_text(size = 8.2, color = COLOR_NEUTRAL_INK,
-                                                  lineheight = 1.05, hjust = 0.5),
-                      plot.margin = margin(8, 10, 12, 10)))
-    save_fig(fig2v3, OUT_DIR_V3, "figure2v3_nepc_validation", 10, 5)
-    if (show) print(fig2v3)
+    if (show) print(pA1_v3)
+    if (show) print(pA2_v3)
   }
   }
 
@@ -2462,7 +2440,6 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     list("xgb", "XGBoost Survival", load_xgb_importance)
   )
 
-  importance_panels <- list()
   for (row in IMPORTANCE_MODEL_ROWS) {
     kind <- row[[1]]; model_name <- row[[2]]; loader <- row[[3]]
     for (lm in LANDMARKS) {
@@ -2473,29 +2450,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       save_fig(p, OUT_DIR, sprintf("figure4b_importance_%s_%s_landmark%d", ENDPOINT, kind, lm),
                width = 7.5, height = 5.5)
       if (show) print(p)
-      importance_panels[[sprintf("%s_%d", kind, lm)]] <- p
     }
   }
-
-  disc_row <- render_discrimination_panel("auc", "Test Mean AUC(t)", show_legend = TRUE) |
-              render_discrimination_panel("cindex", "Test C-index", show_legend = FALSE)
-
-  # Include every landmark in the composite. The previous hard-coded 2x2 grid
-  # silently omitted day 180 even though its standalone panels were written.
-  imp_grid <- wrap_plots(
-    importance_panels[c("cox_0", "cox_90", "cox_180",
-                        "xgb_0", "xgb_90", "xgb_180")],
-    ncol = 3, byrow = TRUE
-  )
-
-  fig4 <- disc_row / imp_grid +
-    plot_layout(heights = c(1, 2)) +
-    plot_annotation(
-      title = "Figure 4 \u2014 Multivariate model performance (labs vs. age baseline)",
-      theme = theme(plot.title = element_text(face = "bold", size = 13)))
-  save_fig(fig4, fig_dir("figure4_multivariate"), "figure4_multivariate_performance",
-           width = 18, height = 13)
-  if (show) print(fig4)
 
   # Every per-lab panel below is platinum-specific: the KM panels model
   # time-to-platinum, distributions split on PLATINUM, and trajectory panels
@@ -2831,7 +2787,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       message(sprintf("Figure 7: skipped -- %s not found", LONGITUDINAL_CSV)); return(NULL)
     }
     # Canonical classification/numeric cleanup is cached at arm level.
-    df <- tryCatch(cached_canonical_longitudinal(LONGITUDINAL_CSV),
+    df <- tryCatch(cached_canonical_longitudinal(LONGITUDINAL_CSV, labs = LAB_FIGURE_LABS),
                    error = function(e) {
                      message("Figure 7: skipped -- ", conditionMessage(e)); NULL
                    })
@@ -3066,9 +3022,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         coverage_strata <- bind_rows(coverage_strata, nepc_strata)
       }
 
-      pre_lab_summary <- canonical_long_df %>%
+      pre_androgen_df <- canonical_long_df %>%
+        select(DFCI_MRN, LAB_GROUP, t_rel) %>%
         filter(LAB_GROUP %in% coverage_labs,
-               t_rel >= -COVERAGE_PRE_DAYS, t_rel < 0) %>%
+               t_rel >= -COVERAGE_PRE_DAYS, t_rel < 0)
+      pre_lab_summary <- pre_androgen_df %>%
         group_by(DFCI_MRN = as.character(DFCI_MRN), LAB_GROUP) %>%
         summarise(
           n_pre = n(),
@@ -3199,15 +3157,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       names(pre_bin_mids) <- pre_bin_levels
       pre_bin_denominators <- coverage_strata %>%
         count(stratification, stratum, name = "n_patients")
-      pre_bin_counts <- canonical_long_df %>%
-        filter(LAB_GROUP %in% coverage_labs,
-               t_rel >= -COVERAGE_PRE_DAYS, t_rel < 0) %>%
+      pre_bin_counts <- pre_androgen_df %>%
         transmute(
           DFCI_MRN = as.character(DFCI_MRN), LAB_GROUP,
           t_bin = as.character(cut(
             t_rel, breaks = pre_edges, include.lowest = TRUE, right = FALSE
           ))
         ) %>%
+        # Availability is binary per patient/lab/bin. Collapse repeated tests
+        # before expanding each patient into platinum and NEPC strata.
+        distinct(DFCI_MRN, LAB_GROUP, t_bin) %>%
         inner_join(coverage_strata, by = "DFCI_MRN") %>%
         distinct(DFCI_MRN, LAB_GROUP, t_bin, stratification, stratum) %>%
         count(stratification, stratum, LAB_GROUP, t_bin, name = "n_covered")
@@ -3634,23 +3593,22 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       p_nepc <- plot_gam_curve_panel(
         nepc_summary, "By classifier NEPC status", nepc_palette, landmark
       )
-      landmark_label <- if (landmark == 0) "0-day" else sprintf("+%d-day", landmark)
-      combined <- (p_platinum | p_nepc) +
-        plot_annotation(
-          title = sprintf(
-            "%s — GAM-smoothed trajectories through the %s landmark",
-            lab_group, landmark_label
-          ),
-          theme = theme(plot.title = element_text(face = "bold", size = 13))
-        )
       save_fig(
-        combined,
+        p_platinum,
         fig_dir("gam_trajectories"),
-        sprintf("gam_trajectory_%s_landmark%d", lab_stem_slug(lab_group), landmark),
-        width = 13,
+        sprintf("gam_trajectory_platinum_%s_landmark%d", lab_stem_slug(lab_group), landmark),
+        width = 6.5,
         height = 5.5
       )
-      if (show) print(combined)
+      save_fig(
+        p_nepc,
+        fig_dir("gam_trajectories"),
+        sprintf("gam_trajectory_has_nepc_%s_landmark%d", lab_stem_slug(lab_group), landmark),
+        width = 6.5,
+        height = 5.5
+      )
+      if (show) print(p_platinum)
+      if (show) print(p_nepc)
     }
   }
   } # retired precomputed GAM figure block

@@ -53,6 +53,12 @@ PNG is the default and always-rendered figure format. Set
 tables remain CSV/Markdown and follow the same leaf-naming convention. There is
 no `R/` language subdirectory.
 
+Figures are saved as individual subpanels only. Figure 1 writes its CONSORT,
+KM, and three timing panels; Figure 2 writes its confusion matrix and metrics;
+Figure 4 writes AUC, C-index, and each model/landmark importance panel.
+Assembled composite figures are no longer constructed or saved in either
+rendering profile.
+
 Figure 2 v3 validates the binary `has_nepc` classifier call over every
 ADT-exposed patient. It is emitted once from the canonical `adt` / platinum
 pass and skipped for the other cells. AVPC confusion, multi-class subtype, and
@@ -101,6 +107,11 @@ that merged-profile run's outputs.
 ## Setup
 
 ```{r setup}
+# Set these before sourcing/preloading: each fork is already a parallel task.
+# readr otherwise may start a parser thread per visible CPU in every worker;
+# lazy reads can also defer parsing of supposedly warm inputs until after fork.
+options(readr.num_threads = 1L, readr.read_lazy = FALSE)
+
 pipeline_path <- normalizePath(
   file.path(getwd(), "COMPASS_generate_figures_pipeline.R"),
   mustWork = FALSE
@@ -149,15 +160,14 @@ PLOT_GAM_TRAJECTORIES <- FALSE
 # cell. Keep its implementation available without extending the primary render.
 PLOT_ADT_INTENT_SUPPLEMENT <- FALSE
 
-# Rendering profile. The default is optimized for iterative work: 200 dpi and
-# composites instead of duplicate component+composite PNGs. Every requested
-# artifact is regenerated. Set COMPASS_RENDER_PROFILE=publication for the
-# original 600-dpi, all-panels behavior.
+# Rendering profile. Both profiles save individual subpanels only. Every
+# requested artifact is regenerated at 200 dpi by default; set
+# COMPASS_RENDER_PROFILE=publication for 600-dpi subpanels.
 RENDER_PROFILE <- tolower(Sys.getenv("COMPASS_RENDER_PROFILE", "fast"))
 if (!RENDER_PROFILE %in% c("fast", "publication"))
   stop("COMPASS_RENDER_PROFILE must be 'fast' or 'publication'")
 RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 200
-RENDER_OUTPUT_MODE <- if (RENDER_PROFILE == "publication") "all" else "composite"
+RENDER_OUTPUT_MODE <- "panels"
 
 pdf_value <- tolower(Sys.getenv("COMPASS_RENDER_PDF", "false"))
 if (!pdf_value %in% c("true", "false", "1", "0", "yes", "no"))
@@ -165,7 +175,7 @@ if (!pdf_value %in% c("true", "false", "1", "0", "yes", "no"))
 RENDER_PDF <- pdf_value %in% c("true", "1", "yes")
 
 # Parallelize cohort x endpoint cells, but keep the default conservative: each
-# render holds large plotting data and GAM fits, so launching all twelve cells
+# render holds plotting data, so launching all twelve cells
 # together can exhaust memory and make the knit appear to freeze. Increase the
 # worker count explicitly only on a host with enough RAM.
 RENDER_WORKERS <- suppressWarnings(as.integer(
@@ -213,8 +223,18 @@ shared_longitudinal_csv <- file.path(
   NEPC_PROJ_PATH, "longitudinal_prediction_data_adt.csv"
 )
 preload_started <- proc.time()[["elapsed"]]
+message("Preloading patient metadata and all-lab record spans ...")
 invisible(cached_profile_patient_and_labs(shared_longitudinal_csv, "DFCI_MRN"))
-invisible(cached_canonical_longitudinal(shared_longitudinal_csv))
+message(sprintf("Patient metadata and record spans ready after %.1f seconds; preloading trajectories ...",
+                proc.time()[["elapsed"]] - preload_started))
+invisible(cached_canonical_longitudinal(
+  shared_longitudinal_csv,
+  labs = if (PLOT_NON_ANDROGEN_LAB_FIGURES) names(CATEGORY_MAP) else ANDROGEN
+))
+
+# The wide longitudinal CSV is no longer needed once both processed caches
+# are ready. Drop that raw frame before warming the smaller shared inputs.
+clear_raw_read_cache()
 
 # These sources are smaller, but every cell reads them. Warm their raw caches
 # as well so forked workers do no repeated shared-input I/O.
@@ -231,6 +251,9 @@ invisible(cached_read_csv(
   show_col_types = FALSE
 ))
 invisible(load_llm_strata(DEFAULT_LLM_ANNOTATIONS_PATH))
+# Collect temporary parsing/transformation objects before workers inherit the
+# heap. Cached patient summaries and compact trajectory tables remain live.
+invisible(gc())
 message(sprintf(
   "shared inputs preloaded once in %.1f seconds; forking workers from warm cache",
   proc.time()[["elapsed"]] - preload_started
@@ -262,6 +285,11 @@ Each cohort x endpoint cell is rendered independently, with two cells running
 concurrently by default. A failure in one is reported rather than abandoning
 the other 11. Any failures are re-reported at the end and the chunk then fails,
 so a partial render cannot pass silently.
+
+Shared inputs are parsed eagerly with one reader thread. Patient record spans
+are computed once per arm, and only requested labs enter the trajectory cache.
+The log reports preload time, each PNG/PDF render time, and total time per cell,
+so a slow input transformation can be distinguished from a slow graphics device.
 
 ```{r render-figures}
 render_cell <- function(COHORT, ENDPOINT) {
@@ -314,7 +342,11 @@ if (n_workers > 1L && .Platform$OS.type != "windows") {
     message("Parallel fork rendering is unavailable on Windows; using one worker.")
   render_results <- lapply(seq_len(nrow(render_grid)), render_one)
 }
-worker_errors <- vapply(render_results, inherits, logical(1), what = "try-error")
+worker_errors <- vapply(render_results, function(result) {
+  # mclapply can return NULL when a worker is killed (for example by OOM).
+  # A successful cell returns character(0), which must stay distinct from NULL.
+  is.null(result) || inherits(result, "try-error")
+}, logical(1))
 render_failures <- unlist(render_results[!worker_errors], use.names = FALSE)
 if (any(worker_errors))
   render_failures <- c(
