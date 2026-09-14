@@ -40,14 +40,14 @@ def test_retained_lab_figure_families_are_platinum_only():
     assert "Retired: per-lab distribution figures" in block
 
 
-def test_figure_strata_are_limited_to_binary_nepc():
+def test_lab_strata_remain_binary_nepc_with_figure2_subtypes_restored():
     source = PIPELINE_R.read_text()
     assert 'FIGURE_LLM_STRATA <- LLM_STRATA["has_nepc"]' in source
     assert "for (scheme_name in names(FIGURE_LLM_STRATA))" in source
     assert "for (scheme_name in names(LLM_STRATA))" not in source
     assert 'save_fig(p_has_avpc_v3' not in source
-    assert 'save_fig(pB_v3' not in source
-    assert 'save_fig(pC_v3' not in source
+    assert 'save_fig(pB_v3, OUT_DIR_V3, "figure2v3_subtype_landscape"' in source
+    assert 'save_fig(pC_v3, OUT_DIR_V3, "figure2v3_enrichment"' in source
     assert '"figure2v3_confusion_matrix"' in source
     assert '"figure2v3_metric_bar"' in source
 
@@ -157,7 +157,7 @@ def test_requested_figure_families_remain_retired_without_output_cleanup():
     source = PIPELINE_R.read_text()
     assert "Retired: Figure 1 analysis-set-size supplement" in source
     assert "Retired: supplemental all-model comparison" in source
-    assert 'SG_ANALYSES  <- "sequencing"' in source
+    assert 'SG_ANALYSES  <- c("sequencing", "gleason")' in source
     assert "figure3_univariate_%s_significance_landmark%d" not in source
     assert "plot_volcano_panel_by_significance(sub" not in source
 
@@ -206,15 +206,15 @@ def test_png_is_default_and_pdf_is_opt_in():
     pipeline = PIPELINE_R.read_text()
     notebook = FIGURES_RMD.read_text()
     assert "save_pdf = FALSE" in pipeline
-    assert 'ggsave(png_out, plot = plot' in pipeline
-    assert "if (save_pdf) {" in pipeline
+    assert 'ggsave(temporary, plot = plot' in pipeline
+    assert "need_pdf <- save_pdf &&" in pipeline
     assert "kept existing" not in pipeline
     assert 'Sys.getenv("COMPASS_RENDER_PDF", "false")' in notebook
     assert "save_pdf = RENDER_PDF" in notebook
     assert 'RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 200' in notebook
 
 
-def test_render_does_not_discover_or_reuse_existing_outputs():
+def test_render_reuses_completed_outputs_with_explicit_overwrite():
     pipeline = PIPELINE_R.read_text()
     notebook = FIGURES_RMD.read_text()
     setup = pipeline[pipeline.index("COHORT_ARM_DIR <-"):pipeline.index("COHORT_LEAF <-")]
@@ -222,8 +222,10 @@ def test_render_does_not_discover_or_reuse_existing_outputs():
     assert "list.files(" not in setup
     assert "list.dirs(" not in setup
     assert "dir.exists(" not in setup
-    assert "file.exists(" not in save
+    assert "figure_file_complete(png_out)" in save
+    assert "figure_file_complete(pdf_out)" in save
     assert "remove_legacy" not in save
-    assert "overwrite" not in save
-    assert "COMPASS_RENDER_OVERWRITE" not in notebook
+    assert "overwrite ||" in save
+    assert 'Sys.getenv("COMPASS_RENDER_OVERWRITE", "false")' in notebook
+    assert "overwrite = RENDER_OVERWRITE" in notebook
     assert "completion_path" not in notebook

@@ -339,7 +339,7 @@ FIGURES_RMD = REPO_ROOT / "COMPASS" / "survival_analysis" / "05_figures.Rmd"
 
 
 def _rmd_vector(name: str) -> list[str]:
-    body = re.search(rf"^{name} <- c\((.*?)\n\)", FIGURES_RMD.read_text(), re.S | re.M)
+    body = re.search(rf"^{name} <- c\((.*?)\)", FIGURES_RMD.read_text(), re.S | re.M)
     assert body, f"{name} not found in 05_figures.Rmd"
     return re.findall(r'"([^"]*)"', body.group(1))
 
@@ -366,13 +366,10 @@ def _python_run_labels() -> set[str]:
     return {run["label"] for run in runs}
 
 
-def test_the_figures_rmd_renders_every_modelled_run():
-    """Every Python run label must get a figure set.
-
-    A run whose trees are built but never rendered is invisible: nothing errors,
-    the knit just produces fewer figures than there are cohorts.
-    """
-    assert _python_run_labels() == set(_rmd_vector("COHORTS"))
+def test_the_figures_rmd_keeps_every_modelled_run_selectable():
+    """The default is full ADT/included, with all other ADT runs selectable."""
+    assert _python_run_labels() == set(_rmd_vector("ADT_COHORT_OPTIONS"))
+    assert _rmd_vector("COHORTS") == ["adt"]
 
 
 def test_the_figures_rmd_names_no_retired_endpoint():

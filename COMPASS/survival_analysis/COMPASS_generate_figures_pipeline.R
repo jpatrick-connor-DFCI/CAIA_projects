@@ -57,8 +57,8 @@ COLOR_NEUTRAL_INK  <- "#52514e"   # secondary ink, for annotations/text only
 # the path used everywhere else in the pipeline invocation.
 DEFAULT_LLM_ANNOTATIONS_PATH <- "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_NEPC_labels"
 
-# Classifier fields retained for input validation/normalization. Figure output
-# uses only the binary NEPC stratum selected in FIGURE_LLM_STRATA below.
+# Figure 2 uses primary subtypes for landscape/enrichment panels. Longitudinal
+# lab figures use only the binary NEPC stratum in FIGURE_LLM_STRATA below.
 LLM_STRATA <- list(
   primary_label = list(
     col = "primary_label",
@@ -724,6 +724,32 @@ ENDPOINT_SUFFIXES <- c(
 # endpoint rather than duplicated per endpoint.
 ENDPOINT_INDEPENDENT_FIGURES_ENDPOINT <- "platinum"
 
+# Check existing graphics without decoding whole images. Empty/truncated files
+# lack the format header or closing marker and must be regenerated.
+figure_file_complete <- function(path) {
+  info <- file.info(path)
+  if (is.na(info$size) || isTRUE(info$isdir) || info$size < 12) return(FALSE)
+  tryCatch({
+    con <- file(path, "rb")
+    on.exit(close(con))
+    if (endsWith(tolower(path), ".png")) {
+      header <- readBin(con, "raw", 8L)
+      seek(con, info$size - 12, origin = "start")
+      footer <- readBin(con, "raw", 12L)
+      identical(header, as.raw(c(137, 80, 78, 71, 13, 10, 26, 10))) &&
+        identical(footer, as.raw(c(0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130)))
+    } else if (endsWith(tolower(path), ".pdf")) {
+      header <- readBin(con, "raw", 5L)
+      seek(con, max(0, info$size - 1024), origin = "start")
+      footer <- readBin(con, "raw", 1024L)
+      nonspace <- which(!footer %in% as.raw(c(9, 10, 13, 32)))
+      last <- if (length(nonspace)) tail(nonspace, 1L) else 0L
+      identical(header, charToRaw("%PDF-")) && last >= 5L &&
+        identical(footer[seq.int(last - 4L, last)], charToRaw("%%EOF"))
+    } else FALSE
+  }, error = function(e) FALSE)
+}
+
 # Each worker owns one small status file. Atomic replacement lets concurrent
 # workers report a shared total without racing on a shared counter. These are
 # session-temporary progress records, never figure-output completion markers.
@@ -736,7 +762,8 @@ new_figure_progress <- function(labels,
   paths <- file.path(progress_dir, sprintf("cell-%03d.rds", seq_along(labels)))
   started <- Sys.time()
   for (path in paths)
-    saveRDS(list(status = "queued", detail = "queued", panels = character()), path,
+    saveRDS(list(status = "queued", detail = "queued", panels = character(),
+                 skipped = character()), path,
             compress = FALSE)
 
   snapshot <- function() {
@@ -748,6 +775,7 @@ new_figure_progress <- function(labels,
       successful = sum(statuses == "complete"),
       failed = sum(statuses == "failed"),
       panels = sum(vapply(states, function(x) length(x$panels), integer(1))),
+      skipped = sum(vapply(states, function(x) length(x$skipped), integer(1))),
       elapsed = as.numeric(difftime(Sys.time(), started, units = "secs")),
       states = states
     )
@@ -760,26 +788,31 @@ new_figure_progress <- function(labels,
     clock <- sprintf("%02d:%02d:%02d", seconds %/% 3600,
                      (seconds %% 3600) %/% 60, seconds %% 60)
     report(sprintf(
-      "[%s] %d/%d sets finished (%3.0f%%) | %d subpanels saved | %d failed | %s elapsed | %s",
+      "[%s] %d/%d sets finished (%3.0f%%) | %d saved, %d skipped | %d failed | %s elapsed | %s",
       bar, s$finished, s$total, 100 * s$finished / s$total,
-      s$panels, s$failed, clock, gsub("[\r\n]+", " ", detail)
+      s$panels, s$skipped, s$failed, clock, gsub("[\r\n]+", " ", detail)
     ))
     invisible(s)
   }
   update <- function(i, event, detail = "") {
     stopifnot(length(i) == 1L, !is.na(i), i %in% seq_along(paths))
-    event <- match.arg(event, c("start", "stage", "panel_start", "panel_done",
+    event <- match.arg(event, c("start", "stage", "panel_start", "panel_done", "panel_skipped",
                                "complete", "failed"))
     state <- readRDS(paths[[i]])
     state$status <- if (event %in% c("complete", "failed")) event else "running"
     state$detail <- detail
-    if (event == "panel_done") state$panels <- unique(c(state$panels, detail))
+    if (event == "panel_done") {
+      state$panels <- unique(c(state$panels, detail))
+      state$skipped <- setdiff(state$skipped, detail)
+    }
+    if (event == "panel_skipped" && !detail %in% state$panels)
+      state$skipped <- unique(c(state$skipped, detail))
     pending <- paste0(paths[[i]], ".", Sys.getpid(), ".tmp")
     saveRDS(state, pending, compress = FALSE)
     if (!file.rename(pending, paths[[i]]))
       stop("Could not publish figure progress for ", labels[[i]])
     verb <- switch(event, start = "starting", stage = "preparing",
-                   panel_start = "rendering", panel_done = "saved",
+                   panel_start = "rendering", panel_done = "saved", panel_skipped = "skipped",
                    complete = "complete", failed = "FAILED")
     display(sprintf("%s: %s %s", labels[[i]], verb, detail))
   }
@@ -807,7 +840,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                              save_dpi = SAVE_DPI,
                              save_pdf = FALSE,
                              output_mode = "panels",
-                             progress = NULL) {
+                             progress = NULL,
+                             overwrite = FALSE) {
   if (!is.null(progress) && !is.function(progress))
     stop("progress must be NULL or a function(event, detail)")
   notify_progress <- function(event, detail) {
@@ -840,6 +874,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     stop("save_dpi must be one positive number")
   if (!is.logical(save_pdf) || length(save_pdf) != 1L || is.na(save_pdf))
     stop("save_pdf must be one non-missing logical value")
+  if (!is.logical(overwrite) || length(overwrite) != 1L || is.na(overwrite))
+    stop("overwrite must be one non-missing logical value")
   # Endpoint-independent figures describe the platinum-labelled cohort itself.
   # Emit them only on the platinum pass so a NEPC run does not create a second,
   # misleadingly endpoint-labelled copy.
@@ -1028,8 +1064,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     file.path(FIG_ROOT, "by_figure", group, artifact_name_for_stem(plot_stem, group))
   }
 
-  # Treat the output root as caller-managed for a full regeneration. Do not
-  # discover, retain, migrate, or clean artifacts from earlier renders here.
+  # Preserve the output layout. save_fig checks only the exact requested
+  # destinations; unrelated artifacts are never migrated or cleaned.
 
   # Compatibility shim: call sites still pass an `out_dir`, but actual routing
   # is derived from each exact `stem` inside save_fig/write_table1. Kept so the
@@ -1062,35 +1098,53 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                 format(sum(!llm_classifier_labels$is_platinum), big.mark = ",")))
   }
 
-  # Always regenerate the requested PNG and optional vector PDF. Output roots
-  # are assumed to be prepared by the caller; no old-artifact discovery or
-  # incremental existence checks occur here.
+  # Inspect the exact current cohort/endpoint paths; unrelated older artifacts
+  # are never reused. Only render missing/incomplete formats unless overwritten.
   save_fig <- function(plot, out_dir, stem, width, height, prefix = COHORT_LEAF) {
     save_started <- proc.time()[["elapsed"]]
-    if (is.null(progress)) message("rendering ", stem, " ...")
-    notify_progress("panel_start", stem)
     # `out_dir` is retained for call-site compatibility. The directory already
     # encodes group/artifact/endpoint, so the filename carries only the cohort
     # identity -- that is what makes one leaf directory a six-way comparison.
     output_dir <- output_dir_for_stem(stem)
-    dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
     output_stem <- prefix
 
     png_out <- file.path(output_dir, paste0(output_stem, ".png"))
     pdf_out <- file.path(output_dir, paste0(output_stem, ".pdf"))
-    if (HAS_RAGG) {
-      ggsave(png_out, plot = plot, width = width, height = height, units = "in",
-             dpi = save_dpi, bg = "white", device = ragg::agg_png)
-    } else {
-      ggsave(png_out, plot = plot, width = width, height = height, units = "in",
-             dpi = save_dpi, bg = "white", type = "cairo")
+    need_png <- overwrite || !figure_file_complete(png_out)
+    need_pdf <- save_pdf && (overwrite || !figure_file_complete(pdf_out))
+    if (!need_png && !need_pdf) {
+      message("skipped completed figure: ", stem)
+      notify_progress("panel_skipped", stem)
+      # Do not force a lazy plot expression when its files already exist.
+      return(invisible(NULL))
     }
-    message("wrote ", png_out)
-    if (save_pdf) {
-      ggsave(pdf_out, plot = plot, width = width, height = height, units = "in",
-             bg = "white", device = grDevices::cairo_pdf)
-      message("wrote ", pdf_out)
+    if (is.null(progress)) message("rendering ", stem, " ...")
+    notify_progress("panel_start", stem)
+    dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+    write_format <- function(destination, pdf = FALSE) {
+      # A failed/interrupted graphics device cannot leave a completed-looking
+      # destination. Keep any previous figure until the replacement is ready.
+      temporary <- tempfile(".compass-render-", tmpdir = output_dir,
+                            fileext = if (pdf) ".pdf" else ".png")
+      on.exit(unlink(temporary))
+      if (pdf) {
+        ggsave(temporary, plot = plot, width = width, height = height, units = "in",
+               bg = "white", device = grDevices::cairo_pdf)
+      } else if (HAS_RAGG) {
+        ggsave(temporary, plot = plot, width = width, height = height, units = "in",
+               dpi = save_dpi, bg = "white", device = ragg::agg_png)
+      } else {
+        ggsave(temporary, plot = plot, width = width, height = height, units = "in",
+               dpi = save_dpi, bg = "white", type = "cairo")
+      }
+      if (!figure_file_complete(temporary))
+        stop("Graphics device produced an incomplete file for ", destination)
+      if (!file.rename(temporary, destination))
+        stop("Could not publish figure ", destination)
+      message("wrote ", destination)
     }
+    if (need_png) write_format(png_out)
+    if (need_pdf) write_format(pdf_out, pdf = TRUE)
 
     message(sprintf("rendered %s in %.1f seconds", stem,
                     proc.time()[["elapsed"]] - save_started))
@@ -1637,7 +1691,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                     ENDPOINT_INDEPENDENT_FIGURES_ENDPOINT, COHORT, ENDPOINT))
 
   if (IS_CANONICAL_ADT && EMIT_ENDPOINT_INDEPENDENT) {
-  notify_progress("stage", "Figure 2: classifier validation")
+  notify_progress("stage", "Figure 2: validation, subtype landscape, and platinum enrichment")
   ## ---- Figure 2 v3 -- classifier labels over every ADT-exposed patient ----
   # The only Figure 2 variant retained. Earlier variants (v0: unrestricted
   # LLM_v3_labels.tsv; v1: those labels narrowed to the ADT landmark-0
@@ -1652,6 +1706,17 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     OUT_DIR_V3 <- fig_dir("figure2v3_llm")
 
     drop_cols <- function(df, cols) df %>% select(-any_of(cols))
+
+    # Panels B/C restored from 3c4efc4 (before their removal in fec33f4).
+    # Fixed class order groups the two aggressive classes together for readability.
+    CLASS_ORDER <- c("conventional", "avpc", "nepc", "biomarker")
+    CLASS_LABELS <- c(conventional = "Conventional", avpc = "AVPC", nepc = "NEPC",
+                      biomarker = "Biomarker")
+
+    count_labels <- function(df) {
+      df %>% count(primary_label, name = "count") %>%
+        mutate(frac = count / sum(count))
+    }
 
     # Annotated 2x2 confusion matrix, LLM (rows) vs manual truth (cols).
     render_confusion_panel <- function(metrics,
@@ -1696,6 +1761,96 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         theme(plot.title = element_text(face = "bold", size = 11))
     }
 
+    render_landscape_panel <- function(label_distributions, n_pos, n_neg,
+                                       title = "Panel B — subtype landscape by platinum status (descriptive)") {
+      if (n_pos + n_neg == 0)
+        return(ggplot() + annotate("text", x = 0, y = 0, label = "(no classified patients)") +
+                 theme_void() + labs(title = str_wrap(title, 65)))
+      d <- label_distributions %>%
+        mutate(primary_label   = factor(primary_label, levels = CLASS_ORDER,
+                                        labels = CLASS_LABELS[CLASS_ORDER]),
+               platinum_status = factor(platinum_status, levels = c("positive","negative"))) %>%
+        # Anything outside CLASS_ORDER became NA in the factor() above; keeping it
+        # would draw an "NA" column. Callers are expected to have filtered already.
+        filter(!is.na(primary_label))
+      ggplot(d, aes(primary_label, frac, fill = platinum_status)) +
+        geom_col(position = position_dodge(width = 0.8), width = 0.72) +
+        scale_fill_manual(
+          values = c(positive = COLOR_PLATINUM_POS, negative = COLOR_PLATINUM_NEG),
+          labels = c(sprintf("Platinum+ (n=%s)", format(n_pos, big.mark = ",")),
+                     sprintf("Platinum- (n=%s)", format(n_neg, big.mark = ","))),
+          name = NULL) +
+        coord_cartesian(ylim = c(0, 1.0)) +
+        labs(x = NULL, y = "Fraction within platinum group", title = str_wrap(title, 65)) +
+        theme_fig() +
+        theme(plot.title = element_text(face = "bold", size = 11),
+              axis.title.x = element_blank(),
+              axis.title.y = element_text(size = 16),
+              axis.text  = element_text(size = 14),
+              legend.position = c(0.98, 0.98), legend.justification = c(1, 1))
+    }
+
+    render_enrichment_panel <- function(enrichment) {
+      panel_title <- "Panel C — platinum enrichment among aggressive variants"
+      if (enrichment$n_aggressive == 0 || enrichment$n_conventional == 0)
+        return(ggplot() + annotate("text", x = 0, y = 0,
+                                  label = "(both aggressive and conventional patients required)") +
+                 theme_void() + labs(title = str_wrap(panel_title, 48)))
+      d <- tibble(
+        group = factor(c("Aggressive\n(AVPC + NEPC)", "Conventional"),
+                       levels = c("Aggressive\n(AVPC + NEPC)", "Conventional")),
+        prop  = c(enrichment$p_agg, enrichment$p_conv),
+        lo    = c(enrichment$lo_agg, enrichment$lo_conv),
+        hi    = c(enrichment$hi_agg, enrichment$hi_conv),
+        n     = c(enrichment$n_aggressive, enrichment$n_conventional),
+        k     = c(enrichment$k_agg, enrichment$k_conv)
+      )
+      ymax <- max(enrichment$hi_agg, enrichment$hi_conv) * 1.35
+      ggplot(d, aes(group, prop, fill = group)) +
+        geom_col(width = 0.55) +
+        geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.18,
+                      color = COLOR_NEUTRAL_INK, linewidth = 0.7) +
+        scale_fill_manual(values = c(COLOR_PLATINUM_POS, "#9a9890"), guide = "none") +
+        annotate("text", x = 1.5, y = ymax * 0.97,
+                 label = sprintf("OR = %.1f, Fisher's exact p = %.1e",
+                                 enrichment$OR, enrichment$p_value),
+                 fontface = "bold", size = 3.7, color = COLOR_NEUTRAL_INK) +
+        scale_y_continuous(labels = scales::percent, limits = c(0, ymax)) +
+        labs(x = NULL, y = "P(platinum+ | subtype group)",
+             title = str_wrap(panel_title, 48)) +
+        theme_fig() +
+        theme(plot.title = element_text(face = "bold", size = 11))
+    }
+
+    # 2x2 aggressive/conventional x platinum+/- contrast with Wilson intervals.
+    compute_enrichment <- function(labels_all) {
+      df <- labels_all %>%
+        filter(primary_label %in% c("conventional", "avpc", "nepc")) %>%
+        mutate(aggressive = primary_label %in% c("avpc", "nepc"))
+      n_excluded <- nrow(labels_all) - nrow(df)
+      ct <- matrix(
+        c(sum(df$aggressive  &  df$is_platinum), sum(df$aggressive  & !df$is_platinum),
+          sum(!df$aggressive &  df$is_platinum), sum(!df$aggressive & !df$is_platinum)),
+        nrow = 2, byrow = TRUE,
+        dimnames = list(c("aggressive", "conventional"), c("platinum+", "platinum-")))
+      print(ct)
+      n_aggressive   <- sum(ct["aggressive", ])
+      n_conventional <- sum(ct["conventional", ])
+      ft <- if (n_aggressive > 0 && n_conventional > 0) {
+        fisher.test(ct, alternative = "greater")
+      } else list(estimate = NA_real_, p.value = NA_real_)
+      k_agg  <- ct["aggressive",   "platinum+"]
+      k_conv <- ct["conventional", "platinum+"]
+      w_agg  <- wilson_ci(k_agg,  n_aggressive)
+      w_conv <- wilson_ci(k_conv, n_conventional)
+      list(ct = ct, n_excluded = n_excluded,
+           OR = unname(ft$estimate), p_value = ft$p.value,
+           n_aggressive = n_aggressive, n_conventional = n_conventional,
+           k_agg = k_agg, k_conv = k_conv,
+           p_agg = w_agg[1], lo_agg = w_agg[2], hi_agg = w_agg[3],
+           p_conv = w_conv[1], lo_conv = w_conv[2], hi_conv = w_conv[3])
+    }
+
     adt_exposed_mrns_v3 <- unique(as.character(
       icd_prostate_mrn_flags[[ID_COL]][icd_prostate_mrn_flags$ADT_EXPOSED == 1]))
     v3_labels_all <- llm_classifier_labels %>%
@@ -1717,8 +1872,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       format(nrow(llm_classifier_labels), big.mark = ",")
     ))
 
-    ## Binary NEPC validation. Use has_nepc directly; primary_label and has_avpc
-    ## are source-normalization fields and are not rendered as figures.
+    ## Panel A: binary NEPC validation uses has_nepc directly. Panels B/C below
+    ## use primary_label for the subtype landscape and aggressive-variant group.
     merged_v3 <- manual_annotations %>%
       drop_cols(c("pathology_details", "manual_platinum_reason")) %>%
       inner_join(v3_labels_all, by = "DFCI_MRN") %>%
@@ -1735,16 +1890,62 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                             format(length(adt_exposed_mrns_v3), big.mark = ","),
                             format(n_total_v3, big.mark = ","), format(n_nepc_manual_v3, big.mark = ","))
     pA1_v3 <- render_confusion_panel(
-      metrics_v3, "NEPC", "has_nepc=1", "Panel A — NEPC confusion matrix"
+      metrics_v3, "NEPC", "has_nepc=1", "Panel A1 — NEPC confusion matrix"
     ) + labs(caption = caption_a_v3) +
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
     pA2_v3 <- render_metric_bar_panel(metrics_v3) +
-      labs(title = "Panel B — NEPC classifier metrics", caption = caption_a_v3) +
+      labs(title = "Panel A2 — NEPC classifier metrics", caption = caption_a_v3) +
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
     save_fig(pA1_v3, OUT_DIR_V3, "figure2v3_confusion_matrix", 4.2, 4.2)
     save_fig(pA2_v3, OUT_DIR_V3, "figure2v3_metric_bar", 5.0, 4.2)
     if (show) print(pA1_v3)
     if (show) print(pA2_v3)
+
+    ## Panel B -- subtype landscape by platinum status (4-class primary_label).
+    # load_llm_strata coerces primary_label values outside the four modeled
+    # classes to NA, and those rows would draw an "NA" bar.
+    v3_labels_classified <- v3_labels_all %>% filter(!is.na(primary_label))
+    n_unclassified_v3 <- nrow(v3_labels_all) - nrow(v3_labels_classified)
+    if (n_unclassified_v3 > 0) {
+      message(sprintf(
+        "figure2v3 Panel B: dropped %s row(s) without one of the four primary_label classes",
+        format(n_unclassified_v3, big.mark = ",")
+      ))
+    }
+    platinum_positive_v3 <- v3_labels_classified %>% filter(is_platinum) %>% count_labels() %>%
+      mutate(platinum_status = "positive")
+    platinum_negative_v3 <- v3_labels_classified %>% filter(!is_platinum) %>% count_labels() %>%
+      mutate(platinum_status = "negative")
+    label_distributions_v3 <- bind_rows(platinum_positive_v3, platinum_negative_v3)
+    n_pos <- sum(platinum_positive_v3$count)
+    n_neg <- sum(platinum_negative_v3$count)
+    caption_b_v3 <- sprintf("All ADT-exposed patients; %s classified of %s total patients%s; platinum+ n=%s, platinum- n=%s.",
+                            format(nrow(v3_labels_classified), big.mark = ","),
+                            format(length(adt_exposed_mrns_v3), big.mark = ","),
+                            if (n_unclassified_v3 > 0)
+                              sprintf(" (%s labeled row(s) outside the four classes excluded)",
+                                      format(n_unclassified_v3, big.mark = ","))
+                            else "",
+                            format(n_pos, big.mark = ","), format(n_neg, big.mark = ","))
+    pB_v3 <- render_landscape_panel(
+        label_distributions_v3, n_pos, n_neg,
+        "Panel B — subtype landscape by platinum status (classifier labels, all ADT)") +
+      labs(caption = str_wrap(caption_b_v3, 85)) +
+      theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
+    save_fig(pB_v3, OUT_DIR_V3, "figure2v3_subtype_landscape", 6.5, 8)
+
+    ## Panel C -- aggressive (avpc+nepc) vs conventional platinum enrichment.
+    enrichment_v3 <- compute_enrichment(v3_labels_all)
+    cat(sprintf("figure2v3 enrichment: OR = %.2f, Fisher p = %.3g\n",
+                enrichment_v3$OR, enrichment_v3$p_value))
+    caption_c_v3 <- sprintf("All ADT-exposed patients; excludes biomarker/unclassified labels (%s rows). Error bars are 95%% Wilson intervals. OR=%.1f, one-sided Fisher p=%.1e.",
+                            format(enrichment_v3$n_excluded, big.mark = ","),
+                            enrichment_v3$OR, enrichment_v3$p_value)
+    pC_v3 <- render_enrichment_panel(enrichment_v3) + labs(caption = str_wrap(caption_c_v3, 58)) +
+      theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
+    save_fig(pC_v3, OUT_DIR_V3, "figure2v3_enrichment", 4.5, 5.5)
+    if (show) print(pB_v3)
+    if (show) print(pC_v3)
   }
   }
 
@@ -1972,8 +2173,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (show) print(p)
   }
 
-  ## ---- Figure 3b -- sequencing-based somatic univariate associations ----
-  notify_progress("stage", "Figure 3b: somatic associations")
+  ## ---- Figure 3b -- somatic and Gleason-score univariate associations ----
+  notify_progress("stage", "Figure 3b: somatic and Gleason-score associations")
   # Separate plots from the lab volcanoes above: these come from
   # build_somatic_gleason_inputs.py / run_somatic_gleason_univariate(), which
   # build three DIFFERENT cohorts with three different index dates
@@ -1987,13 +2188,15 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   OUT_DIR <- fig_dir("figure3b_somatic_gleason")
 
   SG_LANDMARK  <- 0L
-  SG_ANALYSES  <- "sequencing"
+  SG_ANALYSES  <- c("sequencing", "gleason")
   SG_LABELS <- c(
-    sequencing = "Somatic alterations"
+    sequencing = "Somatic alterations",
+    gleason = "Gleason score"
   )
   # Each analysis' prediction time origin, from build_somatic_gleason_inputs.py.
   SG_ORIGINS <- c(
-    sequencing = "sequencing specimen collection date"
+    sequencing = "sequencing specimen collection date",
+    gleason = "Gleason score date nearest ADT initiation"
   )
   SG_TOP_N <- 25   # forest plots show at most this many features, ranked by p
 
@@ -2126,7 +2329,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
 
   if (!IS_ADT) {
-    message(paste0("Figure 3b: the sequencing index date is defined ",
+    message(paste0("Figure 3b: the sequencing and Gleason index dates are defined ",
                    "relative to ADT start, so these analyses are built for the ADT ",
                    "arm only -- skipping for the ARPI pass."))
   } else {

@@ -6,16 +6,15 @@ output:
     toc_depth: 2
 ---
 
-Canonical R figure workflow using tidyverse/ggplot2. **Knit** renders every
-modelled **ADT** cohort -- the full arm, the ADT-intent metastatic stratum, and
-the two LLM metastatic strata, each with and without the pre-ADT castrate
-exclusion -- for the **NEPC** and **platinum** endpoints. ARPI remains
-available by explicit request.
+Canonical R figure workflow using tidyverse/ggplot2. By default, **Knit**
+renders the full **ADT** cohort with pre-ADT castrate patients included for
+the **NEPC** and **platinum** endpoints. Metastatic subsets, the pre-ADT
+castrate exclusion, and ARPI remain selectable in the configuration below.
 
 The AVPC endpoint and the localized-adjuvant cohort are retired; no such trees
-are built. AVPC and multi-class `primary_label` fields may be read while
-normalizing classifier inputs, but no figures are generated from them. Figure
-stratifications are limited to platinum and binary NEPC status.
+are built. Figure 2 uses the four primary subtypes for its landscape and
+aggressive-variant enrichment panels. Lab-trajectory stratifications remain
+limited to platinum and binary NEPC status.
 
 The document reads the merged `profile_data` run under `.../CAIA/COMPASS`
 and writes to `figures/CAIA/COMPASS`.
@@ -32,8 +31,9 @@ example, a `figure3_` prefix is removed inside `figure3/`, and a PSA
 longitudinal artifact omits both `longitudinal_` and `_psa` inside
 `labs/Androgen axis/PSA/longitudinal/`.
 
-so one leaf holds all twelve cohort x endpoint panels, endpoint first so they
-sort into two contiguous six-cohort blocks:
+When all six ADT cohort options are selected, one leaf holds twelve cohort x
+endpoint panels, endpoint first so they sort into two six-cohort blocks.
+The default run writes only the two `all__incl` panels:
 
 ```
 ADT/by_figure/figure3/univariate_landmark180/
@@ -45,24 +45,40 @@ ADT/by_figure/figure3/univariate_landmark180/
     platinum__metastatic_llm__incl.png  platinum__metastatic_llm__noprecastrate.png
 ```
 
-`by_figure/` is the sole output tree. The generator assumes a full regeneration
-and does not inspect or clean output artifacts left by older runs.
+`by_figure/` is the sole output tree. Existing figures at the exact
+cohort/endpoint output paths are skipped by default. Set
+`COMPASS_RENDER_OVERWRITE=true` (or `RENDER_OVERWRITE <- TRUE` below) to regenerate
+them after changing inputs, styling, or DPI. Unrelated older outputs are left
+alone. Completion checks inspect file headers and end markers; empty or
+truncated graphics are regenerated.
 
-PNG is the default and always-rendered figure format. Set
+PNG is the default required figure format. Set
 `COMPASS_RENDER_PDF=true` to additionally write a vector PDF beside every PNG;
 tables remain CSV/Markdown and follow the same leaf-naming convention. There is
 no `R/` language subdirectory.
 
+When PDF output is enabled, a panel is complete only when both PNG and PDF
+exist. Missing formats are generated individually, preserving completed ones.
+New graphics are written to temporary files and published only after a
+successful save. Input preparation and CSV/Markdown tables still run.
+
 Figures are saved as individual subpanels only. Figure 1 writes its CONSORT,
-KM, and three timing panels; Figure 2 writes its confusion matrix and metrics;
+KM, and three timing panels; Figure 2 writes its confusion matrix, metrics,
+subtype landscape, and platinum enrichment;
 Figure 4 writes AUC, C-index, and each model/landmark importance panel.
 Assembled composite figures are no longer constructed or saved in either
 rendering profile.
 
 Figure 2 v3 validates the binary `has_nepc` classifier call over every
 ADT-exposed patient. It is emitted once from the canonical `adt` / platinum
-pass and skipped for the other cells. AVPC confusion, multi-class subtype, and
-AVPC/NEPC enrichment panels are not generated.
+pass and skipped for the other cells. Panels A1/A2 show the binary NEPC
+confusion matrix and classifier metrics. Restored Panel B shows the
+conventional/AVPC/NEPC/biomarker landscape within each platinum-status group.
+Restored Panel C compares platinum use among aggressive primary subtypes
+(AVPC + NEPC) versus conventional disease, excluding biomarker/unclassified
+labels, with 95% Wilson intervals and a one-sided Fisher test. B/C use all
+classifier-labeled ADT-exposed patients, independently of manual chart review.
+AVPC confusion panels remain retired.
 
 All outputs under `by_figure/labs/` are likewise emitted only by the platinum
 pass. Lab outputs are limited to longitudinal summaries; R-fitted GAM panels
@@ -88,10 +104,11 @@ classifier-labeled cohort patients, including those with no androgen lab. The
 coverage diagnostics retain their five-year pre-ADT lookback independently of
 the shorter trajectory window.
 
-Figure 3b is limited to sequencing-based somatic associations, shown as a
-volcano plus a top-hits forest. PRS and Gleason panels are retired. The
-sequencing analysis exists for the ADT arm at landmark 0 only, and a missing
-`cox_somatic_gleason/` tree is reported and skipped.
+Figure 3b includes sequencing-based somatic associations (volcano plus top-hits
+forest) and a separate Gleason-score forest. Each uses its own index date and
+existing Cox results for the selected endpoint. PRS panels remain retired.
+These analyses exist for the ADT arm at landmark 0 only; a missing
+`cox_somatic_gleason/` result is reported and skipped independently.
 
 All figure-generation logic lives in `COMPASS_generate_figures_pipeline.R` as
 `generate_figures(cohort, endpoint, ...)`. This document just sources that file
@@ -135,14 +152,14 @@ FIG_ROOT <- "/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS"
 # ENDPOINT_SUFFIXES lookup below rather than at generate_figures().
 ENDPOINTS <- c("nepc", "platinum")
 
-# Cohorts to render: every modelled ADT run label, matching the notebooks'
-# COHORTS x EXCLUSIONS cross in compass_pipeline.DEFAULT_COHORTS /
-# DEFAULT_EXCLUSIONS. Narrow this to iterate on a single tree.
-COHORTS <- c(
+# Keep every modelled ADT configuration available. To render them all, set
+# COHORTS <- ADT_COHORT_OPTIONS. ARPI labels remain in SUPPORTED_COHORTS.
+ADT_COHORT_OPTIONS <- c(
   "adt",                 "adt_noprecastrate",
   "adt_metastatic_adt",  "adt_metastatic_adt_noprecastrate",
   "adt_metastatic_llm",  "adt_metastatic_llm_noprecastrate"
 )
+COHORTS <- c("adt")  # all ADT patients; pre-ADT castrate patients included
 
 stopifnot(
   all(ENDPOINTS %in% SUPPORTED_ENDPOINTS),
@@ -160,9 +177,9 @@ PLOT_GAM_TRAJECTORIES <- FALSE
 # cell. Keep its implementation available without extending the primary render.
 PLOT_ADT_INTENT_SUPPLEMENT <- FALSE
 
-# Rendering profile. Both profiles save individual subpanels only. Every
-# requested artifact is regenerated at 200 dpi by default; set
-# COMPASS_RENDER_PROFILE=publication for 600-dpi subpanels.
+# Rendering profile. Both profiles save individual subpanels only, at 200 dpi
+# by default. Use COMPASS_RENDER_PROFILE=publication for 600-dpi subpanels and
+# enable overwrite to replace figures already rendered at a different DPI.
 RENDER_PROFILE <- tolower(Sys.getenv("COMPASS_RENDER_PROFILE", "fast"))
 if (!RENDER_PROFILE %in% c("fast", "publication"))
   stop("COMPASS_RENDER_PROFILE must be 'fast' or 'publication'")
@@ -173,6 +190,12 @@ pdf_value <- tolower(Sys.getenv("COMPASS_RENDER_PDF", "false"))
 if (!pdf_value %in% c("true", "false", "1", "0", "yes", "no"))
   stop("COMPASS_RENDER_PDF must be true or false")
 RENDER_PDF <- pdf_value %in% c("true", "1", "yes")
+
+# FALSE resumes missing figures; TRUE regenerates all requested figure files.
+overwrite_value <- tolower(Sys.getenv("COMPASS_RENDER_OVERWRITE", "false"))
+if (!overwrite_value %in% c("true", "false", "1", "0", "yes", "no"))
+  stop("COMPASS_RENDER_OVERWRITE must be true or false")
+RENDER_OVERWRITE <- overwrite_value %in% c("true", "1", "yes")
 
 # Parallelize cohort x endpoint cells, but keep the default conservative: each
 # render holds plotting data, so launching all twelve cells
@@ -265,25 +288,27 @@ message("endpoints:   ", paste(ENDPOINTS, collapse = ", "))
 message("cohorts:     ", paste(COHORTS, collapse = ", "))
 message(sprintf("renders:     %d cohort x endpoint figure sets",
                 length(COHORTS) * length(ENDPOINTS)))
-message(sprintf("profile:     %s (%d dpi, output=%s, pdf=%s, workers=%d)",
+message(sprintf("profile:     %s (%d dpi, output=%s, pdf=%s, overwrite=%s, workers=%d)",
                 RENDER_PROFILE, RENDER_DPI, RENDER_OUTPUT_MODE,
-                RENDER_PDF, RENDER_WORKERS))
+                RENDER_PDF, RENDER_OVERWRITE, RENDER_WORKERS))
 ```
 
 ## Render ADT figures
 
-Runs the R figure-generation pipeline once per cohort x endpoint -- 6 cohorts x
-2 endpoints = 12 figure sets. Outputs go to `FIG_ROOT/<ARM>/by_figure/`, with
+Runs the R figure-generation pipeline once per selected cohort x endpoint.
+The default is 1 cohort x 2 endpoints = 2 figure sets. Outputs go to
+`FIG_ROOT/<ARM>/by_figure/`, with
 each run writing one `<endpoint>__<subset>__<exclusion>` leaf per plot stem.
 
-Narrow `COHORTS` or `ENDPOINTS` above to iterate on a single tree. `COHORTS`
+Set `COHORTS <- ADT_COHORT_OPTIONS` to render all six ADT configurations,
+or select individual cohort labels and endpoints above. `COHORTS`
 accepts any run label in `SUPPORTED_COHORTS`, so the ARPI arm is rendered by
 naming its labels, and a retired tree that still exists on disk (an
 `adt_localized` or `_avpc` build) can be re-rendered by naming it explicitly.
 
 Each cohort x endpoint cell is rendered independently, with two cells running
 concurrently by default. A failure in one is reported rather than abandoning
-the other 11. Any failures are re-reported at the end and the chunk then fails,
+the remaining cells. Any failures are re-reported at the end and the chunk then fails,
 so a partial render cannot pass silently.
 
 Shared inputs are parsed eagerly with one reader thread. Patient record spans
@@ -292,10 +317,10 @@ The log reports preload time, each PNG/PDF render time, and total time per cell,
 so a slow input transformation can be distinguished from a slow graphics device.
 
 A live console progress bar combines both workers: finished cohort/endpoint
-sets out of the total, subpanels saved, failures, elapsed time, and the worker's
+sets out of the total, subpanels saved or skipped, failures, elapsed time, and the worker's
 current figure or preparation stage. The percentage tracks sets, since optional
 input availability changes the number of subpanels. A PNG and its optional PDF
-count as one completed subpanel after both requested files are saved.
+count as one completed subpanel after both requested files are available.
 
 ```{r render-figures}
 render_cell <- function(COHORT, ENDPOINT, cell_index) {
@@ -321,7 +346,8 @@ render_cell <- function(COHORT, ENDPOINT, cell_index) {
       save_dpi = RENDER_DPI,
       save_pdf = RENDER_PDF,
       output_mode = RENDER_OUTPUT_MODE,
-      progress = progress
+      progress = progress,
+      overwrite = RENDER_OVERWRITE
     )
     TRUE
   }, error = function(e) {
@@ -389,8 +415,9 @@ if (any(worker_errors))
 n_total <- length(COHORTS) * length(ENDPOINTS)
 progress_summary <- figure_progress$snapshot()
 figure_progress$close()
-message(sprintf("%d subpanels saved in %.1f minutes.",
-                progress_summary$panels, progress_summary$elapsed / 60))
+message(sprintf("%d subpanels saved, %d completed subpanels skipped in %.1f minutes.",
+                progress_summary$panels, progress_summary$skipped,
+                progress_summary$elapsed / 60))
 message(sprintf("\n%d of %d figure sets rendered.",
                 n_total - length(render_failures), n_total))
 if (length(render_failures))

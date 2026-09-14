@@ -20,6 +20,9 @@ local({
   stopifnot(tracker$snapshot()$panels == 1L) # duplicate events cannot overcount
   tracker$update(1, "complete")
   tracker$update(2, "start")
+  tracker$update(2, "panel_skipped", "existing_panel")
+  tracker$update(2, "panel_skipped", "existing_panel")
+  stopifnot(tracker$snapshot()$skipped == 1L)
   tracker$update(2, "panel_start", "figure3_univariate")
   tracker$update(2, "failed", "graphics device failed")
   s <- tracker$snapshot()
@@ -48,6 +51,7 @@ for (workers in if (.Platform$OS.type == "windows") 1L else c(1L, 2L)) {
   env$PLOT_GAM_TRAJECTORIES <- env$PLOT_ADT_INTENT_SUPPLEMENT <- FALSE
   env$RENDER_DPI <- 200
   env$RENDER_PDF <- FALSE
+  env$RENDER_OVERWRITE <- FALSE
   env$RENDER_OUTPUT_MODE <- "panels"
   env$generate_figures <- function(cohort, ..., endpoint, progress) {
     progress("stage", "synthetic inputs")
