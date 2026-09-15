@@ -209,7 +209,8 @@ figure_notebook_manifest <- function(config, check_sources = TRUE) {
   # R only checks metadata. It never launches Python or reconstructs its tables.
   # Render-only deliberately uses the prepared snapshot with sources offline.
   fingerprints <- if (federated_only) {
-    if (check_sources) manifest$federated_sources else list()
+    if (check_sources) Filter(function(item) identical(figure_absolute_path(item$path),
+      figure_absolute_path(config$federated_path)), manifest$federated_sources) else list()
   } else c(manifest$outputs, if (check_sources) manifest$source_fingerprints)
   for (item in fingerprints) {
     exists <- file.exists(item$path)
@@ -240,7 +241,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
   runtime <- list(R = as.character(getRversion()), packages = vapply(
     c("ggplot2", "survival", "survminer", "mgcv", "dplyr", "tidyr", "readr", "ggrepel", "scales", "stringr"),
     function(x) as.character(utils::packageVersion(x)), character(1)),
-    code = unname(tools::md5sum(c(pipeline_path, file.path(dirname(pipeline_path), "figure_data_cache.R")))),
+    code = unname(tools::md5sum(list.files(dirname(pipeline_path), pattern = "\\.R$", full.names = TRUE))),
     fig_root = config$fig_root)
   jobs <- list()
   if (!identical(config$scope, "federated")) {
@@ -258,14 +259,21 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     jobs$federated <- list(name = "federated", signature = signature,
       directory = file.path(config$cache_root, "scenes", "federated", signature))
   }
+  if (!identical(config$scope, "federated") && "adt" %in% config$cohorts && "platinum" %in% config$endpoints) {
+    signature <- figure_object_hash(list(manifest$cohort_overview$key, runtime))
+    jobs$cohort_overview <- list(name = "cohort_overview", signature = signature,
+      directory = file.path(config$cache_root, "scenes", "cohort_overview", signature))
+  }
   build_job <- function(job) {
     if (!is.null(manifest$errors[[job$name]])) stop(manifest$errors[[job$name]])
     # Optional missing federation inputs produce a reported skip, not an empty
     # completion marker. A later delivery is picked up by source fingerprints.
-    if (job$name == "federated") {
+    if (job$name == "cohort_overview") {
+      source(file.path(dirname(pipeline_path), "cohort_overview_figures.R"), local = TRUE)
+      build <- function() render_cohort_overview(manifest, config)
+    } else if (job$name == "federated") {
       source(federated_config$script, local = TRUE)
-      inputs <- c(federated_config$results, vapply(c(0L, 90L, 180L),
-        federated_no_msk_local_result_path, character(1), data_root = config$data_root))
+      inputs <- federated_config$results
       if (stage != "render" && any(!file.exists(inputs))) {
         warning("Federated supplement skipped; missing: ", paste(inputs[!file.exists(inputs)], collapse = ", "))
         return(list(skipped = TRUE))
@@ -297,7 +305,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
   # Only pending jobs warm tables. A resumed all-mode knit reads no patient
   # Parquet at all when every scene snapshot is current.
   if (stage != "render") {
-    pending <- Filter(function(job) job$name != "federated" &&
+    pending <- Filter(function(job) !job$name %in% c("federated", "cohort_overview") &&
       is.null(manifest$errors[[job$name]]) &&
       (prepare_overwrite || is.null(figure_scene_manifest(job$directory, job$signature))), jobs)
     for (arm in unique(vapply(pending, function(job) cohort_arm(job$cohort), character(1)))) {

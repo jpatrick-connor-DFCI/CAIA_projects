@@ -993,6 +993,112 @@ figure_output_tier <- function(cohort, endpoint, plot_stem) {
 # endpoint. Mirrors the body of the former figure notebook's per-cohort cells
 # (Figures 1-7 + Table 1), so the R Markdown document can call it once per
 # (cohort, endpoint) pair in the same R session.
+# ----------------------------- labeling knobs ---------------------------
+TOP_K_PER_PANEL <- 4
+ALWAYS_LABEL    <- c("Hemoglobin", "Albumin", "Alkaline phosphatase")
+PANEL_XLIM      <- c(-1.5, 1.5)
+Y_MAX_CAP       <- 30   # -log10(p) ceiling; values above are drawn at the cap as triangles
+
+q_threshold_neglog10p <- function(sub) {
+  sig <- sub$p_value[sub$q_value < 0.05]
+  if (length(sig) == 0) return(NA_real_)
+  -log10(max(max(sig), 1e-300))
+}
+
+# Which rows to label, following the Python _auto_label selection rules.
+labels_for_panel <- function(sub, top_k, always_label) {
+  sig <- sub %>% filter(sig)
+  if (nrow(sig) == 0) return(sig[0, ])
+  # Label the mean and strongest other statistic per androgen lab. All
+  # observations remain plotted, without ten near-identical labels piling up.
+  androgen_rows <- sig %>% filter(category == "Androgen axis") %>%
+    arrange(desc(feature_stat == "mean"), p_value) %>%
+    group_by(lab_name) %>% slice_head(n = 2L) %>% ungroup()
+  non_andro <- sig %>% filter(category != "Androgen axis") %>%
+    arrange(p_value) %>% distinct(lab_name, .keep_all = TRUE)
+  always_sig <- non_andro %>% filter(lab_name %in% always_label)
+  extra <- non_andro %>% filter(!lab_name %in% always_label) %>% head(top_k)
+  non_andro_label <- bind_rows(always_sig, extra) %>% distinct(lab_name, .keep_all = TRUE)
+  bind_rows(androgen_rows, non_andro_label) %>%
+    distinct(lab_name, feature_stat, .keep_all = TRUE)
+}
+
+plot_volcano_panel <- function(sub, title) {
+  sub <- sub %>%
+    filter(!lab_name %in% DROP) %>%
+    mutate(
+      .point_id  = row_number(),
+      category  = vapply(lab_name, assign_category, character(1)),
+      neglog10p = -log10(pmax(p_value, 1e-300)),
+      sig       = q_value < 0.05,
+      capped    = neglog10p > Y_MAX_CAP,
+      y         = pmin(neglog10p, Y_MAX_CAP),
+      label     = sprintf("%s (%s)", lab_name, feature_stat)
+    )
+  ns  <- sub %>% filter(!sig)
+  sigd <- sub %>% filter(sig) %>%
+    mutate(category = factor(category, levels = DRAW_ORDER),
+           is_hero  = category == "Androgen axis")
+  y_max <- if (nrow(sub)) max(sub$y) else 5
+  q_y <- q_threshold_neglog10p(sub)
+  lab_df <- labels_for_panel(sub, TOP_K_PER_PANEL, ALWAYS_LABEL)
+  # Keep every point in the repel calculation, including unlabeled points, so
+  # text cannot settle on top of a nearby observation.
+  sub <- sub %>% mutate(repel_label = ifelse(.point_id %in% lab_df$.point_id, label, ""))
+
+  n_tested <- nrow(sub); n_sig <- sum(sub$sig)
+  breakdown <- sub %>% filter(sig) %>% count(category)
+  short <- c("Androgen axis"="Androgen","CBC"="CBC","LFT"="LFT","CMP"="CMP",
+             "Vitals"="Vitals")
+  bd_str <- paste(vapply(setdiff(LEGEND_ORDER, "Other"), function(c) {
+    n <- breakdown$n[match(c, breakdown$category)]; if (is.na(n)) n <- 0
+    sprintf("%s %d", short[[c]], n)
+  }, character(1)), collapse = "  ")
+  footer <- sprintf("%d / %d q<0.05   \u00b7   %s", n_sig, n_tested, bd_str)
+
+  p <- ggplot() +
+    geom_vline(xintercept = 0, color = "grey", linewidth = 0.7) +
+    geom_vline(xintercept = c(-0.5, 0.5), color = "grey", linetype = "dashed",
+               linewidth = 0.6, alpha = 0.7) +
+    { if (!is.na(q_y)) geom_hline(yintercept = q_y, color = "black",
+                                  linetype = "dotted", linewidth = 0.9) } +
+    geom_point(data = ns, aes(coef_feature, y), size = 1.6 * 1.5, color = NS_COLOR, alpha = 0.7) +
+    geom_point(data = sigd %>% filter(!capped),
+               aes(coef_feature, y, color = category, size = is_hero),
+               shape = 21, fill = NA, stroke = 0.9, show.legend = FALSE) +
+    geom_point(data = sigd %>% filter(!capped),
+               aes(coef_feature, y, fill = category, size = is_hero),
+               shape = 21, color = "white", stroke = 0.6, alpha = 0.92) +
+    geom_point(data = sigd %>% filter(capped),
+               aes(coef_feature, y, fill = category), shape = 24,
+               size = 3.4 * 1.5, color = "white", stroke = 0.6, alpha = 0.92, show.legend = FALSE) +
+    ggrepel::geom_text_repel(
+      data = sub,
+      aes(coef_feature, pmin(neglog10p, Y_MAX_CAP), label = repel_label, color = category),
+      size = 3.2, fontface = "plain", segment.color = "#95a5a6", segment.size = 0.3,
+      max.overlaps = Inf, min.segment.length = 0, box.padding = 0.55,
+      point.padding = 0.8, point.size = 4, force = 2, max.time = 4, max.iter = 100000, seed = 0,
+      nudge_x = ifelse(sub$coef_feature < 0, -0.35, 0.35), nudge_y = 0.35,
+      show.legend = FALSE) +
+    scale_color_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL) +
+    scale_fill_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL) +
+    guides(color = "none", fill = guide_legend(nrow = 2, override.aes = list(shape = 21, size = 3, alpha = 1))) +
+    scale_size_manual(values = c(`TRUE` = 3.2 * 1.5, `FALSE` = 2.1 * 1.5), guide = "none") +
+    coord_cartesian(xlim = range(c(PANEL_XLIM, sub$coef_feature), finite = TRUE) * 1.08,
+                    ylim = c(-0.2, max(y_max * 1.20, 5))) +
+    labs(x = "Cox log HR per SD", y = expression(-log[10](p)), title = title,
+         caption = str_wrap(footer, 88)) +
+    theme_fig() +
+    theme(plot.title = element_text(face = "bold", size = 14),
+          plot.caption = element_text(size = 9, color = "#5d6d7e", family = "sans",
+                                      hjust = 0, lineheight = 1.05),
+          axis.title = element_text(size = 12),
+          axis.text  = element_text(size = 10),
+          legend.text = element_text(size = 10),
+          legend.position = "bottom", legend.justification = "center")
+  p
+}
+
 generate_figures <- function(cohort, nepc_proj_path, fig_root,
                              endpoint = "platinum",
                              cohorts = SUPPORTED_COHORTS, show = FALSE,
@@ -2123,111 +2229,6 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
   }
 
-  # ----------------------------- labeling knobs ---------------------------
-  TOP_K_PER_PANEL <- 4
-  ALWAYS_LABEL    <- c("Hemoglobin", "Albumin", "Alkaline phosphatase")
-  PANEL_XLIM      <- c(-1.5, 1.5)
-  Y_MAX_CAP       <- 30   # -log10(p) ceiling; values above are drawn at the cap as triangles
-
-  q_threshold_neglog10p <- function(sub) {
-    sig <- sub$p_value[sub$q_value < 0.05]
-    if (length(sig) == 0) return(NA_real_)
-    -log10(max(max(sig), 1e-300))
-  }
-
-  # Which rows to label, following the Python _auto_label selection rules.
-  labels_for_panel <- function(sub, top_k, always_label) {
-    sig <- sub %>% filter(sig)
-    if (nrow(sig) == 0) return(sig[0, ])
-    # Label the mean and strongest other statistic per androgen lab. All
-    # observations remain plotted, without ten near-identical labels piling up.
-    androgen_rows <- sig %>% filter(category == "Androgen axis") %>%
-      arrange(desc(feature_stat == "mean"), p_value) %>%
-      group_by(lab_name) %>% slice_head(n = 2L) %>% ungroup()
-    non_andro <- sig %>% filter(category != "Androgen axis") %>%
-      arrange(p_value) %>% distinct(lab_name, .keep_all = TRUE)
-    always_sig <- non_andro %>% filter(lab_name %in% always_label)
-    extra <- non_andro %>% filter(!lab_name %in% always_label) %>% head(top_k)
-    non_andro_label <- bind_rows(always_sig, extra) %>% distinct(lab_name, .keep_all = TRUE)
-    bind_rows(androgen_rows, non_andro_label) %>%
-      distinct(lab_name, feature_stat, .keep_all = TRUE)
-  }
-
-  plot_volcano_panel <- function(sub, title) {
-    sub <- sub %>%
-      filter(!lab_name %in% DROP) %>%
-      mutate(
-        .point_id  = row_number(),
-        category  = vapply(lab_name, assign_category, character(1)),
-        neglog10p = -log10(pmax(p_value, 1e-300)),
-        sig       = q_value < 0.05,
-        capped    = neglog10p > Y_MAX_CAP,
-        y         = pmin(neglog10p, Y_MAX_CAP),
-        label     = sprintf("%s (%s)", lab_name, feature_stat)
-      )
-    ns  <- sub %>% filter(!sig)
-    sigd <- sub %>% filter(sig) %>%
-      mutate(category = factor(category, levels = DRAW_ORDER),
-             is_hero  = category == "Androgen axis")
-    y_max <- if (nrow(sub)) max(sub$y) else 5
-    q_y <- q_threshold_neglog10p(sub)
-    lab_df <- labels_for_panel(sub, TOP_K_PER_PANEL, ALWAYS_LABEL)
-    # Keep every point in the repel calculation, including unlabeled points, so
-    # text cannot settle on top of a nearby observation.
-    sub <- sub %>% mutate(repel_label = ifelse(.point_id %in% lab_df$.point_id, label, ""))
-
-    n_tested <- nrow(sub); n_sig <- sum(sub$sig)
-    breakdown <- sub %>% filter(sig) %>% count(category)
-    short <- c("Androgen axis"="Androgen","CBC"="CBC","LFT"="LFT","CMP"="CMP",
-               "Vitals"="Vitals")
-    bd_str <- paste(vapply(setdiff(LEGEND_ORDER, "Other"), function(c) {
-      n <- breakdown$n[match(c, breakdown$category)]; if (is.na(n)) n <- 0
-      sprintf("%s %d", short[[c]], n)
-    }, character(1)), collapse = "  ")
-    footer <- sprintf("%d / %d q<0.05   \u00b7   %s", n_sig, n_tested, bd_str)
-
-    p <- ggplot() +
-      geom_vline(xintercept = 0, color = "grey", linewidth = 0.7) +
-      geom_vline(xintercept = c(-0.5, 0.5), color = "grey", linetype = "dashed",
-                 linewidth = 0.6, alpha = 0.7) +
-      { if (!is.na(q_y)) geom_hline(yintercept = q_y, color = "black",
-                                    linetype = "dotted", linewidth = 0.9) } +
-      geom_point(data = ns, aes(coef_feature, y), size = 1.6 * 1.5, color = NS_COLOR, alpha = 0.7) +
-      geom_point(data = sigd %>% filter(!capped),
-                 aes(coef_feature, y, color = category, size = is_hero),
-                 shape = 21, fill = NA, stroke = 0.9, show.legend = FALSE) +
-      geom_point(data = sigd %>% filter(!capped),
-                 aes(coef_feature, y, fill = category, size = is_hero),
-                 shape = 21, color = "white", stroke = 0.6, alpha = 0.92) +
-      geom_point(data = sigd %>% filter(capped),
-                 aes(coef_feature, y, fill = category), shape = 24,
-                 size = 3.4 * 1.5, color = "white", stroke = 0.6, alpha = 0.92, show.legend = FALSE) +
-      ggrepel::geom_text_repel(
-        data = sub,
-        aes(coef_feature, pmin(neglog10p, Y_MAX_CAP), label = repel_label, color = category),
-        size = 3.2, fontface = "plain", segment.color = "#95a5a6", segment.size = 0.3,
-        max.overlaps = Inf, min.segment.length = 0, box.padding = 0.55,
-        point.padding = 0.8, point.size = 4, force = 2, max.time = 4, max.iter = 100000, seed = 0,
-        nudge_x = ifelse(sub$coef_feature < 0, -0.35, 0.35), nudge_y = 0.35,
-        show.legend = FALSE) +
-      scale_color_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL) +
-      scale_fill_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL) +
-      guides(color = "none", fill = guide_legend(nrow = 2, override.aes = list(shape = 21, size = 3, alpha = 1))) +
-      scale_size_manual(values = c(`TRUE` = 3.2 * 1.5, `FALSE` = 2.1 * 1.5), guide = "none") +
-      coord_cartesian(xlim = range(c(PANEL_XLIM, sub$coef_feature), finite = TRUE) * 1.08,
-                      ylim = c(-0.2, max(y_max * 1.20, 5))) +
-      labs(x = "Cox log HR per SD", y = expression(-log[10](p)), title = title,
-           caption = str_wrap(footer, 88)) +
-      theme_fig() +
-      theme(plot.title = element_text(face = "bold", size = 14),
-            plot.caption = element_text(size = 9, color = "#5d6d7e", family = "sans",
-                                        hjust = 0, lineheight = 1.05),
-            axis.title = element_text(size = 12),
-            axis.text  = element_text(size = 10),
-            legend.text = element_text(size = 10),
-            legend.position = "bottom", legend.justification = "center")
-    p
-  }
 
   # Significance-only coloring for the univariate volcano: no lab-category
   # color, just significant (q<0.05) vs not, with optional caller-supplied

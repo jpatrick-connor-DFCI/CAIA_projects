@@ -217,6 +217,72 @@ def prepare_metastatic(config: dict, patients: pl.DataFrame) -> pl.DataFrame:
         if isinstance(dtype, pl.Datetime)])
 
 
+def prepare_cohort_overview(config: dict) -> dict:
+    """Small Stage-3 incidence and Stage-1 label summaries from notebook 07."""
+    root, cache = Path(config["data_root"]), Path(config["cache_root"])
+    cohorts = as_list(config.get("forest_cohorts", ["adt", "adt_noprecastrate",
+        "adt_metastatic_adt", "adt_metastatic_adt_noprecastrate",
+        "adt_metastatic_llm", "adt_metastatic_llm_noprecastrate"]))
+    landmark = config.get("forest_landmark", 180)
+    paths = {(cohort, ep): root / "survival_analysis" /
+        f"prediction_inputs_{cohort}{'_nepc' if ep == 'nepc' else ''}" /
+        f"aggregated_landmark{landmark}.csv" for cohort in cohorts for ep in ["platinum", "nepc"]}
+    intent = root / "mrn_lists" / "adt_intent_labels_model_cohort.csv"
+    llm = root / "mrn_lists" / "llm_met_labels_model_cohort.csv"
+    sources = [fingerprint(p) for p in [*paths.values(), intent, llm]]
+    key = digest([sources, cohorts, landmark, pl.__version__,
+                  hashlib.sha256(Path(__file__).read_bytes()).hexdigest()])
+    directory = cache / "cohort_overview" / key
+    names = ["incidence", "label_overlap"]
+    if config.get("force") or not valid_bundle(directory, key, names):
+        rows = []
+        for (cohort, ep), path in paths.items():
+            row = dict(cohort=cohort, endpoint=ep, landmark_days=landmark,
+                       n_patients=None, n_events=None, status="missing")
+            if path.exists():
+                scan = pl.scan_csv(path, infer_schema_length=0, null_values=["", "NA", "NaN"])
+                if not {ID, ep.upper()} <= set(scan.collect_schema().names()):
+                    row["status"] = f"missing {ID} or {ep.upper()} column"
+                else:
+                    counts = scan.select(pl.len().alias("n"), pl.col(ID).n_unique().alias("ids"),
+                        pl.col(ID).null_count().alias("missing_ids"),
+                        (pl.col(ep.upper()).cast(pl.Float64, strict=False) == 1).sum().alias("events")).collect().row(0, named=True)
+                    if counts["n"] != counts["ids"] or counts["missing_ids"]:
+                        raise ValueError(f"Non-unique/missing patient IDs in {path}")
+                    row.update(n_patients=counts["n"], n_events=counts["events"], status="ok")
+            rows.append(row)
+        incidence = pl.DataFrame(rows, schema_overrides={"n_patients": pl.Int64, "n_events": pl.Int64})
+        overlap = pl.DataFrame(schema={"adt_label": pl.String, "llm_label": pl.String, "n": pl.Int64})
+        if intent.exists() and llm.exists():
+            def labels(path, column):
+                d = pl.read_csv(path, infer_schema_length=0).select(
+                    pl.col(ID).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False).cast(pl.String),
+                    pl.col(column)).unique()
+                if d[ID].null_count() or d[ID].n_unique() != d.height:
+                    raise ValueError(f"Missing IDs or conflicting {column} labels in {path}")
+                return d
+            a = labels(intent, "ADT_INTENT").with_columns(pl.col("ADT_INTENT").str.to_uppercase().replace_strict(
+                {"METASTATIC": "Metastatic", "LOCALIZED_ADJUVANT": "Local"}, default="Unlabelled").alias("adt_label"))
+            b = labels(llm, "LLM_METASTATIC").with_columns(pl.col("LLM_METASTATIC").str.strip_chars().str.to_lowercase().replace_strict(
+                {"true": "Metastatic", "1": "Metastatic", "yes": "Metastatic",
+                 "false": "Local", "0": "Local", "no": "Local"}, default="Unlabelled").alias("llm_label"))
+            overlap = a.join(b, on=ID, how="left").with_columns(pl.col("llm_label").fill_null("Unlabelled")) \
+                .group_by("adt_label", "llm_label").len(name="n").with_columns(pl.col("n").cast(pl.Int64))
+        directory.mkdir(parents=True, exist_ok=True)
+        for name, table in [("incidence", incidence), ("label_overlap", overlap)]:
+            with tempfile.NamedTemporaryFile(dir=directory, suffix=".parquet", delete=False) as stream:
+                temporary = Path(stream.name)
+            table.write_parquet(temporary)
+            os.replace(temporary, directory / f"{name}.parquet")
+        if sources != [fingerprint(p) for p in [*paths.values(), intent, llm]]:
+            raise RuntimeError("Cohort overview inputs changed during preparation; rerun notebook 04")
+        atomic_json(directory / "manifest.json", {"key": key, "outputs": {
+            name: fingerprint(directory / f"{name}.parquet") for name in names}})
+    outputs = list(json.loads((directory / "manifest.json").read_text())["outputs"].values())
+    return {"directory": str(directory.resolve()), "key": digest([key, outputs]),
+            "sources": sources, "outputs": outputs}
+
+
 def prepare(config: dict) -> dict:
     root = Path(config["data_root"])
     cache = Path(config["cache_root"])
@@ -309,6 +375,15 @@ def prepare(config: dict) -> dict:
                     manifest["metastatic_labels"] = str(path.resolve())
                     manifest["outputs"].append(fingerprint(path))
 
+        if "adt" in cohorts and "platinum" in endpoints and config.get("scope") != "federated":
+            try:
+                overview = prepare_cohort_overview(config)
+                manifest["cohort_overview"] = overview
+                manifest["outputs"].extend(overview["outputs"])
+                manifest["source_fingerprints"].extend(overview["sources"])
+            except Exception as exc:
+                manifest["errors"]["cohort_overview"] = str(exc)
+
         shared_paths = [root / "LLM_NEPC_labels" / "baca_lab_annotations.csv",
                         root / "mrn_lists" / "platinum_MRN_list.csv",
                         root / "mrn_lists" / "icd_prostate_mrn_flags.csv",
@@ -340,14 +415,9 @@ def prepare(config: dict) -> dict:
                     "arm": manifest["arms"][arm]["key"], "code": version, "force": manifest["force_version"],
                     "settings": {k: config.get(k) for k in ["gam", "metastatic", "metastatic_extra", "adt_intent", "forest_cohorts", "forest_landmark"]}})
         manifest["federated"] = digest({"code": version, "force": manifest["force_version"],
-            "file": fingerprint(Path(config["federated_path"])),
-            "local": [fingerprint(root / "survival_analysis" / "local_runs_adt" / "cox" / f"landmark_{lm}" / "both" /
-                                  "cox_agg_univariate_nobs_adjusted.csv") for lm in [0, 90, 180]]})
+            "file": fingerprint(Path(config["federated_path"]))})
         if config.get("federated", False):
-            manifest["federated_sources"] = [
-                fingerprint(Path(config["federated_path"])), *[
-                    fingerprint(root / "survival_analysis" / "local_runs_adt" / "cox" / f"landmark_{lm}" / "both" /
-                                "cox_agg_univariate_nobs_adjusted.csv") for lm in [0, 90, 180]]]
+            manifest["federated_sources"] = [fingerprint(Path(config["federated_path"]))]
             manifest["source_fingerprints"].extend(manifest["federated_sources"])
         atomic_json(Path(config.get("manifest_path", cache / "manifest.json")), manifest)
     return manifest

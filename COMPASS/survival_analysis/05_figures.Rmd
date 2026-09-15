@@ -31,7 +31,7 @@ metadata, prepares changed R figure sets, then renders missing or stale formats.
 source data, and requires the same cohort/analysis settings. Use `all` for
 normal updates and `render` for DPI/PDF changes.
 
-`COMPASS_FIGURE_SCOPE=federated` processes only the no-MSK comparison without
+`COMPASS_FIGURE_SCOPE=federated` processes only the no-MSK volcanoes without
 requiring longitudinal data or running other figure families.
 
 Caches live under `COMPASS_FIGURE_DATA_ROOT` (default `COMPASS/figure_data`).
@@ -60,6 +60,19 @@ landmarks 0/90/180. The forests read existing day-180 results across six ADT
 configurations without enabling six full renders. ARPI uses its own input file.
 Retired AVPC endpoints and localized-adjuvant cohorts remain unavailable.
 
+Canonical ADT/platinum also generates two combined cohort-comparison figures:
+event incidence with 95% Wilson intervals plus patient/event counts across all
+six ADT definitions and both endpoints at day 180; and Stage-1 ADT-intent/LLM
+label overlap plus the four agreement-cell counts. The incidence denominator
+is each endpoint's aggregated landmark input, not a feature-specific Cox fit.
+It is the observed follow-up event fraction, not cumulative risk by day 180.
+Cells with fewer than 25 events are hatched/marked; missing cells stay blank.
+The label figure uses `mrn_lists/adt_intent_labels_model_cohort.csv` and
+`llm_met_labels_model_cohort.csv`, preserving missing labels explicitly.
+Run notebook `04` once after this update to prepare these small summary tables.
+Outputs (and their count tables) are under `supplements/cohort_comparison/`:
+`event_incidence_landmark180` and `metastatic_label_overlap`.
+
 Canonical ADT/platinum panels are main figures; NEPC, cohort variants and
 diagnostics are supplements. Individual subpanels retain this layout:
 
@@ -79,7 +92,15 @@ regex stage across the record, and ADT versus LLM. Set
 trajectory diagnostics. These use canonical ADT/platinum and the longitudinal
 analysis anchor, with supplied ADT/LLM labels preserved.
 
-The federated comparison runs when canonical ADT/platinum is selected, or scope
+The federated supplement now contains only category-colored volcano plots at
+days 0/90/180, using the same renderer as the local univariate volcanoes:
+Cox log HR per SD versus −log10(p), q < 0.05 coloring, shared lab categories,
+label selection, and a y cap of 30 (triangles for capped significant points).
+The same unstable-fit limits apply (|log HR| ≤ 4 and CI ratio < 100).
+It does not join or require local results. Outputs are under
+`supplements/federated_no_msk/volcano_landmark{0,90,180}/`.
+Old agreement/overlap/effect comparison files are not regenerated or deleted.
+These volcanoes run when canonical ADT/platinum is selected, or scope
 is `federated`. Missing optional sources are reported and skipped. Failures in
 one figure set do not prevent preparation/rendering of other available sets.
 

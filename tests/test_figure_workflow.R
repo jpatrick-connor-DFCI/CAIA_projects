@@ -64,6 +64,10 @@ local({
   # Repeated consistent NEPC labels must not abort the cached trajectory path.
   write_tsv(bind_rows(classifier, classifier[1:3, ]),
     file.path(cfg$classifier_path, "LLM_NEPC_classifier_labels.tsv"))
+  write_csv(tibble(DFCI_MRN = ids, ADT_INTENT = rep(c("METASTATIC", "LOCALIZED_ADJUVANT"), 20)),
+    file.path(root, "mrn_lists", "adt_intent_labels_model_cohort.csv"))
+  write_csv(tibble(DFCI_MRN = ids[-1], LLM_METASTATIC = patient$NEPC[-1] == 1),
+    file.path(root, "mrn_lists", "llm_met_labels_model_cohort.csv"))
   fc <- list(script = file.path(dirname(pipeline_path), "federated_no_msk_figures.R"), results = fed_path)
   forest <- list(script = file.path(dirname(pipeline_path), "cohort_forest_figures.R"), cohorts = "adt", landmark = 180L)
   # Fixture setup represents the separate notebook preparation stage. Python
@@ -80,14 +84,14 @@ local({
   stopifnot(inherits(mismatch, "error"), grepl("04_prep_figure_data.ipynb", conditionMessage(mismatch), fixed = TRUE))
   t1 <- system.time(first <- run_cached_figure_workflow(cfg, pipeline_path, "all", dpi = 60,
     prepare_workers = 1L, render_workers = 2L, forest_config = forest, federated_config = fc))[["elapsed"]]
-  stopifnot(length(first$prepared) == 3L, length(first$rendered) > 20L,
+  stopifnot(length(first$prepared) == 4L, length(first$rendered) > 20L,
             all(vapply(first$rendered, function(x) x$rendered == 1L, logical(1))))
   t2 <- system.time(second <- run_cached_figure_workflow(cfg, pipeline_path, "all", dpi = 60,
     forest_config = forest, federated_config = fc))[["elapsed"]]
   stopifnot(all(vapply(second$rendered, function(x) x$rendered == 0L, logical(1))))
   prepared_only <- run_cached_figure_workflow(cfg, pipeline_path, "prepare", dpi = 60,
     forest_config = forest, federated_config = fc)
-  stopifnot(length(prepared_only$prepared) == 3L, length(prepared_only$rendered) == 0L)
+  stopifnot(length(prepared_only$prepared) == 4L, length(prepared_only$rendered) == 0L)
   # Render-only must not even start Python or read a raw input.
   python <- Sys.getenv("COMPASS_FIGURE_PYTHON", unset = NA)
   Sys.setenv(COMPASS_FIGURE_PYTHON = "/no/python/allowed")
@@ -109,6 +113,9 @@ local({
     else do.call(Sys.setenv, setNames(list(previous[[name]]), name))
   }, add = TRUE)
   do.call(Sys.setenv, as.list(variables))
+  # Federated volcanoes do not require a matching local result tree.
+  stopifnot(file.rename(file.path(root, "survival_analysis", "local_runs_adt"),
+                        file.path(root, "local_runs_hidden")))
   rmd <- readLines(file.path(dirname(pipeline_path), "05_figures.Rmd"))
   inside <- FALSE; code <- character()
   for (line in rmd) {
@@ -119,5 +126,7 @@ local({
   env <- new.env(parent = globalenv())
   eval(parse(text = code), env)
   stopifnot(identical(names(env$figure_run$prepared), "federated"))
+  stopifnot(identical(vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem"),
+                      paste0("volcano_landmark", c(0, 90, 180))))
   cat(sprintf("Synthetic workflow: first %.2fs; unchanged %.2fs; %d panels\n", t1, t2, length(first$rendered)))
 })

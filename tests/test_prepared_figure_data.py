@@ -97,10 +97,12 @@ def test_cache_reuse_invalidation_and_force(tmp_path, monkeypatch):
 
 def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     config = make_config(tmp_path, "federated")
+    config["federated"] = True
     monkeypatch.setattr(prep, "prepare_arm", lambda *a: pytest.fail("Federated scope read longitudinal data"))
     result = prep.prepare(config)
     assert result["arms"] == {} and result["cells"] == {}
     assert result["federated"]
+    assert [item["path"] for item in result["federated_sources"]] == [config["federated_path"]]
 
 
 def test_arpi_preparation_does_not_require_adt(tmp_path):
@@ -141,6 +143,33 @@ def test_preparation_notebook_runs_all_python_cells(tmp_path, monkeypatch):
     assert Path(config["cache_root"], "preparation_config.json").exists()
     assert "PSA" in state["figure_data"].canonical_lab_names()
     assert state["rows"] and all(row["rows"] >= 0 for row in state["rows"])
+
+
+def test_overview_counts_use_endpoint_inputs_and_keep_missing_labels(tmp_path):
+    config = make_config(tmp_path)
+    config["forest_cohorts"] = ["adt", "adt_noprecastrate"]
+    root = Path(config["data_root"])
+    for suffix, event, values in [("", "PLATINUM", [1, 0, 1]), ("_nepc", "NEPC", [1, 0])]:
+        pl.DataFrame({"DFCI_MRN": [str(i) for i in range(len(values))], event: values}).write_csv(
+            root / "survival_analysis" / f"prediction_inputs_adt{suffix}" / "aggregated_landmark180.csv")
+    mrns = root / "mrn_lists"
+    mrns.mkdir()
+    pl.DataFrame({"DFCI_MRN": ["001", "2.0", "3"], "ADT_INTENT": ["METASTATIC", "LOCALIZED_ADJUVANT", "UNKNOWN"]}).write_csv(
+        mrns / "adt_intent_labels_model_cohort.csv")
+    pl.DataFrame({"DFCI_MRN": ["1", "002.0"], "LLM_METASTATIC": ["true", "false"]}).write_csv(
+        mrns / "llm_met_labels_model_cohort.csv")
+    result = prep.prepare_cohort_overview(config)
+    d = pl.read_parquet(Path(result["directory"]) / "incidence.parquet")
+    assert d["n_patients"].to_list() == [3, 2, None, None]
+    assert d["n_events"].to_list() == [2, 1, None, None]
+    labels = pl.read_parquet(Path(result["directory"]) / "label_overlap.parquet")
+    assert labels["n"].sum() == 3
+    assert labels.filter(pl.col("adt_label") == "Unlabelled")["llm_label"].to_list() == ["Unlabelled"]
+    assert prep.prepare_cohort_overview(config) == result
+    pl.DataFrame({"DFCI_MRN": ["1", "1"], "LLM_METASTATIC": ["true", "false"]}).write_csv(
+        mrns / "llm_met_labels_model_cohort.csv")
+    with pytest.raises(ValueError, match="conflicting"):
+        prep.prepare_cohort_overview(config)
 
 
 def test_labels_use_analysis_anchor_and_retain_unlabelled_patients():

@@ -76,14 +76,6 @@ local({
   conflict <- tryCatch(nested$patient_bin_trajectory(legacy_labs, "PSA",
     stratum_values = tibble(DFCI_MRN = c("001", "001"), stratum = c("NEPC+", "NEPC-"))), error = identity)
   stopifnot(inherits(conflict, "error"), grepl("Conflicting trajectory labels for 1 patient", conditionMessage(conflict)))
-  source("COMPASS/survival_analysis/federated_no_msk_figures.R")
-  no_effects <- tibble(usable_effect = FALSE, landmark_days = 0L,
-    discovery_class = factor("Neither", levels = c("Neither", "Local only", "Federated only", "FDR < 0.05 in both")))
-  for (d in list(no_effects, no_effects[0, ])) {
-    empty_plot <- plot_federated_no_msk_discoveries(d)
-    withCallingHandlers(invisible(ggplotGrob(empty_plot)), warning = function(w) stop(w))
-    stopifnot(identical(ggplot_build(empty_plot)$data[[1]]$label, "No usable shared tests"))
-  }
   source("COMPASS/survival_analysis/prepare_metastatic_figure_labels.R")
   legacy_labels <- prepare_metastatic_figure_labels(config$metastatic_sources, legacy_patient) %>% arrange(DFCI_MRN)
   prepared_labels <- figure_read_parquet(manifest$metastatic_labels) %>% arrange(DFCI_MRN)
