@@ -43,6 +43,11 @@ def test_stage_timing_ties_unknowns_and_pairwise_labels():
     assert result["REGEX_LABEL"].to_list() == ["Metastatic", "Local", "Local", "Metastatic", "Local", None]
     assert result["REGEX_MAX_AFTER"].to_list() == [None, None, "Metastatic", None, None, None]
     assert result["REGEX_MAX_BEFORE"].to_list()[-1] == "Metastatic"
+    # Pooled across the whole record, so patient 3's post-ADT stage 4 counts
+    # even though their pre-ADT maximum is only stage 3.
+    assert result["REGEX_MAX_ANY"].to_list() == [
+        "Metastatic", "Local", "Metastatic", "Metastatic", "Local", "Metastatic"]
+    assert result["REGEX_MAX_BEFORE"].to_list()[2] == "Local"
     assert result["ADT_LABEL"].to_list()[4] is None
     assert result["LLM_LABEL"].to_list() == ["Metastatic", "Metastatic", "Local", None, "Local", None]
     with pytest.raises(ValueError, match="one row per patient"):
@@ -123,4 +128,4 @@ def test_r_comparisons_and_standalone_diagnostics(tmp_path):
     path.write_text(script)
     result = subprocess.run(["Rscript", str(path)], cwd=ROOT, text=True, capture_output=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert len(list(tmp_path.glob("*.png"))) == 22
+    assert len(list(tmp_path.glob("*.png"))) == 3

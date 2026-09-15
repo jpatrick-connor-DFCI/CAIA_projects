@@ -17,6 +17,11 @@ the builder never substitutes a different observation based on the outcome.
 
 The PRS matrix is bridged from sample ID to MRN and duplicate sample rows are
 averaged per patient, as in the prior implementation.
+
+Additionally, ``gleason_available_case`` and ``somatic_available_case``
+preserve the ADT time origin and original split while retaining the patients
+with the respective data source. They support separate matched multivariable
+Gleason-versus-labs and somatic-versus-labs sensitivity analyses.
 """
 
 from __future__ import annotations
@@ -42,6 +47,7 @@ from build_genomic_inputs import GENE_VARIANT_RE  # noqa: E402
 from build_prediction_inputs import (  # noqa: E402
     BUILD_MANIFEST_FILENAME,
     aggregated_filename,
+    compute_horizon_grid,
     pre_treatment_lab_filename,
 )
 
@@ -83,6 +89,11 @@ SEQUENCING_DATE = "SEQUENCING_DATE"
 INDEX_DATE = "INDEX_DATE"
 INDEX_TO_ADT_DAYS = "INDEX_TO_ADT_DAYS"
 INDEX_ANALYSES = ("gleason", "sequencing", "prs")
+# Treatment-anchored, complete-availability cohort used to compare baseline
+# labs with baseline Gleason + somatic calls.  This is deliberately distinct
+# from INDEX_ANALYSES: those arms rebase follow-up to an observation date and
+# therefore are not directly comparable with the lab model.
+AVAILABLE_CASE_SENSITIVITIES = ("gleason_available_case", "somatic_available_case")
 PRS_SAMPLE_ID_COL = "cbio_sample_id"
 
 # Exact PGS IDs from the user-supplied complete_germline_data_df column list.
@@ -534,6 +545,45 @@ def closest_observation_to_adt(
     )
 
 
+def closest_available_by_landmark(
+    frame: pd.DataFrame,
+    cutoffs: pd.DataFrame,
+    *,
+    date_col: str,
+    available_date_col: str,
+    value_cols: list[str],
+    combine_date_ties_with_max: bool = False,
+) -> pd.DataFrame:
+    """Select the closest documented value to each landmark without leakage.
+
+    Closeness is based on the clinical observation date, while eligibility is
+    based on the date the datum was available. Exact-distance ties prefer the
+    earlier observation; same-date somatic rows can be unioned with a maximum.
+    """
+    candidates = frame.merge(cutoffs, on=ca.ID_COL, how="inner", validate="many_to_one")
+    candidates = candidates.loc[
+        candidates[date_col].notna()
+        & candidates[available_date_col].notna()
+        & candidates["_landmark_date"].notna()
+        & candidates[available_date_col].le(candidates["_landmark_date"])
+    ].copy()
+    if candidates.empty:
+        return pd.DataFrame(index=pd.Index([], name=ca.ID_COL), columns=value_cols)
+    candidates["_absolute_distance_days"] = (
+        candidates[date_col] - candidates["_landmark_date"]
+    ).dt.days.abs()
+    candidates = candidates.sort_values(
+        [ca.ID_COL, "_absolute_distance_days", date_col], kind="mergesort"
+    )
+    best_distance = candidates.groupby(ca.ID_COL)["_absolute_distance_days"].transform("min")
+    nearest = candidates.loc[candidates["_absolute_distance_days"].eq(best_distance)].copy()
+    preferred_date = nearest.groupby(ca.ID_COL)[date_col].transform("min")
+    nearest = nearest.loc[nearest[date_col].eq(preferred_date)]
+    if combine_date_ties_with_max:
+        return nearest.groupby(ca.ID_COL, sort=False)[value_cols].max()
+    return nearest.groupby(ca.ID_COL, sort=False).head(1).set_index(ca.ID_COL)[value_cols]
+
+
 def _rebase_endpoint_from_index(
     base: pd.DataFrame,
     selected: pd.DataFrame,
@@ -698,6 +748,106 @@ def build_indexed_feature_sets(
     return {"gleason": gleason_out, "sequencing": sequencing, "prs": prs_out}
 
 
+def build_available_case_sensitivity(
+    base: pd.DataFrame,
+    somatic: pd.DataFrame,
+    somatic_features: list[str],
+    gleason: pd.DataFrame,
+    *,
+    treatment_anchors: pd.Series,
+    landmark_day: int = 0,
+    analysis: str = "gleason",
+) -> pd.DataFrame:
+    """Return one source-specific, landmarked sensitivity cohort.
+
+    Each source-specific cohort has its own matched labs comparator. A datum
+    must be available by the requested ADT-relative landmark. Gleason selects
+    the score date closest to that landmark (among available values); somatic
+    selects the latest available specimen. Outcome, split assignment, and lab
+    summaries remain exactly those from the standard input at that landmark.
+    """
+    base = _normalize_mrn(base, source="landmark +0 base inputs")
+    cutoff_dates = treatment_anchors + pd.to_timedelta(int(landmark_day), unit="D")
+    cutoffs = pd.DataFrame(
+        {ca.ID_COL: cutoff_dates.index, "_landmark_date": cutoff_dates.values}
+    )
+    if analysis == "gleason":
+        features = closest_available_by_landmark(
+            gleason,
+            cutoffs,
+            date_col="gleason_date",
+            available_date_col=GLEASON_AVAILABLE_DATE,
+            value_cols=[GLEASON_FEATURE],
+        ).dropna(subset=[GLEASON_FEATURE])
+    elif analysis == "somatic":
+        features = latest_available_by_landmark(
+            somatic,
+            cutoffs,
+            date_col=SOMATIC_AVAILABLE_DATE,
+            order_col=SEQUENCING_DATE,
+            value_cols=somatic_features,
+            combine_latest_ties_with_max=True,
+        )
+    else:
+        raise ValueError("analysis must be 'gleason' or 'somatic'.")
+    out = base.set_index(ca.ID_COL).join(features, how="inner")
+    if out.empty:
+        raise ValueError(
+            f"No patients have {analysis} data available by landmark +{landmark_day}d; "
+            "cannot build the matched sensitivity inputs."
+        )
+    return out.rename_axis(ca.ID_COL).reset_index()
+
+
+def _available_case_manifest(
+    base_manifest: dict, available_by_landmark: dict[int, pd.DataFrame]
+) -> dict:
+    """Clone the base manifest with horizons estimable in the available cases."""
+    manifest = dict(base_manifest)
+    time_unit_days = int(manifest["auc_time_unit_days"])
+    quantiles = tuple(manifest["auc_quantiles"])
+    admin_days = int(manifest["auc_max_time_units"]) * time_unit_days
+    horizons_by_landmark: dict[str, dict[str, list[int]]] = {}
+    n_patients_by_landmark: dict[str, int] = {}
+    split_sizes_by_landmark: dict[str, dict[str, int]] = {}
+    for landmark_day, available in available_by_landmark.items():
+        train_val = available.loc[available["split"].isin(["train", "valid"])]
+        horizons: dict[str, list[int]] = {}
+        for endpoint, cfg in ca.ENDPOINTS.items():
+            if not {cfg["duration_col"], cfg["event_col"]}.issubset(train_val.columns):
+                continue
+            horizons[endpoint] = [
+                int(value)
+                for value in compute_horizon_grid(
+                    train_val,
+                    duration_col=cfg["duration_col"],
+                    event_col=cfg["event_col"],
+                    quantiles=quantiles,
+                    time_unit_days=time_unit_days,
+                    admin_censor_days=admin_days,
+                )
+            ]
+        landmark_key = str(int(landmark_day))
+        horizons_by_landmark[landmark_key] = horizons
+        n_patients_by_landmark[landmark_key] = int(len(available))
+        n_by_split = available["split"].value_counts().to_dict()
+        split_sizes_by_landmark[landmark_key] = {
+            key: int(n_by_split.get(key, 0)) for key in ("train", "valid", "test")
+        }
+    manifest.update(
+        {
+            "feature_set": "source_specific_available_case_sensitivity",
+            "prediction_time_origin": "ADT start",
+            "landmark_days": sorted(available_by_landmark),
+            "n_patients": int(n_patients_by_landmark.get("0", 0)),
+            "n_patients_by_landmark": n_patients_by_landmark,
+            "split_sizes_by_landmark": split_sizes_by_landmark,
+            "auc_horizons_by_landmark": horizons_by_landmark,
+        }
+    )
+    return manifest
+
+
 def main(args: argparse.Namespace) -> None:
     base_inputs_dir = Path(args.base_inputs_dir)
     output_dir = Path(args.output_dir)
@@ -834,10 +984,82 @@ def main(args: argparse.Namespace) -> None:
             f"{analysis}: {len(built):,} patients indexed from {INDEX_DATE} -> {output_path}"
         )
 
+    # Unlike the three observation-indexed univariate analyses above, these
+    # inputs preserve the standard outcome clock and split assignment. Each
+    # source gets its own labs comparator, so Gleason-vs-labs and
+    # somatic-vs-labs never conflate a feature comparison with a cohort shift.
+    sensitivity_landmarks = [int(value) for value in base_manifest["landmark_days"]]
+    sensitivity_cases: dict[str, dict[int, pd.DataFrame]] = {}
+    for analysis, sensitivity_name in zip(("gleason", "somatic"), AVAILABLE_CASE_SENSITIVITIES):
+        sensitivity_dir = output_dir / sensitivity_name
+        sensitivity_dir.mkdir(parents=True, exist_ok=True)
+        available_cases: dict[int, pd.DataFrame] = {}
+        for landmark_day in sensitivity_landmarks:
+            landmark_base_path = base_inputs_dir / aggregated_filename(landmark_day)
+            landmark_labs_path = base_inputs_dir / pre_treatment_lab_filename(landmark_day)
+            if not landmark_base_path.exists() or not landmark_labs_path.exists():
+                raise FileNotFoundError(
+                    "Available-case sensitivity requires standard aggregate and lab inputs at "
+                    f"landmark +{landmark_day}d; missing {landmark_base_path} or {landmark_labs_path}."
+                )
+            available = build_available_case_sensitivity(
+                pd.read_csv(landmark_base_path, low_memory=False),
+                somatic,
+                somatic_features,
+                gleason,
+                treatment_anchors=treatment_anchors,
+                landmark_day=landmark_day,
+                analysis=analysis,
+            )
+            available_cases[landmark_day] = available
+            available.to_csv(sensitivity_dir / aggregated_filename(landmark_day), index=False)
+            available_mrns = set(available[ca.ID_COL])
+            pd.read_csv(landmark_labs_path, low_memory=False).loc[
+                lambda frame: frame[ca.ID_COL].isin(available_mrns)
+            ].to_csv(sensitivity_dir / pre_treatment_lab_filename(landmark_day), index=False)
+            print(
+                f"{sensitivity_name} +{landmark_day}d: {len(available):,} patients "
+                f"with {analysis} data available by the landmark"
+            )
+        feature_rows = (
+            [{"feature": GLEASON_FEATURE, "feature_kind": "gleason_continuous", "source": str(args.gleason_path)}]
+            if analysis == "gleason"
+            else [
+                {"feature": feature, "feature_kind": "somatic_binary", "source": str(args.somatic_path)}
+                for feature in somatic_features
+            ]
+        )
+        pd.DataFrame(feature_rows).to_csv(sensitivity_dir / FEATURE_MANIFEST_FILENAME, index=False)
+        sensitivity_manifest = _available_case_manifest(base_manifest, available_cases)
+        sensitivity_manifest.update(
+            {
+                "base_inputs_dir": str(base_inputs_dir),
+                "sensitivity_analysis": analysis,
+                "somatic_path": str(args.somatic_path),
+                "somatic_manifest_path": str(args.somatic_manifest_path),
+                "gleason_path": str(args.gleason_path),
+            }
+        )
+        (sensitivity_dir / BUILD_MANIFEST_FILENAME).write_text(
+            json.dumps(sensitivity_manifest, indent=2)
+        )
+        sensitivity_cases[analysis] = available_cases
+
     root_manifest = {
         "feature_set": "somatic_gleason_indexed",
         "analyses": list(INDEX_ANALYSES),
         "cohort_sizes": cohort_sizes,
+        "available_case_sensitivities": {
+            analysis: {
+                "path": sensitivity_name,
+                "n_patients_by_landmark": {
+                    str(landmark_day): int(len(available))
+                    for landmark_day, available in sensitivity_cases[analysis].items()
+                },
+                "comparison": f"labs versus {analysis}, same available cases at each landmark",
+            }
+            for analysis, sensitivity_name in zip(("gleason", "somatic"), AVAILABLE_CASE_SENSITIVITIES)
+        },
         "prs_included": True,
     }
     (output_dir / BUILD_MANIFEST_FILENAME).write_text(

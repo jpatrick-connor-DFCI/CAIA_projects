@@ -123,10 +123,22 @@ local({
   env$COHORT <- "adt"
   env$ENDPOINT <- "platinum"
   env$LAB_SLUG_TO_NAME <- c(psa = "PSA", testosterone = "Testosterone")
+  # Default output is the three confusion matrices only.
   stems <- env$metastatic_supplement_stems()
   paths <- vapply(stems, env$output_dir_for_stem, character(1))
   stopifnot(!anyDuplicated(paths), all(grepl("/supplements/metastatic_labels/", paths)),
-    endsWith(paths[["adt_labels_adt_trajectory_psa"]], "/adt_trajectory_psa"),
-    endsWith(paths[["adt_labels_adt_trajectory_testosterone"]], "/adt_trajectory_testosterone"))
+    setequal(stems, paste0("adt_labels_", c("llm_vs_regex_max_any",
+      "adt_vs_regex_max_any", "adt_vs_llm"))))
+  # The retained panels still route correctly when re-enabled; PSA and
+  # testosterone share the group, so their lab tokens must survive in the name.
+  old <- Sys.getenv("COMPASS_METASTATIC_EXTRA_PANELS", unset = NA_character_)
+  Sys.setenv(COMPASS_METASTATIC_EXTRA_PANELS = "1")
+  on.exit(if (is.na(old)) Sys.unsetenv("COMPASS_METASTATIC_EXTRA_PANELS") else
+    Sys.setenv(COMPASS_METASTATIC_EXTRA_PANELS = old), add = TRUE)
+  extra <- env$metastatic_supplement_stems()
+  extra_paths <- vapply(extra, env$output_dir_for_stem, character(1))
+  stopifnot(!anyDuplicated(extra_paths), length(extra) == 22,
+    endsWith(extra_paths[["adt_labels_adt_trajectory_psa"]], "/adt_trajectory_psa"),
+    endsWith(extra_paths[["adt_labels_adt_trajectory_testosterone"]], "/adt_trajectory_testosterone"))
 })
 cat("Figure resume checks passed: skip, formats, endpoint isolation, truncation, overwrite, failed saves.\n")

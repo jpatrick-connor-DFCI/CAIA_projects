@@ -365,6 +365,9 @@ def _run_multivariable_landmark(
             always_include_feature_cols=tuple(
                 getattr(ctx, "always_include_feature_cols", ())
             ),
+            genomic_feature_cols=tuple(
+                getattr(ctx, "genomic_feature_cols", ())
+            ),
         )
         if not fold_canonical_labs_df.empty:
             fold_canonical_labs_df.insert(0, "landmark_days", landmark_day)

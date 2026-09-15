@@ -1592,6 +1592,60 @@ def run_multivariate(run: dict, dry_run: bool = False):
     return summary
 
 
+def run_multivariate_available_case_sensitivity(run: dict, dry_run: bool = False):
+    """Run matched Gleason-vs-labs and somatic-vs-labs sensitivities.
+
+    ``build_somatic_gleason_inputs`` writes this subset with the original
+    ADT-relative outcome clock and split labels.  These four fits therefore
+    differ only in model family / feature set, not data availability at each
+    treatment landmark.
+    """
+    _require_adt_index_run(run)
+    inputs_root = run["inputs_dir"] / "somatic_gleason"
+    specs = (
+        ("gleason", "gleason_available_case", "elastic-net", "labs", "cox", "cox_agg_multivariable_metrics.csv"),
+        ("gleason", "gleason_available_case", "elastic-net", "somatic-gleason", "cox", "cox_agg_multivariable_metrics.csv"),
+        ("gleason", "gleason_available_case", "xgboost", "labs", "xgboost", "landmark_xgboost_metrics.csv"),
+        ("gleason", "gleason_available_case", "xgboost", "somatic-gleason", "xgboost", "landmark_xgboost_metrics.csv"),
+        ("somatic", "somatic_available_case", "elastic-net", "labs", "cox", "cox_agg_multivariable_metrics.csv"),
+        ("somatic", "somatic_available_case", "elastic-net", "somatic-gleason", "cox", "cox_agg_multivariable_metrics.csv"),
+        ("somatic", "somatic_available_case", "xgboost", "labs", "xgboost", "landmark_xgboost_metrics.csv"),
+        ("somatic", "somatic_available_case", "xgboost", "somatic-gleason", "xgboost", "landmark_xgboost_metrics.csv"),
+    )
+    summary = []
+    for landmark_day in run["landmarks"]:
+        for analysis, input_dirname, model, feature_set, model_dir, metrics_name in specs:
+            row_output_dir = run["output_dir"] / "sensitivity_available_case" / analysis / feature_set / model_dir / f"landmark_{landmark_day}" / "both"
+            metrics_path = row_output_dir / metrics_name
+            tag = f"{run['label']:28s} {model:11s} +{landmark_day}d {analysis}/{feature_set}"
+            if metrics_path.exists() and not FORCE_RERUN:
+                print(f"[skip] {tag} -> {metrics_path.relative_to(run['output_dir'])} exists")
+                summary.append((tag, "skipped", 0.0))
+                continue
+            if not dry_run:
+                row_output_dir.mkdir(parents=True, exist_ok=True)
+            cmd = [
+                PYTHON, SURVIVAL_DIR / "multivariate_analysis.py",
+                "--model", model,
+                "--inputs-dir", inputs_root / input_dirname,
+                "--output-dir", row_output_dir,
+                "--landmark-days", str(landmark_day),
+                "--endpoints", run.get("endpoint", ENDPOINT),
+                "--n-folds", str(N_FOLDS),
+                "--feature-set", feature_set,
+                "--cohort", f"{run.get('cohort', DEFAULT_COHORT)}_available_case",
+                "--overwrite" if FORCE_RERUN else "--no-overwrite",
+            ]
+            print(f"[run ] {tag}")
+            t0 = time.time()
+            rc = _run(cmd, dry_run=dry_run)
+            elapsed = time.time() - t0
+            status = "ok" if rc == 0 else f"FAILED (rc={rc})"
+            print(f"[done] {tag} -> {status} ({elapsed/60:.1f} min)\n")
+            summary.append((tag, status, elapsed))
+    return summary
+
+
 def run_multivariate_longitudinal(run: dict, dry_run: bool = False):
     """Dynamic-DeepHit (and optionally SurvLatent ODE) in this run's configs.
 

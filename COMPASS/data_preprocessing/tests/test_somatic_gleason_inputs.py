@@ -19,6 +19,7 @@ from build_somatic_gleason_inputs import (  # noqa: E402
     INDEX_TO_ADT_DAYS,
     SEQUENCING_DATE,
     SOMATIC_AVAILABLE_DATE,
+    build_available_case_sensitivity,
     build_indexed_feature_sets,
     closest_observation_to_adt,
     latest_available_by_landmark,
@@ -94,6 +95,63 @@ def test_closest_observation_uses_absolute_distance_and_prefers_earlier_tie():
     assert selected.loc[1, INDEX_DATE] == pd.Timestamp("2020-01-09")
     assert selected.loc[1, INDEX_TO_ADT_DAYS] == -1
     assert selected.loc[1, "value"] == 7
+
+
+def test_available_case_sensitivity_is_adt_anchored_and_excludes_future_data():
+    base = pd.DataFrame(
+        {
+            "DFCI_MRN": [1, 2, 3],
+            "split": ["train", "test", "valid"],
+            "t_platinum": [100, 100, 100],
+            "PLATINUM": [1, 0, 1],
+            "PSA__mean": [4.0, 5.0, 6.0],
+        }
+    )
+    anchors = pd.Series(
+        pd.to_datetime(["2020-01-10"] * 3), index=pd.Index([1, 2, 3], name="DFCI_MRN")
+    )
+    somatic = pd.DataFrame(
+        {
+            "DFCI_MRN": [1, 2, 3],
+            SEQUENCING_DATE: pd.to_datetime(["2020-01-05", "2020-01-05", "2020-01-20"]),
+            SOMATIC_AVAILABLE_DATE: pd.to_datetime(["2020-01-05", "2020-01-05", "2020-01-20"]),
+            "TP53_SNV": [1, 0, 1],
+        }
+    )
+    gleason = pd.DataFrame(
+        {
+            "DFCI_MRN": [1, 1, 2, 3],
+            "gleason_date": pd.to_datetime(["2020-01-02", "2020-01-09", "2020-01-02", "2020-01-02"]),
+            GLEASON_AVAILABLE_DATE: pd.to_datetime(["2020-01-02", "2020-01-09", "2020-01-20", "2020-01-02"]),
+            GLEASON_FEATURE: [8, 9, 9, 7],
+        }
+    )
+
+    result = build_available_case_sensitivity(
+        base, somatic, ["TP53_SNV"], gleason, treatment_anchors=anchors
+    )
+
+    # MRN 2's score is documented after ADT; MRN 3's specimen is after ADT.
+    assert result["DFCI_MRN"].tolist() == [1]
+    assert result.loc[0, "split"] == "train"
+    assert result.loc[0, "PSA__mean"] == 4.0
+    # The Jan 9 score, not Jan 2, is closest to the Jan 10 landmark.
+    assert result.loc[0, GLEASON_FEATURE] == 9
+    assert "TP53_SNV" not in result
+
+    later = build_available_case_sensitivity(
+        base, somatic, ["TP53_SNV"], gleason,
+        treatment_anchors=anchors, landmark_day=90,
+    )
+    assert later["DFCI_MRN"].tolist() == [1, 2, 3]
+
+    somatic_only = build_available_case_sensitivity(
+        base, somatic, ["TP53_SNV"], gleason,
+        treatment_anchors=anchors, analysis="somatic",
+    )
+    assert somatic_only["DFCI_MRN"].tolist() == [1, 2]
+    assert GLEASON_FEATURE not in somatic_only
+    assert somatic_only.loc[0, "TP53_SNV"] == 1
 
 
 def test_indexed_feature_sets_use_distinct_dates_and_followup_clocks():

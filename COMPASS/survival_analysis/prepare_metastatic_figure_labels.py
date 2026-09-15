@@ -84,10 +84,17 @@ def build_labels(intent: pl.DataFrame, notes: pl.DataFrame,
         result = result.join(frame.group_by(ID).agg(
             pl.col("stage").max().alias(f"REGEX_MAX_{suffix}_STAGE")
         ), on=ID, how="left")
+    # Maximum across the entire record: pre- and post-ADT staging pooled, with
+    # no anchor window, so post-ADT progression counts toward the label. Mirrors
+    # max_any in prepare_metastatic_figure_labels.R; keep the two in step.
+    result = result.join(joined.group_by(ID).agg(
+        pl.col("stage").max().alias("REGEX_MAX_ANY_STAGE")
+    ), on=ID, how="left")
     return result.with_columns(
         collapse_stage("REGEX_STAGE").alias("REGEX_LABEL"),
         collapse_stage("REGEX_MAX_BEFORE_STAGE").alias("REGEX_MAX_BEFORE"),
         collapse_stage("REGEX_MAX_AFTER_STAGE").alias("REGEX_MAX_AFTER"),
+        collapse_stage("REGEX_MAX_ANY_STAGE").alias("REGEX_MAX_ANY"),
     )
 
 
@@ -112,7 +119,7 @@ def main() -> None:
     # Only the fields used by R cross the bridge. R restricts to the canonical
     # time-zero analysis cohort before computing any summaries.
     columns = [ID, "ADT_FIRST_DATE", "ADT_LABEL", "LLM_LABEL", "REGEX_LABEL",
-               "REGEX_MAX_BEFORE", "REGEX_MAX_AFTER"]
+               "REGEX_MAX_BEFORE", "REGEX_MAX_AFTER", "REGEX_MAX_ANY"]
     columns += [c for c in labels.columns if c == "N_MET_SITES" or c.startswith("MET_SITE_")]
     labels.select(columns).write_csv(args.output)
 

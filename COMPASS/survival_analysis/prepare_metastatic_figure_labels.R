@@ -85,13 +85,21 @@ build_metastatic_labels <- function(intent, notes, llm, analysis_anchors = NULL)
     summarise(REGEX_MAX_BEFORE_STAGE = if (length(.stage)) max(.stage) else NA_integer_, .groups = "drop")
   max_after <- notes %>% filter(.days > 0) %>% group_by(DFCI_MRN) %>%
     summarise(REGEX_MAX_AFTER_STAGE = if (length(.stage)) max(.stage) else NA_integer_, .groups = "drop")
+  # Maximum across the entire record: pre- and post-ADT staging pooled, with no
+  # anchor window. Post-ADT progression therefore counts toward the label, so
+  # this is not a point-in-time status at ADT the way REGEX_LABEL is.
+  max_any <- notes %>% group_by(DFCI_MRN) %>%
+    summarise(REGEX_MAX_ANY_STAGE = if (length(.stage)) max(.stage) else NA_integer_, .groups = "drop")
   intent %>% left_join(llm, by = "DFCI_MRN") %>% left_join(nearest, by = "DFCI_MRN") %>%
     left_join(max_before, by = "DFCI_MRN") %>% left_join(max_after, by = "DFCI_MRN") %>%
+    left_join(max_any, by = "DFCI_MRN") %>%
     mutate(REGEX_LABEL = metastatic_collapse_stage(REGEX_STAGE),
            REGEX_MAX_BEFORE = metastatic_collapse_stage(REGEX_MAX_BEFORE_STAGE),
-           REGEX_MAX_AFTER = metastatic_collapse_stage(REGEX_MAX_AFTER_STAGE)) %>%
+           REGEX_MAX_AFTER = metastatic_collapse_stage(REGEX_MAX_AFTER_STAGE),
+           REGEX_MAX_ANY = metastatic_collapse_stage(REGEX_MAX_ANY_STAGE)) %>%
     select(DFCI_MRN, ADT_FIRST_DATE, ANALYSIS_ANCHOR_DATE, ANCHOR_DELTA_DAYS,
-           ADT_LABEL, LLM_LABEL, REGEX_LABEL, REGEX_MAX_BEFORE, REGEX_MAX_AFTER)
+           ADT_LABEL, LLM_LABEL, REGEX_LABEL, REGEX_MAX_BEFORE, REGEX_MAX_AFTER,
+           REGEX_MAX_ANY)
 }
 
 metastatic_icd_site <- function(values) {

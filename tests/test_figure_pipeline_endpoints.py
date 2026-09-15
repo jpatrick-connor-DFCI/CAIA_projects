@@ -205,6 +205,14 @@ def test_missing_file_returns_na(tmp_path):
     assert _run_r(script, tmp_path).strip() == "TRUE"
 
 
+def test_figure4_includes_available_case_labs_vs_somatic_sensitivity():
+    source = _pipeline_source()
+    assert "sensitivity_available_case" in source
+    assert '"gleason", "somatic"' in source
+    assert '"figure4c", "figure4d"' in source
+    assert 'paste0(panel_prefix, "_sensitivity_", sensitivity_analysis, "_")' in source
+
+
 def test_figure_roots_do_not_collide():
     """Arm, tier, artifact and endpoint/subset/exclusion identify each panel."""
     source = _pipeline_source()

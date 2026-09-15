@@ -60,6 +60,28 @@ figure_tertiles <- function(values) {
   result
 }
 
+# Bottom 20% vs top 20%; the middle 60% is dropped rather than plotted. Same
+# tie contract as figure_tertiles: equal measurements never land in opposite
+# arms. This matters most for post-ADT PSA, where a pile of tied values sits at
+# the assay floor and can straddle the 20th-percentile cut -- splitting those by
+# row order would manufacture separation between clinically identical patients.
+figure_extreme_quintiles <- function(values) {
+  values <- suppressWarnings(as.numeric(values))
+  valid <- is.finite(values)
+  result <- rep(NA_character_, length(values))
+  if (sum(valid) < 2L) return(result)
+  cuts <- as.numeric(quantile(values[valid], c(0.2, 0.8), names = FALSE))
+  if (cuts[1] >= cuts[2]) return(result)
+  # Closed at the bottom cut, open at the top: ties at either edge stay whole.
+  low <- valid & values <= cuts[1]
+  high <- valid & values > cuts[2]
+  result[low] <- "Bottom 20%"
+  result[high] <- "Top 20%"
+  if (!any(low) || !any(high)) return(rep(NA_character_, length(values)))
+  attr(result, "cutpoints") <- cuts
+  result
+}
+
 figure_gleason_groups <- function(values) {
   x <- suppressWarnings(as.numeric(values))
   valid <- is.finite(x) & x == floor(x) & x >= 2 & x <= 10
@@ -1097,6 +1119,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       lab <- match_lab_in_stem(plot_stem)
       if (!is.na(lab)) return(file.path("labs", assign_category(lab), lab, "km_quartile"))
     }
+    if (startsWith(plot_stem, "km_quintile_")) {
+      lab <- match_lab_in_stem(plot_stem)
+      if (!is.na(lab)) return(file.path("labs", assign_category(lab), lab, "km_quintile"))
+    }
     if (startsWith(plot_stem, "km_")) return("KM_curves")
     if (startsWith(plot_stem, "androgen_dist_") || startsWith(plot_stem, "dist_")) {
       lab <- match_lab_in_stem(plot_stem)
@@ -1136,6 +1162,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       km_llm = "^km_llm_?",
       KM_curves = "^km_?",
       km_quartile = "^km_quartile_?",
+      km_quintile = "^km_quintile_?",
       km_tertile = "^km_tertile_?",
       distribution = "^(androgen_)?dist(ribution)?_?",
       longitudinal = "^(androgen_)?longitudinal_?",
@@ -2683,6 +2710,65 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (show) print(p)
   }
 
+  # Source-specific available-case sensitivities. Each source (Gleason or
+  # somatic) has its own matched labs comparator, preserving the original
+  # ADT-relative outcome clock and held-out split within every landmark.
+  sensitivity_metric_path <- function(analysis, feature_set, model, landmark, filename) {
+    file.path(BASE, "sensitivity_available_case", analysis, feature_set, model,
+              sprintf("landmark_%s", landmark), "both", filename)
+  }
+  render_available_case_sensitivity <- function(sensitivity_data, series, analysis_label, metric, ylabel) {
+    d <- sensitivity_data %>% transmute(
+      name,
+      landmark = factor(sprintf("%s%d days", ifelse(landmark > 0, "+", ""), landmark),
+                        levels = sprintf("%s%d days", ifelse(LANDMARKS > 0, "+", ""), LANDMARKS)),
+      value = .data[[metric]]
+    )
+    ggplot(d, aes(landmark, value, fill = name)) +
+      geom_col(position = position_dodge(width = 0.85), width = 0.8, color = "white") +
+      geom_text(aes(label = ifelse(is.finite(value), sprintf("%.3f", value), "")),
+                position = position_dodge(width = 0.85), vjust = -0.35, size = 2.5, show.legend = FALSE) +
+      geom_hline(yintercept = 0.5, color = "grey", linetype = "dotted", linewidth = 0.9) +
+      scale_fill_manual(values = setNames(series$color, series$name),
+                        name = NULL, drop = FALSE) +
+      coord_cartesian(ylim = c(0, 1.04)) +
+      labs(x = NULL, y = ylabel,
+           title = sprintf("%s vs. labs sensitivity — %s", analysis_label, ENDPOINT),
+           subtitle = "Same cases within each landmark; source data available by that landmark") +
+      theme_fig() +
+      guides(fill = guide_legend(ncol = 2, byrow = TRUE)) +
+      theme(legend.position = "top", legend.text = element_text(size = 8),
+            panel.grid.major.x = element_blank(),
+            plot.title = element_text(face = "bold", size = 11))
+  }
+  for (sensitivity_analysis in c("gleason", "somatic")) {
+    analysis_label <- ifelse(sensitivity_analysis == "gleason", "Gleason", "Somatic")
+    source_label <- ifelse(sensitivity_analysis == "gleason", "Gleason", "Somatic")
+    SENSITIVITY_SERIES <- tibble::tribble(
+      ~name,                         ~loader, ~color,
+      "Elastic-Net Cox: labs",      list(function(lm) read_endpoint_performance(sensitivity_metric_path(sensitivity_analysis, "labs", "cox", lm, "cox_agg_multivariable_metrics.csv"), ENDPOINT)), "#4C72B0",
+      paste("Elastic-Net Cox:", source_label), list(function(lm) read_endpoint_performance(sensitivity_metric_path(sensitivity_analysis, "somatic-gleason", "cox", lm, "cox_agg_multivariable_metrics.csv"), ENDPOINT)), "#2A9D8F",
+      "XGBoost: labs",              list(function(lm) read_endpoint_performance(sensitivity_metric_path(sensitivity_analysis, "labs", "xgboost", lm, "landmark_xgboost_metrics.csv"), ENDPOINT)), "#B58900",
+      paste("XGBoost:", source_label), list(function(lm) read_endpoint_performance(sensitivity_metric_path(sensitivity_analysis, "somatic-gleason", "xgboost", lm, "landmark_xgboost_metrics.csv"), ENDPOINT)), "#D55E00"
+    )
+    sensitivity_data <- SENSITIVITY_SERIES %>% rowwise() %>% do({
+      s <- .
+      map_dfr(LANDMARKS, function(lm) {
+        v <- s$loader[[1]](lm)
+        tibble(name = s$name, landmark = lm, auc = v[["auc"]], cindex = v[["cindex"]])
+      })
+    }) %>% ungroup() %>% mutate(name = factor(name, levels = SENSITIVITY_SERIES$name))
+    panel_prefix <- ifelse(sensitivity_analysis == "gleason", "figure4c", "figure4d")
+    for (dp in disc_panels) {
+      p <- render_available_case_sensitivity(sensitivity_data, SENSITIVITY_SERIES,
+                                               analysis_label, dp[[2]], dp[[3]])
+      save_fig(p, OUT_DIR,
+               sub("figure4a_discrimination_", paste0(panel_prefix, "_sensitivity_", sensitivity_analysis, "_"), dp[[1]]),
+               width = 8.5, height = 5.5)
+      if (show) print(p)
+    }
+  }
+
   # Retired: supplemental all-model comparison.
   if (FALSE) {
   # Supplemental held-out comparison across every directly comparable
@@ -3039,9 +3125,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                  size = 2.6, color = "#5d6d7e", family = "sans")
   }
 
-  # Three value-based groups, using the same incident risk set and pre-landmark
+  # Extreme-quintile contrast, using the same incident risk set and pre-landmark
   # mean features as the fitted models. Only PSA/testosterone are requested.
-  notify_progress("stage", "Time to platinum: PSA/testosterone tertiles")
+  notify_progress("stage", "Time to platinum: PSA/testosterone bottom vs top 20%")
   for (landmark in LANDMARKS) {
     agg <- load_aggregated_landmark(landmark)
     if (is.null(agg)) next
@@ -3054,21 +3140,21 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     for (lab in ANDROGEN) {
       column <- resolve_mean_col(names(agg), lab)
       if (is.na(column)) { message("Tertile KM: missing ", lab, " mean at landmark ", landmark); next }
-      groups <- figure_tertiles(agg[[column]])
+      groups <- figure_extreme_quintiles(agg[[column]])
       if (all(is.na(groups))) {
-        message("Tertile KM: ", lab, " at landmark ", landmark,
-                " cannot form three nonempty groups without splitting tied values; skipped")
+        message("Quintile KM: ", lab, " at landmark ", landmark,
+                " cannot form distinct bottom/top 20% groups without splitting tied values; skipped")
         next
       }
       d <- figure_platinum_strata(agg, groups)
       cuts <- attr(groups, "cutpoints")
-      note <- sprintf("%s. Pre-landmark mean; cutpoints %.4g and %.4g. Equal values stay together. Shading: 95%% CI.",
+      note <- sprintf("%s. Pre-landmark mean; bottom 20%% <= %.4g, top 20%% > %.4g (middle 60%% not shown). Equal values stay together. Shading: 95%% CI.",
                       COHORT_DISPLAY, cuts[1], cuts[2])
-      p <- plot_stratified_platinum(d, paste(lab, "tertiles: time to platinum"),
+      p <- plot_stratified_platinum(d, paste(lab, "bottom vs top 20%: time to platinum"),
         sprintf("the +%d-day treatment landmark", landmark),
-        c("Low tertile", "Middle tertile", "High tertile"), note)
+        c("Bottom 20%", "Top 20%"), note)
       if (is.null(p)) next
-      save_fig(p, OUT_DIR, sprintf("km_tertile_%s_landmark%d", lab_stem_slug(lab), landmark), 8, 6.5)
+      save_fig(p, OUT_DIR, sprintf("km_quintile_%s_landmark%d", lab_stem_slug(lab), landmark), 8, 6.5)
       if (show) print(p)
     }
   }

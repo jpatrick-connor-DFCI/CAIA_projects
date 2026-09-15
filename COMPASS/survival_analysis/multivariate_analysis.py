@@ -132,6 +132,8 @@ def cv_one_endpoint(
     endpoint: str,
     landmark_day: int,
     args: argparse.Namespace,
+    always_include_feature_cols: tuple[str, ...] = (),
+    genomic_feature_cols: tuple[str, ...] = (),
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict, pd.DataFrame]:
     """5-fold stratified CV over (max_depth x eta x min_child_weight).
 
@@ -188,11 +190,15 @@ def cv_one_endpoint(
         )
         fold_canonical_labs[fold] = canonical
         fold_train = train_val.iloc[tr_idx]
+        feature_set = str(getattr(args, "feature_set", "labs")).lower().replace("-", "_")
         selected, fold_feature_meta = select_feature_columns(
             fold_train,
             raw_feature_cols,
             min_patient_coverage=args.min_patient_coverage,
-            restrict_to_labs=canonical,
+            restrict_to_labs=[] if feature_set == "somatic_gleason" else canonical,
+            always_include=list(always_include_feature_cols),
+            genomic_feature_cols=list(genomic_feature_cols),
+            min_genomic_prevalence=_ca.DEFAULT_MIN_GENOMIC_PREVALENCE,
         )
         selected = _truncate_features_by_rank(selected, fold_feature_meta, args.max_features)
         fold_selected_features[fold] = selected
@@ -427,6 +433,8 @@ def run_one_endpoint(
     landmark_day: int,
     args: argparse.Namespace,
     baseline: bool = False,
+    always_include_feature_cols: tuple[str, ...] = (),
+    genomic_feature_cols: tuple[str, ...] = (),
 ) -> tuple[
     pd.DataFrame,
     pd.DataFrame,
@@ -463,6 +471,8 @@ def run_one_endpoint(
             endpoint=endpoint,
             landmark_day=landmark_day,
             args=args,
+            always_include_feature_cols=always_include_feature_cols,
+            genomic_feature_cols=genomic_feature_cols,
         )
         chosen = chosen_from_best_row(best_row)
         print(
@@ -487,7 +497,14 @@ def run_one_endpoint(
             train_val,
             raw_feature_cols,
             min_patient_coverage=args.min_patient_coverage,
-            restrict_to_labs=canonical_labs,
+            restrict_to_labs=(
+                []
+                if str(getattr(args, "feature_set", "labs")).lower().replace("-", "_") == "somatic_gleason"
+                else canonical_labs
+            ),
+            always_include=list(always_include_feature_cols),
+            genomic_feature_cols=list(genomic_feature_cols),
+            min_genomic_prevalence=_ca.DEFAULT_MIN_GENOMIC_PREVALENCE,
         )
     if args.max_features is not None and len(selected_features) > args.max_features:
         feature_meta = feature_meta.copy()
@@ -710,9 +727,16 @@ def run_xgboost(args: argparse.Namespace) -> None:
         all_cv_summaries = []
         all_fold_canonical_labs = []
 
-        merged, train_val, test, pre_treatment_lab_df = _load_prebuilt_landmark(
-            inputs_dir, landmark_day
+        ctx = _ca.prepare_landmark_context(
+            inputs_dir,
+            landmark_day,
+            min_patient_coverage=args.min_patient_coverage,
+            feature_set=getattr(args, "feature_set", "labs"),
         )
+        merged = ctx.merged
+        train_val = ctx.train_val
+        test = ctx.test
+        pre_treatment_lab_df = ctx.pre_treatment_lab_df
         # Admin censoring removed (DeepHit silenced) — train/test use full follow-up.
 
         assert_no_test_leakage(
@@ -721,21 +745,14 @@ def run_xgboost(args: argparse.Namespace) -> None:
             context=f"landmark_xgboost.main[+{landmark_day}d]",
         )
 
-        raw_feature_cols = [
-            col for col in merged.columns if col not in _ca.outcome_columns()
-        ]
+        raw_feature_cols = ctx.raw_feature_cols
         print(
             f"\nLandmark +{landmark_day}d: train_val={len(train_val)} test={len(test)} "
             f"raw_features={len(raw_feature_cols)}"
         )
         if args.baseline:
             print("  baseline mode: age-only")
-        canonical_labs = select_canonical_labs(
-            pre_treatment_lab_df,
-            mrns=train_val.index,
-            min_coverage=args.min_patient_coverage,
-            id_col=ID_COL,
-        )
+        canonical_labs = ctx.canonical_labs
         print(f"Canonical labs (train_val): {len(canonical_labs)}")
         landmark_horizons = auc_horizons_by_landmark.get(str(int(landmark_day)))
         if landmark_horizons is None:
@@ -771,6 +788,8 @@ def run_xgboost(args: argparse.Namespace) -> None:
                 landmark_day=landmark_day,
                 args=args,
                 baseline=args.baseline,
+                always_include_feature_cols=ctx.always_include_feature_cols,
+                genomic_feature_cols=ctx.genomic_feature_cols,
             )
             all_metrics.append(metrics)
             all_auc.append(auc_t)

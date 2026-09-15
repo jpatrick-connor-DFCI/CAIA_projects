@@ -406,7 +406,10 @@ notebook. All operate on the merged `profile_data` run:
   independent of both cohort and endpoint and only need running once; Stage 3 forks per
   (cohort, endpoint).
 - `02_univariate.ipynb` / `03_multivariate.ipynb` — read `01`'s prediction inputs and run
-  univariate, elastic-net, and XGBoost models independently of preprocessing
+  univariate, elastic-net, and XGBoost models independently of preprocessing.
+  `03` also runs an available-case sensitivity at 0, +90, and +180 days:
+  separate Gleason-versus-labs and somatic-versus-labs models, each among its
+  own identical available patients (the Figure 4C/D AUC/C-index panels).
   (`tasks_for_run(run)` builds the per-run task grid from `run["landmarks"]`); either can be
   re-run alone without touching Stage 1-3 outputs.
 - `03b_multivariate_longitudinal.ipynb` — optional, torch-gated (README invariant #7).
@@ -446,7 +449,9 @@ notebook. All operate on the merged `profile_data` run:
   platinum exclusion, and the requested post-ADT cancer exclusion; the ARPI arm additionally
   displays its post-diagnosis ARPI/docetaxel exposure criterion. Axis and table labels throughout
   name the arm's anchor ("ARPI/chemo initiation" vs. "ADT initiation") via `ANCHOR_LABEL`.
-  Figure 4 additionally emits `figure4s_multivariate_all_models`, a supplemental held-out comparison
+  Figure 4 additionally emits `figure4{c,d}_sensitivity_{gleason,somatic}_{auc,cindex}`, the held-out
+  source-specific available-case comparisons of labs against Gleason or somatic features at every landmark, alongside
+  `figure4s_multivariate_all_models`, a supplemental held-out comparison
   of elastic-net Cox, XGBoost, and death-censored Dynamic-DeepHit using mean AUC(t), C-index, and
   integrated Brier score. If optional `03b_multivariate_longitudinal.ipynb` results are absent, the
   figure and data CSV mark Dynamic-DeepHit as missing instead of suppressing the supplement.
@@ -488,6 +493,9 @@ notebook. All operate on the merged `profile_data` run:
       `longitudinal_<stratum>_<lab>`.
     - **All-lab KM-by-quartile** — Figure 5's Q1-vs-Q4 platinum-free KM curves, generalized the same
       way via `resolve_mean_col()`. Stems: `km_quartile_<lab>_landmark<D>`.
+      The live PSA/testosterone KM contrast is the extreme-quintile split
+      (bottom 20% vs top 20%, middle 60% dropped), stem
+      `km_quintile_<lab>_landmark<D>`.
     - **All-lab distribution panels** — Figure 6's log/raw platinum-split distribution plots,
       generalized the same way. Stems: `dist_by_platinum_{log,raw}_<lab>_landmark<D>`.
       `PLOT_NON_ANDROGEN_DISTRIBUTIONS` controls whether distributions extend beyond PSA and

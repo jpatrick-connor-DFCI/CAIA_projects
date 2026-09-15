@@ -1,12 +1,18 @@
 # Standalone ADT/LLM/regex diagnostics used by 05_figures.Rmd. All writes use
 # the main pipeline's save_fig, so progress, atomic saves and overwrite apply.
+# The three requested confusion matrices: each of the LLM and ADT metastatic
+# labels against the regex maximum stage across the record, plus ADT vs LLM.
 metastatic_label_pairs <- function() {
-  pairs <- list(adt_vs_llm = c("ADT_LABEL", "LLM_LABEL"))
-  for (stage in c("REGEX_LABEL", "REGEX_MAX_BEFORE", "REGEX_MAX_AFTER")) {
-    for (label in c("ADT_LABEL", "LLM_LABEL"))
-      pairs[[tolower(paste(label, "vs", stage, sep = "_"))]] <- c(label, stage)
-  }
-  pairs
+  list(llm_vs_regex_max_any = c("LLM_LABEL", "REGEX_MAX_ANY"),
+       adt_vs_regex_max_any = c("ADT_LABEL", "REGEX_MAX_ANY"),
+       adt_vs_llm = c("ADT_LABEL", "LLM_LABEL"))
+}
+
+# The coverage, burden, site, KM and trajectory panels are retained but no
+# longer emitted. Set COMPASS_METASTATIC_EXTRA_PANELS=1 to restore them.
+metastatic_extra_panels_enabled <- function() {
+  !identical(tolower(trimws(Sys.getenv("COMPASS_METASTATIC_EXTRA_PANELS", ""))), "") &&
+    !identical(tolower(trimws(Sys.getenv("COMPASS_METASTATIC_EXTRA_PANELS", ""))), "0")
 }
 
 metastatic_pair_counts <- function(labels, first, second) {
@@ -22,9 +28,12 @@ metastatic_pair_counts <- function(labels, first, second) {
 }
 
 metastatic_supplement_stems <- function() {
-  paste0("adt_labels_", c("coverage", names(metastatic_label_pairs()),
-    outer(c("adt", "llm"), c("burden", "sites", "km_death", "km_platinum", "km_nepc",
-                              "trajectory_psa", "trajectory_testosterone"), paste, sep = "_")))
+  stems <- names(metastatic_label_pairs())
+  if (metastatic_extra_panels_enabled())
+    stems <- c("coverage", stems,
+      outer(c("adt", "llm"), c("burden", "sites", "km_death", "km_platinum", "km_nepc",
+                                "trajectory_psa", "trajectory_testosterone"), paste, sep = "_"))
+  paste0("adt_labels_", stems)
 }
 
 render_metastatic_supplements <- function(config, patient_df, labs, save_panel,
@@ -50,7 +59,8 @@ render_metastatic_supplements <- function(config, patient_df, labs, save_panel,
   names_pretty <- c(ADT_LABEL = "ADT intent", LLM_LABEL = "LLM metastatic status",
                     REGEX_LABEL = "Regex stage nearest before ADT (365 days)",
                     REGEX_MAX_BEFORE = "Regex maximum stage before ADT",
-                    REGEX_MAX_AFTER = "Regex maximum stage after ADT")
+                    REGEX_MAX_AFTER = "Regex maximum stage after ADT",
+                    REGEX_MAX_ANY = "Regex maximum stage across record")
   colors <- c(Local = "#0b6ba8", Metastatic = "#c1272d", Unclassified = "#999999")
   caption <- paste("Canonical ADT analysis cohort; pre-ADT castrate patients included.",
                    "Regex I–III = local; IV = metastatic. ADT/LLM labels use full observed history.",
@@ -60,15 +70,17 @@ render_metastatic_supplements <- function(config, patient_df, labs, save_panel,
     save_panel(plot, paste0("adt_labels_", name), width, height)
     if (show) print(plot)
   }
-  coverage <- labels %>% select(all_of(names(names_pretty))) %>%
-    pivot_longer(everything(), names_to = "source", values_to = "label") %>%
-    mutate(label = coalesce(label, "Unclassified")) %>% count(source, label)
-  emit(ggplot(coverage, aes(x = source, y = n, fill = label)) + geom_col() +
-         geom_text(aes(label = n), position = position_stack(vjust = .5), size = 3) +
-         scale_x_discrete(labels = names_pretty) + scale_fill_manual(values = colors) +
-         coord_flip() + labs(x = NULL, y = "Patients", fill = NULL,
-                            title = "Label coverage and local/metastatic composition", caption = caption) +
-         theme_bw(), "coverage", 9, 6)
+  if (metastatic_extra_panels_enabled()) {
+    coverage <- labels %>% select(all_of(names(names_pretty))) %>%
+      pivot_longer(everything(), names_to = "source", values_to = "label") %>%
+      mutate(label = coalesce(label, "Unclassified")) %>% count(source, label)
+    emit(ggplot(coverage, aes(x = source, y = n, fill = label)) + geom_col() +
+           geom_text(aes(label = n), position = position_stack(vjust = .5), size = 3) +
+           scale_x_discrete(labels = names_pretty) + scale_fill_manual(values = colors) +
+           coord_flip() + labs(x = NULL, y = "Patients", fill = NULL,
+                              title = "Label coverage and local/metastatic composition", caption = caption) +
+           theme_bw(), "coverage", 9, 6)
+  }
 
   for (name in names(metastatic_label_pairs())) {
     pair <- metastatic_label_pairs()[[name]]
@@ -90,7 +102,8 @@ render_metastatic_supplements <- function(config, patient_df, labs, save_panel,
 
   # Merge the old ADT filtering diagnostics, also displaying the LLM definition.
   # Reuse the parent's patient and androgen caches; never parse the large CSV again.
-  for (source in c("ADT_LABEL", "LLM_LABEL")) {
+  # Retained but not emitted by default; see metastatic_extra_panels_enabled().
+  for (source in if (metastatic_extra_panels_enabled()) c("ADT_LABEL", "LLM_LABEL") else character()) {
     slug <- if (source == "ADT_LABEL") "adt" else "llm"
     grouped <- labels %>% mutate(label = .data[[source]]) %>% filter(!is.na(label))
     if ("N_MET_SITES" %in% names(grouped)) {

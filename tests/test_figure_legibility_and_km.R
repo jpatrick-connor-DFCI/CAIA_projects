@@ -10,7 +10,8 @@ find_assignment <- function(expr, name) {
   }
   NULL
 }
-for (name in c("theme_fig", "figure_tertiles", "figure_gleason_groups", "figure_platinum_strata",
+for (name in c("theme_fig", "figure_tertiles", "figure_extreme_quintiles",
+               "figure_gleason_groups", "figure_platinum_strata",
                "significant_mutation_features", "plot_stratified_platinum", "prepare_figure_text",
                "render_discrimination_panel", "plot_volcano_panel", "labels_for_panel",
                "q_threshold_neglog10p", "assign_category", "plot_sg_forest")) {
@@ -25,6 +26,17 @@ source("COMPASS/survival_analysis/cohort_forest_figures.R")
 groups <- figure_tertiles(c(1,1,2,3,4,5,6,7,8,NA,Inf))
 stopifnot(groups[1] == groups[2], length(unique(na.omit(groups))) == 3,
           all(is.na(tail(groups, 2))), all(is.na(figure_tertiles(rep(0, 20)))))
+# Bottom/top 20% only: the middle 60% is dropped, and ties at a cut stay whole.
+q <- figure_extreme_quintiles(1:100)
+stopifnot(identical(sort(unique(na.omit(q))), c("Bottom 20%", "Top 20%")),
+          sum(q == "Bottom 20%", na.rm = TRUE) == 20,
+          sum(q == "Top 20%", na.rm = TRUE) == 20,
+          sum(is.na(q)) == 60)
+stopifnot(all(is.na(figure_extreme_quintiles(rep(0, 20)))),
+          all(is.na(figure_extreme_quintiles(c(1, NA, Inf)))))
+# A pile of tied values straddling the bottom cut is never split across arms.
+tied <- figure_extreme_quintiles(c(rep(2, 40), 3:62))
+stopifnot(length(unique(tied[1:40])) == 1L)
 stopifnot(identical(figure_gleason_groups(c(6,7,8,9,10,0,11,NA,6.5)),
   c("Gleason ≤6", "Gleason 7", "Gleason 8", "Gleason 9", "Gleason 10", rep(NA_character_,4))))
 results <- tibble(feature = c("TP53_SNV", "PTEN_DEL", "RB1_SNV", "PSA__mean", "ALK_SNV"),
@@ -48,6 +60,13 @@ g <- figure_tertiles(1:90)
 plots$tertiles <- plot_stratified_platinum(figure_platinum_strata(f,g), "PSA tertiles: time to platinum",
   "the +180-day treatment landmark", c("Low tertile","Middle tertile","High tertile"),
   "Synthetic data. Equal values stay together. Shading: 95% CI.")
+qg <- figure_extreme_quintiles(1:90)
+plots$quintiles <- plot_stratified_platinum(figure_platinum_strata(f,qg),
+  "PSA bottom vs top 20%: time to platinum", "the +180-day treatment landmark",
+  c("Bottom 20%","Top 20%"),
+  "Synthetic data. Equal values stay together. Shading: 95% CI.")
+stopifnot(!is.null(plots$quintiles),
+          nrow(figure_platinum_strata(f,qg)) == sum(!is.na(qg)))
 plots$carriers <- plot_stratified_platinum(figure_platinum_strata(f,rep(c("Carrier","Non-carrier"),45)),
   "TP53 SNV carrier status: time to platinum", "sequencing specimen collection date")
 plots$gleason <- plot_stratified_platinum(figure_platinum_strata(f,figure_gleason_groups(rep(6:10,18))),

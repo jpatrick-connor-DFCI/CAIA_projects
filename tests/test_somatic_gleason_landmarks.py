@@ -101,6 +101,40 @@ def test_somatic_gleason_univariate_runs_three_index_cohorts_at_zero(monkeypatch
     assert len(summary) == 3
 
 
+def test_available_case_multivariate_sensitivity_runs_matched_feature_sets(monkeypatch, tmp_path):
+    commands = []
+    monkeypatch.setattr(
+        compass_pipeline,
+        "_run",
+        lambda command, *, dry_run=False: commands.append(command) or 0,
+    )
+
+    summary = compass_pipeline.run_multivariate_available_case_sensitivity(
+        _run(tmp_path), dry_run=True
+    )
+
+    assert len(commands) == 24
+    assert len(summary) == 24
+    assert {command[command.index("--model") + 1] for command in commands} == {
+        "elastic-net", "xgboost"
+    }
+    assert {command[command.index("--feature-set") + 1] for command in commands} == {
+        "labs", "somatic-gleason"
+    }
+    assert {command[command.index("--landmark-days") + 1] for command in commands} == {
+        "0", "90", "180"
+    }
+    inputs = {str(command[command.index("--inputs-dir") + 1]) for command in commands}
+    assert inputs == {
+        str(tmp_path / "prediction_inputs_adt" / "somatic_gleason" / "gleason_available_case"),
+        str(tmp_path / "prediction_inputs_adt" / "somatic_gleason" / "somatic_available_case"),
+    }
+    for command in commands:
+        assert str(command[command.index("--inputs-dir") + 1]).endswith(
+            ("gleason_available_case", "somatic_available_case")
+        )
+
+
 def test_somatic_gleason_index_cohorts_reject_non_adt_arm(tmp_path):
     run = _run(tmp_path)
     run["label"] = "arpi"
