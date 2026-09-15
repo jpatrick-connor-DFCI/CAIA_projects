@@ -56,6 +56,9 @@ local({
   write_csv(tibble(site_name = rep(c("site_a", "site_b"), each = 3), analysis_label = "adt",
                    landmark_days = rep(c(0, 90, 180), 2), n_patients = 40, n_events = 20),
             file.path(site_dir, "cox_within_site_all_sites_cohort.csv"))
+  within_path <- file.path(site_dir, "cox_within_site_all_sites_results.csv")
+  write_csv(bind_rows(lapply(c("site_a", "site_b"), function(site)
+    mutate(bind_rows(federated), site_name = site, analysis_label = "adt"))), within_path)
   pipeline_path <- normalizePath("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
   cfg <- list(data_root = root, cache_root = file.path(root, "cache"), fig_root = file.path(root, "figures"),
     cohorts = "adt", endpoints = c("platinum", "nepc"), scope = "all", labs = ANDROGEN,
@@ -137,11 +140,20 @@ local({
   eval(parse(text = code), env)
   stopifnot(identical(names(env$figure_run$prepared), "federated"))
   stopifnot(identical(vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem"),
-                      c(paste0("psa_testosterone_forest_landmark", c(0, 90, 180)), "site_cohort_counts")))
+                      c(paste0("psa_testosterone_forest_landmark", c(0, 90, 180)),
+                        paste0("psa_testosterone_forest_site_a_landmark", c(0, 90, 180)),
+                        paste0("psa_testosterone_forest_site_b_landmark", c(0, 90, 180)), "site_cohort_counts")))
+  site_export <- read_csv(file.path(cfg$fig_root, "ADT", "by_figure", "federated_no_msk",
+                                    "site_cohort_counts", "platinum__all__incl.csv"), show_col_types = FALSE)
+  stopifnot(nrow(site_export) == 2L, all(site_export$landmark_days == 0))
+  federated_cfg <- cfg; federated_cfg$scope <- "federated"
+  Sys.setFileTime(within_path, file.info(within_path)$mtime + 5)
+  changed_within <- tryCatch(figure_notebook_manifest(federated_cfg), error = identity)
+  stopifnot(inherits(changed_within, "error"),
+            grepl("cox_within_site_all_sites_results.csv", conditionMessage(changed_within), fixed = TRUE))
   # Site-count changes must invalidate federation-only runs as well as all runs.
   site_path <- file.path(site_dir, "cox_within_site_all_sites_cohort.csv")
   Sys.setFileTime(site_path, file.info(site_path)$mtime + 5)
-  federated_cfg <- cfg; federated_cfg$scope <- "federated"
   changed_sites <- tryCatch(figure_notebook_manifest(federated_cfg), error = identity)
   stopifnot(inherits(changed_sites, "error"),
             grepl("04_prep_figure_data.ipynb", conditionMessage(changed_sites), fixed = TRUE))

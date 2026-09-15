@@ -103,13 +103,19 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     assert result["arms"] == {} and result["cells"] == {}
     assert result["federated"]
     site_path = Path(config["federated_path"]).parent / "nvflare_within_site_cox_univariate" / "cox_within_site_all_sites_cohort.csv"
-    assert [item["path"] for item in result["federated_sources"]] == [config["federated_path"], str(site_path)]
+    within_path = site_path.with_name("cox_within_site_all_sites_results.csv")
+    assert [item["path"] for item in result["federated_sources"]] == [config["federated_path"], str(site_path), str(within_path)]
     assert result["federated_sources"][1]["missing"]
     site_path.parent.mkdir()
     pl.DataFrame({"site_name": ["site_a"], "n_patients": [10], "n_events": [2]}).write_csv(site_path)
     updated = prep.prepare(config)
     assert updated["federated"] != result["federated"]
     assert "missing" not in updated["federated_sources"][1]
+    assert updated["federated_sources"][2]["missing"]
+    pl.DataFrame({"site_name": ["site_a"], "hazard_ratio_per_sd": [1.2]}).write_csv(within_path)
+    with_forests = prep.prepare(config)
+    assert with_forests["federated"] != updated["federated"]
+    assert "missing" not in with_forests["federated_sources"][2]
 
 
 def test_arpi_preparation_does_not_require_adt(tmp_path):

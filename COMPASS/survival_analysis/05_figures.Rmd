@@ -36,8 +36,10 @@ requiring longitudinal data or running other figure families.
 
 The site report reads `nvflare_within_site_cox_univariate/cox_within_site_all_sites_cohort.csv`
 beside the federated results CSV. It exports cohort sizes, event counts, and observed
-event percentages at landmarks 0/90/180 under `federated_no_msk/site_cohort_counts`.
-Percentages are events divided by analyzed patients over available follow-up,
+event percentages at landmark 0 only under `federated_no_msk/site_cohort_counts`.
+The figure matches the cohort-comparison layout: incidence with 95% Wilson CIs
+on the left and patient counts with events overlaid on the right. Cells with
+fewer than 25 events are hatched/marked. Percentages are events divided by analyzed patients over available follow-up,
 not fixed-horizon cumulative incidence estimates. Missing site counts are reported
 as unavailable; forest plots still render if the site file is absent.
 
@@ -110,15 +112,21 @@ regex stage across the record, and ADT versus LLM. Set
 trajectory diagnostics. These use canonical ADT/platinum and the longitudinal
 analysis anchor, with supplied ADT/LLM labels preserved.
 
-The federated output contains only PSA/testosterone forest plots at days
+The federated HR output contains only PSA/testosterone forest plots at days
 0/90/180: mean, minimum, maximum, and last value, with delta and observation-count
 features excluded. Plots show HR per SD and 95% CIs on a log axis, plus each
 row's p-value and supplied q-value. Symbols distinguish nominal-only p < 0.05,
 FDR q < 0.05, and nonsignificance. q-values are not recalculated on this subset.
 Finite positive HR estimates are retained; missing/invalid estimates or CIs are
 explicitly marked instead of applying the former volcano magnitude filters.
-No matching local results are required. Outputs are under
+Both across-site and individual within-site HRs are plotted, without re-pooling
+site estimates. Within-site forests read
+`nvflare_within_site_cox_univariate/cox_within_site_all_sites_results.csv` beside
+the across-site results CSV. Each uses its own supplied p/q values.
+No matching local results are required. Across-site outputs are under
 `by_figure/federated_no_msk/psa_testosterone_forest_landmark{0,90,180}/`.
+Within-site outputs use `psa_testosterone_forest_<site_name>_landmark{0,90,180}/`
+in the same directory, with their selected input rows in `within_site_forest_input/`.
 Old volcano/comparison files are not regenerated or deleted.
 These forests run when canonical ADT/platinum is selected, or scope
 is `federated`. Missing optional sources are reported and skipped. Failures in

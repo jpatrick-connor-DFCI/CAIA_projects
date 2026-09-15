@@ -16,9 +16,21 @@ federated_lab_label <- function(raw) {
   short
 }
 
-load_federated_no_msk_forest <- function(path) {
+federated_site_label <- function(site_name) {
+  labels <- c(dana_farber_caia_1_1 = "Dana-Farber", fred_hutch_caia_1_1 = "Fred Hutch",
+              jhu_caia_1_1 = "Johns Hopkins")
+  coalesce(unname(labels[site_name]), site_name)
+}
+
+validate_federated_sites <- function(site_name) {
+  if (any(is.na(site_name) | !nzchar(trimws(site_name)))) stop("Missing federated site name")
+  if (any(grepl("msk|sloan", site_name, ignore.case = TRUE))) stop("MSK site found in no-MSK inputs")
+}
+
+load_federated_no_msk_forest <- function(path, within_site = FALSE) {
   d <- readr::read_csv(path, show_col_types = FALSE)
   needed <- c("landmark_days", "endpoint", "feature", "ci_lower", "ci_upper", "p_value", "q_value")
+  if (within_site) needed <- c(needed, "site_name")
   missing <- setdiff(needed, names(d))
   if (length(missing)) stop("Federated forest input is missing: ", paste(missing, collapse = ", "))
   if (!"hazard_ratio_per_sd" %in% names(d)) {
@@ -31,11 +43,16 @@ load_federated_no_msk_forest <- function(path) {
   if (!"feature_stat" %in% names(d)) d$feature_stat <- sub("^.*__", "", d$feature)
   d$raw_lab_name <- d$lab_name
   d$lab_name <- federated_lab_label(d$lab_name)
+  if ("analysis_label" %in% names(d)) d <- filter(d, tolower(analysis_label) == "adt")
   d <- d %>% mutate(feature_stat = tolower(trimws(feature_stat))) %>%
     filter(tolower(endpoint) == "platinum", landmark_days %in% c(0, 90, 180),
            lab_name %in% c("PSA", "Testosterone"), feature_stat %in% c("mean", "min", "max", "last"))
-  if (anyDuplicated(d[c("landmark_days", "lab_name", "feature_stat")]))
-    stop("Duplicate analyte/statistic/landmark rows in federated forest input")
+  keys <- c(if (within_site) "site_name", "landmark_days", "lab_name", "feature_stat")
+  if (anyDuplicated(d[keys])) stop("Duplicate site/analyte/statistic/landmark rows in federated forest input")
+  if (within_site) {
+    validate_federated_sites(d$site_name)
+    d$site <- federated_site_label(d$site_name)
+  }
   d %>% mutate(
     nominal_significant = if_else(is.finite(p_value) & p_value >= 0 & p_value <= 1, p_value < .05, NA),
     fdr_significant = if_else(is.finite(q_value) & q_value >= 0 & q_value <= 1, q_value < .05, NA),
@@ -49,7 +66,14 @@ load_federated_no_msk_forest <- function(path) {
       ci_upper >= ci_lower & ci_lower <= hazard_ratio_per_sd & ci_upper >= hazard_ratio_per_sd)
 }
 
-plot_federated_no_msk_forest <- function(d, landmark) {
+plot_federated_no_msk_forest <- function(d, landmark, site_name = NULL) {
+  scope <- "Across sites"
+  if (!is.null(site_name)) {
+    d <- filter(d, .data$site_name == .env$site_name)
+    scope <- paste("Within site:", federated_site_label(site_name))
+  } else if ("site_name" %in% names(d)) {
+    stop("Select one site for a within-site forest; do not pool site rows")
+  }
   stats <- c("mean", "min", "max", "last")
   stat_labels <- c(mean = "Mean", min = "Minimum", max = "Maximum", last = "Last")
   sub <- filter(d, landmark_days == landmark) %>%
@@ -84,7 +108,7 @@ plot_federated_no_msk_forest <- function(d, landmark) {
     scale_y_discrete(labels = row_labels, expand = expansion(add = .7)) +
     facet_wrap(~lab_name, nrow = 1, scales = "free_y", drop = FALSE) +
     labs(x = "Hazard ratio per SD (95% CI; log scale)", y = NULL,
-      title = sprintf("Federated no-MSK | ADT platinum | +%d days", landmark),
+      title = sprintf("Federated no-MSK | %s | ADT platinum | +%d days", scope, landmark),
       subtitle = "PSA and testosterone: mean, minimum, maximum, and last value",
       caption = paste("Nominal significance: p < 0.05; FDR significance: supplied q < 0.05.",
         "Delta and observation-count features excluded. q-values are not recomputed for this subset.",
@@ -113,9 +137,7 @@ load_federated_no_msk_sites <- function(federated_path) {
   if ("endpoint" %in% names(d)) d <- filter(d, tolower(endpoint) == "platinum")
   d <- filter(d, tolower(analysis_label) == "adt", landmark_days %in% c(0, 90, 180))
   if (!nrow(d)) stop("No ADT platinum site counts at landmarks 0/90/180")
-  if (any(is.na(d$site_name) | !nzchar(trimws(d$site_name)))) stop("Missing federated site name")
-  if (any(grepl("msk|sloan", d$site_name, ignore.case = TRUE)))
-    stop("MSK site found in no-MSK cohort counts")
+  validate_federated_sites(d$site_name)
   if (anyDuplicated(d[c("site_name", "landmark_days")])) stop("Duplicate federated site/landmark counts")
   for (column in c("n_patients", "n_events")) {
     d[[column]] <- suppressWarnings(as.numeric(d[[column]]))
@@ -123,43 +145,74 @@ load_federated_no_msk_sites <- function(federated_path) {
       stop("Invalid federated site counts: ", column)
   }
   if (any(d$n_events > d$n_patients)) stop("Federated events exceed patients")
-  labels <- c(dana_farber_caia_1_1 = "Dana-Farber", fred_hutch_caia_1_1 = "Fred Hutch",
-              jhu_caia_1_1 = "Johns Hopkins")
-  d %>% mutate(endpoint = "platinum", site = coalesce(unname(labels[site_name]), site_name),
+  d %>% mutate(endpoint = "platinum", site = federated_site_label(site_name),
     event_incidence_pct = if_else(n_patients > 0, 100 * n_events / n_patients, NA_real_)) %>%
     arrange(landmark_days, site)
 }
 
+prepare_federated_site_incidence <- function(d) {
+  # Preserve a blank row for sites with no day-0 result, never borrow day 90/180.
+  d <- distinct(d, site_name, site) %>% left_join(
+    filter(d, landmark_days == 0) %>% select(-site), by = "site_name") %>%
+    mutate(landmark_days = 0, endpoint = "platinum") %>% arrange(site)
+  z <- 1.96
+  d %>% mutate(available = !is.na(n_patients) & n_patients > 0,
+    p = if_else(available, n_events / n_patients, NA_real_),
+    denominator = 1 + z^2 / n_patients,
+    centre = (p + z^2 / (2*n_patients)) / denominator,
+    half = z * sqrt(p*(1-p)/n_patients + z^2/(4*n_patients^2)) / denominator,
+    event_incidence_pct = 100*p, ci_lower_pct = 100*pmax(0, centre-half),
+    ci_upper_pct = 100*pmin(1, centre+half), thin = available & n_events < 25) %>%
+    select(-p, -denominator, -centre, -half)
+}
+
 plot_federated_no_msk_sites <- function(d) {
-  # Missing site/landmark cells are unavailable, never zero-sized cohorts.
-  d <- d %>% select(site, landmark_days, n_patients, n_events, event_incidence_pct) %>%
-    complete(site, landmark_days = c(0, 90, 180)) %>%
-    mutate(site = factor(site, levels = rev(sort(unique(site)))),
-      landmark = factor(landmark_days, levels = c(0, 90, 180), labels = c("0 days", "+90 days", "+180 days")))
-  number <- function(x) format(x, big.mark = ",", scientific = FALSE, trim = TRUE)
-  counts <- d %>% mutate(panel = "Cohort size", value = n_patients,
-    label = if_else(is.na(n_patients), "Unavailable",
-      paste0(number(n_events), "/", number(n_patients))))
-  incidence <- d %>% mutate(panel = "Observed event incidence", value = event_incidence_pct,
-    label = if_else(is.finite(event_incidence_pct), sprintf("%.2f%%", event_incidence_pct), "Unavailable"))
-  plot_data <- bind_rows(counts, incidence) %>% mutate(
-    panel = factor(panel, levels = c("Cohort size", "Observed event incidence")))
-  ggplot(plot_data, aes(value, site)) +
-    geom_col(fill = "#0072B2", width = .65, na.rm = TRUE) +
-    geom_text(aes(x = coalesce(value, 0), label = label), hjust = -.08, size = 3.4) +
-    facet_grid(landmark ~ panel, scales = "free_x") +
-    scale_x_continuous(expand = expansion(mult = c(0, .32))) +
-    labs(x = "Patients (left) / observed event incidence, % (right)", y = NULL,
-      title = "Federated no-MSK | ADT platinum | Cohort counts and event incidence by site",
-      subtitle = "Count labels: events / analyzed patients; separate cohort at each landmark",
-      caption = paste("Observed incidence = events / analyzed patients over available follow-up after each landmark.",
-        "Not a fixed-horizon cumulative incidence estimate. Patients can recur across landmarks; do not sum rows.",
-        "Source: cox_within_site_all_sites_cohort.csv; denominators are not feature-specific complete cases.", sep = "\n")) +
-    theme_classic(base_size = 11) +
-    theme(strip.background = element_blank(), strip.text = element_text(face = "bold"),
-      plot.title.position = "plot", plot.caption.position = "plot",
-      plot.caption = element_text(hjust = 0, size = 9), panel.spacing = grid::unit(1.3, "lines"),
-      plot.margin = margin(12, 16, 12, 12))
+  d <- prepare_federated_site_incidence(d) %>% mutate(y = n():1)
+  good <- filter(d, available)
+  rate_max <- max(c(1, good$ci_upper_pct), na.rm = TRUE)
+  count_max <- max(c(1, d$n_patients), na.rm = TRUE)
+  yscale <- function(labels = TRUE) scale_y_continuous(breaks = d$y,
+    labels = if (labels) d$site else NULL, limits = c(.4, nrow(d)+.6))
+  style <- theme_classic(base_size = 11) + theme(
+    panel.grid.major.x = element_line(color = "grey92", linewidth = .3),
+    axis.ticks.y = element_blank(), axis.line.y = element_blank(),
+    plot.title = element_text(face = "bold", size = 12),
+    plot.margin = margin(12, 20, 12, 12))
+  a <- ggplot(good, aes(y = y)) +
+    geom_rect(aes(xmin = 0, xmax = event_incidence_pct, ymin = y-.20, ymax = y+.20), fill = "#2a78d6")
+  hatch <- bind_rows(lapply(which(good$thin & good$event_incidence_pct > 0), function(i) {
+    width <- rate_max/25
+    starts <- seq(-width, good$event_incidence_pct[i], by = width*.6)
+    x <- pmax(0, starts); xend <- pmin(good$event_incidence_pct[i], starts+width)
+    tibble(x = x, xend = xend, y = good$y[i]-.20+(x-starts)/width*.40,
+           yend = good$y[i]-.20+(xend-starts)/width*.40) %>% filter(xend > x)
+  }))
+  if (nrow(hatch)) a <- a + geom_segment(data = hatch, aes(x=x, xend=xend, y=y, yend=yend),
+    inherit.aes = FALSE, color = "white", linewidth = .35)
+  a <- a + geom_errorbar(aes(xmin = ci_lower_pct, xmax = ci_upper_pct), orientation = "y",
+      width = .12, color = "grey30", linewidth = .5) +
+    geom_text(aes(x = ci_upper_pct, label = sprintf("%.2f%s", event_incidence_pct, if_else(thin, "*", ""))),
+      hjust = -.2, size = 3, color = "grey30") +
+    geom_text(data = filter(d, !available), aes(x = 0, label = "Unavailable"), hjust = 0, size = 3) +
+    yscale() + scale_x_continuous(limits = c(0, rate_max*1.25), expand = expansion(mult = c(0,.01))) +
+    labs(x = "Event rate (%)", y = NULL, title = "(a) incidence at landmark 0d (95% Wilson CI)") + style
+  b <- ggplot(filter(d, !is.na(n_patients)), aes(y = y)) +
+    geom_rect(aes(xmin = 0, xmax = n_patients, ymin = y-.20, ymax = y+.20), fill = "#2a78d6", alpha = .28) +
+    geom_rect(aes(xmin = 0, xmax = n_events, ymin = y-.20, ymax = y+.20), fill = "#2a78d6") +
+    geom_text(aes(x = n_patients, label = paste0(scales::comma(n_events), "/", scales::comma(n_patients))),
+      hjust = -.1, size = 3, color = "grey30") +
+    geom_text(data = filter(d, is.na(n_patients)), aes(x = 0, label = "Unavailable"), hjust = 0, size = 3) +
+    yscale(FALSE) + scale_x_continuous(limits = c(0, count_max*1.32), expand = expansion(mult = c(0,.01))) +
+    labs(x = "Patients (events overlaid)", y = NULL, title = "(b) cohort size and event count",
+      caption = "Pale = patients; solid = events; label = events/patients") + style
+  a <- ggplotGrob(a); b <- ggplotGrob(b)
+  a$heights <- b$heights <- grid::unit.pmax(a$heights, b$heights)
+  gridExtra::arrangeGrob(a, b, ncol = 2, top = grid::textGrob(paste(
+    "Federated no-MSK | ADT platinum incidence by site | landmark 0d",
+    sprintf("Hatched/* = <25 events (%d of %d available sites); read as power, not biology", sum(good$thin), nrow(good)),
+    sep = "\n"), gp = grid::gpar(fontsize = 14)),
+    bottom = grid::textGrob("Observed events / analyzed patients during follow-up; not fixed-horizon cumulative incidence.",
+      gp = grid::gpar(fontsize = 10)), padding = grid::unit(2.3, "lines"))
 }
 
 save_federated_no_msk_panel <- function(plot, path, width, height, dpi, overwrite) {
@@ -196,14 +249,32 @@ render_federated_no_msk_supplement <- function(data_root, fig_root, federated_pa
       file.path(root, paste0("psa_testosterone_forest_landmark", landmark), "platinum__all__incl.png"),
       12, 7, dpi, overwrite)
   }
+  within_path <- file.path(dirname(federated_path), "nvflare_within_site_cox_univariate",
+                           "cox_within_site_all_sites_results.csv")
+  if (file.exists(within_path)) {
+    within <- load_federated_no_msk_forest(within_path, within_site = TRUE)
+    within_table <- file.path(root, "within_site_forest_input", "platinum__all__incl.csv")
+    dir.create(dirname(within_table), recursive = TRUE, showWarnings = FALSE)
+    readr::write_csv(within, within_table)
+    if (is.function(capture)) capture(within_table)
+    sites <- sort(unique(within$site_name))
+    slugs <- gsub("[^a-zA-Z0-9_-]", "_", sites)
+    if (anyDuplicated(slugs)) stop("Federated site names collide in output filenames")
+    for (i in seq_along(sites)) for (landmark in c(0L, 90L, 180L)) {
+      p <- plot_federated_no_msk_forest(within, landmark, site_name = sites[i])
+      save_federated_no_msk_panel(p, file.path(root,
+        paste0("psa_testosterone_forest_", slugs[i], "_landmark", landmark), "platinum__all__incl.png"),
+        12, 7, dpi, overwrite)
+    }
+  } else warning("Within-site federated forests unavailable; missing: ", within_path)
   sites <- load_federated_no_msk_sites(federated_path)
   if (!is.null(sites)) {
     site_path <- file.path(root, "site_cohort_counts", "platinum__all__incl.csv")
     dir.create(dirname(site_path), recursive = TRUE, showWarnings = FALSE)
-    readr::write_csv(sites, site_path)
+    readr::write_csv(prepare_federated_site_incidence(sites), site_path)
     if (is.function(capture)) capture(site_path)
     save_federated_no_msk_panel(plot_federated_no_msk_sites(sites),
-      file.path(root, "site_cohort_counts", "platinum__all__incl.png"), 12, 8, dpi, overwrite)
+      file.path(root, "site_cohort_counts", "platinum__all__incl.png"), 14, 5.5, dpi, overwrite)
   }
   invisible(d)
 }

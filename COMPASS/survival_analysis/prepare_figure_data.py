@@ -416,7 +416,9 @@ def prepare(config: dict) -> dict:
                     "settings": {k: config.get(k) for k in ["gam", "metastatic", "metastatic_extra", "adt_intent", "forest_cohorts", "forest_landmark"]}})
         federated_path = Path(config["federated_path"])
         federated_sources = [fingerprint(federated_path), fingerprint(federated_path.parent /
-            "nvflare_within_site_cox_univariate" / "cox_within_site_all_sites_cohort.csv")]
+            "nvflare_within_site_cox_univariate" / "cox_within_site_all_sites_cohort.csv"),
+            fingerprint(federated_path.parent / "nvflare_within_site_cox_univariate" /
+                        "cox_within_site_all_sites_results.csv")]
         manifest["federated"] = digest({"code": version, "force": manifest["force_version"],
             "files": federated_sources})
         if config.get("federated", False):
