@@ -61,10 +61,11 @@ stopifnot(aligned_burden$N_MET_SITES[aligned_burden$DFCI_MRN=="1"]==3,
 failure <- tryCatch(build_metastatic_labels(intent,notes,llm,bind_rows(anchors,anchors[1,])),error=identity)
 stopifnot(inherits(failure,"error"), grepl("one row per patient",conditionMessage(failure)))
 
-# Prove that the active R workflow has no external Python execution/configuration.
+# Python runs once during preparation; individual label panels use the cache.
 active <- paste(readLines("COMPASS/survival_analysis/05_figures.Rmd"),
                 collapse="\n")
 renderer <- paste(readLines("COMPASS/survival_analysis/metastatic_figure_supplements.R"),collapse="\n")
-stopifnot(!grepl("COMPASS_FIGURE_PYTHON|prepare_metastatic_figure_labels.py|system2\\(", active),
+stopifnot(grepl("run_cached_figure_workflow", active),
+          grepl("metastatic_labels", renderer),
           !grepl("system2\\(|config\\$python", renderer))
-cat("R metastatic labels: stage collapse, windows/ties, missingness, IDs, dates, ICD burden, and R-only execution passed.\n")
+cat("R metastatic labels: stage collapse, windows/ties, missingness, IDs, dates, ICD burden, and cached execution passed.\n")

@@ -32,49 +32,17 @@ local({
 })
 
 # Exercise the actual notebook scheduler, including error handling and both
-# sequential and forked rendering. Substitute only the expensive renderer.
-notebook <- readLines("COMPASS/survival_analysis/05_figures.Rmd", warn = FALSE)
-start <- match("```{r render-figures}", notebook)
-end <- which(seq_along(notebook) > start & notebook == "```")[[1]]
-render_code <- parse(text = notebook[seq.int(start + 1L, end - 1L)])
+# Exercise the scheduler shared by preparation and rendering, sequentially and
+# with forks. Failures are values so remaining jobs always complete.
+source("COMPASS/survival_analysis/figure_data_cache.R")
 for (workers in if (.Platform$OS.type == "windows") 1L else c(1L, 2L)) {
-  env <- new.env(parent = globalenv())
-  env$new_figure_progress <- function(labels) {
-    new_figure_progress(labels, report = function(line) invisible(NULL))
-  }
-  env$COHORTS <- c("adt", "adt_test")
-  env$ENDPOINTS <- c("nepc", "platinum")
-  env$RENDER_WORKERS <- workers
-  env$cohort_display <- identity
-  env$NEPC_PROJ_PATH <- env$FIG_ROOT <- tempdir()
-  env$PLOT_NON_ANDROGEN_DISTRIBUTIONS <- env$PLOT_NON_ANDROGEN_LAB_FIGURES <- FALSE
-  env$PLOT_GAM_TRAJECTORIES <- env$PLOT_ADT_INTENT_SUPPLEMENT <- FALSE
-  env$RENDER_DPI <- 200
-  env$RENDER_PDF <- FALSE
-  env$RENDER_OVERWRITE <- FALSE
-  env$RENDER_OUTPUT_MODE <- "panels"
-  env$generate_figures <- function(cohort, ..., endpoint, progress) {
-    progress("stage", "synthetic inputs")
-    for (i in 1:3) {
-      progress("panel_start", paste0("panel", i))
-      if (cohort == "adt_test" && endpoint == "platinum" && i == 2L)
-        stop("synthetic device failure")
-      progress("panel_done", paste0("panel", i))
-    }
-  }
-  failure <- tryCatch({
-    suppressMessages(eval(render_code, env))
-    NULL
-  }, error = identity)
-  stopifnot(inherits(failure, "error"),
-            grepl("1 of 4 figure sets failed", conditionMessage(failure), fixed = TRUE),
-            grepl("adt_test / PLATINUM [synthetic inputs]: synthetic device failure",
-                  conditionMessage(failure), fixed = TRUE),
-            grepl("Call:", conditionMessage(failure), fixed = TRUE),
-            env$progress_summary$finished == 4L,
-            env$progress_summary$successful == 3L,
-            env$progress_summary$failed == 1L,
-            env$progress_summary$panels == 10L,
-            length(env$render_failures) == 1L)
+  results <- figure_parallel(as.list(1:4), function(i) {
+    if (i == 2) stop("synthetic device failure")
+    list(panels = 3L)
+  }, workers)
+  stopifnot(length(results) == 4L,
+            identical(results[[2]]$error, "synthetic device failure"),
+            sum(vapply(results, function(x) is.null(x$error), logical(1))) == 3L,
+            sum(vapply(results, function(x) if (is.null(x$panels)) 0L else x$panels, integer(1))) == 9L)
 }
 cat("Figure progress checks passed: sequential, parallel, failures, and panel counts.\n")

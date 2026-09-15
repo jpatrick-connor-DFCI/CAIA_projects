@@ -332,6 +332,10 @@ FIGURES_RMD = REPO_ROOT / "COMPASS" / "survival_analysis" / "05_figures.Rmd"
 
 def _rmd_vector(name: str) -> list[str]:
     body = re.search(rf"^{name} <- c\((.*?)\)", FIGURES_RMD.read_text(), re.S | re.M)
+    if body is None:
+        default = re.search(rf'^{name} <- env_values\("[^"]+", "([^"]+)"\)', FIGURES_RMD.read_text(), re.M)
+        assert default, f"{name} not found in 05_figures.Rmd"
+        return default.group(1).split(",")
     assert body, f"{name} not found in 05_figures.Rmd"
     return re.findall(r'"([^"]*)"', body.group(1))
 
@@ -371,10 +375,7 @@ def test_the_figures_rmd_names_no_retired_endpoint():
     block = re.search(r"SUPPORTED_ENDPOINTS <- c\((.*?)\)", source, re.S)
     supported = set(re.findall(r'"([^"]*)"', block.group(1)))
 
-    rmd = FIGURES_RMD.read_text()
-    endpoints = re.findall(
-        r'"([^"]*)"', re.search(r"^ENDPOINTS <- c\((.*?)\)", rmd, re.S | re.M).group(1)
-    )
+    endpoints = _rmd_vector("ENDPOINTS")
     assert set(endpoints) <= supported, (
         f"05_figures.Rmd requests endpoints the pipeline does not support: "
         f"{sorted(set(endpoints) - supported)}"
@@ -383,11 +384,7 @@ def test_the_figures_rmd_names_no_retired_endpoint():
 
 def test_a_failed_cohort_does_not_abandon_the_rest():
     """A failed cell does not discard the rest; the final summary still fails."""
-    rmd = FIGURES_RMD.read_text()
-    render = rmd[rmd.index("```{r render-figures}"):]
-    assert "tryCatch(" in render, "per-cohort rendering must be fault-isolated"
-    assert "render_failures" in render
-    # The summary stop() must come after the loop, not inside it.
-    assert render.index("render_failures <- unlist(render_results[!worker_errors]") < render.index(
-        'stop(length(render_failures)'
-    )
+    helper = (PIPELINE_R.parent / "figure_data_cache.R").read_text()
+    assert "tryCatch(fun(item)" in helper
+    assert helper.index("prepared <- figure_parallel(") < helper.index('stop("Figure workflow failures:')
+    assert helper.index("render_results[!completed] <- figure_parallel(") < helper.index('stop("Figure workflow failures:')

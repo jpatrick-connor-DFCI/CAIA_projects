@@ -1,260 +1,128 @@
 ---
-title: "COMPASS platinum figures and supplementary analyses"
+title: "COMPASS figures: cached preparation and rendering"
 output:
   html_document:
     toc: true
     toc_depth: 2
 ---
 
-Canonical R figure workflow using tidyverse/ggplot2. By default, **Knit**
-renders the full **ADT** cohort with pre-ADT castrate patients included for
-the **NEPC** and **platinum** endpoints. Metastatic subsets, the pre-ADT
-castrate exclusion, and ARPI remain selectable in the configuration below.
+## Workflow
 
-The AVPC endpoint and the localized-adjuvant cohort are retired; no such trees
-are built. Figure 2 uses the four primary subtypes for its landscape and
-aggressive-variant enrichment panels. Lab-trajectory stratifications remain
-limited to platinum and binary NEPC status.
+Run `04_prep_figure_data.ipynb` to prepare the Python tables first. Its settings
+match this document; the default knit revalidates and reuses those caches.
+The notebook imports `prepare_figure_data.py`, which also supports a standalone
+`--config` CLI. Running the notebook is optional: this document can run the
+same preparation automatically.
 
-The document reads the merged `profile_data` run under `.../CAIA/COMPASS`
-and writes to `figures/CAIA/COMPASS`.
+Preparation and rendering are separate stages:
 
-Platinum predictions for the full ADT cohort with pre-ADT castrate patients
-included are the **main figures**. NEPC results, alternative cohort definitions,
-NEPC-label validation, and ADT/LLM/regex diagnostics are **supplements**.
-All cohort configurations remain selectable; the default stays `COHORTS <- c("adt")`.
+1. `prepare_figure_data.py` uses Polars to scan each selected arm's longitudinal
+   CSV once and cache patient metadata, all-lab record spans, selected lab
+   measurements, patient/bin raw and log means, and pre-treatment coverage.
+2. R consumes those tables, calculates the existing survival statistics and
+   optional GAMs, and caches finished graphics objects. CSV/Markdown figure
+   tables are written during this stage; no images are generated.
+3. Rendering loads the graphics objects and writes individual PNGs and optional
+   PDFs. It does not read patient inputs, fit curves, or repeat plot calculations.
 
-Outputs are grouped by figure and individual subpanel:
+`COMPASS_FIGURE_STAGE=all` (default) validates source fingerprints, prepares
+changed data/figure sets, then renders missing or stale formats. `prepare`
+builds caches only. `render` uses the last prepared snapshot without checking
+source data, and requires the same cohort/analysis settings. Use `all` for
+normal updates and `render` for DPI/PDF changes.
+
+`COMPASS_FIGURE_SCOPE=federated` processes only the no-MSK comparison without
+requiring longitudinal data or running other figure families.
+
+Caches live under `COMPASS_FIGURE_DATA_ROOT` (default `COMPASS/figure_data`).
+They include patient data and need the same access restrictions as the analysis
+inputs. Versioned caches are retained. Source identity uses absolute paths,
+file sizes and nanosecond modification times, plus code/settings versions.
+Set `COMPASS_PREPARE_OVERWRITE=true` after replacing sources while preserving
+timestamps and sizes. Image receipts record the prepared snapshot and DPI;
+affected formats regenerate automatically. Existing images without a receipt
+are regenerated once.
+
+Python requires Polars; `COMPASS_FIGURE_PYTHON` selects its executable.
+R needs its existing plotting packages plus `nanoparquet` or `arrow`.
+Polars completes before R workers start. `POLARS_MAX_THREADS` defaults to at
+most four, respecting the SLURM CPU allocation when available.
+`COMPASS_PREPARE_WORKERS` defaults to one to limit memory use;
+`COMPASS_RENDER_WORKERS` defaults to two and parallelizes individual panels on
+Linux. macOS and Windows render sequentially because native graphics libraries
+are not safe to fork.
+
+## Cohorts and outputs
+
+Defaults: all ADT, pre-ADT castrate patients included, platinum and NEPC, at
+landmarks 0/90/180. The forests read existing day-180 results across six ADT
+configurations without enabling six full renders. ARPI uses its own input file.
+Retired AVPC endpoints and localized-adjuvant cohorts remain unavailable.
+
+Canonical ADT/platinum panels are main figures; NEPC, cohort variants and
+diagnostics are supplements. Individual subpanels retain this layout:
 
 `FIG_ROOT/<ARM>/by_figure/<main|supplements>/<group>/<artifact>/<endpoint>__<subset>__<exclusion>.png`
 
-For example:
+Figure 2 runs once for canonical ADT/platinum. Lab figures run on each selected
+platinum cohort, for PSA/testosterone by default. Trajectories retain day-zero
+boundaries, 180-day bins, and log transformation before averaging. Pre-ADT
+coverage uses five years and full-stratum denominators. Lab KM curves compare
+bottom versus top 20% without splitting ties. Somatic and Gleason curves retain
+their specimen/score date origins. GAMs, non-androgen lab panels and the older
+ADT-intent comparison are disabled by default.
 
-```
-ADT/by_figure/main/figure3/univariate_landmark180/platinum__all__incl.png
-ADT/by_figure/supplements/figure3/univariate_landmark180/nepc__all__incl.png
-ADT/by_figure/supplements/figure3/univariate_landmark180/platinum__metastatic_adt__incl.png
-ADT/by_figure/supplements/metastatic_labels/coverage/platinum__all__incl.png
-```
+The metastatic supplement defaults to three heatmaps: ADT/LLM versus maximum
+regex stage across the record, and ADT versus LLM. Set
+`COMPASS_METASTATIC_EXTRA_PANELS=1` to restore coverage, ICD burden, survival and
+trajectory diagnostics. These use canonical ADT/platinum and the longitudinal
+analysis anchor, with supplied ADT/LLM labels preserved.
 
-Artifact names omit their parent figure prefix and lab name. Completed panels
-from the preceding `by_figure/<group>/<artifact>/` layout are copied to the new
-main/supplement folders when the exact cohort/endpoint leaf matches, avoiding
-unnecessary rendering. Originals are retained. Overwrite regenerates instead.
+The federated comparison runs when canonical ADT/platinum is selected, or scope
+is `federated`. Missing optional sources are reported and skipped. Failures in
+one figure set do not prevent preparation/rendering of other available sets.
 
-Existing figures at the exact
-cohort/endpoint output paths are skipped by default. Set
-`COMPASS_RENDER_OVERWRITE=true` (or `RENDER_OVERWRITE <- TRUE` below) to regenerate
-them after changing inputs, styling, or DPI. Unrelated older outputs are left
-alone. Completion checks inspect file headers and end markers; empty or
-truncated graphics are regenerated.
-
-PNG is the default required figure format. Set
-`COMPASS_RENDER_PDF=true` to additionally write a vector PDF beside every PNG;
-tables remain CSV/Markdown and follow the same leaf-naming convention. There is
-no `R/` language subdirectory.
-
-When PDF output is enabled, a panel is complete only when both PNG and PDF
-exist. Missing formats are generated individually, preserving completed ones.
-New graphics are written to temporary files and published only after a
-successful save. Input preparation and CSV/Markdown tables still run.
-
-Figures are saved as individual subpanels only. Figure 1 writes its CONSORT,
-KM, and three timing panels; Figure 2 writes its confusion matrix, metrics,
-subtype landscape, and platinum enrichment;
-Figure 4 writes AUC, C-index, and each model/landmark importance panel.
-Assembled composite figures are no longer constructed or saved in either
-rendering profile.
-
-Figure 2 v3 validates the binary `has_nepc` classifier call over every
-ADT-exposed patient. It is emitted once from the canonical `adt` / platinum
-pass and skipped for the other cells. Panels A1/A2 show the binary NEPC
-confusion matrix and classifier metrics. Restored Panel B shows the
-conventional/AVPC/NEPC/biomarker landscape within each platinum-status group.
-Restored Panel C compares platinum use among aggressive primary subtypes
-(AVPC + NEPC) versus conventional disease, excluding biomarker/unclassified
-labels, with 95% Wilson intervals and a one-sided Fisher test. B/C use all
-classifier-labeled ADT-exposed patients, independently of manual chart review.
-AVPC confusion panels remain retired.
-
-All lab outputs under `by_figure/<main|supplements>/labs/` are likewise emitted only by the platinum
-pass. Lab outputs include longitudinal summaries and time-to-platinum tertile curves; R-fitted GAM panels
-remain available but are toggled off by default. The distribution and
-quartile-KM families remain retired; the restored curves use all three tertiles. A second NEPC-labelled copy would not
-represent a different endpoint analysis.
-Longitudinal summaries use 180-day bins from one year before through five
-years after the treatment anchor, with day 0 as a hard boundary. A second
-trajectory set can be fit directly during plotting with `mgcv::bam` when
-`PLOT_GAM_TRAJECTORIES` is enabled; fREML and shrinkage select smoothness
-without depending on Python GAM outputs. Both implementations support the
-original scale and log space. The log versions transform each lab measurement
-with `log1p` before patient/bin aggregation or GAM fitting and use an `_log`
-filename suffix.
-Trajectory and GAM titles contain only the cohort definition and contributing
-patient count; the lab, scale, and stratum remain identified by the axes,
-legend, and artifact path.
-For the ADT arm, two additional PSA/testosterone diagnostics quantify the
-pre-ADT data supporting those trajectories: any/recent measurement coverage
-and zero-anchored 180-day-bin availability. Platinum panels use the
-entire analysis-cohort stratum as their denominator; NEPC panels use all
-classifier-labeled cohort patients, including those with no androgen lab. The
-coverage diagnostics retain their five-year pre-ADT lookback independently of
-the shorter trajectory window.
-
-Figure 3b includes sequencing-based somatic associations (volcano plus top-hits
-forest) and a separate Gleason-score forest. Each uses its own index date and
-existing Cox results for the selected endpoint. PRS panels remain retired.
-These analyses exist for the ADT arm at landmark 0 only; a missing
-`cox_somatic_gleason/` result is reported and skipped independently.
-
-The platinum pass now writes PSA and testosterone **tertile KM curves** at
-each selected landmark, using the pre-landmark mean in `aggregated_landmark*.csv`.
-Only incident, observed outcomes enter the split. Equal lab values stay in one
-group; a distribution that cannot form three nonempty value-based groups is
-reported and skipped. Legends show each group's patient and event counts.
-
-Figure 3b also writes platinum KM curves for every significant mutation feature
-(Cox q < 0.05), comparing carriers with non-carriers among patients with a known
-binary call. These curves start at the sequencing specimen date. Gleason KM
-curves start at the selected score date, grouping scores as ≤6, 7, 8, 9, and 10.
-Both read the existing indexed `somatic_gleason/<analysis>/aggregated_landmark0.csv`
-inputs. They do not mix those clocks with ADT-relative durations. Mutation
-selection and KM visualization use the same cohort, so the panels are descriptive.
-
-Two additional cohort forests show **PSA/testosterone for platinum** and
-**PSA/testosterone for NEPC**. Each has mean, minimum, maximum, and last-value
-rows; delta and observation counts are excluded. `COHORT_FOREST_CONFIG` controls
-the landmark (180 days by default) and available cohorts. These summaries read
-existing results from all six ADT configurations without enabling six full
-figure renders. The forest section of `07_cohort_comparison.ipynb` uses the same
-`cohort_forest_figures.R` renderer and output paths.
-
-The local ADT figure review prompted wrapped titles/captions, external legends,
-clearer background points, fewer overlapping volcano labels, and axes that
-retain all plotted estimates. Run once with **`COMPASS_RENDER_OVERWRITE=true`**
-to replace existing panels with the revised styling; then return it to `false`
-for normal resume behavior. The downloaded PNGs contain no patient-level KM
-inputs, so the new survival curves require the corresponding analysis inputs.
-
-`05_figures.Rmd` now also renders the ADT filtering diagnostics as separate
-supplemental subpanels. These use the canonical ADT platinum time-zero analysis
-cohort, including pre-ADT castrate patients, so counts are comparable across
-ADT intent and LLM metastatic status. This differs from the older
-`08_adt_intent.ipynb` all-ADT-exposed population.
-
-All dated stage/ICD windows use that cohort's longitudinal
-`TREATMENT_ANCHOR_DATE`, matching its survival and lab clocks. The intent
-classifier's `ADT_FIRST_DATE` can differ because it uses medication history
-while the longitudinal anchor is restricted to on/after diagnosis. Preparation
-retains both dates, reports the number of differences, and recomputes the
-stage/ICD windows using the analysis date. It preserves the supplied ADT/LLM
-labels. Missing analysis dates leave dated stage/ICD results unclassified.
-
-Regex stage is collapsed to **I–III = local** and **IV = metastatic**. Missing
-or invalid stages remain unclassified. The primary comparison uses the nearest
-stage within 365 days before/on ADT; maximum stage before/on ADT and maximum
-stage after ADT are separate retrospective comparisons. Each compares ADT
-intent with regex and LLM metastatic status with regex; an additional panel
-compares ADT with LLM. Heatmaps report counts, row percentages, paired coverage,
-and agreement. A coverage panel retains missing labels. No method is designated
-a gold standard. ADT intent and the LLM metastatic label both use full observed
-history, so these are descriptive comparisons rather than baseline validation.
-
-The same supplement includes ICD site burden, site patterns, death/platinum/NEPC
-KM curves, and PSA/testosterone trajectories for each label definition, where
-inputs are available. It reuses cached longitudinal data, saves only individual
-subpanels, and shares progress tracking and the overwrite switch. The older
-localized-adjuvant versus metastatic **model-result** comparison remains
-available via `PLOT_ADT_INTENT_SUPPLEMENT`; it needs precomputed comparison CSVs.
-
-`PLOT_METASTATIC_LABEL_SUPPLEMENT` defaults to `TRUE`. Preparation runs entirely
-in R, using `arrow` or `nanoparquet` for the Parquet inputs and the existing
-`mrn_lists/adt_intent_labels_model_cohort.csv`, dated regex stage parquet, and
-`LLM_met_diagnosis/met_dx_labels.parquet`. Set
-`COMPASS_REGEX_STAGE_PATH` or `LLM_MET_LABELS_PATH` to use other input paths.
-If neither R Parquet reader is installed, run `install.packages("nanoparquet")`
-once in the R environment used for knitting. No Python interpreter is called.
-The NEPC subtype classifier is not used as a metastatic-status label.
-Missing required sources produce a warning and skip
-this supplement; other figures continue.
-
-The main workflow calls `generate_figures()` in
-`COMPASS_generate_figures_pipeline.R`. Supplement rendering lives in
-`metastatic_figure_supplements.R`; `prepare_metastatic_figure_labels.R` joins
-small label/stage inputs without reading the longitudinal lab file.
-
-The Figure 1 analysis-set supplement, Figure 3 significance-only variants,
-Figure 4 all-model supplement, and subtype-stratified KM family are retired.
-
-Run `01_preprocessing.ipynb` to completion first; this document only reads
-that merged-profile run's outputs.
-
-## Setup
+## Configuration
 
 ```{r setup}
-# Set these before sourcing/preloading: each fork is already a parallel task.
-# readr otherwise may start a parser thread per visible CPU in every worker;
-# lazy reads can also defer parsing of supposedly warm inputs until after fork.
 options(readr.num_threads = 1L, readr.read_lazy = FALSE)
-
-pipeline_path <- normalizePath(
-  file.path(getwd(), "COMPASS_generate_figures_pipeline.R"),
-  mustWork = FALSE
-)
-if (!file.exists(pipeline_path)) {
-  pipeline_path <- normalizePath(
-    file.path(getwd(), "COMPASS", "survival_analysis", "COMPASS_generate_figures_pipeline.R"),
-    mustWork = FALSE
-  )
-}
-if (!file.exists(pipeline_path))
-  stop("Could not locate COMPASS_generate_figures_pipeline.R")
+pipeline_path <- file.path(getwd(), "COMPASS_generate_figures_pipeline.R")
+if (!file.exists(pipeline_path)) pipeline_path <- file.path(
+  getwd(), "COMPASS", "survival_analysis", "COMPASS_generate_figures_pipeline.R")
+pipeline_path <- normalizePath(pipeline_path, mustWork = TRUE)
 source(pipeline_path)
+source(file.path(dirname(pipeline_path), "figure_data_cache.R"))
 
-NEPC_PROJ_PATH <- "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS"
-FIG_ROOT <- "/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS"
-
-# Endpoints to render. Each needs its own 01/02/03 build; see
-# compass_pipeline.make_endpoint_runs(). Must be a subset of the pipeline's
-# SUPPORTED_ENDPOINTS -- naming a retired endpoint here fails in the
-# ENDPOINT_SUFFIXES lookup below rather than at generate_figures().
-ENDPOINTS <- c("nepc", "platinum")
-
-# Keep every modelled ADT configuration available. To render them all, set
-# COHORTS <- ADT_COHORT_OPTIONS. ARPI labels remain in SUPPORTED_COHORTS.
-ADT_COHORT_OPTIONS <- c(
-  "adt",                 "adt_noprecastrate",
-  "adt_metastatic_adt",  "adt_metastatic_adt_noprecastrate",
-  "adt_metastatic_llm",  "adt_metastatic_llm_noprecastrate"
-)
-COHORTS <- c("adt")  # all ADT patients; pre-ADT castrate patients included
-# This small, read-only summary compares available results from all six ADT
-# configurations without enabling the expensive full render for each variant.
-COHORT_FOREST_CONFIG <- list(
-  script = file.path(dirname(pipeline_path), "cohort_forest_figures.R"),
-  cohorts = ADT_COHORT_OPTIONS,
-  landmark = 180L
-)
-
-stopifnot(
-  all(ENDPOINTS %in% SUPPORTED_ENDPOINTS),
-  all(COHORTS %in% SUPPORTED_COHORTS)
-)
-
-# Generate lab-specific panels only for PSA and Testosterone.
-# Non-androgen labs remain available to models and aggregate feature plots.
-PLOT_NON_ANDROGEN_DISTRIBUTIONS <- FALSE
-PLOT_NON_ANDROGEN_LAB_FIGURES <- FALSE
-# Keep the R/mgcv fitting implementation available without running its
-# comparatively expensive trajectory fits during the default figure knit.
-PLOT_GAM_TRAJECTORIES <- FALSE
-# The ADT-intent comparison supplement runs after Figure 4 in the canonical ADT
-# cell. Keep its implementation available without extending the primary render.
-PLOT_ADT_INTENT_SUPPLEMENT <- FALSE
-
-# Merge the ADT filtering diagnostics into this workflow. Uses the medication
-# intent labels already built by compass_pipeline; no model refits are needed.
-PLOT_METASTATIC_LABEL_SUPPLEMENT <- TRUE
+env_flag <- function(name, default = FALSE) {
+  value <- tolower(Sys.getenv(name, if (default) "true" else "false"))
+  if (!value %in% c("true", "false", "1", "0", "yes", "no")) stop(name, " must be true or false")
+  value %in% c("true", "1", "yes")
+}
+env_values <- function(name, default) trimws(strsplit(Sys.getenv(name, default), ",", fixed = TRUE)[[1]])
+env_workers <- function(name, default) {
+  value <- suppressWarnings(as.integer(Sys.getenv(name, as.character(default))))
+  if (is.na(value) || value < 1L) stop(name, " must be a positive integer")
+  value
+}
+NEPC_PROJ_PATH <- Sys.getenv("COMPASS_DATA_ROOT", "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS")
+FIG_ROOT <- Sys.getenv("COMPASS_FIG_ROOT", "/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS")
+FIGURE_DATA_ROOT <- Sys.getenv("COMPASS_FIGURE_DATA_ROOT", file.path(NEPC_PROJ_PATH, "figure_data"))
+FIGURE_STAGE <- match.arg(Sys.getenv("COMPASS_FIGURE_STAGE", "all"), c("all", "prepare", "render"))
+FIGURE_SCOPE <- match.arg(Sys.getenv("COMPASS_FIGURE_SCOPE", "all"), c("all", "federated"))
+ENDPOINTS <- env_values("COMPASS_FIGURE_ENDPOINTS", "nepc,platinum")
+ADT_COHORT_OPTIONS <- c("adt", "adt_noprecastrate", "adt_metastatic_adt",
+  "adt_metastatic_adt_noprecastrate", "adt_metastatic_llm", "adt_metastatic_llm_noprecastrate")
+COHORTS <- env_values("COMPASS_FIGURE_COHORTS", "adt")
+stopifnot(length(COHORTS) > 0L, length(ENDPOINTS) > 0L,
+          all(COHORTS %in% SUPPORTED_COHORTS), all(ENDPOINTS %in% SUPPORTED_ENDPOINTS),
+          !anyDuplicated(COHORTS), !anyDuplicated(ENDPOINTS))
+COHORT_FOREST_CONFIG <- list(script = file.path(dirname(pipeline_path), "cohort_forest_figures.R"),
+                             cohorts = ADT_COHORT_OPTIONS, landmark = 180L)
+PLOT_NON_ANDROGEN_LAB_FIGURES <- env_flag("COMPASS_NON_ANDROGEN_LABS")
+PLOT_GAM_TRAJECTORIES <- env_flag("COMPASS_GAM_TRAJECTORIES")
+PLOT_ADT_INTENT_SUPPLEMENT <- env_flag("COMPASS_ADT_INTENT_SUPPLEMENT")
+PLOT_METASTATIC_LABEL_SUPPLEMENT <- env_flag("COMPASS_METASTATIC_LABEL_SUPPLEMENT", TRUE)
+PLOT_FEDERATED_NO_MSK_SUPPLEMENT <- env_flag("COMPASS_FEDERATED_NO_MSK_SUPPLEMENT", TRUE)
 METASTATIC_SUPPLEMENT <- list(
   prepare_script = file.path(dirname(pipeline_path), "prepare_metastatic_figure_labels.R"),
   r_script = file.path(dirname(pipeline_path), "metastatic_figure_supplements.R"),
@@ -262,276 +130,43 @@ METASTATIC_SUPPLEMENT <- list(
   stage = Sys.getenv("COMPASS_REGEX_STAGE_PATH", file.path(
     Sys.getenv("PROFILE_DATA_PATH", "/data/gusev/USERS/jpconnor/data/PROFILE_DATA"),
     "CANCER_ANNOTATIONS", "CANCER_STAGE_NOTE_LEVEL.parquet")),
-  llm = Sys.getenv("LLM_MET_LABELS_PATH",
-    "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_met_diagnosis/met_dx_labels.parquet"),
-  icd = file.path(NEPC_PROJ_PATH, "prostate_icd_data.csv")
-)
-
-# Rendering profile. Both profiles save individual subpanels only, at 200 dpi
-# by default. Use COMPASS_RENDER_PROFILE=publication for 600-dpi subpanels and
-# enable overwrite to replace figures already rendered at a different DPI.
-RENDER_PROFILE <- tolower(Sys.getenv("COMPASS_RENDER_PROFILE", "fast"))
-if (!RENDER_PROFILE %in% c("fast", "publication"))
-  stop("COMPASS_RENDER_PROFILE must be 'fast' or 'publication'")
+  llm = Sys.getenv("LLM_MET_LABELS_PATH", "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_met_diagnosis/met_dx_labels.parquet"),
+  icd = file.path(NEPC_PROJ_PATH, "prostate_icd_data.csv"))
+FEDERATED_NO_MSK_SUPPLEMENT <- list(
+  script = file.path(dirname(pipeline_path), "federated_no_msk_figures.R"),
+  results = Sys.getenv("COMPASS_FEDERATED_NO_MSK_RESULTS", file.path(
+    NEPC_PROJ_PATH, "federated_results_no_MSK", "cox_federated_univariate_adt.csv")))
+RENDER_PROFILE <- match.arg(tolower(Sys.getenv("COMPASS_RENDER_PROFILE", "fast")), c("fast", "publication"))
 RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 200
-RENDER_OUTPUT_MODE <- "panels"
+RENDER_PDF <- env_flag("COMPASS_RENDER_PDF")
+RENDER_OVERWRITE <- env_flag("COMPASS_RENDER_OVERWRITE")
+PREPARE_OVERWRITE <- env_flag("COMPASS_PREPARE_OVERWRITE")
+RENDER_WORKERS <- env_workers("COMPASS_RENDER_WORKERS", 2L)
+PREPARE_WORKERS <- env_workers("COMPASS_PREPARE_WORKERS", 1L)
+source(file.path(dirname(pipeline_path), "metastatic_figure_supplements.R"))
 
-pdf_value <- tolower(Sys.getenv("COMPASS_RENDER_PDF", "false"))
-if (!pdf_value %in% c("true", "false", "1", "0", "yes", "no"))
-  stop("COMPASS_RENDER_PDF must be true or false")
-RENDER_PDF <- pdf_value %in% c("true", "1", "yes")
-
-# FALSE resumes missing figures; TRUE regenerates all requested figure files.
-overwrite_value <- tolower(Sys.getenv("COMPASS_RENDER_OVERWRITE", "false"))
-if (!overwrite_value %in% c("true", "false", "1", "0", "yes", "no"))
-  stop("COMPASS_RENDER_OVERWRITE must be true or false")
-RENDER_OVERWRITE <- overwrite_value %in% c("true", "1", "yes")
-
-# Parallelize cohort x endpoint cells, but keep the default conservative: each
-# render holds plotting data, so launching all twelve cells
-# together can exhaust memory and make the knit appear to freeze. Increase the
-# worker count explicitly only on a host with enough RAM.
-RENDER_WORKERS <- suppressWarnings(as.integer(
-  Sys.getenv("COMPASS_RENDER_WORKERS", "2")
-))
-if (is.na(RENDER_WORKERS) || RENDER_WORKERS < 1L)
-  stop("COMPASS_RENDER_WORKERS must be a positive integer")
-
-# Check the R Parquet reader before expensive reads/forking, only when this
-# supplement needs rendering. Completed figures do not need source readers.
-if (PLOT_METASTATIC_LABEL_SUPPLEMENT && "adt" %in% COHORTS && "platinum" %in% ENDPOINTS &&
-    all(file.exists(unlist(METASTATIC_SUPPLEMENT[c("intent", "stage", "llm")])))) {
-  source(METASTATIC_SUPPLEMENT$r_script)
-  bases <- file.path(FIG_ROOT, "ADT", "by_figure", "supplements", "metastatic_labels",
-                     sub("^adt_labels_", "", metastatic_supplement_stems()), "platinum__all__incl")
-  outputs <- c(paste0(bases, ".png"), if (RENDER_PDF) paste0(bases, ".pdf"))
-  if (RENDER_OVERWRITE || !all(vapply(outputs, figure_file_complete, logical(1)))) {
-    source(METASTATIC_SUPPLEMENT$prepare_script)
-    metastatic_parquet_backend()
-  }
-}
-
-# Fail early with a useful message rather than deep inside generate_figures().
-for (required_path in c(
-    file.path(NEPC_PROJ_PATH, "LLM_NEPC_labels"),
-    file.path(NEPC_PROJ_PATH, "mrn_lists", "platinum_MRN_list.csv"),
-    file.path(NEPC_PROJ_PATH, "mrn_lists", "icd_prostate_mrn_flags.csv"),
-    file.path(NEPC_PROJ_PATH, "longitudinal_prediction_data_adt.csv")
-)) {
-    if (!file.exists(required_path))
-      stop(required_path, " not found -- run 01_preprocessing.ipynb first.")
-}
-
-# Each cohort x endpoint reads its own prediction-inputs tree. Check them all up
-# front and report EVERY missing one together: with 6 cohorts x 2 endpoints,
-# stopping at the first would mean 12 edit-rerun cycles to discover an
-# incomplete 01_preprocessing pass.
-missing_trees <- character(0)
-for (COHORT in COHORTS) {
-  for (ENDPOINT in ENDPOINTS) {
-    suffix <- unname(ENDPOINT_SUFFIXES[[ENDPOINT]])
-    inputs_dir <- file.path(NEPC_PROJ_PATH, "survival_analysis",
-                            paste0("prediction_inputs_", COHORT, suffix))
-    if (!dir.exists(inputs_dir))
-      missing_trees <- c(missing_trees, inputs_dir)
-  }
-}
-if (length(missing_trees))
-  stop(length(missing_trees), " of ", length(COHORTS) * length(ENDPOINTS),
-       " prediction-input trees are missing -- run 01_preprocessing.ipynb for ",
-       "every cohort x endpoint first:\n  ",
-       paste(missing_trees, collapse = "\n  "))
-
-# Populate arm-level caches before parallel::mclapply forks. On Unix, workers
-# then inherit these large read-only objects through copy-on-write memory
-# instead of parsing the longitudinal CSV independently up to 12 times.
-# Sequential/Windows renders benefit from the same warm caches.
-shared_longitudinal_csv <- file.path(
-  NEPC_PROJ_PATH, "longitudinal_prediction_data_adt.csv"
-)
-preload_started <- proc.time()[["elapsed"]]
-message("Preloading patient metadata and all-lab record spans ...")
-invisible(cached_profile_patient_and_labs(shared_longitudinal_csv, "DFCI_MRN"))
-message(sprintf("Patient metadata and record spans ready after %.1f seconds; preloading trajectories ...",
-                proc.time()[["elapsed"]] - preload_started))
-invisible(cached_canonical_longitudinal(
-  shared_longitudinal_csv,
-  labs = if (PLOT_NON_ANDROGEN_LAB_FIGURES) names(CATEGORY_MAP) else ANDROGEN
-))
-
-# The wide longitudinal CSV is no longer needed once both processed caches
-# are ready. Drop that raw frame before warming the smaller shared inputs.
-clear_raw_read_cache()
-
-# These sources are smaller, but every cell reads them. Warm their raw caches
-# as well so forked workers do no repeated shared-input I/O.
-invisible(cached_read_csv(
-  file.path(NEPC_PROJ_PATH, "LLM_NEPC_labels", "baca_lab_annotations.csv"),
-  show_col_types = FALSE
-))
-invisible(cached_read_csv(
-  file.path(NEPC_PROJ_PATH, "mrn_lists", "platinum_MRN_list.csv"),
-  show_col_types = FALSE
-))
-invisible(cached_read_csv(
-  file.path(NEPC_PROJ_PATH, "mrn_lists", "icd_prostate_mrn_flags.csv"),
-  show_col_types = FALSE
-))
-invisible(load_llm_strata(DEFAULT_LLM_ANNOTATIONS_PATH))
-# Collect temporary parsing/transformation objects before workers inherit the
-# heap. Cached patient summaries and compact trajectory tables remain live.
-invisible(gc())
-message(sprintf(
-  "shared inputs preloaded once in %.1f seconds; forking workers from warm cache",
-  proc.time()[["elapsed"]] - preload_started
-))
-
-message("data root:   ", NEPC_PROJ_PATH)
-message("figure root: ", FIG_ROOT)
-message("endpoints:   ", paste(ENDPOINTS, collapse = ", "))
-message("cohorts:     ", paste(COHORTS, collapse = ", "))
-message(sprintf("renders:     %d cohort x endpoint figure sets",
-                length(COHORTS) * length(ENDPOINTS)))
-message(sprintf("profile:     %s (%d dpi, output=%s, pdf=%s, overwrite=%s, workers=%d)",
-                RENDER_PROFILE, RENDER_DPI, RENDER_OUTPUT_MODE,
-                RENDER_PDF, RENDER_OVERWRITE, RENDER_WORKERS))
+figure_config <- list(
+  data_root = NEPC_PROJ_PATH, cache_root = FIGURE_DATA_ROOT, fig_root = FIG_ROOT,
+  cohorts = COHORTS, endpoints = ENDPOINTS, scope = FIGURE_SCOPE,
+  labs = if (PLOT_NON_ANDROGEN_LAB_FIGURES) names(CATEGORY_MAP) else ANDROGEN,
+  classifier_path = DEFAULT_LLM_ANNOTATIONS_PATH,
+  forest_cohorts = COHORT_FOREST_CONFIG$cohorts, forest_landmark = COHORT_FOREST_CONFIG$landmark,
+  gam = PLOT_GAM_TRAJECTORIES, adt_intent = PLOT_ADT_INTENT_SUPPLEMENT,
+  metastatic = PLOT_METASTATIC_LABEL_SUPPLEMENT, metastatic_extra = metastatic_extra_panels_enabled(),
+  metastatic_sources = METASTATIC_SUPPLEMENT[c("intent", "stage", "llm", "icd")],
+  federated = PLOT_FEDERATED_NO_MSK_SUPPLEMENT,
+  federated_path = FEDERATED_NO_MSK_SUPPLEMENT$results)
 ```
 
-## Render ADT figures
+## Prepare and render
 
-Runs the R figure-generation pipeline once per selected cohort x endpoint.
-The default is 1 cohort x 2 endpoints = 2 figure sets. Outputs go to
-`FIG_ROOT/<ARM>/by_figure/<main|supplements>/`, with
-each run writing one `<endpoint>__<subset>__<exclusion>` leaf per plot stem.
-
-Set `COHORTS <- ADT_COHORT_OPTIONS` to render all six ADT configurations,
-or select individual cohort labels and endpoints above. `COHORTS`
-accepts any run label in `SUPPORTED_COHORTS`, so the ARPI arm is rendered by
-naming its supported labels. Retired cohort and endpoint labels are rejected.
-
-Each cohort x endpoint cell is rendered independently, with two cells running
-concurrently by default. A failure in one is reported rather than abandoning
-the remaining cells. Any failures are re-reported at the end and the chunk then fails,
-so a partial render cannot pass silently.
-
-Shared inputs are parsed eagerly with one reader thread. Patient record spans
-are computed once per arm, and only requested labs enter the trajectory cache.
-The log reports preload time, each PNG/PDF render time, and total time per cell,
-so a slow input transformation can be distinguished from a slow graphics device.
-
-A live console progress bar combines both workers: finished cohort/endpoint
-sets out of the total, subpanels saved or skipped, failures, elapsed time, and the worker's
-current figure or preparation stage. The percentage tracks sets, since optional
-input availability changes the number of subpanels. A PNG and its optional PDF
-count as one completed subpanel after both requested files are available.
-
-```{r render-figures}
-render_cell <- function(COHORT, ENDPOINT, cell_index) {
-  label <- sprintf("%s / %s", cohort_display(COHORT), toupper(ENDPOINT))
-  cell_started <- proc.time()[["elapsed"]]
-  current_stage <- "initialization"
-  progress <- function(event, detail = "") {
-    if (event == "stage" && nzchar(detail)) current_stage <<- detail
-    figure_progress$update(cell_index, event, detail)
-    invisible(NULL)
-  }
-  progress("start")
-  failure_detail <- ""
-  message(sprintf("\n========== R figures: %s ==========", label))
-  ok <- tryCatch({
-    generate_figures(
-      COHORT,
-      nepc_proj_path = NEPC_PROJ_PATH,
-      fig_root = FIG_ROOT,
-      endpoint = ENDPOINT,
-      plot_non_androgen_distributions = PLOT_NON_ANDROGEN_DISTRIBUTIONS,
-      plot_non_androgen_lab_figures = PLOT_NON_ANDROGEN_LAB_FIGURES,
-      plot_gam_trajectories = PLOT_GAM_TRAJECTORIES,
-      plot_adt_intent_supplement = PLOT_ADT_INTENT_SUPPLEMENT,
-      save_dpi = RENDER_DPI,
-      save_pdf = RENDER_PDF,
-      output_mode = RENDER_OUTPUT_MODE,
-      progress = progress,
-      overwrite = RENDER_OVERWRITE,
-      metastatic_supplement = if (PLOT_METASTATIC_LABEL_SUPPLEMENT) METASTATIC_SUPPLEMENT else NULL,
-      cohort_forest_config = COHORT_FOREST_CONFIG
-    )
-    TRUE
-  }, error = function(e) {
-    failure_detail <<- sprintf("%s [%s]: %s", label, current_stage, conditionMessage(e))
-    failed_call <- conditionCall(e)
-    if (!is.null(failed_call))
-      failure_detail <<- paste0(failure_detail, "\n    Call: ",
-                               paste(deparse(failed_call), collapse = " "))
-    message("FAILED ", failure_detail)
-    FALSE
-  })
-  if (ok) {
-    progress("complete")
-    message(sprintf("\nCompleted R figures for %s in %.1f seconds.", label,
-                    proc.time()[["elapsed"]] - cell_started))
-    character(0)
-  } else {
-    progress("failed", failure_detail)
-    failure_detail
-  }
-}
-
-render_grid <- tidyr::crossing(COHORT = COHORTS, ENDPOINT = ENDPOINTS)
-figure_progress <- new_figure_progress(
-  paste(render_grid$COHORT, toupper(render_grid$ENDPOINT), sep = " / ")
-)
-render_one <- function(i) {
-  render_cell(render_grid$COHORT[[i]], render_grid$ENDPOINT[[i]], i)
-}
-n_workers <- min(RENDER_WORKERS, nrow(render_grid))
-render_results <- tryCatch({
-if (n_workers > 1L && .Platform$OS.type != "windows") {
-  # Platinum cells emit the additional longitudinal panels and are much slower
-  # than NEPC cells. Dynamic scheduling prevents one prescheduled fork from
-  # receiving every heavy platinum cell while the NEPC fork finishes early.
-  parallel::mclapply(
-    seq_len(nrow(render_grid)), render_one,
-    mc.cores = n_workers, mc.preschedule = FALSE
-  )
-} else {
-  if (n_workers > 1L)
-    message("Parallel fork rendering is unavailable on Windows; using one worker.")
-  lapply(seq_len(nrow(render_grid)), render_one)
-}
-}, error = function(e) {
-  figure_progress$close()
-  stop(e)
-}, interrupt = function(e) {
-  figure_progress$close()
-  stop(e)
-})
-worker_errors <- vapply(render_results, function(result) {
-  # mclapply can return NULL when a worker is killed (for example by OOM).
-  # A successful cell returns character(0), which must stay distinct from NULL.
-  is.null(result) || inherits(result, "try-error")
-}, logical(1))
-for (i in which(worker_errors))
-  figure_progress$update(i, "failed", "worker exited without a result")
-render_failures <- unlist(render_results[!worker_errors], use.names = FALSE)
-if (any(worker_errors))
-  render_failures <- c(
-    render_failures,
-    unlist(lapply(which(worker_errors), function(i) {
-      sprintf("%s / %s (worker failed)", cohort_display(render_grid$COHORT[[i]]),
-              toupper(render_grid$ENDPOINT[[i]]))
-    }), use.names = FALSE)
-  )
-
-n_total <- length(COHORTS) * length(ENDPOINTS)
-progress_summary <- figure_progress$snapshot()
-figure_progress$close()
-message(sprintf("%d subpanels saved, %d completed subpanels skipped in %.1f minutes.",
-                progress_summary$panels, progress_summary$skipped,
-                progress_summary$elapsed / 60))
-message(sprintf("\n%d of %d figure sets rendered.",
-                n_total - length(render_failures), n_total))
-if (length(render_failures))
-  stop(length(render_failures), " of ", n_total, " figure sets failed:\n  ",
-       paste(render_failures, collapse = "\n  "))
+```{r figures}
+figure_run <- run_cached_figure_workflow(
+  figure_config, pipeline_path, FIGURE_STAGE,
+  prepare_workers = PREPARE_WORKERS, render_workers = RENDER_WORKERS,
+  dpi = RENDER_DPI, pdf = RENDER_PDF,
+  prepare_overwrite = PREPARE_OVERWRITE, render_overwrite = RENDER_OVERWRITE,
+  metastatic_config = METASTATIC_SUPPLEMENT,
+  forest_config = COHORT_FOREST_CONFIG,
+  federated_config = FEDERATED_NO_MSK_SUPPLEMENT)
 ```

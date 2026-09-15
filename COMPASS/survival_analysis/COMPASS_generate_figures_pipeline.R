@@ -368,6 +368,10 @@ figure_dates <- function(x) {
 .processed_read_cache <- new.env(parent = emptyenv())
 
 cached_profile_patient_and_labs <- function(path, id_col = "DFCI_MRN") {
+  if (!is.null(getOption("compass.figure_data_manifest"))) {
+    patients <- figure_prepared_table(path, "patients")
+    return(list(patient_df = patients, labs_df = NULL))
+  }
   resolved <- tryCatch(normalizePath(path, mustWork = TRUE),
                        error = function(e) path)
   key <- paste0("profile-split:", resolved, ":", id_col)
@@ -599,6 +603,8 @@ CATEGORY_COLORS <- c(
 NS_COLOR <- "#9ba4ae"
 
 cached_canonical_longitudinal <- function(path, labs = names(CATEGORY_MAP)) {
+  if (!is.null(getOption("compass.figure_data_manifest")))
+    return(figure_prepared_table(path, "canonical") %>% filter(LAB_GROUP %in% labs))
   resolved <- tryCatch(normalizePath(path, mustWork = TRUE),
                        error = function(e) path)
   key <- paste0("canonical-longitudinal:", resolved, ":", paste(sort(unique(labs)), collapse = "|"))
@@ -1238,6 +1244,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # Reuse the same artifact/cohort/endpoint from the preceding figure-major
   # layout, then render only missing formats. Overwrite always regenerates.
   save_fig <- function(plot, out_dir, stem, width, height, prefix = COHORT_LEAF) {
+    capture <- getOption("compass.figure_capture")
+    if (is.function(capture)) {
+      capture(plot, file.path(output_dir_for_stem(stem), prefix), width, height, stem)
+      notify_progress("panel_done", paste("prepared", stem))
+      return(invisible(NULL))
+    }
     save_started <- proc.time()[["elapsed"]]
     # `out_dir` is retained for call-site compatibility. The directory already
     # encodes group/artifact/endpoint, so the filename carries only the cohort
@@ -1519,6 +1531,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     csv <- paste0(out_base, ".csv"); md_p <- paste0(out_base, ".md")
     write_csv(table1, csv)
     writeLines(to_markdown_table(table1), md_p)
+    capture <- getOption("compass.figure_table_capture")
+    if (is.function(capture)) capture(c(csv, md_p))
     c(csv, md_p)
   }
 
@@ -3435,6 +3449,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # patients with dense testing do not dominate either visualization.
   patient_bin_trajectory <- function(df, lab_group, stratum_col = "plat_group",
                                      stratum_values = NULL, log_scale = FALSE) {
+    if (!is.null(getOption("compass.figure_data_manifest")))
+      return(figure_cached_patient_bins(LONGITUDINAL_CSV, df, lab_group,
+                                        stratum_col, stratum_values, log_scale))
     sub <- df %>% filter(LAB_GROUP == lab_group, t_rel >= -PRE_DAYS, t_rel <= POST_DAYS)
     if (isTRUE(log_scale)) {
       # Transform measurements before patient/bin aggregation. This makes both
@@ -3603,7 +3620,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         select(DFCI_MRN, LAB_GROUP, t_rel) %>%
         filter(LAB_GROUP %in% coverage_labs,
                t_rel >= -COVERAGE_PRE_DAYS, t_rel < 0)
-      pre_lab_summary <- pre_androgen_df %>%
+      pre_lab_summary <- if (!is.null(getOption("compass.figure_data_manifest"))) {
+        figure_prepared_table(LONGITUDINAL_CSV, "coverage_patient") %>%
+          filter(DFCI_MRN %in% cohort_mrns_long, LAB_GROUP %in% coverage_labs)
+      } else pre_androgen_df %>%
         group_by(DFCI_MRN = as.character(DFCI_MRN), LAB_GROUP) %>%
         summarise(
           n_pre = n(),
@@ -3734,13 +3754,18 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       names(pre_bin_mids) <- pre_bin_levels
       pre_bin_denominators <- coverage_strata %>%
         count(stratification, stratum, name = "n_patients")
-      pre_bin_counts <- pre_androgen_df %>%
+      pre_bin_observations <- if (!is.null(getOption("compass.figure_data_manifest"))) {
+        figure_prepared_table(LONGITUDINAL_CSV, "coverage_bins") %>%
+          filter(DFCI_MRN %in% cohort_mrns_long, LAB_GROUP %in% coverage_labs) %>%
+          transmute(DFCI_MRN, LAB_GROUP, t_bin = pre_bin_levels[bin_id + 1L])
+      } else pre_androgen_df %>%
         transmute(
           DFCI_MRN = as.character(DFCI_MRN), LAB_GROUP,
           t_bin = as.character(cut(
             t_rel, breaks = pre_edges, include.lowest = TRUE, right = FALSE
           ))
-        ) %>%
+        )
+      pre_bin_counts <- pre_bin_observations %>%
         # Availability is binary per patient/lab/bin. Collapse repeated tests
         # before expanding each patient into platinum and NEPC strata.
         distinct(DFCI_MRN, LAB_GROUP, t_bin) %>%

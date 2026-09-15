@@ -1,7 +1,4 @@
-"""Legacy label reference retained for regression tests.
-
-05_figures.Rmd now sources prepare_metastatic_figure_labels.R directly and
-never calls this Python module.
+"""Polars label preparation shared by the cached figure workflow and tests.
 
 Reuse the pipeline's medication-derived ADT intent labels, and compare them
 with the metastatic-diagnosis LLM task and dated regex stages. Stage I–III is
@@ -39,16 +36,34 @@ def collapse_stage(column: str) -> pl.Expr:
     )
 
 
+def parse_datetime(column: str) -> pl.Expr:
+    value = pl.col(column).cast(pl.String).str.strip_chars()
+    iso = value.str.to_datetime(format="%+", strict=False, time_unit="us", time_zone="UTC").dt.replace_time_zone(None)
+    return pl.coalesce(iso, *[value.str.to_datetime(format=fmt, strict=False, time_unit="us")
+        for fmt in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d",
+                    "%m/%d/%Y %H:%M:%S", "%m/%d/%Y"]])
+
+
 def build_labels(intent: pl.DataFrame, notes: pl.DataFrame,
-                 llm: pl.DataFrame) -> pl.DataFrame:
+                 llm: pl.DataFrame, analysis_anchors: pl.DataFrame | None = None) -> pl.DataFrame:
     intent = normalize_id(intent).with_columns(
-        pl.col("ADT_FIRST_DATE").cast(pl.String).str.to_datetime(strict=False),
+        parse_datetime("ADT_FIRST_DATE"),
         pl.col("ADT_INTENT").replace_strict(
             {"LOCALIZED_ADJUVANT": LOCAL, "METASTATIC": MET}, default=None
         ).alias("ADT_LABEL"),
     )
     if intent[ID].n_unique() != intent.height:
         raise ValueError("ADT intent input must contain exactly one row per patient")
+    if analysis_anchors is not None:
+        anchors = normalize_id(analysis_anchors).select(ID,
+            parse_datetime("TREATMENT_ANCHOR_DATE").alias("ANALYSIS_ANCHOR_DATE"))
+        if anchors[ID].n_unique() != anchors.height:
+            raise ValueError("Analysis anchors must contain exactly one row per patient")
+        intent = anchors.join(intent, on=ID, how="left")
+    else:
+        intent = intent.with_columns(pl.col("ADT_FIRST_DATE").alias("ANALYSIS_ANCHOR_DATE"))
+    intent = intent.with_columns((pl.col("ANALYSIS_ANCHOR_DATE").dt.date() -
+        pl.col("ADT_FIRST_DATE").dt.date()).dt.total_days().alias("ANCHOR_DELTA_DAYS"))
 
     # The input is the metastatic-diagnosis task, not the NEPC subtype task.
     verdict = pl.col("has_metastatic_disease").cast(pl.String).str.to_lowercase()
@@ -65,15 +80,15 @@ def build_labels(intent: pl.DataFrame, notes: pl.DataFrame,
     stage_text = pl.col("DERIVED_STAGE_MERGED").cast(pl.String).str.strip_chars().str.to_uppercase()
     notes = normalize_id(notes).select(
         ID,
-        pl.col("EVENT_DATE").cast(pl.String).str.to_datetime(strict=False).alias("stage_date"),
+        parse_datetime("EVENT_DATE").alias("stage_date"),
         stage_text.replace_strict(
             {"1": 1, "2": 2, "3": 3, "4": 4,
              "I": 1, "II": 2, "III": 3, "IV": 4,
              "1.0": 1, "2.0": 2, "3.0": 3, "4.0": 4}, default=None,
         ).alias("stage"),
     ).drop_nulls(["stage_date", "stage"])
-    joined = notes.join(intent.select(ID, "ADT_FIRST_DATE"), on=ID).with_columns(
-        (pl.col("stage_date") - pl.col("ADT_FIRST_DATE")).dt.total_days().alias("days")
+    joined = notes.join(intent.select(ID, "ANALYSIS_ANCHOR_DATE"), on=ID).with_columns(
+        (pl.col("stage_date") - pl.col("ANALYSIS_ANCHOR_DATE")).dt.total_days().alias("days")
     )
     before = joined.filter(pl.col("days") <= 0)
     nearest = before.filter(pl.col("days") >= -365).sort(
