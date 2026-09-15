@@ -214,12 +214,12 @@ def test_figure4_includes_available_case_labs_vs_somatic_sensitivity():
 
 
 def test_figure_roots_do_not_collide():
-    """Arm, tier, artifact and endpoint/subset/exclusion identify each panel."""
+    """Arm, figure family, artifact and endpoint/subset/exclusion identify each panel."""
     source = _pipeline_source()
     assert "COHORT_ARM_DIR <- toupper(cohort_arm(COHORT))" in source
     assert "FIG_ROOT <- file.path(fig_root, COHORT_ARM_DIR)" in source
     assert 'COHORT_LEAF <- paste0(ENDPOINT, "__", cohort_leaf_slug(COHORT))' in source
-    assert 'file.path(FIG_ROOT, "by_figure", tier, group, artifact_name_for_stem(plot_stem, group))' in source
+    assert 'file.path(FIG_ROOT, "by_figure", group, artifact_name_for_stem(plot_stem, group))' in source
 
 
 def test_results_trees_are_endpoint_suffixed():
@@ -237,16 +237,10 @@ def test_results_trees_are_endpoint_suffixed():
 
 
 def test_every_supported_endpoint_nests_uniformly(tmp_path):
-    """The primary platinum cohort goes to main; NEPC and variants to supplements."""
-    script = _extract_function("figure_output_tier") + "\n" + textwrap.dedent("""
-        stopifnot(
-          figure_output_tier("adt", "platinum", "figure3_test") == "main",
-          figure_output_tier("adt", "nepc", "figure3_test") == "supplements",
-          figure_output_tier("adt_metastatic_adt", "platinum", "figure3_test") == "supplements",
-          figure_output_tier("arpi", "platinum", "figure3_test") == "supplements")
-        cat("OK")
-    """)
-    assert _run_r(script, tmp_path).strip() == "OK"
+    """Every endpoint shares figure-family folders without tier selection."""
+    source = _pipeline_source()
+    assert "figure_output_tier" not in source
+    assert 'file.path(FIG_ROOT, "by_figure", group, artifact_name_for_stem(plot_stem, group))' in source
 
 
 def test_pipeline_parses(tmp_path):
@@ -296,7 +290,7 @@ def test_supplement_stems_route_to_their_own_figure_group():
     assert supplement_at < figure1_at
 
     # All groups retain the artifact level; no numbered-group cleanup remains.
-    assert 'file.path(FIG_ROOT, "by_figure", tier, group, artifact_name_for_stem(plot_stem, group))' in source
+    assert 'file.path(FIG_ROOT, "by_figure", group, artifact_name_for_stem(plot_stem, group))' in source
     assert "numbered_figure_groups" not in source
 
 

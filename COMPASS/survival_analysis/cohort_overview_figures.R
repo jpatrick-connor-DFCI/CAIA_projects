@@ -124,7 +124,7 @@ render_cohort_overview <- function(manifest, config) {
   landmark <- config$forest_landmark
   plots <- list(event_incidence = plot_cohort_event_overview(incidence, config$forest_cohorts, landmark),
                 metastatic_label_overlap = plot_stage1_label_overview(overlap))
-  base <- file.path(config$fig_root, "ADT", "by_figure", "supplements", "cohort_comparison")
+  base <- file.path(config$fig_root, "ADT", "by_figure", "cohort_comparison")
   for (name in names(plots)) {
     if (is.null(plots[[name]])) { message("Cohort overview skipped: ", name, " (no available inputs)"); next }
     leaf <- if (name == "event_incidence") paste0(name, "_landmark", landmark) else name

@@ -31,12 +31,17 @@ metadata, prepares changed R figure sets, then renders missing or stale formats.
 source data, and requires the same cohort/analysis settings. Use `all` for
 normal updates and `render` for DPI/PDF changes.
 
-`COMPASS_FIGURE_SCOPE=federated` processes only the no-MSK volcanoes without
+`COMPASS_FIGURE_SCOPE=federated` processes only the no-MSK forest plots without
 requiring longitudinal data or running other figure families.
 
 Caches live under `COMPASS_FIGURE_DATA_ROOT` (default `COMPASS/figure_data`).
 They include patient data and need the same access restrictions as the analysis
-inputs. Versioned caches are retained. Source identity uses absolute paths,
+inputs. All RDS files, including per-image render receipts, live in that data
+cache; none are written beside figure exports. On the next knit, recognized
+legacy `*.cache.rds` receipts in the figure tree are copied, verified, and moved
+into `COMPASS_FIGURE_DATA_ROOT/legacy_render_receipts`. Figures are untouched.
+The data-cache and figure-output directories must be separate and non-nested.
+Versioned caches are retained. Source identity uses absolute paths,
 file sizes and nanosecond modification times, plus code/settings versions.
 Use `FORCE = True` in `04_prep_figure_data.ipynb` after replacing sources while
 preserving timestamps and sizes. In this Rmd, `COMPASS_PREPARE_OVERWRITE=true`
@@ -70,13 +75,17 @@ Cells with fewer than 25 events are hatched/marked; missing cells stay blank.
 The label figure uses `mrn_lists/adt_intent_labels_model_cohort.csv` and
 `llm_met_labels_model_cohort.csv`, preserving missing labels explicitly.
 Run notebook `04` once after this update to prepare these small summary tables.
-Outputs (and their count tables) are under `supplements/cohort_comparison/`:
+Outputs (and their count tables) are under `by_figure/cohort_comparison/`:
 `event_incidence_landmark180` and `metastatic_label_overlap`.
 
-Canonical ADT/platinum panels are main figures; NEPC, cohort variants and
-diagnostics are supplements. Individual subpanels retain this layout:
+All endpoints, cohort variants, and diagnostics are grouped by figure family,
+without a `main`/`supplements` split. Individual subpanels use this layout:
 
-`FIG_ROOT/<ARM>/by_figure/<main|supplements>/<group>/<artifact>/<endpoint>__<subset>__<exclusion>.png`
+`FIG_ROOT/<ARM>/by_figure/<group>/<artifact>/<endpoint>__<subset>__<exclusion>.png`
+
+The next knit moves existing exports out of the old `main`/`supplements`
+directories into this layout and removes the emptied folders. Identical copies
+are consolidated; conflicting files stop migration without overwriting either.
 
 Figure 2 runs once for canonical ADT/platinum. Lab figures run on each selected
 platinum cohort, for PSA/testosterone by default. Trajectories retain day-zero
@@ -92,15 +101,17 @@ regex stage across the record, and ADT versus LLM. Set
 trajectory diagnostics. These use canonical ADT/platinum and the longitudinal
 analysis anchor, with supplied ADT/LLM labels preserved.
 
-The federated supplement now contains only category-colored volcano plots at
-days 0/90/180, using the same renderer as the local univariate volcanoes:
-Cox log HR per SD versus −log10(p), q < 0.05 coloring, shared lab categories,
-label selection, and a y cap of 30 (triangles for capped significant points).
-The same unstable-fit limits apply (|log HR| ≤ 4 and CI ratio < 100).
-It does not join or require local results. Outputs are under
-`supplements/federated_no_msk/volcano_landmark{0,90,180}/`.
-Old agreement/overlap/effect comparison files are not regenerated or deleted.
-These volcanoes run when canonical ADT/platinum is selected, or scope
+The federated output contains only PSA/testosterone forest plots at days
+0/90/180: mean, minimum, maximum, and last value, with delta and observation-count
+features excluded. Plots show HR per SD and 95% CIs on a log axis, plus each
+row's p-value and supplied q-value. Symbols distinguish nominal-only p < 0.05,
+FDR q < 0.05, and nonsignificance. q-values are not recalculated on this subset.
+Finite positive HR estimates are retained; missing/invalid estimates or CIs are
+explicitly marked instead of applying the former volcano magnitude filters.
+No matching local results are required. Outputs are under
+`by_figure/federated_no_msk/psa_testosterone_forest_landmark{0,90,180}/`.
+Old volcano/comparison files are not regenerated or deleted.
+These forests run when canonical ADT/platinum is selected, or scope
 is `federated`. Missing optional sources are reported and skipped. Failures in
 one figure set do not prevent preparation/rendering of other available sets.
 

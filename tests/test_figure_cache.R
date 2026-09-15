@@ -102,6 +102,19 @@ local({
   first <- render_figure_scene(m$scenes[[1]], m$signature, 72, TRUE)
   stopifnot(first$rendered == 2L, figure_file_complete(paste0(destination, ".png")),
             figure_file_complete(paste0(destination, ".pdf")))
+  receipts <- vapply(c("png", "pdf"), function(format) figure_receipt_path(m$scenes[[1]], format), character(1))
+  stopifnot(all(file.exists(receipts)), all(startsWith(receipts, directory)),
+            length(list.files(file.path(root, "figures"), pattern = "\\.rds$", recursive = TRUE)) == 0L)
+  # Migrate old sidecars into data, preserving exact contents and all images.
+  legacy <- paste0(destination, ".png.cache.rds")
+  file.copy(receipts[[1]], legacy)
+  original_hash <- unname(tools::md5sum(legacy))
+  images_before <- figure_file_identity(paste0(destination, c(".png", ".pdf")))
+  stopifnot(figure_archive_legacy_receipts(file.path(root, "figures"), file.path(root, "cache")) == 1L,
+            !file.exists(legacy), identical(images_before, figure_file_identity(images_before$path)))
+  archived <- list.files(file.path(root, "cache", "legacy_render_receipts"), full.names = TRUE)
+  stopifnot(length(archived) == 1L, identical(unname(tools::md5sum(archived)), original_hash),
+            figure_archive_legacy_receipts(file.path(root, "figures"), file.path(root, "cache")) == 0L)
   unchanged <- figure_file_identity(paste0(destination, c(".png", ".pdf")))
   second <- render_figure_scene(m$scenes[[1]], m$signature, 72, TRUE)
   stopifnot(second$rendered == 0L, identical(unchanged, figure_file_identity(unchanged$path)))

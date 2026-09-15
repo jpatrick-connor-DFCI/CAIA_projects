@@ -86,6 +86,12 @@ local({
     prepare_workers = 1L, render_workers = 2L, forest_config = forest, federated_config = fc))[["elapsed"]]
   stopifnot(length(first$prepared) == 4L, length(first$rendered) > 20L,
             all(vapply(first$rendered, function(x) x$rendered == 1L, logical(1))))
+  stopifnot(length(list.files(cfg$fig_root, pattern = "\\.rds$", recursive = TRUE)) == 0L,
+            length(list.files(cfg$cache_root, pattern = "\\.receipt\\.rds$", recursive = TRUE)) > 20L)
+  stopifnot(!any(basename(list.dirs(cfg$fig_root, recursive = TRUE)) %in% c("main", "supplements")))
+  nested_cache <- tryCatch(run_cached_figure_workflow(modifyList(cfg, list(cache_root = cfg$fig_root)),
+    pipeline_path), error = identity)
+  stopifnot(inherits(nested_cache, "error"), grepl("non-nested", conditionMessage(nested_cache)))
   t2 <- system.time(second <- run_cached_figure_workflow(cfg, pipeline_path, "all", dpi = 60,
     forest_config = forest, federated_config = fc))[["elapsed"]]
   stopifnot(all(vapply(second$rendered, function(x) x$rendered == 0L, logical(1))))
@@ -113,7 +119,7 @@ local({
     else do.call(Sys.setenv, setNames(list(previous[[name]]), name))
   }, add = TRUE)
   do.call(Sys.setenv, as.list(variables))
-  # Federated volcanoes do not require a matching local result tree.
+  # Federated forests do not require a matching local result tree.
   stopifnot(file.rename(file.path(root, "survival_analysis", "local_runs_adt"),
                         file.path(root, "local_runs_hidden")))
   rmd <- readLines(file.path(dirname(pipeline_path), "05_figures.Rmd"))
@@ -127,6 +133,6 @@ local({
   eval(parse(text = code), env)
   stopifnot(identical(names(env$figure_run$prepared), "federated"))
   stopifnot(identical(vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem"),
-                      paste0("volcano_landmark", c(0, 90, 180))))
+                      paste0("psa_testosterone_forest_landmark", c(0, 90, 180))))
   cat(sprintf("Synthetic workflow: first %.2fs; unchanged %.2fs; %d panels\n", t1, t2, length(first$rendered)))
 })

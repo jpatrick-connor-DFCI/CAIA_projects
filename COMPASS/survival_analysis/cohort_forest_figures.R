@@ -105,7 +105,7 @@ if (sys.nframe() == 0L) {
     d <- prepare_cohort_forest(frame, endpoint, landmark)
     p <- plot_cohort_forest(d, endpoint, landmark)
     if (is.null(p)) next
-    directory <- file.path(args[2], "ADT", "by_figure", "supplements", "cohort_comparison",
+    directory <- file.path(args[2], "ADT", "by_figure", "cohort_comparison",
                            sprintf("%s_landmark%d", endpoint, landmark))
     dir.create(directory, recursive = TRUE, showWarnings = FALSE)
     destination <- file.path(directory, paste0(endpoint, "__all__incl.png"))

@@ -968,9 +968,13 @@ new_figure_progress <- function(labels,
 
 reuse_previous_figure_layout <- function(destination) {
   if (figure_file_complete(destination)) return(invisible(FALSE))
-  previous <- sub("/by_figure/(main|supplements)/", "/by_figure/", destination)
-  if (identical(previous, destination) || !figure_file_complete(previous))
-    return(invisible(FALSE))
+  candidates <- c(sub("/by_figure/", "/by_figure/main/", destination),
+                  sub("/by_figure/", "/by_figure/supplements/", destination))
+  candidates <- candidates[candidates != destination & vapply(candidates, figure_file_complete, logical(1))]
+  if (!length(candidates)) return(invisible(FALSE))
+  if (length(unique(unname(tools::md5sum(candidates)))) > 1L)
+    stop("Conflicting old figure copies for ", destination)
+  previous <- candidates[[1]]
   dir.create(dirname(destination), recursive = TRUE, showWarnings = FALSE)
   temporary <- tempfile(".compass-copy-", tmpdir = dirname(destination),
                         fileext = paste0(".", tools::file_ext(destination)))
@@ -979,14 +983,6 @@ reuse_previous_figure_layout <- function(destination) {
       !file.rename(temporary, destination)) stop("Could not reuse previous figure: ", previous)
   message("reused completed figure in new layout: ", destination)
   invisible(TRUE)
-}
-
-figure_output_tier <- function(cohort, endpoint, plot_stem) {
-  supplemental <- cohort != "adt" || endpoint != "platinum" ||
-    grepl("^(adt_intent_|adt_labels_|cohort_forest_|figure1s|pre_adt_coverage_)", plot_stem) ||
-    grepl("nepc", plot_stem, ignore.case = TRUE) ||
-    plot_stem %in% c("figure2v3_confusion_matrix", "figure2v3_metric_bar")
-  if (supplemental) "supplements" else "main"
 }
 
 # Render the full COMPASS figure set for one cohort arm and one survival
@@ -1195,8 +1191,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     NEPC_PROJ_PATH, "mrn_lists", "icd_prostate_mrn_flags.csv"
   )
 
-  # Canonical ADT platinum panels are main figures; NEPC, cohort variations,
-  # and diagnostic families are supplements. Each subpanel keeps its own
+  # All endpoints, cohort variants, and diagnostics share figure-family folders.
+  # Each subpanel keeps its own
   # artifact directory and endpoint/subset/exclusion leaf to avoid collisions.
   COHORT_ARM_DIR <- toupper(cohort_arm(COHORT))
   FIG_ROOT <- file.path(fig_root, COHORT_ARM_DIR)
@@ -1220,7 +1216,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     NA_character_
   }
   # Layout, every output:
-  #   FIG_ROOT/by_figure/<main|supplements>/<group>/<trimmed-name>/<endpoint>__<subset>__<exclusion>.png
+  #   FIG_ROOT/by_figure/<group>/<trimmed-name>/<endpoint>__<subset>__<exclusion>.png
   # Per-lab panels keep their category/lab nesting for the same reason as
   # before -- ~40 labs x 4 strata would otherwise dump 160+ entries into one
   # directory -- and still bottom out at <= 12 files per leaf:
@@ -1320,15 +1316,14 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (!nzchar(artifact_name)) "figure" else artifact_name
   }
 
-  # Every stem routes to .../by_figure/<main|supplements>/<group>/<trimmed-artifact-name>/, whose leaf holds one
+  # Every stem routes to .../by_figure/<group>/<trimmed-artifact-name>/, whose leaf holds one
   # file per cohort x endpoint cell. Uniform for numbered and supplemental
   # groups alike: the per-artifact level is what keeps sibling panels in a group
   # from sharing a leaf, and COHORT_LEAF (endpoint + subset + exclusion) is
   # what keeps the twelve cells within a stem from colliding.
   output_dir_for_stem <- function(plot_stem) {
     group <- figure_group(plot_stem)
-    tier <- figure_output_tier(COHORT, ENDPOINT, plot_stem)
-    file.path(FIG_ROOT, "by_figure", tier, group, artifact_name_for_stem(plot_stem, group))
+    file.path(FIG_ROOT, "by_figure", group, artifact_name_for_stem(plot_stem, group))
   }
 
   # save_fig checks only the exact requested
@@ -2061,12 +2056,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                      sprintf("Platinum- (n=%s)", format(n_neg, big.mark = ","))),
           name = NULL) +
         coord_cartesian(ylim = c(0, 1.0)) +
+        # Dodged pairs leave each class only ~1/4 of the panel, so wrap the class
+        # names rather than letting neighbouring labels collide at this text size.
+        scale_x_discrete(labels = function(x) str_wrap(x, 12)) +
         labs(x = NULL, y = "Fraction within platinum group", title = str_wrap(title, 65)) +
         theme_fig() +
         theme(plot.title = element_text(face = "bold", size = 11),
               axis.title.x = element_blank(),
               axis.title.y = element_text(size = 16),
               axis.text  = element_text(size = 14),
+              axis.text.x = element_text(size = 13, lineheight = 0.95, margin = margin(t = 4)),
               legend.position = "bottom", legend.justification = "center")
     }
 
@@ -2212,7 +2211,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         "Subtype landscape by platinum status") +
       labs(caption = str_wrap(caption_b_v3, 85)) +
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-    save_fig(pB_v3, OUT_DIR_V3, "figure2v3_subtype_landscape", 6.5, 8)
+    save_fig(pB_v3, OUT_DIR_V3, "figure2v3_subtype_landscape", 9.5, 8)
 
     ## Panel C -- aggressive (avpc+nepc) vs conventional platinum enrichment.
     enrichment_v3 <- compute_enrichment(v3_labels_all)

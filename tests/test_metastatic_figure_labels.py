@@ -85,17 +85,6 @@ def test_r_comparisons_and_standalone_diagnostics(tmp_path):
     script = f'''
       suppressPackageStartupMessages({{library(dplyr); library(tidyr); library(ggplot2)}})
       source({json.dumps(str(SCRIPTS / "metastatic_figure_supplements.R"))})
-      for (expr in parse({json.dumps(str(SCRIPTS / "COMPASS_generate_figures_pipeline.R"))})) {{
-        if (is.call(expr) && identical(expr[[1]], as.name("<-")) &&
-            identical(expr[[2]], as.name("figure_output_tier"))) eval(expr)
-      }}
-      stopifnot(figure_output_tier("adt", "platinum", "figure3_test") == "main",
-        figure_output_tier("adt", "nepc", "figure3_test") == "supplements",
-        figure_output_tier("adt_metastatic_llm", "platinum", "figure3_test") == "supplements",
-        figure_output_tier("adt_noprecastrate", "platinum", "figure3_test") == "supplements",
-        figure_output_tier("adt", "platinum", "adt_labels_coverage") == "supplements",
-        figure_output_tier("adt", "platinum", "longitudinal_has_nepc_psa") == "supplements",
-        figure_output_tier("adt", "platinum", "figure2v3_enrichment") == "main")
       root <- {json.dumps(str(tmp_path))}
       config <- list(prepare_script = {json.dumps(str(SCRIPTS / "prepare_metastatic_figure_labels.R"))},
         intent = file.path(root, "intent.csv"), stage = file.path(root, "stage.parquet"),

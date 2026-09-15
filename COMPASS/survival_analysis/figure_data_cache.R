@@ -104,12 +104,94 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE) {
   m
 }
 
+figure_receipt_path <- function(scene, format) {
+  # Scene objects live under COMPASS_FIGURE_DATA_ROOT, never beside exports.
+  paste0(scene$path, ".", format, ".receipt.rds")
+}
+
+figure_flatten_export_layout <- function(fig_root) {
+  moves <- list(); roots <- character()
+  for (arm in c("ADT", "ARPI")) {
+    base <- file.path(fig_root, arm, "by_figure")
+    for (tier in c("main", "supplements")) {
+      old <- file.path(base, tier)
+      if (!dir.exists(old)) next
+      roots <- c(roots, old)
+      paths <- list.files(old, recursive = TRUE, full.names = TRUE, all.files = TRUE, no.. = TRUE)
+      for (path in paths) moves[[length(moves)+1L]] <- c(from = path,
+        to = file.path(base, substring(path, nchar(old)+2L)))
+    }
+    # Notebook 07 previously wrote standalone cohort-comparison panels here.
+    old <- file.path(fig_root, arm, "supplements")
+    if (dir.exists(old)) {
+      roots <- c(roots, old)
+      paths <- list.files(old, recursive = TRUE, full.names = TRUE, all.files = TRUE, no.. = TRUE)
+      for (path in paths) moves[[length(moves)+1L]] <- c(from = path,
+        to = file.path(base, "cohort_comparison", substring(path, nchar(old)+2L)))
+    }
+  }
+  if (!length(roots)) return(invisible(0L))
+  # Preflight all collisions before moving anything. Different images/tables
+  # with the same destination need an explicit choice, not a silent overwrite.
+  if (length(moves)) {
+    from <- vapply(moves, `[[`, character(1), "from")
+    to <- vapply(moves, `[[`, character(1), "to")
+    if (any(grepl("\\.rds$", from, ignore.case = TRUE)))
+      stop("Unrecognized RDS files remain in the old figure layout; move them to data before flattening.")
+    for (destination in unique(to)) {
+      candidates <- c(from[to == destination], if (file.exists(destination)) destination)
+      hashes <- unname(tools::md5sum(candidates))
+      if (anyNA(hashes) || length(unique(hashes)) != 1L)
+        stop("Figure layout collision; no files moved. Resolve differing copies for: ", destination)
+    }
+    for (i in seq_along(from)) {
+      dir.create(dirname(to[i]), recursive = TRUE, showWarnings = FALSE)
+      if (file.exists(to[i])) {
+        if (unlink(from[i]) != 0L) stop("Could not remove identical legacy copy: ", from[i])
+      } else if (!file.rename(from[i], to[i])) stop("Could not move figure: ", from[i])
+    }
+  }
+  for (root in roots) {
+    directories <- list.dirs(root, recursive = TRUE, full.names = TRUE)
+    for (directory in directories[order(nchar(directories), decreasing = TRUE)])
+      if (!length(list.files(directory, all.files = TRUE, no.. = TRUE))) unlink(directory, recursive = TRUE)
+  }
+  if (length(moves)) message("Flattened ", length(moves),
+    " figure/table files into by_figure families; removed empty main/supplements directories. Identical duplicate copies were consolidated.")
+  invisible(length(moves))
+}
+
+figure_archive_legacy_receipts <- function(fig_root, cache_root) {
+  if (!dir.exists(fig_root)) return(invisible(0L))
+  paths <- list.files(fig_root, pattern = "\\.cache\\.rds$", recursive = TRUE, full.names = TRUE)
+  moved <- 0L
+  for (path in paths) {
+    # Only migrate this pipeline's known receipt schema, not arbitrary user RDS.
+    receipt <- tryCatch(readRDS(path), error = function(e) NULL)
+    if (!is.list(receipt) || !is.list(receipt$identity) || is.null(receipt$identity$signature) ||
+        !is.data.frame(receipt$file) || !all(c("path", "size", "mtime") %in% names(receipt$file))) next
+    archive <- file.path(cache_root, "legacy_render_receipts",
+      paste0(figure_object_hash(list(figure_absolute_path(path), unname(tools::md5sum(path)))), ".rds"))
+    dir.create(dirname(archive), recursive = TRUE, showWarnings = FALSE)
+    # Copy/verify before removal: figure and data roots can be different filesystems.
+    if (!file.exists(archive) && !file.copy(path, archive, copy.date = TRUE))
+      stop("Could not move legacy render receipt into data cache: ", path)
+    if (!identical(unname(tools::md5sum(path)), unname(tools::md5sum(archive))))
+      stop("Legacy receipt copy failed verification; original retained: ", path)
+    if (unlink(path) != 0L) stop("Receipt copied to data cache but could not remove original: ", path)
+    moved <- moved + 1L
+  }
+  if (moved) message("Moved ", moved, " legacy render receipts from figure exports into ",
+                     file.path(cache_root, "legacy_render_receipts"), " (recoverable there).")
+  invisible(moved)
+}
+
 render_figure_scene <- function(scene, signature, dpi, pdf, overwrite = FALSE) {
   grob <- NULL
   rendered <- 0L
   for (format in c("png", if (pdf) "pdf")) {
     path <- paste0(scene$destination, ".", format)
-    receipt <- paste0(path, ".cache.rds")
+    receipt <- figure_receipt_path(scene, format)
     identity <- list(signature = signature, dpi = if (format == "png") dpi else NULL,
                      width = scene$width, height = scene$height)
     fresh <- if (file.exists(receipt)) tryCatch({
@@ -135,7 +217,7 @@ render_figure_scene <- function(scene, signature, dpi, pdf, overwrite = FALSE) {
 figure_scene_complete <- function(scene, signature, dpi, pdf) {
   all(vapply(c("png", if (pdf) "pdf"), function(format) {
     path <- paste0(scene$destination, ".", format)
-    receipt <- paste0(path, ".cache.rds")
+    receipt <- figure_receipt_path(scene, format)
     if (!file.exists(receipt) || !figure_file_complete(path)) return(FALSE)
     identity <- list(signature = signature, dpi = if (format == "png") dpi else NULL,
                      width = scene$width, height = scene$height)
@@ -232,10 +314,16 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     metastatic_config = NULL, forest_config = NULL, federated_config = NULL) {
   stage <- match.arg(stage, c("all", "prepare", "render"))
   started <- proc.time()[["elapsed"]]
-  dir.create(config$cache_root, recursive = TRUE, showWarnings = FALSE)
   for (name in c("data_root", "cache_root", "fig_root"))
     config[[name]] <- figure_absolute_path(config[[name]])
+  if (identical(config$cache_root, config$fig_root) ||
+      startsWith(config$cache_root, paste0(config$fig_root, "/")) ||
+      startsWith(config$fig_root, paste0(config$cache_root, "/")))
+    stop("COMPASS_FIGURE_DATA_ROOT and COMPASS_FIG_ROOT must be separate, non-nested directories; keep caches in data.")
+  dir.create(config$cache_root, recursive = TRUE, showWarnings = FALSE)
   manifest <- figure_notebook_manifest(config, check_sources = stage != "render")
+  figure_archive_legacy_receipts(config$fig_root, config$cache_root)
+  figure_flatten_export_layout(config$fig_root)
   old <- options(compass.figure_data_manifest = manifest)
   on.exit(options(old), add = TRUE)
   runtime <- list(R = as.character(getRversion()), packages = vapply(

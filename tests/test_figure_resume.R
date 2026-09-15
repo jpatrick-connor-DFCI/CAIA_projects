@@ -67,10 +67,10 @@ local({
   stopifnot(length(env$saves) == 4L)
 
   # Main/supplement reorganization reuses only the same leaf and artifact.
-  old <- file.path(root, "by_figure", "figure3", "test", "platinum__all__incl.png")
+  old <- file.path(root, "by_figure", "main", "figure3", "test", "platinum__all__incl.png")
   dir.create(dirname(old), recursive = TRUE)
   file.copy(png, old)
-  new <- file.path(root, "by_figure", "main", "figure3", "test", "platinum__all__incl.png")
+  new <- file.path(root, "by_figure", "figure3", "test", "platinum__all__incl.png")
   stopifnot(env$reuse_previous_figure_layout(new), identical(bytes(new), bytes(old)),
     !env$reuse_previous_figure_layout(sub("platinum__", "nepc__", new)),
     !env$reuse_previous_figure_layout(new))
@@ -112,7 +112,7 @@ local({
 local({
   env <- new.env(parent = globalenv())
   for (expr in expressions) {
-    for (name in c("figure_output_tier", "figure_group", "artifact_name_for_stem",
+    for (name in c("figure_group", "artifact_name_for_stem",
                    "output_dir_for_stem", "lab_stem_slug", "match_lab_in_stem")) {
       assignment <- find_assignment(expr, name)
       if (!is.null(assignment)) eval(assignment, env)
@@ -126,7 +126,7 @@ local({
   # Default output is the three confusion matrices only.
   stems <- env$metastatic_supplement_stems()
   paths <- vapply(stems, env$output_dir_for_stem, character(1))
-  stopifnot(!anyDuplicated(paths), all(grepl("/supplements/metastatic_labels/", paths)),
+  stopifnot(!anyDuplicated(paths), all(grepl("/metastatic_labels/", paths)),
     setequal(stems, paste0("adt_labels_", c("llm_vs_regex_max_any",
       "adt_vs_regex_max_any", "adt_vs_llm"))))
   # The retained panels still route correctly when re-enabled; PSA and
@@ -137,7 +137,7 @@ local({
     Sys.setenv(COMPASS_METASTATIC_EXTRA_PANELS = old), add = TRUE)
   extra <- env$metastatic_supplement_stems()
   extra_paths <- vapply(extra, env$output_dir_for_stem, character(1))
-  stopifnot(!anyDuplicated(extra_paths), length(extra) == 22,
+  stopifnot(!anyDuplicated(extra_paths), length(extra) == 18,
     endsWith(extra_paths[["adt_labels_adt_trajectory_psa"]], "/adt_trajectory_psa"),
     endsWith(extra_paths[["adt_labels_adt_trajectory_testosterone"]], "/adt_trajectory_testosterone"))
 })
