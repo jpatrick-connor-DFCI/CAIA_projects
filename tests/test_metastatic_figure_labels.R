@@ -61,7 +61,7 @@ stopifnot(aligned_burden$N_MET_SITES[aligned_burden$DFCI_MRN=="1"]==3,
 failure <- tryCatch(build_metastatic_labels(intent,notes,llm,bind_rows(anchors,anchors[1,])),error=identity)
 stopifnot(inherits(failure,"error"), grepl("one row per patient",conditionMessage(failure)))
 
-# Python runs once during preparation; individual label panels use the cache.
+# Python runs only in the 04 notebook; all R figure stages use its cache.
 active <- paste(readLines("COMPASS/survival_analysis/05_figures.Rmd"),
                 collapse="\n")
 renderer <- paste(readLines("COMPASS/survival_analysis/metastatic_figure_supplements.R"),collapse="\n")

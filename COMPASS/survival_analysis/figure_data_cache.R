@@ -172,6 +172,59 @@ figure_parallel <- function(items, fun, workers) {
     list(error = "worker exited without a result") else x)
 }
 
+figure_notebook_manifest <- function(config, check_sources = TRUE) {
+  guidance <- "Run 04_prep_figure_data.ipynb with the requested settings, then rerun 05_figures.Rmd."
+  fail <- function(detail) stop(detail, "\n", guidance, call. = FALSE)
+  path <- file.path(config$cache_root, "manifest.json")
+  if (!file.exists(path)) fail(paste("Missing notebook-prepared manifest:", path))
+  manifest <- tryCatch(jsonlite::read_json(path, simplifyVector = FALSE),
+    error = function(e) fail(paste("Cannot read prepared manifest:", conditionMessage(e))))
+  if (!identical(manifest$schema_version, 2L)) fail("Prepared manifest has an unsupported schema.")
+  prepared <- manifest$config
+  values <- function(x) as.character(unlist(x, use.names = FALSE))
+  same <- function(a, b) identical(sort(values(a)), sort(values(b)))
+  same_path <- function(a, b) length(a) == 1L && length(b) == 1L &&
+    identical(figure_absolute_path(a), figure_absolute_path(b))
+  for (key in c("data_root", "cache_root"))
+    if (!same_path(prepared[[key]], config[[key]])) fail(paste("Prepared path does not match:", key))
+  federated_only <- identical(config$scope, "federated")
+  if (!federated_only) {
+    if (identical(prepared$scope, "federated")) fail("Only federated data were prepared.")
+    for (key in c("cohorts", "endpoints"))
+      if (!all(values(config[[key]]) %in% values(prepared[[key]])))
+        fail(paste("Notebook did not prepare requested", key))
+    for (key in c("labs", "gam", "adt_intent", "metastatic", "metastatic_extra",
+                  "forest_cohorts", "forest_landmark"))
+      if (!same(prepared[[key]], config[[key]])) fail(paste("Prepared setting does not match:", key))
+    if (!same_path(prepared$classifier_path, config$classifier_path))
+      fail("Prepared classifier path does not match.")
+    if (isTRUE(config$metastatic)) for (key in c("intent", "stage", "llm", "icd"))
+      if (!same_path(prepared$metastatic_sources[[key]], config$metastatic_sources[[key]]))
+        fail(paste("Prepared metastatic source does not match:", key))
+  }
+  if (isTRUE(config$federated)) {
+    if (!isTRUE(prepared$federated) || !same_path(prepared$federated_path, config$federated_path))
+      fail("Requested federated results were not prepared.")
+  }
+  # R only checks metadata. It never launches Python or reconstructs its tables.
+  # Render-only deliberately uses the prepared snapshot with sources offline.
+  fingerprints <- if (federated_only) {
+    if (check_sources) manifest$federated_sources else list()
+  } else c(manifest$outputs, if (check_sources) manifest$source_fingerprints)
+  for (item in fingerprints) {
+    exists <- file.exists(item$path)
+    if (isTRUE(item$missing)) {
+      if (exists) fail(paste("A previously missing source is now present:", item$path))
+    } else {
+      info <- file.info(item$path)
+      if (!exists || is.na(info$size) || info$size != item$bytes ||
+          abs(as.numeric(info$mtime) - item$mtime_ns / 1e9) > 1e-6)
+        fail(paste("Prepared data/source is missing or changed:", item$path))
+    }
+  }
+  manifest
+}
+
 run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     prepare_workers = 1L, render_workers = 2L, dpi = 200, pdf = FALSE,
     prepare_overwrite = FALSE, render_overwrite = FALSE,
@@ -181,31 +234,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
   dir.create(config$cache_root, recursive = TRUE, showWarnings = FALSE)
   for (name in c("data_root", "cache_root", "fig_root"))
     config[[name]] <- figure_absolute_path(config[[name]])
-  request <- figure_object_hash(config)
-  request_dir <- file.path(config$cache_root, "requests", request)
-  dir.create(request_dir, recursive = TRUE, showWarnings = FALSE)
-  manifest_path <- file.path(request_dir, "manifest.json")
-  if (stage != "render") {
-    python_config <- config
-    python_config$manifest_path <- manifest_path
-    python_config$force <- prepare_overwrite
-    config_path <- tempfile("config-", tmpdir = request_dir, fileext = ".json")
-    jsonlite::write_json(python_config, config_path, auto_unbox = TRUE, pretty = TRUE)
-    python <- Sys.getenv("COMPASS_FIGURE_PYTHON", "python3")
-    threads <- Sys.getenv("POLARS_MAX_THREADS", "")
-    if (!nzchar(threads)) {
-      allocation <- suppressWarnings(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "4")))
-      if (is.na(allocation) || allocation < 1L) allocation <- 4L
-      threads <- as.character(min(4L, allocation))
-    }
-    if (!grepl("^[1-9][0-9]*$", threads)) stop("POLARS_MAX_THREADS must be a positive integer")
-    message("Preparing/validating Polars figure data (threads=", threads, ") ...")
-    status <- system2(python, c(shQuote(file.path(dirname(pipeline_path), "prepare_figure_data.py")),
-                               "--config", shQuote(config_path)), env = paste0("POLARS_MAX_THREADS=", threads))
-    if (status != 0L) stop("Figure preparation failed; see Python output above. Config: ", config_path)
-  }
-  if (!file.exists(manifest_path)) stop("No prepared snapshot for these settings; run COMPASS_FIGURE_STAGE=all or prepare first.")
-  manifest <- jsonlite::read_json(manifest_path, simplifyVector = FALSE)
+  manifest <- figure_notebook_manifest(config, check_sources = stage != "render")
   old <- options(compass.figure_data_manifest = manifest)
   on.exit(options(old), add = TRUE)
   runtime <- list(R = as.character(getRversion()), packages = vapply(

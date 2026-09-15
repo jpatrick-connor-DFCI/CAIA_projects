@@ -1,6 +1,6 @@
 """Prepare immutable Polars figure tables and source fingerprints for 05_figures.
 
-Run with --config CONFIG.json (also written automatically by the Rmd). Patient
+Imported by 04_prep_figure_data.ipynb. Patient
 tables stay under the data root, never under the public figure output tree.
 The large longitudinal CSV is scanned once per changed treatment arm. R keeps
 the established survival/GAM/statistical estimators and caches their outputs
@@ -231,7 +231,10 @@ def prepare(config: dict) -> dict:
     if config.get("scope", "all") not in {"all", "federated"}:
         raise ValueError("scope must be all or federated")
     version = code_version()
-    manifest = {"version": version, "arms": {}, "cells": {}, "errors": {}, "bins": {
+    manifest = {"schema_version": 2,
+                "config": {k: v for k, v in config.items() if k not in {"force", "manifest_path"}},
+                "source_fingerprints": [],
+                "outputs": [], "version": version, "arms": {}, "cells": {}, "errors": {}, "bins": {
         "trajectory_edges": bin_edges(), "coverage_edges": bin_edges(COVERAGE_PRE, 0)}}
     arms = [] if config.get("scope") == "federated" else sorted({"arpi" if c.startswith("arpi") else "adt" for c in cohorts})
     with preparation_lock(cache):
@@ -277,6 +280,8 @@ def prepare(config: dict) -> dict:
             else:
                 print(f"Reused {arm} Polars tables", flush=True)
             output_version = json.loads((directory / "manifest.json").read_text())["outputs"]
+            manifest["outputs"].extend(output_version.values())
+            manifest["source_fingerprints"].append(fingerprint(source))
             manifest["arms"][arm] = {"source": str(source.resolve()), "key": digest([key, output_version]),
                                      "directory": str(directory.resolve())}
 
@@ -302,12 +307,15 @@ def prepare(config: dict) -> dict:
                         manifest["errors"]["adt__platinum"] = f"Metastatic label preparation failed: {exc}"
                 if "adt__platinum" not in manifest["errors"]:
                     manifest["metastatic_labels"] = str(path.resolve())
+                    manifest["outputs"].append(fingerprint(path))
 
         shared_paths = [root / "LLM_NEPC_labels" / "baca_lab_annotations.csv",
                         root / "mrn_lists" / "platinum_MRN_list.csv",
                         root / "mrn_lists" / "icd_prostate_mrn_flags.csv",
                         Path(config["classifier_path"]) / "LLM_NEPC_classifier_labels.tsv"]
         shared = [fingerprint(p) for p in shared_paths]
+        if arms:
+            manifest["source_fingerprints"].extend(shared)
         for cohort in (cohorts if arms else []):
             arm = "arpi" if cohort.startswith("arpi") else "adt"
             for endpoint in endpoints:
@@ -327,6 +335,7 @@ def prepare(config: dict) -> dict:
                     if endpoint == "platinum" and config.get("metastatic", False):
                         sources += [fingerprint(Path(p)) for p in config["metastatic_sources"].values()]
                 cell = f"{cohort}__{endpoint}"
+                manifest["source_fingerprints"].extend(sources)
                 manifest["cells"][cell] = digest({"sources": sources, "shared": shared,
                     "arm": manifest["arms"][arm]["key"], "code": version, "force": manifest["force_version"],
                     "settings": {k: config.get(k) for k in ["gam", "metastatic", "metastatic_extra", "adt_intent", "forest_cohorts", "forest_landmark"]}})
@@ -334,6 +343,12 @@ def prepare(config: dict) -> dict:
             "file": fingerprint(Path(config["federated_path"])),
             "local": [fingerprint(root / "survival_analysis" / "local_runs_adt" / "cox" / f"landmark_{lm}" / "both" /
                                   "cox_agg_univariate_nobs_adjusted.csv") for lm in [0, 90, 180]]})
+        if config.get("federated", False):
+            manifest["federated_sources"] = [
+                fingerprint(Path(config["federated_path"])), *[
+                    fingerprint(root / "survival_analysis" / "local_runs_adt" / "cox" / f"landmark_{lm}" / "both" /
+                                "cox_agg_univariate_nobs_adjusted.csv") for lm in [0, 90, 180]]]
+            manifest["source_fingerprints"].extend(manifest["federated_sources"])
         atomic_json(Path(config.get("manifest_path", cache / "manifest.json")), manifest)
     return manifest
 

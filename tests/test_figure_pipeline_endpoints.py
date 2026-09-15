@@ -388,3 +388,15 @@ def test_a_failed_cohort_does_not_abandon_the_rest():
     assert "tryCatch(fun(item)" in helper
     assert helper.index("prepared <- figure_parallel(") < helper.index('stop("Figure workflow failures:')
     assert helper.index("render_results[!completed] <- figure_parallel(") < helper.index('stop("Figure workflow failures:')
+
+
+def test_r_figure_workflow_never_launches_python():
+    """Python belongs exclusively to 04, including all/prepare stages in 05."""
+    paths = [PIPELINE_R.parent / "05_figures.Rmd", *PIPELINE_R.parent.glob("*.R")]
+    for path in paths:
+        code = path.read_text()
+        assert not re.search(r"\b(?:system2?|py_run_file|py_run_string|source_python)\s*\(", code), path
+        assert "reticulate::" not in code, path
+    helper = (PIPELINE_R.parent / "figure_data_cache.R").read_text()
+    assert "figure_notebook_manifest(config" in helper
+    assert "Run 04_prep_figure_data.ipynb" in helper

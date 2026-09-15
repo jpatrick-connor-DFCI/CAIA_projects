@@ -58,6 +58,18 @@ local({
     federated = TRUE, federated_path = fed_path)
   fc <- list(script = file.path(dirname(pipeline_path), "federated_no_msk_figures.R"), results = fed_path)
   forest <- list(script = file.path(dirname(pipeline_path), "cohort_forest_figures.R"), cohorts = "adt", landmark = 180L)
+  # Fixture setup represents the separate notebook preparation stage. Python
+  # is then unavailable for every R workflow stage, not just render-only.
+  missing <- tryCatch(figure_notebook_manifest(cfg), error = identity)
+  stopifnot(inherits(missing, "error"), grepl("04_prep_figure_data.ipynb", conditionMessage(missing), fixed = TRUE))
+  config_path <- file.path(root, "fixture-config.json")
+  jsonlite::write_json(cfg, config_path, auto_unbox = TRUE)
+  stopifnot(system2("python3", c(shQuote(file.path(dirname(pipeline_path), "prepare_figure_data.py")),
+    "--config", shQuote(config_path))) == 0L)
+  for (name in c("system", "system2")) assign(name, function(...) stop("Process launch forbidden during R figures"), .GlobalEnv)
+  on.exit(rm(list = c("system", "system2"), envir = .GlobalEnv), add = TRUE)
+  mismatch <- tryCatch(figure_notebook_manifest(modifyList(cfg, list(cohorts = "arpi"))), error = identity)
+  stopifnot(inherits(mismatch, "error"), grepl("04_prep_figure_data.ipynb", conditionMessage(mismatch), fixed = TRUE))
   t1 <- system.time(first <- run_cached_figure_workflow(cfg, pipeline_path, "all", dpi = 60,
     prepare_workers = 1L, render_workers = 2L, forest_config = forest, federated_config = fc))[["elapsed"]]
   stopifnot(length(first$prepared) == 3L, length(first$rendered) > 20L,
@@ -65,6 +77,9 @@ local({
   t2 <- system.time(second <- run_cached_figure_workflow(cfg, pipeline_path, "all", dpi = 60,
     forest_config = forest, federated_config = fc))[["elapsed"]]
   stopifnot(all(vapply(second$rendered, function(x) x$rendered == 0L, logical(1))))
+  prepared_only <- run_cached_figure_workflow(cfg, pipeline_path, "prepare", dpi = 60,
+    forest_config = forest, federated_config = fc)
+  stopifnot(length(prepared_only$prepared) == 3L, length(prepared_only$rendered) == 0L)
   # Render-only must not even start Python or read a raw input.
   python <- Sys.getenv("COMPASS_FIGURE_PYTHON", unset = NA)
   Sys.setenv(COMPASS_FIGURE_PYTHON = "/no/python/allowed")
@@ -73,7 +88,8 @@ local({
   third <- run_cached_figure_workflow(cfg, pipeline_path, "render", dpi = 60,
     forest_config = forest, federated_config = fc)
   stopifnot(all(vapply(third$rendered, function(x) x$rendered == 0L, logical(1))))
-  if (is.na(python)) Sys.unsetenv("COMPASS_FIGURE_PYTHON") else Sys.setenv(COMPASS_FIGURE_PYTHON = python)
+  stale <- tryCatch(figure_notebook_manifest(cfg), error = identity)
+  stopifnot(inherits(stale, "error"), grepl("04_prep_figure_data.ipynb", conditionMessage(stale), fixed = TRUE))
   # Execute the actual Rmd chunks with a federation-only scope and raw patient
   # input hidden. This verifies configuration wiring as well as the helper API.
   variables <- c(COMPASS_DATA_ROOT = root, COMPASS_FIG_ROOT = cfg$fig_root,

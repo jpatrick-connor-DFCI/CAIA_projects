@@ -8,15 +8,14 @@ output:
 
 ## Workflow
 
-Run `04_prep_figure_data.ipynb` to prepare the Python tables first. Its settings
-match this document; the default knit revalidates and reuses those caches.
-The notebook imports `prepare_figure_data.py`, which also supports a standalone
-`--config` CLI. Running the notebook is optional: this document can run the
-same preparation automatically.
+Run `04_prep_figure_data.ipynb` first to prepare the Polars tables and manifest.
+All Python execution belongs to that notebook. This document and its R helpers
+never invoke Python: they consume the notebook's prepared data only. Missing,
+changed, or incompatible inputs stop with instructions to rerun the notebook.
 
 Preparation and rendering are separate stages:
 
-1. `prepare_figure_data.py` uses Polars to scan each selected arm's longitudinal
+1. `04_prep_figure_data.ipynb` uses Polars to scan each selected arm's longitudinal
    CSV once and cache patient metadata, all-lab record spans, selected lab
    measurements, patient/bin raw and log means, and pre-treatment coverage.
 2. R consumes those tables, calculates the existing survival statistics and
@@ -25,9 +24,10 @@ Preparation and rendering are separate stages:
 3. Rendering loads the graphics objects and writes individual PNGs and optional
    PDFs. It does not read patient inputs, fit curves, or repeat plot calculations.
 
-`COMPASS_FIGURE_STAGE=all` (default) validates source fingerprints, prepares
-changed data/figure sets, then renders missing or stale formats. `prepare`
-builds caches only. `render` uses the last prepared snapshot without checking
+`COMPASS_FIGURE_STAGE=all` (default) checks the notebook manifest and source
+metadata, prepares changed R figure sets, then renders missing or stale formats.
+`prepare` builds R graphics caches only; it does not prepare Python tables.
+`render` uses the last prepared snapshot without checking
 source data, and requires the same cohort/analysis settings. Use `all` for
 normal updates and `render` for DPI/PDF changes.
 
@@ -38,15 +38,16 @@ Caches live under `COMPASS_FIGURE_DATA_ROOT` (default `COMPASS/figure_data`).
 They include patient data and need the same access restrictions as the analysis
 inputs. Versioned caches are retained. Source identity uses absolute paths,
 file sizes and nanosecond modification times, plus code/settings versions.
-Set `COMPASS_PREPARE_OVERWRITE=true` after replacing sources while preserving
-timestamps and sizes. Image receipts record the prepared snapshot and DPI;
+Use `FORCE = True` in `04_prep_figure_data.ipynb` after replacing sources while
+preserving timestamps and sizes. In this Rmd, `COMPASS_PREPARE_OVERWRITE=true`
+rebuilds R graphics caches only. Image receipts record the prepared snapshot and DPI;
 affected formats regenerate automatically. Existing images without a receipt
 are regenerated once.
 
-Python requires Polars; `COMPASS_FIGURE_PYTHON` selects its executable.
-R needs its existing plotting packages plus `nanoparquet` or `arrow`.
-Polars completes before R workers start. `POLARS_MAX_THREADS` defaults to at
-most four, respecting the SLURM CPU allocation when available.
+The notebook's Python kernel requires Polars. R needs its existing plotting
+packages plus `nanoparquet` or `arrow`; no Python installation is needed to knit.
+The notebook controls `POLARS_MAX_THREADS`, defaulting to at most four and
+respecting the SLURM CPU allocation when available.
 `COMPASS_PREPARE_WORKERS` defaults to one to limit memory use;
 `COMPASS_RENDER_WORKERS` defaults to two and parallelizes individual panels on
 Linux. macOS and Windows render sequentially because native graphics libraries
