@@ -2061,12 +2061,20 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         scale_x_discrete(labels = function(x) str_wrap(x, 12)) +
         labs(x = NULL, y = "Fraction within platinum group", title = str_wrap(title, 65)) +
         theme_fig() +
+        # Keep cohort counts on separate rows so long labels cannot touch the
+        # next colour key, including when the cached grob is rendered smaller.
+        guides(fill = guide_legend(ncol = 1, byrow = TRUE)) +
         theme(plot.title = element_text(face = "bold", size = 11),
               axis.title.x = element_blank(),
-              axis.title.y = element_text(size = 16),
+              axis.title.y = element_text(size = 14, margin = margin(r = 14)),
               axis.text  = element_text(size = 14),
+              axis.text.y = element_text(margin = margin(r = 6)),
               axis.text.x = element_text(size = 13, lineheight = 0.95, margin = margin(t = 4)),
-              legend.position = "bottom", legend.justification = "center")
+              legend.position = "bottom", legend.justification = "center",
+              legend.box = "vertical",
+              legend.text = element_text(size = 10, margin = margin(l = 6)),
+              legend.key.height = grid::unit(16, "pt"),
+              legend.margin = margin(t = 8, b = 8))
     }
 
     render_enrichment_panel <- function(enrichment) {

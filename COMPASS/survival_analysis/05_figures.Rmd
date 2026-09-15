@@ -60,9 +60,11 @@ are not safe to fork.
 
 ## Cohorts and outputs
 
-Defaults: all ADT, pre-ADT castrate patients included, platinum and NEPC, at
-landmarks 0/90/180. The forests read existing day-180 results across six ADT
-configurations without enabling six full renders. ARPI uses its own input file.
+Defaults: all ADT, pre-ADT castrate patients included, platinum only, at
+landmarks 0/90/180. NEPC landmark figures are off by default; set
+`COMPASS_FIGURE_ENDPOINTS=nepc,platinum` to render both. The forests read
+existing day-180 results across six ADT configurations without enabling six
+full renders. ARPI uses its own input file.
 Retired AVPC endpoints and localized-adjuvant cohorts remain unavailable.
 
 Canonical ADT/platinum also generates two combined cohort-comparison figures:
@@ -142,7 +144,9 @@ FIG_ROOT <- Sys.getenv("COMPASS_FIG_ROOT", "/data/gusev/USERS/jpconnor/figures/C
 FIGURE_DATA_ROOT <- Sys.getenv("COMPASS_FIGURE_DATA_ROOT", file.path(NEPC_PROJ_PATH, "figure_data"))
 FIGURE_STAGE <- match.arg(Sys.getenv("COMPASS_FIGURE_STAGE", "all"), c("all", "prepare", "render"))
 FIGURE_SCOPE <- match.arg(Sys.getenv("COMPASS_FIGURE_SCOPE", "all"), c("all", "federated"))
-ENDPOINTS <- env_values("COMPASS_FIGURE_ENDPOINTS", "nepc,platinum")
+# Platinum only by default; set COMPASS_FIGURE_ENDPOINTS=nepc,platinum to restore
+# the NEPC landmark figures alongside it (or =nepc for that endpoint alone).
+ENDPOINTS <- env_values("COMPASS_FIGURE_ENDPOINTS", "platinum")
 ADT_COHORT_OPTIONS <- c("adt", "adt_noprecastrate", "adt_metastatic_adt",
   "adt_metastatic_adt_noprecastrate", "adt_metastatic_llm", "adt_metastatic_llm_noprecastrate")
 COHORTS <- env_values("COMPASS_FIGURE_COHORTS", "adt")

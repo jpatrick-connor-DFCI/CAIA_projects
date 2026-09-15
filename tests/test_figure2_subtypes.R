@@ -6,7 +6,7 @@ suppressPackageStartupMessages({
 })
 pipeline <- new.env(parent = globalenv())
 needed <- c("COLOR_PLATINUM_POS", "COLOR_PLATINUM_NEG", "COLOR_NEUTRAL_INK",
-            "theme_fig", "wilson_ci", "CLASS_ORDER", "CLASS_LABELS", "count_labels",
+            "theme_fig", "prepare_figure_text", "wilson_ci", "CLASS_ORDER", "CLASS_LABELS", "count_labels",
             "compute_enrichment", "render_landscape_panel", "render_enrichment_panel")
 collect <- function(expr) {
   if (missing(expr) || !is.call(expr)) return(invisible(NULL))
@@ -55,6 +55,36 @@ stopifnot(nrow(contrast$data) == 2L,
           identical(as.character(contrast$data$group),
                     c("Aggressive\n(AVPC + NEPC)", "Conventional")))
 
+# Reproduce the cached-scene path: size text on a PDF device, then render the
+# resulting grob on a raster device. Stacked legend labels must occupy different
+# rows even with large cohort counts. This only changes layout, not the bars.
+cached_landscapes <- list()
+grDevices::pdf(file = NULL)
+for (counts in list(c(213L, 3541L), c(123456L, 987654L))) {
+  panel <- pipeline$render_landscape_panel(bind_rows(positive, negative), counts[1], counts[2],
+    title = "Subtype landscape by platinum status") +
+    labs(caption = str_wrap(paste("Synthetic layout fixture; subtype fractions are test data.",
+                                 "Long cohort labels exercise the cached figure export."), 85)) +
+    theme(plot.caption = element_text(size = 8, color = pipeline$COLOR_NEUTRAL_INK, hjust = .5))
+  stopifnot(identical(ggplot_build(panel)$data[[1]], ggplot_build(landscape)$data[[1]]),
+            as.numeric(panel$theme$axis.title.y$margin[2]) >= 14,
+            as.numeric(panel$theme$axis.text.y$margin[2]) >= 6)
+  for (width in c(9.5, 6.5)) {
+    grob <- ggplotGrob(pipeline$prepare_figure_text(panel, width))
+    boxes <- grob$grobs[grepl("^guide-box", grob$layout$name)]
+    box <- Filter(function(x) inherits(x, "gtable"), boxes)[[1]]
+    guide <- box$grobs[[which(box$layout$name == "guides")]]
+    label_cells <- guide$layout[grepl("^label", guide$layout$name), ]
+    key_cells <- guide$layout[grepl("^key", guide$layout$name), ]
+    stopifnot(nrow(label_cells) == 2L, length(unique(label_cells$t)) == 2L,
+              length(unique(label_cells$l)) == 1L,
+              all(key_cells$r < min(label_cells$l)))
+    key <- sprintf("panel_b_cached_%s_%s", counts[1], width)
+    cached_landscapes[[key]] <- list(grob = grob, width = width)
+  }
+}
+invisible(grDevices::dev.off())
+
 # Missing comparison groups should produce an explanatory panel, not crash the cell.
 for (subset in list(filter(labels, primary_label == "conventional"), labels[0, ])) {
   result <- pipeline$compute_enrichment(subset)
@@ -71,5 +101,10 @@ if (nzchar(review_dir)) {
          dpi = 120, device = ragg::agg_png)
   ggsave(file.path(review_dir, "panel_c.png"), contrast, width = 4.5, height = 5.5,
          dpi = 120, device = ragg::agg_png)
+  for (key in names(cached_landscapes)) {
+    scene <- cached_landscapes[[key]]
+    ggsave(file.path(review_dir, paste0(key, ".png")), scene$grob,
+           width = scene$width, height = 8, dpi = 200, device = ragg::agg_png)
+  }
 }
 cat("Figure 2 subtype/enrichment checks passed.\n")
