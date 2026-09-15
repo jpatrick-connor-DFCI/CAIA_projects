@@ -1,5 +1,5 @@
 # Run with COMPASS_REVIEW_DIR=/tmp/compass-revised Rscript tests/test_figure_legibility_and_km.R
-suppressPackageStartupMessages({library(ggplot2); library(dplyr); library(tidyr); library(stringr); library(survival)})
+suppressPackageStartupMessages({library(ggplot2); library(dplyr); library(tidyr); library(stringr); library(survival); library(readr)})
 source_exprs <- parse("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
 find_assignment <- function(expr, name) {
   if (missing(expr) || !is.call(expr)) return(NULL)
@@ -13,7 +13,8 @@ find_assignment <- function(expr, name) {
 for (name in c("theme_fig", "figure_tertiles", "figure_extreme_quintiles",
                "figure_gleason_groups", "figure_platinum_strata",
                "significant_mutation_features", "plot_stratified_platinum", "prepare_figure_text",
-               "render_discrimination_panel", "plot_volcano_panel", "labels_for_panel",
+               "render_discrimination_panel", "render_available_case_sensitivity",
+               "read_endpoint_performance", "plot_volcano_panel", "labels_for_panel",
                "q_threshold_neglog10p", "assign_category", "plot_sg_forest")) {
   for (expr in source_exprs) {
     assignment <- find_assignment(expr, name)
@@ -37,8 +38,10 @@ stopifnot(all(is.na(figure_extreme_quintiles(rep(0, 20)))),
 # A pile of tied values straddling the bottom cut is never split across arms.
 tied <- figure_extreme_quintiles(c(rep(2, 40), 3:62))
 stopifnot(length(unique(tied[1:40])) == 1L)
-stopifnot(identical(figure_gleason_groups(c(6,7,8,9,10,0,11,NA,6.5)),
-  c("Gleason ≤6", "Gleason 7", "Gleason 8", "Gleason 9", "Gleason 10", rep(NA_character_,4))))
+stopifnot(identical(figure_gleason_groups(c(2:10,0,11,NA,6.5,Inf,-Inf)),
+  c(rep("Gleason ≤7", 6), rep("Gleason ≥8", 3), rep(NA_character_, 6))),
+  identical(figure_gleason_groups(c("6", "7", "8", "10", "unknown")),
+            c("Gleason ≤7", "Gleason ≤7", "Gleason ≥8", "Gleason ≥8", NA_character_)))
 results <- tibble(feature = c("TP53_SNV", "PTEN_DEL", "RB1_SNV", "PSA__mean", "ALK_SNV"),
                   q_value = c(.01,.04,.051,.001,NA))
 stopifnot(identical(significant_mutation_features(results), c("TP53_SNV", "PTEN_DEL")))
@@ -69,8 +72,20 @@ stopifnot(!is.null(plots$quintiles),
           nrow(figure_platinum_strata(f,qg)) == sum(!is.na(qg)))
 plots$carriers <- plot_stratified_platinum(figure_platinum_strata(f,rep(c("Carrier","Non-carrier"),45)),
   "TP53 SNV carrier status: time to platinum", "sequencing specimen collection date")
-plots$gleason <- plot_stratified_platinum(figure_platinum_strata(f,figure_gleason_groups(rep(6:10,18))),
-  "Gleason score: time to platinum", "Gleason score date nearest ADT initiation")
+gleason_data <- figure_platinum_strata(f, figure_gleason_groups(rep(6:10,18)))
+plots$gleason <- plot_stratified_platinum(gleason_data,
+  "Gleason score: time to platinum", "Gleason score date nearest ADT initiation",
+  c("Gleason ≤7", "Gleason ≥8"),
+  "Scores grouped as ≤7 versus ≥8. Missing or invalid scores excluded. Shading: 95% CI.")
+stopifnot(nrow(gleason_data) == nrow(f), sum(gleason_data$event) == sum(f$PLATINUM),
+          identical(sort(unique(plots$gleason$data$stratum)), c("Gleason ≤7", "Gleason ≥8")),
+          identical(unname(plots$gleason$scales$get_scales("colour")$labels),
+                    c("Gleason ≤7 (n=36; events=12)", "Gleason ≥8 (n=54; events=18)")))
+gleason_logrank <- survival::survdiff(survival::Surv(time, event) ~ stratum, data = gleason_data)
+stopifnot(identical(plots$gleason$labels$subtitle,
+                    sprintf("Log-rank p = %.3g", pchisq(gleason_logrank$chisq, 1, lower.tail = FALSE))),
+          is.null(plot_stratified_platinum(filter(gleason_data, stratum == "Gleason ≤7"),
+                                           "Gleason", "index date")))
 
 forest <- expand_grid(cohort = names(cohort_forest_labels), endpoint = c("platinum","nepc"),
   lab_name = c("PSA","Testosterone"), feature_stat = c("mean","min","max","last","delta","n_observations")) %>%
@@ -96,6 +111,34 @@ plots$performance <- render_discrimination_panel("auc","Test mean AUC(t)",TRUE)
 b <- ggplot_build(plots$performance)
 stopifnot(b$layout$panel_params[[1]]$y.range[1] <= 0, b$layout$panel_params[[1]]$y.range[2] > 1)
 
+# Sensitivity counts come from the same endpoint/model rows as the metrics, not
+# from the full cohort or a sum across the four repeated model populations.
+ENDPOINT <- "platinum"
+series <- tibble(name = c("Elastic-Net Cox: labs", "Elastic-Net Cox: Gleason",
+                          "XGBoost: labs", "XGBoost: Gleason"),
+                 color = c("#4C72B0", "#2A9D8F", "#B58900", "#D55E00"))
+sensitivity <- expand_grid(name = series$name, landmark = LANDMARKS) %>%
+  mutate(auc = .7, cindex = .65, n_train_val = 960 - landmark, n_test = 240)
+plots$sensitivity <- render_available_case_sensitivity(sensitivity, series, "Gleason", "auc", "Test mean AUC(t)")
+stopifnot(identical(plots$sensitivity$labels$title,
+  "Gleason vs. labs sensitivity — platinum\n0d: n=1,200; +90d: n=1,110; +180d: n=1,020"))
+counts_path <- tempfile(fileext = ".csv")
+readr::write_csv(tibble(endpoint = c("nepc", "platinum"), test_mean_auc_t = c(.6, .7),
+                       n_train_val = c(80, 960), n_test = c(20, 240)), counts_path)
+metrics <- read_endpoint_performance(counts_path, "platinum")
+stopifnot(metrics[["n_train_val"]] == 960, metrics[["n_test"]] == 240,
+          metrics[["auc"]] == .7)
+unlink(counts_path)
+sensitivity$n_train_val[sensitivity$landmark == 90] <- NA_real_
+sensitivity$n_test[1] <- 241
+sensitivity$auc[sensitivity$landmark == 180] <- NA_real_
+unavailable <- render_available_case_sensitivity(sensitivity, series, "Gleason", "auc", "AUC")
+stopifnot(grepl("0d: n=1,200–1,201 (varies by model)", unavailable$labels$title, fixed = TRUE),
+          grepl("+90d: n=unavailable; +180d: n=unavailable", unavailable$labels$title, fixed = TRUE))
+sensitivity$n_test[2] <- -1
+sensitivity$n_train_val[3] <- 1.5
+invisible(ggplot_build(render_available_case_sensitivity(sensitivity, series, "Gleason", "cindex", "C-index")))
+
 # Dense volcano: full x-range, one external legend, readable labels, all points retained.
 DROP <- character(); TOP_K_PER_PANEL <- 4; ALWAYS_LABEL <- "Hemoglobin"
 PANEL_XLIM <- c(-1.5,1.5); Y_MAX_CAP <- 30; NS_COLOR <- "#9ba4ae"
@@ -114,9 +157,10 @@ if (nzchar(review)) {
   dir.create(review, recursive=TRUE, showWarnings=FALSE)
   for (name in names(plots)) {
     is_forest <- startsWith(name,"forest_")
-    w <- if (is_forest) 12 else 9
+    w <- if (is_forest) COHORT_FOREST_SLIDE_SIZE[["width"]] else if (name == "sensitivity") 8.5 else 9
     p <- prepare_figure_text(plots[[name]],w)
-    ggsave(file.path(review,paste0(name,".png")),p,width=w,height=if(is_forest)12 else 7.5,
+    ggsave(file.path(review,paste0(name,".png")),p,width=w,
+           height=if(is_forest)COHORT_FOREST_SLIDE_SIZE[["height"]] else if(name == "sensitivity")5.5 else 7.5,
            dpi=120,device=ragg::agg_png,bg="white")
   }
 }

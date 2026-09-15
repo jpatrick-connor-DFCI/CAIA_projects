@@ -287,12 +287,16 @@ figure_notebook_manifest <- function(config, check_sources = TRUE) {
   if (isTRUE(config$federated)) {
     if (!isTRUE(prepared$federated) || !same_path(prepared$federated_path, config$federated_path))
       fail("Requested federated results were not prepared.")
+    site_path <- file.path(dirname(config$federated_path), "nvflare_within_site_cox_univariate",
+                           "cox_within_site_all_sites_cohort.csv")
+    if (!any(vapply(manifest$federated_sources, function(item)
+      identical(figure_absolute_path(item$path), figure_absolute_path(site_path)), logical(1))))
+      fail("Federated site cohort counts were not registered by the notebook.")
   }
   # R only checks metadata. It never launches Python or reconstructs its tables.
   # Render-only deliberately uses the prepared snapshot with sources offline.
   fingerprints <- if (federated_only) {
-    if (check_sources) Filter(function(item) identical(figure_absolute_path(item$path),
-      figure_absolute_path(config$federated_path)), manifest$federated_sources) else list()
+    if (check_sources) manifest$federated_sources else list()
   } else c(manifest$outputs, if (check_sources) manifest$source_fingerprints)
   for (item in fingerprints) {
     exists <- file.exists(item$path)

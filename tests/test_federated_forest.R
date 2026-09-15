@@ -29,4 +29,28 @@ local({
   duplicate <- tryCatch(load_federated_no_msk_forest(path), error = identity)
   stopifnot(inherits(duplicate, "error"))
 })
-cat("Federated forest: analytes/stats, supplied p/q thresholds, missing estimates and duplicate checks passed.\n")
+local({
+  root <- tempfile("federated-sites-"); dir.create(root)
+  on.exit(unlink(root, recursive = TRUE))
+  fed <- file.path(root, "federated.csv")
+  dir.create(file.path(root, "nvflare_within_site_cox_univariate"))
+  path <- file.path(root, "nvflare_within_site_cox_univariate", "cox_within_site_all_sites_cohort.csv")
+  stopifnot(is.null(suppressWarnings(load_federated_no_msk_sites(fed))))
+  d <- tibble(site_name = c("dana_farber_caia_1_1", "jhu_caia_1_1", "fred_hutch_caia_1_1"),
+              analysis_label = "adt", landmark_days = 0, n_patients = c(100, 10, 0), n_events = c(4, 0, 0))
+  write_csv(d, path)
+  counts <- load_federated_no_msk_sites(fed)
+  stopifnot(counts$event_incidence_pct[counts$site == "Dana-Farber"] == 4,
+            counts$event_incidence_pct[counts$site == "Johns Hopkins"] == 0,
+            is.na(counts$event_incidence_pct[counts$site == "Fred Hutch"]))
+  p <- plot_federated_no_msk_sites(counts)
+  stopifnot(nrow(p$data) == 18, all(is.na(p$data$n_patients[p$data$landmark_days == 90])))
+  withCallingHandlers(invisible(ggplotGrob(p)), warning = function(w) stop(w))
+  for (bad in list(bind_rows(d, d[1, ]), mutate(d, n_events = 101),
+                   mutate(d, n_patients = -1), mutate(d, n_events = NA_real_),
+                   mutate(d, site_name = "msk_caia_1_1"))) {
+    write_csv(bad, path)
+    stopifnot(inherits(tryCatch(load_federated_no_msk_sites(fed), error = identity), "error"))
+  }
+})
+cat("Federated forests and site counts: significance, incidence, missing data and invalid input checks passed.\n")

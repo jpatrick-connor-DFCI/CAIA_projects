@@ -1,5 +1,11 @@
 # Shared by 05_figures.Rmd and the forest section of 07_cohort_comparison.ipynb.
-# One faceted figure per endpoint: PSA and testosterone columns, no delta row.
+# One faceted figure per endpoint: PSA and testosterone rows, no delta column.
+
+# Sized to drop into a 16:9 PowerPoint slide (13.33 x 7.5 in) as a single
+# full-bleed figure, leaving ~0.4 in of margin on each edge. Both save sites --
+# the Rmd pipeline and the notebook adapter below -- use this one constant so a
+# deck never receives two differently-shaped copies of the same forest.
+COHORT_FOREST_SLIDE_SIZE <- c(width = 12.5, height = 6.8)
 cohort_forest_labels <- c(
   adt = "All ADT", adt_noprecastrate = "All ADT; no pre-ADT castrate",
   adt_metastatic_adt = "Metastatic: ADT intent",
@@ -69,7 +75,9 @@ plot_cohort_forest <- function(d, endpoint, landmark = 180L) {
   limits <- exp(log(limits) + c(-1, 1) * max(diff(log(limits)) * .06, .05))
   labels <- function(x) {
     out <- unname(cohort_forest_labels[x]); out[is.na(out)] <- x[is.na(out)]
-    stringr::str_wrap(out, 29)
+    # Four stat columns leave the shared y-axis narrower than the old 2-column
+    # layout did, so wrap the cohort names harder to keep them off the panels.
+    stringr::str_wrap(out, 22)
   }
   ggplot(d, aes(hazard_ratio_per_sd, cohort, color = analyte)) +
     geom_vline(xintercept = 1, linewidth = .4, linetype = "dashed", color = "grey55") +
@@ -79,7 +87,12 @@ plot_cohort_forest <- function(d, endpoint, landmark = 180L) {
     scale_color_manual(values = c(PSA = "#0072B2", Testosterone = "#D55E00"), guide = "none") +
     scale_x_log10(labels = scales::label_number(), limits = limits) +
     scale_y_discrete(labels = labels, drop = TRUE, expand = expansion(add = .7)) +
-    facet_grid(feature_stat ~ analyte, switch = "y") +
+    # Analyte rows x statistic columns: a 2x4 grid is wide and short, so the
+    # figure fills a 16:9 slide instead of the old 4x2 near-square arrangement.
+    # No switch = "y" here: that was for the previous orientation, where it moved
+    # the statistic strip left. In this one it would drop the analyte strip onto
+    # the shared y-axis, on top of the wrapped cohort names.
+    facet_grid(analyte ~ feature_stat) +
     labs(x = "Hazard ratio per SD (95% CI; log scale)", y = NULL,
          title = paste("PSA and testosterone associations with", toupper(endpoint)),
          subtitle = sprintf("Treatment landmark: +%d days", landmark),
@@ -87,7 +100,8 @@ plot_cohort_forest <- function(d, endpoint, landmark = 180L) {
                          "Points remain visible when a confidence interval is unavailable.", sep = "\n")) +
     theme_classic(base_size = 11) +
     theme(strip.background = element_blank(), strip.text = element_text(face = "bold", size = 11),
-          strip.placement = "outside", axis.text.y = element_text(size = 9),
+          strip.text.y = element_text(angle = -90),
+          axis.text.y = element_text(size = 9),
           axis.text.x = element_text(size = 9), panel.spacing = grid::unit(14, "pt"),
           plot.title.position = "plot", plot.caption.position = "plot", plot.caption = element_text(hjust = 0, size = 9),
           legend.position = "bottom", plot.margin = margin(12, 16, 12, 12))
@@ -121,7 +135,8 @@ if (sys.nframe() == 0L) {
     if (!overwrite && complete(destination)) { message("Skipped ", destination); next }
     temporary <- tempfile(tmpdir = directory, fileext = ".png")
     tryCatch({
-      ggsave(temporary, p, width = 12, height = max(6, 3 * length(unique(d$feature_stat))),
+      ggsave(temporary, p, width = COHORT_FOREST_SLIDE_SIZE[["width"]],
+             height = COHORT_FOREST_SLIDE_SIZE[["height"]],
              dpi = dpi, bg = "white", device = if (requireNamespace("ragg", quietly = TRUE)) ragg::agg_png else "png")
       if (!complete(temporary) || !file.rename(temporary, destination)) stop("Could not publish ", destination)
     }, finally = unlink(temporary))

@@ -86,7 +86,7 @@ figure_gleason_groups <- function(values) {
   x <- suppressWarnings(as.numeric(values))
   valid <- is.finite(x) & x == floor(x) & x >= 2 & x <= 10
   out <- rep(NA_character_, length(x))
-  out[valid] <- ifelse(x[valid] <= 6, "Gleason ≤6", paste("Gleason", x[valid]))
+  out[valid] <- ifelse(x[valid] <= 7, "Gleason ≤7", "Gleason ≥8")
   out
 }
 
@@ -692,7 +692,8 @@ parse_feature <- function(name) {
 # a wrong-but-silent default here yields an all-NA panel that looks like a
 # missing torch install instead of an endpoint mismatch.
 read_endpoint_performance <- function(path, endpoint) {
-  missing_metrics <- c(auc = NA_real_, cindex = NA_real_, brier = NA_real_)
+  missing_metrics <- c(auc = NA_real_, cindex = NA_real_, brier = NA_real_,
+                       n_train_val = NA_real_, n_test = NA_real_)
   if (!file.exists(path)) return(missing_metrics)
 
   df <- read_csv(path, show_col_types = FALSE)
@@ -712,7 +713,9 @@ read_endpoint_performance <- function(path, endpoint) {
   c(
     auc = metric("test_mean_auc_t"),
     cindex = metric("test_c_index"),
-    brier = metric("test_integrated_brier")
+    brier = metric("test_integrated_brier"),
+    n_train_val = metric("n_train_val"),
+    n_test = metric("n_test")
   )
 }
 
@@ -2578,9 +2581,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
           values <- suppressWarnings(as.numeric(indexed[[feature]]))
           if (analysis == "gleason") {
             groups <- figure_gleason_groups(values)
-            group_order <- c("Gleason ≤6", "Gleason 7", "Gleason 8", "Gleason 9", "Gleason 10")
+            group_order <- c("Gleason ≤7", "Gleason ≥8")
             title_km <- "Gleason score: time to platinum"
-            note <- "Scores ≤6 are combined; higher scores shown individually. Missing scores excluded. Shading: 95% CI."
+            note <- "Scores grouped as ≤7 versus ≥8. Missing or invalid scores excluded. Shading: 95% CI."
           } else {
             if (any(!is.na(values) & !values %in% c(0, 1))) {
               warning("Carrier KM skipped: ", feature, " is not a binary mutation call")
@@ -2758,6 +2761,23 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
               sprintf("landmark_%s", landmark), "both", filename)
   }
   render_available_case_sensitivity <- function(sensitivity_data, series, analysis_label, metric, ylabel) {
+    # Each landmark has its own available-case population. Counts repeat across
+    # model/feature sets: never sum them or substitute the full cohort size.
+    sample_sizes <- vapply(LANDMARKS, function(lm) {
+      rows <- sensitivity_data[sensitivity_data$landmark == lm &
+                                is.finite(sensitivity_data[[metric]]), ]
+      train <- rows$n_train_val
+      test <- rows$n_test
+      valid <- is.finite(train) & train >= 0 & train == floor(train) &
+               is.finite(test) & test >= 0 & test == floor(test)
+      counts <- sort(unique((train + test)[valid]))
+      label <- if (!length(counts)) "unavailable" else if (length(counts) == 1L)
+        format(counts, big.mark = ",", scientific = FALSE, trim = TRUE) else
+        paste0(paste(format(range(counts), big.mark = ",", scientific = FALSE, trim = TRUE),
+                     collapse = "–"), " (varies by model)")
+      if (length(counts) && any(!valid)) label <- paste0(label, " (some counts unavailable)")
+      sprintf("%s%dd: n=%s", ifelse(lm > 0, "+", ""), lm, label)
+    }, character(1))
     d <- sensitivity_data %>% transmute(
       name,
       landmark = factor(sprintf("%s%d days", ifelse(landmark > 0, "+", ""), landmark),
@@ -2773,8 +2793,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                         name = NULL, drop = FALSE) +
       coord_cartesian(ylim = c(0, 1.04)) +
       labs(x = NULL, y = ylabel,
-           title = sprintf("%s vs. labs sensitivity — %s", analysis_label, ENDPOINT),
-           subtitle = "Same cases within each landmark; source data available by that landmark") +
+           title = sprintf("%s vs. labs sensitivity — %s\n%s", analysis_label, ENDPOINT,
+                           paste(sample_sizes, collapse = "; ")),
+           subtitle = "Source data available by each landmark; n includes training/validation + test") +
       theme_fig() +
       guides(fill = guide_legend(ncol = 2, byrow = TRUE)) +
       theme(legend.position = "top", legend.text = element_text(size = 8),
@@ -2795,7 +2816,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       s <- .
       map_dfr(LANDMARKS, function(lm) {
         v <- s$loader[[1]](lm)
-        tibble(name = s$name, landmark = lm, auc = v[["auc"]], cindex = v[["cindex"]])
+        tibble(name = s$name, landmark = lm, auc = v[["auc"]], cindex = v[["cindex"]],
+               n_train_val = v[["n_train_val"]], n_test = v[["n_test"]])
       })
     }) %>% ungroup() %>% mutate(name = factor(name, levels = SENSITIVITY_SERIES$name))
     panel_prefix <- ifelse(sensitivity_analysis == "gleason", "figure4c", "figure4d")
@@ -4249,8 +4271,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     forest <- load_cohort_forest(NEPC_PROJ_PATH, cohort_forest_config$cohorts, ENDPOINT, landmark)
     if (nrow(forest)) {
       p_forest <- plot_cohort_forest(forest, ENDPOINT, landmark)
+      # Fixed slide geometry from cohort_forest_figures.R, not a per-stat height:
+      # this figure is presented as one full-bleed 16:9 slide.
       save_fig(p_forest, OUT_DIR, sprintf("cohort_forest_%s_landmark%d", ENDPOINT, landmark),
-               12, max(6, 3 * length(unique(forest$feature_stat))))
+               COHORT_FOREST_SLIDE_SIZE[["width"]], COHORT_FOREST_SLIDE_SIZE[["height"]])
       if (show) print(p_forest)
     } else message("Cohort forest: no PSA/testosterone estimates available for ", ENDPOINT)
   }

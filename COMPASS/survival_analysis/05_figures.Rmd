@@ -31,8 +31,15 @@ metadata, prepares changed R figure sets, then renders missing or stale formats.
 source data, and requires the same cohort/analysis settings. Use `all` for
 normal updates and `render` for DPI/PDF changes.
 
-`COMPASS_FIGURE_SCOPE=federated` processes only the no-MSK forest plots without
+`COMPASS_FIGURE_SCOPE=federated` processes only the no-MSK forest plots and site cohort report without
 requiring longitudinal data or running other figure families.
+
+The site report reads `nvflare_within_site_cox_univariate/cox_within_site_all_sites_cohort.csv`
+beside the federated results CSV. It exports cohort sizes, event counts, and observed
+event percentages at landmarks 0/90/180 under `federated_no_msk/site_cohort_counts`.
+Percentages are events divided by analyzed patients over available follow-up,
+not fixed-horizon cumulative incidence estimates. Missing site counts are reported
+as unavailable; forest plots still render if the site file is absent.
 
 Caches live under `COMPASS_FIGURE_DATA_ROOT` (default `COMPASS/figure_data`).
 They include patient data and need the same access restrictions as the analysis

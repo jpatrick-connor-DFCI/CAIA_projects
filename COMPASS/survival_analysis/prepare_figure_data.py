@@ -414,10 +414,13 @@ def prepare(config: dict) -> dict:
                 manifest["cells"][cell] = digest({"sources": sources, "shared": shared,
                     "arm": manifest["arms"][arm]["key"], "code": version, "force": manifest["force_version"],
                     "settings": {k: config.get(k) for k in ["gam", "metastatic", "metastatic_extra", "adt_intent", "forest_cohorts", "forest_landmark"]}})
+        federated_path = Path(config["federated_path"])
+        federated_sources = [fingerprint(federated_path), fingerprint(federated_path.parent /
+            "nvflare_within_site_cox_univariate" / "cox_within_site_all_sites_cohort.csv")]
         manifest["federated"] = digest({"code": version, "force": manifest["force_version"],
-            "file": fingerprint(Path(config["federated_path"]))})
+            "files": federated_sources})
         if config.get("federated", False):
-            manifest["federated_sources"] = [fingerprint(Path(config["federated_path"]))]
+            manifest["federated_sources"] = federated_sources
             manifest["source_fingerprints"].extend(manifest["federated_sources"])
         atomic_json(Path(config.get("manifest_path", cache / "manifest.json")), manifest)
     return manifest
