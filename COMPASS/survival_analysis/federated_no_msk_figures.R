@@ -64,7 +64,7 @@ load_federated_no_msk_comparison <- function(data_root, federated_path,
   }
 
   joined <- inner_join(
-    local %>% select(-.data$source), federated %>% select(-.data$source),
+    local %>% select(-all_of("source")), federated %>% select(-all_of("source")),
     by = c("landmark_days", "feature"), suffix = c("_local", "_federated")
   ) %>%
     mutate(
@@ -119,6 +119,13 @@ plot_federated_no_msk_hr_agreement <- function(d) {
 }
 
 plot_federated_no_msk_discoveries <- function(d) {
+  if (!any(d$usable_effect, na.rm = TRUE)) {
+    return(ggplot() +
+      annotate("text", x = 0, y = 0, label = "No usable shared tests", color = COLOR_NEUTRAL_INK) +
+      theme_void() +
+      labs(title = "FDR discovery overlap between local and federated screens",
+           subtitle = sprintf("%d shared rows before numerical filtering; see the comparison table for fit validity.", nrow(d))))
+  }
   summary <- d %>% filter(.data$usable_effect) %>%
     count(.data$landmark_days, .data$discovery_class, name = "n") %>%
     complete(landmark_days, discovery_class, fill = list(n = 0L)) %>%
@@ -155,9 +162,9 @@ plot_federated_no_msk_top_effects <- function(d, n_per_landmark = 10L) {
   plot_data$key <- paste(plot_data$landmark_days, plot_data$label, sep = "__")
   plot_data$key <- factor(plot_data$key, levels = rev(unique(plot_data$key)))
   long <- plot_data %>%
-    select(.data$landmark_days, .data$key, .data$label, .data$log_hr_local,
-           .data$log_hr_federated) %>%
-    pivot_longer(c(.data$log_hr_local, .data$log_hr_federated),
+    select(all_of(c("landmark_days", "key", "label", "log_hr_local",
+                    "log_hr_federated"))) %>%
+    pivot_longer(all_of(c("log_hr_local", "log_hr_federated")),
                  names_to = "run", values_to = "log_hr") %>%
     mutate(run = recode(.data$run, log_hr_local = "Local COMPASS",
                         log_hr_federated = "Federated no-MSK"))

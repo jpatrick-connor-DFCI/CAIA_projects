@@ -513,6 +513,24 @@ load_llm_strata <- function(llm_annotations_path) {
     mutate(primary_label = factor(primary_label, levels = LLM_STRATA$primary_label$levels))
 }
 
+figure_trajectory_lookup <- function(values, patient_ids = NULL) {
+  required <- c("DFCI_MRN", "stratum")
+  missing <- setdiff(required, names(values))
+  if (length(missing)) stop("Trajectory labels missing: ", paste(missing, collapse = ", "))
+  lookup <- values %>% transmute(DFCI_MRN = as.character(DFCI_MRN),
+                                 stratum = as.character(stratum)) %>%
+    filter(!is.na(DFCI_MRN), !is.na(stratum))
+  if (!is.null(patient_ids)) lookup <- lookup %>% filter(DFCI_MRN %in% as.character(patient_ids))
+  # Classifier exports may repeat a patient across records/subtypes. Repeated
+  # identical labels are harmless, but do not choose an arbitrary conflicting label.
+  lookup <- distinct(lookup, DFCI_MRN, stratum)
+  conflicts <- lookup %>% count(DFCI_MRN) %>% filter(n > 1L)
+  if (nrow(conflicts)) stop(sprintf(
+    "Conflicting trajectory labels for %d patient(s); resolve the classifier labels before rerunning. No label was selected arbitrarily.",
+    nrow(conflicts)))
+  lookup
+}
+
 # ---- helpers ported from the Python notebook ----
 
 # binary_metrics: confusion-matrix-derived classification metrics for a 0/1
@@ -3473,7 +3491,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       sub <- sub %>%
         mutate(DFCI_MRN = as.character(DFCI_MRN)) %>%
         select(-any_of("stratum")) %>%
-        inner_join(stratum_values %>% select(all_of(required_lookup_cols)),
+        inner_join(figure_trajectory_lookup(stratum_values, sub$DFCI_MRN),
                    by = "DFCI_MRN")
     } else {
       sub <- sub %>% mutate(
@@ -3769,7 +3787,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         # Availability is binary per patient/lab/bin. Collapse repeated tests
         # before expanding each patient into platinum and NEPC strata.
         distinct(DFCI_MRN, LAB_GROUP, t_bin) %>%
-        inner_join(coverage_strata, by = "DFCI_MRN") %>%
+        inner_join(coverage_strata, by = "DFCI_MRN", relationship = "many-to-many") %>%
         distinct(DFCI_MRN, LAB_GROUP, t_bin, stratification, stratum) %>%
         count(stratification, stratum, LAB_GROUP, t_bin, name = "n_covered")
       coverage_by_bin <- crossing(

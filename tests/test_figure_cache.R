@@ -53,6 +53,8 @@ local({
   legacy_patient <- suppressWarnings(cached_profile_patient_and_labs(source_path)$patient_df)
   legacy_labs <- cached_canonical_longitudinal(source_path, ANDROGEN)
   lookups <- list(NULL, tibble(DFCI_MRN = c("001", "004"), stratum = c("NEPC+", "NEPC-")))
+  lookups[[3]] <- bind_rows(lookups[[2]], lookups[[2]],
+    tibble(DFCI_MRN = "outside-cohort", stratum = c("NEPC+", "NEPC-")))
   expected <- lapply(c(FALSE, TRUE), function(log) lapply(lookups, function(lookup)
     nested$patient_bin_trajectory(legacy_labs, "PSA", stratum_values = lookup, log_scale = log)))
   old <- options(compass.figure_data_manifest = manifest)
@@ -66,9 +68,21 @@ local({
   stopifnot(isTRUE(all.equal(as.data.frame(actual_labs[names(legacy_labs)]), as.data.frame(legacy_labs), check.attributes = FALSE)))
   normalize <- function(d) d %>% mutate(stratum = as.character(stratum)) %>%
     arrange(DFCI_MRN, t_mid, stratum) %>% select(DFCI_MRN, t_bin, stratum, LAB_VALUE, t_mid)
-  for (i in 1:2) for (j in 1:2) {
+  for (i in 1:2) for (j in seq_along(lookups)) {
     actual <- nested$patient_bin_trajectory(actual_labs, "PSA", stratum_values = lookups[[j]], log_scale = c(FALSE, TRUE)[i])
     stopifnot(isTRUE(all.equal(normalize(actual), normalize(expected[[i]][[j]]), check.attributes = FALSE)))
+  }
+  for (i in 1:2) stopifnot(identical(normalize(expected[[i]][[2]]), normalize(expected[[i]][[3]])))
+  conflict <- tryCatch(nested$patient_bin_trajectory(legacy_labs, "PSA",
+    stratum_values = tibble(DFCI_MRN = c("001", "001"), stratum = c("NEPC+", "NEPC-"))), error = identity)
+  stopifnot(inherits(conflict, "error"), grepl("Conflicting trajectory labels for 1 patient", conditionMessage(conflict)))
+  source("COMPASS/survival_analysis/federated_no_msk_figures.R")
+  no_effects <- tibble(usable_effect = FALSE, landmark_days = 0L,
+    discovery_class = factor("Neither", levels = c("Neither", "Local only", "Federated only", "FDR < 0.05 in both")))
+  for (d in list(no_effects, no_effects[0, ])) {
+    empty_plot <- plot_federated_no_msk_discoveries(d)
+    withCallingHandlers(invisible(ggplotGrob(empty_plot)), warning = function(w) stop(w))
+    stopifnot(identical(ggplot_build(empty_plot)$data[[1]]$label, "No usable shared tests"))
   }
   source("COMPASS/survival_analysis/prepare_metastatic_figure_labels.R")
   legacy_labels <- prepare_metastatic_figure_labels(config$metastatic_sources, legacy_patient) %>% arrange(DFCI_MRN)

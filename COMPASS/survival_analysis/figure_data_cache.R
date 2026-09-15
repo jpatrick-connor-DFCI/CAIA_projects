@@ -29,8 +29,8 @@ figure_cached_patient_bins <- function(source, df, lab_group, stratum_col,
   count_col <- if (log_scale) "n_log" else "n_raw"
   d <- d %>% filter(.data[[count_col]] > 0)
   if (!is.null(stratum_values)) {
-    if (anyDuplicated(stratum_values$DFCI_MRN)) stop("Duplicate patient IDs in trajectory label lookup")
-    d <- inner_join(d, stratum_values %>% select(DFCI_MRN, stratum), by = "DFCI_MRN")
+    lookup <- figure_trajectory_lookup(stratum_values, d$DFCI_MRN)
+    d <- inner_join(d, lookup, by = "DFCI_MRN")
   } else if (identical(stratum_col, "plat_group")) {
     d$stratum <- as.character(as.integer(coalesce(d$PLATINUM, 0)))
   } else {

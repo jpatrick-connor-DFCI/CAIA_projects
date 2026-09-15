@@ -26,7 +26,9 @@ local({
   for (col in c("DATED_PROSTATE_DIAGNOSIS", "MALE", "ARPI_DOCETAXEL_EXPOSED", "ADT_EXPOSED", "HAS_5_OR_MORE_PSA_TESTS", "ELIGIBLE")) flags[[col]] <- 1
   write_csv(flags, file.path(root, "mrn_lists", "icd_prostate_mrn_flags.csv"))
   write_csv(patient %>% filter(PLATINUM == 1) %>% select(DFCI_MRN), file.path(root, "mrn_lists", "platinum_MRN_list.csv"))
-  write_csv(tibble(DFCI_MRN = ids, NEPC = patient$NEPC), file.path(root, "LLM_NEPC_labels", "baca_lab_annotations.csv"))
+  write_csv(tibble(DFCI_MRN = ids, NEPC = patient$NEPC,
+    simplified_manual_platinum_reason = if_else(patient$NEPC == 1, "nepc", "conventional")),
+    file.path(root, "LLM_NEPC_labels", "baca_lab_annotations.csv"))
   federated <- list()
   for (endpoint in c("platinum", "nepc")) {
     suffix <- if (endpoint == "platinum") "" else "_nepc"
@@ -56,6 +58,12 @@ local({
     classifier_path = file.path(root, "classifier"), gam = FALSE, adt_intent = FALSE,
     metastatic = FALSE, metastatic_extra = FALSE, forest_cohorts = "adt", forest_landmark = 180L,
     federated = TRUE, federated_path = fed_path)
+  dir.create(cfg$classifier_path)
+  classifier <- tibble(DFCI_MRN = ids, primary_label = if_else(patient$NEPC == 1, "nepc", "conventional"),
+    has_nepc = patient$NEPC, has_avpc = 0)
+  # Repeated consistent NEPC labels must not abort the cached trajectory path.
+  write_tsv(bind_rows(classifier, classifier[1:3, ]),
+    file.path(cfg$classifier_path, "LLM_NEPC_classifier_labels.tsv"))
   fc <- list(script = file.path(dirname(pipeline_path), "federated_no_msk_figures.R"), results = fed_path)
   forest <- list(script = file.path(dirname(pipeline_path), "cohort_forest_figures.R"), cohorts = "adt", landmark = 180L)
   # Fixture setup represents the separate notebook preparation stage. Python
