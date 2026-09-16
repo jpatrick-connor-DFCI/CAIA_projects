@@ -130,6 +130,7 @@ render_cohort_overview <- function(manifest, config) {
     leaf <- if (name == "event_incidence") paste0(name, "_landmark", landmark) else name
     destination <- file.path(base, leaf, "platinum__all__incl")
     getOption("compass.figure_capture")(plots[[name]], destination, 16, 7.5, leaf)
+    if(exists("figure_public_path",mode="function")) destination <- figure_public_path(destination)
     dir.create(dirname(destination), recursive = TRUE, showWarnings = FALSE)
     table <- paste0(destination, ".csv")
     readr::write_csv(if (name == "event_incidence") incidence else overlap, table)

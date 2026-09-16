@@ -1,6 +1,10 @@
 # Persistent bridge: Polars tables -> R statistics/graphics objects -> PNG/PDF.
 # Preparation serializes gtable objects, not ggplot environments (which can
 # otherwise retain the entire patient data frame in every saved RDS).
+.figure_cache_sources <- Filter(function(x) is.character(x) && length(x)==1 &&
+  basename(x)=="figure_data_cache.R", lapply(sys.frames(),function(frame) frame$ofile))
+source(file.path(dirname(tail(.figure_cache_sources,1)[[1]]), "figure_publication.R"), local = TRUE)
+rm(.figure_cache_sources)
 figure_read_parquet <- function(path) {
   if (requireNamespace("arrow", quietly = TRUE)) return(as_tibble(arrow::read_parquet(path)))
   if (requireNamespace("nanoparquet", quietly = TRUE)) return(as_tibble(nanoparquet::read_parquet(path)))
@@ -80,23 +84,83 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE) {
   dir.create(directory, recursive = TRUE, showWarnings = FALSE)
   generation <- tempfile("generation-", tmpdir = directory)
   dir.create(generation)
-  scenes <- list(); tables <- character()
+  scenes <- list(); tables <- character(); bundles <- list()
+  publish <- function(plot, destination, width, height, stem, title = NULL, landmarks = "") {
+    path <- file.path(generation, sprintf("panel-%04d.rds", length(scenes) + 1L))
+    if(is.null(title)) title <- if(inherits(plot,"ggplot") && length(plot$labels$title))
+      paste(plot$labels$title,collapse=" ") else gsub("_"," ",stem)
+    grob <- figure_grob(plot,width,height,generation)
+    if(!nzchar(landmarks) && inherits(plot,"ggplot")) {
+      for(column in c("landmark_days","landmark")) if(column %in% names(plot$data)) {
+        values <- unique(gsub("[^0-9]","",as.character(plot$data[[column]])))
+        landmarks <- paste(values[nzchar(values)],collapse=",")
+        break
+      }
+    }
+    if(!nzchar(landmarks) && grepl("lm[0-9]+",stem)) landmarks <- sub("^.*lm([0-9]+).*$","\\1",stem)
+    figure_atomic_rds(grob, path)
+    scenes[[length(scenes) + 1L]] <<- list(path = path, destination = figure_public_path(destination),
+      width = width, height = height, stem = stem, title = title, landmark = landmarks)
+  }
   capture <- function(plot, destination, width, height, stem) {
     # Resolve all aesthetics/stats now; renderer needs neither raw data nor fits.
     if (is.null(plot)) return(invisible(NULL))
-    path <- file.path(generation, sprintf("panel-%04d.rds", length(scenes) + 1L))
-    plot <- prepare_figure_text(plot, width)
-    grob <- if (inherits(plot, "ggplot")) ggplot2::ggplotGrob(plot) else plot
-    figure_atomic_rds(grob, path)
-    scenes[[length(scenes) + 1L]] <<- list(path = path, destination = destination,
-                                          width = width, height = height, stem = stem)
+    spec <- figure_compilation_spec(stem)
+    if(!is.null(spec)) {
+      # Lab artifacts have an extra landmark directory; bundle by arm/identity
+      # and logical key instead of their legacy folder depth.
+      key <- paste(sub("/by_figure/.*$","",destination),basename(destination),spec$key,sep="|")
+      bundles[[key]] <<- c(bundles[[key]],list(list(plot=plot,destination=destination,stem=stem,spec=spec)))
+    } else publish(plot,destination,width,height,stem,landmarks=if(grepl("landmark[0-9]+",stem))
+      sub("^.*landmark([0-9]+).*$","\\1",stem) else "")
     invisible(NULL)
   }
-  table_capture <- function(paths) tables <<- unique(c(tables, paths))
+  table_capture <- function(paths) {
+    for(path in paths) {
+      target <- figure_public_path(path)
+      if(!identical(path,target)) {
+        dir.create(dirname(target),recursive=TRUE,showWarnings=FALSE)
+        if(!file.copy(path,target,overwrite=TRUE) ||
+           !identical(unname(tools::md5sum(path)),unname(tools::md5sum(target)))) stop("Cannot publish figure table: ",path)
+        # The old path is archived after a successful render, not removed here.
+      }
+      tables <<- unique(c(tables,target))
+    }
+  }
   old <- options(compass.figure_capture = capture, compass.figure_table_capture = table_capture,
                  device = function(...) grDevices::pdf(file = NULL, ...))
   on.exit(options(old), add = TRUE)
+  # Build all nested gtables on the raster renderer too; PDF-metric sizing caused
+  # the clipped labels and touching legend keys in the downloaded cluster PNGs.
+  measure <- tempfile(".build-device-",tmpdir=generation,fileext=".png")
+  figure_measure_device(measure,16,10)
+  on.exit({grDevices::dev.off(); unlink(measure)},add=TRUE)
   build()
+  for(items in bundles) {
+    spec <- items[[1]]$spec
+    page_size <- if(is.null(spec$page_size)) length(items) else spec$page_size
+    pages <- split(seq_along(items),ceiling(seq_along(items)/page_size))
+    for(page in seq_along(pages)) {
+      selected <- items[pages[[page]]]
+      compiled <- figure_combine(selected,spec,generation)
+      destination <- figure_public_path(selected[[1]]$destination)
+      identity <- basename(selected[[1]]$destination)
+      key <- paste0(spec$key,if(length(pages)>1) paste0("_page",page))
+      # Lab name is already the folder; omit it from the compiled filename.
+      if(startsWith(key,"km_quintile_")) key <- "km_extremes"
+      destination <- file.path(dirname(destination),paste0(key,"__",identity))
+      landmarks <- unique(unlist(lapply(selected,function(x) if(grepl("landmark[0-9]+",x$stem))
+        sub("^.*landmark([0-9]+).*$","\\1",x$stem) else character())))
+      if(!length(landmarks)) landmarks <- unique(unlist(lapply(selected,function(x) {
+        if(inherits(x$plot,"ggplot") && "landmark" %in% names(x$plot$data))
+          gsub("[^0-9]","",as.character(x$plot$data$landmark)) else character()
+      })))
+      title <- spec$title
+      if(startsWith(spec$key,"km_quintile_")) title <- paste(if(grepl("_psa$",spec$key)) "PSA" else
+        tools::toTitleCase(gsub("_"," ",sub("^km_quintile_","",spec$key))),"extremes: time to platinum")
+      publish(compiled,destination,spec$width,spec$height,key,title,paste(landmarks[nzchar(landmarks)],collapse=","))
+    }
+  }
   paths <- vapply(scenes, `[[`, character(1), "path")
   m <- list(signature = signature, scenes = scenes, files = figure_file_identity(paths),
             tables = tables, table_files = figure_file_identity(tables))
@@ -437,5 +501,9 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
   }
   message(sprintf("Figure workflow finished in %.1fs (%s).", proc.time()[["elapsed"]] - started, stage))
   if (length(failures)) stop("Figure workflow failures:\n", paste(failures, collapse = "\n"))
+  if(stage != "prepare") {
+    figure_archive_old_exports(config,prepared)
+    figure_write_catalog(config,prepared)
+  }
   invisible(list(prepared = prepared, rendered = render_results))
 }

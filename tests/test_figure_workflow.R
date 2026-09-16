@@ -140,11 +140,12 @@ local({
   eval(parse(text = code), env)
   stopifnot(identical(names(env$figure_run$prepared), "federated"))
   stopifnot(identical(vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem"),
-                      c(paste0("psa_testosterone_forest_landmark", c(0, 90, 180)),
-                        paste0("psa_testosterone_forest_site_a_landmark", c(0, 90, 180)),
-                        paste0("psa_testosterone_forest_site_b_landmark", c(0, 90, 180)), "site_cohort_counts")))
-  site_export <- read_csv(file.path(cfg$fig_root, "ADT", "by_figure", "federated_no_msk",
-                                    "site_cohort_counts", "platinum__all__incl.csv"), show_col_types = FALSE)
+                      c("psa_forest", "testosterone_forest", "site_incidence_lm000")))
+  site_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated_no_msk",
+                                    "site_incidence_lm000__platinum.csv"), show_col_types = FALSE)
+  stopifnot(file.exists(file.path(cfg$fig_root,"ADT","index.html")),
+            file.exists(file.path(cfg$fig_root,"ADT","manifest.csv")),
+            !dir.exists(file.path(cfg$fig_root,"ADT","by_figure")))
   stopifnot(nrow(site_export) == 2L, all(site_export$landmark_days == 0))
   federated_cfg <- cfg; federated_cfg$scope <- "federated"
   Sys.setFileTime(within_path, file.info(within_path)$mtime + 5)

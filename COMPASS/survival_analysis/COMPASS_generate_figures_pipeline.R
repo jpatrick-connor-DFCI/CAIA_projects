@@ -155,6 +155,9 @@ prepare_figure_text <- function(plot, width) {
         function(line) paste(strwrap(line, width = widths[[field]]), collapse = "\n"), character(1)), collapse = "\n")
   }
   plot + theme(plot.title.position = "plot", plot.caption.position = "plot",
+               legend.text = element_text(margin = margin(l = 5, r = 10)),
+               legend.spacing.x = grid::unit(10,"pt"),
+               axis.title.y = element_text(margin = margin(r = 10)),
                plot.margin = margin(12, 16, 12, 12))
 }
 
@@ -1218,7 +1221,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     }
     NA_character_
   }
-  # Layout, every output:
+  # Legacy logical addresses, retained as stable inputs to the 05 compiler.
+  # figure_data_cache.R intercepts these before any image export, compiles
+  # related panels, and routes them to shallow topic folders via
+  # figure_publication.R. Direct legacy callers retain the addressing below.
+  # Logical layout:
   #   FIG_ROOT/by_figure/<group>/<trimmed-name>/<endpoint>__<subset>__<exclusion>.png
   # Per-lab panels keep their category/lab nesting for the same reason as
   # before -- ~40 labs x 4 strata would otherwise dump 160+ entries into one
@@ -1648,8 +1655,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   write_table1 <- function(table1, out_base) {
     stem <- basename(out_base)
     output_dir <- output_dir_for_stem(stem)
-    dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
     out_base <- file.path(output_dir, COHORT_LEAF)
+    if(exists("figure_public_path",mode="function")) out_base <- figure_public_path(out_base)
+    dir.create(dirname(out_base),recursive=TRUE,showWarnings=FALSE)
     csv <- paste0(out_base, ".csv"); md_p <- paste0(out_base, ".md")
     write_csv(table1, csv)
     writeLines(to_markdown_table(table1), md_p)
@@ -3874,9 +3882,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         scale_suffix <- if (log_scale) "_log" else ""
 
         # Platinum-status stratum (existing behavior, now over every lab).
-        ttl <- sprintf("%s (n=%s)", COHORT_DISPLAY,
-                       format(n_pat, big.mark = ","))
+        ttl <- sprintf("%s trajectories by platinum status", lab_group)
         p <- plot_group_ci_panel(group_df, lab_group, ttl, log_scale = log_scale)
+        p <- p + labs(subtitle=sprintf("%s · n=%s · %s scale",COHORT_DISPLAY,
+          format(n_pat,big.mark=","),if(log_scale) "log1p" else "raw"))
         save_fig(p, OUT_DIR, sprintf("longitudinal_platinum_%s%s", slug, scale_suffix),
                  width = 9.5, height = 5.5)
         if (show) print(p)
@@ -3896,14 +3905,14 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
             stratum_legend <- if (!is.null(scheme$labels)) setNames(scheme$labels, scheme$labels) else NULL
             stratum_colors <- setNames(KM_PALETTE[seq_along(scheme$levels)],
                                        if (!is.null(scheme$labels)) scheme$labels else as.character(scheme$levels))
-            ttl_s <- sprintf("%s (n=%s/%s labeled)", COHORT_DISPLAY,
-                             format(n_labeled, big.mark = ","),
-                             format(n_pat, big.mark = ","))
+            ttl_s <- sprintf("%s trajectories by NEPC label",lab_group)
             p_s <- plot_group_ci_panel(
               group_df, lab_group, ttl_s, stratum_col = scheme$col,
               stratum_values = stratum_values, stratum_legend = stratum_legend,
               stratum_colors = stratum_colors, log_scale = log_scale
             )
+            p_s <- p_s + labs(subtitle=sprintf("%s · n=%s/%s labeled · %s scale",COHORT_DISPLAY,
+              format(n_labeled,big.mark=","),format(n_pat,big.mark=","),if(log_scale) "log1p" else "raw"))
             save_fig(p_s, OUT_DIR,
                      sprintf("longitudinal_%s_%s%s", scheme_name, slug, scale_suffix),
                      width = 9.5, height = 5.5)

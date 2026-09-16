@@ -218,7 +218,7 @@ plot_federated_no_msk_sites <- function(d) {
 save_federated_no_msk_panel <- function(plot, path, width, height, dpi, overwrite) {
   capture <- getOption("compass.figure_capture")
   if (is.function(capture)) {
-    capture(plot, sub("\\.png$", "", path), width, height, basename(dirname(path)))
+    capture(plot, sub("\\.png$", "", path), width, height, sub("__.*$","",basename(path)))
     return(invisible(TRUE))
   }
   if (is.null(plot)) return(FALSE)
@@ -234,47 +234,113 @@ save_federated_no_msk_panel <- function(plot, path, width, height, dpi, overwrit
   TRUE
 }
 
+federated_population_note <- function(across, cohorts) {
+  unknown <- "Federated*: participating sites unverified; not assumed to include all displayed sites."
+  if(is.null(cohorts) || !all(c("n_patients_used","n_events_used") %in% names(across))) return(unknown)
+  targets <- distinct(across,landmark_days,n_patients_used,n_events_used)
+  if(anyDuplicated(targets$landmark_days) || anyNA(targets)) return(unknown)
+  sites <- sort(unique(cohorts$site_name))
+  if(!length(sites) || length(sites)>10) return(unknown)
+  candidates <- unlist(lapply(seq_along(sites),function(k) combn(sites,k,simplify=FALSE)),recursive=FALSE)
+  matches <- Filter(function(selected) {
+    all(vapply(seq_len(nrow(targets)),function(i) {
+      rows <- filter(cohorts,site_name %in% selected,landmark_days==targets$landmark_days[i])
+      nrow(rows)==length(selected) && sum(rows$n_patients)==targets$n_patients_used[i] &&
+        sum(rows$n_events)==targets$n_events_used[i]
+    },logical(1)))
+  },candidates)
+  if(length(matches)!=1) return(unknown)
+  paste0("Federated*: patient/event counts match ",paste(federated_site_label(matches[[1]]),collapse=" + "),
+         "; membership inferred, not verified.")
+}
+
+prepare_federated_comparison <- function(across, within=NULL) {
+  across <- mutate(across,source="Federated*",source_kind="across_sites")
+  if(is.null(within)) return(across)
+  bind_rows(across,mutate(within,source=site,source_kind="within_site"))
+}
+
+plot_federated_comparison <- function(estimates, analyte, population_note) {
+  sources <- c(sort(setdiff(unique(estimates$source),"Federated*")),"Federated*")
+  d <- filter(estimates,lab_name==analyte) %>%
+    complete(source=sources,feature_stat=c("mean","min","max","last"),landmark_days=c(0,90,180)) %>%
+    mutate(source=factor(source,levels=rev(sources)),
+      feature_stat=factor(feature_stat,levels=c("mean","min","max","last"),labels=c("Mean","Minimum","Maximum","Last")),
+      landmark=factor(landmark_days,levels=c(0,90,180),labels=c("0 days","+90 days","+180 days")),
+      valid_estimate=coalesce(valid_estimate,FALSE),valid_ci=coalesce(valid_ci,FALSE),
+      significance=coalesce(significance,"Significance unavailable"))
+  limits <- range(c(1,d$hazard_ratio_per_sd[d$valid_estimate],
+    d$ci_lower[d$valid_estimate & d$valid_ci],d$ci_upper[d$valid_estimate & d$valid_ci]),finite=TRUE)
+  limits <- exp(log(limits)+c(-1,1)*max(.12,diff(log(limits))*.12))
+  palette <- setNames(c("#0072B2","#D55E00","#009E73","#CC79A7","#E69F00")[seq_along(sources)],sources)
+  palette["Federated*"] <- "#222222"
+  counts <- filter(estimates,source_kind=="across_sites",lab_name==analyte)
+  count_note <- ""
+  if(all(c("n_patients_used","n_patients_observed") %in% names(counts))) {
+    rows <- distinct(counts,landmark_days,n_patients_used,n_patients_observed) %>% arrange(landmark_days)
+    count_note <- paste0("Federated modeled / observed n: ",paste(sprintf("%dd: %s / %s",rows$landmark_days,
+      scales::comma(rows$n_patients_used),scales::comma(rows$n_patients_observed)),collapse="; "),".")
+  }
+  ggplot(d,aes(hazard_ratio_per_sd,source,color=source)) +
+    geom_vline(xintercept=1,linetype="dashed",color="grey65",linewidth=.4) +
+    geom_blank(aes(x=1)) +
+    geom_errorbar(data=filter(d,valid_estimate,valid_ci),aes(xmin=ci_lower,xmax=ci_upper),
+      orientation="y",width=.12,linewidth=.65) +
+    geom_point(data=filter(d,valid_estimate),aes(shape=significance),size=2.8,stroke=.8) +
+    geom_text(data=filter(d,!valid_estimate),aes(x=1,label="Unavailable"),color="grey50",size=2.6) +
+    geom_text(data=filter(d,valid_estimate,!valid_ci),aes(x=limits[2],label="CI unavailable"),
+      hjust=1,color="grey50",size=2.3) +
+    scale_color_manual(values=palette,guide="none") +
+    scale_shape_manual(name=NULL,values=c("Not significant"=1,"Nominal p < 0.05 only"=16,
+      "FDR q < 0.05"=18,"Significance unavailable"=4),
+      breaks=c("Not significant","Nominal p < 0.05 only","FDR q < 0.05",
+        if(any(d$significance=="Significance unavailable")) "Significance unavailable"),drop=FALSE) +
+    scale_x_log10(limits=limits,labels=scales::label_number(accuracy=.01)) +
+    scale_y_discrete(drop=FALSE,expand=expansion(add=.65)) +
+    facet_grid(feature_stat ~ landmark,drop=FALSE) +
+    labs(title=paste(analyte,"associations across sites"),
+      subtitle="ADT · platinum endpoint · no MSK · hazard ratios per SD with 95% confidence intervals",
+      x="Hazard ratio per SD (log scale)",y=NULL,
+      caption=paste(population_note,count_note,
+        "Open: not significant; filled: nominal p < 0.05 only; diamond: supplied FDR q < 0.05. No FDR recalculation.",
+        "Exact HR/CI/p/q, modeled and observed counts, and fitting metadata are in the accompanying CSV; no delta features.",sep="\n")) +
+    theme_classic(base_size=11) +
+    theme(strip.background=element_blank(),strip.text=element_text(face="bold"),
+      panel.spacing=grid::unit(.9,"lines"),legend.position="bottom",
+      legend.text=element_text(margin=margin(l=5,r=10)),
+      plot.caption=element_text(hjust=0,size=8),plot.title.position="plot",plot.caption.position="plot",
+      plot.margin=margin(12,18,12,12))
+}
+
 render_federated_no_msk_supplement <- function(data_root, fig_root, federated_path,
                                                 dpi = 200, overwrite = FALSE) {
   d <- load_federated_no_msk_forest(federated_path)
-  root <- file.path(fig_root, "ADT", "by_figure", "federated_no_msk")
-  table_path <- file.path(root, "forest_input", "platinum__all__incl.csv")
-  dir.create(dirname(table_path), recursive = TRUE, showWarnings = FALSE)
-  readr::write_csv(d, table_path)
+  root <- file.path(fig_root, "ADT", "federated_no_msk")
+  dir.create(root, recursive = TRUE, showWarnings = FALSE)
   capture <- getOption("compass.figure_table_capture")
-  if (is.function(capture)) capture(table_path)
-  for (landmark in c(0L, 90L, 180L)) {
-    p <- plot_federated_no_msk_forest(d, landmark)
-    save_federated_no_msk_panel(p,
-      file.path(root, paste0("psa_testosterone_forest_landmark", landmark), "platinum__all__incl.png"),
-      12, 7, dpi, overwrite)
-  }
+  within <- NULL
   within_path <- file.path(dirname(federated_path), "nvflare_within_site_cox_univariate",
                            "cox_within_site_all_sites_results.csv")
   if (file.exists(within_path)) {
     within <- load_federated_no_msk_forest(within_path, within_site = TRUE)
-    within_table <- file.path(root, "within_site_forest_input", "platinum__all__incl.csv")
-    dir.create(dirname(within_table), recursive = TRUE, showWarnings = FALSE)
-    readr::write_csv(within, within_table)
-    if (is.function(capture)) capture(within_table)
-    sites <- sort(unique(within$site_name))
-    slugs <- gsub("[^a-zA-Z0-9_-]", "_", sites)
-    if (anyDuplicated(slugs)) stop("Federated site names collide in output filenames")
-    for (i in seq_along(sites)) for (landmark in c(0L, 90L, 180L)) {
-      p <- plot_federated_no_msk_forest(within, landmark, site_name = sites[i])
-      save_federated_no_msk_panel(p, file.path(root,
-        paste0("psa_testosterone_forest_", slugs[i], "_landmark", landmark), "platinum__all__incl.png"),
-        12, 7, dpi, overwrite)
-    }
   } else warning("Within-site federated forests unavailable; missing: ", within_path)
   sites <- load_federated_no_msk_sites(federated_path)
+  estimates <- prepare_federated_comparison(d,within)
+  note <- federated_population_note(d,sites)
+  estimates$population_note <- ifelse(estimates$source_kind=="across_sites",note,"Within-site model")
+  for(analyte in c("PSA","Testosterone")) {
+    base <- file.path(root,paste0(tolower(analyte),"_forest__platinum"))
+    readr::write_csv(filter(estimates,lab_name==analyte),paste0(base,".csv"))
+    if(is.function(capture)) capture(paste0(base,".csv"))
+    save_federated_no_msk_panel(plot_federated_comparison(estimates,analyte,note),paste0(base,".png"),12,10, dpi,overwrite)
+  }
   if (!is.null(sites)) {
-    site_path <- file.path(root, "site_cohort_counts", "platinum__all__incl.csv")
+    site_path <- file.path(root, "site_incidence_lm000__platinum.csv")
     dir.create(dirname(site_path), recursive = TRUE, showWarnings = FALSE)
     readr::write_csv(prepare_federated_site_incidence(sites), site_path)
     if (is.function(capture)) capture(site_path)
     save_federated_no_msk_panel(plot_federated_no_msk_sites(sites),
-      file.path(root, "site_cohort_counts", "platinum__all__incl.png"), 14, 5.5, dpi, overwrite)
+      file.path(root, "site_incidence_lm000__platinum.png"), 14, 5.5, dpi, overwrite)
   }
   invisible(d)
 }

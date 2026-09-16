@@ -36,7 +36,7 @@ requiring longitudinal data or running other figure families.
 
 The site report reads `nvflare_within_site_cox_univariate/cox_within_site_all_sites_cohort.csv`
 beside the federated results CSV. It exports cohort sizes, event counts, and observed
-event percentages at landmark 0 only under `federated_no_msk/site_cohort_counts`.
+event percentages at landmark 0 only in `federated_no_msk/site_incidence_lm000__platinum.{png,csv}`.
 The figure matches the cohort-comparison layout: incidence with 95% Wilson CIs
 on the left and patient counts with events overlaid on the right. Cells with
 fewer than 25 events are hatched/marked. Percentages are events divided by analyzed patients over available follow-up,
@@ -48,7 +48,7 @@ They include patient data and need the same access restrictions as the analysis
 inputs. All RDS files, including per-image render receipts, live in that data
 cache; none are written beside figure exports. On the next knit, recognized
 legacy `*.cache.rds` receipts in the figure tree are copied, verified, and moved
-into `COMPASS_FIGURE_DATA_ROOT/legacy_render_receipts`. Figures are untouched.
+into `COMPASS_FIGURE_DATA_ROOT/legacy_render_receipts`.
 The data-cache and figure-output directories must be separate and non-nested.
 Versioned caches are retained. Source identity uses absolute paths,
 file sizes and nanosecond modification times, plus code/settings versions.
@@ -86,17 +86,26 @@ Cells with fewer than 25 events are hatched/marked; missing cells stay blank.
 The label figure uses `mrn_lists/adt_intent_labels_model_cohort.csv` and
 `llm_met_labels_model_cohort.csv`, preserving missing labels explicitly.
 Run notebook `04` once after this update to prepare these small summary tables.
-Outputs (and their count tables) are under `by_figure/cohort_comparison/`:
-`event_incidence_landmark180` and `metastatic_label_overlap`.
+Outputs (and their count tables) are under `cohort/`:
+`event_incidence_lm180__platinum__all__incl` and `metastatic_label_overlap__platinum__all__incl`.
 
-All endpoints, cohort variants, and diagnostics are grouped by figure family,
-without a `main`/`supplements` split. Individual subpanels use this layout:
+Exports use shallow topic folders: `cohort/`, `labels/`, `associations/`,
+`prediction/`, `trajectories/<lab>/`, and `federated_no_msk/`. There is no
+main/supplement split or per-plot directory. Local filenames are
+`<figure>__<endpoint>__<subset>__<exclusion>.png`; CSV/Markdown tables live alongside.
+Each arm gets a thumbnail `index.html` and a `manifest.csv` with relative paths,
+titles, endpoint, cohort, and landmark metadata. No duplicate thumbnail files are made.
 
-`FIG_ROOT/<ARM>/by_figure/<group>/<artifact>/<endpoint>__<subset>__<exclusion>.png`
+R compiles classifier validation into one figure and subtype/enrichment into one;
+AUC/C-index into paired comparisons; importance into one three-landmark sheet per
+model; lab-extreme KM into one three-landmark sheet per lab; and mutation KM into
+pages of at most four panels. Model fits, counts, time origins, and tests are unchanged.
+Dense local volcanoes remain separate. Individual component images are not exported.
 
-The next knit moves existing exports out of the old `main`/`supplements`
-directories into this layout and removes the emptied folders. Identical copies
-are consolidated; conflicting files stop migration without overwriting either.
+After a successful render, superseded `by_figure` exports for regenerated cohorts
+are copied, checksum-verified, and archived in `COMPASS_FIGURE_DATA_ROOT/previous_exports/`;
+only then are those old copies and emptied folders removed. Unselected cohorts remain
+untouched. Failed renders do not trigger archival. Archives are recoverable in data.
 
 Figure 2 runs once for canonical ADT/platinum. Lab figures run on each selected
 platinum cohort, for PSA/testosterone by default. Trajectories retain day-zero
@@ -114,8 +123,10 @@ analysis anchor, with supplied ADT/LLM labels preserved.
 
 The federated HR output contains only PSA/testosterone forest plots at days
 0/90/180: mean, minimum, maximum, and last value, with delta and observation-count
-features excluded. Plots show HR per SD and 95% CIs on a log axis, plus each
-row's p-value and supplied q-value. Symbols distinguish nominal-only p < 0.05,
+features excluded. Two compiled forests (one per analyte) show all sites and the
+federated result together, with landmark columns and statistic rows. Plots show
+HR per SD and 95% CIs on a common log axis per analyte. Exact p/q values and
+modeled/observed counts remain in the adjacent CSV. Symbols distinguish nominal-only p < 0.05,
 FDR q < 0.05, and nonsignificance. q-values are not recalculated on this subset.
 Finite positive HR estimates are retained; missing/invalid estimates or CIs are
 explicitly marked instead of applying the former volcano magnitude filters.
@@ -123,11 +134,12 @@ Both across-site and individual within-site HRs are plotted, without re-pooling
 site estimates. Within-site forests read
 `nvflare_within_site_cox_univariate/cox_within_site_all_sites_results.csv` beside
 the across-site results CSV. Each uses its own supplied p/q values.
-No matching local results are required. Across-site outputs are under
-`by_figure/federated_no_msk/psa_testosterone_forest_landmark{0,90,180}/`.
-Within-site outputs use `psa_testosterone_forest_<site_name>_landmark{0,90,180}/`
-in the same directory, with their selected input rows in `within_site_forest_input/`.
-Old volcano/comparison files are not regenerated or deleted.
+No matching local results are required. Outputs are
+`federated_no_msk/{psa,testosterone}_forest__platinum.{png,csv}` plus the day-0
+incidence figure/table. Supplied p/q values are not recomputed or pooled.
+The federated population is not assumed to include every displayed site: matching
+patient/event counts across landmarks are reported as inferred membership only;
+ambiguous or unavailable membership is explicitly unverified.
 These forests run when canonical ADT/platinum is selected, or scope
 is `federated`. Missing optional sources are reported and skipped. Failures in
 one figure set do not prevent preparation/rendering of other available sets.
