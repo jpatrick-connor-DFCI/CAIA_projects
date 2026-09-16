@@ -111,7 +111,9 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE) {
       # and logical key instead of their legacy folder depth.
       key <- paste(sub("/by_figure/.*$","",destination),basename(destination),spec$key,sep="|")
       bundles[[key]] <<- c(bundles[[key]],list(list(plot=plot,destination=destination,stem=stem,spec=spec)))
-    } else publish(plot,destination,width,height,stem,landmarks=if(grepl("landmark[0-9]+",stem))
+    }
+    if(is.null(spec) || isTRUE(spec$keep_individuals))
+      publish(plot,destination,width,height,stem,landmarks=if(grepl("landmark[0-9]+",stem))
       sub("^.*landmark([0-9]+).*$","\\1",stem) else "")
     invisible(NULL)
   }
@@ -351,11 +353,14 @@ figure_notebook_manifest <- function(config, check_sources = TRUE) {
   if (isTRUE(config$federated)) {
     if (!isTRUE(prepared$federated) || !same_path(prepared$federated_path, config$federated_path))
       fail("Requested federated results were not prepared.")
-    for (filename in c("cox_within_site_all_sites_cohort.csv", "cox_within_site_all_sites_results.csv")) {
-      site_path <- file.path(dirname(config$federated_path), "nvflare_within_site_cox_univariate", filename)
+    registered_inputs <- c(file.path("nvflare_within_site_cox_univariate",
+      c("cox_within_site_all_sites_cohort.csv", "cox_within_site_all_sites_results.csv")),
+      file.path("federated_xgboost",c("xgboost_federated_metrics_adt.csv","xgboost_federated_importance_adt.csv")))
+    for (filename in registered_inputs) {
+      site_path <- file.path(dirname(config$federated_path), filename)
       if (!any(vapply(manifest$federated_sources, function(item)
         identical(figure_absolute_path(item$path), figure_absolute_path(site_path)), logical(1))))
-        fail(paste("Federated site input was not registered by the notebook:", filename))
+        fail(paste("Federated input was not registered by the notebook:", filename))
     }
   }
   # R only checks metadata. It never launches Python or reconstructs its tables.

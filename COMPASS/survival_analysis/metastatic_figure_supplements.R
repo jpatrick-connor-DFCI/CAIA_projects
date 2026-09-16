@@ -102,9 +102,10 @@ render_metastatic_supplements <- function(config, patient_df, labs, save_panel,
            scale_fill_gradient(low = "white", high = "#56B4E9", limits = c(0, 1), na.value = "grey90") +
            scale_x_discrete(limits = c("Local", "Metastatic")) +
            scale_y_discrete(limits = c("Metastatic", "Local")) +
+           coord_fixed(ratio = 1) +
            labs(x = names_pretty[[pair[2]]], y = names_pretty[[pair[1]]],
                 title = "Local versus metastatic label agreement", subtitle = subtitle,
-                fill = "Row fraction", caption = caption) + theme_bw(), name, 9, 6)
+                fill = "Row fraction", caption = caption) + theme_bw(), name, 7, 6)
   }
 
   # Merge the old ADT filtering diagnostics, also displaying the LLM definition.

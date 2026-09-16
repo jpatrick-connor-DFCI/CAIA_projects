@@ -680,6 +680,69 @@ parse_feature <- function(name) {
   }
 }
 
+# Shared local/federated Figure 4 presentation. Callers supply already fitted
+# held-out metrics and feature gains; these functions never fit or pool models.
+plot_model_discrimination <- function(data, metric, ylabel, colors,
+                                     landmarks=c(0,90,180), show_legend=FALSE) {
+  d <- data %>%
+    transmute(name, baseline = name %in% c("Cox baseline (age)","XGBoost baseline (age)"),
+      landmark = factor(sprintf("%s%d days", ifelse(landmark > 0, "+", ""), landmark),
+        levels = sprintf("%s%d days", ifelse(landmarks > 0,"+",""), landmarks)),
+      value = .data[[metric]])
+  finite_max <- suppressWarnings(max(d$value, na.rm = TRUE))
+  ymax <- min(1.0, (if (is.finite(finite_max)) finite_max else 0.7) * 1.12)
+  base <- ggplot(d, aes(landmark, value, group = name))
+  if (requireNamespace("ggpattern", quietly=TRUE)) {
+    p <- base + ggpattern::geom_col_pattern(
+      aes(fill = name, pattern = baseline),
+      position = position_dodge(width = 0.85), width = 0.8,
+      color = "white", pattern_fill = "white", pattern_density = 0.08,
+      pattern_spacing = 0.02, pattern_angle = 45) +
+      ggpattern::scale_pattern_manual(values = c(`TRUE` = "stripe", `FALSE` = "none"), guide = "none")
+  } else {
+    p <- base + geom_col(aes(fill = name, linetype = baseline),
+      position = position_dodge(width = 0.85), width = 0.8, color = "white") +
+      scale_linetype_manual(values = c(`TRUE` = "dashed", `FALSE` = "solid"), guide = "none")
+  }
+  p + geom_text(aes(label = ifelse(is.finite(value), sprintf("%.3f", value), "")),
+      position = position_dodge(width = 0.85), vjust = -0.4, size = 2.5, show.legend = FALSE) +
+    geom_hline(yintercept = 0.5, color = "grey", linetype = "dotted", linewidth = 0.9) +
+    scale_fill_manual(values = colors, name = NULL, drop = FALSE) +
+    coord_cartesian(ylim = c(0, max(1.04, ymax))) +
+    labs(x = NULL, y = ylabel) + theme_fig() +
+    guides(fill = guide_legend(ncol = 2, byrow = TRUE)) +
+    theme(legend.position = if (show_legend) "top" else "none",
+      legend.justification = "right", legend.box.just = "right",
+      legend.direction = "horizontal", panel.grid.major.x = element_blank())
+}
+
+plot_model_importance <- function(df, kind, title, top_n=15) {
+  df <- df %>% filter(!lab_name %in% DROP) %>%
+    mutate(category = vapply(lab_name, assign_category, character(1)))
+  if (nrow(df) == 0) {
+    return(ggplot() + annotate("text", x = 0, y = 0, label = "(no features to display)",
+      color = "#7f8c8d") + theme_void() + labs(title = title) +
+      theme(plot.title = element_text(face = "bold", size = 11)))
+  }
+  if (kind == "cox") {
+    df <- df %>% arrange(desc(abs(coef))) %>% head(top_n)
+    df$value <- df$coef; xlabel <- "log HR coefficient"
+  } else {
+    df <- df %>% arrange(desc(gain)) %>% head(top_n)
+    df$value <- df$gain; xlabel <- "XGBoost gain"
+  }
+  df <- df %>% mutate(label = mapply(format_label, lab_name, feature_stat),
+    category = factor(category, levels = LEGEND_ORDER))
+  df$label <- factor(df$label, levels = rev(df$label))
+  p <- ggplot(df, aes(value, label, fill = category)) +
+    geom_col(color = "white", linewidth = 0.5, show.legend = TRUE) +
+    scale_fill_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL, drop = FALSE) +
+    labs(x = xlabel, y = NULL, title = title) + theme_fig() +
+    theme(plot.title = element_text(face = "bold", size = 11), axis.text.y = element_text(size = 10))
+  if (kind == "cox") p <- p + geom_vline(xintercept = 0, color = "black", linewidth = 0.5)
+  p
+}
+
 # Read held-out discrimination/calibration metrics for one endpoint. Every model
 # family now writes the canonical schema (survival_common/metrics_schema.py), so
 # there are no per-family column candidates to reconcile -- `endpoint`,
@@ -1070,20 +1133,22 @@ plot_volcano_panel <- function(sub, title) {
                shape = 21, fill = NA, stroke = 0.9, show.legend = FALSE) +
     geom_point(data = sigd %>% filter(!capped),
                aes(coef_feature, y, fill = category, size = is_hero),
-               shape = 21, color = "white", stroke = 0.6, alpha = 0.92) +
+               shape = 21, color = "white", stroke = 0.6, alpha = 0.92, show.legend = TRUE) +
     geom_point(data = sigd %>% filter(capped),
                aes(coef_feature, y, fill = category), shape = 24,
                size = 3.4 * 1.5, color = "white", stroke = 0.6, alpha = 0.92, show.legend = FALSE) +
     ggrepel::geom_text_repel(
       data = sub,
       aes(coef_feature, pmin(neglog10p, Y_MAX_CAP), label = repel_label, color = category),
-      size = 3.2, fontface = "plain", segment.color = "#95a5a6", segment.size = 0.3,
+      size = 4.2, fontface = "plain", segment.color = "#95a5a6", segment.size = 0.3,
       max.overlaps = Inf, min.segment.length = 0, box.padding = 0.55,
-      point.padding = 0.8, point.size = 4, force = 2, max.time = 4, max.iter = 100000, seed = 0,
+      point.padding = 1, point.size = 4, force = 3, force_pull = 0.2,
+      max.time = 4, max.iter = 100000, seed = 0,
       nudge_x = ifelse(sub$coef_feature < 0, -0.35, 0.35), nudge_y = 0.35,
       show.legend = FALSE) +
     scale_color_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL) +
-    scale_fill_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL) +
+    scale_fill_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, limits = LEGEND_ORDER,
+                      drop = FALSE, name = NULL) +
     guides(color = "none", fill = guide_legend(nrow = 2, override.aes = list(shape = 21, size = 3, alpha = 1))) +
     scale_size_manual(values = c(`TRUE` = 3.2 * 1.5, `FALSE` = 2.1 * 1.5), guide = "none") +
     coord_cartesian(xlim = range(c(PANEL_XLIM, sub$coef_feature), finite = TRUE) * 1.08,
@@ -1091,12 +1156,12 @@ plot_volcano_panel <- function(sub, title) {
     labs(x = "Cox log HR per SD", y = expression(-log[10](p)), title = title,
          caption = str_wrap(footer, 88)) +
     theme_fig() +
-    theme(plot.title = element_text(face = "bold", size = 14),
-          plot.caption = element_text(size = 9, color = "#5d6d7e", family = "sans",
+    theme(plot.title = element_text(face = "bold", size = 16),
+          plot.caption = element_text(size = 11, color = "#5d6d7e", family = "sans",
                                       hjust = 0, lineheight = 1.05),
-          axis.title = element_text(size = 12),
-          axis.text  = element_text(size = 10),
-          legend.text = element_text(size = 10),
+          axis.title = element_text(size = 14),
+          axis.text  = element_text(size = 12),
+          legend.text = element_text(size = 12),
           legend.position = "bottom", legend.justification = "center")
   p
 }
@@ -2356,7 +2421,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   uni <- uni[mask, ]
   cat(sprintf("%d rows remaining\n", nrow(uni)))
 
-  # One solo volcano panel per landmark in this cohort's LANDMARKS.
+  # Keep solo volcanoes; 05 also compiles these same plots across landmarks.
   panels <- lapply(LANDMARKS, function(lm) {
     list(lm, ifelse(lm > 0, sprintf("+%d days", lm), sprintf("%d days", lm)))
   })
@@ -2710,43 +2775,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     mutate(name = factor(name, levels = SERIES_LEVELS))
 
   render_discrimination_panel <- function(metric, ylabel, show_legend = FALSE) {
-    d <- discrimination_data %>%
-      transmute(name, baseline = name %in% c("Cox baseline (age)","XGBoost baseline (age)"),
-                landmark = factor(sprintf("%s%d days", ifelse(landmark > 0, "+", ""), landmark),
-                                  levels = sprintf("%s%d days", ifelse(LANDMARKS > 0,"+",""), LANDMARKS)),
-                value = .data[[metric]])
-    finite_max <- suppressWarnings(max(d$value, na.rm = TRUE))
-    ymax <- min(1.0, (if (is.finite(finite_max)) finite_max else 0.7) * 1.12)
-
-    base <- ggplot(d, aes(landmark, value, group = name))
-    if (HAS_GGPATTERN) {
-      p <- base + ggpattern::geom_col_pattern(
-        aes(fill = name, pattern = baseline),
-        position = position_dodge(width = 0.85), width = 0.8,
-        color = "white", pattern_fill = "white", pattern_density = 0.08,
-        pattern_spacing = 0.02, pattern_angle = 45) +
-        ggpattern::scale_pattern_manual(values = c(`TRUE` = "stripe", `FALSE` = "none"), guide = "none")
-    } else {
-      p <- base + geom_col(aes(fill = name, linetype = baseline),
-                           position = position_dodge(width = 0.85), width = 0.8,
-                           color = "white") +
-        scale_linetype_manual(values = c(`TRUE` = "dashed", `FALSE` = "solid"), guide = "none")
-    }
-    p +
-      geom_text(aes(label = ifelse(is.finite(value), sprintf("%.3f", value), "")),
-                position = position_dodge(width = 0.85), vjust = -0.4, size = 2.5,
-                show.legend = FALSE) +
-      geom_hline(yintercept = 0.5, color = "grey", linetype = "dotted", linewidth = 0.9) +
-      scale_fill_manual(values = SERIES_COLORS, name = NULL, drop = FALSE) +
-      coord_cartesian(ylim = c(0, max(1.04, ymax))) +
-      labs(x = NULL, y = ylabel) +
-      theme_fig() +
-      guides(fill = guide_legend(ncol = 2, byrow = TRUE)) +
-      theme(legend.position = if (show_legend) "top" else "none",
-            legend.justification = "right",
-            legend.box.just = "right",
-            legend.direction = "horizontal",
-            panel.grid.major.x = element_blank())
+    plot_model_discrimination(discrimination_data,metric,ylabel,SERIES_COLORS,LANDMARKS,show_legend)
   }
 
   disc_panels <- list(
@@ -3013,35 +3042,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                                  color = "#7f8c8d") + theme_void() +
                labs(title = title) + theme(plot.title = element_text(face = "bold", size = 11)))
     }
-    df <- df %>%
-      filter(!lab_name %in% DROP) %>%
-      mutate(category = vapply(lab_name, assign_category, character(1)))
-    if (nrow(df) == 0) {
-      return(ggplot() + annotate("text", x = 0, y = 0, label = "(no features to display)",
-                                 color = "#7f8c8d") + theme_void() +
-               labs(title = title) + theme(plot.title = element_text(face = "bold", size = 11)))
-    }
-    if (kind == "cox") {
-      df <- df %>% arrange(desc(abs(coef))) %>% head(TOP_N)
-      df$value <- df$coef; xlabel <- "log HR coefficient"
-    } else {
-      df <- df %>% arrange(desc(gain)) %>% head(TOP_N)
-      df$value <- df$gain; xlabel <- "XGBoost gain"
-    }
-    df <- df %>% mutate(
-      label = mapply(format_label, lab_name, feature_stat),
-      category = factor(category, levels = LEGEND_ORDER))
-    df$label <- factor(df$label, levels = rev(df$label))   # top feature at top of barh
-
-    p <- ggplot(df, aes(value, label, fill = category)) +
-      geom_col(color = "white", linewidth = 0.5) +
-      scale_fill_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL, drop = FALSE) +
-      labs(x = xlabel, y = NULL, title = title) +
-      theme_fig() +
-      theme(plot.title = element_text(face = "bold", size = 11),
-            axis.text.y = element_text(size = 10))
-    if (kind == "cox") p <- p + geom_vline(xintercept = 0, color = "black", linewidth = 0.5)
-    p
+    plot_model_importance(df,kind,title,TOP_N)
   }
 
   IMPORTANCE_MODEL_ROWS <- list(

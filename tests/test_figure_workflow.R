@@ -59,6 +59,14 @@ local({
   within_path <- file.path(site_dir, "cox_within_site_all_sites_results.csv")
   write_csv(bind_rows(lapply(c("site_a", "site_b"), function(site)
     mutate(bind_rows(federated), site_name = site, analysis_label = "adt"))), within_path)
+  xgb_dir <- file.path(root,"federated_xgboost"); dir.create(xgb_dir)
+  xgb_metrics_path <- file.path(xgb_dir,"xgboost_federated_metrics_adt.csv")
+  xgb_importance_path <- file.path(xgb_dir,"xgboost_federated_importance_adt.csv")
+  write_csv(expand_grid(landmark_days=c(0,90,180),config=c("both","baseline")) %>%
+    mutate(analysis_label="adt",endpoint="platinum",model="xgboost_cox",cohort="all",
+      test_c_index=.7,test_mean_auc_t=.75,n_test=20,n_events_test=5),xgb_metrics_path)
+  write_csv(expand_grid(landmark_days=c(0,90,180),feature=c("PSA__mean","Testosterone__last","age")) %>%
+    mutate(analysis_label="adt",endpoint="platinum",gain=seq_len(n())),xgb_importance_path)
   pipeline_path <- normalizePath("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
   cfg <- list(data_root = root, cache_root = file.path(root, "cache"), fig_root = file.path(root, "figures"),
     cohorts = "adt", endpoints = c("platinum", "nepc"), scope = "all", labs = ANDROGEN,
@@ -140,7 +148,15 @@ local({
   eval(parse(text = code), env)
   stopifnot(identical(names(env$figure_run$prepared), "federated"))
   stopifnot(identical(vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem"),
-                      c("psa_forest", "testosterone_forest", "site_incidence_lm000")))
+                      c("psa_forest", "testosterone_forest", "site_incidence_lm000",
+                        "xgboost_performance", "xgboost_importance")))
+  # Both forest scenes keep widescreen slide dimensions through 05's cache;
+  # the day-zero incidence layout is unchanged.
+  for(scene in env$figure_run$prepared$federated$scenes[1:2]) {
+    stopifnot(scene$width == 16, scene$height == 9)
+  }
+  incidence_scene <- env$figure_run$prepared$federated$scenes[[3]]
+  stopifnot(incidence_scene$width == 14, incidence_scene$height == 5.5)
   site_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated_no_msk",
                                     "site_incidence_lm000__platinum.csv"), show_col_types = FALSE)
   stopifnot(file.exists(file.path(cfg$fig_root,"ADT","index.html")),
@@ -148,6 +164,14 @@ local({
             !dir.exists(file.path(cfg$fig_root,"ADT","by_figure")))
   stopifnot(nrow(site_export) == 2L, all(site_export$landmark_days == 0))
   federated_cfg <- cfg; federated_cfg$scope <- "federated"
+  # Both XGBoost files require a refreshed 04 manifest after source changes.
+  for(path in c(xgb_metrics_path,xgb_importance_path)) {
+    original_time <- file.info(path)$mtime
+    Sys.setFileTime(path,original_time+5)
+    changed <- tryCatch(figure_notebook_manifest(federated_cfg),error=identity)
+    stopifnot(inherits(changed,"error"),grepl(basename(path),conditionMessage(changed),fixed=TRUE))
+    Sys.setFileTime(path,original_time)
+  }
   Sys.setFileTime(within_path, file.info(within_path)$mtime + 5)
   changed_within <- tryCatch(figure_notebook_manifest(federated_cfg), error = identity)
   stopifnot(inherits(changed_within, "error"),

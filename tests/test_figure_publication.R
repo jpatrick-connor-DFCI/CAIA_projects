@@ -61,8 +61,13 @@ local({
   for(lab in c("PSA","Testosterone")) {
     p <- plot_federated_comparison(estimates,lab,"Unverified population")
     stopifnot(nrow(p$data)==48,all(p$data$p_value==.04),all(p$data$q_value==.2))
-    b <- ggplot_build(p); stopifnot(nrow(b$data[[4]])==48,length(b$layout$panel_params)==12)
+    b <- ggplot_build(p)
+    stopifnot(nrow(b$data[[4]])==48,length(b$layout$panel_params)==12,
+      max(b$layout$layout$ROW)==3,max(b$layout$layout$COL)==4,
+      identical(as.character(b$layout$layout$feature_stat[1:4]),c("Mean","Minimum","Maximum","Last")))
   }
+  stopifnot(isTRUE(all.equal(unname(FEDERATED_FOREST_SLIDE_SIZE[["width"]] /
+    FEDERATED_FOREST_SLIDE_SIZE[["height"]]),16/9)))
   counts <- tibble(site_name=rep(c("fred_hutch_caia_1_1","jhu_caia_1_1","dana_farber_caia_1_1"),each=3),
     landmark_days=rep(c(0,90,180),3),n_patients=rep(c(100,50,200),each=3),n_events=rep(c(10,5,30),each=3))
   across <- tibble(landmark_days=c(0,90,180),n_patients_used=150,n_events_used=15)

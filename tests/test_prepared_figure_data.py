@@ -104,7 +104,9 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     assert result["federated"]
     site_path = Path(config["federated_path"]).parent / "nvflare_within_site_cox_univariate" / "cox_within_site_all_sites_cohort.csv"
     within_path = site_path.with_name("cox_within_site_all_sites_results.csv")
-    assert [item["path"] for item in result["federated_sources"]] == [config["federated_path"], str(site_path), str(within_path)]
+    xgb_dir = site_path.parent.parent / "federated_xgboost"
+    xgb_paths = [xgb_dir / f"xgboost_federated_{kind}_adt.csv" for kind in ("metrics", "importance")]
+    assert [item["path"] for item in result["federated_sources"]] == [config["federated_path"], str(site_path), str(within_path), *map(str, xgb_paths)]
     assert result["federated_sources"][1]["missing"]
     site_path.parent.mkdir()
     pl.DataFrame({"site_name": ["site_a"], "n_patients": [10], "n_events": [2]}).write_csv(site_path)
@@ -116,6 +118,18 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     with_forests = prep.prepare(config)
     assert with_forests["federated"] != updated["federated"]
     assert "missing" not in with_forests["federated_sources"][2]
+    previous = with_forests
+    xgb_dir.mkdir()
+    for index, path in enumerate(xgb_paths, start=3):
+        assert previous["federated_sources"][index]["missing"]
+        pl.DataFrame({"endpoint": ["platinum"]}).write_csv(path)
+        delivered = prep.prepare(config)
+        assert delivered["federated"] != previous["federated"]
+        assert "missing" not in delivered["federated_sources"][index]
+        pl.DataFrame({"endpoint": ["platinum"], "changed": [1]}).write_csv(path)
+        updated_xgb = prep.prepare(config)
+        assert updated_xgb["federated"] != delivered["federated"]
+        previous = updated_xgb
 
 
 def test_arpi_preparation_does_not_require_adt(tmp_path):

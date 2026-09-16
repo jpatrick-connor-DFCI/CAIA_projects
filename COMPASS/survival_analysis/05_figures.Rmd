@@ -31,7 +31,8 @@ metadata, prepares changed R figure sets, then renders missing or stale formats.
 source data, and requires the same cohort/analysis settings. Use `all` for
 normal updates and `render` for DPI/PDF changes.
 
-`COMPASS_FIGURE_SCOPE=federated` processes only the no-MSK forest plots and site cohort report without
+`COMPASS_FIGURE_SCOPE=federated` processes only the no-MSK forests, site cohort report,
+and XGBoost performance/importance figures without
 requiring longitudinal data or running other figure families.
 
 The site report reads `nvflare_within_site_cox_univariate/cox_within_site_all_sites_cohort.csv`
@@ -100,7 +101,12 @@ R compiles classifier validation into one figure and subtype/enrichment into one
 AUC/C-index into paired comparisons; importance into one three-landmark sheet per
 model; lab-extreme KM into one three-landmark sheet per lab; and mutation KM into
 pages of at most four panels. Model fits, counts, time origins, and tests are unchanged.
-Dense local volcanoes remain separate. Individual component images are not exported.
+Local univariate lab volcanoes retain individual day-0/90/180 plots and also
+export `associations/labs_univariate_all_landmarks__<endpoint>__<subset>__<exclusion>`.
+The combined figure uses three side-by-side panels on a 24 × 9-inch canvas,
+common axes, a shared category legend, and separate per-landmark significance
+counts. Larger feature labels (approximately 12 pt) and axis text are preserved
+in both formats. Other compiled figure families do not export component images.
 
 After a successful render, superseded `by_figure` exports for regenerated cohorts
 are copied, checksum-verified, and archived in `COMPASS_FIGURE_DATA_ROOT/previous_exports/`;
@@ -124,7 +130,8 @@ analysis anchor, with supplied ADT/LLM labels preserved.
 The federated HR output contains only PSA/testosterone forest plots at days
 0/90/180: mean, minimum, maximum, and last value, with delta and observation-count
 features excluded. Two compiled forests (one per analyte) show all sites and the
-federated result together, with landmark columns and statistic rows. Plots show
+federated result together, with statistic columns and landmark rows on a 16:9
+landscape canvas (one analyte per PowerPoint slide). Plots show
 HR per SD and 95% CIs on a common log axis per analyte. Exact p/q values and
 modeled/observed counts remain in the adjacent CSV. Symbols distinguish nominal-only p < 0.05,
 FDR q < 0.05, and nonsignificance. q-values are not recalculated on this subset.
@@ -143,6 +150,24 @@ ambiguous or unavailable membership is explicitly unverified.
 These forests run when canonical ADT/platinum is selected, or scope
 is `federated`. Missing optional sources are reported and skipped. Failures in
 one figure set do not prevent preparation/rendering of other available sets.
+
+Federated XGBoost uses `federated_xgboost/xgboost_federated_metrics_adt.csv` and
+`xgboost_federated_importance_adt.csv` beside the Cox results. Two additional
+compiled figures share the local PROFILE Figure 4 plotting functions:
+`federated_no_msk/xgboost_performance__platinum` pairs held-out test mean AUC(t)
+and C-index for labs versus the age baseline at days 0/90/180;
+`xgboost_importance__platinum` combines the three landmarks' top 15 positive-gain
+features, using the same labels, clinical-category colors, and age/body-height
+display exclusions as local runs. Unlike the selected HR forests, importance
+includes all supplied feature statistics, including deltas and observation counts.
+No models are refitted; training/tuning-CV metrics are not substituted for test
+performance. The horizon export lacks a train/test identifier and is not plotted.
+CSV sidecars retain source metadata, counts, all feature gains, and display flags.
+Identifier features with nonzero gain trigger a warning and a figure caption;
+they are not silently removed or treated as validated predictors.
+Missing optional XGBoost files are reported and skipped independently. Run `04`
+again after this update to register both files (including absent paths), then
+run `05` with stage `all`. All Python remains in `04`; graphics caches stay in data.
 
 ## Configuration
 

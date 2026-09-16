@@ -34,6 +34,10 @@ figure_public_path <- function(path) {
 }
 
 figure_compilation_spec <- function(stem) {
+  if (grepl("^figure3_univariate_(platinum|nepc)_landmark[0-9]+$", stem))
+    return(list(key="labs_univariate_all_landmarks", title="Univariate lab associations",
+      width=24, height=9, cols=3, keep_individuals=TRUE,
+      shared_caption=FALSE, shared_legend=TRUE))
   if (stem %in% c("figure2v3_confusion_matrix", "figure2v3_metric_bar"))
     return(list(key="classifier_validation", title="NEPC classifier validation", width=12, height=6, cols=2,
       shared_caption=TRUE, shared_legend=FALSE))
@@ -74,6 +78,19 @@ figure_grob <- function(plot, width, height, directory=tempdir()) {
 }
 
 figure_combine <- function(items, spec, directory) {
+  is_volcano <- identical(spec$key,"labs_univariate_all_landmarks")
+  # Compare landmarks on common axes, without dropping observations or changing
+  # the source plots used by the individual exports. Empty panels stay explicit.
+  if(is_volcano) {
+    axes <- lapply(items,function(x) x$plot$coordinates$limits)
+    available <- vapply(axes,function(x) length(x$x)==2 && length(x$y)==2,logical(1))
+    if(any(available)) {
+      xlim <- range(unlist(lapply(axes[available],`[[`,"x")),finite=TRUE)
+      ylim <- range(unlist(lapply(axes[available],`[[`,"y")),finite=TRUE)
+      for(i in which(available)) items[[i]]$plot <- items[[i]]$plot +
+        ggplot2::coord_cartesian(xlim=xlim,ylim=ylim)
+    }
+  }
   captions <- lapply(items, function(x) if(inherits(x$plot,"ggplot")) x$plot$labels$caption else NULL)
   same_caption <- isTRUE(spec$shared_caption) && length(captions) > 1 &&
     all(vapply(captions, identical, logical(1), captions[[1]]))
@@ -82,7 +99,9 @@ figure_combine <- function(items, spec, directory) {
     p <- items[[i]]$plot; stem <- items[[i]]$stem
     if (inherits(p,"ggplot")) {
       title <- p$labels$title
-      if (grepl("^figure4[acd]_",stem)) {
+      if (is_volcano) {
+        title <- paste0("Landmark ",sub("^.*landmark","",stem)," days")
+      } else if (grepl("^figure4[acd]_",stem)) {
         # Preserve the previously requested landmark n's, once in the shared title.
         if (i==1 && length(title) && grepl("\n",title))
           spec$title <- paste(spec$title, sub("^[^\n]*\n", "",title),sep="\n")
@@ -117,7 +136,7 @@ figure_combine <- function(items, spec, directory) {
         p <- p + ggplot2::theme(legend.position="none")
       }
       # Long category names need space at the smaller compiled panel width.
-      p <- p + ggplot2::theme(plot.title=ggplot2::element_text(size=11,face="bold"),
+      if(!is_volcano) p <- p + ggplot2::theme(plot.title=ggplot2::element_text(size=11,face="bold"),
         axis.text=ggplot2::element_text(size=9), legend.text=ggplot2::element_text(size=9),
         plot.caption=ggplot2::element_text(size=8))
     }
@@ -130,14 +149,22 @@ figure_combine <- function(items, spec, directory) {
     if(length(fields)) paste(fields[1],"endpoint"),
     if(length(fields)>1) if(fields[2]=="all") "all patients" else gsub("_"," ",fields[2]),
     if(length(fields)>2) if(fields[3]=="incl") "pre-ADT castrate included" else gsub("_"," ",fields[3])),collapse=" · ")
+  if (!is.null(spec$context)) context <- spec$context
   title <- paste(spec$title, context, sep="\n")
   bottom <- list()
   if(length(legends)) bottom <- c(bottom,legends)
   if(length(caption) && nzchar(caption)) bottom <- c(bottom,list(grid::textGrob(
-    paste(strwrap(caption,width=floor(spec$width*12)),collapse="\n"),gp=grid::gpar(fontsize=8))))
+    paste(unlist(lapply(strsplit(caption,"\n",fixed=TRUE)[[1]],strwrap,
+      width=floor(spec$width*12))),collapse="\n"),gp=grid::gpar(fontsize=8))))
+  # Reserve the actual legend/caption heights. Equal null rows can overlap or
+  # clip multi-line captions when this footer is nested as arrangeGrob's bottom.
+  footer <- if(length(bottom)) gridExtra::arrangeGrob(grobs=bottom,ncol=1,
+    heights=do.call(grid::unit.c,lapply(bottom,function(g)
+      (if(inherits(g,"gtable")) sum(g$heights) else grid::grobHeight(g)) + grid::unit(4,"pt")))) else NULL
+  if(!is.null(footer)) footer <- gtable::gtable_add_rows(footer,grid::unit(12,"pt"),pos=-1)
   gridExtra::arrangeGrob(grobs=grobs,ncol=spec$cols,
-    top=grid::textGrob(title,gp=grid::gpar(fontsize=14,fontface="bold")),
-    bottom=if(length(bottom)) gridExtra::arrangeGrob(grobs=bottom,ncol=1) else NULL,
+    top=grid::textGrob(title,gp=grid::gpar(fontsize=if(is_volcano) 18 else 14,fontface="bold")),
+    bottom=footer,
     padding=grid::unit(2,"lines"))
 }
 

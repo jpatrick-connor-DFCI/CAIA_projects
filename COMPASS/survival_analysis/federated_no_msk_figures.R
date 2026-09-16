@@ -1,4 +1,5 @@
-# Federated-only PSA/testosterone forests and site cohort counts. Significance uses the supplied
+# Federated PSA/testosterone forests, site counts, and XGBoost Figure 4 reports.
+# Significance uses the supplied
 # p/q values, never an FDR recalculation on this selected subset.
 federated_lab_label <- function(raw) {
   short <- gsub("_", " ", sub("__.*$", "", raw))
@@ -260,6 +261,9 @@ prepare_federated_comparison <- function(across, within=NULL) {
   bind_rows(across,mutate(within,source=site,source_kind="within_site"))
 }
 
+# Widescreen slide canvas; shared by both analytes and the cached renderer.
+FEDERATED_FOREST_SLIDE_SIZE <- c(width=16, height=9)
+
 plot_federated_comparison <- function(estimates, analyte, population_note) {
   sources <- c(sort(setdiff(unique(estimates$source),"Federated*")),"Federated*")
   d <- filter(estimates,lab_name==analyte) %>%
@@ -286,7 +290,7 @@ plot_federated_comparison <- function(estimates, analyte, population_note) {
     geom_blank(aes(x=1)) +
     geom_errorbar(data=filter(d,valid_estimate,valid_ci),aes(xmin=ci_lower,xmax=ci_upper),
       orientation="y",width=.12,linewidth=.65) +
-    geom_point(data=filter(d,valid_estimate),aes(shape=significance),size=2.8,stroke=.8) +
+    geom_point(data=filter(d,valid_estimate),aes(shape=significance),size=3.2,stroke=.8) +
     geom_text(data=filter(d,!valid_estimate),aes(x=1,label="Unavailable"),color="grey50",size=2.6) +
     geom_text(data=filter(d,valid_estimate,!valid_ci),aes(x=limits[2],label="CI unavailable"),
       hjust=1,color="grey50",size=2.3) +
@@ -297,19 +301,129 @@ plot_federated_comparison <- function(estimates, analyte, population_note) {
         if(any(d$significance=="Significance unavailable")) "Significance unavailable"),drop=FALSE) +
     scale_x_log10(limits=limits,labels=scales::label_number(accuracy=.01)) +
     scale_y_discrete(drop=FALSE,expand=expansion(add=.65)) +
-    facet_grid(feature_stat ~ landmark,drop=FALSE) +
+    facet_grid(landmark ~ feature_stat,drop=FALSE) +
     labs(title=paste(analyte,"associations across sites"),
       subtitle="ADT · platinum endpoint · no MSK · hazard ratios per SD with 95% confidence intervals",
       x="Hazard ratio per SD (log scale)",y=NULL,
       caption=paste(population_note,count_note,
-        "Open: not significant; filled: nominal p < 0.05 only; diamond: supplied FDR q < 0.05. No FDR recalculation.",
-        "Exact HR/CI/p/q, modeled and observed counts, and fitting metadata are in the accompanying CSV; no delta features.",sep="\n")) +
-    theme_classic(base_size=11) +
+        "Supplied FDR q values (not recalculated). Exact estimates, counts and fitting metadata: accompanying CSV. No delta features.",sep="\n")) +
+    theme_classic(base_size=14) +
     theme(strip.background=element_blank(),strip.text=element_text(face="bold"),
-      panel.spacing=grid::unit(.9,"lines"),legend.position="bottom",
+      panel.spacing=grid::unit(.65,"lines"),legend.position="bottom",
       legend.text=element_text(margin=margin(l=5,r=10)),
-      plot.caption=element_text(hjust=0,size=8),plot.title.position="plot",plot.caption.position="plot",
+      plot.caption=element_text(hjust=0,size=10.5),plot.title.position="plot",plot.caption.position="plot",
       plot.margin=margin(12,18,12,12))
+}
+
+load_federated_xgboost <- function(path, kind=c("metrics","importance")) {
+  kind <- match.arg(kind)
+  if (!file.exists(path)) {
+    warning("Federated XGBoost ",kind," unavailable; missing: ",path)
+    return(NULL)
+  }
+  d <- readr::read_csv(path,show_col_types=FALSE)
+  needed <- c("analysis_label","endpoint","landmark_days",if(kind=="metrics")
+    c("model","cohort","config","test_c_index","test_mean_auc_t","n_test","n_events_test") else c("feature","gain"))
+  missing <- setdiff(needed,names(d))
+  if(length(missing)) stop("Federated XGBoost ",kind," input is missing: ",paste(missing,collapse=", "))
+  d <- filter(d,tolower(analysis_label)=="adt",tolower(endpoint)=="platinum",landmark_days %in% c(0,90,180))
+  if(kind=="metrics") {
+    d <- filter(d,tolower(model)=="xgboost_cox",tolower(cohort)=="all",config %in% c("both","baseline"))
+    keys <- c("landmark_days","config")
+    for(column in c("test_c_index","test_mean_auc_t")) {
+      if(!is.numeric(d[[column]]) && !all(is.na(d[[column]]))) stop("Non-numeric XGBoost metric: ",column)
+      if(any(!is.na(d[[column]]) & (!is.finite(d[[column]]) | d[[column]]<0 | d[[column]]>1)))
+        stop("Invalid XGBoost metric: ",column)
+    }
+    if(any(!is.na(d$n_test) & (!is.finite(d$n_test) | d$n_test<0)) ||
+       any(!is.na(d$n_events_test) & (!is.finite(d$n_events_test) | d$n_events_test<0 | d$n_events_test>d$n_test),na.rm=TRUE))
+      stop("Invalid XGBoost test counts")
+  } else {
+    keys <- c("landmark_days","feature")
+    if(any(is.na(d$feature) | !nzchar(trimws(d$feature)))) stop("Missing XGBoost feature name")
+    if(!is.numeric(d$gain) || any(!is.finite(d$gain) | d$gain<0)) stop("Invalid XGBoost gain")
+    # OMOP names contain internal double underscores: the statistic is the LAST
+    # suffix, unlike the short local names. Keep original names/gains in CSV.
+    d <- mutate(d,lab_name=federated_lab_label(feature),
+      feature_stat=if_else(grepl("__",feature,fixed=TRUE),sub("^.*__","",feature),""),
+      identifier_feature=tolower(feature) %in% c("person_id","patient_id","dfci_mrn","mrn"))
+  }
+  if(anyDuplicated(d[keys])) stop("Duplicate landmark/",if(kind=="metrics") "config" else "feature",
+    " rows in federated XGBoost ",kind," input")
+  if(!nrow(d)) warning("No ADT/platinum rows in federated XGBoost ",kind," input: ",path)
+  d
+}
+
+prepare_federated_xgboost_performance <- function(metrics) {
+  metrics %>% complete(landmark_days=c(0,90,180),config=c("both","baseline")) %>%
+    mutate(name=factor(if_else(config=="both","XGBoost Survival","XGBoost baseline (age)"),
+      levels=c("XGBoost Survival","XGBoost baseline (age)")),
+      landmark=landmark_days,auc=test_mean_auc_t,cindex=test_c_index)
+}
+
+federated_xgboost_audit_note <- function(importance) {
+  if(is.null(importance)) return("Feature-input audit unavailable: importance file missing.")
+  ids <- filter(importance,identifier_feature,gain>0)
+  if(!nrow(ids)) return("")
+  paste0("CAUTION: identifier feature(s) ",paste(unique(ids$feature),collapse=", "),
+    " have nonzero gain at landmark(s) ",paste(sort(unique(ids$landmark_days)),collapse=", "),
+    " days; audit model inputs before interpreting performance or importance.")
+}
+
+render_federated_xgboost <- function(root,federated_path,dpi,overwrite) {
+  directory <- file.path(dirname(federated_path),"federated_xgboost")
+  metrics <- load_federated_xgboost(file.path(directory,"xgboost_federated_metrics_adt.csv"),"metrics")
+  importance <- load_federated_xgboost(file.path(directory,"xgboost_federated_importance_adt.csv"),"importance")
+  audit <- federated_xgboost_audit_note(importance)
+  if(startsWith(audit,"CAUTION")) warning(audit)
+  capture <- getOption("compass.figure_table_capture")
+  write_table <- function(data,stem) {
+    path <- file.path(root,paste0(stem,"__platinum.csv"))
+    readr::write_csv(data,path)
+    if(is.function(capture)) capture(path)
+  }
+  context <- "ADT · platinum endpoint · federated no MSK"
+  if(!is.null(metrics) && nrow(metrics)) {
+    d <- prepare_federated_xgboost_performance(metrics)
+    colors <- c("XGBoost Survival"="#B58900","XGBoost baseline (age)"="#E0CC8A")
+    count_note <- d %>% arrange(landmark_days,config) %>%
+      transmute(note=sprintf("%dd %s: n=%s, events=%s",landmark_days,
+        if_else(config=="both","labs","baseline"),scales::comma(n_test),scales::comma(n_events_test))) %>%
+      pull(note) %>% paste(collapse="; ")
+    caption <- paste("Held-out test metrics (not training or tuning CV). Gaps indicate unavailable metrics.",
+      paste0("Test counts — ",count_note,"."),audit,sep="\n")
+    items <- lapply(c("auc","cindex"),function(metric) {
+      stem <- paste0("figure4a_discrimination_",metric,"_platinum")
+      list(plot=plot_model_discrimination(d,metric,if(metric=="auc") "Test Mean AUC(t)" else "Test C-index",
+        colors,show_legend=TRUE)+labs(caption=caption),stem=stem,destination=file.path(root,"platinum"))
+    })
+    spec <- figure_compilation_spec(items[[1]]$stem)
+    spec$title <- "Federated XGBoost: labs vs. age baseline"; spec$context <- context
+    p <- figure_combine(items,spec,tempdir())
+    write_table(mutate(d,input_audit_note=audit),"xgboost_performance")
+    save_federated_no_msk_panel(p,file.path(root,"xgboost_performance__platinum.png"),spec$width,spec$height,dpi,overwrite)
+  }
+  if(!is.null(importance) && nrow(importance)) {
+    caption <- paste("Top 15 positive-gain features per landmark; age and body height excluded from display, as in local plots.",
+      "Gains are supplied model split gains, not signed effects or SHAP values. All source features remain in the CSV.",audit,sep="\n")
+    items <- lapply(c(0,90,180),function(lm) {
+      d <- filter(importance,landmark_days==lm,tolower(feature)!="age",gain>0)
+      stem <- paste0("figure4b_importance_platinum_xgb_landmark",lm)
+      p <- plot_model_importance(d,"xgb",paste("Landmark",lm,"days"))+labs(caption=caption)
+      if(!any(importance$landmark_days==lm)) p <- p+labs(subtitle="Importance unavailable")
+      list(plot=p,stem=stem,destination=file.path(root,"platinum"))
+    })
+    shown <- bind_rows(tibble(landmark_days=numeric(),feature=character()),
+      Filter(is.data.frame,lapply(items,function(item) item$plot$data)))
+    exported <- importance %>% mutate(displayed=paste(landmark_days,feature) %in% paste(shown$landmark_days,shown$feature),
+      input_audit_note=audit)
+    spec <- figure_compilation_spec(items[[1]]$stem)
+    spec$title <- "Federated XGBoost feature importance"; spec$context <- context
+    p <- figure_combine(items,spec,tempdir())
+    write_table(exported,"xgboost_importance")
+    save_federated_no_msk_panel(p,file.path(root,"xgboost_importance__platinum.png"),spec$width,spec$height,dpi,overwrite)
+  }
+  invisible(NULL)
 }
 
 render_federated_no_msk_supplement <- function(data_root, fig_root, federated_path,
@@ -332,7 +446,8 @@ render_federated_no_msk_supplement <- function(data_root, fig_root, federated_pa
     base <- file.path(root,paste0(tolower(analyte),"_forest__platinum"))
     readr::write_csv(filter(estimates,lab_name==analyte),paste0(base,".csv"))
     if(is.function(capture)) capture(paste0(base,".csv"))
-    save_federated_no_msk_panel(plot_federated_comparison(estimates,analyte,note),paste0(base,".png"),12,10, dpi,overwrite)
+    save_federated_no_msk_panel(plot_federated_comparison(estimates,analyte,note),paste0(base,".png"),
+      FEDERATED_FOREST_SLIDE_SIZE[["width"]],FEDERATED_FOREST_SLIDE_SIZE[["height"]],dpi,overwrite)
   }
   if (!is.null(sites)) {
     site_path <- file.path(root, "site_incidence_lm000__platinum.csv")
@@ -342,5 +457,6 @@ render_federated_no_msk_supplement <- function(data_root, fig_root, federated_pa
     save_federated_no_msk_panel(plot_federated_no_msk_sites(sites),
       file.path(root, "site_incidence_lm000__platinum.png"), 14, 5.5, dpi, overwrite)
   }
+  render_federated_xgboost(root,federated_path,dpi,overwrite)
   invisible(d)
 }

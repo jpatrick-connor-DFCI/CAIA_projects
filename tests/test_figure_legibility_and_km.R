@@ -13,7 +13,7 @@ find_assignment <- function(expr, name) {
 for (name in c("theme_fig", "figure_tertiles", "figure_extreme_quintiles",
                "figure_gleason_groups", "figure_platinum_strata",
                "significant_mutation_features", "plot_stratified_platinum", "prepare_figure_text",
-               "render_discrimination_panel", "render_available_case_sensitivity",
+               "plot_model_discrimination", "render_discrimination_panel", "render_available_case_sensitivity",
                "read_endpoint_performance", "plot_volcano_panel", "labels_for_panel",
                "q_threshold_neglog10p", "assign_category", "plot_sg_forest")) {
   for (expr in source_exprs) {

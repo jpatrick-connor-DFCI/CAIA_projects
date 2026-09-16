@@ -419,6 +419,10 @@ def prepare(config: dict) -> dict:
             "nvflare_within_site_cox_univariate" / "cox_within_site_all_sites_cohort.csv"),
             fingerprint(federated_path.parent / "nvflare_within_site_cox_univariate" /
                         "cox_within_site_all_sites_results.csv")]
+        # Small fitted-result tables are read by R, like the Cox exports. Track
+        # absent paths too so later XGBoost deliveries invalidate preparation.
+        federated_sources += [fingerprint(federated_path.parent / "federated_xgboost" /
+            f"xgboost_federated_{kind}_adt.csv") for kind in ("metrics", "importance")]
         manifest["federated"] = digest({"code": version, "force": manifest["force_version"],
             "files": federated_sources})
         if config.get("federated", False):
