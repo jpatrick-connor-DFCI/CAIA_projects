@@ -132,6 +132,11 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
       sub("^.*landmark([0-9]+).*$","\\1",stem) else "")
     invisible(NULL)
   }
+  manuscript_capture <- function(plot,stem) {
+    if(!is.null(manuscript_root) && inherits(plot,"ggplot"))
+      manuscript_items[[stem]] <<- list(plot=plot)
+    invisible(NULL)
+  }
   table_capture <- function(paths) {
     for(path in paths) {
       target <- figure_public_path(path)
@@ -144,7 +149,9 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
       tables <<- unique(c(tables,target))
     }
   }
-  old <- options(compass.figure_capture = capture, compass.figure_table_capture = table_capture,
+  old <- options(compass.figure_capture = capture,
+                 compass.manuscript_capture = manuscript_capture,
+                 compass.figure_table_capture = table_capture,
                  device = function(...) grDevices::pdf(file = NULL, ...))
   on.exit(options(old), add = TRUE)
   # Build all nested gtables on the raster renderer too; PDF-metric sizing caused
@@ -467,7 +474,11 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
       directory = file.path(config$cache_root, "scenes", "federated", signature))
   }
   if (!identical(config$scope, "federated") && "adt" %in% config$cohorts && "platinum" %in% config$endpoints) {
-    signature <- figure_object_hash(list(manifest$cohort_overview$key, runtime))
+    # Figure 6 also consumes the canonical ADT/platinum cohort-forest inputs,
+    # so changes to either the overview tables or those model results must
+    # invalidate this job's prepared manuscript scene.
+    signature <- figure_object_hash(list(manifest$cohort_overview$key,
+      manifest$cells[["adt__platinum"]],runtime))
     jobs$cohort_overview <- list(name = "cohort_overview", signature = signature,
       directory = file.path(config$cache_root, "scenes", "cohort_overview", signature))
   }
@@ -477,7 +488,8 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     # completion marker. A later delivery is picked up by source fingerprints.
     if (job$name == "cohort_overview") {
       source(file.path(dirname(pipeline_path), "cohort_overview_figures.R"), local = TRUE)
-      build <- function() render_cohort_overview(manifest, config)
+      if(!is.null(forest_config)) sys.source(forest_config$script,envir=environment())
+      build <- function() render_cohort_overview(manifest, config, forest_config)
     } else if (job$name == "federated") {
       source(federated_config$script, local = TRUE)
       inputs <- federated_config$results

@@ -153,6 +153,8 @@ manuscript_combine <- function(plots,spec,shared_legend=FALSE,tag_offset=0L) {
       plot.subtitle=ggplot2::element_text(size=8,face="bold",hjust=.5,
         margin=ggplot2::margin(b=2)),
       plot.margin=ggplot2::margin(4,1,4,1))
+    if(identical(spec$key,"03_dfci_univariable") && i %in% c(5,7)) p <- p + ggplot2::theme(
+      plot.tag=ggplot2::element_text(size=11,face="bold",margin=ggplot2::margin(b=6)))
     if(inherits(p,"ggplot")) {
       if(shared_legend || i %in% inline_legend_panels) {
         g <- manuscript_grob(p,spec$width,spec$height)
@@ -186,6 +188,10 @@ manuscript_legend <- function(p,width,height) {
   if(length(boxes)) boxes[[1]] else NULL
 }
 
+manuscript_center_landmark_header <- function(p) p + ggplot2::theme(
+  plot.subtitle=ggplot2::element_text(size=8,face="bold",hjust=.5,
+    margin=ggplot2::margin(b=3)))
+
 manuscript_multivariable_labs <- function(plots,spec) {
   stopifnot(length(plots)==8)
   performance <- vector("list",2)
@@ -204,6 +210,7 @@ manuscript_multivariable_labs <- function(plots,spec) {
     p <- manuscript_style(plots[[i+2]] + ggplot2::labs(subtitle=landmarks[(i-1)%%3+1]),NULL,NULL) +
       ggplot2::guides(color="none",fill=ggplot2::guide_legend(nrow=1,byrow=TRUE,
         override.aes=list(alpha=1)))
+    p <- manuscript_center_landmark_header(p)
     if(is.null(category_legend)) category_legend <- manuscript_legend(p,spec$width,spec$height)
     importance[[i]] <- manuscript_grob(p + ggplot2::theme(legend.position="none"),
       spec$width/3,spec$height*.24)
@@ -302,7 +309,7 @@ manuscript_incidence <- function(d) {
       "'No prior castrate' denotes the source noprecastrate cohort restriction."))
 }
 
-manuscript_log_hazard_axis <- function(p) {
+manuscript_log_hazard_axis <- function(p,outer_breaks=FALSE) {
   stopifnot(inherits(p,"ggplot"),all(c("hazard_ratio_per_sd","ci_lower","ci_upper") %in% names(p$data)))
   values <- unlist(p$data[c("hazard_ratio_per_sd","ci_lower","ci_upper")],use.names=FALSE)
   values <- values[is.finite(values) & values>0]
@@ -312,6 +319,7 @@ manuscript_log_hazard_axis <- function(p) {
   ticks <- pretty(log_limits,n=5)
   ticks <- ticks[ticks>=log_limits[1] & ticks<=log_limits[2]]
   if(!any(abs(ticks)<sqrt(.Machine$double.eps))) ticks <- sort(unique(c(ticks,0)))
+  if(isTRUE(outer_breaks) && length(ticks)>2) ticks <- range(ticks)
   p + ggplot2::scale_x_log10(limits=exp(log_limits),breaks=exp(ticks),
     labels=function(x) scales::label_number(accuracy=.1)(log(x))) +
     ggplot2::labs(x="Log hazard ratio per SD (95% CI)")
@@ -395,7 +403,8 @@ manuscript_federated_labs <- function(d) {
   # horizontal coordinate directly as the natural-log hazard ratio.
   plots <- lapply(c("PSA","Testosterone"),function(analyte)
     manuscript_log_hazard_axis(
-      plot_federated_comparison(d,analyte,note) + ggplot2::labs(subtitle=NULL)))
+      plot_federated_comparison(d,analyte,note) + ggplot2::labs(subtitle=NULL),
+      outer_breaks=analyte=="PSA"))
   spec <- list(key="07_federated_incidence_associations",width=7.2,height=8.4,
     layout=matrix(1:2,2),titles=c("PSA","Testosterone"))
   list(plot=manuscript_combine(plots,spec,shared_legend=TRUE),panels=plots,spec=spec,data=d,
@@ -551,9 +560,11 @@ manuscript_build <- function(items,tables,root) {
   }
   incidence <- read("^event_incidence_lm180__platinum__all__incl[.]csv$")
   association_key <- "cohort_forest_platinum_landmark180"
-  if(!is.null(incidence) && association_key %in% names(items))
-    result[["06"]] <- manuscript_dfci_cohort_sensitivity(
+  if(!is.null(incidence)) {
+    if(association_key %in% names(items)) result[["06"]] <- manuscript_dfci_cohort_sensitivity(
       manuscript_incidence(incidence),items[[association_key]]$plot)
+    else message("Skipping manuscript Figure 6: missing captured ",association_key)
+  }
   psa <- read("^psa_forest__platinum[.]csv$"); testosterone <- read("^testosterone_forest__platinum[.]csv$")
   site_incidence <- read("^site_incidence_lm000__platinum[.]csv$")
   required_sites <- c("dana_farber_caia_1_1","fred_hutch_caia_1_1","jhu_caia_1_1")

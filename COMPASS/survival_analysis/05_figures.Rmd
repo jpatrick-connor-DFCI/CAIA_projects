@@ -143,7 +143,9 @@ PSA/testosterone associations on natural-log hazard-ratio axes), and
 `08_federated_xgboost` (test performance and feature importance). The cohort
 sensitivity components are assembled into one continuous multipanel figure for
 each analysis setting. Federated manuscript plots reuse the original subplot
-renderers: forests retain site colors and landmark/statistic facets; XGBoost
+renderers: forests retain site colors and landmark/statistic facets; panel c
+labels only the outer log-hazard-ratio ticks because its four facets repeat the
+same scale and the dashed line already marks the null; XGBoost
 retains gold model/baseline bars and lab-category importance colors. Incomplete source groups are not assembled. The DFCI
 overview uses the same configurable extreme-quintile KM landmark as its larger
 compiled counterpart. Figure titles remain in filenames/legends, not supertitles.
@@ -152,12 +154,17 @@ patient-count subtitles because those counts are retained in the external legend
 In the DFCI univariable manuscript figure, the three landmark volcanoes use an
 expanded first row, compact horizontal spacing, a shared y-axis displayed
 through -log10(P)=22, centered landmark headers, and one horizontal category legend.
+The day-180 Albumin-minimum annotation receives a fixed upper-left nudge so it
+does not overlap the Testosterone-maximum label. Panels e and g reserve space
+below their letter tags so the tags remain separate from the rotated y-axis titles.
 Trajectory patient-count/scale subtitles are kept in the external legend, and
 KM log-rank values are drawn inside their panels. The manuscript figure fixes
 both KM panels at the 180-day landmark.
 The multivariable-labs manuscript figure includes held-out AUC(t) and C-index
 panels followed by three-landmark Elastic-Net coefficient and XGBoost gain rows;
-the importance rows share the source lab-category colors. Its 8.5-inch canvas
+the panel-c and panel-d landmark headers are bold and centered above their
+corresponding Elastic-Net coefficient and XGBoost importance subplots. The
+importance rows share the source lab-category colors. Its 8.5-inch canvas
 provides additional horizontal space for the three-column coefficient and gain rows.
 All compiled figures use lowercase bold panel letters and bold x- and y-axis
 titles; tick labels and legend text retain their existing weight.

@@ -1063,6 +1063,7 @@ TOP_K_PER_PANEL <- 4
 ALWAYS_LABEL    <- c("Hemoglobin", "Albumin", "Alkaline phosphatase")
 PANEL_XLIM      <- c(-1.5, 1.5)
 Y_MAX_CAP       <- 30   # -log10(p) ceiling; values above are drawn at the cap as triangles
+ALBUMIN_DAY180_NUDGE <- c(x=-0.8,y=1.7)
 
 q_threshold_neglog10p <- function(sub) {
   sig <- sub$p_value[sub$q_value < 0.05]
@@ -1110,6 +1111,11 @@ plot_volcano_panel <- function(sub, title) {
   # Keep every point in the repel calculation, including unlabeled points, so
   # text cannot settle on top of a nearby observation.
   sub <- sub %>% mutate(repel_label = ifelse(.point_id %in% lab_df$.point_id, label, ""))
+  albumin_day180 <- grepl("180",title,fixed=TRUE) &
+    sub$lab_name=="Albumin" & sub$feature_stat=="min"
+  label_nudge_x <- ifelse(albumin_day180,ALBUMIN_DAY180_NUDGE[["x"]],
+    ifelse(sub$coef_feature < 0,-0.35,0.35))
+  label_nudge_y <- ifelse(albumin_day180,ALBUMIN_DAY180_NUDGE[["y"]],0.35)
 
   n_tested <- nrow(sub); n_sig <- sum(sub$sig)
   breakdown <- sub %>% filter(sig) %>% count(category)
@@ -1144,7 +1150,7 @@ plot_volcano_panel <- function(sub, title) {
       max.overlaps = Inf, min.segment.length = 0, box.padding = 0.55,
       point.padding = 1, point.size = 4, force = 3, force_pull = 0.2,
       max.time = 4, max.iter = 100000, seed = 0,
-      nudge_x = ifelse(sub$coef_feature < 0, -0.35, 0.35), nudge_y = 0.35,
+      nudge_x = label_nudge_x, nudge_y = label_nudge_y,
       show.legend = FALSE) +
     scale_color_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, name = NULL) +
     scale_fill_manual(values = CATEGORY_COLORS, breaks = LEGEND_ORDER, limits = LEGEND_ORDER,

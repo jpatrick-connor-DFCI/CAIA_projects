@@ -117,7 +117,7 @@ plot_stage1_label_overview <- function(d) {
       scales::comma(n), scales::comma(paired), if (n) scales::percent(paired/n, accuracy = 1) else "NA"))
 }
 
-render_cohort_overview <- function(manifest, config) {
+render_cohort_overview <- function(manifest, config, forest_config=NULL) {
   prepared <- manifest$cohort_overview
   if (is.null(prepared)) stop("Run 04_prep_figure_data.ipynb to prepare the new cohort overview tables.")
   incidence <- figure_read_parquet(file.path(prepared$directory, "incidence.parquet"))
@@ -136,5 +136,20 @@ render_cohort_overview <- function(manifest, config) {
     table <- paste0(destination, ".csv")
     readr::write_csv(if (name == "event_incidence") incidence else overlap, table)
     getOption("compass.figure_table_capture")(table)
+  }
+  # Figure 6 combines this job's incidence table with the cohort forest. The
+  # canonical ADT job also renders the standalone forest, but manuscript
+  # assembly is job-local, so register the same source plot here without
+  # publishing a duplicate standalone scene.
+  if(!is.null(forest_config)) {
+    stopifnot(as.integer(forest_config$landmark)==as.integer(landmark))
+    forest <- load_cohort_forest(config$data_root,forest_config$cohorts,"platinum",landmark)
+    if(nrow(forest)) {
+      forest_plot <- plot_cohort_forest(forest,"platinum",landmark)
+      manuscript_capture <- getOption("compass.manuscript_capture")
+      if(!is.function(manuscript_capture)) stop("Manuscript capture is unavailable for cohort Figure 6")
+      manuscript_capture(forest_plot,
+        sprintf("cohort_forest_platinum_landmark%d",landmark))
+    } else message("Cohort overview: no platinum forest available for manuscript Figure 6")
   }
 }

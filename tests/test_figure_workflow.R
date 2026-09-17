@@ -107,6 +107,8 @@ local({
   stopifnot(length(manuscript_scenes)>=7L,
     all(vapply(manuscript_scenes,function(s) file.exists(paste0(s$destination,".pdf")) &&
       file.exists(paste0(s$destination,".md")) && s$width==7.2,logical(1))))
+  overview_stems <- vapply(first$prepared$cohort_overview$scenes,`[[`,character(1),"stem")
+  stopifnot("06_dfci_cohort_sensitivity" %in% overview_stems)
   platinum_stems <- vapply(first$prepared$adt__platinum$scenes, `[[`, character(1), "stem")
   nepc_stems <- vapply(first$prepared$adt__nepc$scenes, `[[`, character(1), "stem")
   stopifnot(all(c("figure1_cohort", "figure1a_consort", "figure1b_km", "figure1c_span",
