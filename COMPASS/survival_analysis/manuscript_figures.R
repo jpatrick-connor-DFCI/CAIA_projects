@@ -4,7 +4,7 @@
   basename(x)=="manuscript_figures.R", lapply(sys.frames(),function(frame) frame$ofile))
 source(file.path(dirname(tail(.manuscript_sources,1)[[1]]), "federated_no_msk_figures.R"), local=TRUE)
 rm(.manuscript_sources)
-manuscript_dfci_volcano_ylim <- c(-.2,22)
+manuscript_dfci_volcano_ylim <- c(-.2,20)
 manuscript_dfci_landmark_headers <- c("+0 days","+90 days","+180 days")
 manuscript_dfci_km_landmark <- 180
 manuscript_km_y_label <- "Platinum-free\nprobability"
@@ -50,7 +50,7 @@ manuscript_captions <- function() {
       "Panels a and b include 41 chart-reviewed patients, of whom 12 were manually annotated as NEPC. Panel c includes 3,754 classified patients (213 platinum positive and 3,541 platinum negative) from 3,869 ADT-exposed patients; seven labeled rows outside the four displayed classes were excluded. Panel d excludes 382 biomarker or unclassified rows. OR, odds ratio."),
     `03_dfci_univariable`=caption(
       "Figure 3. Univariable laboratory associations with platinum treatment and longitudinal PSA and testosterone patterns.",
-      "(a-c) Univariable Cox associations at ADT initiation (a), 90 days (b), and 180 days (c). The horizontal axis gives the log hazard ratio per standard-deviation increase and the vertical axis gives -log10(P), displayed through 22. The solid vertical line denotes no association, dashed vertical lines mark log hazard ratios of -0.5 and 0.5, and the dotted horizontal line is the landmark-specific threshold corresponding to a Benjamini-Hochberg false-discovery rate below 0.05. Colors identify laboratory categories. At the three landmarks, 31 of 235, 72 of 244, and 76 of 245 tested features, respectively, had q < 0.05. (d,f) Mean log1p-transformed PSA (d) and testosterone (f) trajectories by subsequent platinum status; points and shading denote the mean and 95% confidence interval, and only bins containing at least 10 patients per stratum are shown. The dotted vertical line denotes ADT initiation. (e,g) Kaplan-Meier platinum-free survival from the 180-day landmark comparing the bottom and top 20% of the pre-landmark mean PSA (e) or testosterone (g) distribution. Middle quintiles are omitted, equal values remain together, shading denotes pointwise 95% confidence intervals, and P values are from log-rank tests.",
+      "(a-c) Univariable Cox associations at ADT initiation (a), 90 days (b), and 180 days (c). The horizontal axis gives the log hazard ratio per standard-deviation increase and the vertical axis gives -log10(P), displayed through 20. The solid vertical line denotes no association, dashed vertical lines mark log hazard ratios of -0.5 and 0.5, and the dotted horizontal line is the landmark-specific threshold corresponding to a Benjamini-Hochberg false-discovery rate below 0.05. Colors identify laboratory categories. At the three landmarks, 31 of 235, 72 of 244, and 76 of 245 tested features, respectively, had q < 0.05. (d,f) Mean log1p-transformed PSA (d) and testosterone (f) trajectories by subsequent platinum status; points and shading denote the mean and 95% confidence interval, and only bins containing at least 10 patients per stratum are shown. The dotted vertical line denotes ADT initiation. (e,g) Kaplan-Meier platinum-free survival from the 180-day landmark comparing the bottom and top 20% of the pre-landmark mean PSA (e) or testosterone (g) distribution. Middle quintiles are omitted, equal values remain together, shading denotes pointwise 95% confidence intervals, and P values are from log-rank tests.",
       "The trajectory analyses include 2,217 patients for PSA and 2,059 for testosterone. For PSA, the bottom group was ≤0.2453 (n=403; 11 events) and the top group was >9.626 (n=403; 58 events); log-rank P=2.75 × 10^-13. For testosterone, the bottom group was ≤10 (n=317; 41 events) and the top group was >294.3 (n=313; 19 events); log-rank P=6.92 × 10^-6. ADT, androgen-deprivation therapy; CBC, complete blood count; CMP, comprehensive metabolic panel; HR, hazard ratio; LFT, liver-function test; PSA, prostate-specific antigen; SD, standard deviation."),
     `04_multivariable_labs`=caption(
       "Figure 4. Multivariable laboratory models for prediction of platinum treatment.",
@@ -526,7 +526,7 @@ manuscript_build <- function(items,tables,root) {
             hjust=1.08,vjust=0,size=2.3,color="#52514e")
       }
       legend <- c(legend,
-        "Panels a-c share a -log10(p) display range through 22 and centered landmark headers.")
+        "Panels a-c share a -log10(p) display range through 20 and centered landmark headers.")
     }
     if(spec$key=="01_cohort_overview") {
       # Patient counts stay in the external legend; omit them from panels B-E.

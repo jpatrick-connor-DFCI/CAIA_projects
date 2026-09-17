@@ -16,7 +16,7 @@ stopifnot(cohort_spec$key=="01_cohort_overview",cohort_spec$height==7.2)
 dfci_spec <- manuscript_specs()[[3]]
 stopifnot(dfci_spec$key=="03_dfci_univariable",identical(dfci_spec$row_heights,c(1.5,.18,1,1)),
   identical(dfci_spec$shared_legend_panels,1:3),all(dfci_spec$layout[2,]==8),
-  identical(manuscript_dfci_volcano_ylim,c(-.2,22)),
+  identical(manuscript_dfci_volcano_ylim,c(-.2,20)),
   manuscript_dfci_km_landmark==180,
   grepl("landmark180",dfci_spec$members[5],fixed=TRUE),
   grepl("landmark180",dfci_spec$members[7],fixed=TRUE),
