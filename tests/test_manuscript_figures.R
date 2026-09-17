@@ -21,6 +21,7 @@ stopifnot(dfci_spec$key=="03_dfci_univariable",identical(dfci_spec$row_heights,c
   grepl("landmark180",dfci_spec$members[5],fixed=TRUE),
   grepl("landmark180",dfci_spec$members[7],fixed=TRUE),
   identical(manuscript_dfci_landmark_headers,c("+0 days","+90 days","+180 days")),
+  identical(manuscript_km_y_label,"Platinum-free\nprobability"),
   identical(ALBUMIN_DAY180_NUDGE,c(x=-.8,y=1.7)))
 multivariable_spec <- manuscript_specs()[[4]]
 stopifnot(multivariable_spec$key=="04_multivariable_labs",length(multivariable_spec$members)==8,
@@ -102,7 +103,7 @@ for(column in c("hazard_ratio_per_sd","ci_lower","ci_upper","p_value","q_value")
   stopifnot(identical(forest$data[[column]],labs[[column]]))
 psa_axis <- forest$panels[[1]]$scales$get_scales("x")
 stopifnot(nrow(forest$data)==48,grepl("Membership inferred",forest$legend,fixed=TRUE),
-  length(psa_axis$breaks)==2,!any(abs(log(psa_axis$breaks))<sqrt(.Machine$double.eps)))
+  length(psa_axis$breaks)==3,any(abs(log(psa_axis$breaks))<sqrt(.Machine$double.eps)))
 federated_combined <- manuscript_federated_incidence_associations(federated_incidence,forest)
 stopifnot(federated_combined$spec$key=="07_federated_incidence_associations",
   identical(federated_combined$spec$layout,rbind(c(1,2),c(3,3),c(4,4))),

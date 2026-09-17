@@ -7,6 +7,7 @@ rm(.manuscript_sources)
 manuscript_dfci_volcano_ylim <- c(-.2,22)
 manuscript_dfci_landmark_headers <- c("+0 days","+90 days","+180 days")
 manuscript_dfci_km_landmark <- 180
+manuscript_km_y_label <- "Platinum-free\nprobability"
 manuscript_multivariable_legend_height <- .14
 manuscript_specs <- function() {
   spec <- function(key, members, height, layout, titles, row_heights=NULL,
@@ -153,8 +154,6 @@ manuscript_combine <- function(plots,spec,shared_legend=FALSE,tag_offset=0L) {
       plot.subtitle=ggplot2::element_text(size=8,face="bold",hjust=.5,
         margin=ggplot2::margin(b=2)),
       plot.margin=ggplot2::margin(4,1,4,1))
-    if(identical(spec$key,"03_dfci_univariable") && i %in% c(5,7)) p <- p + ggplot2::theme(
-      plot.tag=ggplot2::element_text(size=11,face="bold",margin=ggplot2::margin(b=6)))
     if(inherits(p,"ggplot")) {
       if(shared_legend || i %in% inline_legend_panels) {
         g <- manuscript_grob(p,spec$width,spec$height)
@@ -319,7 +318,7 @@ manuscript_log_hazard_axis <- function(p,outer_breaks=FALSE) {
   ticks <- pretty(log_limits,n=5)
   ticks <- ticks[ticks>=log_limits[1] & ticks<=log_limits[2]]
   if(!any(abs(ticks)<sqrt(.Machine$double.eps))) ticks <- sort(unique(c(ticks,0)))
-  if(isTRUE(outer_breaks) && length(ticks)>2) ticks <- range(ticks)
+  if(isTRUE(outer_breaks)) ticks <- sort(unique(c(range(ticks),0)))
   p + ggplot2::scale_x_log10(limits=exp(log_limits),breaks=exp(ticks),
     labels=function(x) scales::label_number(accuracy=.1)(log(x))) +
     ggplot2::labs(x="Log hazard ratio per SD (95% CI)")
@@ -521,7 +520,7 @@ manuscript_build <- function(items,tables,root) {
       for(i in c(5,7)) {
         logrank <- plots[[i]]$labels$subtitle
         plots[[i]] <- plots[[i]] + ggplot2::labs(subtitle=NULL,
-          x=paste0("Days from day-",manuscript_dfci_km_landmark," landmark"),y="Platinum-free probability")
+          x=paste0("Days from day-",manuscript_dfci_km_landmark," landmark"),y=manuscript_km_y_label)
         if(is.character(logrank) && length(logrank)==1 && nzchar(logrank))
           plots[[i]] <- plots[[i]] + ggplot2::annotate("text",x=Inf,y=.05,label=logrank,
             hjust=1.08,vjust=0,size=2.3,color="#52514e")

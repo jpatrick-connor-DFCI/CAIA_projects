@@ -145,7 +145,7 @@ sensitivity components are assembled into one continuous multipanel figure for
 each analysis setting. Federated manuscript plots reuse the original subplot
 renderers: forests retain site colors and landmark/statistic facets; panel c
 labels only the outer log-hazard-ratio ticks because its four facets repeat the
-same scale and the dashed line already marks the null; XGBoost
+same scale, plus 0 at the dashed null line; XGBoost
 retains gold model/baseline bars and lab-category importance colors. Incomplete source groups are not assembled. The DFCI
 overview uses the same configurable extreme-quintile KM landmark as its larger
 compiled counterpart. Figure titles remain in filenames/legends, not supertitles.
@@ -155,8 +155,9 @@ In the DFCI univariable manuscript figure, the three landmark volcanoes use an
 expanded first row, compact horizontal spacing, a shared y-axis displayed
 through -log10(P)=22, centered landmark headers, and one horizontal category legend.
 The day-180 Albumin-minimum annotation receives a fixed upper-left nudge so it
-does not overlap the Testosterone-maximum label. Panels e and g reserve space
-below their letter tags so the tags remain separate from the rotated y-axis titles.
+does not overlap the Testosterone-maximum label. Panels e and g use a two-line
+platinum-free-probability y-axis title whose shorter vertical extent remains
+separate from the panel letter.
 Trajectory patient-count/scale subtitles are kept in the external legend, and
 KM log-rank values are drawn inside their panels. The manuscript figure fixes
 both KM panels at the 180-day landmark.
