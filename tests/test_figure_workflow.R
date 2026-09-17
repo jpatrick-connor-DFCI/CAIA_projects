@@ -101,6 +101,13 @@ local({
     prepare_workers = 1L, render_workers = 2L, forest_config = forest, federated_config = fc))[["elapsed"]]
   stopifnot(length(first$prepared) == 4L, length(first$rendered) > 20L,
             all(vapply(first$rendered, function(x) x$rendered == 1L, logical(1))))
+  platinum_stems <- vapply(first$prepared$adt__platinum$scenes, `[[`, character(1), "stem")
+  nepc_stems <- vapply(first$prepared$adt__nepc$scenes, `[[`, character(1), "stem")
+  stopifnot(all(c("figure1_cohort", "figure1a_consort", "figure1b_km", "figure1c_span",
+    "figure1c_dx_to_tx", "figure1c_time_to_platinum", "figure2v3_llm",
+    "figure2v3_confusion_matrix", "figure2v3_metric_bar", "figure2v3_subtype_landscape",
+    "figure2v3_enrichment", "classifier_validation", "subtype_platinum") %in% platinum_stems),
+    !any(startsWith(nepc_stems,"figure2v3")))
   stopifnot(length(list.files(cfg$fig_root, pattern = "\\.rds$", recursive = TRUE)) == 0L,
             length(list.files(cfg$cache_root, pattern = "\\.receipt\\.rds$", recursive = TRUE)) > 20L)
   stopifnot(!any(basename(list.dirs(cfg$fig_root, recursive = TRUE)) %in% c("main", "supplements")))

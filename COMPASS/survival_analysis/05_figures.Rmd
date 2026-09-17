@@ -21,7 +21,7 @@ Preparation and rendering are separate stages:
 2. R consumes those tables, calculates the existing survival statistics and
    optional GAMs, and caches finished graphics objects. CSV/Markdown figure
    tables are written during this stage; no images are generated.
-3. Rendering loads the graphics objects and writes individual PNGs and optional
+3. Rendering loads the graphics objects and writes individual and multipanel PNGs and optional
    PDFs. It does not read patient inputs, fit curves, or repeat plot calculations.
 
 `COMPASS_FIGURE_STAGE=all` (default) checks the notebook manifest and source
@@ -90,6 +90,20 @@ Run notebook `04` once after this update to prepare these small summary tables.
 Outputs (and their count tables) are under `cohort/`:
 `event_incidence_lm180__platinum__all__incl` and `metastatic_label_overlap__platinum__all__incl`.
 
+Figure 1 also exports `cohort/figure1_cohort__<endpoint>__<subset>__<exclusion>`:
+a five-panel figure with the cohort-selection flow spanning the left column,
+and survival, record span, diagnosis-to-treatment timing, and time to platinum
+on the right. Figure 2v3 exports `labels/figure2v3_llm__platinum__all__incl`,
+with agreement, classification metrics, subtype composition, and platinum
+enrichment in a 2-by-2 layout. The existing `classifier_validation` and
+`subtype_platinum` paired exports remain available. The three metastatic-label
+confusion matrices also form `labels/metastatic_label_agreement__<endpoint>__<subset>__<exclusion>`.
+These combined figures have lettered panels and retain each panel's counts,
+captions, and legends. All individual panels are exported alongside them.
+Compilation stays within each arm/cohort/endpoint; Figure 2v3 remains exclusive
+to canonical ADT/platinum. Run the default `COMPASS_FIGURE_STAGE=all` to rebuild
+the graphics caches and export these additions; `render` requires a matching prepared snapshot.
+
 Exports use shallow topic folders: `cohort/`, `labels/`, `associations/`,
 `prediction/`, `trajectories/<lab>/`, and `federated_no_msk/`. There is no
 main/supplement split or per-plot directory. Local filenames are
@@ -106,7 +120,8 @@ export `associations/labs_univariate_all_landmarks__<endpoint>__<subset>__<exclu
 The combined figure uses three side-by-side panels on a 24 × 9-inch canvas,
 common axes, a shared category legend, and separate per-landmark significance
 counts. Larger feature labels (approximately 12 pt) and axis text are preserved
-in both formats. Other compiled figure families do not export component images.
+in both formats. The cohort and label figures described above also retain their
+individual panels; other compiled figure families do not export component images.
 
 After a successful render, superseded `by_figure` exports for regenerated cohorts
 are copied, checksum-verified, and archived in `COMPASS_FIGURE_DATA_ROOT/previous_exports/`;

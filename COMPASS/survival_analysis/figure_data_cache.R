@@ -105,14 +105,14 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE) {
   capture <- function(plot, destination, width, height, stem) {
     # Resolve all aesthetics/stats now; renderer needs neither raw data nor fits.
     if (is.null(plot)) return(invisible(NULL))
-    spec <- figure_compilation_spec(stem)
-    if(!is.null(spec)) {
+    specs <- figure_compilation_specs(stem)
+    for(spec in specs) {
       # Lab artifacts have an extra landmark directory; bundle by arm/identity
       # and logical key instead of their legacy folder depth.
       key <- paste(sub("/by_figure/.*$","",destination),basename(destination),spec$key,sep="|")
       bundles[[key]] <<- c(bundles[[key]],list(list(plot=plot,destination=destination,stem=stem,spec=spec)))
     }
-    if(is.null(spec) || isTRUE(spec$keep_individuals))
+    if(!length(specs) || any(vapply(specs,function(spec) isTRUE(spec$keep_individuals),logical(1))))
       publish(plot,destination,width,height,stem,landmarks=if(grepl("landmark[0-9]+",stem))
       sub("^.*landmark([0-9]+).*$","\\1",stem) else "")
     invisible(NULL)
@@ -140,6 +140,15 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE) {
   build()
   for(items in bundles) {
     spec <- items[[1]]$spec
+    if(length(spec$members)) {
+      stems <- vapply(items,`[[`,character(1),"stem")
+      missing <- setdiff(spec$members,stems)
+      if(length(missing)) {
+        message("Skipping incomplete combined figure ",spec$key,": missing ",paste(missing,collapse=", "))
+        next
+      }
+      items <- items[match(spec$members,stems)]
+    }
     page_size <- if(is.null(spec$page_size)) length(items) else spec$page_size
     pages <- split(seq_along(items),ceiling(seq_along(items)/page_size))
     for(page in seq_along(pages)) {

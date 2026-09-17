@@ -10,6 +10,8 @@ local({
     geom_col()+theme_fig()+labs(title="Synthetic comparison",caption="Synthetic test data; no clinical interpretation.")
   plot <- plot + guides(fill=guide_legend(ncol=1))
   stems <- c("figure2v3_confusion_matrix","figure2v3_metric_bar","figure2v3_subtype_landscape","figure2v3_enrichment",
+    "figure1a_consort","figure1b_km","figure1c_span","figure1c_dx_to_tx","figure1c_time_to_platinum",
+    "adt_labels_llm_vs_regex_max_any","adt_labels_adt_vs_regex_max_any","adt_labels_adt_vs_llm",
     as.vector(outer(c("figure4a_discrimination","figure4c_sensitivity_gleason","figure4d_sensitivity_somatic"),
       c("auc_platinum","cindex_platinum"),paste,sep="_")),
     as.vector(outer(c("figure4b_importance_platinum_cox","figure4b_importance_platinum_xgb"),
@@ -18,7 +20,8 @@ local({
     as.vector(outer(c("km_quintile_psa","km_quintile_testosterone"),c("landmark0","landmark90","landmark180"),paste,sep="_")))
   old_paths <- character()
   build <- function() for(stem in stems) {
-    family <- if(startsWith(stem,"figure2")) "figure2v3_llm" else if(startsWith(stem,"figure4")) "figure4" else if(startsWith(stem,"figure3")) "figure3b" else
+    family <- if(startsWith(stem,"figure1")) "figure1" else if(startsWith(stem,"adt_labels_")) "metastatic_labels" else
+      if(startsWith(stem,"figure2")) "figure2v3_llm" else if(startsWith(stem,"figure4")) "figure4" else if(startsWith(stem,"figure3")) "figure3b" else
       paste0("labs/Androgen axis/",if(grepl("testosterone",stem)) "Testosterone" else "PSA","/km_quintile")
     destination <- file.path(output,"ADT","by_figure",family,stem,"platinum__all__incl")
     old_paths <<- c(old_paths,paste0(destination,".png"))
@@ -27,16 +30,30 @@ local({
     getOption("compass.figure_capture")(p,destination,8,6,stem)
   }
   m <- prepare_figure_scenes(file.path(cache,"scenes"),"test",build)
-  stopifnot(length(stems)==29, length(m$scenes)==11,
+  stopifnot(length(stems)==37, length(m$scenes)==26,
     !anyDuplicated(vapply(m$scenes,`[[`,character(1),"destination")),
     !any(grepl("/by_figure/",vapply(m$scenes,`[[`,character(1),"destination"))))
   stopifnot(sum(grepl("somatic_carrier_km_page",vapply(m$scenes,`[[`,character(1),"stem")))==2)
+  for(key in c("figure1_cohort","figure2v3_llm","metastatic_label_agreement")) {
+    scene <- Filter(function(s) s$stem==key,m$scenes)[[1]]
+    grob <- readRDS(scene$path)
+    panels <- Filter(function(g) inherits(g,"gtable"),grob$grobs)
+    members <- if(key=="figure2v3_llm") stems[1:4] else
+      figure_compilation_spec(if(key=="figure1_cohort") stems[5] else stems[10])$members
+    stopifnot(length(panels)==length(members),
+      all(members %in% vapply(m$scenes,`[[`,character(1),"stem")))
+    for(i in seq_along(panels)) {
+      tag <- panels[[i]]$grobs[[which(panels[[i]]$layout$name=="tag")]]
+      stopifnot(tag$children[[1]]$label==LETTERS[i])
+    }
+    if(key=="figure1_cohort") stopifnot(grob$layout$b[1]>grob$layout$t[1])
+  }
   for(scene in m$scenes) render_figure_scene(scene,"test",120,FALSE)
   prepared <- list(adt__platinum=m)
   config <- list(fig_root=output,cache_root=cache)
   figure_write_catalog(config,prepared)
   registry <- read_csv(file.path(output,"ADT","manifest.csv"),show_col_types=FALSE)
-  stopifnot(nrow(registry)==11,all(file.exists(file.path(output,"ADT",registry$path))),
+  stopifnot(nrow(registry)==26,all(file.exists(file.path(output,"ADT",registry$path))),
     !any(grepl(root,registry$path,fixed=TRUE)),file.exists(file.path(output,"ADT","index.html")))
   html <- paste(readLines(file.path(output,"ADT","index.html")),collapse="\n")
   urls <- regmatches(html,gregexpr('(?:href|src)="[^"]+"',html,perl=TRUE))[[1]]
@@ -52,6 +69,25 @@ local({
   stopifnot(!file.exists(old_paths[1]),file.exists(unknown),
     length(list.files(file.path(cache,"previous_exports"),recursive=TRUE,pattern="png$"))==1,
     length(list.files(output,recursive=TRUE,pattern="rds$"))==0)
+  # Grouping stays within arm/cohort/endpoint. An incomplete cell retains its
+  # subpanels, and complete figures follow the declared order of their panels.
+  capture_mixed <- function() {
+    for(arm in c("ADT","ARPI")) for(identity in c("platinum__all__incl","nepc__metastatic_llm__incl")) {
+      selected <- rev(stems[5:9])
+      if(arm=="ARPI" && startsWith(identity,"nepc")) selected <- selected[-1]
+      for(stem in selected) getOption("compass.figure_capture")(
+        plot+labs(title=stem),file.path(output,arm,"by_figure","figure1",stem,identity),8,6,stem)
+    }
+  }
+  mixed <- prepare_figure_scenes(file.path(cache,"mixed"),"mixed",capture_mixed)
+  combined <- Filter(function(s) s$stem=="figure1_cohort",mixed$scenes)
+  stopifnot(length(mixed$scenes)==22,length(combined)==3,
+    !anyDuplicated(vapply(mixed$scenes,`[[`,character(1),"destination")))
+  for(scene in combined) {
+    panels <- Filter(function(g) inherits(g,"gtable"),readRDS(scene$path)$grobs)
+    titles <- vapply(panels,function(g) g$grobs[[which(g$layout$name=="title")]]$children[[1]]$label,character(1))
+    stopifnot(identical(unname(titles),stems[5:9]))
+  }
   # Every federated estimate survives composition with its original p/q values.
   estimates <- tidyr::expand_grid(source=c("Dana-Farber","Fred Hutch","Johns Hopkins","Federated*"),
     landmark_days=c(0,90,180),lab_name=c("PSA","Testosterone"),feature_stat=c("mean","min","max","last")) %>%

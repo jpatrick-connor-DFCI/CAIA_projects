@@ -34,16 +34,31 @@ figure_public_path <- function(path) {
 }
 
 figure_compilation_spec <- function(stem) {
+  cohort_panels <- c("figure1a_consort", "figure1b_km", "figure1c_span",
+    "figure1c_dx_to_tx", "figure1c_time_to_platinum")
+  if (stem %in% cohort_panels)
+    return(list(key="figure1_cohort", title="Cohort selection and follow-up",
+      width=22.5, height=11, cols=3, keep_individuals=TRUE,
+      members=cohort_panels, panel_tags=LETTERS[1:5],
+      layout_matrix=rbind(c(1,2,3),c(1,4,5)),
+      shared_caption=FALSE, shared_legend=FALSE))
+  metastatic_panels <- paste0("adt_labels_", c("llm_vs_regex_max_any",
+    "adt_vs_regex_max_any", "adt_vs_llm"))
+  if (stem %in% metastatic_panels)
+    return(list(key="metastatic_label_agreement", title="Metastatic label agreement",
+      width=21, height=7, cols=3, keep_individuals=TRUE,
+      members=metastatic_panels, panel_tags=LETTERS[1:3],
+      shared_caption=FALSE, shared_legend=FALSE))
   if (grepl("^figure3_univariate_(platinum|nepc)_landmark[0-9]+$", stem))
     return(list(key="labs_univariate_all_landmarks", title="Univariate lab associations",
       width=24, height=9, cols=3, keep_individuals=TRUE,
       shared_caption=FALSE, shared_legend=TRUE))
   if (stem %in% c("figure2v3_confusion_matrix", "figure2v3_metric_bar"))
     return(list(key="classifier_validation", title="NEPC classifier validation", width=12, height=6, cols=2,
-      shared_caption=TRUE, shared_legend=FALSE))
+      keep_individuals=TRUE, shared_caption=TRUE, shared_legend=FALSE))
   if (stem %in% c("figure2v3_subtype_landscape", "figure2v3_enrichment"))
     return(list(key="subtype_platinum", title="Subtype landscape and platinum enrichment", width=15, height=7, cols=2,
-      shared_caption=FALSE, shared_legend=FALSE))
+      keep_individuals=TRUE, shared_caption=FALSE, shared_legend=FALSE))
   if (grepl("^figure4[acd]_", stem)) {
     key <- sub("_(auc|cindex)_[^_]+$", "", stem)
     title <- if (grepl("gleason", key)) "Gleason vs. labs sensitivity" else
@@ -63,6 +78,20 @@ figure_compilation_spec <- function(stem) {
     return(list(key="somatic_carrier_km", title="Mutation carrier status: time to platinum",
       width=16, height=12, cols=2, page_size=4, shared_caption=TRUE, shared_legend=FALSE))
   NULL
+}
+
+# A panel can belong to both an existing paired export and a complete figure.
+figure_compilation_specs <- function(stem) {
+  spec <- figure_compilation_spec(stem)
+  specs <- if(is.null(spec)) list() else list(spec)
+  llm_panels <- c("figure2v3_confusion_matrix", "figure2v3_metric_bar",
+    "figure2v3_subtype_landscape", "figure2v3_enrichment")
+  if(stem %in% llm_panels) specs <- c(specs, list(list(
+    key="figure2v3_llm", title="LLM annotation validation and subtype landscape",
+    width=16, height=12, cols=2, keep_individuals=TRUE,
+    members=llm_panels, panel_tags=LETTERS[1:4],
+    shared_caption=FALSE, shared_legend=FALSE)))
+  specs
 }
 
 figure_measure_device <- function(path, width, height) {
@@ -124,6 +153,8 @@ figure_combine <- function(items, spec, directory) {
         title <- "Platinum enrichment"
       }
       p <- p + ggplot2::labs(title=title)
+      if(length(spec$panel_tags)) p <- p + ggplot2::labs(tag=spec$panel_tags[i]) +
+        ggplot2::theme(plot.tag=ggplot2::element_text(size=16,face="bold"))
       if (same_caption) p <- p + ggplot2::labs(caption=NULL)
       # Shared captions/legends do not remove per-panel n/events in KM legends.
       if (isTRUE(spec$shared_legend)) {
@@ -139,8 +170,18 @@ figure_combine <- function(items, spec, directory) {
       if(!is_volcano) p <- p + ggplot2::theme(plot.title=ggplot2::element_text(size=11,face="bold"),
         axis.text=ggplot2::element_text(size=9), legend.text=ggplot2::element_text(size=9),
         plot.caption=ggplot2::element_text(size=8))
+      # The flowchart has no axes; resizing must not revive theme_void labels.
+      if(stem=="figure1a_consort") p <- p + ggplot2::labs(x=NULL,y=NULL) +
+        ggplot2::theme(axis.text=ggplot2::element_blank())
     }
-    grobs[[i]] <- figure_grob(p,spec$width/spec$cols,spec$height/ceiling(length(items)/spec$cols),directory)
+    panel_width <- spec$width/spec$cols
+    panel_height <- spec$height/ceiling(length(items)/spec$cols)
+    if(!is.null(spec$layout_matrix)) {
+      cells <- which(spec$layout_matrix==i,arr.ind=TRUE)
+      panel_width <- spec$width * length(unique(cells[,"col"])) / ncol(spec$layout_matrix)
+      panel_height <- spec$height * length(unique(cells[,"row"])) / nrow(spec$layout_matrix)
+    }
+    grobs[[i]] <- figure_grob(p,panel_width,panel_height,directory)
   }
   caption <- if(same_caption) captions[[1]] else NULL
   identity <- basename(items[[1]]$destination)
@@ -162,10 +203,11 @@ figure_combine <- function(items, spec, directory) {
     heights=do.call(grid::unit.c,lapply(bottom,function(g)
       (if(inherits(g,"gtable")) sum(g$heights) else grid::grobHeight(g)) + grid::unit(4,"pt")))) else NULL
   if(!is.null(footer)) footer <- gtable::gtable_add_rows(footer,grid::unit(12,"pt"),pos=-1)
-  gridExtra::arrangeGrob(grobs=grobs,ncol=spec$cols,
+  do.call(gridExtra::arrangeGrob,c(list(grobs=grobs,ncol=spec$cols,
     top=grid::textGrob(title,gp=grid::gpar(fontsize=if(is_volcano) 18 else 14,fontface="bold")),
     bottom=footer,
-    padding=grid::unit(2,"lines"))
+    padding=grid::unit(2,"lines")),
+    if(!is.null(spec$layout_matrix)) list(layout_matrix=spec$layout_matrix)))
 }
 
 figure_html_escape <- function(x) {
