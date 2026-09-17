@@ -91,8 +91,10 @@ local({
     !anyDuplicated(vapply(mixed$scenes,`[[`,character(1),"destination")))
   for(scene in combined) {
     panels <- Filter(function(g) inherits(g,"gtable"),readRDS(scene$path)$grobs)
-    titles <- vapply(panels,function(g) g$grobs[[which(g$layout$name=="title")]]$children[[1]]$label,character(1))
-    stopifnot(identical(unname(titles),stems[5:9]))
+    stopifnot(all(vapply(panels,function(g)
+      inherits(g$grobs[[which(g$layout$name=="title")]],"zeroGrob"),logical(1))))
+    tags <- vapply(panels,function(g) g$grobs[[which(g$layout$name=="tag")]]$children[[1]]$label,character(1))
+    stopifnot(identical(unname(tags),LETTERS[1:5]))
   }
   # Every federated estimate survives composition with its original p/q values.
   estimates <- tidyr::expand_grid(source=c("Dana-Farber","Fred Hutch","Johns Hopkins","Federated*"),

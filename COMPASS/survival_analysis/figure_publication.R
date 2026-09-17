@@ -191,7 +191,7 @@ figure_combine <- function(items, spec, directory) {
           adt_labels_adt_vs_regex_max_any="ADT intent vs regex stage",
           adt_labels_adt_vs_llm="ADT intent vs LLM", title)
       }
-      p <- p + ggplot2::labs(title=title)
+      p <- p + ggplot2::labs(title=NULL) # retain letter tags; descriptions live in the catalog/legends
       tag <- if(length(spec$panel_tags)) spec$panel_tags[i] else LETTERS[i]
       p <- p + ggplot2::labs(tag=tag) +
         ggplot2::theme(plot.tag=ggplot2::element_text(size=18,face="bold"))

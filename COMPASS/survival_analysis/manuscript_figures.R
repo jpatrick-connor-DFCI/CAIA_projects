@@ -1,5 +1,9 @@
 # Manuscript exports are additional views of the original statistics/plots.
 # Never refit, recompute q-values, or serialize patient-bearing ggplot objects.
+.manuscript_sources <- Filter(function(x) is.character(x) && length(x)==1 &&
+  basename(x)=="manuscript_figures.R", lapply(sys.frames(),function(frame) frame$ofile))
+source(file.path(dirname(tail(.manuscript_sources,1)[[1]]), "federated_no_msk_figures.R"), local=TRUE)
+rm(.manuscript_sources)
 manuscript_specs <- function() {
   spec <- function(key, members, height, layout, titles) list(key=key, members=members,
     width=7.2, height=height, layout=layout, titles=titles)
@@ -56,9 +60,12 @@ manuscript_style <- function(p, title=NULL, tag=NULL) {
       copy$aes_params$size <- min(1.8,layer$aes_params$size)
     copy
   })
-  result <- p + ggplot2::labs(title=title,tag=tag,caption=NULL) + manuscript_theme()
+  # Panel descriptions belong in the legend; only letter tags remain above panels.
+  result <- p + ggplot2::labs(title=NULL,tag=tag,caption=NULL) + manuscript_theme()
   for(field in c("axis.text","axis.text.x","axis.text.y","axis.title.x","axis.title.y"))
-    if(inherits(p$theme[[field]],"element_blank")) result$theme[[field]] <- p$theme[[field]]
+    if(inherits(p$theme[[field]],"element_blank") ||
+       (startsWith(field,"axis.text.") && inherits(p$theme$axis.text,"element_blank")))
+      result$theme[[field]] <- ggplot2::element_blank()
   result
 }
 
@@ -85,11 +92,12 @@ manuscript_combine <- function(plots,spec,shared_legend=FALSE) {
         p <- p + ggplot2::labs(subtitle=NULL)
     }
     cells <- which(spec$layout==i,arr.ind=TRUE)
+    row_heights <- if(is.null(spec$row_heights)) rep(1,nrow(spec$layout)) else spec$row_heights
     grobs[[i]] <- manuscript_grob(p,spec$width*length(unique(cells[,2]))/ncol(spec$layout),
-      spec$height*length(unique(cells[,1]))/nrow(spec$layout))
+      spec$height*sum(row_heights[unique(cells[,1])])/sum(row_heights))
   }
   footer <- if(length(legends)) legends[[1]] else NULL
-  gridExtra::arrangeGrob(grobs=grobs,layout_matrix=spec$layout,bottom=footer,
+  gridExtra::arrangeGrob(grobs=grobs,layout_matrix=spec$layout,heights=row_heights,bottom=footer,
     padding=grid::unit(3,"pt"))
 }
 
@@ -143,71 +151,45 @@ manuscript_incidence <- function(d) {
 }
 
 manuscript_federated_labs <- function(d) {
-  stats <- c("mean","min","max","last")
-  d <- d[d$feature_stat %in% stats & d$landmark_days %in% c(0,90,180),,drop=FALSE]
+  d <- d[d$feature_stat %in% c("mean","min","max","last") &
+    d$landmark_days %in% c(0,90,180),,drop=FALSE]
   stopifnot(!anyDuplicated(d[c("lab_name","landmark_days","source","feature_stat")]))
-  sources <- c("Dana-Farber","Fred Hutch","Johns Hopkins","Federated*")
-  sources <- c(sources[sources %in% d$source],setdiff(unique(d$source),sources))
-  short <- c("Dana-Farber"="DFCI","Fred Hutch"="Fred Hutch","Johns Hopkins"="Johns Hopkins","Federated*"="Federated*")
-  rows <- as.vector(t(outer(c(0,90,180),sources,paste,sep=" | ")))
-  d$row <- factor(paste(d$landmark_days,d$source,sep=" | "),levels=rev(rows))
-  labels <- setNames(gsub("Dana-Farber","DFCI",paste0(sub(" \\| ","d · ",rows))),rows)
-  d$feature_stat <- factor(d$feature_stat,levels=stats,labels=c("Mean","Minimum","Maximum","Last"))
-  d$lab_name <- factor(d$lab_name,levels=c("PSA","Testosterone"))
-  valid <- d$valid_estimate & !is.na(d$valid_estimate)
-  ci <- valid & d$valid_ci & !is.na(d$valid_ci)
-  p <- ggplot2::ggplot(d,ggplot2::aes(hazard_ratio_per_sd,row,color=lab_name)) +
-    ggplot2::geom_vline(xintercept=1,linetype=2,linewidth=.3,color="grey65") +
-    ggplot2::geom_blank(ggplot2::aes(x=1)) +
-    ggplot2::geom_errorbar(data=d[ci,],ggplot2::aes(xmin=ci_lower,xmax=ci_upper),orientation="y",width=.18,linewidth=.4) +
-    ggplot2::geom_point(data=d[valid,],ggplot2::aes(shape=significance),size=1.7,stroke=.5) +
-    ggplot2::scale_shape_manual(values=c("Not significant"=1,"Nominal p < 0.05 only"=16,
-      "FDR q < 0.05"=18,"Significance unavailable"=4),name=NULL) +
-    ggplot2::scale_color_manual(values=c(PSA="#0072B2",Testosterone="#D55E00"),guide="none") +
-    ggplot2::scale_x_log10(breaks=c(.25,.5,1,2,4,8),labels=scales::label_number()) +
-    ggplot2::scale_y_discrete(labels=labels,drop=FALSE) +
-    ggplot2::facet_grid(lab_name~feature_stat) + ggplot2::theme_classic() +
-    ggplot2::labs(x="Hazard ratio per SD (95% CI; log scale)",y=NULL) + manuscript_theme()
-  spec <- list(key="08_federated_psa_testosterone",width=7.2,height=7.2)
-  list(plot=p,spec=spec,data=d,legend=paste(
-    "Platinum endpoint; within-site and supplied federated estimates at days 0, 90 and 180.",
-    "Columns show mean, minimum, maximum and last lab value. Supplied p/q values are unchanged.",
-    "Open circles: not significant; filled circles: nominal p < 0.05 only; diamonds: FDR q < 0.05.",
-    "Missing estimates/CIs remain unavailable; see the aggregate CSV.",
-    paste(unique(d$population_note),collapse="\n")))
+  note <- paste(unique(d$population_note[d$source=="Federated*"]),collapse="\n")
+  # Reuse the standalone forests: source colors, landmark/statistic facets,
+  # log scales and significance symbols all retain their original meaning.
+  plots <- lapply(c("PSA","Testosterone"),function(analyte)
+    plot_federated_comparison(d,analyte,note) + ggplot2::labs(subtitle=NULL))
+  spec <- list(key="08_federated_psa_testosterone",width=7.2,height=8.4,
+    layout=matrix(1:2,2),titles=c("PSA","Testosterone"))
+  list(plot=manuscript_combine(plots,spec,shared_legend=TRUE),spec=spec,data=d,
+    legend=paste("A: PSA. B: testosterone. Platinum endpoint; original site colors and landmark/statistic facets.",
+      "Columns: mean, minimum, maximum and last value. Rows: days 0, 90 and 180.",
+      "Open circles: not significant; filled circles: nominal p < 0.05 only; diamonds: supplied FDR q < 0.05.",
+      paste(vapply(plots,function(p) p$labels$caption,character(1)),collapse="\n"),sep="\n"))
 }
 
 manuscript_federated_xgb <- function(metrics,importance) {
-  metrics$name <- factor(ifelse(metrics$config=="both","Labs","Age baseline"),levels=c("Labs","Age baseline"))
-  metrics$landmark <- factor(metrics$landmark_days,levels=c(0,90,180))
-  plots <- lapply(c("test_mean_auc_t","test_c_index"),function(column) {
-    ggplot2::ggplot(metrics,ggplot2::aes(landmark,.data[[column]],color=name,group=name)) +
-      ggplot2::geom_hline(yintercept=.5,linetype=3,color="grey65") +
-      ggplot2::geom_line(linewidth=.45) + ggplot2::geom_point(size=1.7) +
-      ggplot2::scale_color_manual(values=c(Labs="#0072B2","Age baseline"="#D55E00"),name=NULL) +
-      ggplot2::coord_cartesian(ylim=c(.45,1)) + ggplot2::labs(x="Landmark (days)",y=NULL) + ggplot2::theme_classic()
-  })
+  d <- prepare_federated_xgboost_performance(metrics)
+  colors <- c("XGBoost Survival"="#B58900","XGBoost baseline (age)"="#E0CC8A")
+  plots <- lapply(c("auc","cindex"),function(metric)
+    plot_model_discrimination(d,metric,if(metric=="auc") "Test mean AUC(t)" else "Test C-index",
+      colors,show_legend=TRUE))
   for(lm in c(0,90,180)) {
-    d <- importance[importance$landmark_days==lm & importance$displayed %in% TRUE,,drop=FALSE]
-    d <- d[order(d$gain),,drop=FALSE]
-    label <- paste(d$lab_name,d$feature_stat)
-    label <- gsub("Alkaline phosphatase","ALP",label,fixed=TRUE)
-    label <- gsub("n_observations","n obs.",label,fixed=TRUE)
-    label <- gsub("Neutrophils absolute","Neutrophils (abs.)",label,fixed=TRUE)
-    label <- gsub("person id","person_id",label,fixed=TRUE)
-    d$label <- factor(label,levels=unique(label))
-    p <- ggplot2::ggplot(d,ggplot2::aes(gain,label,fill=identifier_feature)) +
-      ggplot2::geom_col(width=.7,show.legend=FALSE) +
-      ggplot2::scale_fill_manual(values=c(`FALSE`="#0072B2",`TRUE`="#D55E00")) +
-      ggplot2::scale_y_discrete() +
-      ggplot2::labs(x="Split gain",y=NULL) + ggplot2::theme_classic()
-    plots[[length(plots)+1L]] <- p
+    selected <- importance[importance$landmark_days==lm & importance$displayed %in% TRUE,,drop=FALSE]
+    plots[[length(plots)+1L]] <- plot_model_importance(selected,"xgb",NULL) +
+      ggplot2::scale_y_discrete(labels=function(x) {
+        x <- gsub("Alkaline phosphatase","ALP",x,fixed=TRUE)
+        gsub("Neutrophils absolute","Neutrophils (abs.)",x,fixed=TRUE)
+      }) + ggplot2::guides(fill=ggplot2::guide_legend(nrow=1))
   }
   spec <- list(key="09_federated_xgboost",width=7.2,height=9.2,
     layout=rbind(c(1,1,2,2),c(3,3,3,3),c(4,4,4,4),c(5,5,5,5)),
+    row_heights=c(.85,.65,1,1.2),
     titles=c("Test mean AUC(t)","Test C-index","Feature importance: day 0",
       "Feature importance: day 90","Feature importance: day 180"))
-  # Full-width importance rows keep all 15 feature labels readable.
+  # Share the category legend across importance panels. Keep the performance
+  # legend in A/B because its colors encode model configuration, not lab class.
+  for(i in 3:4) plots[[i]] <- plots[[i]] + ggplot2::guides(fill="none")
   p <- manuscript_combine(plots,spec)
   audit <- unique(c(metrics$input_audit_note,importance$input_audit_note))
   audit <- audit[!is.na(audit)&nzchar(audit)]
@@ -215,12 +197,12 @@ manuscript_federated_xgb <- function(metrics,importance) {
     paste(strwrap(paste(audit,collapse=" "),width=115),collapse="\n"),
     gp=grid::gpar(fontsize=7,col="#a33b19")))
   counts <- paste(sprintf("Day %d, %s: test n=%s; events=%s",metrics$landmark_days,
-    metrics$name,metrics$n_test,metrics$n_events_test),collapse="\n")
+    metrics$config,metrics$n_test,metrics$n_events_test),collapse="\n")
   list(plot=p,spec=spec,data=metrics,legend=paste(
-    "Held-out test performance, not training or tuning CV. Missing results are not interpolated.",
-    "Importance displays up to 15 positive-gain features per landmark, with the source display exclusions.",
-    "ALP: alkaline phosphatase; n obs.: observation count; abs.: absolute count.",
-    "Split gains are not signed effects or SHAP values. Orange flags identifier features.",counts,paste(audit,collapse="\n"),sep="\n"))
+    "A: test mean AUC(t). B: test C-index. C–E: feature importance at days 0, 90 and 180.",
+    "Held-out test metrics, not training or tuning CV. Original gold model/baseline bars and lab-category importance colors.",
+    "Up to 15 positive-gain features per landmark, using the original display exclusions. ALP: alkaline phosphatase; abs.: absolute count.",
+    "Gains are supplied split gains, not signed effects or SHAP values.",counts,paste(audit,collapse="\n"),sep="\n"))
 }
 
 manuscript_build <- function(items,tables,root) {
@@ -241,6 +223,21 @@ manuscript_build <- function(items,tables,root) {
       if(all(vapply(axes,function(x) length(x$x)==2 && length(x$y)==2,logical(1))))
         for(i in 1:3) plots[[i]] <- plots[[i]] + ggplot2::coord_cartesian(
           xlim=range(unlist(lapply(axes,`[[`,"x"))),ylim=range(unlist(lapply(axes,`[[`,"y"))))
+      for(i in 1:3) {
+        plots[[i]]$layers <- lapply(plots[[i]]$layers,function(layer) {
+          copy <- ggplot2::ggproto(NULL,layer)
+          if(inherits(layer$geom,"GeomTextRepel")) {
+            copy$aes_params$size <- 2.2
+            copy$aes_params$point.size <- 1
+            copy$geom_params$box.padding <- grid::unit(.18,"lines")
+            copy$geom_params$point.padding <- grid::unit(.12,"lines")
+          }
+          if(inherits(layer$geom,"GeomPoint")) copy$aes_params$stroke <- .3
+          copy
+        })
+        plots[[i]] <- plots[[i]] + ggplot2::scale_size_manual(
+          values=c(`TRUE`=1.8,`FALSE`=1.2),guide="none")
+      }
       for(i in 1:3) plots[[i]] <- plots[[i]] + ggplot2::labs(subtitle=NULL) +
         ggplot2::guides(color="none",fill=ggplot2::guide_legend(ncol=2,
           override.aes=list(shape=21,size=1.8,alpha=1)))

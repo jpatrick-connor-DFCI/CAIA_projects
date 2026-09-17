@@ -8,7 +8,9 @@ p <- ggplot(tibble(x=1,y=2,label="Unchanged"),aes(x,y,label=label)) +
 q <- manuscript_style(p,"Copy","A")
 stopifnot(p$layers[[1]]$aes_params$size==6,q$layers[[1]]$aes_params$size==2.5,
   q$theme$axis.title.y$size==8,q$theme$axis.text.x$size==7,
-  identical(p$data,q$data))
+  identical(p$data,q$data),is.null(q$labels$title),identical(q$labels$tag,"A"))
+flow <- manuscript_style(p+theme(axis.text=element_blank()),"Flow","A")
+stopifnot(inherits(flow$theme$axis.text.x,"element_blank"),inherits(flow$theme$axis.text.y,"element_blank"))
 
 # Endpoint selection does not combine event definitions or invent missing cells.
 incidence <- tibble(cohort=c("adt","adt","adt_noprecastrate"),
@@ -25,6 +27,7 @@ labs <- tidyr::expand_grid(lab_name=c("PSA","Testosterone"),feature_stat=c("mean
   landmark_days=c(0,90,180),source=c("Dana-Farber","Federated*")) %>%
   mutate(hazard_ratio_per_sd=seq(.6,1.3,length.out=n()),ci_lower=hazard_ratio_per_sd-.1,
     ci_upper=hazard_ratio_per_sd+.1,valid_estimate=TRUE,valid_ci=TRUE,p_value=.02,q_value=.09,
+    source_kind=if_else(source=="Federated*","across_sites","within_site"),
     significance="Nominal p < 0.05 only",population_note="Membership inferred; verify source.")
 forest <- manuscript_federated_labs(labs)
 for(column in c("hazard_ratio_per_sd","ci_lower","ci_upper","p_value","q_value"))
@@ -45,4 +48,7 @@ xgb <- manuscript_federated_xgb(metrics,importance)
 stopifnot(grepl("person_id",xgb$legend,fixed=TRUE),
   identical(xgb$data$test_mean_auc_t,metrics$test_mean_auc_t),
   sum(importance$identifier_feature)==3)
+original <- plot_federated_comparison(labs,"PSA","Test")
+stopifnot(identical(original$scales$get_scales("colour")$palette(2),
+  c(`Dana-Farber`="#0072B2",`Federated*`="#222222")))
 cat("Manuscript data fidelity, missing cells, audit notes and isolated styling passed.\n")
