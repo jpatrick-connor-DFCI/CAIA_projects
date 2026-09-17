@@ -43,14 +43,14 @@ figure_compiled_path <- function(path, arm_root) {
 }
 
 figure_overview_km_landmark <- function() {
-  value <- Sys.getenv("COMPASS_COMBINED_KM_LANDMARK","0")
+  value <- Sys.getenv("COMPASS_COMBINED_KM_LANDMARK","180")
   if(!value %in% c("0","90","180"))
     stop("COMPASS_COMBINED_KM_LANDMARK must be 0, 90, or 180.")
   as.integer(value)
 }
 
-figure_dfci_overview_spec <- function() {
-  landmark <- figure_overview_km_landmark()
+figure_dfci_overview_spec <- function(landmark=figure_overview_km_landmark()) {
+  stopifnot(landmark %in% c(0,90,180))
   list(key=paste0("dfci_labs_overview_km_lm",landmark),
     title=paste0("DFCI lab associations, trajectories and extreme-quintile survival (KM day ",landmark,")"),
     width=24, height=22, cols=6, row_heights=c(8,7,7),

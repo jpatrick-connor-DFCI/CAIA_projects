@@ -194,7 +194,8 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
       dir.create(manuscript_root,recursive=TRUE,showWarnings=FALSE)
       legend_path <- paste0(destination,".md")
       writeLines(c(paste0("# ",gsub("_"," ",item$spec$key)),"",
-        "Source-rendered manuscript figure: 7.2-inch width; 600-dpi PNG and vector PDF.","",item$legend),legend_path)
+        sprintf("Source-rendered manuscript figure: %.1f-inch width; 600-dpi PNG and vector PDF.",
+          item$spec$width),"",item$legend),legend_path)
       table_capture(legend_path)
       if(is.data.frame(item$data)) {
         data_path <- paste0(destination,".csv")

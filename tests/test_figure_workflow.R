@@ -168,7 +168,7 @@ local({
   stopifnot(identical(vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem"),
                       c("psa_forest", "testosterone_forest", "site_incidence_lm000",
                         "xgboost_performance", "xgboost_importance",
-                        "08_federated_psa_testosterone", "09_federated_xgboost")))
+                        "08_federated_xgboost")))
   # Both forest scenes keep widescreen slide dimensions through 05's cache;
   # the day-zero incidence layout is unchanged.
   for(scene in env$figure_run$prepared$federated$scenes[1:2]) {

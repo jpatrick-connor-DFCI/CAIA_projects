@@ -4,10 +4,14 @@
   basename(x)=="manuscript_figures.R", lapply(sys.frames(),function(frame) frame$ofile))
 source(file.path(dirname(tail(.manuscript_sources,1)[[1]]), "federated_no_msk_figures.R"), local=TRUE)
 rm(.manuscript_sources)
+manuscript_dfci_volcano_ylim <- c(-.2,22)
+manuscript_dfci_landmark_headers <- c("+0 days","+90 days","+180 days")
+manuscript_dfci_km_landmark <- 180
+manuscript_multivariable_legend_height <- .14
 manuscript_specs <- function() {
   spec <- function(key, members, height, layout, titles, row_heights=NULL,
-                   shared_legend_panels=integer()) list(key=key, members=members,
-    width=7.2, height=height, layout=layout, titles=titles,
+                   shared_legend_panels=integer(),width=7.2) list(key=key, members=members,
+    width=width, height=height, layout=layout, titles=titles,
     row_heights=row_heights, shared_legend_panels=shared_legend_panels)
   list(
     spec("01_cohort_overview", c("figure1a_consort","figure1b_km","figure1c_span",
@@ -17,7 +21,7 @@ manuscript_specs <- function() {
     spec("02_llm_nepc_avpc", c("figure2v3_confusion_matrix","figure2v3_metric_bar",
       "figure2v3_subtype_landscape","figure2v3_enrichment"), 6.2, rbind(1:2,3:4),
       c("NEPC: chart-review agreement","NEPC classification metrics","NEPC/AVPC proxy subtypes","Platinum enrichment")),
-    spec("03_dfci_univariable", figure_dfci_overview_spec()$members, 8.6,
+    spec("03_dfci_univariable", figure_dfci_overview_spec(manuscript_dfci_km_landmark)$members, 8.6,
       rbind(c(1,1,2,2,3,3),rep(8,6),c(4,4,4,5,5,5),c(6,6,6,7,7,7)),
       c("Day 0","Day 90","Day 180","PSA trajectory","PSA: extreme quintiles",
         "Testosterone trajectory","Testosterone: extreme quintiles"),
@@ -27,11 +31,9 @@ manuscript_specs <- function() {
       paste0("figure4b_importance_platinum_cox_landmark",c(0,90,180)),
       paste0("figure4b_importance_platinum_xgb_landmark",c(0,90,180))),
       11.8, matrix(1:4,4), c("Mean AUC(t)","C-index","Elastic-Net coefficients","XGBoost feature importance"),
-      row_heights=c(.9,.9,1,1)),
+      row_heights=c(.9,.9,1,1),width=8.5),
     spec("05_gleason_sensitivity", paste0("figure4c_sensitivity_gleason_",c("auc","cindex"),"_platinum"),
-      5.6, matrix(1:2,2), c("Mean AUC(t)","C-index")),
-    spec("07_cohort_sensitivity_associations", "cohort_forest_platinum_landmark180",
-      5.0, matrix(1), "PSA and testosterone: day 180"))
+      5.6, matrix(1:2,2), c("Mean AUC(t)","C-index")))
 }
 
 manuscript_captions <- function() {
@@ -47,8 +49,8 @@ manuscript_captions <- function() {
       "Panels a and b include 41 chart-reviewed patients, of whom 12 were manually annotated as NEPC. Panel c includes 3,754 classified patients (213 platinum positive and 3,541 platinum negative) from 3,869 ADT-exposed patients; seven labeled rows outside the four displayed classes were excluded. Panel d excludes 382 biomarker or unclassified rows. OR, odds ratio."),
     `03_dfci_univariable`=caption(
       "Figure 3. Univariable laboratory associations with platinum treatment and longitudinal PSA and testosterone patterns.",
-      "(a-c) Univariable Cox associations at ADT initiation (a), 90 days (b), and 180 days (c). The horizontal axis gives the log hazard ratio per standard-deviation increase and the vertical axis gives -log10(P). The solid vertical line denotes no association, dashed vertical lines mark log hazard ratios of -0.5 and 0.5, and the dotted horizontal line is the landmark-specific threshold corresponding to a Benjamini-Hochberg false-discovery rate below 0.05. Colors identify laboratory categories. At the three landmarks, 31 of 235, 72 of 244, and 76 of 245 tested features, respectively, had q < 0.05. (d,f) Mean log1p-transformed PSA (d) and testosterone (f) trajectories by subsequent platinum status; points and shading denote the mean and 95% confidence interval, and only bins containing at least 10 patients per stratum are shown. The dotted vertical line denotes ADT initiation. (e,g) Kaplan-Meier platinum-free survival from the day-0 landmark comparing the bottom and top 20% of the pre-landmark mean PSA (e) or testosterone (g) distribution. Middle quintiles are omitted, equal values remain together, shading denotes pointwise 95% confidence intervals, and P values are from log-rank tests.",
-      "The trajectory analyses include 2,217 patients for PSA and 2,059 for testosterone. For PSA, the bottom group was ≤1.04 (n=232; 6 events) and the top group was >18.02 (n=231; 24 events); log-rank P=8.4 × 10^-5. For testosterone, the bottom group was ≤96.6 (n=164; 21 events) and the top group was >474.2 (n=164; 10 events); log-rank P=4.11 × 10^-4. ADT, androgen-deprivation therapy; CBC, complete blood count; CMP, comprehensive metabolic panel; HR, hazard ratio; LFT, liver-function test; PSA, prostate-specific antigen; SD, standard deviation."),
+      "(a-c) Univariable Cox associations at ADT initiation (a), 90 days (b), and 180 days (c). The horizontal axis gives the log hazard ratio per standard-deviation increase and the vertical axis gives -log10(P), displayed through 22. The solid vertical line denotes no association, dashed vertical lines mark log hazard ratios of -0.5 and 0.5, and the dotted horizontal line is the landmark-specific threshold corresponding to a Benjamini-Hochberg false-discovery rate below 0.05. Colors identify laboratory categories. At the three landmarks, 31 of 235, 72 of 244, and 76 of 245 tested features, respectively, had q < 0.05. (d,f) Mean log1p-transformed PSA (d) and testosterone (f) trajectories by subsequent platinum status; points and shading denote the mean and 95% confidence interval, and only bins containing at least 10 patients per stratum are shown. The dotted vertical line denotes ADT initiation. (e,g) Kaplan-Meier platinum-free survival from the 180-day landmark comparing the bottom and top 20% of the pre-landmark mean PSA (e) or testosterone (g) distribution. Middle quintiles are omitted, equal values remain together, shading denotes pointwise 95% confidence intervals, and P values are from log-rank tests.",
+      "The trajectory analyses include 2,217 patients for PSA and 2,059 for testosterone. For PSA, the bottom group was ≤0.2453 (n=403; 11 events) and the top group was >9.626 (n=403; 58 events); log-rank P=2.75 × 10^-13. For testosterone, the bottom group was ≤10 (n=317; 41 events) and the top group was >294.3 (n=313; 19 events); log-rank P=6.92 × 10^-6. ADT, androgen-deprivation therapy; CBC, complete blood count; CMP, comprehensive metabolic panel; HR, hazard ratio; LFT, liver-function test; PSA, prostate-specific antigen; SD, standard deviation."),
     `04_multivariable_labs`=caption(
       "Figure 4. Multivariable laboratory models for prediction of platinum treatment.",
       "(a,b) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t) (a), and Harrell concordance index (b) for Elastic-Net Cox and XGBoost survival models at 0, 90, and 180 days after ADT initiation. Laboratory models are compared with age-only baselines; the dotted horizontal line marks 0.5. (c) Nonzero Elastic-Net Cox coefficients at each landmark. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (d) XGBoost split-gain feature importance at each landmark. Colors in c and d identify laboratory categories.",
@@ -57,20 +59,16 @@ manuscript_captions <- function() {
       "Figure 5. Gleason-score sensitivity analysis of platinum-treatment prediction.",
       "Held-out test mean AUC(t) (a) and Harrell C-index (b) for Elastic-Net Cox and XGBoost survival models at 0, 90, and 180 days after ADT initiation. Within each model class, laboratory-feature models are compared with models using Gleason score. Values are printed above the bars, and the dotted horizontal line marks 0.5.",
       "The source-data cohorts contained 1,144 patients at day 0, 1,173 at day 90, and 1,171 at day 180, including training/validation and test partitions. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; C-index, concordance index."),
-    `06_cohort_sensitivity_incidence`=caption(
-      "Figure 6. Cohort-size and platinum-incidence sensitivity analyses.",
-      "Patients eligible at the 180-day ADT landmark are shown across the full ADT cohort, cohorts excluding prior castration, metastatic cohorts defined from ADT treatment intent, and metastatic cohorts defined by the LLM. (a) Pale bars show eligible patients and dark bars show observed platinum events; labels give events/patients. (b) Observed platinum-event fractions during follow-up with 95% Wilson confidence intervals. An asterisk denotes a cohort with fewer than 25 events.",
-      "The cohort definitions overlap. Fractions in b are observed event proportions and are not censoring-adjusted cumulative incidence estimates or risks by the landmark day. 'No prior castrate' denotes the source no-previous-castration restriction. ADT, androgen-deprivation therapy; LLM, large language model."),
-    `07_cohort_sensitivity_associations`=caption(
-      "Figure 7. PSA and testosterone associations with platinum treatment across cohort definitions.",
-      "Forest plots show hazard ratios per standard-deviation increase and 95% confidence intervals for the mean, minimum, maximum, and last PSA or testosterone value through the 180-day ADT landmark. Estimates are shown for the full ADT cohort, cohorts excluding prior castration, metastatic cohorts defined from ADT treatment intent, and metastatic cohorts defined by the LLM. The horizontal scale is logarithmic and the dashed line marks a hazard ratio of 1. Filled points indicate Benjamini-Hochberg q < 0.05; open points indicate q ≥ 0.05 or an unavailable q value.",
-      "Change-from-baseline and observation-count features are excluded. Cohort definitions overlap, so the estimates are presented descriptively. ADT, androgen-deprivation therapy; CI, confidence interval; LLM, large language model; PSA, prostate-specific antigen; SD, standard deviation."),
-    `08_federated_psa_testosterone`=caption(
-      "Figure 8. Federated PSA and testosterone associations with platinum treatment.",
-      "Hazard ratios per standard-deviation increase and 95% confidence intervals are shown for PSA (a) and testosterone (b) at Dana-Farber, Fred Hutch, Johns Hopkins, and in the supplied federated analysis. Columns show the mean, minimum, maximum, and last observed value; rows show landmarks at 0, 90, and 180 days after ADT initiation. Horizontal scales are logarithmic and dashed lines mark a hazard ratio of 1. Open circles indicate nonsignificant associations, filled circles indicate nominal P < 0.05 without false-discovery-rate significance, and diamonds indicate supplied q < 0.05.",
-      "For PSA, federated modeled/observed sample sizes were 6,346/4,250 at day 0, 6,272/5,516 at day 90, and 6,125/5,753 at day 180. Corresponding testosterone sample sizes were 6,346/734, 6,272/1,419, and 6,125/1,567. Federated patient and event counts match the combined Fred Hutch and Johns Hopkins counts, but membership was inferred and not independently verified. Supplied false-discovery-rate q values were not recalculated. Change-from-baseline features are excluded. ADT, androgen-deprivation therapy; PSA, prostate-specific antigen."),
-    `09_federated_xgboost`=caption(
-      "Figure 9. Federated XGBoost performance and feature importance for prediction of platinum treatment.",
+    `06_dfci_cohort_sensitivity`=caption(
+      "Figure 6. Cohort-size, endpoint-incidence, and laboratory-association sensitivity analyses within Dana-Farber.",
+      "Patients eligible at the 180-day androgen-deprivation therapy (ADT) landmark are shown across the full ADT cohort, cohorts excluding prior castration, metastatic cohorts defined from ADT treatment intent, and metastatic cohorts defined by the large language model (LLM). (a) Observed platinum and neuroendocrine prostate cancer (NEPC) event fractions during follow-up with 95% Wilson confidence intervals. (b) Pale bars show eligible patients and solid bars show observed events; labels give events/patients. Blue denotes platinum and orange denotes NEPC in a and b; an asterisk denotes fewer than 25 events. (c) Natural-log hazard ratios per standard-deviation increase and 95% confidence intervals for the mean, minimum, maximum, and last PSA or testosterone value through the landmark. The dashed line at 0 marks the null; filled points indicate Benjamini-Hochberg q < 0.05.",
+      "Cohort definitions overlap. Event fractions are observed proportions rather than censoring-adjusted cumulative incidence estimates. Change-from-baseline and observation-count features are excluded from c. 'No prior castrate' denotes the source no-previous-castration restriction. CI, confidence interval; PSA, prostate-specific antigen; SD, standard deviation."),
+    `07_federated_incidence_associations`=caption(
+      "Figure 7. Site-specific platinum incidence and federated PSA and testosterone associations.",
+      "The Dana-Farber, Fred Hutch, and Johns Hopkins ADT cohorts are shown at treatment initiation. (a) Observed platinum-event fractions during follow-up with 95% Wilson confidence intervals. (b) Pale bars show analyzed patients and solid bars show observed platinum events; labels give events/patients. (c,d) Natural-log hazard ratios per standard-deviation increase and 95% confidence intervals for PSA (c) and testosterone (d) at the three sites and in the supplied federated analysis. Columns show the mean, minimum, maximum, and last observed value; rows show landmarks at 0, 90, and 180 days. Dashed lines at 0 mark the null. Open circles indicate nonsignificant associations, filled circles indicate nominal P < 0.05 without false-discovery-rate significance, and diamonds indicate supplied q < 0.05.",
+      "Site-specific fractions are observed event proportions rather than censoring-adjusted cumulative incidence estimates. For PSA, federated modeled/observed sample sizes were 6,346/4,250 at day 0, 6,272/5,516 at day 90, and 6,125/5,753 at day 180. Corresponding testosterone sample sizes were 6,346/734, 6,272/1,419, and 6,125/1,567. Federated patient and event counts match the combined Fred Hutch and Johns Hopkins counts, but membership was inferred and not independently verified. Supplied q values were not recalculated. ADT, androgen-deprivation therapy; PSA, prostate-specific antigen; SD, standard deviation."),
+    `08_federated_xgboost`=caption(
+      "Figure 8. Federated XGBoost performance and feature importance for prediction of platinum treatment.",
       "(a,b) Held-out test mean AUC(t) (a) and Harrell C-index (b) for the XGBoost survival model and age-only XGBoost baseline at 0, 90, and 180 days after ADT initiation; the dotted horizontal line marks 0.5. (c-e) Positive split-gain feature importances at day 0 (c), day 90 (d), and day 180 (e), with up to 15 features displayed per landmark. Colors identify laboratory categories.",
       "Test-set sample sizes/events were 1,270/25 at day 0, 1,255/23 at day 90, and 1,226/22 at day 180 for both model configurations. Performance values are from held-out test sets rather than training or tuning cross-validation. Gains are unsigned measures of split improvement and are not signed effects or SHAP values. The supplied model-input audit reports nonzero gain for person_id at days 90 and 180; model inputs require audit before performance or importance is interpreted. ADT, androgen-deprivation therapy; ALP, alkaline phosphatase; AUC(t), time-dependent area under the receiver-operating-characteristic curve; BUN, blood urea nitrogen; C-index, concordance index; MCV, mean corpuscular volume; PSA, prostate-specific antigen; RDW, red-cell distribution width; SHAP, Shapley additive explanations.")
   )
@@ -144,12 +142,17 @@ manuscript_grob <- function(p,width,height) {
   if(inherits(p,"ggplot")) ggplot2::ggplotGrob(p) else p
 }
 
-manuscript_combine <- function(plots,spec,shared_legend=FALSE) {
+manuscript_combine <- function(plots,spec,shared_legend=FALSE,tag_offset=0L) {
   legends <- list(); grobs <- list()
   inline_legend_panels <- if(is.null(spec$shared_legend_panels)) integer() else
     spec$shared_legend_panels
   for(i in seq_along(plots)) {
-    p <- manuscript_style(plots[[i]],spec$titles[i],if(length(plots)>1) letters[i] else NULL)
+    p <- manuscript_style(plots[[i]],spec$titles[i],
+      if(length(plots)>1) letters[i+tag_offset] else NULL)
+    if(identical(spec$key,"03_dfci_univariable") && i<=3) p <- p + ggplot2::theme(
+      plot.subtitle=ggplot2::element_text(size=8,face="bold",hjust=.5,
+        margin=ggplot2::margin(b=2)),
+      plot.margin=ggplot2::margin(4,1,4,1))
     if(inherits(p,"ggplot")) {
       if(shared_legend || i %in% inline_legend_panels) {
         g <- manuscript_grob(p,spec$width,spec$height)
@@ -211,11 +214,22 @@ manuscript_multivariable_labs <- function(plots,spec) {
     padding=grid::unit(1,"pt"))
   xgboost_row <- gridExtra::arrangeGrob(grobs=importance[4:6],ncol=3,top=tag("D"),
     padding=grid::unit(1,"pt"))
-  legends <- Filter(Negate(is.null),list(model_legend,category_legend))
-  footer <- if(length(legends)) gridExtra::arrangeGrob(grobs=legends,ncol=1,
-    padding=grid::unit(0,"pt")) else NULL
-  gridExtra::arrangeGrob(grobs=c(performance,list(coefficient_row,xgboost_row)),ncol=1,
-    heights=spec$row_heights,bottom=footer,padding=grid::unit(3,"pt"))
+  grobs <- performance
+  heights <- spec$row_heights[1:2]
+  if(!is.null(model_legend)) {
+    grobs <- c(grobs,list(model_legend))
+    heights <- c(heights,manuscript_multivariable_legend_height)
+  }
+  grobs <- c(grobs,list(coefficient_row))
+  heights <- c(heights,spec$row_heights[3])
+  if(!is.null(category_legend)) {
+    grobs <- c(grobs,list(category_legend))
+    heights <- c(heights,manuscript_multivariable_legend_height)
+  }
+  grobs <- c(grobs,list(xgboost_row))
+  heights <- c(heights,spec$row_heights[4])
+  gridExtra::arrangeGrob(grobs=grobs,ncol=1,heights=heights,
+    padding=grid::unit(3,"pt"))
 }
 
 manuscript_cohort_labels <- c(adt="All ADT",adt_noprecastrate="All ADT; no prior castrate",
@@ -225,11 +239,13 @@ manuscript_cohort_labels <- c(adt="All ADT",adt_noprecastrate="All ADT; no prior
   adt_metastatic_llm_noprecastrate="Metastatic (LLM);\nno prior castrate")
 
 manuscript_incidence <- function(d) {
-  d <- d[d$endpoint=="platinum",,drop=FALSE]
-  stopifnot(nrow(d)>0,!anyDuplicated(d$cohort))
+  d <- d[tolower(d$endpoint) %in% c("platinum","nepc"),,drop=FALSE]
+  d$endpoint <- tolower(d$endpoint)
+  stopifnot(nrow(d)>0,!anyDuplicated(d[c("cohort","endpoint")]))
+  cohort_order <- c(intersect(names(manuscript_cohort_labels),unique(d$cohort)),
+    setdiff(unique(d$cohort),names(manuscript_cohort_labels)))
   d$label <- unname(manuscript_cohort_labels[d$cohort])
   d$label[is.na(d$label)] <- d$cohort[is.na(d$label)]
-  d$label <- factor(d$label,levels=rev(unique(d$label)))
   d$available <- d$status=="ok" & !is.na(d$n_patients) & d$n_patients>0
   stopifnot(all(d$n_events[d$available]>=0),all(d$n_events[d$available]<=d$n_patients[d$available]))
   good <- d[d$available,,drop=FALSE]
@@ -237,34 +253,136 @@ manuscript_incidence <- function(d) {
   centre <- (p+z^2/(2*good$n_patients))/den
   half <- z*sqrt(p*(1-p)/good$n_patients+z^2/(4*good$n_patients^2))/den
   good$rate <- 100*p; good$lo <- 100*pmax(0,centre-half);good$hi <- 100*pmin(1,centre+half)
-  a <- ggplot2::ggplot(good,ggplot2::aes(n_patients,label)) +
-    ggplot2::geom_col(fill="#bbd6ea",width=.6) +
-    ggplot2::geom_col(ggplot2::aes(x=n_events),fill="#0072B2",width=.6) +
-    ggplot2::geom_text(ggplot2::aes(label=paste0(scales::comma(n_events),"/",scales::comma(n_patients))),
-      hjust=-.1,size=2.5) + ggplot2::scale_x_continuous(expand=ggplot2::expansion(mult=c(0,.36)),labels=scales::comma) +
-    ggplot2::scale_y_discrete(drop=FALSE) + ggplot2::labs(x="Patients",y=NULL) + ggplot2::theme_classic()
-  b <- ggplot2::ggplot(good,ggplot2::aes(rate,label)) +
-    ggplot2::geom_errorbar(ggplot2::aes(xmin=lo,xmax=hi),orientation="y",width=.15,linewidth=.4) +
-    ggplot2::geom_point(color="#0072B2",size=1.8) +
-    ggplot2::geom_text(ggplot2::aes(x=hi,label=sprintf("%.1f%%%s",rate,ifelse(n_events<25,"*",""))),hjust=-.15,size=2.5) +
-    ggplot2::scale_x_continuous(limits=c(0,max(good$hi)*1.35)) +
-    ggplot2::scale_y_discrete(drop=FALSE) + ggplot2::labs(x="Observed platinum events (%)",y=NULL) +
-    ggplot2::theme_classic() + ggplot2::theme(axis.text.y=ggplot2::element_blank(),axis.ticks.y=ggplot2::element_blank())
+  good$endpoint_label <- factor(good$endpoint,levels=c("platinum","nepc"),labels=c("Platinum","NEPC"))
+  good$y <- length(cohort_order)+1-match(good$cohort,cohort_order)+
+    ifelse(good$endpoint=="platinum",.18,-.18)
+  colors <- c(Platinum="#2a78d6",NEPC="#eb6834")
+  labels <- unname(manuscript_cohort_labels[cohort_order])
+  labels[is.na(labels)] <- cohort_order[is.na(labels)]
+  yscale <- function(show=TRUE) ggplot2::scale_y_continuous(
+    breaks=rev(seq_along(cohort_order)),labels=if(show) labels else NULL,
+    limits=c(.45,length(cohort_order)+.55),expand=ggplot2::expansion(mult=0))
+  a <- ggplot2::ggplot(good,ggplot2::aes(y=y,fill=endpoint_label)) +
+    ggplot2::geom_rect(ggplot2::aes(xmin=0,xmax=rate,ymin=y-.14,ymax=y+.14),color="white",linewidth=.2) +
+    ggplot2::geom_errorbar(ggplot2::aes(xmin=lo,xmax=hi),orientation="y",width=.09,linewidth=.4,color="#454545") +
+    ggplot2::geom_text(ggplot2::aes(x=hi,label=sprintf("%.1f%%%s",rate,ifelse(n_events<25,"*",""))),
+      hjust=-.18,size=2.5,color="#52514e") +
+    ggplot2::scale_fill_manual(values=colors,drop=FALSE) + yscale(TRUE) +
+    ggplot2::scale_x_continuous(limits=c(0,max(good$hi)*1.22),expand=ggplot2::expansion(mult=c(0,.01))) +
+    ggplot2::labs(x="Observed events (%)",y=NULL,fill=NULL) + ggplot2::theme_classic() +
+    ggplot2::theme(panel.grid.major.x=ggplot2::element_line(color="grey92",linewidth=.3),
+      axis.ticks.y=ggplot2::element_blank(),axis.line.y=ggplot2::element_blank())
+  b <- ggplot2::ggplot(good,ggplot2::aes(y=y,fill=endpoint_label)) +
+    ggplot2::geom_rect(ggplot2::aes(xmin=0,xmax=n_patients,ymin=y-.14,ymax=y+.14),alpha=.28) +
+    ggplot2::geom_rect(ggplot2::aes(xmin=0,xmax=n_events,ymin=y-.14,ymax=y+.14)) +
+    ggplot2::geom_text(ggplot2::aes(x=n_patients,label=paste0(scales::comma(n_events),"/",scales::comma(n_patients))),
+      hjust=-.1,size=2.5,color="#52514e") +
+    ggplot2::scale_fill_manual(values=colors,drop=FALSE) + yscale(FALSE) +
+    ggplot2::scale_x_continuous(limits=c(0,max(good$n_patients)*1.27),expand=ggplot2::expansion(mult=c(0,.01)),labels=scales::comma) +
+    ggplot2::labs(x="Patients (events overlaid)",y=NULL,fill=NULL) + ggplot2::theme_classic() +
+    ggplot2::theme(panel.grid.major.x=ggplot2::element_line(color="grey92",linewidth=.3),
+      axis.text.y=ggplot2::element_blank(),axis.ticks.y=ggplot2::element_blank(),axis.line.y=ggplot2::element_blank())
   # Explicit missing rows, never substituted with zero events.
   missing <- d[!d$available,,drop=FALSE]
+  missing$y <- length(cohort_order)+1-match(missing$cohort,cohort_order)+
+    ifelse(missing$endpoint=="platinum",.18,-.18)
   if(nrow(missing)) for(which in c("a","b")) {
-    p <- get(which)+ggplot2::geom_text(data=missing,ggplot2::aes(x=0,label="Unavailable"),hjust=0,size=2.5)
+    p <- get(which)+ggplot2::geom_text(data=missing,ggplot2::aes(x=0,y=y,label="Unavailable"),
+      inherit.aes=FALSE,hjust=0,size=2.5)
     assign(which,p)
   }
-  spec <- list(key="06_cohort_sensitivity_incidence",width=7.2,height=3.5,
-    layout=matrix(1:2,1),titles=c("Cohort size and platinum events","Platinum event fraction"))
-  # The shared labels occupy space only in A; both panels still share row order.
-  list(plot=manuscript_combine(list(a,b),spec),spec=spec,data=d,
+  spec <- list(key="06_dfci_cohort_sensitivity",width=7.2,height=3.6,
+    layout=matrix(1:2,1),titles=c("Endpoint incidence","Cohort size and event count"))
+  list(plot=manuscript_combine(list(a,b),spec,shared_legend=TRUE),panels=list(a,b),spec=spec,data=d,
     legend=paste("Landmark day",paste(unique(d$landmark_days),collapse=", "),
-      ". a: pale bars show eligible patients; dark bars show platinum events; labels are events/patients.",
-      "b: observed event fraction during follow-up with 95% Wilson confidence intervals; * marks fewer than 25 events.",
+      ". a: observed platinum and NEPC event fractions during follow-up with 95% Wilson confidence intervals.",
+      "b: pale bars show eligible patients; solid bars show observed events; labels are events/patients.",
+      "Blue denotes platinum and orange denotes NEPC; * marks fewer than 25 events.",
       "These are not censoring-adjusted cumulative incidences or risks by the landmark day. Cohorts overlap.",
       "'No prior castrate' denotes the source noprecastrate cohort restriction."))
+}
+
+manuscript_log_hazard_axis <- function(p) {
+  stopifnot(inherits(p,"ggplot"),all(c("hazard_ratio_per_sd","ci_lower","ci_upper") %in% names(p$data)))
+  values <- unlist(p$data[c("hazard_ratio_per_sd","ci_lower","ci_upper")],use.names=FALSE)
+  values <- values[is.finite(values) & values>0]
+  stopifnot(length(values)>0)
+  log_limits <- range(c(0,log(values)))
+  log_limits <- log_limits+c(-1,1)*max(.04,diff(log_limits)*.04)
+  ticks <- pretty(log_limits,n=5)
+  ticks <- ticks[ticks>=log_limits[1] & ticks<=log_limits[2]]
+  if(!any(abs(ticks)<sqrt(.Machine$double.eps))) ticks <- sort(unique(c(ticks,0)))
+  p + ggplot2::scale_x_log10(limits=exp(log_limits),breaks=exp(ticks),
+    labels=function(x) scales::label_number(accuracy=.1)(log(x))) +
+    ggplot2::labs(x="Log hazard ratio per SD (95% CI)")
+}
+
+manuscript_dfci_cohort_sensitivity <- function(incidence,association) {
+  stopifnot(is.list(incidence),inherits(association,"ggplot"))
+  association <- manuscript_log_hazard_axis(association) +
+    ggplot2::scale_y_discrete(labels=function(x) unname(manuscript_cohort_labels[x]))
+  association_grob <- manuscript_grob(manuscript_style(association,NULL,"c"),7.2,5)
+  spec <- list(key="06_dfci_cohort_sensitivity",width=7.2,height=8.7,
+    layout=rbind(c(1,2),c(3,3)),titles=c("Endpoint incidence","Cohort size and event count",
+      "PSA and testosterone associations"),row_heights=c(3.6,5.1))
+  combined <- gridExtra::arrangeGrob(grobs=list(incidence$plot,association_grob),ncol=1,
+    heights=spec$row_heights,padding=grid::unit(3,"pt"))
+  incidence_data <- incidence$data;incidence_data$figure_section <- "incidence_and_counts"
+  association_data <- association$data;association_data$figure_section <- "laboratory_associations"
+  list(plot=combined,spec=spec,data=dplyr::bind_rows(incidence_data,association_data),
+    legend=paste(incidence$legend,
+      "c: natural-log hazard ratios per SD and 95% CIs for PSA and testosterone at day 180; dashed lines at 0 mark the null. Filled points: q < 0.05; open points: q >= 0.05 or unavailable.",
+      sep="\n"))
+}
+
+manuscript_federated_incidence <- function(d) {
+  d <- d[tolower(d$endpoint)=="platinum" & d$landmark_days==0,,drop=FALSE]
+  keys <- c("dana_farber_caia_1_1","fred_hutch_caia_1_1","jhu_caia_1_1")
+  selected <- d[match(keys,d$site_name),,drop=FALSE]
+  stopifnot(nrow(selected)==3,!anyNA(selected$site_name),!anyDuplicated(selected$site_name),
+    all(selected$available %in% TRUE),all(selected$n_events>=0),
+    all(selected$n_events<=selected$n_patients))
+  out <- data.frame(site_key=keys,
+    site=c("Dana-Farber","Fred Hutch","Johns Hopkins"),
+    landmark_days=0L,endpoint="platinum",
+    n_patients=selected$n_patients,n_events=selected$n_events,available=TRUE,
+    stringsAsFactors=FALSE)
+  z <- 1.96;p <- out$n_events/out$n_patients;den <- 1+z^2/out$n_patients
+  centre <- (p+z^2/(2*out$n_patients))/den
+  half <- z*sqrt(p*(1-p)/out$n_patients+z^2/(4*out$n_patients^2))/den
+  out$event_incidence_pct <- 100*p
+  out$ci_lower_pct <- 100*pmax(0,centre-half)
+  out$ci_upper_pct <- 100*pmin(1,centre+half)
+  out$y <- rev(seq_len(nrow(out)))
+  yscale <- function(show=TRUE) ggplot2::scale_y_continuous(breaks=out$y,
+    labels=if(show) out$site else NULL,limits=c(.5,nrow(out)+.5),expand=ggplot2::expansion(mult=0))
+  a <- ggplot2::ggplot(out,ggplot2::aes(y=y)) +
+    ggplot2::geom_rect(ggplot2::aes(xmin=0,xmax=event_incidence_pct,ymin=y-.22,ymax=y+.22),fill="#2a78d6") +
+    ggplot2::geom_errorbar(ggplot2::aes(xmin=ci_lower_pct,xmax=ci_upper_pct),orientation="y",
+      width=.12,color="#454545",linewidth=.4) +
+    ggplot2::geom_text(ggplot2::aes(x=ci_upper_pct,label=sprintf("%.2f%%",event_incidence_pct)),
+      hjust=-.18,size=2.5,color="#52514e") + yscale(TRUE) +
+    ggplot2::scale_x_continuous(limits=c(0,max(out$ci_upper_pct)*1.25),
+      expand=ggplot2::expansion(mult=c(0,.01))) +
+    ggplot2::labs(x="Observed platinum events (%)",y=NULL) + ggplot2::theme_classic() +
+    ggplot2::theme(panel.grid.major.x=ggplot2::element_line(color="grey92",linewidth=.3),
+      axis.ticks.y=ggplot2::element_blank(),axis.line.y=ggplot2::element_blank())
+  b <- ggplot2::ggplot(out,ggplot2::aes(y=y)) +
+    ggplot2::geom_rect(ggplot2::aes(xmin=0,xmax=n_patients,ymin=y-.22,ymax=y+.22),fill="#2a78d6",alpha=.28) +
+    ggplot2::geom_rect(ggplot2::aes(xmin=0,xmax=n_events,ymin=y-.22,ymax=y+.22),fill="#2a78d6") +
+    ggplot2::geom_text(ggplot2::aes(x=n_patients,label=paste0(scales::comma(n_events),"/",scales::comma(n_patients))),
+      hjust=-.1,size=2.5,color="#52514e") + yscale(FALSE) +
+    ggplot2::scale_x_continuous(limits=c(0,max(out$n_patients)*1.28),
+      expand=ggplot2::expansion(mult=c(0,.01)),labels=scales::comma) +
+    ggplot2::labs(x="Patients (events overlaid)",y=NULL) + ggplot2::theme_classic() +
+    ggplot2::theme(panel.grid.major.x=ggplot2::element_line(color="grey92",linewidth=.3),
+      axis.text.y=ggplot2::element_blank(),axis.ticks.y=ggplot2::element_blank(),axis.line.y=ggplot2::element_blank())
+  spec <- list(key="07_federated_incidence_associations",width=7.2,height=3,
+    layout=matrix(1:2,1),titles=c("Platinum incidence","Cohort size and event count"))
+  list(plot=manuscript_combine(list(a,b),spec),panels=list(a,b),spec=spec,data=out,
+    legend=paste("Landmark day 0. a: observed platinum-event fraction during follow-up with 95% Wilson confidence intervals.",
+      "b: pale bars show analyzed patients; solid bars show platinum events; labels are events/patients.",
+      "Observed proportions are not censoring-adjusted cumulative incidences."))
 }
 
 manuscript_federated_labs <- function(d) {
@@ -272,17 +390,36 @@ manuscript_federated_labs <- function(d) {
     d$landmark_days %in% c(0,90,180),,drop=FALSE]
   stopifnot(!anyDuplicated(d[c("lab_name","landmark_days","source","feature_stat")]))
   note <- paste(unique(d$population_note[d$source=="Federated*"]),collapse="\n")
-  # Reuse the standalone forests: source colors, landmark/statistic facets,
-  # log scales and significance symbols all retain their original meaning.
+  # Reuse the standalone forests: source colors, landmark/statistic facets and
+  # significance symbols retain their original meaning; relabel the transformed
+  # horizontal coordinate directly as the natural-log hazard ratio.
   plots <- lapply(c("PSA","Testosterone"),function(analyte)
-    plot_federated_comparison(d,analyte,note) + ggplot2::labs(subtitle=NULL))
-  spec <- list(key="08_federated_psa_testosterone",width=7.2,height=8.4,
+    manuscript_log_hazard_axis(
+      plot_federated_comparison(d,analyte,note) + ggplot2::labs(subtitle=NULL)))
+  spec <- list(key="07_federated_incidence_associations",width=7.2,height=8.4,
     layout=matrix(1:2,2),titles=c("PSA","Testosterone"))
-  list(plot=manuscript_combine(plots,spec,shared_legend=TRUE),spec=spec,data=d,
+  list(plot=manuscript_combine(plots,spec,shared_legend=TRUE),panels=plots,spec=spec,data=d,
     legend=paste("a: PSA. b: testosterone. Platinum endpoint; original site colors and landmark/statistic facets.",
       "Columns: mean, minimum, maximum and last value. Rows: days 0, 90 and 180.",
+      "Horizontal coordinates are natural-log hazard ratios per SD; dashed lines at 0 mark the null.",
       "Open circles: not significant; filled circles: nominal p < 0.05 only; diamonds: supplied FDR q < 0.05.",
       paste(vapply(plots,function(p) p$labels$caption,character(1)),collapse="\n"),sep="\n"))
+}
+
+manuscript_federated_incidence_associations <- function(incidence,labs) {
+  stopifnot(is.list(incidence),is.list(labs),length(labs$panels)==2)
+  lab_spec <- labs$spec
+  lab_spec$height <- 8.4
+  lab_grob <- manuscript_combine(labs$panels,lab_spec,shared_legend=TRUE,tag_offset=2L)
+  spec <- list(key="07_federated_incidence_associations",width=7.2,height=11.5,
+    layout=rbind(c(1,2),c(3,3),c(4,4)),titles=c("Platinum incidence","Cohort size and event count",
+      "PSA associations","Testosterone associations"),row_heights=c(3,4.25,4.25))
+  combined <- gridExtra::arrangeGrob(grobs=list(incidence$plot,lab_grob),ncol=1,
+    heights=c(spec$row_heights[1],sum(spec$row_heights[-1])),padding=grid::unit(3,"pt"))
+  incidence_data <- incidence$data;incidence_data$figure_section <- "incidence_and_counts"
+  lab_data <- labs$data;lab_data$figure_section <- "laboratory_associations"
+  list(plot=combined,spec=spec,data=dplyr::bind_rows(incidence_data,lab_data),
+    legend=paste(incidence$legend,labs$legend,sep="\n"))
 }
 
 manuscript_federated_xgb <- function(metrics,importance) {
@@ -299,7 +436,7 @@ manuscript_federated_xgb <- function(metrics,importance) {
         gsub("Neutrophils absolute","Neutrophils (abs.)",x,fixed=TRUE)
       }) + ggplot2::guides(fill=ggplot2::guide_legend(nrow=1))
   }
-  spec <- list(key="09_federated_xgboost",width=7.2,height=10.2,
+  spec <- list(key="08_federated_xgboost",width=7.2,height=10.2,
     layout=rbind(c(1,1,2,2),c(3,3,3,3),c(4,4,4,4),c(5,5,5,5)),
     row_heights=c(.85,.65,1,1.2),
     titles=c("Test mean AUC(t)","Test C-index","Feature importance: day 0",
@@ -344,9 +481,9 @@ manuscript_build <- function(items,tables,root) {
     }
     if(spec$key=="03_dfci_univariable") {
       axes <- lapply(plots[1:3],function(p) p$coordinates$limits)
-      if(all(vapply(axes,function(x) length(x$x)==2 && length(x$y)==2,logical(1))))
+      if(all(vapply(axes,function(x) length(x$x)==2,logical(1))))
         for(i in 1:3) plots[[i]] <- plots[[i]] + ggplot2::coord_cartesian(
-          xlim=range(unlist(lapply(axes,`[[`,"x"))),ylim=range(unlist(lapply(axes,`[[`,"y"))))
+          xlim=range(unlist(lapply(axes,`[[`,"x"))),ylim=manuscript_dfci_volcano_ylim)
       for(i in 1:3) {
         plots[[i]]$layers <- lapply(plots[[i]]$layers,function(layer) {
           copy <- ggplot2::ggproto(NULL,layer)
@@ -362,23 +499,27 @@ manuscript_build <- function(items,tables,root) {
         plots[[i]] <- plots[[i]] + ggplot2::scale_size_manual(
           values=c(`TRUE`=1.8,`FALSE`=1.2),guide="none")
       }
-      for(i in 1:3) plots[[i]] <- plots[[i]] + ggplot2::labs(
-        subtitle=NULL,y=if(i==1) expression(-log[10](p)) else NULL) +
-        ggplot2::guides(color="none",fill=ggplot2::guide_legend(nrow=1,byrow=TRUE,
-          override.aes=list(shape=21,size=1.8,alpha=1)))
+      for(i in 1:3) {
+        plots[[i]] <- plots[[i]] + ggplot2::labs(
+          subtitle=manuscript_dfci_landmark_headers[i],y=if(i==1) expression(-log[10](p)) else NULL) +
+          ggplot2::guides(color="none",fill=ggplot2::guide_legend(nrow=1,byrow=TRUE,
+            override.aes=list(shape=21,size=1.8,alpha=1)))
+        if(i>1) plots[[i]] <- plots[[i]] + ggplot2::theme(
+          axis.text.y=ggplot2::element_blank(),axis.ticks.y=ggplot2::element_blank())
+      }
       for(i in c(4,6)) plots[[i]] <- plots[[i]] + ggplot2::labs(subtitle=NULL,
         x="Years from ADT initiation",y=paste0("Mean log1p(",if(i==4) "PSA" else "testosterone", ")\n(95% CI)"))
       for(i in c(5,7)) {
         logrank <- plots[[i]]$labels$subtitle
         plots[[i]] <- plots[[i]] + ggplot2::labs(subtitle=NULL,
-          x=paste0("Days from day-",figure_overview_km_landmark()," landmark"),y="Platinum-free probability")
+          x=paste0("Days from day-",manuscript_dfci_km_landmark," landmark"),y="Platinum-free probability")
         if(is.character(logrank) && length(logrank)==1 && nzchar(logrank))
           plots[[i]] <- plots[[i]] + ggplot2::annotate("text",x=Inf,y=.05,label=logrank,
             hjust=1.08,vjust=0,size=2.3,color="#52514e")
       }
+      legend <- c(legend,
+        "Panels a-c share a -log10(p) display range through 22 and centered landmark headers.")
     }
-    if(spec$key=="07_cohort_sensitivity_associations") plots[[1]] <- plots[[1]] +
-      ggplot2::scale_y_discrete(labels=function(x) unname(manuscript_cohort_labels[x]))
     if(spec$key=="01_cohort_overview") {
       # Patient counts stay in the external legend; omit them from panels B-E.
       for(i in 2:5) plots[[i]] <- plots[[i]] + ggplot2::labs(subtitle=NULL)
@@ -401,7 +542,7 @@ manuscript_build <- function(items,tables,root) {
     result[[spec$key]] <- list(plot=manuscript_combine(plots,spec,
       shared_legend=startsWith(spec$key,"04_")||startsWith(spec$key,"05_")),spec=spec,
       legend=paste(legend,collapse="\n\n"),
-      data=if(startsWith(spec$key,"07_")) plots[[1]]$data else NULL)
+      data=NULL)
   }
   read <- function(pattern) {
     paths <- tables[grepl(pattern,basename(tables))]
@@ -409,10 +550,19 @@ manuscript_build <- function(items,tables,root) {
     readr::read_csv(paths,show_col_types=FALSE)
   }
   incidence <- read("^event_incidence_lm180__platinum__all__incl[.]csv$")
-  if(!is.null(incidence)) result[["06"]] <- manuscript_incidence(incidence)
+  association_key <- "cohort_forest_platinum_landmark180"
+  if(!is.null(incidence) && association_key %in% names(items))
+    result[["06"]] <- manuscript_dfci_cohort_sensitivity(
+      manuscript_incidence(incidence),items[[association_key]]$plot)
   psa <- read("^psa_forest__platinum[.]csv$"); testosterone <- read("^testosterone_forest__platinum[.]csv$")
-  if(!is.null(psa)&&!is.null(testosterone)) result[["08"]] <- manuscript_federated_labs(dplyr::bind_rows(psa,testosterone))
+  site_incidence <- read("^site_incidence_lm000__platinum[.]csv$")
+  required_sites <- c("dana_farber_caia_1_1","fred_hutch_caia_1_1","jhu_caia_1_1")
+  if(!is.null(psa)&&!is.null(testosterone)&&!is.null(site_incidence) &&
+     all(required_sites %in% site_incidence$site_name))
+    result[["07"]] <- manuscript_federated_incidence_associations(
+      manuscript_federated_incidence(site_incidence),
+      manuscript_federated_labs(dplyr::bind_rows(psa,testosterone)))
   metrics <- read("^xgboost_performance__platinum[.]csv$"); importance <- read("^xgboost_importance__platinum[.]csv$")
-  if(!is.null(metrics)&&!is.null(importance)) result[["09"]] <- manuscript_federated_xgb(metrics,importance)
+  if(!is.null(metrics)&&!is.null(importance)) result[["08"]] <- manuscript_federated_xgb(metrics,importance)
   result
 }

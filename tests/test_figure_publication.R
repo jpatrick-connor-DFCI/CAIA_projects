@@ -2,6 +2,20 @@ source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
 source("COMPASS/survival_analysis/figure_data_cache.R")
 source("COMPASS/survival_analysis/federated_no_msk_figures.R")
 local({
+  variable <- "COMPASS_COMBINED_KM_LANDMARK"
+  previous <- Sys.getenv(variable,unset=NA_character_)
+  on.exit(if(is.na(previous)) Sys.unsetenv(variable) else
+    do.call(Sys.setenv,setNames(list(previous),variable)))
+  Sys.unsetenv(variable)
+  stopifnot(figure_overview_km_landmark()==180)
+  Sys.setenv(COMPASS_COMBINED_KM_LANDMARK="0")
+  stopifnot(figure_overview_km_landmark()==0)
+  fixed <- figure_dfci_overview_spec(180)
+  stopifnot(fixed$key=="dfci_labs_overview_km_lm180",
+    fixed$members[5]=="km_quintile_psa_landmark180",
+    fixed$members[7]=="km_quintile_testosterone_landmark180")
+})
+local({
   root <- tempfile("publication-",tmpdir="/private/tmp"); dir.create(root)
   if(Sys.getenv("COMPASS_PUBLICATION_REVIEW")!="1") on.exit(unlink(root,recursive=TRUE))
   else message("Publication review: ",root)
