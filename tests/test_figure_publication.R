@@ -46,7 +46,7 @@ local({
       all(members %in% vapply(m$scenes,`[[`,character(1),"stem")))
     for(i in seq_along(panels)) {
       tag <- panels[[i]]$grobs[[which(panels[[i]]$layout$name=="tag")]]
-      stopifnot(tag$children[[1]]$label==LETTERS[i])
+      stopifnot(tag$children[[1]]$label==letters[i])
     }
     if(key=="figure1_cohort") stopifnot(grob$layout$b[1]>grob$layout$t[1])
   }
@@ -94,7 +94,7 @@ local({
     stopifnot(all(vapply(panels,function(g)
       inherits(g$grobs[[which(g$layout$name=="title")]],"zeroGrob"),logical(1))))
     tags <- vapply(panels,function(g) g$grobs[[which(g$layout$name=="tag")]]$children[[1]]$label,character(1))
-    stopifnot(identical(unname(tags),LETTERS[1:5]))
+    stopifnot(identical(unname(tags),letters[1:5]))
   }
   # Every federated estimate survives composition with its original p/q values.
   estimates <- tidyr::expand_grid(source=c("Dana-Farber","Fred Hutch","Johns Hopkins","Federated*"),

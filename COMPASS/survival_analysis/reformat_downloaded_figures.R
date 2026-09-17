@@ -92,13 +92,13 @@ reformat_downloaded_figures <- function(input, output, landmark=0L) {
   width <- 24; height <- 22
   draw <- function() {
     grid::grid.newpage()
-    for(i in 1:3) grid::grid.text(paste(LETTERS[i],"  DFCI — landmark",c(0,90,180)[i],"days"),
+    for(i in 1:3) grid::grid.text(paste(letters[i],"  DFCI — landmark",c(0,90,180)[i],"days"),
       x=grid::unit((i-1)*8+.12,"in"),y=grid::unit(height-.12,"in"),just=c("left","top"),
       gp=grid::gpar(fontsize=17,fontface="bold"))
     download_draw_panel(volcano,.5,1-(.4+7.6/2)/height,1,7.6/height,
       canvas_width=width,canvas_height=height)
-    headings <- c("D   PSA trajectory (log1p)",paste0("E   PSA bottom vs top 20% — day ",landmark),
-      "F   Testosterone trajectory (log1p)",paste0("G   Testosterone bottom vs top 20% — day ",landmark))
+    headings <- c("d   PSA trajectory (log1p)",paste0("e   PSA bottom vs top 20% — day ",landmark),
+      "f   Testosterone trajectory (log1p)",paste0("g   Testosterone bottom vs top 20% — day ",landmark))
     for(i in 1:4) {
       row <- ceiling(i/2); col <- (i-1) %% 2
       download_draw_panel(panels[[i]],.25+.5*col,1-(8+(row-.5)*7)/height,.5,7/height,

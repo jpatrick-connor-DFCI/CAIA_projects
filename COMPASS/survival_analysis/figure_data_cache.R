@@ -202,6 +202,8 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
       }
       publish(item$plot,destination,item$spec$width,item$spec$height,item$spec$key)
     }
+    manuscript_write_captions(manuscript_root,
+      vapply(manuscripts,function(item) item$spec$key,character(1)),table_capture)
   }
   paths <- vapply(scenes, `[[`, character(1), "path")
   m <- list(signature = signature, scenes = scenes, files = figure_file_identity(paths),

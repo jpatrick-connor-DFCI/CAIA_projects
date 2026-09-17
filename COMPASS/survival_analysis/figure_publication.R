@@ -58,7 +58,7 @@ figure_dfci_overview_spec <- function() {
     members=c(paste0("figure3_univariate_platinum_landmark",c(0,90,180)),
       "longitudinal_platinum_psa_log",paste0("km_quintile_psa_landmark",landmark),
       "longitudinal_platinum_testosterone_log",paste0("km_quintile_testosterone_landmark",landmark)),
-    panel_tags=LETTERS[1:7], keep_individuals=TRUE, endpoint="platinum",
+    panel_tags=letters[1:7], keep_individuals=TRUE, endpoint="platinum",
     shared_caption=FALSE, shared_legend=FALSE)
 }
 
@@ -68,7 +68,7 @@ figure_compilation_spec <- function(stem) {
   if (stem %in% cohort_panels)
     return(list(key="figure1_cohort", title="Cohort selection and follow-up",
       width=22.5, height=11, cols=3, keep_individuals=TRUE,
-      members=cohort_panels, panel_tags=LETTERS[1:5],
+      members=cohort_panels, panel_tags=letters[1:5],
       layout_matrix=rbind(c(1,2,3),c(1,4,5)),
       shared_caption=FALSE, shared_legend=FALSE))
   metastatic_panels <- paste0("adt_labels_", c("llm_vs_regex_max_any",
@@ -76,7 +76,7 @@ figure_compilation_spec <- function(stem) {
   if (stem %in% metastatic_panels)
     return(list(key="metastatic_label_agreement", title="Metastatic label agreement",
       width=21, height=7, cols=3, keep_individuals=TRUE,
-      members=metastatic_panels, panel_tags=LETTERS[1:3],
+      members=metastatic_panels, panel_tags=letters[1:3],
       shared_caption=FALSE, shared_legend=FALSE))
   if (grepl("^figure3_univariate_(platinum|nepc)_landmark[0-9]+$", stem))
     return(list(key="labs_univariate_all_landmarks", title="Univariate lab associations",
@@ -118,7 +118,7 @@ figure_compilation_specs <- function(stem) {
   if(stem %in% llm_panels) specs <- c(specs, list(list(
     key="figure2v3_llm", title="LLM annotation validation and subtype landscape",
     width=16, height=12, cols=2, keep_individuals=TRUE,
-    members=llm_panels, panel_tags=LETTERS[1:4],
+    members=llm_panels, panel_tags=letters[1:4],
     shared_caption=FALSE, shared_legend=FALSE)))
   overview <- figure_dfci_overview_spec()
   if(stem %in% overview$members) specs <- c(specs,list(overview))
@@ -192,9 +192,10 @@ figure_combine <- function(items, spec, directory) {
           adt_labels_adt_vs_llm="ADT intent vs LLM", title)
       }
       p <- p + ggplot2::labs(title=NULL) # retain letter tags; descriptions live in the catalog/legends
-      tag <- if(length(spec$panel_tags)) spec$panel_tags[i] else LETTERS[i]
+      tag <- if(length(spec$panel_tags)) spec$panel_tags[i] else letters[i]
       p <- p + ggplot2::labs(tag=tag) +
-        ggplot2::theme(plot.tag=ggplot2::element_text(size=18,face="bold"))
+        ggplot2::theme(plot.tag=ggplot2::element_text(size=18,face="bold"),
+          axis.title=ggplot2::element_text(face="bold"))
       if (same_caption) p <- p + ggplot2::labs(caption=NULL)
       # Shared captions/legends do not remove per-panel n/events in KM legends.
       if (isTRUE(spec$shared_legend)) {
@@ -208,7 +209,7 @@ figure_combine <- function(items, spec, directory) {
       }
       # Long category names need space at the smaller compiled panel width.
       if(!volcano_panels[i]) p <- p + ggplot2::theme(plot.title=ggplot2::element_text(size=13,face="bold"),
-        axis.title=ggplot2::element_text(size=12), axis.text=ggplot2::element_text(size=11),
+        axis.title=ggplot2::element_text(size=12,face="bold"), axis.text=ggplot2::element_text(size=11),
         legend.text=ggplot2::element_text(size=10), plot.caption=ggplot2::element_text(size=9))
       # The flowchart has no axes; resizing must not revive theme_void labels.
       if(stem=="figure1a_consort") p <- p + ggplot2::labs(x=NULL,y=NULL) +

@@ -127,7 +127,9 @@ locations are archived in the data cache.
 
 The canonical ADT/platinum run also creates `ADT/manuscript figures/`. These
 additional exports use a 7.2-inch manuscript width, consistent 7–9 pt plot text,
-lettered panels without subplot titles, and separate `.md` figure legends. They always include a
+lettered panels without subplot titles, and separate `.md` figure legends. A
+`captions/` subdirectory contains manuscript-ready legends as matching
+`figureN.md` and `figureN.txt` files. They always include a
 600-dpi (or higher requested DPI) PNG and a PDF, even when `COMPASS_RENDER_PDF`
 is false. The existing individual and compiled exports are retained.
 
@@ -142,15 +144,25 @@ renderers: forests retain site colors and landmark/statistic facets; XGBoost
 retains gold model/baseline bars and lab-category importance colors. Incomplete source groups are not assembled. The DFCI
 overview uses the same configurable extreme-quintile KM landmark as its larger
 compiled counterpart. Figure titles remain in filenames/legends, not supertitles.
+The cohort overview uses a 7.2 × 7.2-inch canvas; panels b–e omit their
+patient-count subtitles because those counts are retained in the external legend.
+In the DFCI univariable manuscript figure, the three landmark volcanoes use an
+expanded first row, one shared y-axis title, and one horizontal category legend.
+Trajectory patient-count/scale subtitles are kept in the external legend, and
+KM log-rank values are drawn inside their panels.
+The multivariable-labs manuscript figure includes held-out AUC(t) and C-index
+panels followed by three-landmark Elastic-Net coefficient and XGBoost gain rows;
+the importance rows share the source lab-category colors.
+All compiled figures use lowercase bold panel letters and bold x- and y-axis
+titles; tick labels and legend text retain their existing weight.
 
 Manuscript figures are built from the source ggplots or exported aggregate
 tables during `prepare`/`all`, then cached as graphics only. Run `all` after
 updating the R files; `render` alone cannot rebuild stale scenes. Cohort counts,
 original panel captions and supplied federated population/model-input audit
-notes are retained in the accompanying legends. In particular, nonzero gain
-for an identifier feature remains an explicit warning on the federated
-XGBoost figure and requires a model-input audit before publication. Formatting
-does not resolve that issue. Downloaded PNGs alone cannot provide vector
+notes are retained in the accompanying legends. The federated XGBoost figure
+uses a 7.2 × 10.2-inch canvas; its model-input audit remains in the external
+legend rather than as a caution footer on the plotted page. Downloaded PNGs alone cannot provide vector
 replacements for the original source plots.
 Each arm gets a thumbnail `index.html` and a `manifest.csv` with relative paths,
 titles, endpoint, cohort, and landmark metadata. No duplicate thumbnail files are made.
