@@ -33,6 +33,35 @@ figure_public_path <- function(path) {
   file.path(root, topic, paste0(artifact, "__", leaf))
 }
 
+figure_compiled_path <- function(path, arm_root) {
+  public <- figure_public_path(path)
+  prefix <- paste0(arm_root,"/")
+  stopifnot(startsWith(public,prefix))
+  relative <- substring(public,nchar(prefix)+1L)
+  if(startsWith(relative,"compiled/")) return(public)
+  file.path(arm_root,"compiled",relative)
+}
+
+figure_overview_km_landmark <- function() {
+  value <- Sys.getenv("COMPASS_COMBINED_KM_LANDMARK","0")
+  if(!value %in% c("0","90","180"))
+    stop("COMPASS_COMBINED_KM_LANDMARK must be 0, 90, or 180.")
+  as.integer(value)
+}
+
+figure_dfci_overview_spec <- function() {
+  landmark <- figure_overview_km_landmark()
+  list(key=paste0("dfci_labs_overview_km_lm",landmark),
+    title=paste0("DFCI lab associations, trajectories and extreme-quintile survival (KM day ",landmark,")"),
+    width=24, height=22, cols=6, row_heights=c(8,7,7),
+    layout_matrix=rbind(c(1,1,2,2,3,3),c(4,4,4,5,5,5),c(6,6,6,7,7,7)),
+    members=c(paste0("figure3_univariate_platinum_landmark",c(0,90,180)),
+      "longitudinal_platinum_psa_log",paste0("km_quintile_psa_landmark",landmark),
+      "longitudinal_platinum_testosterone_log",paste0("km_quintile_testosterone_landmark",landmark)),
+    panel_tags=LETTERS[1:7], keep_individuals=TRUE, endpoint="platinum",
+    shared_caption=FALSE, shared_legend=FALSE)
+}
+
 figure_compilation_spec <- function(stem) {
   cohort_panels <- c("figure1a_consort", "figure1b_km", "figure1c_span",
     "figure1c_dx_to_tx", "figure1c_time_to_platinum")
@@ -73,7 +102,7 @@ figure_compilation_spec <- function(stem) {
   }
   if (grepl("^km_quintile_", stem))
     return(list(key=sub("_landmark[0-9]+$", "", stem), title="Lab extremes: time to platinum",
-      width=19, height=7, cols=3, shared_caption=TRUE, shared_legend=FALSE))
+      width=24, height=7.5, cols=3, keep_individuals=TRUE, shared_caption=TRUE, shared_legend=FALSE))
   if (grepl("^figure3b_sequencing_.*_km_", stem))
     return(list(key="somatic_carrier_km", title="Mutation carrier status: time to platinum",
       width=16, height=12, cols=2, page_size=4, shared_caption=TRUE, shared_legend=FALSE))
@@ -91,6 +120,8 @@ figure_compilation_specs <- function(stem) {
     width=16, height=12, cols=2, keep_individuals=TRUE,
     members=llm_panels, panel_tags=LETTERS[1:4],
     shared_caption=FALSE, shared_legend=FALSE)))
+  overview <- figure_dfci_overview_spec()
+  if(stem %in% overview$members) specs <- c(specs,list(overview))
   specs
 }
 
@@ -108,11 +139,13 @@ figure_grob <- function(plot, width, height, directory=tempdir()) {
 
 figure_combine <- function(items, spec, directory) {
   is_volcano <- identical(spec$key,"labs_univariate_all_landmarks")
+  is_overview <- startsWith(spec$key,"dfci_labs_overview_")
+  volcano_panels <- vapply(items,function(x) grepl("^figure3_univariate_",x$stem),logical(1))
   # Compare landmarks on common axes, without dropping observations or changing
   # the source plots used by the individual exports. Empty panels stay explicit.
-  if(is_volcano) {
+  if(is_volcano || is_overview) {
     axes <- lapply(items,function(x) x$plot$coordinates$limits)
-    available <- vapply(axes,function(x) length(x$x)==2 && length(x$y)==2,logical(1))
+    available <- volcano_panels & vapply(axes,function(x) length(x$x)==2 && length(x$y)==2,logical(1))
     if(any(available)) {
       xlim <- range(unlist(lapply(axes[available],`[[`,"x")),finite=TRUE)
       ylim <- range(unlist(lapply(axes[available],`[[`,"y")),finite=TRUE)
@@ -128,18 +161,20 @@ figure_combine <- function(items, spec, directory) {
     p <- items[[i]]$plot; stem <- items[[i]]$stem
     if (inherits(p,"ggplot")) {
       title <- p$labels$title
-      if (is_volcano) {
+      if (volcano_panels[i]) {
         title <- paste0("Landmark ",sub("^.*landmark","",stem)," days")
       } else if (grepl("^figure4[acd]_",stem)) {
-        # Preserve the previously requested landmark n's, once in the shared title.
-        if (i==1 && length(title) && grepl("\n",title))
-          spec$title <- paste(spec$title, sub("^[^\n]*\n", "",title),sep="\n")
+        # Counts formerly in the supertitle belong to the panel subtitle now.
+        if (length(title) && grepl("\n",title)) p <- p + ggplot2::labs(
+          subtitle=paste(c(p$labels$subtitle,sub("^[^\n]*\n", "",title)),collapse="\n"))
         title <- if(grepl("cindex",stem)) "C-index" else "Mean AUC(t)"
       } else if (grepl("^figure4b_|^km_quintile_",stem)) {
         title <- paste0("Landmark ", sub("^.*landmark", "",stem), " days")
         if (grepl("^km_quintile_",stem)) {
           lab <- sub("^km_quintile_(.*)_landmark.*$", "\\1",stem)
           spec$title <- paste(if(lab=="psa") "PSA" else tools::toTitleCase(gsub("_"," ",lab)), "extremes: time to platinum")
+          if(is_overview) title <- paste(if(lab=="psa") "PSA" else "Testosterone",
+            "bottom vs top 20%",paste0("(day ",sub("^.*landmark","",stem),")"))
         }
       } else if (grepl("^figure3b_.*_km_",stem)) {
         title <- sub(" carrier status: time to platinum$", "", title)
@@ -151,10 +186,15 @@ figure_combine <- function(items, spec, directory) {
         title <- "Subtype composition"
       } else if (stem=="figure2v3_enrichment") {
         title <- "Platinum enrichment"
+      } else if (startsWith(stem,"adt_labels_")) {
+        title <- switch(stem, adt_labels_llm_vs_regex_max_any="LLM vs regex stage",
+          adt_labels_adt_vs_regex_max_any="ADT intent vs regex stage",
+          adt_labels_adt_vs_llm="ADT intent vs LLM", title)
       }
       p <- p + ggplot2::labs(title=title)
-      if(length(spec$panel_tags)) p <- p + ggplot2::labs(tag=spec$panel_tags[i]) +
-        ggplot2::theme(plot.tag=ggplot2::element_text(size=16,face="bold"))
+      tag <- if(length(spec$panel_tags)) spec$panel_tags[i] else LETTERS[i]
+      p <- p + ggplot2::labs(tag=tag) +
+        ggplot2::theme(plot.tag=ggplot2::element_text(size=18,face="bold"))
       if (same_caption) p <- p + ggplot2::labs(caption=NULL)
       # Shared captions/legends do not remove per-panel n/events in KM legends.
       if (isTRUE(spec$shared_legend)) {
@@ -167,9 +207,9 @@ figure_combine <- function(items, spec, directory) {
         p <- p + ggplot2::theme(legend.position="none")
       }
       # Long category names need space at the smaller compiled panel width.
-      if(!is_volcano) p <- p + ggplot2::theme(plot.title=ggplot2::element_text(size=11,face="bold"),
-        axis.text=ggplot2::element_text(size=9), legend.text=ggplot2::element_text(size=9),
-        plot.caption=ggplot2::element_text(size=8))
+      if(!volcano_panels[i]) p <- p + ggplot2::theme(plot.title=ggplot2::element_text(size=13,face="bold"),
+        axis.title=ggplot2::element_text(size=12), axis.text=ggplot2::element_text(size=11),
+        legend.text=ggplot2::element_text(size=10), plot.caption=ggplot2::element_text(size=9))
       # The flowchart has no axes; resizing must not revive theme_void labels.
       if(stem=="figure1a_consort") p <- p + ggplot2::labs(x=NULL,y=NULL) +
         ggplot2::theme(axis.text=ggplot2::element_blank())
@@ -179,19 +219,15 @@ figure_combine <- function(items, spec, directory) {
     if(!is.null(spec$layout_matrix)) {
       cells <- which(spec$layout_matrix==i,arr.ind=TRUE)
       panel_width <- spec$width * length(unique(cells[,"col"])) / ncol(spec$layout_matrix)
-      panel_height <- spec$height * length(unique(cells[,"row"])) / nrow(spec$layout_matrix)
+      heights <- if(is.null(spec$row_heights)) rep(1,nrow(spec$layout_matrix)) else spec$row_heights
+      panel_height <- spec$height * sum(heights[unique(cells[,"row"])]) / sum(heights)
     }
     grobs[[i]] <- figure_grob(p,panel_width,panel_height,directory)
   }
   caption <- if(same_caption) captions[[1]] else NULL
-  identity <- basename(items[[1]]$destination)
-  fields <- strsplit(identity,"__",fixed=TRUE)[[1]]
-  context <- paste(c(toupper(basename(sub("/by_figure/.*$","",items[[1]]$destination))),
-    if(length(fields)) paste(fields[1],"endpoint"),
-    if(length(fields)>1) if(fields[2]=="all") "all patients" else gsub("_"," ",fields[2]),
-    if(length(fields)>2) if(fields[3]=="incl") "pre-ADT castrate included" else gsub("_"," ",fields[3])),collapse=" · ")
-  if (!is.null(spec$context)) context <- spec$context
-  title <- paste(spec$title, context, sep="\n")
+  # Identity/title remain in filenames and the catalog, not in a supertitle.
+  # Explicit population caveats (federated comparisons) must remain visible.
+  if(length(spec$context)) caption <- paste(c(caption,spec$context),collapse="\n")
   bottom <- list()
   if(length(legends)) bottom <- c(bottom,legends)
   if(length(caption) && nzchar(caption)) bottom <- c(bottom,list(grid::textGrob(
@@ -203,11 +239,13 @@ figure_combine <- function(items, spec, directory) {
     heights=do.call(grid::unit.c,lapply(bottom,function(g)
       (if(inherits(g,"gtable")) sum(g$heights) else grid::grobHeight(g)) + grid::unit(4,"pt")))) else NULL
   if(!is.null(footer)) footer <- gtable::gtable_add_rows(footer,grid::unit(12,"pt"),pos=-1)
-  do.call(gridExtra::arrangeGrob,c(list(grobs=grobs,ncol=spec$cols,
-    top=grid::textGrob(title,gp=grid::gpar(fontsize=if(is_volcano) 18 else 14,fontface="bold")),
+  combined <- do.call(gridExtra::arrangeGrob,c(list(grobs=grobs,ncol=spec$cols,
     bottom=footer,
-    padding=grid::unit(2,"lines")),
-    if(!is.null(spec$layout_matrix)) list(layout_matrix=spec$layout_matrix)))
+    padding=grid::unit(1,"lines")),
+    if(!is.null(spec$layout_matrix)) list(layout_matrix=spec$layout_matrix),
+    if(!is.null(spec$row_heights)) list(heights=spec$row_heights)))
+  attr(combined,"compass_compiled") <- TRUE
+  combined
 }
 
 figure_html_escape <- function(x) {
@@ -280,6 +318,15 @@ figure_archive_old_exports <- function(config, prepared) {
   # unknown files are untouched; copies are verified before removing originals.
   successful <- names(Filter(function(m) length(m$scenes)>0 && is.null(m$error),prepared))
   paths <- character()
+  # The former shallow compiled location is retired only after replacement
+  # images were actually rendered. Other identities/formats are untouched.
+  for(m in prepared) for(scene in m$scenes) if(length(scene$previous_destination)) {
+    for(format in c("png","pdf")) {
+      previous <- paste0(scene$previous_destination,".",format)
+      replacement <- paste0(scene$destination,".",format)
+      if(file.exists(previous) && file.exists(replacement)) paths <- c(paths,previous)
+    }
+  }
   for(arm in c("ADT","ARPI")) {
     root <- file.path(config$fig_root,arm,"by_figure")
     if(!dir.exists(root)) next

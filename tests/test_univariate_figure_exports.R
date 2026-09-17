@@ -37,7 +37,9 @@ local({
   stopifnot(length(singles)==6,length(combined)==2,
     all(vapply(singles,function(s) s$width==9 && s$height==7,logical(1))),
     all(vapply(combined,function(s) s$width==24 && s$height==9 && s$landmark=="0,90,180",logical(1))),
-    all(grepl("/associations/",vapply(m$scenes,`[[`,character(1),"destination"))))
+    all(grepl("/associations/",vapply(m$scenes,`[[`,character(1),"destination"))),
+    all(grepl("/compiled/associations/",vapply(combined,`[[`,character(1),"destination"))),
+    !any(grepl("/compiled/",vapply(singles,`[[`,character(1),"destination"))))
   compiled_panels <- Filter(function(p) !is.null(p$labels$title) &&
     startsWith(p$labels$title,"Landmark ") && length(p$coordinates$limits$x)==2,observed)
   stopifnot(length(compiled_panels)>=5)

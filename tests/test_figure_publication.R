@@ -30,13 +30,15 @@ local({
     getOption("compass.figure_capture")(p,destination,8,6,stem)
   }
   m <- prepare_figure_scenes(file.path(cache,"scenes"),"test",build)
-  stopifnot(length(stems)==37, length(m$scenes)==26,
+  stopifnot(length(stems)==37, length(m$scenes)==32,
     !anyDuplicated(vapply(m$scenes,`[[`,character(1),"destination")),
     !any(grepl("/by_figure/",vapply(m$scenes,`[[`,character(1),"destination"))))
   stopifnot(sum(grepl("somatic_carrier_km_page",vapply(m$scenes,`[[`,character(1),"stem")))==2)
   for(key in c("figure1_cohort","figure2v3_llm","metastatic_label_agreement")) {
     scene <- Filter(function(s) s$stem==key,m$scenes)[[1]]
     grob <- readRDS(scene$path)
+    stopifnot(grepl("/compiled/",scene$destination,fixed=TRUE),
+      !any(vapply(grob$grobs,inherits,logical(1),"text")))
     panels <- Filter(function(g) inherits(g,"gtable"),grob$grobs)
     members <- if(key=="figure2v3_llm") stems[1:4] else
       figure_compilation_spec(if(key=="figure1_cohort") stems[5] else stems[10])$members
@@ -53,7 +55,7 @@ local({
   config <- list(fig_root=output,cache_root=cache)
   figure_write_catalog(config,prepared)
   registry <- read_csv(file.path(output,"ADT","manifest.csv"),show_col_types=FALSE)
-  stopifnot(nrow(registry)==26,all(file.exists(file.path(output,"ADT",registry$path))),
+  stopifnot(nrow(registry)==32,all(file.exists(file.path(output,"ADT",registry$path))),
     !any(grepl(root,registry$path,fixed=TRUE)),file.exists(file.path(output,"ADT","index.html")))
   html <- paste(readLines(file.path(output,"ADT","index.html")),collapse="\n")
   urls <- regmatches(html,gregexpr('(?:href|src)="[^"]+"',html,perl=TRUE))[[1]]
@@ -65,9 +67,13 @@ local({
   dir.create(dirname(old_paths[1]),recursive=TRUE)
   writeLines("old export",old_paths[1])
   unknown <- sub("platinum__","nepc__",old_paths[1]); writeLines("other cohort",unknown)
+  compiled_scene <- Filter(function(s) s$stem=="figure1_cohort",m$scenes)[[1]]
+  retired <- paste0(compiled_scene$previous_destination,".png")
+  dir.create(dirname(retired),recursive=TRUE,showWarnings=FALSE)
+  writeLines("previous shallow compiled export",retired)
   figure_archive_old_exports(config,prepared)
-  stopifnot(!file.exists(old_paths[1]),file.exists(unknown),
-    length(list.files(file.path(cache,"previous_exports"),recursive=TRUE,pattern="png$"))==1,
+  stopifnot(!file.exists(old_paths[1]),!file.exists(retired),file.exists(unknown),
+    length(list.files(file.path(cache,"previous_exports"),recursive=TRUE,pattern="png$"))==2,
     length(list.files(output,recursive=TRUE,pattern="rds$"))==0)
   # Grouping stays within arm/cohort/endpoint. An incomplete cell retains its
   # subpanels, and complete figures follow the declared order of their panels.

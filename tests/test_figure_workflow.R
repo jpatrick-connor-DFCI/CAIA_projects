@@ -108,6 +108,11 @@ local({
     "figure2v3_confusion_matrix", "figure2v3_metric_bar", "figure2v3_subtype_landscape",
     "figure2v3_enrichment", "classifier_validation", "subtype_platinum") %in% platinum_stems),
     !any(startsWith(nepc_stems,"figure2v3")))
+  overview <- Filter(function(s) startsWith(s$stem,"dfci_labs_overview_"),first$prepared$adt__platinum$scenes)
+  stopifnot(length(overview)==1L,grepl("/compiled/associations/",overview[[1]]$destination),
+    !any(startsWith(nepc_stems,"dfci_labs_overview_")))
+  panels <- Filter(function(g) inherits(g,"gtable"),readRDS(overview[[1]]$path)$grobs)
+  stopifnot(length(panels)==7)
   stopifnot(length(list.files(cfg$fig_root, pattern = "\\.rds$", recursive = TRUE)) == 0L,
             length(list.files(cfg$cache_root, pattern = "\\.receipt\\.rds$", recursive = TRUE)) > 20L)
   stopifnot(!any(basename(list.dirs(cfg$fig_root, recursive = TRUE)) %in% c("main", "supplements")))

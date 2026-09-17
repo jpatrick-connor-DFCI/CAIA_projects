@@ -450,14 +450,19 @@ notebook. All operate on the merged `profile_data` run:
   displays its post-diagnosis ARPI/docetaxel exposure criterion. Axis and table labels throughout
   name the arm's anchor ("ARPI/chemo initiation" vs. "ADT initiation") via `ANCHOR_LABEL`.
   The cached `05_figures.Rmd` workflow exports lettered multipanel figures alongside
-  all individual Figure 1 and Figure 2v3 panels: `cohort/figure1_cohort__<identity>`
+  all individual Figure 1 and Figure 2v3 panels: `compiled/cohort/figure1_cohort__<identity>`
   combines cohort selection, survival, and three timing distributions, while
-  `labels/figure2v3_llm__platinum__all__incl` combines all four classifier/subtype
+  `compiled/labels/figure2v3_llm__platinum__all__incl` combines all four classifier/subtype
   panels. Existing Figure 2v3 paired exports are retained. The three metastatic-label
-  confusion matrices also receive a combined `labels/metastatic_label_agreement__<identity>`
+  confusion matrices also receive a combined `compiled/labels/metastatic_label_agreement__<identity>`
   export. Filenames use `<identity> = <endpoint>__<subset>__<exclusion>` under each arm;
   Figure 2v3 is emitted only for canonical ADT/platinum. Run the default figure stage
   (`all`) to prepare and render these additions, including PDFs when enabled.
+  All compiled exports use `compiled/<topic>/`, without an overall supertitle.
+  The new `compiled/associations/dfci_labs_overview_km_lm0__platinum__<subset>__<exclusion>`
+  combines the three DFCI landmark volcanoes with PSA/testosterone log1p trajectories
+  by platinum status and bottom-versus-top-20% KM curves. KM defaults to day 0;
+  `COMPASS_COMBINED_KM_LANDMARK=90` or `180` selects another landmark.
   Figure 4 additionally emits `figure4{c,d}_sensitivity_{gleason,somatic}_{auc,cindex}`, the held-out
   source-specific available-case comparisons of labs against Gleason or somatic features at every landmark, alongside
   `figure4s_multivariate_all_models`, a supplemental held-out comparison

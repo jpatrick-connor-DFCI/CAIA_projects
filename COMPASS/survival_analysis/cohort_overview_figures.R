@@ -12,9 +12,10 @@ overview_theme <- function() {
 overview_combine <- function(a, b, title, subtitle) {
   a <- ggplotGrob(a); b <- ggplotGrob(b)
   a$heights <- b$heights <- grid::unit.pmax(a$heights, b$heights)
-  gridExtra::arrangeGrob(a, b, ncol = 2, top = grid::textGrob(
-    paste(title, subtitle, sep = "\n"), gp = grid::gpar(fontsize = 14),
-    x = .5, y = .65), padding = grid::unit(2.3, "lines"))
+  combined <- gridExtra::arrangeGrob(a, b, ncol = 2, bottom = grid::textGrob(
+    subtitle, gp = grid::gpar(fontsize = 10)), padding = grid::unit(1, "lines"))
+  attr(combined,"compass_compiled") <- TRUE
+  combined
 }
 
 plot_cohort_event_overview <- function(d, cohorts, landmark = 180L) {

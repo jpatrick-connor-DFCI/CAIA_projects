@@ -86,6 +86,13 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE) {
   dir.create(generation)
   scenes <- list(); tables <- character(); bundles <- list()
   publish <- function(plot, destination, width, height, stem, title = NULL, landmarks = "") {
+    previous_destination <- NULL
+    if(isTRUE(attr(plot,"compass_compiled"))) {
+      previous_destination <- figure_public_path(destination)
+      arm_root <- if(grepl("/by_figure/",destination,fixed=TRUE)) sub("/by_figure/.*$","",destination) else
+        sub("/(ADT|ARPI)/.*$","/\\1",destination)
+      destination <- figure_compiled_path(previous_destination,arm_root)
+    }
     path <- file.path(generation, sprintf("panel-%04d.rds", length(scenes) + 1L))
     if(is.null(title)) title <- if(inherits(plot,"ggplot") && length(plot$labels$title))
       paste(plot$labels$title,collapse=" ") else gsub("_"," ",stem)
@@ -100,12 +107,15 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE) {
     if(!nzchar(landmarks) && grepl("lm[0-9]+",stem)) landmarks <- sub("^.*lm([0-9]+).*$","\\1",stem)
     figure_atomic_rds(grob, path)
     scenes[[length(scenes) + 1L]] <<- list(path = path, destination = figure_public_path(destination),
-      width = width, height = height, stem = stem, title = title, landmark = landmarks)
+      width = width, height = height, stem = stem, title = title, landmark = landmarks,
+      previous_destination = previous_destination)
   }
   capture <- function(plot, destination, width, height, stem) {
     # Resolve all aesthetics/stats now; renderer needs neither raw data nor fits.
     if (is.null(plot)) return(invisible(NULL))
     specs <- figure_compilation_specs(stem)
+    specs <- Filter(function(spec) is.null(spec$endpoint) ||
+      startsWith(basename(destination),paste0(spec$endpoint,"__")),specs)
     for(spec in specs) {
       # Lab artifacts have an extra landmark directory; bundle by arm/identity
       # and logical key instead of their legacy folder depth.
@@ -413,7 +423,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     c("ggplot2", "survival", "survminer", "mgcv", "dplyr", "tidyr", "readr", "ggrepel", "scales", "stringr"),
     function(x) as.character(utils::packageVersion(x)), character(1)),
     code = unname(tools::md5sum(list.files(dirname(pipeline_path), pattern = "\\.R$", full.names = TRUE))),
-    fig_root = config$fig_root)
+    fig_root = config$fig_root, combined_km_landmark = figure_overview_km_landmark())
   jobs <- list()
   if (!identical(config$scope, "federated")) {
     for (cohort in config$cohorts) for (endpoint in config$endpoints) {

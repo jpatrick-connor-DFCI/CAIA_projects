@@ -87,27 +87,43 @@ Cells with fewer than 25 events are hatched/marked; missing cells stay blank.
 The label figure uses `mrn_lists/adt_intent_labels_model_cohort.csv` and
 `llm_met_labels_model_cohort.csv`, preserving missing labels explicitly.
 Run notebook `04` once after this update to prepare these small summary tables.
-Outputs (and their count tables) are under `cohort/`:
+Combined outputs are under `compiled/cohort/` (count tables remain in `cohort/`):
 `event_incidence_lm180__platinum__all__incl` and `metastatic_label_overlap__platinum__all__incl`.
 
-Figure 1 also exports `cohort/figure1_cohort__<endpoint>__<subset>__<exclusion>`:
+Figure 1 also exports `compiled/cohort/figure1_cohort__<endpoint>__<subset>__<exclusion>`:
 a five-panel figure with the cohort-selection flow spanning the left column,
 and survival, record span, diagnosis-to-treatment timing, and time to platinum
-on the right. Figure 2v3 exports `labels/figure2v3_llm__platinum__all__incl`,
+on the right. Figure 2v3 exports `compiled/labels/figure2v3_llm__platinum__all__incl`,
 with agreement, classification metrics, subtype composition, and platinum
 enrichment in a 2-by-2 layout. The existing `classifier_validation` and
 `subtype_platinum` paired exports remain available. The three metastatic-label
-confusion matrices also form `labels/metastatic_label_agreement__<endpoint>__<subset>__<exclusion>`.
+confusion matrices also form `compiled/labels/metastatic_label_agreement__<endpoint>__<subset>__<exclusion>`.
 These combined figures have lettered panels and retain each panel's counts,
 captions, and legends. All individual panels are exported alongside them.
 Compilation stays within each arm/cohort/endpoint; Figure 2v3 remains exclusive
 to canonical ADT/platinum. Run the default `COMPASS_FIGURE_STAGE=all` to rebuild
 the graphics caches and export these additions; `render` requires a matching prepared snapshot.
 
+The seven-panel DFCI overview is
+`compiled/associations/dfci_labs_overview_km_lm0__platinum__<subset>__<exclusion>`.
+The top row contains day-0/90/180 within-DFCI univariate volcanoes with common axes;
+the second row pairs the PSA log1p trajectory by platinum status with the PSA
+bottom-versus-top-20% KM curve; the third row does the same for testosterone.
+KM panels default to day 0. Set `COMPASS_COMBINED_KM_LANDMARK=90` or `180` to
+select another landmark; the filename and cached graphics record that choice.
+The overview requires all seven source panels and is restricted to platinum.
+Individual KM panels and the three-landmark KM sheets are also retained.
+
 Exports use shallow topic folders: `cohort/`, `labels/`, `associations/`,
 `prediction/`, `trajectories/<lab>/`, and `federated_no_msk/`. There is no
 main/supplement split or per-plot directory. Local filenames are
 `<figure>__<endpoint>__<subset>__<exclusion>.png`; CSV/Markdown tables live alongside.
+Compiled figures have their own `compiled/<topic>/` tree under each arm,
+including `compiled/trajectories/<lab>/` to keep PSA/testosterone filenames distinct.
+They have panel titles/letters but no overall supertitle. Counts formerly in a
+supertitle remain in panel subtitles or footnotes. Standalone panels stay in the
+original topic folders. Successfully replaced compiled exports from the old
+locations are archived in the data cache.
 Each arm gets a thumbnail `index.html` and a `manifest.csv` with relative paths,
 titles, endpoint, cohort, and landmark metadata. No duplicate thumbnail files are made.
 
@@ -116,12 +132,19 @@ AUC/C-index into paired comparisons; importance into one three-landmark sheet pe
 model; lab-extreme KM into one three-landmark sheet per lab; and mutation KM into
 pages of at most four panels. Model fits, counts, time origins, and tests are unchanged.
 Local univariate lab volcanoes retain individual day-0/90/180 plots and also
-export `associations/labs_univariate_all_landmarks__<endpoint>__<subset>__<exclusion>`.
+export `compiled/associations/labs_univariate_all_landmarks__<endpoint>__<subset>__<exclusion>`.
 The combined figure uses three side-by-side panels on a 24 × 9-inch canvas,
 common axes, a shared category legend, and separate per-landmark significance
 counts. Larger feature labels (approximately 12 pt) and axis text are preserved
 in both formats. The cohort and label figures described above also retain their
-individual panels; other compiled figure families do not export component images.
+individual panels, as do the lab KM curves; other compiled figure families do not export component images.
+
+For an existing canonical ADT/platinum PNG download without the graphics cache,
+`reformat_downloaded_figures.R <input-ADT-dir> <new-parent>/ADT [0|90|180]` removes
+the compiled supertitles and assembles the new overview from the rendered panels.
+It preserves raster data/geometry, writes a separate tree and refreshed catalog,
+and exports the overview as PNG plus a PDF containing the existing raster panels.
+Normal pipeline runs rebuild figures from the underlying R plots instead.
 
 After a successful render, superseded `by_figure` exports for regenerated cohorts
 are copied, checksum-verified, and archived in `COMPASS_FIGURE_DATA_ROOT/previous_exports/`;
