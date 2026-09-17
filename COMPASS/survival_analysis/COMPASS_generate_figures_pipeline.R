@@ -2081,7 +2081,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         pred  = factor(c(paste0("Non-", pred_label), paste0("Non-", pred_label),
                          pred_label, pred_label),
                        levels = c(pred_label, paste0("Non-", pred_label))),
-        n     = c(metrics$TN, metrics$FP, metrics$FN, metrics$TP)
+        n     = c(metrics$TN, metrics$FN, metrics$FP, metrics$TP)
       )
       thresh <- max(cm$n) / 2
       ggplot(cm, aes(truth, pred, fill = n)) +

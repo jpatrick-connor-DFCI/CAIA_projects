@@ -7,7 +7,7 @@ suppressPackageStartupMessages({
 pipeline <- new.env(parent = globalenv())
 needed <- c("COLOR_PLATINUM_POS", "COLOR_PLATINUM_NEG", "COLOR_NEUTRAL_INK",
             "theme_fig", "prepare_figure_text", "wilson_ci", "CLASS_ORDER", "CLASS_LABELS", "count_labels",
-            "compute_enrichment", "render_landscape_panel", "render_enrichment_panel")
+            "compute_enrichment", "render_landscape_panel", "render_enrichment_panel", "render_confusion_panel")
 collect <- function(expr) {
   if (missing(expr) || !is.call(expr)) return(invisible(NULL))
   if (identical(expr[[1]], as.name("<-")) && is.symbol(expr[[2]]) &&
@@ -19,6 +19,13 @@ collect <- function(expr) {
 }
 for (expr in parse("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R"))
   collect(expr)
+
+# Columns are manual truth, rows are LLM predictions. Unequal FP/FN expose
+# the transpose that previously contradicted the reported precision/recall.
+cm <- pipeline$render_confusion_panel(list(TN=28,FP=1,FN=2,TP=10))$data
+stopifnot(cm$n[cm$truth=="NEPC" & cm$pred=="Non-NEPC"]==2,
+          cm$n[cm$truth=="Non-NEPC" & cm$pred=="NEPC"]==1,
+          sum(cm$n[cm$truth=="NEPC"])==12)
 
 labels <- tibble(
   primary_label = factor(c(rep("avpc", 4), rep("nepc", 2),

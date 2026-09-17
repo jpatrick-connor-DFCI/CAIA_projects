@@ -56,7 +56,7 @@ local({
   # explicit, and figure data/receipts are never written into the output tree.
   xdir <- file.path(root,"federated_xgboost"); dir.create(xdir)
   write_csv(filter(importance,landmark_days==0),file.path(xdir,"xgboost_federated_importance_adt.csv"))
-  output <- file.path(root,"figures"); dir.create(output)
+  output <- file.path(root,"figures","ADT","federated_no_msk"); dir.create(output,recursive=TRUE)
   scenes <- prepare_figure_scenes(file.path(root,"data"),"test",function()
     suppressWarnings(render_federated_xgboost(output,file.path(root,"fed.csv"),60,TRUE)))
   stopifnot(length(scenes$scenes)==1,scenes$scenes[[1]]$stem=="xgboost_importance")

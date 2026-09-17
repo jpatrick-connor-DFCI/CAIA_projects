@@ -4,6 +4,7 @@
 .figure_cache_sources <- Filter(function(x) is.character(x) && length(x)==1 &&
   basename(x)=="figure_data_cache.R", lapply(sys.frames(),function(frame) frame$ofile))
 source(file.path(dirname(tail(.figure_cache_sources,1)[[1]]), "figure_publication.R"), local = TRUE)
+source(file.path(dirname(tail(.figure_cache_sources,1)[[1]]), "manuscript_figures.R"), local = TRUE)
 rm(.figure_cache_sources)
 figure_read_parquet <- function(path) {
   if (requireNamespace("arrow", quietly = TRUE)) return(as_tibble(arrow::read_parquet(path)))
@@ -78,13 +79,13 @@ figure_scene_manifest <- function(directory, signature) {
   }, error = function(e) NULL)
 }
 
-prepare_figure_scenes <- function(directory, signature, build, force = FALSE) {
+prepare_figure_scenes <- function(directory, signature, build, force = FALSE, manuscript_root = NULL) {
   m <- if (!force) figure_scene_manifest(directory, signature) else NULL
   if (!is.null(m)) { message("Reused prepared figures: ", basename(dirname(directory))); return(m) }
   dir.create(directory, recursive = TRUE, showWarnings = FALSE)
   generation <- tempfile("generation-", tmpdir = directory)
   dir.create(generation)
-  scenes <- list(); tables <- character(); bundles <- list()
+  scenes <- list(); tables <- character(); bundles <- list(); manuscript_items <- list()
   publish <- function(plot, destination, width, height, stem, title = NULL, landmarks = "") {
     previous_destination <- NULL
     if(isTRUE(attr(plot,"compass_compiled"))) {
@@ -109,10 +110,14 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE) {
     scenes[[length(scenes) + 1L]] <<- list(path = path, destination = figure_public_path(destination),
       width = width, height = height, stem = stem, title = title, landmark = landmarks,
       previous_destination = previous_destination)
+    scenes[[length(scenes)]]$manuscript <<- grepl("/manuscript figures/",destination,fixed=TRUE)
   }
   capture <- function(plot, destination, width, height, stem) {
     # Resolve all aesthetics/stats now; renderer needs neither raw data nor fits.
     if (is.null(plot)) return(invisible(NULL))
+    if(!is.null(manuscript_root) && inherits(plot,"ggplot") &&
+       basename(destination)=="platinum__all__incl")
+      manuscript_items[[stem]] <<- list(plot=plot)
     specs <- figure_compilation_specs(stem)
     specs <- Filter(function(spec) is.null(spec$endpoint) ||
       startsWith(basename(destination),paste0(spec$endpoint,"__")),specs)
@@ -180,6 +185,22 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE) {
       if(startsWith(spec$key,"km_quintile_")) title <- paste(if(grepl("_psa$",spec$key)) "PSA" else
         tools::toTitleCase(gsub("_"," ",sub("^km_quintile_","",spec$key))),"extremes: time to platinum")
       publish(compiled,destination,spec$width,spec$height,key,title,paste(landmarks[nzchar(landmarks)],collapse=","))
+    }
+  }
+  if(!is.null(manuscript_root)) {
+    manuscripts <- manuscript_build(manuscript_items,tables,manuscript_root)
+    for(item in manuscripts) {
+      destination <- file.path(manuscript_root,item$spec$key)
+      dir.create(manuscript_root,recursive=TRUE,showWarnings=FALSE)
+      legend_path <- paste0(destination,".md")
+      writeLines(c(paste0("# ",gsub("_"," ",item$spec$key)),"",
+        "Source-rendered manuscript figure: 7.2-inch width; 600-dpi PNG and vector PDF.","",item$legend),legend_path)
+      table_capture(legend_path)
+      if(is.data.frame(item$data)) {
+        data_path <- paste0(destination,".csv")
+        readr::write_csv(item$data,data_path); table_capture(data_path)
+      }
+      publish(item$plot,destination,item$spec$width,item$spec$height,item$spec$key)
     }
   }
   paths <- vapply(scenes, `[[`, character(1), "path")
@@ -272,6 +293,7 @@ figure_archive_legacy_receipts <- function(fig_root, cache_root) {
 }
 
 render_figure_scene <- function(scene, signature, dpi, pdf, overwrite = FALSE) {
+  if(isTRUE(scene$manuscript)) { dpi <- max(600,dpi); pdf <- TRUE }
   grob <- NULL
   rendered <- 0L
   for (format in c("png", if (pdf) "pdf")) {
@@ -300,6 +322,7 @@ render_figure_scene <- function(scene, signature, dpi, pdf, overwrite = FALSE) {
 }
 
 figure_scene_complete <- function(scene, signature, dpi, pdf) {
+  if(isTRUE(scene$manuscript)) { dpi <- max(600,dpi); pdf <- TRUE }
   all(vapply(c("png", if (pdf) "pdf"), function(format) {
     path <- paste0(scene$destination, ".", format)
     receipt <- figure_receipt_path(scene, format)
@@ -481,7 +504,9 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
       if (is.null(m)) stop("Missing/stale prepared figures for ", job$name, "; run all or prepare.")
       return(m)
     }
-    prepare_figure_scenes(job$directory, job$signature, build, force = prepare_overwrite)
+    prepare_figure_scenes(job$directory, job$signature, build, force = prepare_overwrite,
+      manuscript_root=if(job$name %in% c("adt__platinum","cohort_overview","federated"))
+        file.path(config$fig_root,"ADT","manuscript figures") else NULL)
   }
   # Only pending jobs warm tables. A resumed all-mode knit reads no patient
   # Parquet at all when every scene snapshot is current.

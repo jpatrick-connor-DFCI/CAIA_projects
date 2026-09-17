@@ -100,7 +100,13 @@ local({
   t1 <- system.time(first <- run_cached_figure_workflow(cfg, pipeline_path, "all", dpi = 60,
     prepare_workers = 1L, render_workers = 2L, forest_config = forest, federated_config = fc))[["elapsed"]]
   stopifnot(length(first$prepared) == 4L, length(first$rendered) > 20L,
-            all(vapply(first$rendered, function(x) x$rendered == 1L, logical(1))))
+            all(vapply(first$rendered, function(x) x$rendered ==
+              if(grepl("^0[1-9]_",x$stem)) 2L else 1L, logical(1))))
+  manuscript_scenes <- Filter(function(s) isTRUE(s$manuscript),
+    unlist(lapply(first$prepared,`[[`,"scenes"),recursive=FALSE))
+  stopifnot(length(manuscript_scenes)>=7L,
+    all(vapply(manuscript_scenes,function(s) file.exists(paste0(s$destination,".pdf")) &&
+      file.exists(paste0(s$destination,".md")) && s$width==7.2,logical(1))))
   platinum_stems <- vapply(first$prepared$adt__platinum$scenes, `[[`, character(1), "stem")
   nepc_stems <- vapply(first$prepared$adt__nepc$scenes, `[[`, character(1), "stem")
   stopifnot(all(c("figure1_cohort", "figure1a_consort", "figure1b_km", "figure1c_span",
@@ -161,7 +167,8 @@ local({
   stopifnot(identical(names(env$figure_run$prepared), "federated"))
   stopifnot(identical(vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem"),
                       c("psa_forest", "testosterone_forest", "site_incidence_lm000",
-                        "xgboost_performance", "xgboost_importance")))
+                        "xgboost_performance", "xgboost_importance",
+                        "08_federated_psa_testosterone", "09_federated_xgboost")))
   # Both forest scenes keep widescreen slide dimensions through 05's cache;
   # the day-zero incidence layout is unchanged.
   for(scene in env$figure_run$prepared$federated$scenes[1:2]) {

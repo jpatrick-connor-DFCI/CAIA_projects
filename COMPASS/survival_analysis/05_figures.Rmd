@@ -124,6 +124,32 @@ They have panel titles/letters but no overall supertitle. Counts formerly in a
 supertitle remain in panel subtitles or footnotes. Standalone panels stay in the
 original topic folders. Successfully replaced compiled exports from the old
 locations are archived in the data cache.
+
+The canonical ADT/platinum run also creates `ADT/manuscript figures/`. These
+additional exports use a 7.2-inch manuscript width, consistent 7–9 pt plot text,
+lettered panels, and separate `.md` figure legends. They always include a
+600-dpi (or higher requested DPI) PNG and a PDF, even when `COMPASS_RENDER_PDF`
+is false. The existing individual and compiled exports are retained.
+
+The numbered manuscript set is: `01_cohort_overview`, `02_llm_nepc_avpc`,
+`03_dfci_univariable`, `04_multivariable_labs` (held-out Elastic-Net/XGBoost
+discrimination versus age baselines), `05_gleason_sensitivity`,
+`06_cohort_sensitivity_incidence` (platinum only),
+`07_cohort_sensitivity_associations` (day 180),
+`08_federated_psa_testosterone`, and `09_federated_xgboost` (test performance
+and feature importance). Incomplete source groups are not assembled. The DFCI
+overview uses the same configurable extreme-quintile KM landmark as its larger
+compiled counterpart. Figure titles remain in filenames/legends, not supertitles.
+
+Manuscript figures are built from the source ggplots or exported aggregate
+tables during `prepare`/`all`, then cached as graphics only. Run `all` after
+updating the R files; `render` alone cannot rebuild stale scenes. Cohort counts,
+original panel captions and supplied federated population/model-input audit
+notes are retained in the accompanying legends. In particular, nonzero gain
+for an identifier feature remains an explicit warning on the federated
+XGBoost figure and requires a model-input audit before publication. Formatting
+does not resolve that issue. Downloaded PNGs alone cannot provide vector
+replacements for the original source plots.
 Each arm gets a thumbnail `index.html` and a `manifest.csv` with relative paths,
 titles, endpoint, cohort, and landmark metadata. No duplicate thumbnail files are made.
 
