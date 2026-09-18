@@ -347,7 +347,9 @@ the input builder must be rerun after this change.
 | `gam_trajectory_features.R` (COMPASS only) | Hierarchical GAM (`mgcv::bam`, `bs="fs"` factor-smooth per patient, shrinking sparse patients toward the population curve) per canonical lab, replacing the two-point `__delta` with `__gam_level` / `__gam_slope` / `__gam_curvature` / `__gam_auc` / `__gam_dev` evaluated at the landmark boundary | `--inputs-dir`, `--landmark-days`, `--k-pop`, `--k-pat`, `--trailing-window-days`, `--nthreads`, `--fit-split {all,train_val}` |
 | `gam_cox_nonlinearity.R` (COMPASS only) | Penalized-spline Cox (`mgcv::gam(family=cox.ph())`) per selected feature: fits a smooth and a linear model of the same feature and reports `edf`/`p_lrt`/`q_lrt`/`delta_aic` — flags features whose hazard association is not actually linear | `--inputs-dir`, `--output-dir`, `--landmark-days`, `--feature-selection-csv` |
 | `multivariate_longitudinal/dynamic_deephit.py` (COMPASS only, torch, optional) | Discrete-time competing-risks GRU (Dynamic-DeepHit) fit directly on the person-period lab sequence, in a cause-only config (death censored) or a competing config (`0=censored,1=cause,2=death`) | `--inputs-dir`, `--output-dir`, `--landmark-day`, `--config {platinum,competing,nepc,nepc_competing}` |
-| `multivariate_longitudinal/survlatent_ode.py` (COMPASS only, torch, optional) | Adapter around the bundled editable `survlatent_ode_repo/` source, same configs and person-period input as Dynamic-DeepHit. Off by default in `03b` (`cp.RUN_SURVLATENT = False`) | `--survlatent-repo` defaults to the bundled checkout; `--inputs-dir`, `--output-dir`, `--landmark-day`, `--config {platinum,competing,nepc,nepc_competing}` |
+| `multivariate_longitudinal/dynamic_deephit.py --dynamic` (COMPASS only, torch, optional) | The **dynamic arm**: the same GRU, but the unit of prediction becomes one `(patient, prediction time)` pair instead of one patient — a CIF at every observation time, from history up to that time only. Requires the full-follow-up frame. Off by default (`cp.RUN_DYNAMIC = False`) | adds `--dynamic` to the flags above; writes to `dynamic_deephit_dynamic/` with the `dynamic_deephit_dyn_` metrics prefix, so the two arms resume independently |
+| `multivariate_longitudinal/incremental_risk.py` (COMPASS only, **no torch**) | Does accruing lab history sharpen the 6-month estimate? Pure post-processing of the dynamic arm's predictions — no refit. Emits sequential-landmark metrics (5a, confounded by risk-set thinning) and a held-back-window ablation (5b, the one to lead with) | `--output-dir` (the dynamic arm's results dir), `--endpoint`, `--landmark-day` (**singular**), `--config`, `--cohort`, `--horizon-days`, `--delta-days`, `--grid-days`, `--min-risk-set`, `--min-events` |
+| `multivariate_longitudinal/survlatent_ode.py` (COMPASS only, torch, optional) | Adapter around the bundled editable `survlatent_ode_repo/` source, same configs and person-period input as Dynamic-DeepHit. Off by default in `03b` (`cp.RUN_SURVLATENT = False`) | `--survlatent-repo` defaults to the bundled checkout; `--inputs-dir`, `--output-dir`, `--landmark-day`, `--config {platinum,competing,nepc,nepc_competing}`; `--full-followup` / `--observation-cut-days N` for the `end_of_obs_idx` sweep |
 
 `cox_aggregated.py` is now a project adapter: endpoint constants, cohort-specific covariates/restrictions,
 and per-landmark context. The univariate/elastic-net CLI orchestration lives in
@@ -417,7 +419,12 @@ notebook. All operate on the merged `profile_data` run:
   `survival_common/longitudinal_targets.py` (see
   [Longitudinal configs](#longitudinal-configs)). **SurvLatent ODE is off by default**
   (`cp.RUN_SURVLATENT = False`) so the notebook runs Dynamic-DeepHit alone without the bundled
-  external checkout and its conda env; set it to `True` to re-enable. Reads `01`'s
+  external checkout and its conda env; set it to `True` to re-enable. **The dynamic arm is also
+  off by default** (`cp.RUN_DYNAMIC = False`): set it to `True` and the same
+  `run_multivariate_longitudinal` call additionally runs per-timepoint Dynamic-DeepHit and then
+  `incremental_risk.py` on its predictions, with the last two cells reading the tables back via
+  `cp.load_incremental_risk_results(run, "ablation" | "by_landmark")`. That arm needs the
+  full-follow-up inputs (`--longitudinal-full-followup` in `01`; see invariant #10). Reads `01`'s
   `longitudinal_landmark{D}.csv` person-period inputs and runs the enabled models via
   `compass_pipeline.run_multivariate_longitudinal`; kept out of `03_multivariate.ipynb` so that
   notebook stays runnable with no torch installed. When enabled, SurvLatent tasks default to the
@@ -717,6 +724,37 @@ cohort or a silently-dropped feature further down the pipeline. An all-null
    `landmark_day` (singular) also remains correct in the per-landmark CV-fold, patient-risk,
    feature-importance, and run-manifest frames, which are separate files.
 
+   The dynamic arm respects this rather than widening it. Its
+   `dynamic_deephit_dyn_metrics_{config}.csv` carries the canonical block with **one row per
+   cause**, at `prediction_time == landmark_time` — the row directly comparable to Cox/XGBoost.
+   The per-prediction-time series goes to a *separate*
+   `dynamic_deephit_dyn_metrics_by_time_{config}.csv`, precisely so the canonical schema never
+   gains a prediction-time axis. `incremental_risk.py`'s outputs are named
+   `incremental_risk_*.csv`, deliberately outside the `*_metrics_*.csv` namespace this invariant
+   governs: they report a *paired* comparison indexed by prediction time, not one model's
+   held-out performance. A prediction time whose risk set cannot support a metric gets NaN
+   metrics and a `note` beginning `underpowered:` rather than being dropped — a gap in the series
+   should say why it is missing.
+10. **Two longitudinal input frames; on only one of them is the landmark `max(TIME)`.**
+    `longitudinal_landmark{D}.csv` ends at the landmark, so `max(TIME) == landmark_time` per
+    patient and code can infer the landmark that way. `longitudinal_full_landmark{D}.csv`
+    (written by `--longitudinal-full-followup`, **alongside** the landmark frame, never in place
+    of it) runs to end of follow-up, which breaks that identity: `max(TIME)` becomes the
+    patient's last visit. Anything anchoring to it there shifts per patient by the length of that
+    patient's own post-landmark history — silently, and with plausible-looking output. On the
+    full frame, read the explicit `landmark_time` column. This bit both
+    `build_person_period_wide` and `survlatent_ode.add_post_landmark_horizon_columns`; both are
+    now pinned by tests (`tests/test_survlatent_full_followup.py`). The full frame's manifest
+    carries `include_post_landmark: true`, and consumers cross-check it against their own mode
+    and refuse a mismatch **in either direction** — post-landmark labs are legitimate inputs only
+    for predictions made *after* the landmark.
+
+    Related: `end_of_obs_idx` is not a settable parameter upstream in SurvLatent ODE — it is
+    derived as `tt[-1]`, the last retained observation time. Sweeping the prediction-time cut is
+    therefore implemented as **input truncation** (`--observation-cut-days N`, which implies
+    `--full-followup`), which also guarantees no post-cut value reaches the encoder. Each cut is
+    its own fit with its own `_cut<N>` checkpoints, so sweep one value per run, not a grid.
+
 ---
 
 ## Configuration & paths
@@ -891,9 +929,12 @@ entry per (arm, endpoint) pair, so the existing `for run in RUNS:` loops handle 
 
 `03b` takes the same `ENDPOINTS` tuple and derives each endpoint's `--config` values from it via
 `cp.longitudinal_task_specs(endpoint)` (see [Longitudinal configs](#longitudinal-configs)); it
-additionally has `RUN_SURVLATENT`, left off by default, and an optional
+additionally has `RUN_SURVLATENT` and `RUN_DYNAMIC`, both left off by default, and an optional
 `PREDICTION_INPUT_DIRS_BY_ENDPOINT` override for cluster-mounted prediction-input paths, passed
-through as `make_endpoint_runs`'s `prediction_input_dirs_by_endpoint`.
+through as `make_endpoint_runs`'s `prediction_input_dirs_by_endpoint`. Two further SurvLatent
+toggles feed the observation-cut sweep: `SURVLATENT_FULL_FOLLOWUP` and
+`SURVLATENT_OBSERVATION_CUT_DAYS` (a single value or `None` — each cut is a separate fit, so
+sweep by re-running, not by passing a grid).
 
 ## Recommended run order
 

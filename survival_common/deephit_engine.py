@@ -32,7 +32,7 @@ import pandas as pd
 try:
     import torch
     from torch import nn
-    from torch.nn.utils.rnn import pack_padded_sequence
+    from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
     from torch.utils.data import DataLoader, Dataset
 
     TORCH_IMPORT_ERROR: ModuleNotFoundError | None = None
@@ -42,6 +42,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
     Dataset = object
     DataLoader = None
     pack_padded_sequence = None
+    pad_packed_sequence = None
     TORCH_IMPORT_ERROR = exc
 
 try:
@@ -145,26 +146,74 @@ def build_sequences(
     mean: pd.Series,
     std: pd.Series,
     max_observed_time: float,
+    dynamic: bool = False,
 ) -> dict[str, dict]:
+    """Build per-patient model input sequences.
+
+    The feature layout is identical in both arms:
+    ``[normalized values | observed mask | relative time]``, width ``2F + 1``.
+
+    ``dynamic=False`` attaches one scalar target per patient (from
+    :func:`~survival_common.longitudinal_targets.patient_targets`, indexed by
+    patient). ``dynamic=True`` attaches per-step target arrays aligned to the
+    sequence (from
+    :func:`~survival_common.longitudinal_targets.patient_targets_dynamic`,
+    indexed by ``(patient, TIME)``), plus a ``step_mask`` marking which steps
+    have a target at all -- a step whose patient is no longer at risk is carried
+    in ``x`` (the GRU still needs it to build state) but contributes no loss.
+    """
     sequences: dict[str, dict] = {}
     denom = max(float(max_observed_time), 1.0)
     for mrn, group in df.groupby(id_col, sort=False):
-        if mrn not in targets.index:
+        if not dynamic and mrn not in targets.index:
             continue
         group = group.sort_values(time_col)
         raw = group[feature_cols].astype(float)
         mask = raw.notna().astype(float)
         values = ((raw - mean) / std).fillna(0.0)
-        rel_time = (pd.to_numeric(group[time_col], errors="coerce").to_numpy(dtype=float) / denom)
-        rel_time = rel_time.reshape(-1, 1)
+        times = pd.to_numeric(group[time_col], errors="coerce").to_numpy(dtype=float)
+        rel_time = (times / denom).reshape(-1, 1)
         x = np.hstack([values.to_numpy(dtype=np.float32), mask.to_numpy(dtype=np.float32), rel_time.astype(np.float32)])
-        target = targets.loc[mrn]
+
+        if not dynamic:
+            target = targets.loc[mrn]
+            sequences[str(mrn)] = {
+                "x": x.astype(np.float32),
+                "length": int(len(x)),
+                "label": int(target["label"]),
+                "duration_bin": int(target["duration_bin"]),
+                "duration": float(target["duration"]),
+            }
+            continue
+
+        # Per-step targets, aligned positionally to the sorted sequence. Steps
+        # with no target row (patient not at risk at that time) get step_mask=0
+        # and placeholder target values that the loss never reads.
+        n_steps = len(x)
+        step_label = np.zeros(n_steps, dtype=np.int64)
+        step_bin = np.ones(n_steps, dtype=np.int64)
+        step_duration = np.zeros(n_steps, dtype=np.float32)
+        step_mask = np.zeros(n_steps, dtype=np.float32)
+        for pos, t in enumerate(times):
+            key = (mrn, float(t))
+            if key not in targets.index:
+                continue
+            target = targets.loc[key]
+            step_label[pos] = int(target["label"])
+            step_bin[pos] = int(target["duration_bin"])
+            step_duration[pos] = float(target["duration"])
+            step_mask[pos] = 1.0
+        if not step_mask.any():
+            # Patient is never at risk anywhere in their sequence.
+            continue
         sequences[str(mrn)] = {
             "x": x.astype(np.float32),
-            "length": int(len(x)),
-            "label": int(target["label"]),
-            "duration_bin": int(target["duration_bin"]),
-            "duration": float(target["duration"]),
+            "length": int(n_steps),
+            "label": step_label,
+            "duration_bin": step_bin,
+            "duration": step_duration,
+            "step_mask": step_mask,
+            "times": times.astype(np.float32),
         }
     return sequences
 
@@ -180,7 +229,7 @@ class SequenceDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         sample_id = self.ids[idx]
         item = self.sequences[sample_id]
-        return {
+        out = {
             "id": sample_id,
             "x": item["x"],
             "length": item["length"],
@@ -188,22 +237,63 @@ class SequenceDataset(Dataset):
             "duration_bin": item["duration_bin"],
             "duration": item["duration"],
         }
+        # Dynamic arm only; their presence is what collate_batch dispatches on.
+        for key in ("step_mask", "times"):
+            if key in item:
+                out[key] = item[key]
+        return out
 
 
 def collate_batch(batch: list[dict]) -> dict:
+    """Right-zero-pad a batch of sequences to the batch's max length.
+
+    Handles both target shapes. In the landmark arm ``label``/``duration_bin``/
+    ``duration`` are per-patient scalars and collate to ``[B]``. In the dynamic
+    arm they are per-step arrays and collate to ``[B, T]``, padded with a
+    ``step_mask`` of zeros so the loss ignores padded positions. ``length`` is
+    carried separately either way for ``pack_padded_sequence``.
+    """
     max_len = max(item["length"] for item in batch)
     feat_dim = batch[0]["x"].shape[1]
     x = np.zeros((len(batch), max_len, feat_dim), dtype=np.float32)
     for idx, item in enumerate(batch):
         x[idx, : item["length"], :] = item["x"]
-    return {
+
+    out = {
         "ids": [item["id"] for item in batch],
         "x": torch.tensor(x, dtype=torch.float32),
         "length": torch.tensor([item["length"] for item in batch], dtype=torch.long),
-        "label": torch.tensor([item["label"] for item in batch], dtype=torch.long),
-        "duration_bin": torch.tensor([item["duration_bin"] for item in batch], dtype=torch.long),
-        "duration": torch.tensor([item["duration"] for item in batch], dtype=torch.float32),
     }
+
+    if "step_mask" not in batch[0]:
+        out["label"] = torch.tensor([item["label"] for item in batch], dtype=torch.long)
+        out["duration_bin"] = torch.tensor(
+            [item["duration_bin"] for item in batch], dtype=torch.long
+        )
+        out["duration"] = torch.tensor(
+            [item["duration"] for item in batch], dtype=torch.float32
+        )
+        return out
+
+    n = len(batch)
+    label = np.zeros((n, max_len), dtype=np.int64)
+    duration_bin = np.ones((n, max_len), dtype=np.int64)
+    duration = np.zeros((n, max_len), dtype=np.float32)
+    step_mask = np.zeros((n, max_len), dtype=np.float32)
+    times = np.zeros((n, max_len), dtype=np.float32)
+    for idx, item in enumerate(batch):
+        end = item["length"]
+        label[idx, :end] = item["label"]
+        duration_bin[idx, :end] = item["duration_bin"]
+        duration[idx, :end] = item["duration"]
+        step_mask[idx, :end] = item["step_mask"]
+        times[idx, :end] = item["times"]
+    out["label"] = torch.tensor(label, dtype=torch.long)
+    out["duration_bin"] = torch.tensor(duration_bin, dtype=torch.long)
+    out["duration"] = torch.tensor(duration, dtype=torch.float32)
+    out["step_mask"] = torch.tensor(step_mask, dtype=torch.float32)
+    out["times"] = torch.tensor(times, dtype=torch.float32)
+    return out
 
 
 if nn is not None:
@@ -221,23 +311,46 @@ if nn is not None:
                 nn.Linear(hidden_dim, n_events * horizon + 1),
             )
 
-        def forward(self, x, length):
+        def forward(self, x, length, *, per_step: bool = False):
+            """Return head logits for the sequence.
+
+            ``per_step=False`` (the landmark arm) reads the final hidden state
+            and returns ``[B, n_events*horizon + 1]`` -- one prediction per
+            patient. ``per_step=True`` (the dynamic arm) returns
+            ``[B, T, n_events*horizon + 1]`` -- one prediction per observation
+            time.
+
+            The GRU is causal, so step ``t``'s output depends only on steps
+            ``<= t``; no future masking is needed to make the per-step
+            predictions honest. ``tests/test_dynamic_no_future_leakage.py``
+            asserts that property directly rather than trusting it.
+            """
             packed = pack_padded_sequence(
                 x,
                 length.cpu(),
                 batch_first=True,
                 enforce_sorted=False,
             )
-            _, h_n = self.gru(packed)
-            logits = self.head(h_n[-1])
-            return logits
+            out, h_n = self.gru(packed)
+            if not per_step:
+                return self.head(h_n[-1])
+            out, _ = pad_packed_sequence(out, batch_first=True)
+            return self.head(out)
 
         def probabilities(self, logits):
-            probs = torch.softmax(logits, dim=1)
-            event_probs = probs[:, : self.n_events * self.horizon].reshape(
-                -1, self.n_events, self.horizon
+            """Softmax the head logits into (event CIF pmf, no-event mass).
+
+            Shapes follow the input: ``[B, K]`` -> ``([B, n_events, horizon],
+            [B])``; ``[B, T, K]`` -> ``([B, T, n_events, horizon], [B, T])``.
+            The softmax is always over the final axis, which is the one the
+            head emits.
+            """
+            probs = torch.softmax(logits, dim=-1)
+            lead = probs.shape[:-1]
+            event_probs = probs[..., : self.n_events * self.horizon].reshape(
+                *lead, self.n_events, self.horizon
             )
-            no_event = probs[:, -1]
+            no_event = probs[..., -1]
             return event_probs, no_event
 else:
     class DynamicDeepHitGRU:  # pragma: no cover - only used when torch is missing
@@ -245,7 +358,9 @@ else:
             require_torch()
 
 
-def deephit_nll(model: "DynamicDeepHitGRU", logits, label, duration_bin) -> "torch.Tensor":
+def deephit_nll(
+    model: "DynamicDeepHitGRU", logits, label, duration_bin, *, reduction: str = "mean"
+) -> "torch.Tensor":
     """Discrete-time competing-risks negative log-likelihood.
 
     Observed branch: -log P(event at its bin). Censored branch: -log P(no
@@ -254,17 +369,23 @@ def deephit_nll(model: "DynamicDeepHitGRU", logits, label, duration_bin) -> "tor
     (equivalent to summing event_probs[:, censor_idx+1:] per row) rather than
     a per-row Python loop, since this runs inside every fold of a hyperparameter
     grid search.
+
+    ``reduction="none"`` returns the per-row loss **in input order** rather than
+    the batch mean, for callers that need to weight rows (the dynamic arm
+    weights each step by 1/T_i). Note the two branches are computed on disjoint
+    subsets and must be scattered back, not concatenated: concatenating would
+    silently reorder rows relative to their weights.
     """
     event_probs, no_event = model.probabilities(logits)
     eps = 1e-8
     idx = torch.clamp(duration_bin, min=1, max=model.horizon) - 1
     observed = label > 0
-    losses = []
+    per_row = torch.zeros(logits.shape[0], dtype=logits.dtype, device=logits.device)
     if observed.any():
         event_idx = label[observed] - 1
         time_idx = idx[observed]
         prob = event_probs[observed, event_idx, time_idx]
-        losses.append(-torch.log(prob + eps))
+        per_row[observed] = -torch.log(prob + eps)
     if (~observed).any():
         censor_idx = idx[~observed]
         censored_probs = event_probs[~observed]
@@ -282,11 +403,51 @@ def deephit_nll(model: "DynamicDeepHitGRU", logits, label, duration_bin) -> "tor
             in_range, gathered.sum(dim=-1), torch.zeros(n_rows, dtype=gathered.dtype, device=gathered.device)
         )
         future_mass = future_mass + no_event[~observed]
-        losses.append(-torch.log(future_mass + eps))
-    return torch.cat(losses).mean()
+        per_row[~observed] = -torch.log(future_mass + eps)
+    if reduction == "none":
+        return per_row
+    if reduction == "mean":
+        return per_row.mean()
+    raise ValueError(f"Unsupported reduction {reduction!r}; use 'mean' or 'none'.")
 
 
-def run_epoch(model, loader, optimizer, device: str) -> float:
+def deephit_nll_dynamic(
+    model: "DynamicDeepHitGRU", logits, label, duration_bin, step_mask
+) -> "torch.Tensor":
+    """Per-step discrete-time NLL for the dynamic arm.
+
+    ``logits`` is ``[B, T, K]`` and ``label``/``duration_bin``/``step_mask`` are
+    ``[B, T]``. Valid steps are flattened and scored by the identical likelihood
+    :func:`deephit_nll` applies -- the observed/censored branches and the
+    reverse-cumsum over future bins are reused verbatim rather than reimplemented,
+    so the two arms cannot drift apart on the loss.
+
+    Each step is weighted by ``1 / T_i`` (its own patient's valid-step count) so
+    that every patient contributes equally regardless of how much lab history
+    they have. Without this a handful of heavily-sampled patients would dominate
+    the objective, and the model would fit them at everyone else's expense.
+    """
+    valid = step_mask.bool()
+    if not valid.any():
+        raise ValueError("deephit_nll_dynamic received a batch with no valid steps.")
+
+    # 1/T_i for each patient, broadcast to that patient's steps.
+    steps_per_patient = valid.sum(dim=1, keepdim=True).clamp(min=1)
+    weights = (1.0 / steps_per_patient.to(logits.dtype)).expand_as(valid)[valid]
+
+    flat_logits = logits[valid]
+    flat_label = label[valid]
+    flat_bin = duration_bin[valid]
+
+    per_step = deephit_nll(
+        model, flat_logits, flat_label, flat_bin, reduction="none"
+    )
+    # Normalize by total weight so the loss scale is independent of batch size
+    # and of how many steps the batch happens to carry.
+    return (per_step * weights).sum() / weights.sum()
+
+
+def run_epoch(model, loader, optimizer, device: str, *, dynamic: bool = False) -> float:
     model.train(optimizer is not None)
     losses = []
     for batch in loader:
@@ -295,8 +456,13 @@ def run_epoch(model, loader, optimizer, device: str) -> float:
         label = batch["label"].to(device)
         duration_bin = batch["duration_bin"].to(device)
         with torch.set_grad_enabled(optimizer is not None):
-            logits = model(x, length)
-            loss = deephit_nll(model, logits, label, duration_bin)
+            logits = model(x, length, per_step=dynamic)
+            if dynamic:
+                loss = deephit_nll_dynamic(
+                    model, logits, label, duration_bin, batch["step_mask"].to(device)
+                )
+            else:
+                loss = deephit_nll(model, logits, label, duration_bin)
             if optimizer is not None:
                 optimizer.zero_grad()
                 loss.backward()
@@ -332,6 +498,81 @@ def predict(model, loader, device: str, *, id_col: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def predict_dynamic(
+    model, loader, device: str, *, id_col: str, time_col: str = "TIME"
+) -> pd.DataFrame:
+    """One prediction row per (patient, prediction time).
+
+    Emits the same ``event_{k}_risk_h{h}`` / ``event_{k}_risk_total`` columns
+    :func:`predict` does, plus ``time_col``, so downstream metric code can treat
+    a single-time slice of this frame exactly like a landmark prediction frame.
+    Padded and not-at-risk steps are skipped via ``step_mask``.
+    """
+    model.eval()
+    rows = []
+    with torch.no_grad():
+        for batch in loader:
+            logits = model(
+                batch["x"].to(device), batch["length"].to(device), per_step=True
+            )
+            event_probs, no_event = model.probabilities(logits)
+            event_probs_np = event_probs.cpu().numpy()   # [B, T, n_events, horizon]
+            no_event_np = no_event.cpu().numpy()         # [B, T]
+            step_mask_np = batch["step_mask"].numpy()
+            times_np = batch["times"].numpy()
+            label_np = batch["label"].numpy()
+            bin_np = batch["duration_bin"].numpy()
+            duration_np = batch["duration"].numpy()
+            for row_idx, sample_id in enumerate(batch["ids"]):
+                for step in range(int(batch["length"][row_idx])):
+                    if step_mask_np[row_idx, step] <= 0:
+                        continue
+                    row = {
+                        id_col: sample_id,
+                        time_col: float(times_np[row_idx, step]),
+                        "duration": float(duration_np[row_idx, step]),
+                        "duration_bin": int(bin_np[row_idx, step]),
+                        "label": int(label_np[row_idx, step]),
+                        "no_event_probability": float(no_event_np[row_idx, step]),
+                    }
+                    for event_idx in range(event_probs_np.shape[2]):
+                        pmf = event_probs_np[row_idx, step, event_idx, :]
+                        cif = np.cumsum(pmf)
+                        row[f"event_{event_idx + 1}_risk_total"] = float(cif[-1])
+                        for horizon, risk in enumerate(cif, start=1):
+                            row[f"event_{event_idx + 1}_risk_h{horizon}"] = float(risk)
+                    rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def landmark_slice(
+    pred: pd.DataFrame,
+    landmark_targets: pd.DataFrame,
+    *,
+    id_col: str,
+    time_col: str = "TIME",
+) -> pd.DataFrame:
+    """Reduce a dynamic prediction frame to one row per patient, at the landmark.
+
+    This is the row the landmark arm would have produced for the same patient,
+    so the result can be handed to :func:`compute_metrics` unchanged and the
+    dynamic arm's headline numbers stay comparable to Cox/XGBoost. Patients whose
+    landmark time is absent from ``pred`` (not at risk there) are dropped, which
+    is the same exclusion the landmark arm applies.
+    """
+    landmark_by_id = (
+        landmark_targets["landmark_time"].astype(float).rename("__landmark_time")
+    )
+    landmark_by_id.index = landmark_by_id.index.map(str)
+    out = pred.copy()
+    out["__landmark_time"] = out[id_col].map(str).map(landmark_by_id)
+    out = out.loc[
+        out["__landmark_time"].notna()
+        & np.isclose(out[time_col].astype(float), out["__landmark_time"])
+    ]
+    return out.drop(columns="__landmark_time").reset_index(drop=True)
+
+
 def train_evaluate(
     *,
     df: pd.DataFrame,
@@ -349,10 +590,15 @@ def train_evaluate(
     dropout: float,
     lr: float,
     seed: int,
+    dynamic: bool = False,
 ) -> tuple[pd.DataFrame, list[dict], float]:
     """Train DeepHit on `train_ids` watching `valid_ids` for early stopping,
     predict on `eval_ids`. Normalization is fit on train_ids only -- never on
     valid or eval. Returns (pred_df, history, best_valid_loss).
+
+    ``dynamic=True`` trains against per-step targets and returns one prediction
+    row per (patient, time) instead of per patient; ``targets`` must then be a
+    ``(patient, TIME)``-indexed frame from ``patient_targets_dynamic``.
     """
     require_torch()
     set_seed(seed)
@@ -370,6 +616,7 @@ def train_evaluate(
         mean=mean,
         std=std,
         max_observed_time=max_observed_time,
+        dynamic=dynamic,
     )
 
     train_ds = SequenceDataset(sequences, sorted(train_ids))
@@ -407,8 +654,8 @@ def train_evaluate(
     epochs_without_improvement = 0
     history: list[dict] = []
     for epoch in range(1, args.epochs + 1):
-        train_loss = run_epoch(model, train_loader, optimizer, device)
-        valid_loss = run_epoch(model, valid_loader, None, device)
+        train_loss = run_epoch(model, train_loader, optimizer, device, dynamic=dynamic)
+        valid_loss = run_epoch(model, valid_loader, None, device, dynamic=dynamic)
         history.append(
             {"epoch": epoch, "train_loss": train_loss, "valid_loss": valid_loss}
         )
@@ -423,7 +670,10 @@ def train_evaluate(
 
     if best_state is not None:
         model.load_state_dict(best_state)
-    pred = predict(model, eval_loader, device, id_col=id_col)
+    if dynamic:
+        pred = predict_dynamic(model, eval_loader, device, id_col=id_col, time_col=time_col)
+    else:
+        pred = predict(model, eval_loader, device, id_col=id_col)
     return pred, history, best_valid
 
 
@@ -645,6 +895,138 @@ def compute_brier_for_pred(
     return pd.DataFrame(rows), integrated_by_event
 
 
+# A prediction time is reported only if its risk set is at least this large and
+# carries at least this many events of the cause. Below that, C-index and IPCW
+# AUC(t) are dominated by sampling noise, and the late prediction times in a
+# dynamic sweep always thin out this way -- the risk set shrinks monotonically
+# as patients have their event, die, or are censored. Reporting a 0.93 C-index
+# computed on 6 patients and 2 events next to a 0.61 on 400 invites exactly the
+# wrong reading, so those rows are emitted with NaN metrics and a `note` naming
+# the shortfall rather than being silently dropped (a gap in the series is
+# itself information) or silently reported.
+MIN_RISK_SET_FOR_BY_TIME = 25
+MIN_EVENTS_FOR_BY_TIME = 5
+
+
+def compute_metrics_by_time(
+    dynamic_pred: pd.DataFrame,
+    *,
+    event_names: list[str],
+    train_val_targets: pd.DataFrame,
+    fixed_horizons_by_event: dict[str, np.ndarray],
+    id_col: str,
+    time_col: str = "TIME",
+    quantiles: tuple[float, ...] = DEFAULT_AUC_QUANTILES,
+    time_unit_days: int = 7,
+    min_risk_set: int = MIN_RISK_SET_FOR_BY_TIME,
+    min_events: int = MIN_EVENTS_FOR_BY_TIME,
+) -> pd.DataFrame:
+    """Score the dynamic arm separately at each prediction time.
+
+    This is the output that makes the dynamic arm worth running: it shows
+    whether a patient's risk estimate actually sharpens as their lab history
+    accrues, which a single landmark number cannot express.
+
+    Reuses :func:`compute_metrics` and :func:`compute_brier_for_pred`
+    unmodified, once per prediction time, so a by-time row at
+    ``prediction_time == landmark_time`` is computed by exactly the same code
+    that produces the headline ``*_metrics.csv`` row. That identity is what
+    makes the series anchorable to the other model arms, and it is asserted in
+    tests/test_dynamic_metrics_schema.py.
+
+    The returned frame carries the canonical metric columns plus
+    ``prediction_time``, ``prediction_day``, ``n_at_risk`` and ``note``. It is
+    written to a SEPARATE ``*_metrics_by_time.csv`` -- invariant #9 fixes the
+    canonical block on ``*_metrics.csv``, which stays one row per cause.
+
+    Interpretation caveat, which belongs in any write-up of these numbers: the
+    risk set at a late prediction time is not a sample of the cohort, it is the
+    subset that had not yet had the event. Rising AUC across prediction time is
+    therefore not a clean "the model gets better" claim -- the population being
+    scored changes underneath it. The held-back-window ablation
+    (``incremental_risk.py``) is the cleaner contrast, because it holds the risk
+    set fixed and varies only the input window.
+    """
+    require_lifelines()
+    if dynamic_pred.empty:
+        return pd.DataFrame()
+    if time_col not in dynamic_pred.columns:
+        raise ValueError(
+            f"Dynamic predictions have no {time_col!r} column, so they cannot be "
+            "grouped by prediction time. Was this frame produced with --dynamic?"
+        )
+
+    rows: list[dict] = []
+    for pred_time, block in dynamic_pred.groupby(time_col, sort=True):
+        pred_time = float(pred_time)
+        n_at_risk = int(len(block))
+        for event_idx, event_name in enumerate(event_names, start=1):
+            n_events = int(block["label"].eq(event_idx).sum())
+            base = {
+                "prediction_time": pred_time,
+                # Days since the per-patient TIME origin. The origin is
+                # landmark_time, so this is days relative to the landmark, and
+                # is negative for pre-landmark prediction times.
+                "prediction_day": pred_time * float(time_unit_days),
+                "endpoint": event_name,
+                "n_at_risk": n_at_risk,
+            }
+            if n_at_risk < min_risk_set or n_events < min_events:
+                rows.append({
+                    **base,
+                    "n_test": n_at_risk,
+                    "n_events_test": n_events,
+                    "test_c_index": float("nan"),
+                    "test_mean_auc_t": float("nan"),
+                    "test_integrated_brier": float("nan"),
+                    "note": (
+                        f"underpowered: n_at_risk={n_at_risk} "
+                        f"(min {min_risk_set}), n_events={n_events} "
+                        f"(min {min_events})"
+                    ),
+                })
+                continue
+
+            # One cause at a time: compute_metrics loops over every name it is
+            # given, and the power gate above is per-cause, so passing the full
+            # list here would resurrect a cause this prediction time cannot
+            # support.
+            metrics, _auc = compute_metrics(
+                block,
+                event_names=[event_name],
+                train_val_targets=train_val_targets,
+                quantiles=quantiles,
+                fixed_horizons_by_event=fixed_horizons_by_event,
+            )
+            _brier, ibs_by_event = compute_brier_for_pred(
+                block,
+                event_names=[event_name],
+                train_val_targets=train_val_targets,
+                horizons_by_event=fixed_horizons_by_event,
+                time_unit_days=time_unit_days,
+            )
+            if metrics.empty:
+                rows.append({**base, "note": "compute_metrics returned no row"})
+                continue
+            row = metrics.iloc[0]
+            rows.append({
+                **base,
+                "n_test": int(row["n_test"]),
+                "n_events_test": int(row["n_events_test"]),
+                "test_c_index": float(row["test_c_index"]),
+                "test_mean_auc_t": float(row["test_mean_auc_t"]),
+                "test_integrated_brier": float(
+                    ibs_by_event.get(event_name, float("nan"))
+                ),
+                "note": "",
+            })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(["endpoint", "prediction_time"]).reset_index(drop=True)
+
+
 def cv_run(
     *,
     df: pd.DataFrame,
@@ -658,8 +1040,16 @@ def cv_run(
     event_names: list[str],
     fixed_horizons_by_event: dict[str, np.ndarray],
     config_label: str = "",
+    dynamic: bool = False,
+    landmark_targets: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """5-fold stratified CV over (hidden_dim x dropout x lr).
+
+    ``dynamic=True`` fits each fold against the per-step targets in ``targets``
+    but *scores* it on the landmark slice, so a fold's reported C-index means the
+    same thing in both arms and hyperparameters are not selected by a metric the
+    landmark arm never computes. ``landmark_targets`` (patient-indexed, required
+    when ``dynamic``) supplies both that slice and the IPCW reference.
 
     `train_val_static` is patient-indexed with PLATINUM/DEATH for stratification
     (combined 4-cell label via iter_stratified_folds(event_col=None)). For each
@@ -676,6 +1066,12 @@ def cv_run(
     the identical convention and caveat in multivariate_analysis.py's
     run_xgboost) and is a documented methodological choice, not a bug.
     """
+    if dynamic and landmark_targets is None:
+        raise ValueError("cv_run(dynamic=True) requires landmark_targets.")
+    # Patient-indexed targets used for fold scoring and as the IPCW reference.
+    # In the landmark arm this is `targets` itself.
+    scoring_targets = landmark_targets if dynamic else targets
+
     fold_partitions = list(
         iter_stratified_folds(train_val_static, n_folds=args.n_folds, seed=args.seed)
     )
@@ -735,17 +1131,31 @@ def cv_run(
                     dropout=dropout,
                     lr=lr,
                     seed=args.seed + fold,
+                    dynamic=dynamic,
                 )
                 row["best_valid_loss"] = float(best_valid)
                 row["n_epochs"] = int(len(history))
-                fold_train_targets = targets.loc[
-                    targets.index.map(str).isin(fold_train_ids)
+                if dynamic:
+                    pred = landmark_slice(
+                        pred,
+                        landmark_targets,
+                        id_col=id_col,
+                        time_col=time_col,
+                    )
+                fold_train_targets = scoring_targets.loc[
+                    scoring_targets.index.map(str).isin(fold_train_ids)
                 ].copy()
                 metrics_df, _ = compute_metrics(
                     pred,
                     event_names=event_names,
                     train_val_targets=fold_train_targets,
-                    quantiles=tuple(args.auc_quantiles),
+                    # build_deephit_parser exposes no --auc-quantiles, so read it
+                    # defensively. These quantiles are only a fallback anyway:
+                    # fixed_horizons_by_event is always supplied here, and
+                    # compute_metrics ignores `quantiles` whenever it is.
+                    quantiles=tuple(
+                        getattr(args, "auc_quantiles", DEFAULT_AUC_QUANTILES)
+                    ),
                     fixed_horizons_by_event=fixed_horizons_by_event,
                 )
                 _, ibs_by_event = compute_brier_for_pred(
@@ -829,6 +1239,22 @@ def cv_run(
     ]
     candidate = candidate.copy()
     candidate["__rank_score"] = candidate[cindex_cols].mean(axis=1, skipna=True)
+
+    # Refuse to "select" hyperparameters off an all-NaN ranking column. The
+    # n_valid_folds guard above only proves the fits ran -- scoring can still
+    # have failed in every fold (a missing args attribute, an IPCW failure),
+    # leaving the sort to fall through to its tie-break and report a confident
+    # choice that carries no information. Fail loudly instead.
+    if not np.isfinite(candidate["__rank_score"]).any():
+        notes = (
+            fold_df["note"].fillna("").astype(str).replace("", np.nan).dropna().unique()
+        )
+        detail = f" First fold error: {notes[0]}" if len(notes) else ""
+        raise RuntimeError(
+            "DeepHit CV produced no usable C-index in any fold, so no "
+            "hyperparameter combination can be ranked."
+            f"{detail}"
+        )
     best_row = (
         candidate.sort_values(
             ["__rank_score", "n_valid_folds", "hidden_dim", "dropout", "lr"],

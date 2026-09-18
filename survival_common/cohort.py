@@ -440,6 +440,7 @@ def build_pre_treatment_lab_long(
     landmark_offset_days: int = 0,
     anchor_col: str | None = "t_first_treatment",
     anchor_series: pd.Series | None = None,
+    include_post_landmark: bool = False,
 ) -> pd.DataFrame:
     """Long-format pre-landmark lab observations used for canonical-lab selection.
 
@@ -454,6 +455,15 @@ def build_pre_treatment_lab_long(
     Pass ``anchor_col=None`` when ``t_lab`` is already measured from the index
     date (COMPASS's treatment-anchor clock): the window is then the pure offset
     ``t_lab < landmark_offset_days`` with no anchor column required.
+
+    ``include_post_landmark=True`` skips the landmark window filter entirely,
+    returning every lab observation over the full follow-up. This exists **only**
+    for the dynamic (per-timepoint) longitudinal arm, where a lab drawn after the
+    landmark is a legitimate input to a prediction made after that lab. It is
+    unsafe for every other consumer: the aggregated feature matrix, canonical-lab
+    coverage, and the landmark person-period builder all assume a pre-landmark
+    window and would silently ingest future information. Post-event rows are
+    still dropped downstream by ``build_person_period_wide``'s pre-event filter.
     """
     base_required = {ID_COL, "LAB_NAME", "LAB_VALUE", "t_lab"}
     missing = base_required - set(df.columns)
@@ -481,12 +491,15 @@ def build_pre_treatment_lab_long(
             out[anchor_col] = pd.to_numeric(out[anchor_col], errors="coerce")
         dropna_cols.append(anchor_col)
     out = out.dropna(subset=dropna_cols)
-    if anchor_col is None:
-        # t_lab is already index-relative; window is the pure offset from 0.
-        landmark_t = float(landmark_offset_days)
+    if not include_post_landmark:
+        if anchor_col is None:
+            # t_lab is already index-relative; window is the pure offset from 0.
+            landmark_t = float(landmark_offset_days)
+        else:
+            landmark_t = out[anchor_col] + float(landmark_offset_days)
+        out = out.loc[out["t_lab"] < landmark_t].copy()
     else:
-        landmark_t = out[anchor_col] + float(landmark_offset_days)
-    out = out.loc[out["t_lab"] < landmark_t].copy()
+        out = out.copy()
     if cohort_index is not None:
         out = out.loc[out[ID_COL].isin(cohort_index)].copy()
     return out
@@ -701,15 +714,27 @@ def build_person_period_wide(
     outlier_lo: float,
     outlier_hi: float,
     anchor_col: str | None = None,
+    include_post_landmark: bool = False,
 ) -> tuple[pd.DataFrame, dict, list[str], dict[str, tuple[float, float]]]:
     """Build the person-period ("wide", binned-time) sequence input consumed
     by Dynamic-DeepHit and SurvLatent ODE.
 
     Args:
-        lab_long: pre-landmark lab observations, e.g. from
+        lab_long: lab observations, e.g. from
             :func:`build_pre_treatment_lab_long` called at the same
-            ``landmark_day``/``anchor_col``. Already windowed to
-            ``t_lab < landmark`` -- this function does not re-filter.
+            ``landmark_day``/``anchor_col``. The time window is the caller's
+            choice and this function does not re-filter it: pass a pre-landmark
+            frame (``t_lab < landmark``) for the landmark arm, or a
+            full-follow-up frame (``include_post_landmark=True`` on both calls)
+            for the dynamic arm.
+        include_post_landmark: declares that ``lab_long`` carries post-landmark
+            observations. This does not change the binning -- ``landmark_time``
+            is still the pre-landmark history depth, so the landmark anchor row
+            lands at the same ``TIME`` either way and the dynamic arm's
+            ``TIME == landmark_time`` slice stays comparable to the landmark
+            arm. It only (a) suppresses the synthetic landmark row for patients
+            who already have an observation at that bin and (b) records the flag
+            in ``extras`` so runners can refuse to mix input types.
         outcome_df: the already-built per-patient outcome+feature+split table
             (:func:`build_landmark_merged`'s ``merged``, post administrative
             censoring). Outcome columns (``PLATINUM``/``DEATH``/``t_platinum``/
@@ -779,7 +804,18 @@ def build_person_period_wide(
     ).astype(int)
 
     landmark_time = pd.Series(0, index=static.index, dtype=int, name="landmark_time")
-    selected_lab_landmarks = (-selected_lab_rows.groupby(ID_COL)["REL_BIN"].min()).astype(int)
+    # landmark_time is the depth of PRE-landmark history, so it is derived from
+    # REL_BIN < 0 rows only. In the landmark arm that is every row and this is a
+    # no-op; in the dynamic arm it is what keeps the landmark anchor at the same
+    # TIME as the landmark arm puts it, so the two remain slice-comparable. A
+    # patient whose earliest selected lab is post-landmark would otherwise get a
+    # negative landmark_time (= a TIME axis shifted the wrong way).
+    pre_landmark_rows = selected_lab_rows.loc[selected_lab_rows["REL_BIN"] < 0]
+    selected_lab_landmarks = (
+        (-pre_landmark_rows.groupby(ID_COL)["REL_BIN"].min()).astype(int)
+        if not pre_landmark_rows.empty
+        else pd.Series(dtype=int)
+    )
     landmark_time.loc[selected_lab_landmarks.index] = selected_lab_landmarks
     n_without_selected_labs = int((landmark_time == 0).sum())
     print(
@@ -793,12 +829,11 @@ def build_person_period_wide(
     )
     selected_lab_rows["TIME"] = selected_lab_rows["REL_BIN"] + selected_lab_rows["landmark_time"]
 
+    # Reindexed onto the full cohort (not just patients with selected labs) so a
+    # patient with no selected-lab observation keeps landmark_time = 0 and still
+    # receives a synthetic anchor row below.
     landmark_time = (
-        selected_lab_rows.groupby(ID_COL)["landmark_time"].first()
-        .reindex(static.index)
-        .fillna(0)
-        .astype(int)
-        .rename("landmark_time")
+        landmark_time.reindex(static.index).fillna(0).astype(int).rename("landmark_time")
     )
 
     agg = (
@@ -832,6 +867,23 @@ def build_person_period_wide(
     )
     for lab in selected_labs:
         landmark_rows[lab] = np.nan
+    if include_post_landmark:
+        # In the landmark arm every real row is at TIME < landmark_time, so the
+        # anchor never collides. With post-landmark labs a real observation can
+        # land exactly on the anchor bin; appending anyway would emit a duplicate
+        # (id, TIME) pair and silently give that patient two sequence steps at
+        # one time. Keep the real (valued) row and drop the synthetic one.
+        existing = set(
+            zip(wide[ID_COL].to_numpy(), wide["TIME"].to_numpy(dtype=int))
+        )
+        keep = [
+            (mrn, t) not in existing
+            for mrn, t in zip(
+                landmark_rows[ID_COL].to_numpy(),
+                landmark_rows["TIME"].to_numpy(dtype=int),
+            )
+        ]
+        landmark_rows = landmark_rows.loc[keep]
     wide = pd.concat([wide, landmark_rows], ignore_index=True, sort=False)
 
     optional_time_cols = [optional_outcome_cols[e] for e in sorted(optional_outcome_cols)]
@@ -883,6 +935,16 @@ def build_person_period_wide(
     )
     # Optional causes are appended after the always-present platinum/death
     # block so a platinum-only cohort's column order is unchanged.
+    #
+    # landmark_time is carried out ONLY in the full-follow-up variant. The
+    # landmark frame ends at TIME == landmark_time, so a consumer there can
+    # recover it as the patient's max(TIME) -- which is what patient_targets
+    # does, and why this column was never needed. That identity is exactly what
+    # the full-follow-up frame breaks: max(TIME) is the patient's last
+    # follow-up visit, not the landmark. Without the column the dynamic arm
+    # would anchor every patient with a post-landmark lab at the wrong row.
+    # Appending it (rather than inserting) keeps the landmark arm's column
+    # order byte-identical.
     column_order = (
         [ID_COL, "TIME"]
         + selected_labs
@@ -890,12 +952,14 @@ def build_person_period_wide(
         + sorted(optional_outcome_cols)
         + optional_time_cols
         + ["split"]
+        + (["landmark_time"] if include_post_landmark else [])
     )
     wide = wide.sort_values([ID_COL, "TIME"])[column_order]
 
     extras = {
         "max_landmark_time": max_landmark_time,
         "n_patients_without_selected_labs": n_without_selected_labs,
+        "include_post_landmark": bool(include_post_landmark),
     }
     return wide, extras, selected_labs, bounds
 

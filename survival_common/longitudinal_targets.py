@@ -152,6 +152,46 @@ def resolve_config(config: str, manifest: dict) -> LongitudinalEventConfig:
     )
 
 
+def _resolve_label(
+    durations: np.ndarray,
+    observed: np.ndarray,
+    *,
+    max_pred_window: int,
+) -> tuple[float, int, float, int] | None:
+    """Competing-cause label + duration for one (patient, prediction time).
+
+    Shared by :func:`patient_targets` and :func:`patient_targets_dynamic` so the
+    two cannot drift on the semantics that matter: which cause wins a tie, and
+    where the prediction window censors. ``durations`` are residual times from
+    the prediction point; ``observed`` flags which causes were actually seen.
+
+    Returns ``(duration, label, uncensored_duration, uncensored_label)``, or
+    ``None`` when no cause has a finite positive duration (the caller drops the
+    row -- this is the ``duration > 0`` validity filter).
+    """
+    valid_times = np.isfinite(durations) & (durations > 0)
+    if not valid_times.any():
+        return None
+
+    if observed.any():
+        # argmin ties break toward the first listed cause (the cause of
+        # interest), per the fixed ordering asserted above.
+        candidate = np.where(observed & valid_times, durations, np.inf)
+        event_idx = int(np.argmin(candidate))
+        duration = float(candidate[event_idx])
+        label = event_idx + 1 if np.isfinite(duration) else 0
+    else:
+        duration = float(np.nanmin(durations[valid_times]))
+        label = 0
+
+    uncensored_duration = duration
+    uncensored_label = label
+    if duration > max_pred_window:
+        duration = float(max_pred_window)
+        label = 0
+    return duration, label, uncensored_duration, uncensored_label
+
+
 def patient_targets(
     df: pd.DataFrame,
     *,
@@ -198,25 +238,13 @@ def patient_targets(
 
         durations_arr = np.asarray(durations, dtype=float)
         observed_arr = np.asarray(observed, dtype=bool)
-        valid_times = np.isfinite(durations_arr) & (durations_arr > 0)
-        if not valid_times.any():
+        resolved = _resolve_label(
+            durations_arr, observed_arr, max_pred_window=max_pred_window
+        )
+        if resolved is None:
             continue
-
-        if observed_arr.any():
-            candidate = np.where(observed_arr & valid_times, durations_arr, np.inf)
-            event_idx = int(np.argmin(candidate))
-            duration = float(candidate[event_idx])
-            label = event_idx + 1 if np.isfinite(duration) else 0
-        else:
-            duration = float(np.nanmin(durations_arr[valid_times]))
-            label = 0
-
-        uncensored_duration = duration
-        uncensored_label = label
-
-        if duration > max_pred_window:
-            duration = float(max_pred_window)
-            label = 0
+        duration, label, uncensored_duration, uncensored_label = resolved
+        if uncensored_duration > max_pred_window:
             n_censored_at_window += 1
 
         duration_bin = int(np.clip(np.ceil(duration), 1, max_pred_window))
@@ -252,6 +280,131 @@ def patient_targets(
         "uncensored_label",
     ]
     return pd.DataFrame(rows, columns=columns).set_index(id_col)
+
+
+def patient_targets_dynamic(
+    df: pd.DataFrame,
+    *,
+    id_col: str,
+    time_col: str,
+    event_cols: list[str],
+    time_cols: list[str],
+    max_pred_window: int,
+) -> pd.DataFrame:
+    """One discrete-time target row per (patient, prediction time).
+
+    The dynamic counterpart to :func:`patient_targets`. Where that function
+    collapses each patient to a single target anchored at ``landmark_time``,
+    this emits a target at **every** observation time in the person-period
+    frame, so a sequence model can be trained and scored at each step.
+
+    ``duration`` is the **residual** time from that prediction point
+    (``event_time - TIME``), not from the landmark. Everything else -- the
+    competing-cause argmin, the tie-break toward the cause of interest, and the
+    censoring pass at ``max_pred_window`` -- is the shared
+    :func:`_resolve_label`, so the two functions cannot disagree.
+
+    Rows where the patient is no longer at risk (no cause has a finite positive
+    residual duration) are dropped, mirroring the ``duration > 0`` validity
+    filter in :func:`patient_targets`. The surviving rows all carry
+    ``at_risk=True``; the column is retained so downstream code can assert on it
+    rather than re-deriving the condition.
+
+    Returns a frame indexed by ``(id_col, TIME)`` with ``landmark_time``,
+    ``duration``, ``duration_bin``, ``label``, ``at_risk``, and the
+    pre-window-censoring ``uncensored_*`` diagnostics.
+
+    Invariant worth preserving: restricted to ``TIME == landmark_time`` this
+    returns exactly what :func:`patient_targets` returns for the same cohort.
+    ``tests/test_dynamic_targets.py`` pins that equivalence -- it is what makes
+    the dynamic arm's landmark slice comparable to the Cox/XGBoost arms.
+    """
+    if max_pred_window < 1:
+        raise ValueError(f"max_pred_window must be >= 1, got {max_pred_window}.")
+
+    rows: list[dict] = []
+    n_censored_at_window = 0
+    n_not_at_risk = 0
+    has_landmark_col = "landmark_time" in df.columns
+    for mrn, group in df.groupby(id_col, sort=False):
+        group = group.sort_values(time_col)
+        # Read the landmark off the frame, never as max(TIME). patient_targets
+        # can use max(TIME) because its inputs are truncated at the landmark, so
+        # the last row *is* the landmark. These inputs are not: they retain
+        # post-landmark observations, so max(TIME) would be the patient's final
+        # follow-up visit and the "landmark slice" would silently select the
+        # wrong row for every patient with any post-landmark lab.
+        if has_landmark_col:
+            landmark = float(
+                pd.to_numeric(group["landmark_time"], errors="coerce").iloc[0]
+            )
+        else:
+            landmark = float(pd.to_numeric(group[time_col], errors="coerce").max())
+
+        # Per-cause absolute event times are patient-level constants; read them
+        # once rather than per prediction time.
+        event_times: list[float] = []
+        observed: list[bool] = []
+        for event_col, event_time_col in zip(event_cols, time_cols):
+            event = int(pd.to_numeric(group[event_col], errors="coerce").fillna(0).iloc[0])
+            event_time = float(pd.to_numeric(group[event_time_col], errors="coerce").iloc[0])
+            event_times.append(event_time)
+            observed.append(event == 1)
+        event_times_arr = np.asarray(event_times, dtype=float)
+        observed_arr = np.asarray(observed, dtype=bool)
+
+        for prediction_time in pd.to_numeric(group[time_col], errors="coerce").to_numpy(dtype=float):
+            # Residual durations measured from THIS prediction point.
+            durations_arr = event_times_arr - float(prediction_time)
+            resolved = _resolve_label(
+                durations_arr, observed_arr, max_pred_window=max_pred_window
+            )
+            if resolved is None:
+                n_not_at_risk += 1
+                continue
+            duration, label, uncensored_duration, uncensored_label = resolved
+            if uncensored_duration > max_pred_window:
+                n_censored_at_window += 1
+
+            duration_bin = int(np.clip(np.ceil(duration), 1, max_pred_window))
+            if duration_bin < 1:
+                raise AssertionError(
+                    f"patient {mrn} @ TIME={prediction_time}: duration_bin="
+                    f"{duration_bin} < 1 after clipping (duration={duration}). A "
+                    "negative duration must not be silently masked into bin 1."
+                )
+            rows.append(
+                {
+                    id_col: mrn,
+                    time_col: float(prediction_time),
+                    "landmark_time": landmark,
+                    "duration": duration,
+                    "duration_bin": duration_bin,
+                    "label": label,
+                    "at_risk": True,
+                    "uncensored_duration": uncensored_duration,
+                    "uncensored_label": uncensored_label,
+                }
+            )
+
+    n_patients = df[id_col].nunique() if len(df) else 0
+    print(
+        f"[patient_targets_dynamic] {len(rows)} (patient, time) targets across "
+        f"{n_patients} patients; {n_not_at_risk} rows dropped as not-at-risk; "
+        f"{n_censored_at_window} censored at max_pred_window={max_pred_window}."
+    )
+    columns = [
+        id_col,
+        time_col,
+        "landmark_time",
+        "duration",
+        "duration_bin",
+        "label",
+        "at_risk",
+        "uncensored_duration",
+        "uncensored_label",
+    ]
+    return pd.DataFrame(rows, columns=columns).set_index([id_col, time_col])
 
 
 def manifest_horizons_for_config(

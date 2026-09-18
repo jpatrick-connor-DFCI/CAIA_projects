@@ -76,6 +76,13 @@ ENDPOINT = "platinum"
 DEFAULT_SURVLATENT_REPO = SURVIVAL_DIR / "survlatent_ode_repo"
 SURVLATENT_REPO = DEFAULT_SURVLATENT_REPO
 MAX_PRED_WINDOW = 260
+# Also build the full-follow-up longitudinal inputs (post-landmark labs
+# retained), which the dynamic per-timepoint DeepHit arm reads. Off by default:
+# it is a second person-period build per landmark, and only RUN_DYNAMIC
+# consumes it. Set this in 01_preprocessing.ipynb BEFORE building inputs --
+# turning on RUN_DYNAMIC in 03b cannot retroactively create these files, and
+# the runner will refuse to start without them.
+BUILD_FULL_FOLLOWUP = False
 # These analyses use the baseline ADT cohort. Sequencing and Gleason get their
 # own observation-date origins; PRS retains ADT start as time zero.
 SOMATIC_GLEASON_LANDMARKS = (0,)
@@ -1112,6 +1119,12 @@ def build_prediction_inputs(run: dict, dry_run: bool = False) -> None:
     # platinum does not remove NEPC patients, and prevalent NEPC does not remove
     # platinum patients.
     cmd += ["--endpoint", run.get("endpoint", ENDPOINT)]
+    if BUILD_FULL_FOLLOWUP:
+        # Writes longitudinal_full_landmark{D}.csv ALONGSIDE the landmark
+        # files -- never instead of them. Needed by the dynamic
+        # (per-timepoint) DeepHit arm; harmless otherwise beyond the extra
+        # build time and disk. See RUN_DYNAMIC.
+        cmd.append("--longitudinal-full-followup")
     rc = _run(cmd, dry_run=dry_run)
     if not dry_run and rc != 0:
         raise RuntimeError(f"build_prediction_inputs failed for {run['label']} with rc={rc}")
@@ -1218,8 +1231,35 @@ _LONGITUDINAL_CONFIGS_BY_ENDPOINT = {
 # Dynamic-DeepHit alone; set to True once that environment is available.
 RUN_SURVLATENT = False
 
+# Feed SurvLatent ODE the full-follow-up frame instead of the landmark-truncated
+# one. Like RUN_DYNAMIC this needs inputs built with
+# build_prediction_inputs.py --longitudinal-full-followup; the adapter
+# cross-checks the manifest and refuses a mismatch in either direction.
+SURVLATENT_FULL_FOLLOWUP = False
 
-def longitudinal_task_specs(endpoint: str = None, *, include_survlatent: bool = None):
+# One point of the end_of_obs_idx sweep, in days past the landmark, or None for
+# no truncation. Setting it implies full follow-up. It is a SINGLE value rather
+# than a grid because each point is a separate fit with its own checkpoints and
+# its own run_id -- sweep by running the pipeline once per value. Read the
+# risk-SD-collapse warning in the diagnostics before spending a grid: a
+# collapsed run is a stop condition, not a point to compare.
+SURVLATENT_OBSERVATION_CUT_DAYS = None
+
+# The true dynamic (per-timepoint) Dynamic-DeepHit arm. Off by default because
+# it needs inputs built with build_prediction_inputs.py
+# --longitudinal-full-followup; without those the runner refuses to start
+# rather than score a landmark-truncated frame as if it were full follow-up.
+# Turning this on ADDS an arm -- the landmark arm still runs and still produces
+# the number comparable to Cox/XGBoost.
+RUN_DYNAMIC = False
+
+
+def longitudinal_task_specs(
+    endpoint: str = None,
+    *,
+    include_survlatent: bool = None,
+    include_dynamic: bool = None,
+):
     """(model, config_dir, metrics_filename) triples for one endpoint.
 
     The cause-only config is listed first so it leads the summary table; it is
@@ -1228,6 +1268,8 @@ def longitudinal_task_specs(endpoint: str = None, *, include_survlatent: bool = 
     endpoint = ENDPOINT if endpoint is None else endpoint
     if include_survlatent is None:
         include_survlatent = RUN_SURVLATENT
+    if include_dynamic is None:
+        include_dynamic = RUN_DYNAMIC
     if endpoint not in _LONGITUDINAL_CONFIGS_BY_ENDPOINT:
         valid = ", ".join(sorted(_LONGITUDINAL_CONFIGS_BY_ENDPOINT))
         raise ValueError(
@@ -1238,6 +1280,14 @@ def longitudinal_task_specs(endpoint: str = None, *, include_survlatent: bool = 
     specs = [
         ("dynamic-deephit", cfg, f"dynamic_deephit_metrics_{cfg}.csv") for cfg in configs
     ]
+    if include_dynamic:
+        # Filename tracks the runner's `dynamic_deephit_dyn` output prefix, and
+        # the separate model name gives it its own output directory, so the two
+        # DeepHit arms can never overwrite each other's metrics.
+        specs.extend(
+            ("dynamic-deephit-dyn", cfg, f"dynamic_deephit_dyn_metrics_{cfg}.csv")
+            for cfg in configs
+        )
     if include_survlatent:
         specs.extend(("survlatent-ode", cfg, None) for cfg in configs)
     return specs
@@ -1249,16 +1299,33 @@ def longitudinal_task_specs(endpoint: str = None, *, include_survlatent: bool = 
 LONGITUDINAL_TASK_SPECS = longitudinal_task_specs("platinum", include_survlatent=True)
 
 
-def longitudinal_run_id(config_dir: str, landmark: int) -> str:
-    """Matches survlatent_ode.py's default --run-id (prostate_<config>_landmark<D>_v1)."""
-    return f"prostate_{config_dir}_landmark{landmark}_v1"
+def longitudinal_run_id(
+    config_dir: str, landmark: int, *, cut_days: int | None = None
+) -> str:
+    """Matches survlatent_ode.py's default_run_id().
+
+    ``cut_days=None`` gives the historical ``prostate_<config>_landmark<D>_v1``,
+    which existing checkpoints are named after; an observation cut appends
+    ``_cut<N>`` so each sweep point is its own fit. Kept in sync with
+    survlatent_ode.default_run_id by tests/test_survlatent_full_followup.py.
+    """
+    base = f"prostate_{config_dir}_landmark{landmark}"
+    if cut_days is None:
+        return f"{base}_v1"
+    return f"{base}_cut{int(cut_days)}_v1"
 
 
 def longitudinal_metrics_filename(model: str, config_dir: str, landmark: int, metrics_filename) -> str:
     if metrics_filename is not None:
         return metrics_filename
     if model == "survlatent-ode":
-        return f"survlatent_ode_test_metrics_{longitudinal_run_id(config_dir, landmark)}.csv"
+        # Must carry the same cut as build_model_command passed via --run-id, or
+        # the summary looks for the un-cut filename and reports every swept run
+        # as "missing".
+        run_id = longitudinal_run_id(
+            config_dir, landmark, cut_days=SURVLATENT_OBSERVATION_CUT_DAYS
+        )
+        return f"survlatent_ode_test_metrics_{run_id}.csv"
     raise ValueError(f"No metrics filename known for model={model!r}.")
 
 
@@ -1280,6 +1347,7 @@ def model_output_dir(model: str) -> str:
         "elastic-net": "cox",
         "xgboost": "xgboost",
         "dynamic-deephit": "multivariate_longitudinal/dynamic_deephit",
+        "dynamic-deephit-dyn": "multivariate_longitudinal/dynamic_deephit_dynamic",
         "survlatent-ode": "multivariate_longitudinal/survlatent_ode",
     }
     if model not in mapping:
@@ -1318,8 +1386,8 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
         if config_dir == "baseline":
             cmd.append("--baseline")
         return cmd
-    if model == "dynamic-deephit":
-        return [
+    if model in ("dynamic-deephit", "dynamic-deephit-dyn"):
+        cmd = [
             PYTHON, SURVIVAL_DIR / "multivariate_longitudinal" / "dynamic_deephit.py",
             "--inputs-dir", run["inputs_dir"],
             "--output-dir", row_output_dir,
@@ -1329,6 +1397,15 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             *cohort_args,
             overwrite_flag,
         ]
+        if model == "dynamic-deephit-dyn":
+            # Switches the runner to the longitudinal_full_* inputs and scores a
+            # CIF at every observation time. The runner cross-checks this against
+            # the manifest's include_post_landmark flag and refuses a mismatch in
+            # either direction, so a tree built without
+            # --longitudinal-full-followup fails loudly here instead of quietly
+            # scoring the landmark frame twice.
+            cmd.append("--dynamic")
+        return cmd
     if model == "survlatent-ode":
         if not SURVLATENT_REPO:
             raise RuntimeError(
@@ -1345,10 +1422,23 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             "--output-dir", str(Path(row_output_dir).resolve()),
             "--landmark-day", str(landmark),
             "--config", config_dir,
-            "--run-id", longitudinal_run_id(config_dir, landmark),
+            # Cut-aware: --run-id is passed explicitly, so it must carry the
+            # sweep point or every cut would share one set of checkpoints and
+            # prepare_run_artifacts() would resume the previous point's fit.
+            # With SURVLATENT_OBSERVATION_CUT_DAYS = None this is byte-identical
+            # to longitudinal_run_id(config_dir, landmark).
+            "--run-id", longitudinal_run_id(
+                config_dir, landmark, cut_days=SURVLATENT_OBSERVATION_CUT_DAYS
+            ),
             "--max-pred-window", str(MAX_PRED_WINDOW),
             overwrite_flag,
         ]
+        if SURVLATENT_OBSERVATION_CUT_DAYS is not None:
+            # Implies --full-followup in the adapter; truncating the landmark
+            # frame would be a no-op, since it has no post-landmark rows.
+            cmd += ["--observation-cut-days", str(SURVLATENT_OBSERVATION_CUT_DAYS)]
+        elif SURVLATENT_FULL_FOLLOWUP:
+            cmd.append("--full-followup")
         if FORCE_RERUN:
             # A forced refit is a fresh fit: clear this run_id's checkpoints too,
             # or prepare_run_artifacts() aborts on the leftover artifacts.
@@ -1646,16 +1736,82 @@ def run_multivariate_available_case_sensitivity(run: dict, dry_run: bool = False
     return summary
 
 
+def run_incremental_risk(run: dict, dry_run: bool = False):
+    """Phase 5 incremental-value analyses on the dynamic arm's predictions.
+
+    Post-processing, not a model: it reads the per-timepoint predictions the
+    dynamic arm already wrote and needs no refit. Because the GRU is causal,
+    the prediction at step ``t - delta`` already IS the model's estimate from
+    history truncated there, which is what makes the held-back-window ablation
+    a pure re-read of existing output.
+
+    Runs only when RUN_DYNAMIC is on, since it consumes that arm's
+    dynamic_deephit_dyn_predictions_*.csv. Torch-free by construction, so it
+    stays runnable in an env where the model arms cannot run.
+    """
+    if not RUN_DYNAMIC:
+        print("[incremental-risk] disabled (compass_pipeline.RUN_DYNAMIC = False)")
+        return []
+    endpoint = run.get("endpoint", ENDPOINT)
+    configs = [
+        cfg
+        for model, cfg, _ in longitudinal_task_specs(endpoint, include_dynamic=True)
+        if model == "dynamic-deephit-dyn"
+    ]
+    summary = []
+    for landmark in run["landmarks"]:
+        for config_dir in configs:
+            row_output_dir = (
+                run["output_dir"]
+                / model_output_dir("dynamic-deephit-dyn")
+                / f"landmark_{landmark}"
+                / config_dir
+            )
+            tag = f"{run['label']:28s} incremental +{landmark}d {config_dir}"
+            # The ablation table is the one to lead with, so it is what marks
+            # this step done.
+            done = row_output_dir / "incremental_risk_ablation.csv"
+            if done.exists() and not FORCE_RERUN:
+                print(f"[skip] {tag} -> {done.name} exists")
+                summary.append((tag, "skipped", 0.0))
+                continue
+            cmd = [
+                PYTHON,
+                SURVIVAL_DIR / "multivariate_longitudinal" / "incremental_risk.py",
+                "--output-dir", row_output_dir,
+                "--endpoint", endpoint,
+                # Singular, matching incremental_risk.py's parser (the model
+                # runners take --landmark-day too; only the Cox/XGBoost arms
+                # use the plural --landmark-days).
+                "--landmark-day", str(landmark),
+                "--config", config_dir,
+                "--cohort", str(run.get("cohort") or DEFAULT_COHORT),
+                "--overwrite" if FORCE_RERUN else "--no-overwrite",
+            ]
+            print(f"[run ] {tag}")
+            t0 = time.time()
+            rc = _run(cmd, dry_run=dry_run)
+            elapsed = time.time() - t0
+            status = "ok" if rc == 0 else f"FAILED (rc={rc})"
+            print(f"[done] {tag} -> {status} ({elapsed/60:.1f} min)\n")
+            summary.append((tag, status, elapsed))
+    return summary
+
+
 def run_multivariate_longitudinal(run: dict, dry_run: bool = False):
     """Dynamic-DeepHit (and optionally SurvLatent ODE) in this run's configs.
 
     Configs follow the run's endpoint: platinum/competing, or nepc/
     nepc_competing. SurvLatent ODE is included only when RUN_SURVLATENT is on.
+    When RUN_DYNAMIC is on, the incremental-value analyses run afterwards over
+    the dynamic arm's predictions.
     """
     specs = longitudinal_task_specs(run.get("endpoint", ENDPOINT))
     if not RUN_SURVLATENT:
         print("[survlatent-ode] disabled (compass_pipeline.RUN_SURVLATENT = False)")
     summary = _run_tasks(run, specs, dry_run=dry_run)
+    # After the fits, not interleaved: it reads their predictions.
+    summary = summary + run_incremental_risk(run, dry_run=dry_run)
     print("\n=== run summary ===")
     for tag, status, elapsed in summary:
         print(f"  {tag} {status:>20s} {elapsed/60:6.1f} min")
@@ -1735,7 +1891,12 @@ def summarize_longitudinal_outputs(run: dict) -> pd.DataFrame:
             rows.append({**base, **_missing_metric_fields("missing")})
             continue
         df = pd.read_csv(metrics_path)
-        if model == "dynamic-deephit":
+        if model in ("dynamic-deephit", "dynamic-deephit-dyn"):
+            # The dynamic arm writes the same canonical block (invariant #9):
+            # its *_metrics.csv holds the single landmark-time row, and the
+            # per-prediction-time rows go to a separate by-time file. So it is
+            # read exactly like the landmark arm, and the two are directly
+            # comparable in the summary table.
             cause = df.loc[df["endpoint"] == endpoint]
             if cause.empty:
                 rows.append({**base, **_missing_metric_fields(f"no {endpoint} row")})
@@ -1762,6 +1923,54 @@ def summarize_longitudinal_outputs(run: dict) -> pd.DataFrame:
             except (StopIteration, IndexError, KeyError, ValueError) as exc:
                 rows.append({**base, **_missing_metric_fields(f"unparsed ({exc})")})
     return pd.DataFrame(rows).sort_values(["run", "landmark", "model", "config"]).reset_index(drop=True)
+
+
+def load_incremental_risk_results(
+    run: dict, which: str = "ablation"
+) -> pd.DataFrame:
+    """Read back the Phase 5 incremental-value tables for this run.
+
+    ``which="ablation"`` is the held-back-window comparison (5b) and is the one
+    to lead with: it holds the risk set fixed at each prediction time and varies
+    only the input window, so a positive ``auc_gain`` is attributable to the
+    newest labs. ``which="by_landmark"`` is the sequential-landmark series (5a),
+    whose trend is confounded -- the risk set shrinks as the prediction time
+    grows and is increasingly selected for patients who have not yet had the
+    event, so a rising AUC there is not a clean "the model improves" claim.
+
+    Returns an empty frame when the dynamic arm has not been run, rather than
+    raising, so a notebook cell can display it unconditionally.
+    """
+    if which not in ("ablation", "by_landmark"):
+        raise ValueError(
+            f"which must be 'ablation' or 'by_landmark', got {which!r}."
+        )
+    endpoint = run.get("endpoint", ENDPOINT)
+    configs = [
+        cfg
+        for model, cfg, _ in longitudinal_task_specs(endpoint, include_dynamic=True)
+        if model == "dynamic-deephit-dyn"
+    ]
+    frames = []
+    for landmark in run["landmarks"]:
+        for config_dir in configs:
+            path = (
+                run["output_dir"]
+                / model_output_dir("dynamic-deephit-dyn")
+                / f"landmark_{landmark}"
+                / config_dir
+                / f"incremental_risk_{which}.csv"
+            )
+            if not path.exists():
+                continue
+            df = pd.read_csv(path)
+            # The CSVs already carry landmark_days/config/endpoint; `run` is
+            # what lets several arms' tables concat and stay distinguishable.
+            df.insert(0, "run", run["label"])
+            frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
 def filter_nominal(results: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:

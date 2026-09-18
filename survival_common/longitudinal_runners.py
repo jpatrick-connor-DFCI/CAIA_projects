@@ -33,6 +33,7 @@ from survival_common.longitudinal_targets import (
     LONGITUDINAL_CONFIGS,
     manifest_horizons_for_config,
     patient_targets,
+    patient_targets_dynamic,
     resolve_config,
 )
 
@@ -158,6 +159,18 @@ def build_deephit_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip 5-fold CV; fit a single model with --hidden-dim/--dropout/--lr.",
     )
+    parser.add_argument(
+        "--dynamic",
+        action="store_true",
+        help=(
+            "True per-timepoint prediction: emit a CIF at every observation time "
+            "using only history up to that time, instead of one prediction at the "
+            "landmark. Requires inputs built with --longitudinal-full-followup "
+            "(manifest include_post_landmark=true); the runner refuses landmark-"
+            "truncated inputs, which would make every post-landmark prediction "
+            "read a blank future."
+        ),
+    )
     return parser
 
 
@@ -176,16 +189,41 @@ def load_longitudinal_inputs(args: Namespace) -> tuple[pd.DataFrame, dict, dict]
             f"Inputs dir {inputs_dir} not found. Run build_prediction_inputs.py first."
         )
     landmark_day = int(args.landmark_day)
-    input_csv = inputs_dir / f"longitudinal_landmark{landmark_day}.csv"
-    manifest_path = inputs_dir / f"longitudinal_landmark{landmark_day}_manifest.json"
+    # The dynamic arm reads a different file on purpose. Its inputs retain
+    # post-landmark labs, which are legitimate *inputs at prediction times after
+    # the landmark* but would be future information to the landmark arm -- so
+    # the two never share a filename and can never be swapped by accident.
+    dynamic = bool(getattr(args, "dynamic", False))
+    stem = "longitudinal_full" if dynamic else "longitudinal"
+    input_csv = inputs_dir / f"{stem}_landmark{landmark_day}.csv"
+    manifest_path = inputs_dir / f"{stem}_landmark{landmark_day}_manifest.json"
     build_manifest_path = inputs_dir / BUILD_MANIFEST_FILENAME
+    build_flag = (
+        "--build-longitudinal --longitudinal-full-followup"
+        if dynamic
+        else "--build-longitudinal"
+    )
     for path in (input_csv, manifest_path, build_manifest_path):
         if not path.exists():
             raise FileNotFoundError(
-                f"Missing {path}. Run build_prediction_inputs.py --build-longitudinal first."
+                f"Missing {path}. Run build_prediction_inputs.py {build_flag} first."
             )
 
     manifest = json.loads(manifest_path.read_text())
+    include_post_landmark = bool(manifest.get("include_post_landmark", False))
+    if dynamic and not include_post_landmark:
+        raise ValueError(
+            f"{manifest_path} has include_post_landmark=false, so its labs were "
+            "truncated at the landmark. --dynamic needs full-follow-up inputs: "
+            "rebuild with build_prediction_inputs.py --longitudinal-full-followup."
+        )
+    if not dynamic and include_post_landmark:
+        raise ValueError(
+            f"{manifest_path} has include_post_landmark=true (full-follow-up "
+            "inputs). Scoring these at a single landmark would leak post-landmark "
+            "labs into the landmark prediction. Pass --dynamic, or point "
+            "--inputs-dir at landmark-truncated inputs."
+        )
     build_manifest = json.loads(build_manifest_path.read_text())
 
     longitudinal_schema_version = int(build_manifest.get("longitudinal_schema_version", 0))
@@ -205,7 +243,8 @@ def load_longitudinal_inputs(args: Namespace) -> tuple[pd.DataFrame, dict, dict]
     max_followup_days = build_manifest.get("max_followup_days")
     print(
         f"Loading longitudinal inputs from {input_csv} "
-        f"(landmark=+{landmark_day}d, max_followup_days={max_followup_days})"
+        f"(landmark=+{landmark_day}d, max_followup_days={max_followup_days}, "
+        f"include_post_landmark={include_post_landmark})"
     )
 
     df = pd.read_csv(input_csv, low_memory=False)
@@ -223,21 +262,44 @@ def write_deephit_outputs(
     fold_df: pd.DataFrame,
     cv_summary_df: pd.DataFrame,
     run_manifest: dict,
+    prefix: str = "dynamic_deephit",
+    dynamic_pred: pd.DataFrame | None = None,
+    metrics_by_time: pd.DataFrame | None = None,
 ) -> list[Path]:
+    """Write one run's outputs.
+
+    ``prefix`` separates the dynamic arm's files from the landmark arm's so the
+    two can share an --output-dir without overwriting each other. ``dynamic_pred``
+    is the full per-(patient, time) prediction frame; ``pred`` is always the
+    landmark slice, which is what the canonical metrics are computed on and what
+    is comparable to the Cox/XGBoost arms.
+
+    ``metrics_by_time`` goes to its own file rather than into ``metrics``:
+    invariant #9 pins the canonical block on ``*_metrics.csv``, which stays one
+    row per cause so every existing reader of it keeps working.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     config_tag = config
-    pred_path = output_dir / f"dynamic_deephit_patient_risks_{config_tag}.csv"
-    metrics_path = output_dir / f"dynamic_deephit_metrics_{config_tag}.csv"
-    auc_path = output_dir / f"dynamic_deephit_auc_t_{config_tag}.csv"
-    brier_path = output_dir / f"dynamic_deephit_brier_{config_tag}.csv"
-    cv_folds_path = output_dir / f"dynamic_deephit_cv_folds_{config_tag}.csv"
-    cv_summary_path = output_dir / f"dynamic_deephit_cv_summary_{config_tag}.csv"
-    manifest_out_path = output_dir / f"dynamic_deephit_manifest_{config_tag}.json"
+    pred_path = output_dir / f"{prefix}_patient_risks_{config_tag}.csv"
+    metrics_path = output_dir / f"{prefix}_metrics_{config_tag}.csv"
+    auc_path = output_dir / f"{prefix}_auc_t_{config_tag}.csv"
+    brier_path = output_dir / f"{prefix}_brier_{config_tag}.csv"
+    cv_folds_path = output_dir / f"{prefix}_cv_folds_{config_tag}.csv"
+    cv_summary_path = output_dir / f"{prefix}_cv_summary_{config_tag}.csv"
+    manifest_out_path = output_dir / f"{prefix}_manifest_{config_tag}.json"
 
     pred.to_csv(pred_path, index=False)
     metrics.to_csv(metrics_path, index=False)
     auc_t.to_csv(auc_path, index=False)
     saved = [metrics_path, auc_path, pred_path]
+    if dynamic_pred is not None:
+        dynamic_pred_path = output_dir / f"{prefix}_predictions_{config_tag}.csv"
+        dynamic_pred.to_csv(dynamic_pred_path, index=False)
+        saved.append(dynamic_pred_path)
+    if metrics_by_time is not None and not metrics_by_time.empty:
+        by_time_path = output_dir / f"{prefix}_metrics_by_time_{config_tag}.csv"
+        metrics_by_time.to_csv(by_time_path, index=False)
+        saved.append(by_time_path)
     if not brier_t.empty:
         brier_t.to_csv(brier_path, index=False)
         saved.append(brier_path)
@@ -257,7 +319,9 @@ def write_deephit_outputs(
 
 
 def run_deephit(args: Namespace) -> None:
-    metrics_path = Path(args.output_dir) / f"dynamic_deephit_metrics_{args.config}.csv"
+    dynamic = bool(getattr(args, "dynamic", False))
+    prefix = "dynamic_deephit_dyn" if dynamic else "dynamic_deephit"
+    metrics_path = Path(args.output_dir) / f"{prefix}_metrics_{args.config}.csv"
     if not getattr(args, "overwrite", False) and metrics_path.exists():
         print(f"[skip] {metrics_path} already exists (pass --overwrite to refit)")
         return
@@ -297,14 +361,37 @@ def run_deephit(args: Namespace) -> None:
             "Cox/XGBoost."
         )
 
-    targets = patient_targets(
-        df,
-        id_col=id_col,
-        time_col=time_col,
-        event_cols=event_cols,
-        time_cols=time_cols,
-        max_pred_window=args.max_pred_window,
-    )
+    if dynamic:
+        targets = patient_targets_dynamic(
+            df,
+            id_col=id_col,
+            time_col=time_col,
+            event_cols=event_cols,
+            time_cols=time_cols,
+            max_pred_window=args.max_pred_window,
+        )
+        # The landmark slice of the dynamic targets. Every downstream consumer
+        # that expects one row per patient (CV scoring, the IPCW reference
+        # distribution, the canonical metrics counts) reads this, so the dynamic
+        # arm's headline numbers stay on exactly the same footing as the
+        # landmark arm's. tests/test_dynamic_targets.py pins this slice equal to
+        # patient_targets' output.
+        flat = targets.reset_index()
+        landmark_targets = (
+            flat.loc[flat[time_col] == flat["landmark_time"]]
+            .set_index(id_col)
+            .drop(columns=[time_col])
+        )
+    else:
+        targets = patient_targets(
+            df,
+            id_col=id_col,
+            time_col=time_col,
+            event_cols=event_cols,
+            time_cols=time_cols,
+            max_pred_window=args.max_pred_window,
+        )
+        landmark_targets = targets
 
     patient_split = df.groupby(id_col)["split"].first().astype(str)
     train_ids = set(patient_split.index[patient_split.eq("train")].map(str))
@@ -323,7 +410,12 @@ def run_deephit(args: Namespace) -> None:
         patient_static.index.intersection(sorted(train_val_ids))
     ].copy()
 
-    train_val_targets = targets.loc[targets.index.map(str).isin(train_val_ids)].copy()
+    # One row per train_val patient, always at the landmark: this is the IPCW
+    # censoring-weight reference distribution, and it must be a patient-level
+    # sample regardless of arm (a per-step frame would weight long histories up).
+    train_val_targets = landmark_targets.loc[
+        landmark_targets.index.map(str).isin(train_val_ids)
+    ].copy()
     fixed_horizons_by_event = manifest_horizons_for_config(
         build_manifest,
         landmark_day,
@@ -359,6 +451,8 @@ def run_deephit(args: Namespace) -> None:
             event_names=event_names,
             fixed_horizons_by_event=fixed_horizons_by_event,
             config_label=args.config,
+            dynamic=dynamic,
+            landmark_targets=landmark_targets if dynamic else None,
         )
         chosen = {
             "hidden_dim": int(best_row["hidden_dim"]),
@@ -401,9 +495,41 @@ def run_deephit(args: Namespace) -> None:
         dropout=final_dropout,
         lr=final_lr,
         seed=args.seed,
+        dynamic=dynamic,
     )
 
+    # In the dynamic arm `pred` is one row per (patient, prediction time). It is
+    # kept whole for the Phase 5 incremental analysis, while the canonical
+    # metrics below are computed on the landmark slice only -- one row per
+    # patient, the same quantity the other arms report.
+    dynamic_pred = None
+    if dynamic:
+        dynamic_pred = pred
+        pred = engine.landmark_slice(
+            pred, landmark_targets, id_col=id_col, time_col=time_col
+        )
+        if pred.empty:
+            raise RuntimeError(
+                "Dynamic predictions contain no rows at any patient's landmark_time; "
+                "the target rebasing or the at-risk filter is wrong."
+            )
+
     time_unit_days = int(manifest["time_unit_days"])
+    metrics_by_time = None
+    if dynamic:
+        # The per-prediction-time series: computed from the FULL dynamic frame,
+        # which is why it is done here rather than after `pred` was narrowed to
+        # the landmark slice above.
+        metrics_by_time = engine.compute_metrics_by_time(
+            dynamic_pred,
+            event_names=event_names,
+            train_val_targets=train_val_targets,
+            fixed_horizons_by_event=fixed_horizons_by_event,
+            id_col=id_col,
+            time_col=time_col,
+            quantiles=tuple(engine.DEFAULT_AUC_QUANTILES),
+            time_unit_days=time_unit_days,
+        )
     metrics, auc_t = engine.compute_metrics(
         pred,
         event_names=event_names,
@@ -446,6 +572,27 @@ def run_deephit(args: Namespace) -> None:
         "inputs_dir": str(args.inputs_dir),
         "landmark_day": landmark_day,
         "config": args.config,
+        "dynamic": dynamic,
+        "include_post_landmark": bool(manifest.get("include_post_landmark", False)),
+        "n_dynamic_prediction_rows": (
+            int(len(dynamic_pred)) if dynamic_pred is not None else None
+        ),
+        "n_prediction_times": (
+            int(dynamic_pred[time_col].nunique()) if dynamic_pred is not None else None
+        ),
+        # How many by-time rows carry usable metrics vs. were gated as
+        # underpowered. A run where most rows are gated is a run whose by-time
+        # series should not be plotted as if it were a trend.
+        "n_by_time_rows": (
+            int(len(metrics_by_time)) if metrics_by_time is not None else None
+        ),
+        "n_by_time_rows_underpowered": (
+            int((metrics_by_time["note"].astype(str).str.startswith("underpowered")).sum())
+            if metrics_by_time is not None and not metrics_by_time.empty
+            else None
+        ),
+        "by_time_min_risk_set": engine.MIN_RISK_SET_FOR_BY_TIME if dynamic else None,
+        "by_time_min_events": engine.MIN_EVENTS_FOR_BY_TIME if dynamic else None,
         "event_names": event_names,
         "feature_cols": feature_cols,
         "horizon_source": f"auc_horizons_by_landmark[landmark][{horizon_endpoint!r}]",
@@ -482,4 +629,7 @@ def run_deephit(args: Namespace) -> None:
         fold_df=fold_df,
         cv_summary_df=cv_summary_df,
         run_manifest=run_manifest,
+        prefix=prefix,
+        dynamic_pred=dynamic_pred,
+        metrics_by_time=metrics_by_time,
     )

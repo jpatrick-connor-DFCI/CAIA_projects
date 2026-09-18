@@ -108,6 +108,78 @@ def load_split(
     return sub.sort_values([id_col, time_col], ascending=(True, True)).drop(columns=["split"])
 
 
+def default_run_id(*, config: str, landmark_day: int, cut_days: int | None) -> str:
+    """Training identifier, unique per (config, landmark, observation cut).
+
+    With no cut this returns exactly the historical
+    ``prostate_<config>_landmark<D>_v1`` spelling, which compass_pipeline's
+    longitudinal_run_id() also constructs and which existing checkpoints on the
+    cluster are named after -- so turning the sweep on never renames or
+    orphans an existing run.
+    """
+    base = f"prostate_{config}_landmark{int(landmark_day)}"
+    if cut_days is None:
+        return f"{base}_v1"
+    return f"{base}_cut{int(cut_days)}_v1"
+
+
+def truncate_observations_at_cut(
+    df: pd.DataFrame,
+    *,
+    id_col: str,
+    time_col: str,
+    cut_days: int,
+) -> pd.DataFrame:
+    """Keep only observations at or before landmark + ``cut_days``.
+
+    This is the sweep mechanism for ``end_of_obs_idx``. It is not a settable
+    parameter upstream: ``lib/utils.py`` derives it as ``tt[-1]``, the last
+    retained observation time, so moving the prediction point means truncating
+    the input rows. Truncating here -- before the batch builder ever sees the
+    data -- also means no post-cut value can reach the encoder, which is what
+    makes a sweep point an honest "prediction from history up to the cut".
+
+    Patients left with no observations are dropped rather than kept empty:
+    ``variable_time_collate`` would fail on an empty ``tt``, and a patient with
+    no history at the cut has nothing to predict from. Their removal is
+    reported, because a cut that silently discards most of the cohort would
+    otherwise look like a clean run on a much smaller, healthier sample.
+    """
+    if cut_days < 0:
+        raise ValueError("--observation-cut-days must be non-negative.")
+    if "landmark_time" not in df.columns:
+        raise ValueError(
+            "Observation truncation needs the explicit landmark_time column, "
+            "which only the full-follow-up frame carries. Inferring the "
+            "landmark from max(TIME) here would move the cut point per patient "
+            "by the length of their post-landmark history. Rebuild inputs with "
+            "build_prediction_inputs.py --longitudinal-full-followup."
+        )
+    landmark_time = pd.to_numeric(df["landmark_time"], errors="coerce").astype(float)
+    cutoff = landmark_time + float(cut_days)
+    keep = pd.to_numeric(df[time_col], errors="coerce").astype(float).le(cutoff)
+
+    n_before = df[id_col].nunique()
+    out = df.loc[keep].copy()
+    n_after = out[id_col].nunique()
+    n_rows_dropped = int((~keep).sum())
+    print(
+        f"Observation cut at landmark+{cut_days}d: kept {len(out):,}/{len(df):,} rows "
+        f"({n_rows_dropped:,} dropped), {n_after:,}/{n_before:,} patients retained"
+    )
+    if out.empty:
+        raise ValueError(
+            f"Observation cut at landmark+{cut_days}d left no rows at all."
+        )
+    if n_after < n_before:
+        print(
+            f"  [warn] {n_before - n_after:,} patients had no observation at or "
+            f"before the cut and were dropped; this sweep point is scored on a "
+            f"different, smaller cohort than an uncut run."
+        )
+    return out
+
+
 def add_post_landmark_horizon_columns(
     df: pd.DataFrame,
     *,
@@ -123,6 +195,14 @@ def add_post_landmark_horizon_columns(
     evaluates a post-landmark horizon from each patient's landmark. We therefore
     add per-patient horizon-censored event/time columns and reserve the larger
     absolute model window only for making room for pre-landmark history.
+
+    The landmark is read from the explicit ``landmark_time`` column when the
+    frame carries one, and inferred from each patient's ``max(TIME)`` otherwise.
+    Those agree by construction on the landmark frame, which ends AT the
+    landmark -- and that identity is exactly what the full-follow-up frame
+    breaks, where ``max(TIME)`` is the patient's last follow-up visit instead.
+    Inferring there would shift every horizon by the length of a patient's
+    post-landmark history, silently and per patient.
     """
     if horizon <= 0:
         raise ValueError("--max-pred-window must be positive.")
@@ -133,9 +213,23 @@ def add_post_landmark_horizon_columns(
         raise ValueError("event_col and time_to_event_col must have matching lengths.")
 
     adjusted = df.copy()
-    landmark_time = adjusted.groupby(id_col)[time_col].transform("max").astype(float)
-    if landmark_time.isna().any():
-        raise ValueError("Unable to infer landmark time from patient TIME maxima.")
+    if "landmark_time" in adjusted.columns:
+        landmark_time = pd.to_numeric(
+            adjusted["landmark_time"], errors="coerce"
+        ).astype(float)
+        if landmark_time.isna().any():
+            raise ValueError(
+                "The landmark_time column contains non-numeric or missing values."
+            )
+        # One landmark per patient, or the column is not what it claims to be.
+        if adjusted.groupby(id_col)["landmark_time"].nunique().gt(1).any():
+            raise ValueError(
+                "landmark_time varies within a patient; expected one landmark per ID."
+            )
+    else:
+        landmark_time = adjusted.groupby(id_col)[time_col].transform("max").astype(float)
+        if landmark_time.isna().any():
+            raise ValueError("Unable to infer landmark time from patient TIME maxima.")
 
     adjusted_event_cols: list[str] = []
     adjusted_time_cols: list[str] = []
@@ -446,15 +540,40 @@ def load_longitudinal_inputs(args: argparse.Namespace) -> tuple[pd.DataFrame, di
             f"Inputs dir {inputs_dir} not found. Run build_prediction_inputs.py first."
         )
     landmark_day = int(args.landmark_day)
-    input_csv = inputs_dir / f"longitudinal_landmark{landmark_day}.csv"
-    manifest_path = inputs_dir / f"longitudinal_landmark{landmark_day}_manifest.json"
+    # The full-follow-up frame is a SEPARATE file, never a replacement: post-
+    # landmark labs are legitimate inputs only for predictions made after the
+    # landmark, so the two input types must not be interchangeable by accident.
+    full_followup = bool(getattr(args, "full_followup", False))
+    stem = "longitudinal_full" if full_followup else "longitudinal"
+    input_csv = inputs_dir / f"{stem}_landmark{landmark_day}.csv"
+    manifest_path = inputs_dir / f"{stem}_landmark{landmark_day}_manifest.json"
     for path in (input_csv, manifest_path):
         if not path.exists():
-            raise FileNotFoundError(
-                f"Missing {path}. Run build_prediction_inputs.py --build-longitudinal first."
+            hint = (
+                "build_prediction_inputs.py --longitudinal-full-followup"
+                if full_followup
+                else "build_prediction_inputs.py --build-longitudinal"
             )
+            raise FileNotFoundError(f"Missing {path}. Run {hint} first.")
     manifest = json.loads(manifest_path.read_text())
-    print(f"Loading longitudinal inputs from {input_csv} (landmark=+{landmark_day}d)")
+
+    # Cross-check the manifest against the flag in BOTH directions, so a tree
+    # built without the flag cannot be scored as if it were full follow-up, and
+    # the full frame cannot be silently fed to the landmark path.
+    built_full = bool(manifest.get("include_post_landmark", False))
+    if built_full != full_followup:
+        raise ValueError(
+            f"{input_csv.name} has include_post_landmark={built_full} but "
+            f"--full-followup={full_followup}. These inputs anchor their "
+            "horizons differently; refusing to mix them. Rebuild with "
+            "build_prediction_inputs.py --longitudinal-full-followup, or drop "
+            "--full-followup."
+        )
+    kind = "full follow-up" if full_followup else "landmark-truncated"
+    print(
+        f"Loading {kind} longitudinal inputs from {input_csv} "
+        f"(landmark=+{landmark_day}d)"
+    )
     df = pd.read_csv(input_csv, low_memory=False)
     return df, manifest
 
@@ -465,7 +584,17 @@ def main(args: argparse.Namespace) -> None:
     # the repo's own workspace.
     output_dir = Path(args.output_dir).resolve()
 
-    run_id = args.run_id or f"prostate_{args.config}_landmark{args.landmark_day}_v1"
+    # A cut point is a distinct fit, so it has to be a distinct run_id: the
+    # default otherwise collides across sweep points, and prepare_run_artifacts
+    # would either abort on the previous point's checkpoints or resume them.
+    cut_days = getattr(args, "observation_cut_days", None)
+    if cut_days is not None and not getattr(args, "full_followup", False):
+        # Truncation is only meaningful on a frame that HAS post-landmark rows.
+        args.full_followup = True
+        print("[note] --observation-cut-days implies --full-followup")
+    run_id = args.run_id or default_run_id(
+        config=args.config, landmark_day=args.landmark_day, cut_days=cut_days
+    )
     metrics_path = output_dir / f"survlatent_ode_test_metrics_{run_id}.csv"
     if not args.overwrite and metrics_path.exists():
         print(f"[skip] {metrics_path} already exists (pass --overwrite to refit)")
@@ -505,6 +634,15 @@ def main(args: argparse.Namespace) -> None:
         f"model absolute window={model_max_pred_window} "
         f"(max landmark offset={max_landmark_time})"
     )
+
+    # Before the horizon columns and before any split: truncation changes which
+    # observations exist, and the horizon censoring below is anchored to the
+    # landmark (not to the cut), so the two are independent and this ordering
+    # keeps the cut from perturbing the outcome definition.
+    if cut_days is not None:
+        df = truncate_observations_at_cut(
+            df, id_col=id_col, time_col=time_col, cut_days=cut_days
+        )
 
     df, event_col, time_to_event_col = add_post_landmark_horizon_columns(
         df,
@@ -731,6 +869,30 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Single landmark to analyze (singular -- one model fit per "
             "invocation). Resolves to longitudinal_landmark{D}.csv in --inputs-dir."
+        ),
+    )
+    parser.add_argument(
+        "--full-followup",
+        dest="full_followup",
+        action="store_true",
+        help=(
+            "Read longitudinal_full_landmark{D}.csv (post-landmark labs kept) "
+            "instead of the landmark-truncated frame. Requires inputs built "
+            "with build_prediction_inputs.py --longitudinal-full-followup; the "
+            "manifest is cross-checked in both directions."
+        ),
+    )
+    parser.add_argument(
+        "--observation-cut-days",
+        dest="observation_cut_days",
+        type=int,
+        default=None,
+        help=(
+            "Truncate each patient's observations at landmark + this many days "
+            "before fitting, which is how end_of_obs_idx is swept: the upstream "
+            "batch builder derives it from the last retained observation time "
+            "(lib/utils.py, end_of_obs_idx = tt[-1]) rather than from a "
+            "parameter. Implies --full-followup. Omit for no truncation."
         ),
     )
     parser.add_argument(

@@ -143,12 +143,14 @@ def split_assignments_filename(landmark_day: int) -> str:
     return f"split_assignments_landmark{int(landmark_day)}.csv"
 
 
-def longitudinal_filename(landmark_day: int) -> str:
-    return f"longitudinal_landmark{int(landmark_day)}.csv"
+def longitudinal_filename(landmark_day: int, *, full_followup: bool = False) -> str:
+    stem = "longitudinal_full" if full_followup else "longitudinal"
+    return f"{stem}_landmark{int(landmark_day)}.csv"
 
 
-def longitudinal_manifest_filename(landmark_day: int) -> str:
-    return f"longitudinal_landmark{int(landmark_day)}_manifest.json"
+def longitudinal_manifest_filename(landmark_day: int, *, full_followup: bool = False) -> str:
+    stem = "longitudinal_full" if full_followup else "longitudinal"
+    return f"{stem}_landmark{int(landmark_day)}_manifest.json"
 
 
 def validate_max_followup_days(
@@ -768,73 +770,109 @@ def main(args: argparse.Namespace) -> None:
             train_mrns = set(split.index[split.eq("train")])
             merged_with_split = merged.copy()
             merged_with_split["split"] = split.reindex(merged_with_split.index)
-            wide, manifest_extras, selected_labs, bounds = build_person_period_wide(
-                pre_treatment_lab_df,
-                merged_with_split,
-                landmark_day=landmark_day,
-                train_mrns=train_mrns,
-                canonical_labs=None if args.no_canonical_labs else canonical_labs,
-                time_unit_days=args.time_unit_days,
-                min_coverage=args.long_min_coverage,
-                max_labs=args.max_longitudinal_labs,
-                outlier_lo=args.outlier_lo,
-                outlier_hi=args.outlier_hi,
-                anchor_col=anchor_col,
-            )
-            n_without = manifest_extras["n_patients_without_selected_labs"]
-            if n_without:
-                print(f"  patients with landmark-only longitudinal rows: {n_without}")
-
-            long_csv = output_dir / longitudinal_filename(landmark_day)
-            wide.to_csv(long_csv, index=False)
-            long_manifest_path = output_dir / longitudinal_manifest_filename(landmark_day)
             long_event_cols, long_time_cols = longitudinal_event_columns(merged)
-            longitudinal_manifest = {
-                "id_col": ID_COL,
-                "time_col": "TIME",
-                "event_cols": long_event_cols,
-                "time_to_event_cols": long_time_cols,
-                "feat_cont": selected_labs + [AGE_COL],
-                "feat_cat": [],
-                "feat_reconstr": selected_labs,
-                "time_unit_days": int(args.time_unit_days),
-                "time_origin": "first_selected_pre_landmark_lab_bin",
-                "prediction_landmark": f"treatment_anchor_plus_{int(landmark_day)}d",
-                "landmark_days": int(landmark_day),
-                "anchor_col": "none" if anchor_col is None else str(anchor_col),
-                "seed": int(args.seed),
-                "test_frac": float(args.test_frac),
-                "val_frac": float(args.val_frac),
-                "test_stratification": stratification_by_landmark[str(landmark_day)]["test"],
-                "val_stratification": stratification_by_landmark[str(landmark_day)]["validation"],
-                "min_coverage": float(args.long_min_coverage),
-                "outlier_quantiles": [float(args.outlier_lo), float(args.outlier_hi)],
-                "clip_bounds": {k: list(v) for k, v in bounds.items()},
-                "canonical_labs_used": not args.no_canonical_labs,
-                "split_assignments": split_assignments_filename(landmark_day),
-                "split_counts": {
-                    "train": int(wide.loc[wide["split"] == "train", ID_COL].nunique()),
-                    "valid": int(wide.loc[wide["split"] == "valid", ID_COL].nunique()),
-                    "test": int(wide.loc[wide["split"] == "test", ID_COL].nunique()),
-                },
-                "n_rows": int(len(wide)),
-                "longitudinal_schema_version": LONGITUDINAL_SCHEMA_VERSION,
-                **manifest_extras,
-            }
-            long_manifest_path.write_text(json.dumps(longitudinal_manifest, indent=2))
-            print(
-                f"  longitudinal:      rows={len(wide)} patients={wide[ID_COL].nunique()} "
-                f"-> {long_csv}"
-            )
 
-            assert_split_agreement(aggregated, wide, landmark_day=landmark_day)
-            long_mrns = wide[ID_COL].nunique()
-            agg_mrns = len(aggregated)
-            if long_mrns < agg_mrns:
-                print(
-                    f"  note: longitudinal dropped {agg_mrns - long_mrns} MRNs "
-                    "with no usable pre-event observations"
+            # The landmark build is always written. --longitudinal-full-followup
+            # adds a SECOND set of files that retain post-landmark labs, for the
+            # dynamic (per-timepoint) arm; it never replaces the landmark files,
+            # because the two are not interchangeable -- post-landmark labs are
+            # future information to a landmark model. The manifest's
+            # include_post_landmark flag is what lets the runners refuse the
+            # wrong one rather than silently mis-scoring.
+            # getattr, not args.x: programmatic callers build a Namespace by
+            # hand (see tests/test_longitudinal_manifest.py) and must not have
+            # to learn about each new opt-in flag. Absent means off, which is
+            # the pre-existing behaviour.
+            full_followup_requested = bool(
+                getattr(args, "longitudinal_full_followup", False)
+            )
+            variants = [False] + ([True] if full_followup_requested else [])
+            for full_followup in variants:
+                if full_followup:
+                    # Rebuild lab_long over the full follow-up window rather than
+                    # reusing the landmark-truncated frame above.
+                    variant_lab_df = build_pre_treatment_lab_long(
+                        df,
+                        cohort_index=aggregated.index,
+                        landmark_offset_days=landmark_day,
+                        anchor_col=anchor_col,
+                        include_post_landmark=True,
+                    )
+                else:
+                    variant_lab_df = pre_treatment_lab_df
+
+                wide, manifest_extras, selected_labs, bounds = build_person_period_wide(
+                    variant_lab_df,
+                    merged_with_split,
+                    landmark_day=landmark_day,
+                    train_mrns=train_mrns,
+                    canonical_labs=None if args.no_canonical_labs else canonical_labs,
+                    time_unit_days=args.time_unit_days,
+                    min_coverage=args.long_min_coverage,
+                    max_labs=args.max_longitudinal_labs,
+                    outlier_lo=args.outlier_lo,
+                    outlier_hi=args.outlier_hi,
+                    anchor_col=anchor_col,
+                    include_post_landmark=full_followup,
                 )
+                n_without = manifest_extras["n_patients_without_selected_labs"]
+                if n_without and not full_followup:
+                    print(f"  patients with landmark-only longitudinal rows: {n_without}")
+
+                long_csv = output_dir / longitudinal_filename(
+                    landmark_day, full_followup=full_followup
+                )
+                wide.to_csv(long_csv, index=False)
+                long_manifest_path = output_dir / longitudinal_manifest_filename(
+                    landmark_day, full_followup=full_followup
+                )
+                longitudinal_manifest = {
+                    "id_col": ID_COL,
+                    "time_col": "TIME",
+                    "event_cols": long_event_cols,
+                    "time_to_event_cols": long_time_cols,
+                    "feat_cont": selected_labs + [AGE_COL],
+                    "feat_cat": [],
+                    "feat_reconstr": selected_labs,
+                    "time_unit_days": int(args.time_unit_days),
+                    "time_origin": "first_selected_pre_landmark_lab_bin",
+                    "prediction_landmark": f"treatment_anchor_plus_{int(landmark_day)}d",
+                    "landmark_days": int(landmark_day),
+                    "anchor_col": "none" if anchor_col is None else str(anchor_col),
+                    "seed": int(args.seed),
+                    "test_frac": float(args.test_frac),
+                    "val_frac": float(args.val_frac),
+                    "test_stratification": stratification_by_landmark[str(landmark_day)]["test"],
+                    "val_stratification": stratification_by_landmark[str(landmark_day)]["validation"],
+                    "min_coverage": float(args.long_min_coverage),
+                    "outlier_quantiles": [float(args.outlier_lo), float(args.outlier_hi)],
+                    "clip_bounds": {k: list(v) for k, v in bounds.items()},
+                    "canonical_labs_used": not args.no_canonical_labs,
+                    "split_assignments": split_assignments_filename(landmark_day),
+                    "split_counts": {
+                        "train": int(wide.loc[wide["split"] == "train", ID_COL].nunique()),
+                        "valid": int(wide.loc[wide["split"] == "valid", ID_COL].nunique()),
+                        "test": int(wide.loc[wide["split"] == "test", ID_COL].nunique()),
+                    },
+                    "n_rows": int(len(wide)),
+                    "longitudinal_schema_version": LONGITUDINAL_SCHEMA_VERSION,
+                    **manifest_extras,
+                }
+                long_manifest_path.write_text(json.dumps(longitudinal_manifest, indent=2))
+                label = "longitudinal_full:" if full_followup else "longitudinal:     "
+                print(
+                    f"  {label} rows={len(wide)} patients={wide[ID_COL].nunique()} "
+                    f"-> {long_csv}"
+                )
+
+                assert_split_agreement(aggregated, wide, landmark_day=landmark_day)
+                long_mrns = wide[ID_COL].nunique()
+                agg_mrns = len(aggregated)
+                if long_mrns < agg_mrns and not full_followup:
+                    print(
+                        f"  note: longitudinal dropped {agg_mrns - long_mrns} MRNs "
+                        "with no usable pre-event observations"
+                    )
 
     if canonical_labs_rows:
         canonical_path = output_dir / CANONICAL_LABS_FILENAME
@@ -903,6 +941,11 @@ def main(args: argparse.Namespace) -> None:
     }
     if args.build_longitudinal:
         build_manifest["longitudinal_time_unit_days"] = int(args.time_unit_days)
+        # Lets a runner (and a reader) tell whether the full-follow-up variant
+        # exists in this tree without stat-ing for the files.
+        build_manifest["longitudinal_full_followup_built"] = bool(
+            getattr(args, "longitudinal_full_followup", False)
+        )
     manifest_path = output_dir / BUILD_MANIFEST_FILENAME
     manifest_path.write_text(json.dumps(build_manifest, indent=2))
     print(f"Wrote {manifest_path}")
@@ -1075,6 +1118,22 @@ if __name__ == "__main__":
         dest="build_longitudinal",
         action="store_false",
         help="Skip the longitudinal person-period build.",
+    )
+    parser.add_argument(
+        "--longitudinal-full-followup",
+        dest="longitudinal_full_followup",
+        action="store_true",
+        default=False,
+        help=(
+            "Additionally build longitudinal_full_landmark{D}.csv, which retains "
+            "post-landmark lab observations, for the dynamic (per-timepoint) arm "
+            "(dynamic_deephit.py --dynamic). Written ALONGSIDE the landmark files, "
+            "never instead of them: post-landmark labs are legitimate inputs at "
+            "prediction times after the landmark but would be future information "
+            "to a landmark model, so the two must not be interchanged. The "
+            "manifest records include_post_landmark=true and the runners refuse "
+            "the mismatched combination."
+        ),
     )
     parser.add_argument(
         "--long-min-coverage",
