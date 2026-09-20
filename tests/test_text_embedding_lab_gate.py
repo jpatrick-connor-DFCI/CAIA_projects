@@ -161,46 +161,34 @@ def test_constant_embedding_dim_is_still_dropped():
 
 # --- embedding-project path resolution -------------------------------------
 #
-# The builder's first default pointed one directory too shallow (beside
-# PROFILE-testing rather than beside "Official CAIA Project Repos"), so the
-# notebook could not find the checkout without CTEP_REPO_PATH set. These pin the
-# resolution order so that regression cannot come back silently.
+# The default must NOT be derived from this repo's directory layout. COMPASS
+# lives at code/CAIA/ on the cluster but in a differently-nested checkout
+# locally, so a path computed by walking up from __file__ resolves correctly in
+# one place and silently wrongly in the other -- which is exactly how the first
+# version failed on the cluster (it looked for a "Clinical Embeddings" wrapper
+# directory that only exists in the local checkout).
 
 import importlib
 
 import build_text_embedding_inputs as bte
 
 
-def _resolve(monkeypatch, existing: set) -> object:
-    """Re-resolve the default with only `existing` paths having anchors.py."""
-    real_exists = Path.exists
-
-    def fake_exists(self):
-        if self.name == "anchors.py":
-            return str(self.parent) in existing
-        return real_exists(self)
-
-    monkeypatch.setattr(Path, "exists", fake_exists)
-    return bte._default_clinical_embeddings_repo()
+def test_default_is_the_projects_declared_cluster_root():
+    """Copied from PROJECT_ROOT in the embedding project's slurm/*.sh launchers."""
+    assert bte.CTEP_CLUSTER_REPO == Path(
+        "/data/gusev/USERS/jpconnor/code/clinical_text_embedding_project"
+    )
+    assert bte.CLINICAL_EMBEDDINGS_REPO == bte.CTEP_CLUSTER_REPO
 
 
-def test_default_prefers_the_projects_level_layout(monkeypatch):
-    """The real local layout: the project sits beside the CAIA repos folder."""
-    outer, inner = bte._CTEP_CANDIDATE_DIRS
-    assert _resolve(monkeypatch, {str(outer)}) == outer
+def test_default_is_not_derived_from_this_repos_layout():
+    """Pins the regression: no component of the default may come from __file__."""
+    resolved = str(bte.CLINICAL_EMBEDDINGS_REPO)
+    assert "Clinical Embeddings" not in resolved
+    assert str(Path(bte.__file__).resolve().parents[2]) not in resolved
 
 
-def test_default_still_accepts_the_immediate_sibling_layout(monkeypatch):
-    outer, inner = bte._CTEP_CANDIDATE_DIRS
-    assert _resolve(monkeypatch, {str(inner)}) == inner
-
-
-def test_default_is_returned_unresolved_when_nothing_is_found(monkeypatch):
-    """Must not raise: --help and argparse work without the checkout present."""
-    assert _resolve(monkeypatch, set()) == bte._CTEP_CANDIDATE_DIRS[0]
-
-
-def test_env_var_overrides_the_search(monkeypatch, tmp_path):
+def test_env_var_overrides_the_default(monkeypatch, tmp_path):
     monkeypatch.setenv("CTEP_REPO_PATH", str(tmp_path))
     reloaded = importlib.reload(bte)
     try:
@@ -210,7 +198,16 @@ def test_env_var_overrides_the_search(monkeypatch, tmp_path):
         importlib.reload(bte)
 
 
-def test_missing_checkout_names_the_env_var_and_paths_searched(monkeypatch, tmp_path):
+def test_missing_checkout_names_the_env_var(monkeypatch, tmp_path):
     monkeypatch.setattr(bte, "CLINICAL_EMBEDDINGS_REPO", tmp_path / "absent")
     with pytest.raises(FileNotFoundError, match="CTEP_REPO_PATH"):
+        bte._import_embedding_helpers()
+
+
+def test_missing_checkout_is_detected_by_anchors_py_not_the_bare_dir(monkeypatch, tmp_path):
+    """A directory that exists but is not the repo must still fail here."""
+    wrong = tmp_path / "exists_but_wrong"
+    wrong.mkdir()
+    monkeypatch.setattr(bte, "CLINICAL_EMBEDDINGS_REPO", wrong)
+    with pytest.raises(FileNotFoundError):
         bte._import_embedding_helpers()
