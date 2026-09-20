@@ -159,55 +159,86 @@ def test_constant_embedding_dim_is_still_dropped():
     assert set(emb_cols[1:]) <= set(selected)
 
 
-# --- embedding-project path resolution -------------------------------------
+# --- self-containment -------------------------------------------------------
 #
-# The default must NOT be derived from this repo's directory layout. COMPASS
-# lives at code/CAIA/ on the cluster but in a differently-nested checkout
-# locally, so a path computed by walking up from __file__ resolves correctly in
-# one place and silently wrongly in the other -- which is exactly how the first
-# version failed on the cluster (it looked for a "Clinical Embeddings" wrapper
-# directory that only exists in the local checkout).
+# This repo must not import the clinical text embedding project at runtime. The
+# pooling helpers are vendored into COMPASS/data_preprocessing/vendor/ instead,
+# so the two repos deploy independently. An earlier version imported them across
+# repos, which failed on the cluster when only one side was deployed.
 
-import importlib
+import ast
 
 import build_text_embedding_inputs as bte
 
+_BUILDER_SRC = Path(bte.__file__).resolve()
+_VENDORED = _BUILDER_SRC.parent / "vendor" / "note_pooling.py"
 
-def test_default_is_the_projects_declared_cluster_root():
-    """Copied from PROJECT_ROOT in the embedding project's slurm/*.sh launchers."""
-    assert bte.CTEP_CLUSTER_REPO == Path(
-        "/data/gusev/USERS/jpconnor/code/clinical_text_embedding_project"
+
+def test_builder_does_not_import_the_embedding_project():
+    """No import may reach into the other repo, however it is spelled."""
+    tree = ast.parse(_BUILDER_SRC.read_text())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+
+    forbidden = {"anchors", "config", "schemes", "survival.preprocessing"}
+    assert not (imported & forbidden), f"cross-repo import: {imported & forbidden}"
+    assert not [m for m in imported if m.startswith("survival.")]
+
+
+def test_builder_carries_no_path_to_the_other_checkout():
+    src = _BUILDER_SRC.read_text()
+    assert "CTEP_REPO_PATH" not in src
+    assert "clinical_text_embedding_project/code" not in src
+    # The DATA path is still that project's, which is correct -- it is data, not code.
+    assert "CTEP_DATA_PATH" in src
+
+
+def test_pooling_helpers_are_vendored_in_this_repo():
+    assert _VENDORED.exists()
+    names = {
+        n.name
+        for n in ast.parse(_VENDORED.read_text()).body
+        if isinstance(n, ast.FunctionDef)
+    }
+    assert names == {
+        "find_continuous_records_to_analyze",
+        "pool_embedding_series_vectorized",
+        "generate_survival_embedding_df",
+    }
+
+
+def test_vendored_module_records_its_upstream_commit():
+    """A fork needs its provenance written down to be re-syncable."""
+    doc = ast.get_docstring(ast.parse(_VENDORED.read_text()))
+    assert "survival/preprocessing.py" in doc
+    assert "commit" in doc.lower()
+
+
+def test_notes_path_matches_the_embedding_projects_config():
+    """Copied from that project's config.py: DATA_PATH + NOTES_PATH suffix."""
+    assert bte.NOTES_PATH == Path(
+        "/data/gusev/USERS/jpconnor/data/clinical_text_embedding_project"
+        "/batched_datasets/processed_datasets"
     )
-    assert bte.CLINICAL_EMBEDDINGS_REPO == bte.CTEP_CLUSTER_REPO
 
 
-def test_default_is_not_derived_from_this_repos_layout():
-    """Pins the regression: no component of the default may come from __file__."""
-    resolved = str(bte.CLINICAL_EMBEDDINGS_REPO)
-    assert "Clinical Embeddings" not in resolved
-    assert str(Path(bte.__file__).resolve().parents[2]) not in resolved
+def test_notes_path_honours_the_shared_data_env_var(monkeypatch, tmp_path):
+    import importlib
 
-
-def test_env_var_overrides_the_default(monkeypatch, tmp_path):
-    monkeypatch.setenv("CTEP_REPO_PATH", str(tmp_path))
+    monkeypatch.setenv("CTEP_DATA_PATH", str(tmp_path))
     reloaded = importlib.reload(bte)
     try:
-        assert reloaded.CLINICAL_EMBEDDINGS_REPO == tmp_path
+        assert reloaded.NOTES_PATH == tmp_path / "batched_datasets" / "processed_datasets"
     finally:
-        monkeypatch.delenv("CTEP_REPO_PATH", raising=False)
+        monkeypatch.delenv("CTEP_DATA_PATH", raising=False)
         importlib.reload(bte)
 
 
-def test_missing_checkout_names_the_env_var(monkeypatch, tmp_path):
-    monkeypatch.setattr(bte, "CLINICAL_EMBEDDINGS_REPO", tmp_path / "absent")
-    with pytest.raises(FileNotFoundError, match="CTEP_REPO_PATH"):
-        bte._import_embedding_helpers()
-
-
-def test_missing_checkout_is_detected_by_anchors_py_not_the_bare_dir(monkeypatch, tmp_path):
-    """A directory that exists but is not the repo must still fail here."""
-    wrong = tmp_path / "exists_but_wrong"
-    wrong.mkdir()
-    monkeypatch.setattr(bte, "CLINICAL_EMBEDDINGS_REPO", wrong)
-    with pytest.raises(FileNotFoundError):
-        bte._import_embedding_helpers()
+def test_note_time_column_is_defined_locally():
+    """Not read from the other repo's anchor registry, which we must not edit."""
+    assert bte.NOTE_TIME_COL == "NOTE_TIME_REL_ADT"
+    assert bte.ANCHOR == "adt"

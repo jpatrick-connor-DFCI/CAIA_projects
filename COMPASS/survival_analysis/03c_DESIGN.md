@@ -17,16 +17,20 @@ embeddings, unreduced; elastic-net Cox + XGBoost only (no DeepHit arm for now).
 Two findings determine the whole shape of this work.
 
 **1. The embedding project's pooling is already landmark-aware and anchor-parameterized.**
-`survival/preprocessing.py:generate_survival_embedding_df` takes `note_timing_col` and
-`max_note_window`, filters to notes strictly before the landmark, re-centers note times on
-it, and shifts every `tt_*` outcome column by the same amount
-(`survival/preprocessing.py:388-392`). It then asserts `max(note_time) <= 0`. That is the
-same landmark contract COMPASS's `build_prediction_inputs.py` enforces.
+`generate_survival_embedding_df` takes `note_timing_col` and `max_note_window`, filters to
+notes strictly before the landmark, re-centers note times on it, and shifts every `tt_*`
+outcome column by the same amount. It then asserts `max(note_time) <= 0`. That is the same
+landmark contract COMPASS's `build_prediction_inputs.py` enforces.
 
 Consequence: we do **not** reimplement pooling or leakage control. We compute an
-ADT-relative note-time column and pass it in as `note_timing_col`. `anchors.py` is the
-registry to extend — it already carries `treatment` and `sequencing`, and a third `adt`
-anchor is the idiomatic addition.
+ADT-relative note-time column and pass it in as `note_timing_col`.
+
+*Built differently from the plan:* the original plan added an `adt` anchor to the embedding
+project's `anchors.py` and imported its pooling code. Both were undone — **PROFILE-testing
+must not modify or import the embedding project.** Instead the three pooling functions are
+vendored verbatim into `COMPASS/data_preprocessing/vendor/note_pooling.py`, and the anchor
+constants (`NOTE_TIME_REL_ADT`, `ANCHOR = "adt"`) are defined locally in the builder. Stage 0
+now depends on nothing outside this repo at runtime; only the embedding *data* is external.
 
 **2. COMPASS's `feature_set` switch is an existing, tested extension point.**
 `cox_aggregated.py:prepare_landmark_context` accepts `feature_set` in
@@ -46,21 +50,27 @@ fix; renaming columns is not.
 
 ## Shape of the work
 
-### Stage 1 — an `adt` anchor in the embedding project
+### Stage 1 — an ADT anchor, defined locally
 
-Add to `anchors.py`:
+*Superseded.* The plan was to register an `adt` anchor in the embedding project's
+`anchors.py`. That edit was reverted; the anchor is now three module constants in
+`build_text_embedding_inputs.py`:
 
 ```python
-"adt": {
-    "date_col": "adt_start_date",
-    "note_time_col": "NOTE_TIME_REL_ADT",
-    "age_col": "AGE_AT_ADT_START",
-},
+NOTE_TIME_COL = "NOTE_TIME_REL_ADT"
+ANCHOR = "adt"          # recorded in each build manifest
+NOTES_PATH = Path(os.environ.get("CTEP_DATA_PATH", "<fixed cluster path>")) / ...
 ```
 
-`anchor_suffix("adt")` returns `__adt`, so embedding files and results directories are
-namespaced automatically and nothing existing moves. The ADT start dates come from the
-COMPASS cohort build, joined on `DFCI_MRN` — the shared key on both sides.
+`NOTES_PATH` is a fixed cluster path, deliberately *not* derived from this repo's checkout
+layout — COMPASS lives at a different place on the cluster than it does locally. The ADT
+start dates come from the COMPASS cohort build, joined on `DFCI_MRN` — the shared key on
+both sides.
+
+Because the vendored code is a fork, `tests/test_vendored_pooling.py` pins the landmark
+contract it must keep honoring: notes at or after the landmark are excluded, remaining note
+times are re-centered to `<= 0`, and a patient with no pre-landmark notes is dropped rather
+than zero-filled.
 
 ### Stage 2 — build text features per landmark
 
@@ -85,9 +95,8 @@ A new `COMPASS/data_preprocessing/build_text_embedding_inputs.py`, modeled direc
    downstream changes. The AUC horizon grid is also recomputed per arm on the matched
    cohort rather than inherited, since the subset's event-time quantiles differ.
 
-Complete-case policy: the embedding project requires all three pre-anchor note modalities
-(Clinician, Imaging, Pathology) and errors out otherwise
-(`generate_embedding_prediction_datasets.py:442`). COMPASS patients missing a modality at a
+Complete-case policy: all three pre-anchor note modalities (Clinician, Imaging, Pathology)
+are required, matching the embedding project's own datasets. COMPASS patients missing a modality at a
 given landmark therefore drop out. **This makes the text cohort a subset, which is why the
 `labs` arm must be refit on the matched subset rather than compared against
 `03_multivariate.ipynb`'s numbers** — the same available-case logic
@@ -187,13 +196,15 @@ RUNS[0]["landmarks"] = [0]
 
 | piece | where |
 |---|---|
-| `adt` anchor | `clinical_text_embedding_project/.../anchors.py` |
+| ADT anchor constants | `build_text_embedding_inputs.py` (local; no cross-repo edit) |
+| vendored pooling | `COMPASS/data_preprocessing/vendor/note_pooling.py` (upstream `52a499f`) |
 | builder | `COMPASS/data_preprocessing/build_text_embedding_inputs.py` |
 | `text` / `labs_text` feature sets | `cox_aggregated.py:prepare_landmark_context` |
 | CLI choices | `survival_common/projects/compass_profile.py` |
 | lab-gate exemptions | `multivariate_analysis.py` (x2), `survival_common/cox_models.py` |
 | pipeline entry points | `compass_pipeline.py`: `build_text_embedding_inputs`, `run_multivariate_text`, `summarize_text_outputs` |
 | notebook | `03c_multivariate_text.ipynb` |
+| tests | `tests/test_text_embedding_lab_gate.py`, `tests/test_vendored_pooling.py` |
 
 Three lab gates had to be exempted, not one: the per-fold CV gate and the final
 full-train_val gate in `multivariate_analysis.py`, plus a third inside

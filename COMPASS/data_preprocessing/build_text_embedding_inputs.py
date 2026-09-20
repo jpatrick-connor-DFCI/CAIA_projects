@@ -66,23 +66,23 @@ from build_somatic_gleason_inputs import (  # noqa: E402
     load_treatment_anchors,
 )
 
-# The embedding project is a separate checkout, not an installed package. Its
-# pooling helpers are the single implementation of the note window and the
-# time-decay weighting, so they are imported rather than reimplemented.
+# --- Note-embedding inputs, owned by this repo -------------------------------
 #
-# The default is the project's OWN declared cluster location, copied from the
-# PROJECT_ROOT every one of its slurm/*.sh launchers defaults to. It is not
-# derived from this repo's directory layout: COMPASS lives under code/CAIA/ on
-# the cluster but under a differently-nested checkout locally, so any path
-# computed by walking up from __file__ is right in one place and wrong in the
-# other. A fixed cluster path plus CTEP_REPO_PATH is right in both.
-CTEP_CLUSTER_REPO = Path(
-    "/data/gusev/USERS/jpconnor/code/clinical_text_embedding_project"
-)
+# This builder depends on NOTHING in the clinical text embedding project at
+# runtime. Its pooling helpers are vendored (verbatim) into vendor/note_pooling.py
+# and the two constants below are defined here rather than imported, so the two
+# repos can be deployed independently. See the vendored module's docstring.
 
-CLINICAL_EMBEDDINGS_REPO = Path(
-    os.environ.get("CTEP_REPO_PATH") or CTEP_CLUSTER_REPO
-)
+# Where the embedding DATA lives. Copied from the embedding project's config.py
+# (DATA_PATH default + NOTES_PATH suffix); CTEP_DATA_PATH overrides it, matching
+# that project's own env var so a frozen/relocated data run is set the same way
+# on both sides.
+NOTES_PATH = Path(
+    os.environ.get(
+        "CTEP_DATA_PATH",
+        "/data/gusev/USERS/jpconnor/data/clinical_text_embedding_project/",
+    )
+) / "batched_datasets" / "processed_datasets"
 
 FEATURE_MANIFEST_FILENAME = "text_embedding_features.csv"
 FEATURE_SETS = ("text", "labs", "labs_text")
@@ -93,47 +93,31 @@ NOTE_TYPES = ("Clinician", "Imaging", "Pathology")
 # so this arm's features are the manuscript models' features.
 POOL_STRATEGY = "time_decay_mean"
 DECAY_PARAM = 0.01
+# The ADT-relative note-time column this builder computes and pools against.
+# Defined here, not read from that project's anchor registry: registering an
+# `adt` anchor there would be a change to a repo this one must not modify.
 NOTE_TIME_COL = "NOTE_TIME_REL_ADT"
+# Recorded in each build manifest so a downstream reader can tell which time
+# zero the embeddings were pooled against.
 ANCHOR = "adt"
 
 
 def _import_embedding_helpers():
-    """Import the sibling embedding project's pooling helpers.
+    """Return the vendored pooling helper and the embedding-data directory.
 
-    Imported lazily and by path so that ``--help`` and the argument parser work
-    without the sibling checkout present, and so the failure names the env var
-    to set rather than surfacing as a bare ImportError.
+    Kept as a function (rather than a module-level import) so ``--help`` and
+    argument parsing work without polars installed, and so a missing dependency
+    names what to install instead of surfacing as a bare ImportError at import
+    time.
     """
-    if not (CLINICAL_EMBEDDINGS_REPO / "anchors.py").exists():
-        raise FileNotFoundError(
-            f"Clinical text embedding project not found at {CLINICAL_EMBEDDINGS_REPO}.\n"
-            f"        Default is the project's cluster root ({CTEP_CLUSTER_REPO}).\n"
-            "        Set CTEP_REPO_PATH to the repo root (the directory containing "
-            "anchors.py and survival/) to point elsewhere."
-        )
-    if str(CLINICAL_EMBEDDINGS_REPO) not in sys.path:
-        sys.path.insert(0, str(CLINICAL_EMBEDDINGS_REPO))
     try:
-        from anchors import ensure_anchor, note_time_col  # noqa: E402
-        from config import NOTES_PATH  # noqa: E402
-        from survival.preprocessing import (  # noqa: E402
-            generate_survival_embedding_df,
-        )
+        from vendor.note_pooling import generate_survival_embedding_df
     except ImportError as exc:  # pragma: no cover - environment-dependent
         raise ImportError(
-            f"Failed to import the embedding project from {CLINICAL_EMBEDDINGS_REPO}: {exc}. "
-            "Confirm CTEP_REPO_PATH points at the repo root and its dependencies "
-            "(polars, zstandard) are installed in this environment."
+            f"Could not load the vendored note-pooling helpers: {exc}.\n"
+            "        They live in COMPASS/data_preprocessing/vendor/note_pooling.py "
+            "and need polars, numpy and tqdm in this environment."
         ) from exc
-    # Fail loudly here if the anchor registry and this module disagree on the
-    # column name, rather than silently pooling against a column of NaNs.
-    ensure_anchor(ANCHOR)
-    registry_col = note_time_col(ANCHOR)
-    if registry_col != NOTE_TIME_COL:
-        raise ValueError(
-            f"anchors.py defines note_time_col({ANCHOR!r}) = {registry_col!r}, but this "
-            f"builder computes {NOTE_TIME_COL!r}. Reconcile the two."
-        )
     return generate_survival_embedding_df, NOTES_PATH
 
 
