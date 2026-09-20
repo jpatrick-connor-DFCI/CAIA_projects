@@ -21,11 +21,19 @@ The guards, and what each test pins:
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+import pytest
 
 from survival_common.cox_engine import parse_feature_name
 from survival_common.cox_models import select_feature_columns
+
+_PREPROCESSING_DIR = Path(__file__).resolve().parents[1] / "COMPASS" / "data_preprocessing"
+if str(_PREPROCESSING_DIR) not in sys.path:
+    sys.path.insert(0, str(_PREPROCESSING_DIR))
 
 N = 200
 N_EMB_DIMS = 8
@@ -149,3 +157,60 @@ def test_constant_embedding_dim_is_still_dropped():
 
     assert dead_dim not in selected
     assert set(emb_cols[1:]) <= set(selected)
+
+
+# --- embedding-project path resolution -------------------------------------
+#
+# The builder's first default pointed one directory too shallow (beside
+# PROFILE-testing rather than beside "Official CAIA Project Repos"), so the
+# notebook could not find the checkout without CTEP_REPO_PATH set. These pin the
+# resolution order so that regression cannot come back silently.
+
+import importlib
+
+import build_text_embedding_inputs as bte
+
+
+def _resolve(monkeypatch, existing: set) -> object:
+    """Re-resolve the default with only `existing` paths having anchors.py."""
+    real_exists = Path.exists
+
+    def fake_exists(self):
+        if self.name == "anchors.py":
+            return str(self.parent) in existing
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+    return bte._default_clinical_embeddings_repo()
+
+
+def test_default_prefers_the_projects_level_layout(monkeypatch):
+    """The real local layout: the project sits beside the CAIA repos folder."""
+    outer, inner = bte._CTEP_CANDIDATE_DIRS
+    assert _resolve(monkeypatch, {str(outer)}) == outer
+
+
+def test_default_still_accepts_the_immediate_sibling_layout(monkeypatch):
+    outer, inner = bte._CTEP_CANDIDATE_DIRS
+    assert _resolve(monkeypatch, {str(inner)}) == inner
+
+
+def test_default_is_returned_unresolved_when_nothing_is_found(monkeypatch):
+    """Must not raise: --help and argparse work without the checkout present."""
+    assert _resolve(monkeypatch, set()) == bte._CTEP_CANDIDATE_DIRS[0]
+
+
+def test_env_var_overrides_the_search(monkeypatch, tmp_path):
+    monkeypatch.setenv("CTEP_REPO_PATH", str(tmp_path))
+    reloaded = importlib.reload(bte)
+    try:
+        assert reloaded.CLINICAL_EMBEDDINGS_REPO == tmp_path
+    finally:
+        monkeypatch.delenv("CTEP_REPO_PATH", raising=False)
+        importlib.reload(bte)
+
+
+def test_missing_checkout_names_the_env_var_and_paths_searched(monkeypatch, tmp_path):
+    monkeypatch.setattr(bte, "CLINICAL_EMBEDDINGS_REPO", tmp_path / "absent")
+    with pytest.raises(FileNotFoundError, match="CTEP_REPO_PATH"):
+        bte._import_embedding_helpers()

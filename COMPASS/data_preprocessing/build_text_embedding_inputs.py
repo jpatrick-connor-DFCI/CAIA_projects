@@ -66,18 +66,38 @@ from build_somatic_gleason_inputs import (  # noqa: E402
     load_treatment_anchors,
 )
 
-# The embedding project is a sibling checkout, not an installed package. Its
+# The embedding project is a neighboring checkout, not an installed package. Its
 # pooling helpers are the single implementation of the note window and the
 # time-decay weighting, so they are imported rather than reimplemented.
-CLINICAL_EMBEDDINGS_REPO = Path(
-    os.environ.get(
-        "CTEP_REPO_PATH",
-        str(
-            REPO_ROOT.parent
-            / "Clinical Embeddings"
-            / "clinical_text_embedding_project"
-        ),
-    )
+#
+# CTEP_REPO_PATH wins when set. Otherwise search the layouts this repo is
+# actually checked out in: the project lives beside "Official CAIA Project
+# Repos" under a shared Projects/ parent (the current local layout), not beside
+# PROFILE-testing itself. Both are tried so neither layout needs the env var.
+_CTEP_CANDIDATE_DIRS = (
+    REPO_ROOT.parent.parent / "Clinical Embeddings" / "clinical_text_embedding_project",
+    REPO_ROOT.parent / "Clinical Embeddings" / "clinical_text_embedding_project",
+)
+
+
+def _default_clinical_embeddings_repo() -> Path:
+    """First candidate that looks like the repo root, else the first candidate.
+
+    Returning a non-existent path rather than raising keeps ``--help`` and
+    argument parsing working without the checkout present;
+    ``_import_embedding_helpers`` raises with the env var named when it is
+    actually needed.
+    """
+    for candidate in _CTEP_CANDIDATE_DIRS:
+        if (candidate / "anchors.py").exists():
+            return candidate
+    return _CTEP_CANDIDATE_DIRS[0]
+
+
+CLINICAL_EMBEDDINGS_REPO = (
+    Path(os.environ["CTEP_REPO_PATH"])
+    if os.environ.get("CTEP_REPO_PATH")
+    else _default_clinical_embeddings_repo()
 )
 
 FEATURE_MANIFEST_FILENAME = "text_embedding_features.csv"
@@ -100,10 +120,12 @@ def _import_embedding_helpers():
     without the sibling checkout present, and so the failure names the env var
     to set rather than surfacing as a bare ImportError.
     """
-    if not CLINICAL_EMBEDDINGS_REPO.exists():
+    if not (CLINICAL_EMBEDDINGS_REPO / "anchors.py").exists():
+        searched = "\n".join(f"          {c}" for c in _CTEP_CANDIDATE_DIRS)
         raise FileNotFoundError(
-            f"Clinical text embedding project not found at {CLINICAL_EMBEDDINGS_REPO}. "
-            "Set CTEP_REPO_PATH to the repo root (the directory containing "
+            f"Clinical text embedding project not found at {CLINICAL_EMBEDDINGS_REPO}.\n"
+            f"        Searched:\n{searched}\n"
+            "        Set CTEP_REPO_PATH to the repo root (the directory containing "
             "anchors.py and survival/)."
         )
     if str(CLINICAL_EMBEDDINGS_REPO) not in sys.path:
