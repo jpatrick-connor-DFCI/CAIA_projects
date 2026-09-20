@@ -25,11 +25,13 @@ def _prepare_context_kwargs(args: argparse.Namespace) -> dict:
 def _add_cli_args(parser: argparse.ArgumentParser, _cox) -> None:
     parser.add_argument(
         "--feature-set",
-        choices=["labs", "somatic-gleason", "genomic"],
+        choices=["labs", "somatic-gleason", "genomic", "text", "labs-text"],
         default="labs",
         help=(
             "Run the standard lab features, the separate somatic + Gleason "
-            "feature inputs, or the SNV-only genomic arm."
+            "feature inputs, the SNV-only genomic arm, pooled clinical-note "
+            "embeddings ('text'), or labs plus embeddings ('labs-text'). The "
+            "two text arms read inputs from build_text_embedding_inputs.py."
         ),
     )
 

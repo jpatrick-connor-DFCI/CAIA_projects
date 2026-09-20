@@ -1149,6 +1149,31 @@ def build_somatic_gleason_inputs(run: dict, dry_run: bool = False) -> None:
         )
 
 
+def build_text_embedding_inputs(run: dict, dry_run: bool = False) -> None:
+    """Build the matched text / labs / labs_text landmark inputs.
+
+    All three arms share one patient set -- the standard landmark cohort
+    intersected with the complete-case text cohort (patients having all three
+    pre-landmark note modalities). The labs arm is rebuilt on that subset rather
+    than reused from 03_multivariate, so the feature comparison is not
+    confounded by the cohort shift.
+    """
+    _require_adt_index_run(run)
+    output_dir = run["inputs_dir"] / TEXT_EMBEDDING_DIRNAME
+    print(f"\n========== build text embedding inputs: {run['title']} ==========")
+    cmd = [
+        PYTHON, DATA_PREPROCESSING_DIR / "build_text_embedding_inputs.py",
+        "--base-inputs-dir", run["inputs_dir"],
+        "--output-dir", output_dir,
+        "--landmark-days", *[str(lm) for lm in run["landmarks"]],
+    ]
+    rc = _run(cmd, dry_run=dry_run)
+    if not dry_run and rc != 0:
+        raise RuntimeError(
+            f"build_text_embedding_inputs failed for {run['label']} with rc={rc}"
+        )
+
+
 def cohort_diagnostics(run: dict) -> None:
     print(f"\n========== cohort diagnostics: {run['title']} ==========")
     endpoint = run.get("endpoint", ENDPOINT)
@@ -1212,6 +1237,27 @@ MULTIVARIATE_TASK_SPECS = [
     ("elastic-net", "baseline", "cox_agg_baseline_metrics.csv"),
     ("xgboost", "both", "landmark_xgboost_metrics.csv"),
     ("xgboost", "baseline", "landmark_xgboost_baseline_metrics.csv"),
+]
+
+# --- 03c: clinical text as a predictor ---------------------------------------
+# Subdirectory under inputs_dir holding the three matched arms, written by
+# build_text_embedding_inputs.py.
+TEXT_EMBEDDING_DIRNAME = "text_embedding"
+
+# The three feature sets, in the order the summary table should read them:
+# labs is the reference, then text alone, then the combination. `labs` reuses the
+# standard metrics filename because it IS the standard arm, just refit on the
+# matched cohort; the other two get their own names so no arm can overwrite
+# another and each resumes independently under OVERWRITE = False.
+TEXT_FEATURE_SETS = ("labs", "text", "labs_text")
+
+TEXT_TASK_SPECS = [
+    ("elastic-net", "labs", "cox_agg_multivariable_metrics.csv"),
+    ("elastic-net", "text", "cox_agg_text_metrics.csv"),
+    ("elastic-net", "labs_text", "cox_agg_labs_text_metrics.csv"),
+    ("xgboost", "labs", "landmark_xgboost_metrics.csv"),
+    ("xgboost", "text", "landmark_xgboost_text_metrics.csv"),
+    ("xgboost", "labs_text", "landmark_xgboost_labs_text_metrics.csv"),
 ]
 
 # Per-endpoint config pair for the longitudinal arm. config_dir doubles as
@@ -1734,6 +1780,121 @@ def run_multivariate_available_case_sensitivity(run: dict, dry_run: bool = False
             print(f"[done] {tag} -> {status} ({elapsed/60:.1f} min)\n")
             summary.append((tag, status, elapsed))
     return summary
+
+
+def run_multivariate_text(run: dict, dry_run: bool = False):
+    """Fit the three matched feature arms at every landmark.
+
+    Structure follows run_multivariate_available_case_sensitivity: distinct
+    per-arm output directories and metrics filenames, so the arms resume
+    independently and cannot overwrite each other.
+    """
+    _require_adt_index_run(run)
+    inputs_root = run["inputs_dir"] / TEXT_EMBEDDING_DIRNAME
+    summary = []
+    for landmark_day in run["landmarks"]:
+        for model, feature_set, metrics_name in TEXT_TASK_SPECS:
+            row_output_dir = (
+                run["output_dir"] / TEXT_EMBEDDING_DIRNAME / model_output_dir(model)
+                / f"landmark_{landmark_day}" / feature_set
+            )
+            metrics_path = row_output_dir / metrics_name
+            tag = f"{run['label']:28s} {model:11s} +{landmark_day}d {feature_set}"
+            if metrics_path.exists() and not FORCE_RERUN:
+                print(f"[skip] {tag} -> {metrics_path.relative_to(run['output_dir'])} exists")
+                summary.append((tag, "skipped", 0.0))
+                continue
+            inputs_dir = inputs_root / feature_set
+            if not inputs_dir.exists():
+                print(
+                    f"[warn] {tag} -> missing inputs {inputs_dir}.\n"
+                    "       Run cp.build_text_embedding_inputs(run) first."
+                )
+                summary.append((tag, "missing inputs", 0.0))
+                continue
+            if not dry_run:
+                row_output_dir.mkdir(parents=True, exist_ok=True)
+            cmd = [
+                PYTHON, SURVIVAL_DIR / "multivariate_analysis.py",
+                "--model", model,
+                "--inputs-dir", inputs_dir,
+                "--output-dir", row_output_dir,
+                "--landmark-days", str(landmark_day),
+                "--endpoints", run.get("endpoint", ENDPOINT),
+                "--n-folds", str(N_FOLDS),
+                # argparse declares the hyphenated spelling; prepare_landmark_context
+                # normalizes "-" to "_" on the way in.
+                "--feature-set", feature_set.replace("_", "-"),
+                "--cohort", f"{run.get('cohort') or DEFAULT_COHORT}_text_matched",
+                "--overwrite" if FORCE_RERUN else "--no-overwrite",
+            ]
+            print(f"[run ] {tag}")
+            t0 = time.time()
+            rc = _run(cmd, dry_run=dry_run)
+            elapsed = time.time() - t0
+            status = "ok" if rc == 0 else f"FAILED (rc={rc})"
+            print(f"[done] {tag} -> {status} ({elapsed/60:.1f} min)\n")
+            summary.append((tag, status, elapsed))
+    print("\n=== run summary ===")
+    for tag, status, elapsed in summary:
+        print(f"  {tag} {status:>20s} {elapsed/60:6.1f} min")
+    return summary
+
+
+def summarize_text_outputs(run: dict) -> pd.DataFrame:
+    """One row per (model, landmark, feature_set), plus delta vs the labs arm.
+
+    `delta_c_index` is the text contribution: each arm's C-index minus the labs
+    arm's at the same (model, landmark). It is NaN for the labs row itself and
+    wherever the labs arm is missing, so a partial run reports gaps rather than
+    a spurious zero.
+    """
+    endpoint = run.get("endpoint", ENDPOINT)
+    rows = []
+    for landmark_day in run["landmarks"]:
+        for model, feature_set, metrics_name in TEXT_TASK_SPECS:
+            metrics_path = (
+                run["output_dir"] / TEXT_EMBEDDING_DIRNAME / model_output_dir(model)
+                / f"landmark_{landmark_day}" / feature_set / metrics_name
+            )
+            base = {
+                "run": run["label"],
+                "model": model,
+                "landmark": landmark_day,
+                "feature_set": feature_set,
+                "endpoint": endpoint,
+            }
+            if not metrics_path.exists():
+                rows.append({**base, **_missing_metric_fields("missing")})
+                continue
+            frame = pd.read_csv(metrics_path)
+            matched = frame.loc[frame["endpoint"] == endpoint]
+            if matched.empty:
+                rows.append({**base, **_missing_metric_fields(f"no {endpoint} row")})
+                continue
+            rows.append({**base, **_canonical_metric_fields(matched.iloc[0])})
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    # "c_index" is the canonical schema's spelling (_canonical_metric_fields).
+    reference = (
+        out.loc[out["feature_set"] == "labs", ["model", "landmark", "c_index"]]
+        .rename(columns={"c_index": "_labs_c_index"})
+    )
+    out = out.merge(reference, on=["model", "landmark"], how="left")
+    out["delta_c_index"] = out["c_index"] - out["_labs_c_index"]
+    out.loc[out["feature_set"] == "labs", "delta_c_index"] = pd.NA
+    out = out.drop(columns="_labs_c_index")
+
+    feature_set_order = {name: i for i, name in enumerate(TEXT_FEATURE_SETS)}
+    out["_order"] = out["feature_set"].map(feature_set_order)
+    return (
+        out.sort_values(["run", "landmark", "model", "_order"])
+        .drop(columns="_order")
+        .reset_index(drop=True)
+    )
 
 
 def run_incremental_risk(run: dict, dry_run: bool = False):

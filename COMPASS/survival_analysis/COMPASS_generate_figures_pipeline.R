@@ -3495,6 +3495,63 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   POST_DAYS <- 5 * 365.25   # days AFTER the treatment anchor
   COVERAGE_PRE_DAYS <- 5 * 365.25
 
+  # ---------------------------------------------------------------------
+  # Trajectory anchor modes. The forward ("anchor") mode is the original
+  # treatment-anchored view: t_rel = t_lab, time 0 = ADT/ARPI initiation,
+  # and the question is what happens after treatment starts.
+  #
+  # The backward ("endpoint") mode re-zeroes every patient on the end of
+  # their own observed course: t_rel = t_lab - t_platinum. In the cohort
+  # builder t_platinum is already platinum initiation for platinum-positive
+  # patients and last contact for everyone else, so time 0 is "platinum
+  # start or loss to follow-up" and the window runs strictly backwards from
+  # it. That alignment asks the reverse question -- what the labs were doing
+  # in the run-up to the event -- which a treatment-anchored average blurs
+  # out whenever patients reach platinum at different times.
+  #
+  # The two strata are still platinum vs non-platinum, but note the
+  # comparator's day 0 is a censoring date, not an event: for non-platinum
+  # patients it mixes death, true loss to follow-up and administrative
+  # censoring at data freeze. Read the non-platinum curve as "the last
+  # observed years of patients who never reached platinum", not as a
+  # matched control trajectory.
+  ANCHOR_MODES <- c("anchor", "endpoint")
+
+  # Pure lead-up window: everything is before the event, so no bin mixes
+  # pre- and post-platinum measurements. Five years back matches the
+  # coverage diagnostics' retained history.
+  ENDPOINT_PRE_DAYS  <- 5 * 365.25
+  ENDPOINT_POST_DAYS <- 0
+
+  anchor_mode_window <- function(mode) {
+    if (identical(mode, "endpoint"))
+      list(pre = ENDPOINT_PRE_DAYS, post = ENDPOINT_POST_DAYS,
+           label = "platinum initiation / last contact",
+           suffix = "_endpoint")
+    else
+      list(pre = PRE_DAYS, post = POST_DAYS, label = ANCHOR_LABEL, suffix = "")
+  }
+
+  # Re-zero the canonical trajectory table on each patient's endpoint. Rows
+  # without a usable t_platinum (no anchor, or an unresolvable date) drop
+  # out: there is no defined day 0 to align them on.
+  endpoint_relative_df <- function(df) {
+    if (is.null(df)) return(NULL)
+    if (!"t_platinum" %in% names(df)) {
+      message("Endpoint-anchored trajectories: skipped -- t_platinum not in longitudinal data")
+      return(NULL)
+    }
+    out <- df %>%
+      mutate(t_platinum = suppressWarnings(as.numeric(t_platinum)),
+             t_rel = t_lab - t_platinum) %>%
+      filter(is.finite(t_rel))
+    if (nrow(out) == 0) {
+      message("Endpoint-anchored trajectories: skipped -- no rows with a resolvable endpoint")
+      return(NULL)
+    }
+    out
+  }
+
   # Anchor every bin on day 0 so no summary mixes pre- and post-ADT labs. The
   # outermost bins absorb the fractional-year remainder.
   anchored_bin_edges <- function(pre_days, post_days, width_days) {
@@ -3511,11 +3568,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # bin. Both the direct summaries and the R-fitted GAMs consume this table, so
   # patients with dense testing do not dominate either visualization.
   patient_bin_trajectory <- function(df, lab_group, stratum_col = "plat_group",
-                                     stratum_values = NULL, log_scale = FALSE) {
-    if (!is.null(getOption("compass.figure_data_manifest")))
+                                     stratum_values = NULL, log_scale = FALSE,
+                                     pre_days = PRE_DAYS, post_days = POST_DAYS) {
+    # The prepared-data bundle bins on anchor-relative t_rel only, so it can
+    # only serve the window it was precomputed for. Any other window (the
+    # endpoint-anchored mode) re-bins from the canonical rows in R.
+    if (!is.null(getOption("compass.figure_data_manifest")) &&
+        isTRUE(all.equal(c(pre_days, post_days), c(PRE_DAYS, POST_DAYS))))
       return(figure_cached_patient_bins(LONGITUDINAL_CSV, df, lab_group,
                                         stratum_col, stratum_values, log_scale))
-    sub <- df %>% filter(LAB_GROUP == lab_group, t_rel >= -PRE_DAYS, t_rel <= POST_DAYS)
+    sub <- df %>% filter(LAB_GROUP == lab_group, t_rel >= -pre_days, t_rel <= post_days)
     if (isTRUE(log_scale)) {
       # Transform measurements before patient/bin aggregation. This makes both
       # the observed summaries and GAM fits genuinely operate in log space,
@@ -3546,7 +3608,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       )
     }
     if (nrow(sub) == 0) return(NULL)
-    edges <- anchored_bin_edges(PRE_DAYS, POST_DAYS, BIN_WIDTH_DAYS)
+    edges <- anchored_bin_edges(pre_days, post_days, BIN_WIDTH_DAYS)
+    # Bins are left-closed, so with no post-anchor span the top edge is day 0
+    # itself and a measurement taken exactly on the endpoint would fall outside
+    # every bin. Nudge the final edge past 0 to keep those rows in the last
+    # pre-endpoint bin instead of silently dropping them.
+    if (post_days <= 0) edges[length(edges)] <- edges[length(edges)] + 1e-6
     sub <- sub %>% mutate(
       # right=FALSE makes day 0 the start of the first post-anchor bin.
       t_bin = cut(t_rel, breaks = edges, include.lowest = TRUE, right = FALSE),
@@ -3983,9 +4050,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   plot_group_gam_panel <- function(df, lab_group, title,
                                    stratum_col = "plat_group", stratum_values = NULL,
                                    stratum_legend = NULL, stratum_colors = NULL,
-                                   log_scale = FALSE) {
+                                   log_scale = FALSE,
+                                   pre_days = PRE_DAYS, post_days = POST_DAYS,
+                                   anchor_label = ANCHOR_LABEL) {
     patient_bins <- patient_bin_trajectory(
-      df, lab_group, stratum_col, stratum_values, log_scale = log_scale
+      df, lab_group, stratum_col, stratum_values, log_scale = log_scale,
+      pre_days = pre_days, post_days = post_days
     )
     if (is.null(patient_bins) || nrow(patient_bins) == 0)
       return(ggplot() + annotate("text", x = 0, y = 0, label = "(no data)") +
@@ -4015,11 +4085,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       scale_color_manual(values = stratum_colors, labels = stratum_legend, name = NULL) +
       scale_fill_manual(values = stratum_colors, guide = "none") +
       scale_x_continuous(
-        breaks = seq(-PRE_DAYS, POST_DAYS, by = 365.25),
+        breaks = seq(-pre_days, post_days, by = 365.25),
         labels = function(d) sprintf("%g", round(d / 365.25))
       ) +
       labs(
-        x = sprintf("Years from %s", ANCHOR_LABEL),
+        x = sprintf("Years from %s", anchor_label),
         y = sprintf("GAM-smoothed %s", if (isTRUE(log_scale))
                     paste0("log1p(", lab_group, ")") else lab_group),
         title = title,
@@ -4028,7 +4098,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
           "R/mgcv GAM on patient-level 180-day bin means",
           if (isTRUE(log_scale)) " after log1p transformation" else "",
           "; smoothness selected by fREML with shrinkage. ",
-          "Points are observed bin means (n >= ", MIN_BIN_PATIENTS, ")."
+          "Points are observed bin means (n >= ", MIN_BIN_PATIENTS, ").",
+          if (post_days <= 0) paste0(
+            " Day 0 is platinum initiation (platinum stratum) or last contact",
+            " (non-platinum stratum), so the comparator's origin is a censoring",
+            " date rather than an event."
+          ) else ""
         )
       ) +
       theme_fig() +
@@ -4040,50 +4115,74 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   if (!plot_gam_trajectories) {
     message("R-fitted GAM trajectories: disabled; skipping")
   } else if (!is.null(canonical_long_df)) {
-    for (lab_group in labs_present) {
-      slug <- lab_stem_slug(lab_group)
-      lab_window_mrns <- group_df %>%
-        filter(LAB_GROUP == lab_group, t_rel >= -PRE_DAYS, t_rel <= POST_DAYS) %>%
-        distinct(DFCI_MRN) %>%
-        pull(DFCI_MRN)
-      n_pat <- length(lab_window_mrns)
-      for (log_scale in c(FALSE, TRUE)) {
-        scale_suffix <- if (log_scale) "_log" else ""
-        p_gam <- plot_group_gam_panel(
-          group_df, lab_group,
-          sprintf("%s (n=%s)", COHORT_DISPLAY,
-                  format(n_pat, big.mark = ",")),
-          log_scale = log_scale
-        )
-        save_fig(p_gam, OUT_DIR,
-                 sprintf("gam_longitudinal_platinum_%s%s", slug, scale_suffix),
-                 width = 9.5, height = 5.5)
-        if (show) print(p_gam)
+    # Both anchor modes read the same measurements and the same strata; they
+    # differ only in where each patient's day 0 sits. Rendering them in one
+    # pass keeps the forward and backward views on an identical cohort, so a
+    # difference between the two figures is a difference in alignment rather
+    # than in patient selection.
+    for (anchor_mode in ANCHOR_MODES) {
+      window <- anchor_mode_window(anchor_mode)
+      mode_df <- if (identical(anchor_mode, "endpoint"))
+        endpoint_relative_df(group_df) else group_df
+      if (is.null(mode_df)) next
+      if (identical(anchor_mode, "endpoint"))
+        message(sprintf(
+          "Endpoint-anchored trajectories: %s rows across %s patients re-zeroed on platinum/last contact",
+          format(nrow(mode_df), big.mark = ","),
+          format(length(unique(mode_df$DFCI_MRN)), big.mark = ",")))
 
-        if (!is.null(llm_lookup)) {
-          scheme <- FIGURE_LLM_STRATA[["has_nepc"]]
-          nepc_values <- llm_lookup %>%
-            transmute(DFCI_MRN, stratum = as.character(.data[[scheme$col]]))
-          nepc_values$stratum <- scheme$labels[
-            match(nepc_values$stratum, as.character(scheme$levels))
-          ]
-          nepc_values <- nepc_values %>% filter(!is.na(stratum))
-          n_labeled <- length(intersect(unique(nepc_values$DFCI_MRN),
-                                        lab_window_mrns))
-          p_gam_nepc <- plot_group_gam_panel(
-            group_df, lab_group,
-            sprintf("%s (n=%s/%s labeled)", COHORT_DISPLAY,
-                    format(n_labeled, big.mark = ","),
+      for (lab_group in labs_present) {
+        slug <- lab_stem_slug(lab_group)
+        lab_window_mrns <- mode_df %>%
+          filter(LAB_GROUP == lab_group,
+                 t_rel >= -window$pre, t_rel <= window$post) %>%
+          distinct(DFCI_MRN) %>%
+          pull(DFCI_MRN)
+        n_pat <- length(lab_window_mrns)
+        for (log_scale in c(FALSE, TRUE)) {
+          scale_suffix <- if (log_scale) "_log" else ""
+          p_gam <- plot_group_gam_panel(
+            mode_df, lab_group,
+            sprintf("%s (n=%s)", COHORT_DISPLAY,
                     format(n_pat, big.mark = ",")),
-            stratum_col = scheme$col, stratum_values = nepc_values,
-            stratum_legend = setNames(scheme$labels, scheme$labels),
-            stratum_colors = setNames(KM_PALETTE[seq_along(scheme$levels)], scheme$labels),
-            log_scale = log_scale
+            log_scale = log_scale,
+            pre_days = window$pre, post_days = window$post,
+            anchor_label = window$label
           )
-          save_fig(p_gam_nepc, OUT_DIR,
-                   sprintf("gam_longitudinal_has_nepc_%s%s", slug, scale_suffix),
+          save_fig(p_gam, OUT_DIR,
+                   sprintf("gam_longitudinal_platinum_%s%s%s",
+                           slug, scale_suffix, window$suffix),
                    width = 9.5, height = 5.5)
-          if (show) print(p_gam_nepc)
+          if (show) print(p_gam)
+
+          if (!is.null(llm_lookup)) {
+            scheme <- FIGURE_LLM_STRATA[["has_nepc"]]
+            nepc_values <- llm_lookup %>%
+              transmute(DFCI_MRN, stratum = as.character(.data[[scheme$col]]))
+            nepc_values$stratum <- scheme$labels[
+              match(nepc_values$stratum, as.character(scheme$levels))
+            ]
+            nepc_values <- nepc_values %>% filter(!is.na(stratum))
+            n_labeled <- length(intersect(unique(nepc_values$DFCI_MRN),
+                                          lab_window_mrns))
+            p_gam_nepc <- plot_group_gam_panel(
+              mode_df, lab_group,
+              sprintf("%s (n=%s/%s labeled)", COHORT_DISPLAY,
+                      format(n_labeled, big.mark = ","),
+                      format(n_pat, big.mark = ",")),
+              stratum_col = scheme$col, stratum_values = nepc_values,
+              stratum_legend = setNames(scheme$labels, scheme$labels),
+              stratum_colors = setNames(KM_PALETTE[seq_along(scheme$levels)], scheme$labels),
+              log_scale = log_scale,
+              pre_days = window$pre, post_days = window$post,
+              anchor_label = window$label
+            )
+            save_fig(p_gam_nepc, OUT_DIR,
+                     sprintf("gam_longitudinal_has_nepc_%s%s%s",
+                             slug, scale_suffix, window$suffix),
+                     width = 9.5, height = 5.5)
+            if (show) print(p_gam_nepc)
+          }
         }
       }
     }

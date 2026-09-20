@@ -368,6 +368,12 @@ def _run_multivariable_landmark(
             genomic_feature_cols=tuple(
                 getattr(ctx, "genomic_feature_cols", ())
             ),
+            # A context that selected no canonical labs models no lab summaries,
+            # so gating candidates to that (empty) set would drop every feature.
+            # prepare_landmark_context sets canonical_labs = [] for exactly those
+            # feature sets (COMPASS: somatic_gleason, text). Lab-bearing arms are
+            # unaffected: their canonical set is non-empty and the gate stays on.
+            restrict_to_canonical_labs=bool(getattr(ctx, "canonical_labs", ())),
         )
         if not fold_canonical_labs_df.empty:
             fold_canonical_labs_df.insert(0, "landmark_days", landmark_day)

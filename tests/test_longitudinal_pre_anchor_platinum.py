@@ -89,8 +89,8 @@ def test_plotting_gams_are_fit_in_r_with_reml_tuning():
     assert 'method = "fREML"' in block
     assert "select = TRUE" in block
     assert "patient_bin_trajectory" in block
-    assert 'sprintf("gam_longitudinal_platinum_%s%s"' in block
-    assert 'sprintf("gam_longitudinal_has_nepc_%s%s"' in block
+    assert 'sprintf("gam_longitudinal_platinum_%s%s%s"' in block
+    assert 'sprintf("gam_longitudinal_has_nepc_%s%s%s"' in block
 
 
 def test_figure_notebook_toggles_gam_fitting_off_without_removing_it():
@@ -123,9 +123,53 @@ def test_longitudinal_and_gam_figures_also_emit_log_space_versions():
     assert 'scale_suffix <- if (log_scale) "_log" else ""' in block
     assert 'sprintf("longitudinal_platinum_%s%s"' in block
     assert 'sprintf("longitudinal_%s_%s%s"' in block
-    assert 'sprintf("gam_longitudinal_platinum_%s%s"' in block
-    assert 'sprintf("gam_longitudinal_has_nepc_%s%s"' in block
+    assert 'sprintf("gam_longitudinal_platinum_%s%s%s"' in block
+    assert 'sprintf("gam_longitudinal_has_nepc_%s%s%s"' in block
     assert 'paste0("log1p(", lab_group, ")")' in block
+
+
+def test_endpoint_anchor_mode_rezeroes_on_platinum_or_last_contact():
+    """The backward view aligns each patient on t_platinum, which the cohort
+    builder already sets to platinum initiation for platinum-positive patients
+    and to last contact for everyone else."""
+    source = PIPELINE_R.read_text()
+    assert 'ANCHOR_MODES <- c("anchor", "endpoint")' in source
+    assert "endpoint_relative_df <- function(df)" in source
+    assert "t_rel = t_lab - t_platinum" in source
+    # Rows with no resolvable endpoint have no defined day 0 to align on.
+    assert "filter(is.finite(t_rel))" in source
+    # Pure lead-up window: five years back, nothing after the event.
+    assert "ENDPOINT_PRE_DAYS  <- 5 * 365.25" in source
+    assert "ENDPOINT_POST_DAYS <- 0" in source
+
+
+def test_endpoint_anchor_mode_bypasses_anchor_relative_prepared_bins():
+    """The prepared parquet bins anchor-relative t_rel only, so it cannot serve
+    the endpoint window; that mode must re-bin from the canonical rows."""
+    source = PIPELINE_R.read_text()
+    start = source.index("patient_bin_trajectory <- function")
+    end = source.index("bin_group_ci <- function", start)
+    block = source[start:end]
+    assert "pre_days = PRE_DAYS, post_days = POST_DAYS" in block
+    assert "isTRUE(all.equal(c(pre_days, post_days), c(PRE_DAYS, POST_DAYS)))" in block
+    # Window-parameterized, not reading the forward-mode globals.
+    assert "t_rel >= -pre_days, t_rel <= post_days" in block
+    assert "anchored_bin_edges(pre_days, post_days, BIN_WIDTH_DAYS)" in block
+    # Left-closed bins would otherwise drop a measurement taken exactly on
+    # the endpoint, since day 0 is the top edge when post_days is 0.
+    assert "if (post_days <= 0) edges[length(edges)] <- edges[length(edges)] + 1e-6" in block
+
+
+def test_endpoint_anchor_figures_do_not_collide_with_forward_anchor_ones():
+    source = PIPELINE_R.read_text()
+    assert 'suffix = "_endpoint"' in source
+    assert "for (anchor_mode in ANCHOR_MODES)" in source
+    assert "window <- anchor_mode_window(anchor_mode)" in source
+    # Both modes must run over the same cohort, so a difference between the
+    # two figures is alignment rather than patient selection.
+    assert "endpoint_relative_df(group_df) else group_df" in source
+    # The caption has to say day 0 is a censoring date for the comparator.
+    assert "rather than an event" in source
 
 
 def test_pre_adt_androgen_coverage_keeps_zero_measurement_patients():

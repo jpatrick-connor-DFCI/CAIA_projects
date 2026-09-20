@@ -473,10 +473,10 @@ def prepare_landmark_context(
     )
 
     feature_set = str(feature_set).lower().replace("-", "_")
-    if feature_set not in {"labs", "somatic_gleason", "genomic"}:
+    if feature_set not in {"labs", "somatic_gleason", "genomic", "text", "labs_text"}:
         raise ValueError(
             f"Unsupported feature set {feature_set!r}; expected 'labs', "
-            "'somatic_gleason', or 'genomic'."
+            "'somatic_gleason', 'genomic', 'text', or 'labs_text'."
         )
 
     always_include_feature_cols: tuple[str, ...] = ()
@@ -545,6 +545,49 @@ def prepare_landmark_context(
                 "the genomic feature set has nothing to test. Confirm "
                 "build_genomic_inputs.py wrote genomic_aggregated.csv here."
             )
+    elif feature_set in {"text", "labs_text"}:
+        # Pooled note-embedding columns, declared by the manifest that
+        # build_text_embedding_inputs.py writes beside the landmark frames.
+        #
+        # always_include is load-bearing here, not a convenience. The pooled
+        # columns are named <TYPE>_EMBEDDING_<i> with no "__" separator, so
+        # parse_feature_name() reads each as a lab named after the whole column
+        # with stat "value". select_feature_columns' restrict_to_labs gate would
+        # then drop all of them silently -- leaving an age-only model that looks
+        # like a successful text fit. Exempting them from the lab gate is what
+        # prevents that; coverage and variability filters still apply.
+        manifest_path = inputs_dir / "text_embedding_features.csv"
+        if not manifest_path.exists():
+            raise FileNotFoundError(
+                f"Missing {manifest_path}. Run build_text_embedding_inputs.py first."
+            )
+        feature_manifest = pd.read_csv(manifest_path)
+        if "feature" not in feature_manifest.columns:
+            raise ValueError(f"{manifest_path} is missing the 'feature' column.")
+        text_features = [
+            str(feature)
+            for feature in feature_manifest["feature"].dropna().drop_duplicates()
+        ]
+        missing_text = [f for f in text_features if f not in merged.columns]
+        if missing_text:
+            raise ValueError(
+                f"Landmark +{landmark_day} inputs are missing {len(missing_text)} "
+                f"declared text features; first values: {missing_text[:10]}"
+            )
+        if feature_set == "text":
+            raw_feature_cols = text_features
+        else:
+            lab_cols = [
+                c
+                for c in merged.columns
+                if c not in non_feature_columns(merged) and c not in set(text_features)
+            ]
+            raw_feature_cols = lab_cols + text_features
+        always_include_feature_cols = tuple(text_features)
+        # genomic_feature_cols stays empty: DEFAULT_MIN_GENOMIC_PREVALENCE is a
+        # floor on binary mutation indicators (value == 1 in >= X% of patients).
+        # Applied to dense continuous embedding dimensions it would be
+        # meaningless and would drop essentially every column.
     else:
         raw_feature_cols = [
             c for c in merged.columns if c not in non_feature_columns(merged)
@@ -558,7 +601,10 @@ def prepare_landmark_context(
         context=f"prepare_landmark_context[landmark+{landmark_day}d]",
     )
 
-    if feature_set == "somatic_gleason":
+    if feature_set in {"somatic_gleason", "text"}:
+        # Neither arm models lab summaries, so there is no canonical lab set to
+        # select. "labs_text" DOES carry labs and therefore falls through to the
+        # normal coverage-based selection below.
         canonical_labs = []
     elif canonical_labs_override is not None:
         # Shared-canonical-labs arm: the caller has fixed the canonical set (e.g.
@@ -577,7 +623,9 @@ def prepare_landmark_context(
         train_val,
         raw_feature_cols,
         min_patient_coverage=min_patient_coverage,
-        restrict_to_labs=[] if feature_set == "somatic_gleason" else canonical_labs,
+        restrict_to_labs=(
+            [] if feature_set in {"somatic_gleason", "text"} else canonical_labs
+        ),
         always_include=list(always_include_feature_cols),
         genomic_feature_cols=list(genomic_feature_cols),
         min_genomic_prevalence=DEFAULT_MIN_GENOMIC_PREVALENCE,
@@ -593,9 +641,11 @@ def prepare_landmark_context(
     print(f"Test (Arm 2):      {len(test)} patients")
     print(f"Feature set: {feature_set}")
     print(f"Canonical labs (train_val): {len(canonical_labs)}")
-    feature_label = (
-        "static somatic/Gleason" if feature_set == "somatic_gleason" else "summary-lab"
-    )
+    feature_label = {
+        "somatic_gleason": "static somatic/Gleason",
+        "text": "pooled note-embedding",
+        "labs_text": "summary-lab + note-embedding",
+    }.get(feature_set, "summary-lab")
     print(f"Selected {feature_label} features (train_val pre-filter): {len(selected_feature_cols)}")
 
     return LandmarkContext(

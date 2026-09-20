@@ -195,7 +195,13 @@ def cv_one_endpoint(
             fold_train,
             raw_feature_cols,
             min_patient_coverage=args.min_patient_coverage,
-            restrict_to_labs=[] if feature_set == "somatic_gleason" else canonical,
+            # "text" carries no lab features, so the canonical-lab gate would
+            # drop every embedding column (see prepare_landmark_context).
+            # "labs_text" keeps the gate: its lab columns are still gated, and
+            # its embedding columns ride in via always_include.
+            restrict_to_labs=(
+                [] if feature_set in {"somatic_gleason", "text"} else canonical
+            ),
             always_include=list(always_include_feature_cols),
             genomic_feature_cols=list(genomic_feature_cols),
             min_genomic_prevalence=_ca.DEFAULT_MIN_GENOMIC_PREVALENCE,
@@ -499,7 +505,8 @@ def run_one_endpoint(
             min_patient_coverage=args.min_patient_coverage,
             restrict_to_labs=(
                 []
-                if str(getattr(args, "feature_set", "labs")).lower().replace("-", "_") == "somatic_gleason"
+                if str(getattr(args, "feature_set", "labs")).lower().replace("-", "_")
+                in {"somatic_gleason", "text"}
                 else canonical_labs
             ),
             always_include=list(always_include_feature_cols),

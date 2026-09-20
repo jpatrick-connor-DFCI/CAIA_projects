@@ -602,6 +602,7 @@ def tune_multivariable_model(
     always_include_feature_cols: tuple[str, ...] = (),
     genomic_feature_cols: tuple[str, ...] | None = None,
     min_genomic_prevalence: float | None = None,
+    restrict_to_canonical_labs: bool = True,
     id_col: str = DEFAULT_ID_COL,
     age_col: str = DEFAULT_AGE_COL,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict, pd.DataFrame]:
@@ -615,6 +616,14 @@ def tune_multivariable_model(
     genomic; callers whose always-include set also contains non-genomic
     features (e.g. COMPASS's Gleason score) must pass this explicitly so the
     prevalence floor isn't applied to a continuous clinical score.
+
+    `restrict_to_canonical_labs` (default True, i.e. unchanged behavior) gates
+    candidate features to the fold's canonical lab set. Pass False for a feature
+    set that models no lab summaries at all -- e.g. COMPASS's pooled
+    note-embedding arm, whose column names carry no "__" stat suffix and so
+    would every one be read as a non-canonical "lab" and dropped. Per-fold
+    canonical labs are still computed and reported either way, so the fold
+    audit output is identical.
     """
     require_sksurv()
     duration_col, event_col = _endpoint_columns(endpoint_map, endpoint)
@@ -655,7 +664,7 @@ def tune_multivariable_model(
             fold_train,
             raw_feature_cols,
             min_patient_coverage=min_patient_coverage,
-            restrict_to_labs=canonical,
+            restrict_to_labs=canonical if restrict_to_canonical_labs else [],
             always_include=list(always_include_feature_cols),
             genomic_feature_cols=list(genomic_feature_cols),
             min_genomic_prevalence=min_genomic_prevalence,
