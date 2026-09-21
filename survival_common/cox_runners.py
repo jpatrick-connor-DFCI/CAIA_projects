@@ -379,7 +379,7 @@ def _run_multivariable_landmark(
             fold_canonical_labs_df.insert(0, "landmark_days", landmark_day)
             out["canonical_labs_fold_rows"].append(fold_canonical_labs_df)
 
-        metrics_row, summary_df, _, test_auc_df, test_brier_df = cox.fit_final_multivariable_model(
+        metrics_row, summary_df, predictions_df, test_auc_df, test_brier_df = cox.fit_final_multivariable_model(
             ctx.train_val.copy(),
             ctx.test.copy(),
             feature_cols=ctx.selected_feature_cols,
@@ -394,7 +394,9 @@ def _run_multivariable_landmark(
             canonical_labs=ctx.canonical_labs,
             static_covariate_cols=static_covariate_cols,
         )
-        _collect_multivariable_outputs(out, landmark_day, metrics_row, summary_df, test_auc_df, test_brier_df)
+        _collect_multivariable_outputs(
+            out, landmark_day, metrics_row, summary_df, predictions_df, test_auc_df, test_brier_df
+        )
         _print_multivariable_summary(best_row, metrics_row, summary_df)
 
 
@@ -421,7 +423,7 @@ def _run_baseline_landmark(
     for endpoint in endpoints:
         print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
         print(cox.ENDPOINTS[endpoint]["description"])
-        metrics_row, summary_df, _, test_auc_df, test_brier_df = cox.fit_final_multivariable_model(
+        metrics_row, summary_df, predictions_df, test_auc_df, test_brier_df = cox.fit_final_multivariable_model(
             ctx.train_val.copy(),
             ctx.test.copy(),
             feature_cols=feature_cols,
@@ -436,20 +438,11 @@ def _run_baseline_landmark(
             canonical_labs=[],
             static_covariate_cols=static_covariate_cols,
         )
-        metrics_row["landmark_days"] = landmark_day
         if config.baseline_feature_count_column:
             metrics_row[config.baseline_feature_count_column] = len(feature_cols)
-        summary_df.insert(0, "landmark_days", landmark_day)
-        out["metric_rows"].append(metrics_row)
-        out["frames"].append(summary_df)
-        if not test_auc_df.empty:
-            test_auc_df = test_auc_df.copy()
-            test_auc_df.insert(0, "landmark_days", landmark_day)
-            out["test_auc_frames"].append(test_auc_df)
-        if not test_brier_df.empty:
-            test_brier_df = test_brier_df.copy()
-            test_brier_df.insert(0, "landmark_days", landmark_day)
-            out["test_brier_frames"].append(test_brier_df)
+        _collect_multivariable_outputs(
+            out, landmark_day, metrics_row, summary_df, predictions_df, test_auc_df, test_brier_df
+        )
         print(f"  held-out test C-index={metrics_row['test_c_index']:.4f}")
         print(f"  held-out test mean AUC(t)={metrics_row['test_mean_auc_t']:.4f}")
         print(f"  held-out test integrated Brier={metrics_row['test_integrated_brier']:.4f}")
@@ -460,6 +453,7 @@ def _collect_multivariable_outputs(
     landmark_day: int,
     metrics_row: dict,
     summary_df: pd.DataFrame,
+    predictions_df: pd.DataFrame,
     test_auc_df: pd.DataFrame,
     test_brier_df: pd.DataFrame,
 ) -> None:
@@ -467,6 +461,10 @@ def _collect_multivariable_outputs(
     summary_df.insert(0, "landmark_days", landmark_day)
     out["metric_rows"].append(metrics_row)
     out["frames"].append(summary_df)
+    if predictions_df is not None and not predictions_df.empty:
+        predictions_df = predictions_df.copy()
+        predictions_df.insert(0, "landmark_days", landmark_day)
+        out["patient_risk_frames"].append(predictions_df)
     if not test_auc_df.empty:
         test_auc_df = test_auc_df.copy()
         test_auc_df.insert(0, "landmark_days", landmark_day)
@@ -563,6 +561,7 @@ def run_multivariable(config: CoxProjectConfig, cox: Any, args: Namespace) -> No
             "metric_rows": [],
             "test_auc_frames": [],
             "test_brier_frames": [],
+            "patient_risk_frames": [],
             "canonical_labs_fold_rows": [],
         }
         if args.baseline:
@@ -630,6 +629,10 @@ def _write_multivariable_landmark_outputs(
         pd.concat(out["test_brier_frames"], ignore_index=True).to_csv(
             _per_landmark_path(output_dir, f"{prefix}_test_brier", landmark_day), index=False
         )
+    if out["patient_risk_frames"]:
+        pd.concat(out["patient_risk_frames"], ignore_index=True).to_csv(
+            _per_landmark_path(output_dir, f"{prefix}_patient_risks", landmark_day), index=False
+        )
     if out["metric_rows"]:
         metrics = pd.DataFrame(
             [
@@ -680,5 +683,9 @@ def _combine_multivariable_outputs(
         print(f"  {prefix}_test_auc_t.csv")
     if _combine_per_landmark(output_dir, f"{prefix}_test_brier", landmark_days, f"{prefix}_test_brier.csv"):
         print(f"  {prefix}_test_brier.csv")
+    if _combine_per_landmark(
+        output_dir, f"{prefix}_patient_risks", landmark_days, f"{prefix}_patient_risks.csv"
+    ):
+        print(f"  {prefix}_patient_risks.csv")
     if _combine_per_landmark(output_dir, f"{prefix}_metrics", landmark_days, f"{prefix}_metrics.csv"):
         print(f"  {prefix}_metrics.csv")

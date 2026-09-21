@@ -211,11 +211,16 @@ def overlay_km(
     title: str | None = None,
     xlabel: str = "Days",
     ylabel: str = "Survival probability",
+    ci_show: bool = True,
 ) -> None:
     """Overlay Kaplan-Meier curves for multiple cohorts on `ax`.
 
     `survival_by_label` maps cohort label -> (duration_days, event_indicator).
     Requires `lifelines`; raises ModuleNotFoundError if unavailable.
+
+    `ci_show` defaults to True to preserve every existing caller's output; pass
+    False when many groups share an axis and overlapping confidence bands would
+    obscure the curves themselves.
     """
     from lifelines import KaplanMeierFitter
 
@@ -231,7 +236,7 @@ def overlay_km(
             durations=dur.loc[mask].to_numpy(dtype=float),
             event_observed=evt.loc[mask].to_numpy(dtype=float),
         )
-        kmf.plot_survival_function(ax=ax, color=colors.get(label), ci_show=True)
+        kmf.plot_survival_function(ax=ax, color=colors.get(label), ci_show=ci_show)
     if title:
         ax.set_title(title)
     ax.set_xlabel(xlabel)

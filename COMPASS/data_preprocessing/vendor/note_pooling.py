@@ -1,12 +1,17 @@
 """Vendored note-pooling helpers from the clinical text embedding project.
 
-Copied verbatim -- do not edit the logic -- from that project's
-``survival/preprocessing.py`` at commit 52a499f. Only the three functions
-COMPASS needs are included:
+Copied verbatim -- do not edit the logic -- from that project. Only what COMPASS
+needs is included:
+
+From ``survival/preprocessing.py`` at commit 52a499f:
 
 * ``find_continuous_records_to_analyze``
 * ``pool_embedding_series_vectorized``
 * ``generate_survival_embedding_df``
+
+From ``shared/polars_utils.py`` at commit 437b132:
+
+* ``filter_finite_rows``
 
 WHY A COPY RATHER THAN AN IMPORT. The embedding project is a separate repo with
 its own cluster checkout and SLURM deployment. Importing across the two coupled
@@ -19,13 +24,15 @@ KEEPING IT IN SYNC. This is a fork, so upstream changes do not arrive
 automatically. The landmark contract these functions implement (filter to notes
 strictly before the landmark, re-center note times on it, assert
 ``max(note_time) <= 0``) is the part that must not drift: it is COMPASS's
-leakage control. If the upstream pooling changes materially, re-copy the three
+leakage control. If the upstream pooling changes materially, re-copy these
 functions and re-run tests/test_vendored_pooling.py, which pins that contract.
 
 Upstream requires ``polars``, ``numpy`` and ``tqdm``; so does this copy.
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 import numpy as np
 import polars as pl
@@ -271,3 +278,15 @@ def generate_survival_embedding_df(notes_meta: pl.DataFrame, survival_df: pl.Dat
         return merged_df
     else:
         return pooled_embedding_df
+
+
+def filter_finite_rows(df: pl.DataFrame, columns: Sequence[str]) -> pl.DataFrame:
+    """Keep rows whose selected columns cast to finite Float64 values."""
+    if not columns:
+        return df
+    return df.filter(
+        pl.all_horizontal([
+            pl.col(c).cast(pl.Float64, strict=False).is_finite()
+            for c in columns
+        ])
+    )

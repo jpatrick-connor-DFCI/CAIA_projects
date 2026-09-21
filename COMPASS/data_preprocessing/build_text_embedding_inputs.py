@@ -211,7 +211,7 @@ def pool_embeddings_for_landmark(
     ``continuous_window=False`` matches the embedding project's own prediction
     datasets, which do not require an unbroken note history.
     """
-    from shared.polars_utils import filter_finite_rows
+    from vendor.note_pooling import filter_finite_rows
 
     pooled = generate_survival_embedding_df(
         notes_meta=notes_meta,

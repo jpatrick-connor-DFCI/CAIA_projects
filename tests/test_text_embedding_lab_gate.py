@@ -175,18 +175,41 @@ _VENDORED = _BUILDER_SRC.parent / "vendor" / "note_pooling.py"
 
 
 def test_builder_does_not_import_the_embedding_project():
-    """No import may reach into the other repo, however it is spelled."""
+    """Every import must resolve inside this repo or the standard environment.
+
+    This is an ALLOWLIST, not a denylist. An earlier version of this test listed
+    the forbidden module names instead, and missed a live
+    ``from shared.polars_utils import filter_finite_rows`` sitting inside a
+    function body -- the builder then failed on the cluster with
+    ``ModuleNotFoundError: No module named 'shared'``. Anything not named below
+    fails here, so a newly added cross-repo import cannot slip through by being
+    spelled differently.
+
+    ``ast.walk`` rather than ``tree.body``: that missed import was nested inside
+    ``pool_embeddings_for_landmark``, not at module level.
+    """
     tree = ast.parse(_BUILDER_SRC.read_text())
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            imported.update(a.name for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported.add(node.module)
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            imported.add(node.module.split(".")[0])
 
-    forbidden = {"anchors", "config", "schemes", "survival.preprocessing"}
-    assert not (imported & forbidden), f"cross-repo import: {imported & forbidden}"
-    assert not [m for m in imported if m.startswith("survival.")]
+    allowed = {
+        # stdlib
+        "__future__", "argparse", "io", "json", "os", "sys", "pathlib",
+        "collections", "dataclasses", "typing",
+        # third-party, installed in the cluster environment
+        "numpy", "pandas", "polars", "zstandard", "tqdm",
+        # this repo: COMPASS/data_preprocessing/ and its vendor/ package
+        "build_prediction_inputs", "build_somatic_gleason_inputs",
+        "cox_aggregated", "vendor",
+    }
+    assert imported <= allowed, (
+        f"import(s) resolving outside this repo: {sorted(imported - allowed)}. "
+        "Vendor the code into COMPASS/data_preprocessing/vendor/ instead."
+    )
 
 
 def test_builder_carries_no_path_to_the_other_checkout():
@@ -208,6 +231,7 @@ def test_pooling_helpers_are_vendored_in_this_repo():
         "find_continuous_records_to_analyze",
         "pool_embedding_series_vectorized",
         "generate_survival_embedding_df",
+        "filter_finite_rows",
     }
 
 
@@ -215,6 +239,7 @@ def test_vendored_module_records_its_upstream_commit():
     """A fork needs its provenance written down to be re-syncable."""
     doc = ast.get_docstring(ast.parse(_VENDORED.read_text()))
     assert "survival/preprocessing.py" in doc
+    assert "shared/polars_utils.py" in doc
     assert "commit" in doc.lower()
 
 
