@@ -279,7 +279,9 @@ def tune_multivariable_model(
     min_patient_coverage: float,
     static_covariate_cols: tuple[str, ...] = (),
     always_include_feature_cols: tuple[str, ...] = (),
+    genomic_feature_cols: tuple[str, ...] | None = None,
     min_genomic_prevalence: float | None = DEFAULT_MIN_GENOMIC_PREVALENCE,
+    restrict_to_canonical_labs: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict, pd.DataFrame]:
     return _shared_tune_multivariable_model(
         train_val,
@@ -296,7 +298,9 @@ def tune_multivariable_model(
         min_patient_coverage=min_patient_coverage,
         static_covariate_cols=static_covariate_cols,
         always_include_feature_cols=always_include_feature_cols,
+        genomic_feature_cols=genomic_feature_cols,
         min_genomic_prevalence=min_genomic_prevalence,
+        restrict_to_canonical_labs=restrict_to_canonical_labs,
         endpoint_map=ENDPOINTS,
         id_col=ID_COL,
         age_col=AGE_COL,
