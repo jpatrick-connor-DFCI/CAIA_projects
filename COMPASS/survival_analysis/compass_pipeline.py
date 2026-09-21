@@ -2030,6 +2030,72 @@ def summarize_outputs(run: dict) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["run", "landmark", "model", "config"]).reset_index(drop=True)
 
 
+# Per-patient held-out risk files, keyed by the same (model, config) pair as
+# MULTIVARIATE_TASK_SPECS. Every multivariable family writes one row per
+# held-out patient next to its metrics; these are the filenames.
+PATIENT_RISK_FILENAMES = {
+    ("elastic-net", "both"): "cox_agg_multivariable_patient_risks.csv",
+    ("elastic-net", "baseline"): "cox_agg_baseline_patient_risks.csv",
+    ("xgboost", "both"): "landmark_xgboost_patient_risks.csv",
+    ("xgboost", "baseline"): "landmark_xgboost_baseline_patient_risks.csv",
+}
+
+
+def patient_risk_path(run: dict, model: str, landmark: int, config_dir: str) -> Path | None:
+    """Where one task's held-out risk scores live, or None if unknown for it."""
+    filename = PATIENT_RISK_FILENAMES.get((model, config_dir))
+    if filename is None:
+        return None
+    return (
+        run["output_dir"] / model_output_dir(model)
+        / f"landmark_{landmark}" / config_dir / filename
+    )
+
+
+def summarize_patient_risks(run: dict) -> pd.DataFrame:
+    """Coverage of the per-patient held-out risk scores for one run.
+
+    Mirrors summarize_outputs, but reports whether each task actually wrote its
+    risk file and how many held-out patients it covers. A task whose metrics
+    predate the risk-score output reads as "missing" here while its metrics row
+    still reads fine -- that combination means the fit is stale for this purpose
+    and needs a refit (OVERWRITE = True) to emit scores.
+    """
+    endpoint = run.get("endpoint", ENDPOINT)
+    rows = []
+    for model, landmark, config_dir, _metrics_filename in tasks_for_run(run, MULTIVARIATE_TASK_SPECS):
+        base = {
+            "run": run["label"], "model": model, "landmark": landmark,
+            "config": config_dir, "endpoint": endpoint,
+        }
+        path = patient_risk_path(run, model, landmark, config_dir)
+        if path is None:
+            rows.append({**base, "status": "not applicable", "n_patients": pd.NA,
+                         "n_events": pd.NA, "path": ""})
+            continue
+        if not path.exists():
+            rows.append({**base, "status": "missing", "n_patients": pd.NA,
+                         "n_events": pd.NA, "path": str(path)})
+            continue
+        df = pd.read_csv(path, low_memory=False)
+        scoped = df.loc[df["endpoint"] == endpoint] if "endpoint" in df.columns else df
+        if "dataset" in scoped.columns:
+            scoped = scoped.loc[scoped["dataset"].astype(str) == "test"]
+        rows.append({
+            **base,
+            "status": "ok" if not scoped.empty else f"no {endpoint} row",
+            "n_patients": int(len(scoped)),
+            "n_events": int(pd.to_numeric(scoped["event"], errors="coerce").sum())
+            if "event" in scoped.columns and not scoped.empty else pd.NA,
+            "path": str(path),
+        })
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["run", "landmark", "model", "config"])
+        .reset_index(drop=True)
+    )
+
+
 def summarize_longitudinal_outputs(run: dict) -> pd.DataFrame:
     """Same schema as summarize_outputs, for the longitudinal arms.
 
