@@ -118,13 +118,27 @@ def _read_csv(path: Path, what: str) -> pd.DataFrame:
 
 
 def load_patient_risks(
-    path: Path, *, endpoint: str, landmark_day: int | None, id_col: str
+    path: Path,
+    *,
+    endpoint: str,
+    landmark_day: int | None,
+    id_col: str,
+    dataset: str = "test",
 ) -> pd.DataFrame:
     """Load held-out risk scores for one endpoint/landmark.
 
-    The runners write one row per held-out patient per endpoint per landmark,
-    with dataset == "test". Anything else in the file (should a future writer
-    add train-side rows) is dropped here rather than silently averaged in.
+    The runners write one row per held-out patient per endpoint per landmark.
+    Two schemes can appear in the same file and they are NOT interchangeable:
+
+      dataset == "test"    the held-out test block, scored by the final model
+                           refit on all of train/val.
+      dataset == "cv_oof"  every patient in the cohort, each scored by the one
+                           outer CV fold that excluded them (written only when
+                           the run passed --out-of-fold-risks).
+
+    Exactly one is selected, never both. Pooling them would enter every test
+    patient twice under two different models, and would also silently defeat
+    the duplicate check below. `dataset` picks which.
     """
     risks = _read_csv(path, "patient risk scores")
     required = {id_col, "endpoint", "risk_score", "duration_days", "event"}
@@ -136,7 +150,19 @@ def load_patient_risks(
             f"cox_runners/multivariate_analysis patient_risks output."
         )
     if "dataset" in risks.columns:
-        risks = risks.loc[risks["dataset"].astype(str) == "test"]
+        available = sorted(risks["dataset"].astype(str).unique())
+        risks = risks.loc[risks["dataset"].astype(str) == dataset]
+        if risks.empty:
+            raise ValueError(
+                f"{path} has no dataset=={dataset!r} rows; it contains "
+                f"{available}. Out-of-fold scores are written only when the "
+                f"multivariable run passed --out-of-fold-risks."
+            )
+    elif dataset != "test":
+        raise ValueError(
+            f"{path} has no 'dataset' column, so it predates out-of-fold "
+            f"scoring and cannot satisfy dataset=={dataset!r}."
+        )
     risks = risks.loc[risks["endpoint"].astype(str) == endpoint]
     if landmark_day is not None and "landmark_days" in risks.columns:
         risks = risks.loc[
@@ -144,7 +170,7 @@ def load_patient_risks(
         ]
     if risks.empty:
         raise ValueError(
-            f"No held-out rows in {path} for endpoint={endpoint!r}"
+            f"No dataset=={dataset!r} rows in {path} for endpoint={endpoint!r}"
             + (f", landmark_days={landmark_day}" if landmark_day is not None else "")
         )
     duplicated = risks[id_col].duplicated().sum()
@@ -554,20 +580,32 @@ def run(args: argparse.Namespace) -> None:
     risks = load_patient_risks(
         Path(args.patient_risks), endpoint=args.endpoint,
         landmark_day=args.landmark_days, id_col=args.id_col,
+        dataset=getattr(args, "dataset", "test"),
     )
     clinical = load_clinical_features(
         Path(args.clinical_features) if args.clinical_features else None,
         id_col=args.id_col, ids=risks[args.id_col],
     )
     frame = risks.merge(clinical, on=args.id_col, how="left")
+    dataset = getattr(args, "dataset", "test")
+    scheme = (
+        "held-out test block (final model)"
+        if dataset == "test"
+        else "full cohort, out-of-fold (nested CV)"
+    )
     print(
-        f"Held-out patients: {len(frame):,} "
+        f"Scoring scheme: {scheme}\n"
+        f"Patients: {len(frame):,} "
         f"({int(frame['event'].sum()):,} events) for endpoint={args.endpoint!r}"
         + (f", landmark +{args.landmark_days}d" if args.landmark_days is not None else "")
     )
 
+    # The median is taken within this dataset, never across both: fold models
+    # and the final model can sit on different score scales, so a shared
+    # cutpoint would move patients across the split for reasons unrelated to
+    # their risk.
     cutpoint = float(frame["risk_score"].median())
-    print(f"Risk-score split at the held-out median: {cutpoint:.4f}")
+    print(f"Risk-score split at the {dataset} median: {cutpoint:.4f}")
 
     stratifiers = build_stratifiers(frame, cutpoint=cutpoint)
     available = {s.key for s in stratifiers}
@@ -648,6 +686,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Restrict to one landmark when the risk file carries several.",
     )
     parser.add_argument("--id-col", default="DFCI_MRN")
+    parser.add_argument(
+        "--dataset", default="test", choices=["test", "cv_oof"],
+        help=(
+            "Which held-out scoring scheme to draw. 'test' is the held-out "
+            "test block scored by the final model (the default). 'cv_oof' is "
+            "the full cohort, each patient scored by the outer CV fold that "
+            "excluded them, and requires a run with --out-of-fold-risks. The "
+            "two come from different models and are never pooled; render them "
+            "to separate --output-dir paths."
+        ),
+    )
     parser.add_argument(
         "--max-days", type=float, default=None,
         help="Truncate the KM x-axis, e.g. 1825 for five years.",

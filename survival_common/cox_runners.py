@@ -222,7 +222,42 @@ def build_multivariable_parser(config: CoxProjectConfig, cox: Any) -> argparse.A
         default=cox.DEFAULT_CV_L1_RATIOS,
         help="Elastic-net L1 mixing values (0=ridge, 1=lasso) searched during cross-validation.",
     )
+    add_out_of_fold_risk_args(parser)
     return parser
+
+
+def add_out_of_fold_risk_args(parser: argparse.ArgumentParser) -> None:
+    """Register the --out-of-fold-risks flags on a multivariable parser.
+
+    Shared rather than duplicated because each project's
+    multivariate_analysis.py builds its own parser and then hands the result to
+    the common `run_multivariable`; a flag added to only one of them would make
+    the arm silently skip OOF scoring for the other project.
+    """
+    parser.add_argument(
+        "--out-of-fold-risks",
+        action="store_true",
+        help=(
+            "Additionally compute a held-out risk score for EVERY patient via "
+            "nested CV over the full cohort (train/val + test), written with "
+            "dataset='cv_oof'. The default run scores only the held-out test "
+            "block. Costs roughly --oof-outer-folds times a normal run, since "
+            "hyperparameters are re-tuned inside each outer fold; reusing the "
+            "tuning folds instead would leak the outcome into the scores."
+        ),
+    )
+    parser.add_argument(
+        "--oof-outer-folds",
+        type=int,
+        default=5,
+        help="Outer folds for --out-of-fold-risks; each patient is scored by the one fold that excluded them.",
+    )
+    parser.add_argument(
+        "--oof-inner-folds",
+        type=int,
+        default=3,
+        help="Inner folds used to tune hyperparameters within each outer fold of --out-of-fold-risks.",
+    )
 
 
 def run_univariate(config: CoxProjectConfig, cox: Any, args: Namespace) -> None:
@@ -398,6 +433,38 @@ def _run_multivariable_landmark(
             out, landmark_day, metrics_row, summary_df, predictions_df, test_auc_df, test_brier_df
         )
         _print_multivariable_summary(best_row, metrics_row, summary_df)
+
+        if getattr(args, "out_of_fold_risks", False):
+            # Scored over train_val + test together, so the cohort here is the
+            # full landmark cohort rather than either block alone. The test
+            # block keeps its own dataset="test" rows from the final model
+            # above; these are an additional, separately-labeled set.
+            oof_cohort = pd.concat([ctx.train_val, ctx.test])
+            oof_df = cox.compute_out_of_fold_risk_scores(
+                oof_cohort.copy(),
+                raw_feature_cols=ctx.raw_feature_cols,
+                endpoint=endpoint,
+                penalizers=args.cv_penalizers,
+                l1_ratios=args.cv_l1_ratios,
+                outer_folds=args.oof_outer_folds,
+                inner_folds=args.oof_inner_folds,
+                seed=args.seed,
+                auc_time_unit_days=auc_time_unit_days,
+                auc_max_time_units=auc_max_time_units,
+                pre_treatment_lab_df=ctx.pre_treatment_lab_df,
+                horizon_grid=horizon_grid,
+                min_patient_coverage=min_patient_coverage,
+                static_covariate_cols=static_covariate_cols,
+                always_include_feature_cols=tuple(
+                    getattr(ctx, "always_include_feature_cols", ())
+                ),
+                genomic_feature_cols=tuple(getattr(ctx, "genomic_feature_cols", ())),
+                restrict_to_canonical_labs=bool(getattr(ctx, "canonical_labs", ())),
+            )
+            if oof_df is not None and not oof_df.empty:
+                oof_df = oof_df.copy()
+                oof_df.insert(0, "landmark_days", landmark_day)
+                out["patient_risk_frames"].append(oof_df)
 
 
 def _run_baseline_landmark(

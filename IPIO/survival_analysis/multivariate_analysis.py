@@ -105,6 +105,7 @@ from cox_aggregated import (  # noqa: E402
 from survival_common.cox_runners import (  # noqa: E402
     _combine_per_landmark,
     _per_landmark_path,
+    add_out_of_fold_risk_args,
     run_multivariable,
 )
 from survival_common.cox_engine import summarize_auc_timeline  # noqa: E402
@@ -1096,4 +1097,5 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip 5-fold CV; fit a single model with the args.* hyperparameters.",
     )
+    add_out_of_fold_risk_args(parser)
     main(parser.parse_args())

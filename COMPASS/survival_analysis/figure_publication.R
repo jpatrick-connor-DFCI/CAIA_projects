@@ -11,7 +11,7 @@ figure_public_path <- function(path) {
     androgen_pre_adt_coverage = "cohort", supplement_adt_intent = "cohort", figure1s_analysis_sets = "cohort",
     figure2v3_llm = "labels", metastatic_labels = "labels",
     figure3 = "associations", figure3b = "associations", figure4 = "prediction",
-    federated_no_msk = "federated_no_msk", "associations")
+    federated = "federated", "associations")
   if (group == "labs") {
     topic <- file.path("trajectories", figure_slug(parts[3]))
     artifact <- paste(parts[4:(length(parts)-1)], collapse = "_")
@@ -334,7 +334,7 @@ figure_archive_old_exports <- function(config, prepared) {
     candidates <- list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(png|pdf|csv|md)$")
     for(path in candidates) {
       rel <- substring(path,nchar(root)+2); group <- strsplit(rel,"/",fixed=TRUE)[[1]][1]
-      special <- if(group=="federated_no_msk") "federated" else if(group=="cohort_comparison") "cohort_overview" else NULL
+      special <- if(group=="federated") "federated" else if(group=="cohort_comparison") "cohort_overview" else NULL
       keep <- if(length(special)) special %in% successful else any(vapply(successful,function(job) {
         bits <- strsplit(job,"__",fixed=TRUE)[[1]]
         length(bits)==2 && toupper(cohort_arm(bits[1]))==arm &&

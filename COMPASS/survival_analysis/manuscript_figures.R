@@ -2,7 +2,7 @@
 # Never refit, recompute q-values, or serialize patient-bearing ggplot objects.
 .manuscript_sources <- Filter(function(x) is.character(x) && length(x)==1 &&
   basename(x)=="manuscript_figures.R", lapply(sys.frames(),function(frame) frame$ofile))
-source(file.path(dirname(tail(.manuscript_sources,1)[[1]]), "federated_no_msk_figures.R"), local=TRUE)
+source(file.path(dirname(tail(.manuscript_sources,1)[[1]]), "federated_figures.R"), local=TRUE)
 rm(.manuscript_sources)
 manuscript_dfci_volcano_ylim <- c(-.2,20)
 manuscript_dfci_landmark_headers <- c("+0 days","+90 days","+180 days")

@@ -31,13 +31,13 @@ metadata, prepares changed R figure sets, then renders missing or stale formats.
 source data, and requires the same cohort/analysis settings. Use `all` for
 normal updates and `render` for DPI/PDF changes.
 
-`COMPASS_FIGURE_SCOPE=federated` processes only the no-MSK forests, site cohort report,
+`COMPASS_FIGURE_SCOPE=federated` processes only the federated forests, site cohort report,
 and XGBoost performance/importance figures without
 requiring longitudinal data or running other figure families.
 
 The site report reads `nvflare_within_site_cox_univariate/cox_within_site_all_sites_cohort.csv`
 beside the federated results CSV. It exports cohort sizes, event counts, and observed
-event percentages at landmark 0 only in `federated_no_msk/site_incidence_lm000__platinum.{png,csv}`.
+event percentages at landmark 0 only in `federated/site_incidence_lm000__platinum.{png,csv}`.
 The figure matches the cohort-comparison layout: incidence with 95% Wilson CIs
 on the left and patient counts with events overlaid on the right. Cells with
 fewer than 25 events are hatched/marked. Percentages are events divided by analyzed patients over available follow-up,
@@ -115,7 +115,7 @@ The overview requires all seven source panels and is restricted to platinum.
 Individual KM panels and the three-landmark KM sheets are also retained.
 
 Exports use shallow topic folders: `cohort/`, `labels/`, `associations/`,
-`prediction/`, `trajectories/<lab>/`, and `federated_no_msk/`. There is no
+`prediction/`, `trajectories/<lab>/`, and `federated/`. There is no
 main/supplement split or per-plot directory. Local filenames are
 `<figure>__<endpoint>__<subset>__<exclusion>.png`; CSV/Markdown tables live alongside.
 Compiled figures have their own `compiled/<topic>/` tree under each arm,
@@ -234,7 +234,7 @@ site estimates. Within-site forests read
 `nvflare_within_site_cox_univariate/cox_within_site_all_sites_results.csv` beside
 the across-site results CSV. Each uses its own supplied p/q values.
 No matching local results are required. Outputs are
-`federated_no_msk/{psa,testosterone}_forest__platinum.{png,csv}` plus the day-0
+`federated/{psa,testosterone}_forest__platinum.{png,csv}` plus the day-0
 incidence figure/table. Supplied p/q values are not recomputed or pooled.
 The federated population is not assumed to include every displayed site: matching
 patient/event counts across landmarks are reported as inferred membership only;
@@ -246,7 +246,7 @@ one figure set do not prevent preparation/rendering of other available sets.
 Federated XGBoost uses `federated_xgboost/xgboost_federated_metrics_adt.csv` and
 `xgboost_federated_importance_adt.csv` beside the Cox results. Two additional
 compiled figures share the local PROFILE Figure 4 plotting functions:
-`federated_no_msk/xgboost_performance__platinum` pairs held-out test mean AUC(t)
+`federated/xgboost_performance__platinum` pairs held-out test mean AUC(t)
 and C-index for labs versus the age baseline at days 0/90/180;
 `xgboost_importance__platinum` combines the three landmarks' top 15 positive-gain
 features, using the same labels, clinical-category colors, and age/body-height
@@ -303,7 +303,7 @@ PLOT_NON_ANDROGEN_LAB_FIGURES <- env_flag("COMPASS_NON_ANDROGEN_LABS")
 PLOT_GAM_TRAJECTORIES <- env_flag("COMPASS_GAM_TRAJECTORIES")
 PLOT_ADT_INTENT_SUPPLEMENT <- env_flag("COMPASS_ADT_INTENT_SUPPLEMENT")
 PLOT_METASTATIC_LABEL_SUPPLEMENT <- env_flag("COMPASS_METASTATIC_LABEL_SUPPLEMENT", TRUE)
-PLOT_FEDERATED_NO_MSK_SUPPLEMENT <- env_flag("COMPASS_FEDERATED_NO_MSK_SUPPLEMENT", TRUE)
+PLOT_FEDERATED_SUPPLEMENT <- env_flag("COMPASS_FEDERATED_SUPPLEMENT", TRUE)
 METASTATIC_SUPPLEMENT <- list(
   prepare_script = file.path(dirname(pipeline_path), "prepare_metastatic_figure_labels.R"),
   r_script = file.path(dirname(pipeline_path), "metastatic_figure_supplements.R"),
@@ -313,10 +313,10 @@ METASTATIC_SUPPLEMENT <- list(
     "CANCER_ANNOTATIONS", "CANCER_STAGE_NOTE_LEVEL.parquet")),
   llm = Sys.getenv("LLM_MET_LABELS_PATH", "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_met_diagnosis/met_dx_labels.parquet"),
   icd = file.path(NEPC_PROJ_PATH, "prostate_icd_data.csv"))
-FEDERATED_NO_MSK_SUPPLEMENT <- list(
-  script = file.path(dirname(pipeline_path), "federated_no_msk_figures.R"),
-  results = Sys.getenv("COMPASS_FEDERATED_NO_MSK_RESULTS", file.path(
-    NEPC_PROJ_PATH, "federated_results_no_MSK", "cox_federated_univariate_adt.csv")))
+FEDERATED_SUPPLEMENT <- list(
+  script = file.path(dirname(pipeline_path), "federated_figures.R"),
+  results = Sys.getenv("COMPASS_FEDERATED_RESULTS", file.path(
+    NEPC_PROJ_PATH, "federated_results_with_MSK", "cox_federated_univariate_adt.csv")))
 RENDER_PROFILE <- match.arg(tolower(Sys.getenv("COMPASS_RENDER_PROFILE", "fast")), c("fast", "publication"))
 RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 200
 RENDER_PDF <- env_flag("COMPASS_RENDER_PDF")
@@ -335,8 +335,8 @@ figure_config <- list(
   gam = PLOT_GAM_TRAJECTORIES, adt_intent = PLOT_ADT_INTENT_SUPPLEMENT,
   metastatic = PLOT_METASTATIC_LABEL_SUPPLEMENT, metastatic_extra = metastatic_extra_panels_enabled(),
   metastatic_sources = METASTATIC_SUPPLEMENT[c("intent", "stage", "llm", "icd")],
-  federated = PLOT_FEDERATED_NO_MSK_SUPPLEMENT,
-  federated_path = FEDERATED_NO_MSK_SUPPLEMENT$results)
+  federated = PLOT_FEDERATED_SUPPLEMENT,
+  federated_path = FEDERATED_SUPPLEMENT$results)
 ```
 
 ## Prepare and render
@@ -349,5 +349,5 @@ figure_run <- run_cached_figure_workflow(
   prepare_overwrite = PREPARE_OVERWRITE, render_overwrite = RENDER_OVERWRITE,
   metastatic_config = METASTATIC_SUPPLEMENT,
   forest_config = COHORT_FOREST_CONFIG,
-  federated_config = FEDERATED_NO_MSK_SUPPLEMENT)
+  federated_config = FEDERATED_SUPPLEMENT)
 ```

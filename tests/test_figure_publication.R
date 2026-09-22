@@ -1,6 +1,6 @@
 source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
 source("COMPASS/survival_analysis/figure_data_cache.R")
-source("COMPASS/survival_analysis/federated_no_msk_figures.R")
+source("COMPASS/survival_analysis/federated_figures.R")
 local({
   variable <- "COMPASS_COMBINED_KM_LANDMARK"
   previous <- Sys.getenv(variable,unset=NA_character_)

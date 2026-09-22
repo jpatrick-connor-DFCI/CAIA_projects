@@ -2060,6 +2060,14 @@ def summarize_patient_risks(run: dict) -> pd.DataFrame:
     predate the risk-score output reads as "missing" here while its metrics row
     still reads fine -- that combination means the fit is stale for this purpose
     and needs a refit (OVERWRITE = True) to emit scores.
+
+    n_patients/n_events describe the held-out test block (dataset == "test"),
+    which every completed task has. n_oof_patients/n_oof_scored describe the
+    full-cohort out-of-fold scores (dataset == "cv_oof"), which are present
+    only for runs passed --out-of-fold-risks; both read 0 otherwise. They are
+    reported separately because the two come from different models -- the
+    final refit versus each outer CV fold -- and are not interchangeable.
+    n_oof_scored can trail n_oof_patients if an outer fold failed to fit.
     """
     endpoint = run.get("endpoint", ENDPOINT)
     rows = []
@@ -2078,15 +2086,31 @@ def summarize_patient_risks(run: dict) -> pd.DataFrame:
                          "n_events": pd.NA, "path": str(path)})
             continue
         df = pd.read_csv(path, low_memory=False)
-        scoped = df.loc[df["endpoint"] == endpoint] if "endpoint" in df.columns else df
-        if "dataset" in scoped.columns:
-            scoped = scoped.loc[scoped["dataset"].astype(str) == "test"]
+        endpoint_rows = df.loc[df["endpoint"] == endpoint] if "endpoint" in df.columns else df
+        # Two schemes can share the file and must be counted apart: "test" is
+        # the held-out block scored by the final model, "cv_oof" is every
+        # patient scored by the outer fold that excluded them. n_patients stays
+        # the test count so this column keeps its meaning; OOF coverage is
+        # reported alongside it rather than folded in.
+        if "dataset" in endpoint_rows.columns:
+            dataset_col = endpoint_rows["dataset"].astype(str)
+            scoped = endpoint_rows.loc[dataset_col == "test"]
+            oof = endpoint_rows.loc[dataset_col == "cv_oof"]
+        else:
+            scoped, oof = endpoint_rows, endpoint_rows.iloc[0:0]
+        n_oof_scored = (
+            int(pd.to_numeric(oof["risk_score"], errors="coerce").notna().sum())
+            if "risk_score" in oof.columns and not oof.empty
+            else 0
+        )
         rows.append({
             **base,
             "status": "ok" if not scoped.empty else f"no {endpoint} row",
             "n_patients": int(len(scoped)),
             "n_events": int(pd.to_numeric(scoped["event"], errors="coerce").sum())
             if "event" in scoped.columns and not scoped.empty else pd.NA,
+            "n_oof_patients": int(len(oof)),
+            "n_oof_scored": n_oof_scored,
             "path": str(path),
         })
     return (

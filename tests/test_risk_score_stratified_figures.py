@@ -80,11 +80,36 @@ class TestLoadPatientRisks:
             )
 
     def test_absent_endpoint_raises_rather_than_returning_empty(self, tmp_path):
-        with pytest.raises(ValueError, match="No held-out rows"):
+        with pytest.raises(ValueError, match="for endpoint='avpc'"):
             rsf.load_patient_risks(
                 _write(tmp_path, _risks(4)), endpoint="avpc",
                 landmark_day=180, id_col=ID,
             )
+
+    def test_requesting_oof_from_a_test_only_file_names_what_is_there(self, tmp_path):
+        """A file without --out-of-fold-risks rows must say so, not read empty.
+
+        The two schemes come from different models, so quietly falling back to
+        the test block would draw a figure labelled full-cohort from a subset.
+        """
+        with pytest.raises(ValueError, match=r"no dataset=='cv_oof' rows"):
+            rsf.load_patient_risks(
+                _write(tmp_path, _risks(4)), endpoint="platinum",
+                landmark_day=180, id_col=ID, dataset="cv_oof",
+            )
+
+    def test_oof_rows_are_selected_without_the_test_rows(self, tmp_path):
+        """Selecting one scheme must exclude the other, never pool them."""
+        test_rows = _risks(4)
+        oof_rows = _risks(6)
+        oof_rows["dataset"] = "cv_oof"
+        both = pd.concat([test_rows, oof_rows], ignore_index=True)
+
+        out = rsf.load_patient_risks(
+            _write(tmp_path, both), endpoint="platinum",
+            landmark_day=180, id_col=ID, dataset="cv_oof",
+        )
+        assert len(out) == 6
 
 
 class TestGeneIndicators:

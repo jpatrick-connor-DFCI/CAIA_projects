@@ -840,6 +840,217 @@ def tune_multivariable_model(
     return fold_df, cv_df, best_row, fold_canonical_labs_df
 
 
+def compute_out_of_fold_risk_scores(
+    cohort: pd.DataFrame,
+    *,
+    raw_feature_cols: list[str],
+    endpoint: str,
+    penalizers: list[float],
+    l1_ratios: list[float],
+    outer_folds: int,
+    inner_folds: int,
+    seed: int,
+    auc_time_unit_days: int,
+    auc_max_time_units: int | None,
+    pre_treatment_lab_df: pd.DataFrame,
+    horizon_grid: np.ndarray,
+    min_patient_coverage: float,
+    endpoint_map: EndpointMap,
+    static_covariate_cols: tuple[str, ...] = (),
+    always_include_feature_cols: tuple[str, ...] = (),
+    genomic_feature_cols: tuple[str, ...] | None = None,
+    min_genomic_prevalence: float | None = None,
+    restrict_to_canonical_labs: bool = True,
+    id_col: str = DEFAULT_ID_COL,
+    age_col: str = DEFAULT_AGE_COL,
+) -> pd.DataFrame:
+    """Nested CV over the full cohort so every patient gets a held-out score.
+
+    The scores `fit_final_multivariable_model` returns cover the test block
+    only, because that is the one partition the final model never saw. Risk
+    scores for the whole cohort need a scheme where every patient is held out
+    of the model that scores them -- which is what outer CV gives.
+
+    Nesting is load-bearing, not extra rigor. Reusing the validation
+    predictions already computed inside `tune_multivariable_model` would be
+    cheaper by an order of magnitude, but those folds are the same folds whose
+    `c_index_val` chooses the winning (penalizer, l1_ratio). A patient's score
+    would then come from a model whose hyperparameters were picked partly using
+    that patient's own outcome, and the resulting scores would look better than
+    they are -- exactly the optimism a held-out score exists to avoid. So
+    tuning is re-run inside each outer fold, on that fold's training part only,
+    mirroring the nested-CV scheme in the clinical text embedding project's
+    semantic_search/train_prediction_models.py.
+
+    Per-fold canonical-lab and feature selection is likewise redone from each
+    outer fold's training rows, since those steps read outcome-adjacent
+    coverage statistics.
+
+    Returns one row per patient with `dataset="cv_oof"`, matching the column
+    contract of `fit_final_multivariable_model`'s predictions frame plus an
+    `outer_fold` column. Patients whose outer fold failed to fit are returned
+    with a NaN `risk_score` rather than dropped, so a caller can distinguish
+    "not scored" from "not present".
+    """
+    require_sksurv()
+    duration_col, event_col = _endpoint_columns(endpoint_map, endpoint)
+    if genomic_feature_cols is None:
+        genomic_feature_cols = always_include_feature_cols
+
+    splitter, strat_labels, _ = make_cv_splitter(
+        cohort,
+        n_folds=outer_folds,
+        seed=seed,
+        event_col=event_col,
+    )
+    split_args = (
+        (np.arange(len(cohort)), strat_labels)
+        if strat_labels is not None
+        else (np.arange(len(cohort)),)
+    )
+
+    risk = pd.Series(np.nan, index=cohort.index, dtype=float)
+    assigned_fold = pd.Series(-1, index=cohort.index, dtype=int)
+    notes: dict[int, str] = {}
+
+    outer_partitions = list(enumerate(splitter.split(*split_args), 1))
+    outer_bar = tqdm(
+        total=len(outer_partitions),
+        desc=f"coxnet OOF[{endpoint}]",
+        dynamic_ncols=True,
+    )
+    for outer_fold, (tr_idx, te_idx) in outer_partitions:
+        outer_train = cohort.iloc[tr_idx]
+        outer_test = cohort.iloc[te_idx]
+        assigned_fold.iloc[te_idx] = outer_fold
+        assert_disjoint_folds(
+            fold_train_mrns=outer_train.index,
+            fold_val_mrns=outer_test.index,
+            fold=outer_fold,
+        )
+        try:
+            # Inner CV picks the hyperparameters using only this fold's
+            # training rows; the outer test rows are absent from every step
+            # below, including canonical-lab and feature selection.
+            _, _, inner_best, _ = tune_multivariable_model(
+                outer_train.copy(),
+                raw_feature_cols=raw_feature_cols,
+                endpoint=endpoint,
+                penalizers=penalizers,
+                l1_ratios=l1_ratios,
+                n_folds=inner_folds,
+                seed=seed + outer_fold,
+                auc_time_unit_days=auc_time_unit_days,
+                auc_max_time_units=auc_max_time_units,
+                pre_treatment_lab_df=pre_treatment_lab_df,
+                horizon_grid=horizon_grid,
+                min_patient_coverage=min_patient_coverage,
+                endpoint_map=endpoint_map,
+                static_covariate_cols=static_covariate_cols,
+                always_include_feature_cols=always_include_feature_cols,
+                genomic_feature_cols=genomic_feature_cols,
+                min_genomic_prevalence=min_genomic_prevalence,
+                restrict_to_canonical_labs=restrict_to_canonical_labs,
+                id_col=id_col,
+                age_col=age_col,
+            )
+            canonical = select_canonical_labs(
+                pre_treatment_lab_df,
+                mrns=outer_train.index,
+                min_coverage=min_patient_coverage,
+                id_col=id_col,
+            )
+            selected, _ = select_feature_columns(
+                outer_train,
+                raw_feature_cols,
+                min_patient_coverage=min_patient_coverage,
+                restrict_to_labs=canonical if restrict_to_canonical_labs else [],
+                always_include=list(always_include_feature_cols),
+                genomic_feature_cols=list(genomic_feature_cols),
+                min_genomic_prevalence=min_genomic_prevalence,
+            )
+            train_mdf, test_mdf, covariate_cols = build_model_matrices(
+                outer_train,
+                outer_test,
+                feature_cols=selected,
+                duration_col=duration_col,
+                event_col=event_col,
+                static_covariate_cols=static_covariate_cols,
+                age_col=age_col,
+            )
+            model, _, note = fit_coxnet_with_fallback(
+                train_mdf,
+                duration_col=duration_col,
+                event_col=event_col,
+                penalizers=[float(inner_best["penalizer"])],
+                l1_ratio=float(inner_best["l1_ratio"]),
+                covariate_cols=covariate_cols,
+                unpenalized_cols=["age", *static_covariate_cols],
+            )
+            if model is None:
+                notes[outer_fold] = f"outer_fold_failed: {note}"
+            else:
+                _, fold_pred = score_coxnet_model(
+                    model,
+                    test_mdf,
+                    duration_col=duration_col,
+                    event_col=event_col,
+                    covariate_cols=covariate_cols,
+                )
+                risk.loc[test_mdf.index] = np.asarray(fold_pred, dtype=float).reshape(-1)
+                notes[outer_fold] = note
+        except (*_FOLD_FIT_ERRORS, RuntimeError) as exc:
+            # RuntimeError covers the inner tuner's "all CV fits failed" path,
+            # which is a fold-level failure here rather than a fatal one: the
+            # remaining outer folds can still be scored.
+            #
+            # _FOLD_FIT_ERRORS includes ValueError, which is also what a
+            # misconfiguration raises (unsupported endpoint, absent declared
+            # feature). Those fail identically in every fold, so rather than
+            # reporting five "outer_fold_failed" notes and a confusing "no risk
+            # scores" summary, re-raise once every fold has failed the same way.
+            notes[outer_fold] = f"outer_fold_failed: {exc}"
+            if outer_fold == len(outer_partitions) and risk.notna().sum() == 0:
+                raise RuntimeError(
+                    f"Every outer fold failed for endpoint '{endpoint}'; the last "
+                    f"error is re-raised above as the likely cause. This is more "
+                    f"often a configuration problem than {len(outer_partitions)} "
+                    f"independent numerical failures."
+                ) from exc
+        outer_bar.update(1)
+    outer_bar.close()
+
+    if (assigned_fold < 0).any():
+        raise RuntimeError(
+            f"Outer CV did not assign a fold to every patient for endpoint "
+            f"'{endpoint}': {int((assigned_fold < 0).sum())} of {len(cohort)} unassigned."
+        )
+
+    predictions = pd.DataFrame(
+        {
+            id_col: cohort.index,
+            "endpoint": endpoint,
+            "dataset": "cv_oof",
+            "outer_fold": assigned_fold.to_numpy(),
+            "duration_days": cohort[duration_col].to_numpy(dtype=float),
+            "event": cohort[event_col].to_numpy(dtype=int),
+            "risk_score": risk.to_numpy(),
+        }
+    )
+    n_scored = int(predictions["risk_score"].notna().sum())
+    if n_scored == 0:
+        failures = "; ".join(f"fold {k}: {v}" for k, v in sorted(notes.items()))
+        raise RuntimeError(
+            f"Out-of-fold scoring produced no risk scores for endpoint "
+            f"'{endpoint}'. Per-fold notes: {failures}"
+        )
+    print(
+        f"  OOF risk scores[{endpoint}]: {n_scored}/{len(predictions)} patients scored "
+        f"across {len(outer_partitions)} outer folds"
+    )
+    return predictions
+
+
 def select_best_cv_row(cv_df: pd.DataFrame, *, n_folds: int) -> dict:
     """Pick the winning hyperparameter row from a CV summary frame.
 

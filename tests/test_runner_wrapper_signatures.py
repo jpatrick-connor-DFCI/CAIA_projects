@@ -28,7 +28,11 @@ WRAPPER_PATHS = {
 }
 
 # Functions the runner calls on the `cox` module that each project wraps.
-WRAPPED_FUNCTIONS = ("tune_multivariable_model", "fit_final_multivariable_model")
+WRAPPED_FUNCTIONS = (
+    "tune_multivariable_model",
+    "fit_final_multivariable_model",
+    "compute_out_of_fold_risk_scores",
+)
 
 
 def _module_functions(path: Path) -> dict[str, ast.FunctionDef]:
@@ -110,11 +114,78 @@ def test_wrapper_forwards_every_kwarg_it_accepts(project, path, fn_name):
         if isinstance(node, ast.Call):
             forwarded.update(kw.arg for kw in node.keywords if kw.arg is not None)
     # Positional-only pass-through (the frame itself) and self-evident names.
-    checkable = {a for a in accepted if a not in {"train_val", "test"}}
+    checkable = {a for a in accepted if a not in {"train_val", "test", "cohort"}}
     missing = checkable - forwarded
     assert not missing, (
         f"{project}'s {fn_name} accepts {sorted(missing)} but never forwards "
         f"them to the shared implementation; the value would be silently dropped."
+    )
+
+
+@pytest.mark.parametrize("project", sorted(WRAPPER_PATHS))
+def test_multivariate_cli_registers_the_out_of_fold_flags(project):
+    """Each project builds its own parser, then calls the shared runner.
+
+    The runner reads args.out_of_fold_risks / args.oof_outer_folds /
+    args.oof_inner_folds. A project whose parser never registers them would
+    raise AttributeError, or -- worse, given the getattr default -- silently
+    skip OOF scoring while appearing to succeed.
+    """
+    path = REPO_ROOT / project / "survival_analysis" / "multivariate_analysis.py"
+    tree = ast.parse(path.read_text())
+    called = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "add_out_of_fold_risk_args" in called, (
+        f"{project}'s multivariate_analysis.py never calls "
+        f"add_out_of_fold_risk_args, so --out-of-fold-risks is unavailable "
+        f"there even though the shared runner reads those args."
+    )
+
+
+def test_runner_reads_only_out_of_fold_args_the_helper_registers():
+    """The args the runner reads and the flags the helper adds must agree."""
+    import argparse
+
+    from survival_common.cox_runners import add_out_of_fold_risk_args
+
+    parser = argparse.ArgumentParser()
+    add_out_of_fold_risk_args(parser)
+    registered = set(vars(parser.parse_args([])))
+
+    runner_src = RUNNER_PATH.read_text()
+    tree = ast.parse(runner_src)
+    read: set[str] = set()
+    for node in ast.walk(tree):
+        # args.oof_outer_folds
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "args"
+            and node.attr.startswith("oof_")
+        ):
+            read.add(node.attr)
+        # getattr(args, "out_of_fold_risks", False)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "args"
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+            and node.args[1].value.startswith(("oof_", "out_of_fold"))
+        ):
+            read.add(node.args[1].value)
+
+    assert read, "runner no longer reads any out-of-fold args; this test is stale"
+    missing = read - registered
+    assert not missing, (
+        f"cox_runners.py reads {sorted(missing)} but add_out_of_fold_risk_args "
+        f"does not register them."
     )
 
 

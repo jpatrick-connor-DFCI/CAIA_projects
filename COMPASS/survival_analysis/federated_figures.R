@@ -1,4 +1,5 @@
 # Federated PSA/testosterone forests, site counts, and XGBoost Figure 4 reports.
+# Covers all participating sites, including MSK.
 # Significance uses the supplied
 # p/q values, never an FDR recalculation on this selected subset.
 federated_lab_label <- function(raw) {
@@ -17,18 +18,21 @@ federated_lab_label <- function(raw) {
   short
 }
 
+FEDERATED_SITE_LABELS <- c(dana_farber_caia_1_1 = "Dana-Farber", fred_hutch_caia_1_1 = "Fred Hutch",
+                           jhu_caia_1_1 = "Johns Hopkins", msk_caia_prod_1 = "MSK")
+
 federated_site_label <- function(site_name) {
-  labels <- c(dana_farber_caia_1_1 = "Dana-Farber", fred_hutch_caia_1_1 = "Fred Hutch",
-              jhu_caia_1_1 = "Johns Hopkins")
-  coalesce(unname(labels[site_name]), site_name)
+  coalesce(unname(FEDERATED_SITE_LABELS[site_name]), site_name)
 }
 
 validate_federated_sites <- function(site_name) {
   if (any(is.na(site_name) | !nzchar(trimws(site_name)))) stop("Missing federated site name")
-  if (any(grepl("msk|sloan", site_name, ignore.case = TRUE))) stop("MSK site found in no-MSK inputs")
+  unknown <- setdiff(unique(site_name), names(FEDERATED_SITE_LABELS))
+  if (length(unknown)) warning("Unlabeled federated site(s), shown by raw name: ",
+    paste(unknown, collapse = ", "))
 }
 
-load_federated_no_msk_forest <- function(path, within_site = FALSE) {
+load_federated_forest <- function(path, within_site = FALSE) {
   d <- readr::read_csv(path, show_col_types = FALSE)
   needed <- c("landmark_days", "endpoint", "feature", "ci_lower", "ci_upper", "p_value", "q_value")
   if (within_site) needed <- c(needed, "site_name")
@@ -67,7 +71,7 @@ load_federated_no_msk_forest <- function(path, within_site = FALSE) {
       ci_upper >= ci_lower & ci_lower <= hazard_ratio_per_sd & ci_upper >= hazard_ratio_per_sd)
 }
 
-plot_federated_no_msk_forest <- function(d, landmark, site_name = NULL) {
+plot_federated_forest <- function(d, landmark, site_name = NULL) {
   scope <- "Across sites"
   if (!is.null(site_name)) {
     d <- filter(d, .data$site_name == .env$site_name)
@@ -109,7 +113,7 @@ plot_federated_no_msk_forest <- function(d, landmark, site_name = NULL) {
     scale_y_discrete(labels = row_labels, expand = expansion(add = .7)) +
     facet_wrap(~lab_name, nrow = 1, scales = "free_y", drop = FALSE) +
     labs(x = "Hazard ratio per SD (95% CI; log scale)", y = NULL,
-      title = sprintf("Federated no-MSK | %s | ADT platinum | +%d days", scope, landmark),
+      title = sprintf("Federated | %s | ADT platinum | +%d days", scope, landmark),
       subtitle = "PSA and testosterone: mean, minimum, maximum, and last value",
       caption = paste("Nominal significance: p < 0.05; FDR significance: supplied q < 0.05.",
         "Delta and observation-count features excluded. q-values are not recomputed for this subset.",
@@ -122,9 +126,20 @@ plot_federated_no_msk_forest <- function(d, landmark, site_name = NULL) {
       plot.margin = margin(12, 16, 12, 12))
 }
 
-load_federated_no_msk_sites <- function(federated_path) {
-  path <- file.path(dirname(federated_path), "nvflare_within_site_cox_univariate",
-                    "cox_within_site_all_sites_cohort.csv")
+# The within-site bundle directory was renamed between exports
+# (nvflare_within_site_cox_univariate -> nvflare_within_site_univariate_cox).
+# Accept either, preferring whichever actually exists.
+FEDERATED_WITHIN_SITE_DIRS <- c("nvflare_within_site_univariate_cox",
+                                "nvflare_within_site_cox_univariate")
+
+federated_within_site_file <- function(federated_path, filename) {
+  candidates <- file.path(dirname(federated_path), FEDERATED_WITHIN_SITE_DIRS, filename)
+  existing <- candidates[file.exists(candidates)]
+  if (length(existing)) existing[1] else candidates[1]
+}
+
+load_federated_sites <- function(federated_path) {
+  path <- federated_within_site_file(federated_path, "cox_within_site_all_sites_cohort.csv")
   if (!file.exists(path)) {
     warning("Federated site counts unavailable; missing: ", path)
     return(NULL)
@@ -167,7 +182,7 @@ prepare_federated_site_incidence <- function(d) {
     select(-p, -denominator, -centre, -half)
 }
 
-plot_federated_no_msk_sites <- function(d) {
+plot_federated_sites <- function(d) {
   d <- prepare_federated_site_incidence(d) %>% mutate(y = n():1)
   good <- filter(d, available)
   rate_max <- max(c(1, good$ci_upper_pct), na.rm = TRUE)
@@ -209,14 +224,14 @@ plot_federated_no_msk_sites <- function(d) {
   a <- ggplotGrob(a); b <- ggplotGrob(b)
   a$heights <- b$heights <- grid::unit.pmax(a$heights, b$heights)
   gridExtra::arrangeGrob(a, b, ncol = 2, top = grid::textGrob(paste(
-    "Federated no-MSK | ADT platinum incidence by site | landmark 0d",
+    "Federated | ADT platinum incidence by site | landmark 0d",
     sprintf("Hatched/* = <25 events (%d of %d available sites); read as power, not biology", sum(good$thin), nrow(good)),
     sep = "\n"), gp = grid::gpar(fontsize = 14)),
     bottom = grid::textGrob("Observed events / analyzed patients during follow-up; not fixed-horizon cumulative incidence.",
       gp = grid::gpar(fontsize = 10)), padding = grid::unit(2.3, "lines"))
 }
 
-save_federated_no_msk_panel <- function(plot, path, width, height, dpi, overwrite) {
+save_federated_panel <- function(plot, path, width, height, dpi, overwrite) {
   capture <- getOption("compass.figure_capture")
   if (is.function(capture)) {
     capture(plot, sub("\\.png$", "", path), width, height, sub("__.*$","",basename(path)))
@@ -303,7 +318,7 @@ plot_federated_comparison <- function(estimates, analyte, population_note) {
     scale_y_discrete(drop=FALSE,expand=expansion(add=.65)) +
     facet_grid(landmark ~ feature_stat,drop=FALSE) +
     labs(title=paste(analyte,"associations across sites"),
-      subtitle="ADT · platinum endpoint · no MSK · hazard ratios per SD with 95% confidence intervals",
+      subtitle="ADT · platinum endpoint · all federated sites · hazard ratios per SD with 95% confidence intervals",
       x="Hazard ratio per SD (log scale)",y=NULL,
       caption=paste(population_note,count_note,
         "Supplied FDR q values (not recalculated). Exact estimates, counts and fitting metadata: accompanying CSV. No delta features.",sep="\n")) +
@@ -382,7 +397,7 @@ render_federated_xgboost <- function(root,federated_path,dpi,overwrite) {
     readr::write_csv(data,path)
     if(is.function(capture)) capture(path)
   }
-  context <- "ADT · platinum endpoint · federated no MSK"
+  context <- "ADT · platinum endpoint · federated (all sites)"
   if(!is.null(metrics) && nrow(metrics)) {
     d <- prepare_federated_xgboost_performance(metrics)
     colors <- c("XGBoost Survival"="#B58900","XGBoost baseline (age)"="#E0CC8A")
@@ -401,7 +416,7 @@ render_federated_xgboost <- function(root,federated_path,dpi,overwrite) {
     spec$title <- "Federated XGBoost: labs vs. age baseline"; spec$context <- context
     p <- figure_combine(items,spec,tempdir())
     write_table(mutate(d,input_audit_note=audit),"xgboost_performance")
-    save_federated_no_msk_panel(p,file.path(root,"xgboost_performance__platinum.png"),spec$width,spec$height,dpi,overwrite)
+    save_federated_panel(p,file.path(root,"xgboost_performance__platinum.png"),spec$width,spec$height,dpi,overwrite)
   }
   if(!is.null(importance) && nrow(importance)) {
     caption <- paste("Top 15 positive-gain features per landmark; age and body height excluded from display, as in local plots.",
@@ -421,24 +436,23 @@ render_federated_xgboost <- function(root,federated_path,dpi,overwrite) {
     spec$title <- "Federated XGBoost feature importance"; spec$context <- context
     p <- figure_combine(items,spec,tempdir())
     write_table(exported,"xgboost_importance")
-    save_federated_no_msk_panel(p,file.path(root,"xgboost_importance__platinum.png"),spec$width,spec$height,dpi,overwrite)
+    save_federated_panel(p,file.path(root,"xgboost_importance__platinum.png"),spec$width,spec$height,dpi,overwrite)
   }
   invisible(NULL)
 }
 
-render_federated_no_msk_supplement <- function(data_root, fig_root, federated_path,
+render_federated_supplement <- function(data_root, fig_root, federated_path,
                                                 dpi = 200, overwrite = FALSE) {
-  d <- load_federated_no_msk_forest(federated_path)
-  root <- file.path(fig_root, "ADT", "federated_no_msk")
+  d <- load_federated_forest(federated_path)
+  root <- file.path(fig_root, "ADT", "federated")
   dir.create(root, recursive = TRUE, showWarnings = FALSE)
   capture <- getOption("compass.figure_table_capture")
   within <- NULL
-  within_path <- file.path(dirname(federated_path), "nvflare_within_site_cox_univariate",
-                           "cox_within_site_all_sites_results.csv")
+  within_path <- federated_within_site_file(federated_path, "cox_within_site_all_sites_results.csv")
   if (file.exists(within_path)) {
-    within <- load_federated_no_msk_forest(within_path, within_site = TRUE)
+    within <- load_federated_forest(within_path, within_site = TRUE)
   } else warning("Within-site federated forests unavailable; missing: ", within_path)
-  sites <- load_federated_no_msk_sites(federated_path)
+  sites <- load_federated_sites(federated_path)
   estimates <- prepare_federated_comparison(d,within)
   note <- federated_population_note(d,sites)
   estimates$population_note <- ifelse(estimates$source_kind=="across_sites",note,"Within-site model")
@@ -446,7 +460,7 @@ render_federated_no_msk_supplement <- function(data_root, fig_root, federated_pa
     base <- file.path(root,paste0(tolower(analyte),"_forest__platinum"))
     readr::write_csv(filter(estimates,lab_name==analyte),paste0(base,".csv"))
     if(is.function(capture)) capture(paste0(base,".csv"))
-    save_federated_no_msk_panel(plot_federated_comparison(estimates,analyte,note),paste0(base,".png"),
+    save_federated_panel(plot_federated_comparison(estimates,analyte,note),paste0(base,".png"),
       FEDERATED_FOREST_SLIDE_SIZE[["width"]],FEDERATED_FOREST_SLIDE_SIZE[["height"]],dpi,overwrite)
   }
   if (!is.null(sites)) {
@@ -454,7 +468,7 @@ render_federated_no_msk_supplement <- function(data_root, fig_root, federated_pa
     dir.create(dirname(site_path), recursive = TRUE, showWarnings = FALSE)
     readr::write_csv(prepare_federated_site_incidence(sites), site_path)
     if (is.function(capture)) capture(site_path)
-    save_federated_no_msk_panel(plot_federated_no_msk_sites(sites),
+    save_federated_panel(plot_federated_sites(sites),
       file.path(root, "site_incidence_lm000__platinum.png"), 14, 5.5, dpi, overwrite)
   }
   render_federated_xgboost(root,federated_path,dpi,overwrite)

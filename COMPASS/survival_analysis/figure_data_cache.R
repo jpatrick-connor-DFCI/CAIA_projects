@@ -497,7 +497,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
         warning("Federated supplement skipped; missing: ", paste(inputs[!file.exists(inputs)], collapse = ", "))
         return(list(skipped = TRUE))
       }
-      build <- function() render_federated_no_msk_supplement(config$data_root, config$fig_root,
+      build <- function() render_federated_supplement(config$data_root, config$fig_root,
         federated_config$results, dpi = dpi, overwrite = TRUE)
     } else {
       build <- function() {

@@ -52,7 +52,7 @@ local({
     }
   }
   fed_path <- file.path(root, "federated.csv"); write_csv(bind_rows(federated), fed_path)
-  site_dir <- file.path(root, "nvflare_within_site_cox_univariate"); dir.create(site_dir)
+  site_dir <- file.path(root, "nvflare_within_site_univariate_cox"); dir.create(site_dir)
   write_csv(tibble(site_name = rep(c("site_a", "site_b"), each = 3), analysis_label = "adt",
                    landmark_days = rep(c(0, 90, 180), 2), n_patients = 40, n_events = 20),
             file.path(site_dir, "cox_within_site_all_sites_cohort.csv"))
@@ -83,7 +83,7 @@ local({
     file.path(root, "mrn_lists", "adt_intent_labels_model_cohort.csv"))
   write_csv(tibble(DFCI_MRN = ids[-1], LLM_METASTATIC = patient$NEPC[-1] == 1),
     file.path(root, "mrn_lists", "llm_met_labels_model_cohort.csv"))
-  fc <- list(script = file.path(dirname(pipeline_path), "federated_no_msk_figures.R"), results = fed_path)
+  fc <- list(script = file.path(dirname(pipeline_path), "federated_figures.R"), results = fed_path)
   forest <- list(script = file.path(dirname(pipeline_path), "cohort_forest_figures.R"), cohorts = "adt", landmark = 180L)
   # Fixture setup represents the separate notebook preparation stage. Python
   # is then unavailable for every R workflow stage, not just render-only.
@@ -147,7 +147,7 @@ local({
   # input hidden. This verifies configuration wiring as well as the helper API.
   variables <- c(COMPASS_DATA_ROOT = root, COMPASS_FIG_ROOT = cfg$fig_root,
     COMPASS_FIGURE_DATA_ROOT = cfg$cache_root, COMPASS_FIGURE_SCOPE = "federated",
-    COMPASS_FEDERATED_NO_MSK_RESULTS = fed_path)
+    COMPASS_FEDERATED_RESULTS = fed_path)
   previous <- Sys.getenv(names(variables), unset = NA)
   on.exit(for (name in names(previous)) {
     if (is.na(previous[[name]])) Sys.unsetenv(name)
@@ -178,7 +178,7 @@ local({
   }
   incidence_scene <- env$figure_run$prepared$federated$scenes[[3]]
   stopifnot(incidence_scene$width == 14, incidence_scene$height == 5.5)
-  site_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated_no_msk",
+  site_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated",
                                     "site_incidence_lm000__platinum.csv"), show_col_types = FALSE)
   stopifnot(file.exists(file.path(cfg$fig_root,"ADT","index.html")),
             file.exists(file.path(cfg$fig_root,"ADT","manifest.csv")),

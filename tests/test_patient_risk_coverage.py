@@ -121,6 +121,49 @@ def test_wrong_endpoint_file_does_not_read_as_ok(tmp_path):
     assert row["status"] == "no platinum row"
 
 
+def test_oof_rows_are_counted_apart_from_the_test_block(tmp_path):
+    """The two schemes come from different models and must not be pooled.
+
+    n_patients has to keep meaning "the held-out test block" even once a file
+    also carries full-cohort out-of-fold rows, or the notebook would report
+    inflated held-out coverage for the test-block figures.
+    """
+    run = _run(tmp_path)
+    path = cp.patient_risk_path(run, "elastic-net", 0, "both")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({
+        "DFCI_MRN": ["1", "2", "1", "2", "3", "4"],
+        "endpoint": "platinum",
+        "dataset": ["test", "test", "cv_oof", "cv_oof", "cv_oof", "cv_oof"],
+        "duration_days": [10, 20, 10, 20, 30, 40],
+        "event": [1, 0, 1, 0, 1, 1],
+        # One out-of-fold patient went unscored: its outer fold failed to fit.
+        "risk_score": [0.1, 0.2, 0.1, 0.2, 0.3, None],
+    }).to_csv(path, index=False)
+
+    row = cp.summarize_patient_risks(run).query(
+        "model == 'elastic-net' and landmark == 0 and config == 'both'"
+    ).iloc[0]
+
+    assert row["status"] == "ok"
+    assert row["n_patients"] == 2       # test block only
+    assert row["n_events"] == 1
+    assert row["n_oof_patients"] == 4   # every patient in the cohort
+    assert row["n_oof_scored"] == 3     # the failed fold's patient is not counted
+
+
+def test_a_test_only_file_reports_zero_oof(tmp_path):
+    """Absence of OOF rows is 0 coverage, never a missing column or an error."""
+    run = _run(tmp_path)
+    _write_risks(run, "elastic-net", 0, "both")
+    row = cp.summarize_patient_risks(run).query(
+        "model == 'elastic-net' and landmark == 0 and config == 'both'"
+    ).iloc[0]
+    assert row["status"] == "ok"
+    assert row["n_oof_patients"] == 0
+    assert row["n_oof_scored"] == 0
+
+
 def test_reports_every_task_once(tmp_path):
     run = _run(tmp_path)
     table = cp.summarize_patient_risks(run)
