@@ -36,6 +36,108 @@ PRE, POST, COVERAGE_PRE, BIN_WIDTH = 365.25, 1826.25, 1826.25, 180
 ARM_TABLES = ["patients", "canonical", "patient_bins", "coverage_patient", "coverage_bins"]
 
 
+# ---- Metastatic-label preparation -------------------------------------------
+# Reuse the pipeline's medication-derived ADT intent labels, and compare them
+# with the metastatic-diagnosis LLM task and dated regex stages. Stage I-III is
+# local; stage IV is metastatic. Missing/invalid values remain unclassified.
+LOCAL = "Local"
+MET = "Metastatic"
+
+
+def normalize_id(frame: pl.DataFrame) -> pl.DataFrame:
+    return frame.with_columns(
+        pl.col(ID).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
+    ).drop_nulls(ID)
+
+
+def collapse_stage(column: str) -> pl.Expr:
+    stage = pl.col(column).cast(pl.String).str.strip_chars().str.to_uppercase()
+    return (
+        pl.when(stage.is_in(["1", "2", "3", "1.0", "2.0", "3.0", "I", "II", "III"]))
+        .then(pl.lit(LOCAL))
+        .when(stage.is_in(["4", "4.0", "IV"]))
+        .then(pl.lit(MET))
+        .otherwise(None)
+    )
+
+
+def parse_datetime(column: str) -> pl.Expr:
+    value = pl.col(column).cast(pl.String).str.strip_chars()
+    iso = value.str.to_datetime(format="%+", strict=False, time_unit="us", time_zone="UTC").dt.replace_time_zone(None)
+    return pl.coalesce(iso, *[value.str.to_datetime(format=fmt, strict=False, time_unit="us")
+        for fmt in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d",
+                    "%m/%d/%Y %H:%M:%S", "%m/%d/%Y"]])
+
+
+def build_labels(intent: pl.DataFrame, notes: pl.DataFrame,
+                 llm: pl.DataFrame, analysis_anchors: pl.DataFrame | None = None) -> pl.DataFrame:
+    intent = normalize_id(intent).with_columns(
+        parse_datetime("ADT_FIRST_DATE"),
+        pl.col("ADT_INTENT").replace_strict(
+            {"LOCALIZED_ADJUVANT": LOCAL, "METASTATIC": MET}, default=None
+        ).alias("ADT_LABEL"),
+    )
+    if intent[ID].n_unique() != intent.height:
+        raise ValueError("ADT intent input must contain exactly one row per patient")
+    if analysis_anchors is not None:
+        anchors = normalize_id(analysis_anchors).select(ID,
+            parse_datetime("TREATMENT_ANCHOR_DATE").alias("ANALYSIS_ANCHOR_DATE"))
+        if anchors[ID].n_unique() != anchors.height:
+            raise ValueError("Analysis anchors must contain exactly one row per patient")
+        intent = anchors.join(intent, on=ID, how="left")
+    else:
+        intent = intent.with_columns(pl.col("ADT_FIRST_DATE").alias("ANALYSIS_ANCHOR_DATE"))
+    intent = intent.with_columns((pl.col("ANALYSIS_ANCHOR_DATE").dt.date() -
+        pl.col("ADT_FIRST_DATE").dt.date()).dt.total_days().alias("ANCHOR_DELTA_DAYS"))
+
+    # The input is the metastatic-diagnosis task, not the NEPC subtype task.
+    verdict = pl.col("has_metastatic_disease").cast(pl.String).str.to_lowercase()
+    llm = normalize_id(llm).with_columns(
+        pl.when(verdict.is_in(["true", "1", "1.0"])).then(pl.lit(MET))
+        .when(verdict.is_in(["false", "0", "0.0"])).then(pl.lit(LOCAL))
+        .otherwise(None).alias("LLM_LABEL")
+    ).group_by(ID).agg(
+        # Match compass_pipeline: any positive wins, missing stays missing.
+        pl.when((pl.col("LLM_LABEL") == MET).any()).then(pl.lit(MET))
+        .when((pl.col("LLM_LABEL") == LOCAL).any()).then(pl.lit(LOCAL))
+        .otherwise(None).alias("LLM_LABEL")
+    )
+    stage_text = pl.col("DERIVED_STAGE_MERGED").cast(pl.String).str.strip_chars().str.to_uppercase()
+    notes = normalize_id(notes).select(
+        ID,
+        parse_datetime("EVENT_DATE").alias("stage_date"),
+        stage_text.replace_strict(
+            {"1": 1, "2": 2, "3": 3, "4": 4,
+             "I": 1, "II": 2, "III": 3, "IV": 4,
+             "1.0": 1, "2.0": 2, "3.0": 3, "4.0": 4}, default=None,
+        ).alias("stage"),
+    ).drop_nulls(["stage_date", "stage"])
+    joined = notes.join(intent.select(ID, "ANALYSIS_ANCHOR_DATE"), on=ID).with_columns(
+        (pl.col("stage_date") - pl.col("ANALYSIS_ANCHOR_DATE")).dt.total_days().alias("days")
+    )
+    before = joined.filter(pl.col("days") <= 0)
+    nearest = before.filter(pl.col("days") >= -365).sort(
+        ["days", "stage"], descending=[True, True]
+    ).group_by(ID).agg(pl.col("stage").first().alias("REGEX_STAGE"))
+    result = intent.join(llm, on=ID, how="left").join(nearest, on=ID, how="left")
+    for suffix, frame in [("BEFORE", before), ("AFTER", joined.filter(pl.col("days") > 0))]:
+        result = result.join(frame.group_by(ID).agg(
+            pl.col("stage").max().alias(f"REGEX_MAX_{suffix}_STAGE")
+        ), on=ID, how="left")
+    # Maximum across the entire record: pre- and post-ADT staging pooled, with
+    # no anchor window, so post-ADT progression counts toward the label. Mirrors
+    # max_any in figure_supplements.R; keep the two in step.
+    result = result.join(joined.group_by(ID).agg(
+        pl.col("stage").max().alias("REGEX_MAX_ANY_STAGE")
+    ), on=ID, how="left")
+    return result.with_columns(
+        collapse_stage("REGEX_STAGE").alias("REGEX_LABEL"),
+        collapse_stage("REGEX_MAX_BEFORE_STAGE").alias("REGEX_MAX_BEFORE"),
+        collapse_stage("REGEX_MAX_AFTER_STAGE").alias("REGEX_MAX_AFTER"),
+        collapse_stage("REGEX_MAX_ANY_STAGE").alias("REGEX_MAX_ANY"),
+    )
+
+
 def canonical_lab_names() -> list[str]:
     """Read the renderer's flat category declarations so the notebook cannot drift."""
     source = Path(__file__).with_name("COMPASS_generate_figures_pipeline.R").read_text()
@@ -62,7 +164,7 @@ def fingerprint(path: Path) -> dict:
 
 def code_version() -> str:
     here = Path(__file__).parent
-    paths = sorted(here.glob("*.R")) + [here / "05_figures.Rmd", Path(__file__), here / "prepare_metastatic_figure_labels.py"]
+    paths = sorted(here.glob("*.R")) + [here / "05_figures.Rmd", Path(__file__)]
     return digest({p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths})
 
 
@@ -183,19 +285,13 @@ def as_list(value):
 
 
 def prepare_metastatic(config: dict, patients: pl.DataFrame) -> pl.DataFrame:
-    # Import works both as a script and as a package in tests.
-    import importlib.util
-    path = Path(__file__).with_name("prepare_metastatic_figure_labels.py")
-    spec = importlib.util.spec_from_file_location("figure_metastatic", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
     sources = config["metastatic_sources"]
-    labels = module.build_labels(
+    labels = build_labels(
         pl.read_csv(sources["intent"], infer_schema_length=0),
         pl.read_parquet(sources["stage"], columns=[ID, "EVENT_DATE", "DERIVED_STAGE_MERGED"]),
         pl.read_parquet(sources["llm"], columns=[ID, "has_metastatic_disease"]), patients)
     if Path(sources["icd"]).exists() and config.get("metastatic_extra", False):
-        codes = module.normalize_id(pl.read_csv(sources["icd"], infer_schema_length=0))
+        codes = normalize_id(pl.read_csv(sources["icd"], infer_schema_length=0))
         code = pl.col("DIAGNOSIS_ICD10_CD").str.strip_chars().str.to_uppercase().str.replace_all("[^A-Z0-9]", "")
         site = pl.lit("other")
         for prefix, name in {"C795": "bone", "C7931": "brain", "C7932": "brain", "C797": "adrenal",
@@ -203,7 +299,7 @@ def prepare_metastatic(config: dict, patients: pl.DataFrame) -> pl.DataFrame:
             site = pl.when(code.str.starts_with(prefix)).then(pl.lit(name)).otherwise(site)
         codes = (codes.join(labels.select(ID, "ANALYSIS_ANCHOR_DATE"), on=ID)
                  .filter((code.str.len_chars() >= 4) & code.str.contains("^C7[789]") & (code != "C799"))
-                 .filter(module.parse_datetime("START_DT") <= pl.col("ANALYSIS_ANCHOR_DATE"))
+                 .filter(parse_datetime("START_DT") <= pl.col("ANALYSIS_ANCHOR_DATE"))
                  .with_columns(site.alias("site")))
         groups = ["brain", "bone", "liver", "lung", "node", "adrenal", "peritoneal", "other"]
         for group in groups:
@@ -354,8 +450,7 @@ def prepare(config: dict) -> dict:
         if "adt" in manifest["arms"] and "adt" in cohorts and "platinum" in endpoints and config.get("metastatic", False):
             sources = config["metastatic_sources"]
             if all(Path(sources[k]).exists() for k in ["intent", "stage", "llm"]):
-                key = digest({"code": [hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                    hashlib.sha256(Path(__file__).with_name("prepare_metastatic_figure_labels.py").read_bytes()).hexdigest()],
+                key = digest({"code": [hashlib.sha256(Path(__file__).read_bytes()).hexdigest()],
                     "arm": manifest["arms"]["adt"]["key"],
                     "sources": [fingerprint(Path(p)) for p in sources.values()], "extra": config.get("metastatic_extra")})
                 path = cache / "labels" / key / "metastatic.parquet"

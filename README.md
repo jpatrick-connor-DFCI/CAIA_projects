@@ -78,7 +78,10 @@ COMPASS/
     ├── cox_aggregated.py                 # PROFILE adapter/config for shared survival code
     ├── univariate_analysis.py            # ENTRY: univariate Cox associations
     ├── multivariate_analysis.py          # ENTRY: elastic-net Cox or XGBoost survival:cox
-    ├── COMPASS_generate_figures_pipeline.R # sole figure-generation implementation
+    ├── COMPASS_generate_figures_pipeline.R # per-cohort figure-generation implementation
+    ├── figure_workflow.R                 # 05 cached prepare/render, federated + manuscript figures, PNG reformat CLI
+    ├── figure_supplements.R              # cohort forest (07 CLI), cohort overview, metastatic-label figures
+    ├── prepare_figure_data.py            # 04 Polars figure tables + metastatic labels
     ├── 01_preprocessing.ipynb            # cohort compile, preprocessing, diagnostics
     ├── 02_univariate.ipynb               # univariate arms + nominal-significance filter
     ├── 03_multivariate.ipynb             # elastic-net + XGBoost + summary tables
@@ -1097,6 +1100,36 @@ booster.trees_to_dataframe()            # a real xgboost.Booster
 cox, bundle, model = load_fitted_model("cox_federated_elasticnet_model_adt.json", 90)
 cox.params_                             # coefficients by covariate name
 ```
+
+### Transporting the platinum models to local NEPC / AVPC
+
+The federated bundles are trained on time to platinum only (NEPC/AVPC are not
+annotated at the other sites). `survival_common/federated_endpoint_transfer.py`
+scores them on the full DFCI ADT cohort and evaluates the same risk score
+against the local LLM-derived NEPC and AVPC timelines, with platinum as the
+reference:
+
+```bash
+python -m survival_common.federated_endpoint_transfer \
+    --bundle xgboost_federated_model_adt.json \
+             cox_federated_elasticnet_model_adt.json \
+    --data /data/gusev/USERS/jpconnor/data/CAIA/COMPASS/longitudinal_prediction_data_adt.csv \
+    --output-dir federated_transfer_adt/ \
+    --n-bootstrap 1000
+```
+
+It maps local `LAB_NAME` to the OMOP names via `OMOP_to_DFCI_lab_ids.csv`, puts
+each endpoint's date in the federated chain's event slot, and reuses
+`federated_scoring.build_landmark_frame` unchanged, so events at/before the
+landmark are dropped (incident risk set) and follow-up is censored at 3650 days.
+NEPC/AVPC are censored at last contact (death is not a competing event).
+Outputs: `transfer_metrics.csv` (Harrell C + bootstrap CI, paired ΔC vs the
+age-only baseline, Uno's C, mean AUC(t), HR per SD of risk),
+`transfer_auc_t.csv`, `transfer_scores.csv`, `transfer_coverage.csv`, and
+`transfer_unit_check.csv`. The last one compares local feature means with the
+bundle's pooled means; a flagged row (>3x off) almost always means a unit
+mismatch between the DFCI and OMOP lab pipelines. Resolve those before you read
+the C-index.
 
 ### Invariants (these change predictions silently if broken)
 

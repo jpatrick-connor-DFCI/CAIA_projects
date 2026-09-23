@@ -21,7 +21,7 @@ for (name in c("theme_fig", "figure_tertiles", "figure_extreme_quintiles",
     if (!is.null(assignment)) eval(assignment)
   }
 }
-source("COMPASS/survival_analysis/cohort_forest_figures.R")
+source("COMPASS/survival_analysis/figure_supplements.R")
 
 # Ties are preserved; degenerate distributions cannot be claimed to have tertiles.
 groups <- figure_tertiles(c(1,1,2,3,4,5,6,7,8,NA,Inf))

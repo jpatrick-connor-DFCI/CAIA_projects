@@ -1,5 +1,5 @@
 source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_data_cache.R")
+source("COMPASS/survival_analysis/figure_workflow.R")
 
 # Styling a manuscript copy must not mutate a layer shared by the standalone.
 p <- ggplot(tibble(x=1,y=2,label="Unchanged"),aes(x,y,label=label)) +

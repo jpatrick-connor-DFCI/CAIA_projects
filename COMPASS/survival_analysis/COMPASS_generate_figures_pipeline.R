@@ -1293,9 +1293,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     NA_character_
   }
   # Legacy logical addresses, retained as stable inputs to the 05 compiler.
-  # figure_data_cache.R intercepts these before any image export, compiles
-  # related panels, and routes them to shallow topic folders via
-  # figure_publication.R. Direct legacy callers retain the addressing below.
+  # figure_workflow.R intercepts these before any image export, compiles
+  # related panels, and routes them to shallow topic folders. Direct legacy
+  # callers retain the addressing below.
   # Logical layout:
   #   FIG_ROOT/by_figure/<group>/<trimmed-name>/<endpoint>__<subset>__<exclusion>.png
   # Per-lab panels keep their category/lab nesting for the same reason as
@@ -4386,7 +4386,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     forest <- load_cohort_forest(NEPC_PROJ_PATH, cohort_forest_config$cohorts, ENDPOINT, landmark)
     if (nrow(forest)) {
       p_forest <- plot_cohort_forest(forest, ENDPOINT, landmark)
-      # Fixed slide geometry from cohort_forest_figures.R, not a per-stat height:
+      # Fixed slide geometry from figure_supplements.R, not a per-stat height:
       # this figure is presented as one full-bleed 16:9 slide.
       save_fig(p_forest, OUT_DIR, sprintf("cohort_forest_%s_landmark%d", ENDPOINT, landmark),
                COHORT_FOREST_SLIDE_SIZE[["width"]], COHORT_FOREST_SLIDE_SIZE[["height"]])

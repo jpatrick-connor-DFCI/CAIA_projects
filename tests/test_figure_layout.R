@@ -1,5 +1,5 @@
 source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_data_cache.R")
+source("COMPASS/survival_analysis/figure_workflow.R")
 local({
   root <- tempfile("figure-layout-"); dir.create(root)
   on.exit(unlink(root, recursive = TRUE))

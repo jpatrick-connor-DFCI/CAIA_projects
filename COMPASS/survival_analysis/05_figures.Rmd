@@ -194,7 +194,7 @@ in both formats. The cohort and label figures described above also retain their
 individual panels, as do the lab KM curves; other compiled figure families do not export component images.
 
 For an existing canonical ADT/platinum PNG download without the graphics cache,
-`reformat_downloaded_figures.R <input-ADT-dir> <new-parent>/ADT [0|90|180]` removes
+`Rscript figure_workflow.R <input-ADT-dir> <new-parent>/ADT [0|90|180]` removes
 the compiled supertitles and assembles the new overview from the rendered panels.
 It preserves raster data/geometry, writes a separate tree and refreshed catalog,
 and exports the overview as PNG plus a PDF containing the existing raster panels.
@@ -270,7 +270,7 @@ if (!file.exists(pipeline_path)) pipeline_path <- file.path(
   getwd(), "COMPASS", "survival_analysis", "COMPASS_generate_figures_pipeline.R")
 pipeline_path <- normalizePath(pipeline_path, mustWork = TRUE)
 source(pipeline_path)
-source(file.path(dirname(pipeline_path), "figure_data_cache.R"))
+source(file.path(dirname(pipeline_path), "figure_workflow.R"))
 
 env_flag <- function(name, default = FALSE) {
   value <- tolower(Sys.getenv(name, if (default) "true" else "false"))
@@ -297,7 +297,7 @@ COHORTS <- env_values("COMPASS_FIGURE_COHORTS", "adt")
 stopifnot(length(COHORTS) > 0L, length(ENDPOINTS) > 0L,
           all(COHORTS %in% SUPPORTED_COHORTS), all(ENDPOINTS %in% SUPPORTED_ENDPOINTS),
           !anyDuplicated(COHORTS), !anyDuplicated(ENDPOINTS))
-COHORT_FOREST_CONFIG <- list(script = file.path(dirname(pipeline_path), "cohort_forest_figures.R"),
+COHORT_FOREST_CONFIG <- list(script = file.path(dirname(pipeline_path), "figure_supplements.R"),
                              cohorts = ADT_COHORT_OPTIONS, landmark = 180L)
 PLOT_NON_ANDROGEN_LAB_FIGURES <- env_flag("COMPASS_NON_ANDROGEN_LABS")
 PLOT_GAM_TRAJECTORIES <- env_flag("COMPASS_GAM_TRAJECTORIES")
@@ -305,8 +305,8 @@ PLOT_ADT_INTENT_SUPPLEMENT <- env_flag("COMPASS_ADT_INTENT_SUPPLEMENT")
 PLOT_METASTATIC_LABEL_SUPPLEMENT <- env_flag("COMPASS_METASTATIC_LABEL_SUPPLEMENT", TRUE)
 PLOT_FEDERATED_SUPPLEMENT <- env_flag("COMPASS_FEDERATED_SUPPLEMENT", TRUE)
 METASTATIC_SUPPLEMENT <- list(
-  prepare_script = file.path(dirname(pipeline_path), "prepare_metastatic_figure_labels.R"),
-  r_script = file.path(dirname(pipeline_path), "metastatic_figure_supplements.R"),
+  prepare_script = file.path(dirname(pipeline_path), "figure_supplements.R"),
+  r_script = file.path(dirname(pipeline_path), "figure_supplements.R"),
   intent = file.path(NEPC_PROJ_PATH, "mrn_lists", "adt_intent_labels_model_cohort.csv"),
   stage = Sys.getenv("COMPASS_REGEX_STAGE_PATH", file.path(
     Sys.getenv("PROFILE_DATA_PATH", "/data/gusev/USERS/jpconnor/data/PROFILE_DATA"),
@@ -314,7 +314,6 @@ METASTATIC_SUPPLEMENT <- list(
   llm = Sys.getenv("LLM_MET_LABELS_PATH", "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_met_diagnosis/met_dx_labels.parquet"),
   icd = file.path(NEPC_PROJ_PATH, "prostate_icd_data.csv"))
 FEDERATED_SUPPLEMENT <- list(
-  script = file.path(dirname(pipeline_path), "federated_figures.R"),
   results = Sys.getenv("COMPASS_FEDERATED_RESULTS", file.path(
     NEPC_PROJ_PATH, "federated_results_with_MSK", "cox_federated_univariate_adt.csv")))
 RENDER_PROFILE <- match.arg(tolower(Sys.getenv("COMPASS_RENDER_PROFILE", "fast")), c("fast", "publication"))
@@ -324,7 +323,7 @@ RENDER_OVERWRITE <- env_flag("COMPASS_RENDER_OVERWRITE")
 PREPARE_OVERWRITE <- env_flag("COMPASS_PREPARE_OVERWRITE")
 RENDER_WORKERS <- env_workers("COMPASS_RENDER_WORKERS", 2L)
 PREPARE_WORKERS <- env_workers("COMPASS_PREPARE_WORKERS", 1L)
-source(file.path(dirname(pipeline_path), "metastatic_figure_supplements.R"))
+source(file.path(dirname(pipeline_path), "figure_supplements.R"))
 
 figure_config <- list(
   data_root = NEPC_PROJ_PATH, cache_root = FIGURE_DATA_ROOT, fig_root = FIG_ROOT,

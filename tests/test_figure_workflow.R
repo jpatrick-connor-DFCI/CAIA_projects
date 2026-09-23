@@ -1,7 +1,7 @@
 # End-to-end synthetic workflow: two endpoints, independent federation, resume,
 # format-only rendering, and missing optional inputs. No clinical data needed.
 source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_data_cache.R")
+source("COMPASS/survival_analysis/figure_workflow.R")
 local({
   root <- tempfile("figure-workflow-", tmpdir = Sys.getenv("COMPASS_TEST_OUTPUT_ROOT", tempdir())); dir.create(root)
   if (Sys.getenv("COMPASS_TEST_KEEP_OUTPUT") == "1") message("Synthetic outputs: ", root)
@@ -83,8 +83,8 @@ local({
     file.path(root, "mrn_lists", "adt_intent_labels_model_cohort.csv"))
   write_csv(tibble(DFCI_MRN = ids[-1], LLM_METASTATIC = patient$NEPC[-1] == 1),
     file.path(root, "mrn_lists", "llm_met_labels_model_cohort.csv"))
-  fc <- list(script = file.path(dirname(pipeline_path), "federated_figures.R"), results = fed_path)
-  forest <- list(script = file.path(dirname(pipeline_path), "cohort_forest_figures.R"), cohorts = "adt", landmark = 180L)
+  fc <- list(results = fed_path)
+  forest <- list(script = file.path(dirname(pipeline_path), "figure_supplements.R"), cohorts = "adt", landmark = 180L)
   # Fixture setup represents the separate notebook preparation stage. Python
   # is then unavailable for every R workflow stage, not just render-only.
   missing <- tryCatch(figure_notebook_manifest(cfg), error = identity)

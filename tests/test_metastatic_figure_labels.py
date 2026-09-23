@@ -7,7 +7,7 @@ import subprocess
 import polars as pl
 import pytest
 
-from COMPASS.survival_analysis.prepare_metastatic_figure_labels import build_labels, collapse_stage
+from COMPASS.survival_analysis.prepare_figure_data import build_labels, collapse_stage
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "COMPASS/survival_analysis"
@@ -84,9 +84,9 @@ def test_r_comparisons_and_standalone_diagnostics(tmp_path):
                   "START_DT": ["2019-12-01"] * intent.height}).write_csv(tmp_path / "icd.csv")
     script = f'''
       suppressPackageStartupMessages({{library(dplyr); library(tidyr); library(ggplot2)}})
-      source({json.dumps(str(SCRIPTS / "metastatic_figure_supplements.R"))})
+      source({json.dumps(str(SCRIPTS / "figure_supplements.R"))})
       root <- {json.dumps(str(tmp_path))}
-      config <- list(prepare_script = {json.dumps(str(SCRIPTS / "prepare_metastatic_figure_labels.R"))},
+      config <- list(prepare_script = {json.dumps(str(SCRIPTS / "figure_supplements.R"))},
         intent = file.path(root, "intent.csv"), stage = file.path(root, "stage.parquet"),
         llm = file.path(root, "llm.parquet"), icd = file.path(root, "icd.csv"))
       patients <- readr::read_csv(config$intent, show_col_types = FALSE) %>%

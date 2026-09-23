@@ -259,7 +259,7 @@ def _gleason_group(frame: pd.DataFrame) -> pd.Series:
 def _stage_group(frame: pd.DataFrame) -> pd.Series:
     """Collapse overall stage I-IV into three bins.
 
-    Mirrors the numeral/roman handling in prepare_metastatic_figure_labels.py so
+    Mirrors the numeral/roman handling in prepare_figure_data.py so
     the two agree on what a stage value means.
     """
     if STAGE_COLUMN not in frame.columns:

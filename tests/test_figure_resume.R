@@ -118,7 +118,7 @@ local({
       if (!is.null(assignment)) eval(assignment, env)
     }
   }
-  sys.source("COMPASS/survival_analysis/metastatic_figure_supplements.R", env)
+  sys.source("COMPASS/survival_analysis/figure_supplements.R", env)
   env$FIG_ROOT <- tempdir()
   env$COHORT <- "adt"
   env$ENDPOINT <- "platinum"

@@ -7,7 +7,7 @@ import polars as pl
 import pytest
 
 from COMPASS.survival_analysis import prepare_figure_data as prep
-from COMPASS.survival_analysis.prepare_metastatic_figure_labels import build_labels
+from COMPASS.survival_analysis.prepare_figure_data import build_labels
 
 
 def input_frame():

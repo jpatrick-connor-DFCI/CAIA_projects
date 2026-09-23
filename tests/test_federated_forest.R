@@ -1,5 +1,5 @@
 source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/federated_figures.R")
+source("COMPASS/survival_analysis/figure_workflow.R")
 local({
   path <- tempfile(fileext = ".csv"); on.exit(unlink(path))
   d <- tibble(landmark_days = 0, endpoint = "platinum", feature = paste0("feature", 1:7),

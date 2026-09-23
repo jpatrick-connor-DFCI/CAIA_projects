@@ -378,7 +378,7 @@ def test_the_figures_rmd_names_no_retired_endpoint():
 
 def test_a_failed_cohort_does_not_abandon_the_rest():
     """A failed cell does not discard the rest; the final summary still fails."""
-    helper = (PIPELINE_R.parent / "figure_data_cache.R").read_text()
+    helper = (PIPELINE_R.parent / "figure_workflow.R").read_text()
     assert "tryCatch(fun(item)" in helper
     assert helper.index("prepared <- figure_parallel(") < helper.index('stop("Figure workflow failures:')
     assert helper.index("render_results[!completed] <- figure_parallel(") < helper.index('stop("Figure workflow failures:')
@@ -391,6 +391,6 @@ def test_r_figure_workflow_never_launches_python():
         code = path.read_text()
         assert not re.search(r"\b(?:system2?|py_run_file|py_run_string|source_python)\s*\(", code), path
         assert "reticulate::" not in code, path
-    helper = (PIPELINE_R.parent / "figure_data_cache.R").read_text()
+    helper = (PIPELINE_R.parent / "figure_workflow.R").read_text()
     assert "figure_notebook_manifest(config" in helper
     assert "Run 04_prep_figure_data.ipynb" in helper

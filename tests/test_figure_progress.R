@@ -34,7 +34,7 @@ local({
 # Exercise the actual notebook scheduler, including error handling and both
 # Exercise the scheduler shared by preparation and rendering, sequentially and
 # with forks. Failures are values so remaining jobs always complete.
-source("COMPASS/survival_analysis/figure_data_cache.R")
+source("COMPASS/survival_analysis/figure_workflow.R")
 for (workers in if (.Platform$OS.type == "windows") 1L else c(1L, 2L)) {
   results <- figure_parallel(as.list(1:4), function(i) {
     if (i == 2) stop("synthetic device failure")

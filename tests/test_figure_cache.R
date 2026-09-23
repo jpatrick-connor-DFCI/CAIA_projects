@@ -1,6 +1,6 @@
 # Rscript tests/test_figure_cache.R: differential preparation and render-cache tests.
 source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_data_cache.R")
+source("COMPASS/survival_analysis/figure_workflow.R")
 options(readr.num_threads = 1L)
 local({
   root <- tempfile("figure-cache-test-")
@@ -76,7 +76,7 @@ local({
   conflict <- tryCatch(nested$patient_bin_trajectory(legacy_labs, "PSA",
     stratum_values = tibble(DFCI_MRN = c("001", "001"), stratum = c("NEPC+", "NEPC-"))), error = identity)
   stopifnot(inherits(conflict, "error"), grepl("Conflicting trajectory labels for 1 patient", conditionMessage(conflict)))
-  source("COMPASS/survival_analysis/prepare_metastatic_figure_labels.R")
+  source("COMPASS/survival_analysis/figure_supplements.R")
   legacy_labels <- prepare_metastatic_figure_labels(config$metastatic_sources, legacy_patient) %>% arrange(DFCI_MRN)
   prepared_labels <- figure_read_parquet(manifest$metastatic_labels) %>% arrange(DFCI_MRN)
   label_comparison <- all.equal(as.data.frame(prepared_labels[names(legacy_labels)]),
