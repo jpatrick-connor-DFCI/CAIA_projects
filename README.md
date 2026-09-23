@@ -1052,6 +1052,83 @@ surprised by them.
 
 ---
 
+## Scoring federated models on local data
+
+The federated runs in `caia-project-compass/rhino_scripts` fit XGBoost and
+elastic-net Cox models across sites and export each fitted model as a
+`caia-federated-model-bundle` JSON. Two modules here consume those bundles:
+
+| Module | Takes | Does |
+| --- | --- | --- |
+| `survival_common/federated_inference.py` | a frame that already has the model's covariates | loads the bundle, rebuilds the design matrix with the **pooled** transform, returns risk / survival; also hands back the trained `xgboost.Booster` or a `FederatedCoxModel` |
+| `survival_common/federated_scoring.py` | the **long-format** table a site actually holds | builds each landmark's wide frame by the federated rules, scores every model in a bundle, reports coverage and local C-index |
+
+Use `federated_scoring` on the cluster; it is the one with a CLI over raw data:
+
+```bash
+python -m survival_common.federated_scoring \
+    --bundle xgboost_federated_model_adt.json \
+           cox_federated_elasticnet_model_adt.json \
+    --data  /data/gusev/.../compass_long.parquet \
+    --output-dir risk_scores/ \
+    --evaluate --horizons 365,730,1095
+```
+
+Outputs, per bundle plus two combined tables:
+
+- `<bundle>_risk_scores.csv` — one row per patient per model: `risk_score`
+  (log-hazard ratio, higher = higher risk), the outcome columns when the local
+  rows carry one, and `survival_<h>d` when the bundle has a Breslow baseline
+  (elastic-net only; the XGBoost export carries none, so it gives relative risk only).
+- `federated_inference_metrics.csv` — per model: cohort counts, risk mean/SD,
+  `n_covariates_absent_locally`, and `c_index` under `--evaluate`.
+- `federated_inference_coverage.csv` — per covariate: whether it exists locally
+  and how often it is observed.
+- `federated_inference_run.json` — the exact invocation, for provenance.
+
+To get at the trained object itself rather than a score:
+
+```python
+from survival_common.federated_inference import load_fitted_model
+
+booster, bundle, model = load_fitted_model("xgboost_federated_model_adt.json", 90)
+booster.trees_to_dataframe()            # a real xgboost.Booster
+
+cox, bundle, model = load_fitted_model("cox_federated_elasticnet_model_adt.json", 90)
+cox.params_                             # coefficients by covariate name
+```
+
+### Invariants (these change predictions silently if broken)
+
+- **The bundle's preprocessing is pooled across the federation and is reused
+  verbatim.** Re-fitting an imputer or scaler on local data would centre the
+  features on the local cohort and shift every prediction, while still returning
+  a plausible-looking score. `federated_inference` never refits; don't add it.
+- **Covariate order is load-bearing.** XGBoost scores by position, so a reordered
+  design matrix returns wrong risks without raising.
+- **Match the cohort arm.** A bundle whose `analysis_label` ends in
+  `noprecastrate` was trained after the pre-anchor castrate exclusion, so score
+  it with `--exclusion pre_anchor_castrate`. The CLI warns on an obvious mismatch.
+- **`federated_scoring` is a second copy of the federated feature derivation**
+  (`rhino_scripts/*/preprocessing.py`), because the bundle carries the pooled
+  *transform* but not the *derivation*. Two copies drift. After pulling
+  caia-project-compass, re-run the cross-repo diff:
+
+  ```bash
+  python tests/check_federated_preprocessing_parity.py
+  ```
+
+  It imports the federated modules and asserts the wide frames match exactly,
+  over both cohort arms and all three landmarks; it exits non-zero on any
+  difference. `tests/test_federated_scoring.py` pins the same rules from this
+  side and runs in the normal suite.
+- **A high `n_covariates_absent_locally` means the extract is wrong**, usually a
+  lab dictionary that does not match the training site's. Absent covariates are
+  imputed to the pooled train mean, which is legitimate for a few features and
+  meaningless for most of them. Check the coverage table before trusting a score.
+
+---
+
 ## Notes
 
 - `.ipynb_checkpoints/` and `__pycache__/` artifacts are git-ignored and not part of the workflow.
