@@ -219,6 +219,48 @@ class TestClinicalStratifiers:
         )
         assert out.loc[out[ID_COL] == 1, "TP53_SNV"].iloc[0] == 1.0
 
+    def test_tz_aware_event_date_does_not_crash_the_stage_comparison(self):
+        """On the cluster, TREATMENT_ANCHOR_DATE comes back UTC-aware while the
+        regex stage parquet's EVENT_DATE is naive; pandas raises TypeError on a
+        naive-vs-aware comparison rather than assuming a timezone. Both sides
+        represent plain calendar dates, so tz must be dropped before comparing.
+        """
+        mrns = [1]
+        base = _base(mrns)
+        anchors = _treatment_anchors(mrns).dt.tz_localize("UTC")
+        gleason = _gleason([])
+        trio_columns = ["TP53_SNV"]
+        somatic_unfiltered = _somatic_unfiltered([], trio_columns)
+        stage = _stage([
+            (1, "2019-12-01", "M1"),
+            (1, "2020-06-01", "M1c"),  # after landmark -- must not leak in
+        ])
+        assert stage["EVENT_DATE"].dt.tz is None
+
+        out = bsg.build_clinical_stratifiers(
+            base, somatic_unfiltered, trio_columns, gleason, stage,
+            treatment_anchors=anchors, landmark_day=0,
+        )
+        assert out.loc[out[ID_COL] == 1, bsg.STAGE_COLUMN].iloc[0] == "M1"
+
+    def test_tz_naive_anchors_with_tz_aware_event_date_also_works(self):
+        """The reverse mismatch (naive anchors, tz-aware EVENT_DATE) must also
+        not crash -- _drop_tz is applied to whichever side carries a tz."""
+        mrns = [1]
+        base = _base(mrns)
+        anchors = _treatment_anchors(mrns)  # naive
+        gleason = _gleason([])
+        trio_columns = ["TP53_SNV"]
+        somatic_unfiltered = _somatic_unfiltered([], trio_columns)
+        stage = _stage([(1, "2019-12-01", "M1")])
+        stage["EVENT_DATE"] = stage["EVENT_DATE"].dt.tz_localize("UTC")
+
+        out = bsg.build_clinical_stratifiers(
+            base, somatic_unfiltered, trio_columns, gleason, stage,
+            treatment_anchors=anchors, landmark_day=0,
+        )
+        assert out.loc[out[ID_COL] == 1, bsg.STAGE_COLUMN].iloc[0] == "M1"
+
 
 class TestLoadStage:
     def test_drops_rows_missing_date_or_stage(self, tmp_path):

@@ -185,6 +185,20 @@ def _table_columns(path: Path) -> list[str]:
     )
 
 
+def _drop_tz(dates: pd.Series) -> pd.Series:
+    """Strip tz-awareness from a datetime Series, leaving naive ones as-is.
+
+    Source date columns in this pipeline are parsed independently (some via
+    plain `pd.to_datetime`, some inherited tz-aware from an upstream parquet),
+    so two columns being compared can disagree on tz-awareness even though
+    both represent plain calendar dates. pandas raises on a naive-vs-aware
+    comparison rather than assuming UTC, so normalize immediately before use.
+    """
+    if isinstance(dates.dtype, pd.DatetimeTZDtype):
+        return dates.dt.tz_localize(None)
+    return dates
+
+
 def _normalize_mrn(frame: pd.DataFrame, *, source: str) -> pd.DataFrame:
     if ca.ID_COL not in frame.columns:
         raise ValueError(f"{source} is missing required column {ca.ID_COL!r}.")
@@ -948,10 +962,17 @@ def build_clinical_stratifiers(
     )
 
     stage_candidates = stage.merge(cutoffs, on=ca.ID_COL, how="inner")
+    # EVENT_DATE (from the regex stage parquet) and _landmark_date (derived
+    # from TREATMENT_ANCHOR_DATE) are not guaranteed to agree on tz-awareness
+    # -- pandas raises rather than comparing naive vs tz-aware datetimes. Both
+    # represent calendar dates with no meaningful intraday/tz semantics, so
+    # drop tz on whichever side has it immediately before comparing.
+    event_date = _drop_tz(stage_candidates["EVENT_DATE"])
+    landmark_date = _drop_tz(stage_candidates["_landmark_date"])
     stage_candidates = stage_candidates.loc[
-        stage_candidates["EVENT_DATE"].notna()
-        & stage_candidates["_landmark_date"].notna()
-        & stage_candidates["EVENT_DATE"].le(stage_candidates["_landmark_date"])
+        event_date.notna()
+        & landmark_date.notna()
+        & event_date.le(landmark_date)
     ]
     if stage_candidates.empty:
         stage_values = pd.DataFrame(
