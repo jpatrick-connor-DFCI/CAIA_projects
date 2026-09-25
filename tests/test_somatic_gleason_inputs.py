@@ -305,6 +305,29 @@ class TestAvailableCaseManifest:
         horizons = manifest["auc_horizons_by_landmark"]["0"]
         assert len(horizons["platinum"]) > 0
 
+    def test_endpoint_with_events_all_at_non_positive_duration_is_also_skipped(self):
+        """A bare `event == 1` count is not enough: compute_horizon_grid also
+        requires duration > 0 (its own validity mask). An event flagged at or
+        before the landmark (duration <= 0, e.g. from an NEPC criterion dated
+        on the landmark itself) still crashes compute_horizon_grid even though
+        n_events > 0 -- this is exactly what happened on the cluster.
+        """
+        n = 6
+        available = pd.DataFrame({
+            ID_COL: range(n),
+            "split": ["train"] * n,
+            "t_platinum": range(10, 10 * (n + 1), 10),
+            "PLATINUM": [1, 1, 0, 0, 0, 0],
+            "t_nepc": [0, -5, 10, 20, 30, 40],
+            "NEPC": [1, 1, 0, 0, 0, 0],  # events exist, but at duration <= 0
+        })
+        manifest = bsg._available_case_manifest(
+            self._base_manifest(), {0: available}
+        )
+        horizons = manifest["auc_horizons_by_landmark"]["0"]
+        assert "platinum" in horizons
+        assert "nepc" not in horizons
+
 
 class TestLoadStage:
     def test_drops_rows_missing_date_or_stage(self, tmp_path):

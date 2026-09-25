@@ -868,10 +868,15 @@ def _available_case_manifest(
             # The available-case cohorts are small subsets of the base cohort
             # (patients with Gleason/somatic data by the landmark), so an
             # endpoint that has events in the full cohort can have zero here
-            # -- compute_horizon_grid requires at least one. Skip it rather
-            # than failing the whole manifest; this endpoint just isn't
-            # estimable in this available-case subset.
-            if not (pd.to_numeric(train_val[cfg["event_col"]], errors="coerce") == 1).any():
+            # -- compute_horizon_grid requires at least one *positive-duration,
+            # finite* event, matching its own validity mask exactly (an event
+            # flagged at duration <= 0, e.g. at the landmark itself, would
+            # still pass a bare `== 1` check but still crash the call below).
+            # Skip it rather than failing the whole manifest; this endpoint
+            # just isn't estimable in this available-case subset.
+            event = pd.to_numeric(train_val[cfg["event_col"]], errors="coerce")
+            duration = pd.to_numeric(train_val[cfg["duration_col"]], errors="coerce")
+            if not ((event == 1) & duration.notna() & (duration > 0)).any():
                 continue
             horizons[endpoint] = [
                 int(value)
