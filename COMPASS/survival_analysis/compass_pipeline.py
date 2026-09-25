@@ -1828,13 +1828,15 @@ def run_ctep_os_adjusted_supplement(run: dict) -> pd.DataFrame:
     manifest = _ca._load_build_manifest(run["inputs_dir"])
     min_patient_coverage = float(manifest["min_patient_coverage"])
     id_col = run.get("id_col", "DFCI_MRN")
-    longitudinal_path = run["inputs_dir"] / "somatic_gleason" / "gleason_available_case" / "aggregated_landmark0.csv"
-    if not longitudinal_path.exists():
-        # Any prebuilt aggregated landmark file carries TREATMENT_ANCHOR_DATE;
-        # fall back to the base cohort's own landmark-0 file if the
-        # somatic_gleason tree was never built.
-        from build_prediction_inputs import aggregated_filename as _aggregated_filename
-        longitudinal_path = run["inputs_dir"] / _aggregated_filename(0)
+    # Aggregated landmark files drop TREATMENT_ANCHOR_DATE; recover it from the
+    # longitudinal CSV the inputs were built from, as build_somatic_gleason_inputs does.
+    longitudinal_value = manifest.get("data")
+    if not longitudinal_value:
+        raise ValueError(
+            f"{run['inputs_dir']} build manifest has no longitudinal 'data' path; "
+            "cannot recover TREATMENT_ANCHOR_DATE for the CTEP leakage exclusion."
+        )
+    longitudinal_path = Path(longitudinal_value)
     from build_somatic_gleason_inputs import load_treatment_anchors
     treatment_anchors = load_treatment_anchors(longitudinal_path)
 
