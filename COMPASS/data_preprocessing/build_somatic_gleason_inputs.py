@@ -868,15 +868,19 @@ def _available_case_manifest(
             # The available-case cohorts are small subsets of the base cohort
             # (patients with Gleason/somatic data by the landmark), so an
             # endpoint that has events in the full cohort can have zero here
-            # -- compute_horizon_grid requires at least one *positive-duration,
-            # finite* event, matching its own validity mask exactly (an event
-            # flagged at duration <= 0, e.g. at the landmark itself, would
-            # still pass a bare `== 1` check but still crash the call below).
-            # Skip it rather than failing the whole manifest; this endpoint
-            # just isn't estimable in this available-case subset.
+            # -- compute_horizon_grid requires at least one event that is
+            # still "observed" after IT'S OWN admin-censoring cap is applied
+            # (events past the cap are recoded to censored there). Replicate
+            # that recoding here so this guard agrees with what the call
+            # below will actually see, rather than just checking event==1 and
+            # duration>0, which can pass while every one of those events gets
+            # zeroed out by the cap inside compute_horizon_grid. Skip the
+            # endpoint rather than failing the whole manifest; it just isn't
+            # estimable in this available-case subset.
             event = pd.to_numeric(train_val[cfg["event_col"]], errors="coerce")
             duration = pd.to_numeric(train_val[cfg["duration_col"]], errors="coerce")
-            if not ((event == 1) & duration.notna() & (duration > 0)).any():
+            censored_event = event.where(duration <= admin_days, 0)
+            if not ((censored_event == 1) & duration.notna() & (duration > 0)).any():
                 continue
             horizons[endpoint] = [
                 int(value)

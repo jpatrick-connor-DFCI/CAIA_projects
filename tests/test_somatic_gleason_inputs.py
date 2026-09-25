@@ -328,6 +328,35 @@ class TestAvailableCaseManifest:
         assert "platinum" in horizons
         assert "nepc" not in horizons
 
+    def test_endpoint_with_events_all_past_the_admin_censor_cap_is_also_skipped(self):
+        """compute_horizon_grid recodes any event past admin_censor_days back
+        to censored before checking for observed events. A guard that checks
+        raw event==1 & duration>0 without also applying that same cap can see
+        "events exist" while every one of them gets zeroed out inside
+        compute_horizon_grid -- this is exactly what happened on the cluster
+        a second time, with the base manifest's auc_max_time_units * time_unit
+        cap (720 days here) smaller than every NEPC event's raw duration.
+        """
+        n = 6
+        admin_days = (
+            self._base_manifest()["auc_max_time_units"]
+            * self._base_manifest()["auc_time_unit_days"]
+        )
+        available = pd.DataFrame({
+            ID_COL: range(n),
+            "split": ["train"] * n,
+            "t_platinum": range(10, 10 * (n + 1), 10),
+            "PLATINUM": [1, 1, 0, 0, 0, 0],
+            "t_nepc": [admin_days + 100, admin_days + 200, 10, 20, 30, 40],
+            "NEPC": [1, 1, 0, 0, 0, 0],  # events exist, but past the admin cap
+        })
+        manifest = bsg._available_case_manifest(
+            self._base_manifest(), {0: available}
+        )
+        horizons = manifest["auc_horizons_by_landmark"]["0"]
+        assert "platinum" in horizons
+        assert "nepc" not in horizons
+
 
 class TestLoadStage:
     def test_drops_rows_missing_date_or_stage(self, tmp_path):
