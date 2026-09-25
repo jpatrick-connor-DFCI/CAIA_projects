@@ -865,6 +865,14 @@ def _available_case_manifest(
         for endpoint, cfg in ca.ENDPOINTS.items():
             if not {cfg["duration_col"], cfg["event_col"]}.issubset(train_val.columns):
                 continue
+            # The available-case cohorts are small subsets of the base cohort
+            # (patients with Gleason/somatic data by the landmark), so an
+            # endpoint that has events in the full cohort can have zero here
+            # -- compute_horizon_grid requires at least one. Skip it rather
+            # than failing the whole manifest; this endpoint just isn't
+            # estimable in this available-case subset.
+            if not (pd.to_numeric(train_val[cfg["event_col"]], errors="coerce") == 1).any():
+                continue
             horizons[endpoint] = [
                 int(value)
                 for value in compute_horizon_grid(

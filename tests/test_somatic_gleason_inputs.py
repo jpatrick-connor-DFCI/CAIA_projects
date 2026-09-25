@@ -262,6 +262,50 @@ class TestClinicalStratifiers:
         assert out.loc[out[ID_COL] == 1, bsg.STAGE_COLUMN].iloc[0] == "M1"
 
 
+class TestAvailableCaseManifest:
+    """_available_case_manifest (called from main() after every analysis):
+    available-case cohorts are small subsets of the base cohort, so an
+    endpoint with events in the full cohort can have zero here.
+    compute_horizon_grid raises ValueError on zero events; the manifest must
+    skip that endpoint rather than let the whole build crash.
+    """
+
+    def _base_manifest(self) -> dict:
+        return {
+            "auc_time_unit_days": 30,
+            "auc_quantiles": [0.1, 0.9],
+            "auc_max_time_units": 24,
+        }
+
+    def _available(self, *, n: int, event_col: str, n_events: int) -> pd.DataFrame:
+        event = [1] * n_events + [0] * (n - n_events)
+        return pd.DataFrame({
+            ID_COL: range(n),
+            "split": ["train"] * n,
+            "t_platinum": range(10, 10 * (n + 1), 10),
+            "PLATINUM": event,
+            "t_nepc": range(10, 10 * (n + 1), 10),
+            "NEPC": [0] * n,  # zero NEPC events in this available-case subset
+        })
+
+    def test_endpoint_with_zero_events_is_skipped_not_raised(self):
+        available = self._available(n=6, event_col="PLATINUM", n_events=3)
+        manifest = bsg._available_case_manifest(
+            self._base_manifest(), {0: available}
+        )
+        horizons = manifest["auc_horizons_by_landmark"]["0"]
+        assert "platinum" in horizons
+        assert "nepc" not in horizons
+
+    def test_endpoint_with_events_still_gets_a_horizon_grid(self):
+        available = self._available(n=6, event_col="PLATINUM", n_events=3)
+        manifest = bsg._available_case_manifest(
+            self._base_manifest(), {0: available}
+        )
+        horizons = manifest["auc_horizons_by_landmark"]["0"]
+        assert len(horizons["platinum"]) > 0
+
+
 class TestLoadStage:
     def test_drops_rows_missing_date_or_stage(self, tmp_path):
         path = tmp_path / "stage.parquet"
