@@ -478,6 +478,7 @@ def _run_baseline_landmark(
     args: Namespace,
     auc_time_unit_days: int,
     auc_max_time_units: int | None,
+    min_patient_coverage: float,
     out: dict[str, list],
 ) -> None:
     static_covariate_cols = config.static_covariates(ctx, args, cox)
@@ -513,6 +514,30 @@ def _run_baseline_landmark(
         print(f"  held-out test C-index={metrics_row['test_c_index']:.4f}")
         print(f"  held-out test mean AUC(t)={metrics_row['test_mean_auc_t']:.4f}")
         print(f"  held-out test integrated Brier={metrics_row['test_integrated_brier']:.4f}")
+
+        if getattr(args, "out_of_fold_risks", False):
+            # The baseline's feature set/penalizer/l1_ratio are fixed, not
+            # CV-searched, so there is nothing for an inner tuning loop to
+            # protect against leakage on -- a single level of outer CV, fit
+            # with these same fixed values in every fold, is enough. This also
+            # sidesteps compute_out_of_fold_risk_scores's feature-selection
+            # gate, which rejects the baseline's typical zero-feature
+            # (age-only) case outright.
+            oof_cohort = pd.concat([ctx.train_val, ctx.test])
+            oof_df = cox.compute_fixed_feature_out_of_fold_risk_scores(
+                oof_cohort.copy(),
+                feature_cols=feature_cols,
+                endpoint=endpoint,
+                penalizer=baseline_penalizer,
+                l1_ratio=baseline_l1_ratio,
+                outer_folds=args.oof_outer_folds,
+                seed=args.seed,
+                static_covariate_cols=static_covariate_cols,
+            )
+            if oof_df is not None and not oof_df.empty:
+                oof_df = oof_df.copy()
+                oof_df.insert(0, "landmark_days", landmark_day)
+                out["patient_risk_frames"].append(oof_df)
 
 
 def _collect_multivariable_outputs(
@@ -642,6 +667,7 @@ def run_multivariable(config: CoxProjectConfig, cox: Any, args: Namespace) -> No
                 args=args,
                 auc_time_unit_days=auc_time_unit_days,
                 auc_max_time_units=auc_max_time_units,
+                min_patient_coverage=min_patient_coverage,
                 out=out,
             )
         else:

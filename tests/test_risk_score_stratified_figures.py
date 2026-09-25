@@ -276,3 +276,95 @@ class TestEndToEnd:
             "--no-plot",
         ])
         assert (out_dir / "risk_stratified_gene_sources_platinum.csv").exists()
+
+    def test_writes_within_stratum_table(self, tmp_path):
+        risks = _risks(12)
+        clinical = pd.DataFrame({
+            ID: [str(i) for i in range(12)],
+            rsf.GLEASON_FEATURE: [6, 7, 8] * 4,
+            "TP53_SNV": [0, 1] * 6,
+        })
+        risk_path = _write(tmp_path, risks)
+        clin_path = tmp_path / "clinical.csv"
+        clinical.to_csv(clin_path, index=False)
+        out_dir = tmp_path / "out"
+        rsf.main([
+            "--patient-risks", str(risk_path),
+            "--clinical-features", str(clin_path),
+            "--output-dir", str(out_dir),
+            "--endpoint", "platinum",
+            "--landmark-days", "180",
+            "--id-col", ID,
+            "--no-plot",
+        ])
+        within_path = out_dir / "risk_within_stratum_platinum_landmark180.csv"
+        assert within_path.exists()
+        table = pd.read_csv(within_path)
+        assert "gleason" in set(table["stratifier"])
+        assert "__pooled__" in set(table["level"])
+
+
+class TestComparisonRisks:
+    def test_comparison_risks_join_adds_a_stratifier(self, tmp_path):
+        risks = _risks(12)
+        # Comparison model's own risk score, unrelated numerically.
+        comparison = risks[[ID]].copy()
+        comparison["endpoint"] = "platinum"
+        comparison["dataset"] = "test"
+        comparison["landmark_days"] = 180
+        comparison["duration_days"] = risks["duration_days"]
+        comparison["event"] = risks["event"]
+        comparison["risk_score"] = np.linspace(2.0, -2.0, 12)
+
+        risk_path = _write(tmp_path, risks)
+        comparison_path = _write(tmp_path, comparison, name="gleason_patient_risks.csv")
+        out_dir = tmp_path / "out"
+        rsf.main([
+            "--patient-risks", str(risk_path),
+            "--output-dir", str(out_dir),
+            "--endpoint", "platinum",
+            "--landmark-days", "180",
+            "--id-col", ID,
+            "--comparison-risks", f"gleason={comparison_path}",
+            "--no-plot",
+        ])
+        table = pd.read_csv(out_dir / "risk_stratified_discrimination_platinum_landmark180.csv")
+        assert "comparison__gleason" in set(table["feature"])
+
+    def test_comparison_risks_requires_name_equals_path(self, tmp_path):
+        out_dir = tmp_path / "out"
+        with pytest.raises(ValueError, match="NAME=PATH"):
+            rsf.main([
+                "--patient-risks", str(_write(tmp_path, _risks(8))),
+                "--output-dir", str(out_dir),
+                "--endpoint", "platinum",
+                "--id-col", ID,
+                "--comparison-risks", "bad-entry-no-equals",
+                "--no-plot",
+            ])
+
+    def test_comparison_risks_never_mixes_dataset_schemes(self, tmp_path):
+        """A comparison file scored only in cv_oof must not silently join under test."""
+        risks = _risks(8)
+        comparison = risks[[ID]].copy()
+        comparison["endpoint"] = "platinum"
+        comparison["dataset"] = "cv_oof"
+        comparison["landmark_days"] = 180
+        comparison["duration_days"] = risks["duration_days"]
+        comparison["event"] = risks["event"]
+        comparison["risk_score"] = np.linspace(2.0, -2.0, 8)
+
+        risk_path = _write(tmp_path, risks)
+        comparison_path = _write(tmp_path, comparison, name="oof_patient_risks.csv")
+        out_dir = tmp_path / "out"
+        with pytest.raises(ValueError, match="no dataset=='test' rows"):
+            rsf.main([
+                "--patient-risks", str(risk_path),
+                "--output-dir", str(out_dir),
+                "--endpoint", "platinum",
+                "--landmark-days", "180",
+                "--id-col", ID,
+                "--comparison-risks", f"oof={comparison_path}",
+                "--dataset", "test",
+                "--no-plot",
+            ])

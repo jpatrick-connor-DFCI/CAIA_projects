@@ -73,6 +73,7 @@ from cox_aggregated import (  # noqa: E402
     _load_build_manifest,
     _load_prebuilt_landmark,
     compute_ipcw_auc_t,
+    feature_set_has_labs_component,
     normalize_endpoints,
     normalize_landmark_days,
     select_feature_columns,
@@ -83,7 +84,10 @@ from survival_common.cox_runners import (  # noqa: E402
     add_out_of_fold_risk_args,
     run_multivariable,
 )
-from survival_common.cox_engine import summarize_auc_timeline  # noqa: E402
+from survival_common.cox_engine import (  # noqa: E402
+    make_cv_splitter,
+    summarize_auc_timeline,
+)
 from survival_common.metrics_schema import (  # noqa: E402
     DEFAULT_COHORT,
     MODEL_XGBOOST,
@@ -201,7 +205,7 @@ def cv_one_endpoint(
             # "labs_text" keeps the gate: its lab columns are still gated, and
             # its embedding columns ride in via always_include.
             restrict_to_labs=(
-                [] if feature_set in {"somatic_gleason", "text"} else canonical
+                canonical if feature_set_has_labs_component(feature_set) else []
             ),
             always_include=list(always_include_feature_cols),
             genomic_feature_cols=list(genomic_feature_cols),
@@ -427,6 +431,126 @@ def cv_one_endpoint(
     return fold_df, cv_df, best_row, fold_canonical_labs_df
 
 
+def _tune_fit_predict(
+    *,
+    train_df: pd.DataFrame,
+    eval_df: pd.DataFrame,
+    raw_feature_cols: list[str],
+    canonical_labs: list[str],
+    pre_treatment_lab_df: pd.DataFrame,
+    horizon_grid: np.ndarray,
+    endpoint: str,
+    landmark_day: int,
+    args: argparse.Namespace,
+    baseline: bool = False,
+    always_include_feature_cols: tuple[str, ...] = (),
+    genomic_feature_cols: tuple[str, ...] = (),
+) -> dict:
+    """Tune (unless --no-cv/baseline) -> final-fit on train_df -> score eval_df.
+
+    Shared by the single held-out-test path (`run_one_endpoint`, train_df is
+    train_val, eval_df is test) and the outer-CV OOF path
+    (`compute_out_of_fold_risk_scores_xgb`, train_df/eval_df are an outer
+    fold's train/test rows). Returns a dict of everything both callers need,
+    since their downstream metrics/schema differ.
+    """
+    duration_col = ENDPOINTS[endpoint]["duration_col"]
+    event_col = ENDPOINTS[endpoint]["event_col"]
+
+    cv_fold_df = pd.DataFrame()
+    cv_summary_df: pd.DataFrame = pd.DataFrame()
+    fold_canonical_labs_df = pd.DataFrame()
+    chosen: dict | None = None
+    if not args.no_cv and not baseline:
+        cv_fold_df, cv_summary_df, best_row, fold_canonical_labs_df = cv_one_endpoint(
+            train_val=train_df,
+            raw_feature_cols=raw_feature_cols,
+            pre_treatment_lab_df=pre_treatment_lab_df,
+            horizon_grid=horizon_grid,
+            endpoint=endpoint,
+            landmark_day=landmark_day,
+            args=args,
+            always_include_feature_cols=always_include_feature_cols,
+            genomic_feature_cols=genomic_feature_cols,
+        )
+        chosen = chosen_from_best_row(best_row)
+        print(
+            f"  CV chose max_depth={chosen['max_depth']} eta={chosen['eta']:g} "
+            f"min_child_weight={chosen['min_child_weight']:g}; "
+            f"cv C-index={chosen['cv_mean_c_index']:.4f} "
+            f"AUC(t)={chosen['cv_mean_auc_t']:.4f} "
+            f"IBS={chosen['cv_mean_integrated_brier']:.4f}"
+        )
+
+    if baseline:
+        # Age-only baseline: no lab features, no per-fold selection. Age is
+        # added by fit_preprocessor regardless of the feature set.
+        selected_features = []
+        feature_meta = pd.DataFrame(
+            {"feature": selected_features, "lab_name": selected_features,
+             "feature_stat": "age", "selected": True}
+        )
+    else:
+        # Final selection on full train_df with the canonical labs already in scope.
+        selected_features, feature_meta = select_feature_columns(
+            train_df,
+            raw_feature_cols,
+            min_patient_coverage=args.min_patient_coverage,
+            restrict_to_labs=(
+                canonical_labs
+                if feature_set_has_labs_component(getattr(args, "feature_set", "labs"))
+                else []
+            ),
+            always_include=list(always_include_feature_cols),
+            genomic_feature_cols=list(genomic_feature_cols),
+            min_genomic_prevalence=_ca.DEFAULT_MIN_GENOMIC_PREVALENCE,
+        )
+    if args.max_features is not None and len(selected_features) > args.max_features:
+        feature_meta = feature_meta.copy()
+        selected_features = _truncate_features_by_rank(selected_features, feature_meta, args.max_features)
+        feature_meta["selected"] = feature_meta["feature"].isin(selected_features)
+
+    final_eta = chosen["eta"] if chosen is not None else None
+    final_max_depth = chosen["max_depth"] if chosen is not None else None
+    final_min_child_weight = chosen["min_child_weight"] if chosen is not None else None
+    final_num_boost_round = int(
+        (chosen.get("selected_num_boost_round") if chosen is not None else None)
+        or args.num_boost_round
+    )
+    model, _, params, preprocessor = fit_xgb_cox(
+        train_df,
+        train_df.iloc[0:0].copy(),
+        feature_cols=selected_features,
+        duration_col=duration_col,
+        event_col=event_col,
+        args=args,
+        age_col=AGE_COL,
+        eta=final_eta,
+        max_depth=final_max_depth,
+        min_child_weight=final_min_child_weight,
+        num_boost_round=final_num_boost_round,
+    )
+    risk, covariate_cols = predict_risk(
+        model,
+        eval_df,
+        preprocessor=preprocessor,
+    )
+    return {
+        "model": model,
+        "params": params,
+        "preprocessor": preprocessor,
+        "risk": risk,
+        "covariate_cols": covariate_cols,
+        "selected_features": selected_features,
+        "feature_meta": feature_meta,
+        "chosen": chosen,
+        "final_num_boost_round": final_num_boost_round,
+        "cv_fold_df": cv_fold_df,
+        "cv_summary_df": cv_summary_df,
+        "fold_canonical_labs_df": fold_canonical_labs_df,
+    }
+
+
 def run_one_endpoint(
     *,
     merged: pd.DataFrame,
@@ -463,87 +587,33 @@ def run_one_endpoint(
         context=f"landmark_xgboost.run_one_endpoint[{endpoint}@+{landmark_day}d]",
     )
 
-    # CV-driven hyperparameter selection (skip with --no-cv to keep the legacy
-    # single-fit path).
-    cv_fold_df = pd.DataFrame()
-    cv_summary_df: pd.DataFrame = pd.DataFrame()
-    fold_canonical_labs_df = pd.DataFrame()
-    chosen: dict | None = None
-    if not args.no_cv and not baseline:
-        cv_fold_df, cv_summary_df, best_row, fold_canonical_labs_df = cv_one_endpoint(
-            train_val=train_val,
-            raw_feature_cols=raw_feature_cols,
-            pre_treatment_lab_df=pre_treatment_lab_df,
-            horizon_grid=horizon_grid,
-            endpoint=endpoint,
-            landmark_day=landmark_day,
-            args=args,
-            always_include_feature_cols=always_include_feature_cols,
-            genomic_feature_cols=genomic_feature_cols,
-        )
-        chosen = chosen_from_best_row(best_row)
-        print(
-            f"  CV chose max_depth={chosen['max_depth']} eta={chosen['eta']:g} "
-            f"min_child_weight={chosen['min_child_weight']:g}; "
-            f"cv C-index={chosen['cv_mean_c_index']:.4f} "
-            f"AUC(t)={chosen['cv_mean_auc_t']:.4f} "
-            f"IBS={chosen['cv_mean_integrated_brier']:.4f}"
-        )
-
-    if baseline:
-        # Age-only baseline: no lab features, no per-fold selection. Age is
-        # added by fit_preprocessor regardless of the feature set.
-        selected_features = []
-        feature_meta = pd.DataFrame(
-            {"feature": selected_features, "lab_name": selected_features,
-             "feature_stat": "age", "selected": True}
-        )
-    else:
-        # Final selection on full train_val with the canonical labs already in scope.
-        selected_features, feature_meta = select_feature_columns(
-            train_val,
-            raw_feature_cols,
-            min_patient_coverage=args.min_patient_coverage,
-            restrict_to_labs=(
-                []
-                if str(getattr(args, "feature_set", "labs")).lower().replace("-", "_")
-                in {"somatic_gleason", "text"}
-                else canonical_labs
-            ),
-            always_include=list(always_include_feature_cols),
-            genomic_feature_cols=list(genomic_feature_cols),
-            min_genomic_prevalence=_ca.DEFAULT_MIN_GENOMIC_PREVALENCE,
-        )
-    if args.max_features is not None and len(selected_features) > args.max_features:
-        feature_meta = feature_meta.copy()
-        selected_features = _truncate_features_by_rank(selected_features, feature_meta, args.max_features)
-        feature_meta["selected"] = feature_meta["feature"].isin(selected_features)
-
-    final_eta = chosen["eta"] if chosen is not None else None
-    final_max_depth = chosen["max_depth"] if chosen is not None else None
-    final_min_child_weight = chosen["min_child_weight"] if chosen is not None else None
-    final_num_boost_round = int(
-        (chosen.get("selected_num_boost_round") if chosen is not None else None)
-        or args.num_boost_round
-    )
-    model, _, params, preprocessor = fit_xgb_cox(
-        train_val,
-        train_val.iloc[0:0].copy(),
-        feature_cols=selected_features,
-        duration_col=duration_col,
-        event_col=event_col,
+    tfp = _tune_fit_predict(
+        train_df=train_val,
+        eval_df=test,
+        raw_feature_cols=raw_feature_cols,
+        canonical_labs=canonical_labs,
+        pre_treatment_lab_df=pre_treatment_lab_df,
+        horizon_grid=horizon_grid,
+        endpoint=endpoint,
+        landmark_day=landmark_day,
         args=args,
-        age_col=AGE_COL,
-        eta=final_eta,
-        max_depth=final_max_depth,
-        min_child_weight=final_min_child_weight,
-        num_boost_round=final_num_boost_round,
+        baseline=baseline,
+        always_include_feature_cols=always_include_feature_cols,
+        genomic_feature_cols=genomic_feature_cols,
     )
-    risk, covariate_cols = predict_risk(
-        model,
-        test,
-        preprocessor=preprocessor,
-    )
+    model = tfp["model"]
+    params = tfp["params"]
+    preprocessor = tfp["preprocessor"]
+    risk = tfp["risk"]
+    covariate_cols = tfp["covariate_cols"]
+    selected_features = tfp["selected_features"]
+    feature_meta = tfp["feature_meta"]
+    chosen = tfp["chosen"]
+    final_num_boost_round = tfp["final_num_boost_round"]
+    cv_fold_df = tfp["cv_fold_df"]
+    cv_summary_df = tfp["cv_summary_df"]
+    fold_canonical_labs_df = tfp["fold_canonical_labs_df"]
+
     event = test[event_col].astype(int).to_numpy()
     duration = test[duration_col].astype(float).to_numpy()
     valid = np.isfinite(duration) & (duration > 0) & np.isfinite(risk)
@@ -656,6 +726,8 @@ def run_one_endpoint(
             "landmark_day": landmark_day,
             "endpoint": endpoint,
             ID_COL: test.index,
+            "dataset": "test",
+            "outer_fold": -1,
             "duration": duration,
             "event": event,
             "risk_score": risk,
@@ -682,6 +754,131 @@ def run_one_endpoint(
         cv_summary_df,
         fold_canonical_labs_df,
     )
+
+
+def compute_out_of_fold_risk_scores_xgb(
+    *,
+    cohort: pd.DataFrame,
+    raw_feature_cols: list[str],
+    canonical_labs: list[str],
+    pre_treatment_lab_df: pd.DataFrame,
+    horizon_grid: np.ndarray,
+    endpoint: str,
+    landmark_day: int,
+    args: argparse.Namespace,
+    always_include_feature_cols: tuple[str, ...] = (),
+    genomic_feature_cols: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    """Nested CV over the full cohort so every patient gets a held-out score.
+
+    Mirrors cox_models.compute_out_of_fold_risk_scores: outer folds are
+    stratified on the event column with args.seed; inside each outer fold,
+    cv_one_endpoint (via _tune_fit_predict) re-tunes and refits using only
+    that fold's training rows, and the fold's held-out rows are scored. This
+    keeps a patient's score coming from a model that never saw their outcome,
+    including at the hyperparameter-selection step.
+    """
+    duration_col = ENDPOINTS[endpoint]["duration_col"]
+    event_col = ENDPOINTS[endpoint]["event_col"]
+
+    splitter, strat_labels, _ = make_cv_splitter(
+        cohort,
+        n_folds=args.oof_outer_folds,
+        seed=args.seed,
+        event_col=event_col,
+    )
+    split_args = (
+        (np.arange(len(cohort)), strat_labels)
+        if strat_labels is not None
+        else (np.arange(len(cohort)),)
+    )
+
+    risk = pd.Series(np.nan, index=cohort.index, dtype=float)
+    assigned_fold = pd.Series(-1, index=cohort.index, dtype=int)
+    notes: dict[int, str] = {}
+
+    outer_partitions = list(enumerate(splitter.split(*split_args), 1))
+    outer_bar = tqdm(
+        total=len(outer_partitions),
+        desc=f"xgb OOF[{endpoint}@+{landmark_day}d]",
+        dynamic_ncols=True,
+    )
+    for outer_fold, (tr_idx, te_idx) in outer_partitions:
+        outer_train = cohort.iloc[tr_idx]
+        outer_test = cohort.iloc[te_idx]
+        assigned_fold.iloc[te_idx] = outer_fold
+        assert_disjoint_folds(
+            fold_train_mrns=outer_train.index,
+            fold_val_mrns=outer_test.index,
+            fold=outer_fold,
+        )
+        try:
+            fold_canonical = select_canonical_labs(
+                pre_treatment_lab_df,
+                mrns=outer_train.index,
+                min_coverage=args.min_patient_coverage,
+                id_col=ID_COL,
+            )
+            tfp = _tune_fit_predict(
+                train_df=outer_train,
+                eval_df=outer_test,
+                raw_feature_cols=raw_feature_cols,
+                canonical_labs=fold_canonical,
+                pre_treatment_lab_df=pre_treatment_lab_df,
+                horizon_grid=horizon_grid,
+                endpoint=endpoint,
+                landmark_day=landmark_day,
+                args=args,
+                baseline=getattr(args, "baseline", False),
+                always_include_feature_cols=always_include_feature_cols,
+                genomic_feature_cols=genomic_feature_cols,
+            )
+            risk.loc[outer_test.index] = np.asarray(
+                tfp["risk"], dtype=float
+            ).reshape(-1)
+            notes[outer_fold] = "ok"
+        except Exception as exc:  # pragma: no cover - defensive, mirrors cox_models
+            notes[outer_fold] = f"outer_fold_failed: {exc}"
+            if outer_fold == len(outer_partitions) and risk.notna().sum() == 0:
+                raise RuntimeError(
+                    f"Every outer fold failed for endpoint '{endpoint}'; the last "
+                    f"error is re-raised above as the likely cause. This is more "
+                    f"often a configuration problem than {len(outer_partitions)} "
+                    f"independent numerical failures."
+                ) from exc
+        outer_bar.update(1)
+    outer_bar.close()
+
+    if (assigned_fold < 0).any():
+        raise RuntimeError(
+            f"Outer CV did not assign a fold to every patient for endpoint "
+            f"'{endpoint}': {int((assigned_fold < 0).sum())} of {len(cohort)} unassigned."
+        )
+
+    predictions = pd.DataFrame(
+        {
+            "landmark_day": landmark_day,
+            "endpoint": endpoint,
+            ID_COL: cohort.index,
+            "dataset": "cv_oof",
+            "outer_fold": assigned_fold.to_numpy(),
+            "duration": cohort[duration_col].to_numpy(dtype=float),
+            "event": cohort[event_col].to_numpy(dtype=int),
+            "risk_score": risk.to_numpy(),
+        }
+    )
+    n_scored = int(predictions["risk_score"].notna().sum())
+    if n_scored == 0:
+        failures = "; ".join(f"fold {k}: {v}" for k, v in sorted(notes.items()))
+        raise RuntimeError(
+            f"XGBoost out-of-fold scoring produced no risk scores for endpoint "
+            f"'{endpoint}'. Per-fold notes: {failures}"
+        )
+    print(
+        f"  xgb OOF risk scores[{endpoint}]: {n_scored}/{len(predictions)} patients "
+        f"scored across {len(outer_partitions)} outer folds"
+    )
+    return predictions
 
 
 def run_xgboost(args: argparse.Namespace) -> None:
@@ -812,6 +1009,21 @@ def run_xgboost(args: argparse.Namespace) -> None:
                 all_cv_summaries.append(cv_summary)
             if not fold_canonical_labs.empty:
                 all_fold_canonical_labs.append(fold_canonical_labs)
+
+            if getattr(args, "out_of_fold_risks", False):
+                oof_risks = compute_out_of_fold_risk_scores_xgb(
+                    cohort=pd.concat([train_val, test]),
+                    raw_feature_cols=raw_feature_cols,
+                    canonical_labs=canonical_labs,
+                    pre_treatment_lab_df=pre_treatment_lab_df,
+                    horizon_grid=horizon_grid,
+                    endpoint=endpoint,
+                    landmark_day=landmark_day,
+                    args=args,
+                    always_include_feature_cols=ctx.always_include_feature_cols,
+                    genomic_feature_cols=ctx.genomic_feature_cols,
+                )
+                all_risks.append(oof_risks)
 
         order_canonical_first(
             pd.concat(all_metrics, ignore_index=True)

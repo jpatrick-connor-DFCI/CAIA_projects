@@ -141,6 +141,12 @@ def load_patient_risks(
     the duplicate check below. `dataset` picks which.
     """
     risks = _read_csv(path, "patient risk scores")
+    # The XGBoost patient-risk schema predates the elastic-net Cox schema and
+    # used duration/landmark_day; normalize to the Cox names so both readers
+    # share one code path below.
+    risks = risks.rename(
+        columns={"duration": "duration_days", "landmark_day": "landmark_days"}
+    )
     required = {id_col, "endpoint", "risk_score", "duration_days", "event"}
     missing = required - set(risks.columns)
     if missing:
@@ -186,6 +192,69 @@ def load_patient_risks(
     out = out.dropna(subset=["risk_score", "duration_days", "event"])
     out[id_col] = out[id_col].astype(str)
     return out.reset_index(drop=True)
+
+
+def load_comparison_risks(
+    path: Path,
+    *,
+    name: str,
+    endpoint: str,
+    landmark_day: int | None,
+    id_col: str,
+    dataset: str,
+) -> pd.DataFrame:
+    """Load another model's held-out risk scores as an extra stratifier column.
+
+    Uses load_patient_risks so the same dataset-scheme rules apply (never mix
+    'test' and 'cv_oof'); only risk_score survives the rename, under a
+    name-qualified column so several comparison risks can coexist.
+    """
+    other = load_patient_risks(
+        path, endpoint=endpoint, landmark_day=landmark_day, id_col=id_col,
+        dataset=dataset,
+    )
+    return other[[id_col, "risk_score"]].rename(
+        columns={"risk_score": f"_comparison_risk__{name}"}
+    )
+
+
+def _comparison_risk_group(frame: pd.DataFrame, *, column: str, cutpoint: float) -> pd.Series:
+    score = pd.to_numeric(frame[column], errors="coerce")
+    out = pd.Series(np.nan, index=frame.index, dtype=object)
+    out.loc[score > cutpoint] = RISK_HIGH
+    out.loc[score <= cutpoint] = RISK_LOW
+    return out
+
+
+def build_comparison_stratifiers(
+    frame: pd.DataFrame, comparison_names: Sequence[str]
+) -> list[Stratifier]:
+    """One extra Stratifier per --comparison-risks entry, split at its own median.
+
+    Each comparison risk's median is computed on the patients where it is
+    observed (the inner-joined overlap with the primary risk file), within the
+    scheme already selected by --dataset -- never pooled with the primary
+    risk's cutpoint or across schemes.
+    """
+    stratifiers = []
+    for name in comparison_names:
+        column = f"_comparison_risk__{name}"
+        if column not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce")
+        if values.notna().sum() < 2:
+            continue
+        cutpoint = float(values.median())
+        stratifiers.append(
+            Stratifier(
+                f"comparison__{name}", f"{name} risk score (held-out)",
+                lambda f, column=column, cutpoint=cutpoint: _comparison_risk_group(
+                    f, column=column, cutpoint=cutpoint
+                ),
+                (RISK_HIGH, RISK_LOW),
+            )
+        )
+    return stratifiers
 
 
 def load_clinical_features(
@@ -344,7 +413,12 @@ def risk_group(frame: pd.DataFrame, *, cutpoint: float) -> pd.Series:
     return out
 
 
-def build_stratifiers(frame: pd.DataFrame, *, cutpoint: float) -> list[Stratifier]:
+def build_stratifiers(
+    frame: pd.DataFrame,
+    *,
+    cutpoint: float,
+    extra_stratifiers: Sequence[Stratifier] = (),
+) -> list[Stratifier]:
     """Assemble the panel list, dropping stratifiers with no usable data."""
     candidates = [
         Stratifier(
@@ -366,6 +440,7 @@ def build_stratifiers(frame: pd.DataFrame, *, cutpoint: float) -> list[Stratifie
         Stratifier("tp53_rb1", "TP53/RB1 co-alteration", _tp53_rb1_pair,
                    ("Neither", "TP53 only", "RB1 only", "TP53+RB1")),
         Stratifier("trio_combinations", "TP53/PTEN/RB1 combinations", _trio_combinations),
+        *extra_stratifiers,
     ]
     usable = []
     for strat in candidates:
@@ -573,6 +648,215 @@ def gene_source_manifest(frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+MIN_EVENTS_FOR_STRATUM_FIT = 5
+
+
+def within_stratum_table(
+    frame: pd.DataFrame,
+    stratifiers: Sequence[Stratifier],
+    *,
+    global_cutpoint: float,
+) -> pd.DataFrame:
+    """Per-level and pooled labs-risk HRs within each clinical stratifier.
+
+    For each clinical stratifier (Gleason group, trio alteration, stage, ...),
+    reports one row per level: n, events, log-rank p (high-vs-low labs risk
+    at the GLOBAL held-out median, i.e. one cutpoint for the whole cohort in
+    this scheme -- never recomputed per level), and a Cox HR for labs risk per
+    SD within that level alone. A pooled row (level == "__pooled__") adds one
+    stratified Cox fit (`CoxPHFitter(strata=[stratifier])`) of labs risk as the
+    only regression covariate, giving one within-stratum HR across all levels.
+
+    Levels with fewer than MIN_EVENTS_FOR_STRATUM_FIT events are reported with
+    status="underpowered" and no fit is attempted, to avoid lifelines errors
+    on tiny/zero-event strata.
+
+    Risk is standardized to unit SD over the WHOLE scored cohort (not
+    per-level) before every fit in this table, including the pooled fit --
+    simpler than a per-level standardization and it keeps the per-level HRs
+    and the pooled HR on the same risk-score scale, so they are directly
+    comparable to each other.
+    """
+    try:
+        from lifelines import CoxPHFitter
+        from lifelines.statistics import logrank_test
+    except ModuleNotFoundError:
+        CoxPHFitter = None
+        logrank_test = None
+
+    durations_all = pd.to_numeric(frame["duration_days"], errors="coerce")
+    events_all = pd.to_numeric(frame["event"], errors="coerce")
+    risk_all = pd.to_numeric(frame["risk_score"], errors="coerce")
+    risk_sd = risk_all.std(ddof=0)
+    risk_z = (risk_all - risk_all.mean()) / risk_sd if risk_sd and np.isfinite(risk_sd) and risk_sd > 0 else risk_all * 0.0
+
+    rows = []
+    for strat in stratifiers:
+        if strat.key == "risk_score":
+            continue
+        labels = strat.build(frame)
+        levels = strat.order or tuple(sorted(labels.dropna().unique(), key=str))
+        for level in levels:
+            mask = (labels == level) & durations_all.notna() & events_all.notna() & risk_z.notna()
+            n = int(mask.sum())
+            n_events = int(events_all.loc[mask].sum())
+            base_row = {
+                "stratifier": strat.key, "stratifier_title": strat.title,
+                "level": level, "n": n, "n_events": n_events,
+            }
+            if n_events < MIN_EVENTS_FOR_STRATUM_FIT:
+                rows.append({
+                    **base_row, "status": "underpowered", "logrank_p": float("nan"),
+                    "hr_per_sd": float("nan"), "hr_ci_low": float("nan"),
+                    "hr_ci_high": float("nan"), "hr_p": float("nan"),
+                })
+                continue
+            high = mask & (risk_all > global_cutpoint)
+            low = mask & (risk_all <= global_cutpoint)
+            if logrank_test is not None and high.sum() > 0 and low.sum() > 0:
+                result = logrank_test(
+                    durations_all.loc[high], durations_all.loc[low],
+                    event_observed_A=events_all.loc[high], event_observed_B=events_all.loc[low],
+                )
+                p_value = float(result.p_value)
+            else:
+                p_value = float("nan")
+            hr, ci_low, ci_high, hr_p = float("nan"), float("nan"), float("nan"), float("nan")
+            if CoxPHFitter is not None:
+                sub = pd.DataFrame({
+                    "duration_days": durations_all.loc[mask].to_numpy(dtype=float),
+                    "event": events_all.loc[mask].to_numpy(dtype=float),
+                    "risk_z": risk_z.loc[mask].to_numpy(dtype=float),
+                })
+                try:
+                    cph = CoxPHFitter()
+                    cph.fit(sub, duration_col="duration_days", event_col="event")
+                    hr = float(np.exp(cph.params_["risk_z"]))
+                    ci = cph.confidence_intervals_.loc["risk_z"]
+                    ci_low = float(np.exp(ci.iloc[0]))
+                    ci_high = float(np.exp(ci.iloc[1]))
+                    hr_p = float(cph.summary.loc["risk_z", "p"])
+                except Exception:
+                    pass
+            rows.append({
+                **base_row, "status": "ok", "logrank_p": p_value,
+                "hr_per_sd": hr, "hr_ci_low": ci_low, "hr_ci_high": ci_high, "hr_p": hr_p,
+            })
+
+        # Pooled stratified Cox: one HR for labs risk across every level of
+        # this stratifier, with the stratifier absorbed via `strata=`.
+        complete = labels.notna() & durations_all.notna() & events_all.notna() & risk_z.notna()
+        n_events_pooled = int(events_all.loc[complete].sum())
+        pooled_row = {
+            "stratifier": strat.key, "stratifier_title": strat.title,
+            "level": "__pooled__", "n": int(complete.sum()), "n_events": n_events_pooled,
+        }
+        if n_events_pooled < MIN_EVENTS_FOR_STRATUM_FIT or CoxPHFitter is None or complete.sum() == 0:
+            rows.append({
+                **pooled_row, "status": "underpowered", "logrank_p": float("nan"),
+                "hr_per_sd": float("nan"), "hr_ci_low": float("nan"),
+                "hr_ci_high": float("nan"), "hr_p": float("nan"),
+            })
+            continue
+        sub = pd.DataFrame({
+            "duration_days": durations_all.loc[complete].to_numpy(dtype=float),
+            "event": events_all.loc[complete].to_numpy(dtype=float),
+            "risk_z": risk_z.loc[complete].to_numpy(dtype=float),
+            "stratum": labels.loc[complete].astype(str).to_numpy(),
+        })
+        hr, ci_low, ci_high, hr_p = float("nan"), float("nan"), float("nan"), float("nan")
+        status = "ok"
+        try:
+            cph = CoxPHFitter()
+            cph.fit(sub, duration_col="duration_days", event_col="event", strata=["stratum"])
+            hr = float(np.exp(cph.params_["risk_z"]))
+            ci = cph.confidence_intervals_.loc["risk_z"]
+            ci_low = float(np.exp(ci.iloc[0]))
+            ci_high = float(np.exp(ci.iloc[1]))
+            hr_p = float(cph.summary.loc["risk_z", "p"])
+        except Exception:
+            status = "underpowered"
+        rows.append({
+            **pooled_row, "status": status, "logrank_p": float("nan"),
+            "hr_per_sd": hr, "hr_ci_low": ci_low, "hr_ci_high": ci_high, "hr_p": hr_p,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def plot_within_stratum(
+    frame: pd.DataFrame,
+    stratifiers: Sequence[Stratifier],
+    *,
+    global_cutpoint: float,
+    title: str,
+    xlabel: str,
+    max_days: float | None = None,
+) -> "object":
+    """One KM subplot per clinical-stratifier level: labs-risk high vs low.
+
+    Uses the same GLOBAL held-out median cutpoint on every panel, so panels
+    are comparable to each other and to the head-to-head risk-score panel.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from survival_common.plotting import RCPARAMS, overlay_km
+
+    risk_labels = risk_group(frame, cutpoint=global_cutpoint)
+
+    panels = []
+    for strat in stratifiers:
+        if strat.key == "risk_score":
+            continue
+        labels = strat.build(frame)
+        levels = strat.order or tuple(sorted(labels.dropna().unique(), key=str))
+        for level in levels:
+            mask = labels == level
+            if mask.sum() == 0:
+                continue
+            panels.append((f"{strat.title}: {level}", mask))
+
+    if not panels:
+        with plt.rc_context(RCPARAMS):
+            fig, ax = plt.subplots(figsize=(5.2, 4.2))
+            ax.set_visible(False)
+            fig.suptitle(title, fontsize=13)
+        return fig
+
+    ncols = min(3, len(panels))
+    nrows = int(np.ceil(len(panels) / ncols))
+    with plt.rc_context(RCPARAMS):
+        fig, axes = plt.subplots(nrows, ncols, figsize=(5.2 * ncols, 4.2 * nrows), squeeze=False)
+        flat = [ax for row in axes for ax in row]
+        for ax, (panel_title, mask) in zip(flat, panels):
+            series = {}
+            for label in (RISK_HIGH, RISK_LOW):
+                sub_mask = mask & (risk_labels == label)
+                if sub_mask.sum() == 0:
+                    continue
+                series[label] = (
+                    frame.loc[sub_mask, "duration_days"], frame.loc[sub_mask, "event"]
+                )
+            if not series:
+                ax.set_visible(False)
+                continue
+            overlay_km(
+                ax, series, colors=STRATUM_COLORS, title=panel_title,
+                xlabel=xlabel, ylabel="Event-free probability",
+                ci_show=True,
+            )
+            if max_days:
+                ax.set_xlim(0, max_days)
+            ax.legend(fontsize=8, loc="upper right")
+        for ax in flat[len(panels):]:
+            ax.set_visible(False)
+        fig.suptitle(title, fontsize=13)
+        fig.tight_layout()
+    return fig
+
+
 def run(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -588,6 +872,22 @@ def run(args: argparse.Namespace) -> None:
     )
     frame = risks.merge(clinical, on=args.id_col, how="left")
     dataset = getattr(args, "dataset", "test")
+
+    comparison_names: list[str] = []
+    for entry in getattr(args, "comparison_risks", None) or []:
+        if "=" not in entry:
+            raise ValueError(
+                f"--comparison-risks entries must be NAME=PATH; got {entry!r}"
+            )
+        name, path_str = entry.split("=", 1)
+        comparison = load_comparison_risks(
+            Path(path_str), name=name, endpoint=args.endpoint,
+            landmark_day=args.landmark_days, id_col=args.id_col, dataset=dataset,
+        )
+        # Inner join: a comparison stratifier only makes sense on patients the
+        # comparison model actually scored, in the SAME dataset scheme.
+        frame = frame.merge(comparison, on=args.id_col, how="left")
+        comparison_names.append(name)
     scheme = (
         "held-out test block (final model)"
         if dataset == "test"
@@ -607,7 +907,8 @@ def run(args: argparse.Namespace) -> None:
     cutpoint = float(frame["risk_score"].median())
     print(f"Risk-score split at the {dataset} median: {cutpoint:.4f}")
 
-    stratifiers = build_stratifiers(frame, cutpoint=cutpoint)
+    extra_stratifiers = build_comparison_stratifiers(frame, comparison_names)
+    stratifiers = build_stratifiers(frame, cutpoint=cutpoint, extra_stratifiers=extra_stratifiers)
     available = {s.key for s in stratifiers}
     skipped = [
         k for k in ("gleason", "stage", "tp53", "pten", "rb1",
@@ -640,8 +941,40 @@ def run(args: argparse.Namespace) -> None:
     gene_source_manifest(frame).to_csv(manifest_path, index=False)
     print(f"Saved {manifest_path.name}")
 
+    # Within-stratum analysis (Plan §4b): clinical stratifiers only, never the
+    # comparison-risk or risk_score stratifiers themselves.
+    clinical_stratifiers = [
+        s for s in stratifiers
+        if s.key != "risk_score" and not s.key.startswith("comparison__")
+    ]
+    within_table = within_stratum_table(
+        frame, clinical_stratifiers, global_cutpoint=cutpoint
+    )
+    if not within_table.empty:
+        within_table_path = output_dir / f"risk_within_stratum{suffix}.csv"
+        within_table.to_csv(within_table_path, index=False)
+        print(f"Saved {within_table_path.name}")
+
     if args.no_plot:
         return
+
+    if clinical_stratifiers:
+        within_fig = plot_within_stratum(
+            frame, clinical_stratifiers, global_cutpoint=cutpoint,
+            title=(
+                f"Labs risk (high vs low) within each clinical stratum "
+                f"({args.endpoint}"
+                + (f", landmark +{args.landmark_days}d" if args.landmark_days is not None else "")
+                + f", held-out n={len(frame):,})"
+            ),
+            xlabel="Days from treatment anchor",
+            max_days=args.max_days,
+        )
+        for ext in args.formats:
+            within_path = output_dir / f"risk_within_stratum_km{suffix}.{ext}"
+            within_fig.savefig(within_path)
+            print(f"Saved {within_path.name}")
+
     fig = plot_panels(
         frame, stratifiers,
         title=(
@@ -703,6 +1036,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--formats", nargs="+", default=["png"])
     parser.add_argument("--no-plot", action="store_true")
+    parser.add_argument(
+        "--comparison-risks", action="append", default=None,
+        metavar="NAME=PATH",
+        help=(
+            "Repeatable. Joins another model's *_patient_risks.csv by the id "
+            "column, using the SAME --dataset scheme as the primary risk file "
+            "(never mixing 'test' and 'cv_oof'). Adds one extra stratifier "
+            "split at its own median within that scheme, e.g. "
+            "--comparison-risks gleason=/path/to/gleason_patient_risks.csv."
+        ),
+    )
     return parser
 
 

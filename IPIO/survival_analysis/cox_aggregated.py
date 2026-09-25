@@ -66,6 +66,7 @@ from survival_common.cox_models import (  # noqa: E402
     run_univariate_nobs_adjusted_associations as _shared_run_univariate_nobs_adjusted_associations,
     select_feature_columns as _shared_select_feature_columns,
     compute_out_of_fold_risk_scores as _shared_compute_out_of_fold_risk_scores,
+    compute_fixed_feature_out_of_fold_risk_scores as _shared_compute_fixed_feature_out_of_fold_risk_scores,
     tune_multivariable_model as _shared_tune_multivariable_model,
 )
 from survival_common.helper import (  # noqa: E402,F401
@@ -348,6 +349,32 @@ def compute_out_of_fold_risk_scores(
         genomic_feature_cols=genomic_feature_cols,
         min_genomic_prevalence=min_genomic_prevalence,
         restrict_to_canonical_labs=restrict_to_canonical_labs,
+        endpoint_map=ENDPOINTS,
+        id_col=ID_COL,
+        age_col=AGE_COL,
+    )
+
+
+def compute_fixed_feature_out_of_fold_risk_scores(
+    cohort: pd.DataFrame,
+    *,
+    feature_cols: list[str],
+    endpoint: str,
+    penalizer: float,
+    l1_ratio: float,
+    outer_folds: int,
+    seed: int,
+    static_covariate_cols: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    return _shared_compute_fixed_feature_out_of_fold_risk_scores(
+        cohort,
+        feature_cols=feature_cols,
+        endpoint=endpoint,
+        penalizer=penalizer,
+        l1_ratio=l1_ratio,
+        outer_folds=outer_folds,
+        seed=seed,
+        static_covariate_cols=static_covariate_cols,
         endpoint_map=ENDPOINTS,
         id_col=ID_COL,
         age_col=AGE_COL,

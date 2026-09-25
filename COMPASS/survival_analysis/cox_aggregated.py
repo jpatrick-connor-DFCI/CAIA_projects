@@ -64,6 +64,7 @@ from survival_common.cox_models import (  # noqa: E402
     run_univariate_nobs_adjusted_associations as _shared_run_univariate_nobs_adjusted_associations,
     select_feature_columns as _shared_select_feature_columns,
     compute_out_of_fold_risk_scores as _shared_compute_out_of_fold_risk_scores,
+    compute_fixed_feature_out_of_fold_risk_scores as _shared_compute_fixed_feature_out_of_fold_risk_scores,
     tune_multivariable_model as _shared_tune_multivariable_model,
 )
 from survival_common.helper import (  # noqa: E402,F401
@@ -113,6 +114,40 @@ GENOMIC_FEATURE_RE = re.compile(r"^([A-Za-z0-9.\-]+)_(SNV)$")
 ANY_VARIANT_RE = re.compile(r"^([A-Za-z0-9.\-]+)_(SV|SNV|AMP|DEL)$")
 HORIZON_GRID_FILENAME = "cox_agg_horizon_grid.csv"
 CANONICAL_LABS_FOLDS_FILENAME = "cox_agg_canonical_labs_folds.csv"
+
+# Component-based feature-set tokens (Plan §2a): each token is a combination
+# of {labs, gleason, somatic} drawn from somatic_gleason_features.csv plus the
+# usual lab summary columns. The legacy "somatic_gleason" token is unchanged
+# and keeps testing every feature in the manifest (labs + gleason + somatic
+# together, but resolved as a single static-feature block rather than through
+# this component map) so existing sensitivity outputs and Figure 4 keep their
+# meaning.
+FEATURE_SET_COMPONENTS: dict[str, frozenset[str]] = {
+    "gleason": frozenset({"gleason"}),
+    "somatic": frozenset({"somatic"}),
+    "gleason_labs": frozenset({"gleason", "labs"}),
+    "somatic_labs": frozenset({"somatic", "labs"}),
+    "gleason_somatic": frozenset({"gleason", "somatic"}),
+    "gleason_somatic_labs": frozenset({"gleason", "somatic", "labs"}),
+}
+# Feature sets that carry no lab summary columns at all, so canonical-lab
+# selection and the lab coverage gate must be skipped entirely rather than
+# just failing to find a canonical lab.
+NO_LABS_FEATURE_SETS: frozenset[str] = frozenset(
+    {"somatic_gleason", "text"}
+    | {token for token, components in FEATURE_SET_COMPONENTS.items() if "labs" not in components}
+)
+
+
+def feature_set_has_labs_component(feature_set: str) -> bool:
+    """True if `feature_set` tests lab summary columns at all.
+
+    Used to decide whether canonical-lab selection and the lab coverage gate
+    apply, generalizing the old `feature_set in {"somatic_gleason", "text"}`
+    check to the new component-based tokens.
+    """
+    token = str(feature_set).lower().replace("-", "_")
+    return token not in NO_LABS_FEATURE_SETS
 
 ENDPOINTS = {
     "platinum": {
@@ -379,6 +414,32 @@ def compute_out_of_fold_risk_scores(
     )
 
 
+def compute_fixed_feature_out_of_fold_risk_scores(
+    cohort: pd.DataFrame,
+    *,
+    feature_cols: list[str],
+    endpoint: str,
+    penalizer: float,
+    l1_ratio: float,
+    outer_folds: int,
+    seed: int,
+    static_covariate_cols: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    return _shared_compute_fixed_feature_out_of_fold_risk_scores(
+        cohort,
+        feature_cols=feature_cols,
+        endpoint=endpoint,
+        penalizer=penalizer,
+        l1_ratio=l1_ratio,
+        outer_folds=outer_folds,
+        seed=seed,
+        static_covariate_cols=static_covariate_cols,
+        endpoint_map=ENDPOINTS,
+        id_col=ID_COL,
+        age_col=AGE_COL,
+    )
+
+
 def fit_final_multivariable_model(
     train_val: pd.DataFrame,
     test: pd.DataFrame,
@@ -522,10 +583,14 @@ def prepare_landmark_context(
     )
 
     feature_set = str(feature_set).lower().replace("-", "_")
-    if feature_set not in {"labs", "somatic_gleason", "genomic", "text", "labs_text"}:
+    _known_feature_sets = (
+        {"labs", "somatic_gleason", "genomic", "text", "labs_text"}
+        | set(FEATURE_SET_COMPONENTS)
+    )
+    if feature_set not in _known_feature_sets:
         raise ValueError(
-            f"Unsupported feature set {feature_set!r}; expected 'labs', "
-            "'somatic_gleason', 'genomic', 'text', or 'labs_text'."
+            f"Unsupported feature set {feature_set!r}; expected one of "
+            f"{sorted(_known_feature_sets)}."
         )
 
     always_include_feature_cols: tuple[str, ...] = ()
@@ -637,6 +702,64 @@ def prepare_landmark_context(
         # floor on binary mutation indicators (value == 1 in >= X% of patients).
         # Applied to dense continuous embedding dimensions it would be
         # meaningless and would drop essentially every column.
+    elif feature_set in FEATURE_SET_COMPONENTS:
+        # Component-based Gleason/somatic/labs arms (Plan §2a). Unlike the
+        # legacy "somatic_gleason" token (every manifest feature together),
+        # each of these picks a subset of {gleason, somatic} components by
+        # feature_kind, optionally combined with the normal lab columns.
+        components = FEATURE_SET_COMPONENTS[feature_set]
+        manifest_path = inputs_dir / "somatic_gleason_features.csv"
+        if not manifest_path.exists():
+            raise FileNotFoundError(
+                f"Missing {manifest_path}. Run build_somatic_gleason_inputs.py first."
+            )
+        feature_manifest = pd.read_csv(manifest_path)
+        for required_col in ("feature", "feature_kind"):
+            if required_col not in feature_manifest.columns:
+                raise ValueError(f"{manifest_path} is missing the '{required_col}' column.")
+
+        component_feature_kind = {"gleason": "gleason_continuous", "somatic": "somatic_binary"}
+        static_feature_cols: list[str] = []
+        somatic_cols: list[str] = []
+        for component in ("gleason", "somatic"):
+            if component not in components:
+                continue
+            kind = component_feature_kind[component]
+            cols = [
+                str(feature)
+                for feature in feature_manifest.loc[
+                    feature_manifest["feature_kind"] == kind, "feature"
+                ]
+                .dropna()
+                .drop_duplicates()
+            ]
+            missing = [c for c in cols if c not in merged.columns]
+            if missing:
+                raise ValueError(
+                    f"Landmark +{landmark_day} inputs are missing {len(missing)} "
+                    f"declared {component} features; first values: {missing[:10]}"
+                )
+            if not cols:
+                raise ValueError(
+                    f"somatic_gleason_features.csv declares no {kind!r} features; "
+                    f"feature set {feature_set!r} has nothing to test for the "
+                    f"{component} component."
+                )
+            static_feature_cols.extend(cols)
+            if component == "somatic":
+                somatic_cols = cols
+
+        always_include_feature_cols = tuple(static_feature_cols)
+        genomic_feature_cols = tuple(somatic_cols)
+        if "labs" in components:
+            lab_cols = [
+                c
+                for c in merged.columns
+                if c not in non_feature_columns(merged) and c not in set(static_feature_cols)
+            ]
+            raw_feature_cols = lab_cols + static_feature_cols
+        else:
+            raw_feature_cols = static_feature_cols
     else:
         raw_feature_cols = [
             c for c in merged.columns if c not in non_feature_columns(merged)
@@ -650,10 +773,11 @@ def prepare_landmark_context(
         context=f"prepare_landmark_context[landmark+{landmark_day}d]",
     )
 
-    if feature_set in {"somatic_gleason", "text"}:
-        # Neither arm models lab summaries, so there is no canonical lab set to
-        # select. "labs_text" DOES carry labs and therefore falls through to the
-        # normal coverage-based selection below.
+    if not feature_set_has_labs_component(feature_set):
+        # This arm models no lab summaries, so there is no canonical lab set
+        # to select. "labs_text" and the "*_labs" component tokens DO carry
+        # labs and therefore fall through to the normal coverage-based
+        # selection below.
         canonical_labs = []
     elif canonical_labs_override is not None:
         # Shared-canonical-labs arm: the caller has fixed the canonical set (e.g.
@@ -673,7 +797,7 @@ def prepare_landmark_context(
         raw_feature_cols,
         min_patient_coverage=min_patient_coverage,
         restrict_to_labs=(
-            [] if feature_set in {"somatic_gleason", "text"} else canonical_labs
+            canonical_labs if feature_set_has_labs_component(feature_set) else []
         ),
         always_include=list(always_include_feature_cols),
         genomic_feature_cols=list(genomic_feature_cols),
@@ -694,6 +818,12 @@ def prepare_landmark_context(
         "somatic_gleason": "static somatic/Gleason",
         "text": "pooled note-embedding",
         "labs_text": "summary-lab + note-embedding",
+        "gleason": "Gleason",
+        "somatic": "somatic",
+        "gleason_labs": "Gleason + summary-lab",
+        "somatic_labs": "somatic + summary-lab",
+        "gleason_somatic": "Gleason + somatic",
+        "gleason_somatic_labs": "Gleason + somatic + summary-lab",
     }.get(feature_set, "summary-lab")
     print(f"Selected {feature_label} features (train_val pre-filter): {len(selected_feature_cols)}")
 

@@ -275,12 +275,15 @@ prostate lab frame used by the current treatment-anchored analyses.
 ### 2.2 — `data_preprocessing/build_prediction_inputs.py` → `prediction_inputs/`
 
 The **single source of truth for model inputs**. It builds an independent eligible risk set at each
-landmark and derives a separate train/valid/test split within each risk set. Day-0 membership therefore
-does not require surviving event-free to day 90, avoiding an immortal-time restriction on the earlier
-cohort.
+landmark. Day-0 membership therefore does not require surviving event-free to day 90, avoiding an
+immortal-time restriction on the earlier cohort. By default (`--split-mode shared`) the train/valid/test
+split is derived once on the union of MRNs across all landmarks and reindexed onto each landmark's risk
+set, so held-out results are comparable across landmarks; `--split-mode independent` derives a separate
+split within each landmark's risk set instead.
 
 - **Key CLI:** `--data`, `--landmark-days 0 90 180` (default from
   `cox_aggregated.DEFAULT_LANDMARK_DAYS`),
+  `--split-mode {shared,independent}` (default `shared`),
   `--seed`, `--test-frac`, `--val-frac`, `--time-unit-days 7`, `--min-patient-coverage`,
   `--auc-quantiles`, `--id-col`, `--age-col`, `--anchor-col`,
   `--restrict-to-mrns`, `--require-first-treatment` / `--no-require-first-treatment`,
@@ -417,6 +420,38 @@ notebook. All operate on the merged `profile_data` run:
   own identical available patients (the Figure 4C/D AUC/C-index panels).
   (`tasks_for_run(run)` builds the per-run task grid from `run["landmarks"]`); either can be
   re-run alone without touching Stage 1-3 outputs.
+  - **Clinical/somatic component combinations** (`03`, `run_multivariate_clinical_combinations` /
+    `summarize_clinical_combinations`) — every non-empty combination of {labs, gleason, somatic}
+    on the two matched available-case cohorts, written under
+    `<output_dir>/clinical_combinations/<cohort>/<arm>/<cox|xgboost>/landmark_<D>/both/`.
+    `summarize_clinical_combinations` adds a paired bootstrap `delta_c_index` against each
+    cohort's `labs` arm on the shared test-block patients.
+  - **Risk-score stratification** (`03`, `run_risk_stratification`) — stratifies the full-cohort
+    labs risk score by Gleason/stage/TP53-PTEN-RB1 (from `build_somatic_gleason_inputs.py`'s
+    `somatic_gleason/clinical_stratifiers/clinical_stratifiers_landmark{D}.csv`), and separately
+    compares the labs arm against every other matched arm within the `gleason_available_case` /
+    `gleason_somatic_available_case` cohorts via `risk_score_stratified_figures.py --comparison-risks`.
+    Runs once per scoring scheme, written to `<output_dir>/risk_stratification/<test|cv_oof>/full_cohort/landmark_<D>/`
+    and `<output_dir>/risk_stratification/<test|cv_oof>/matched/<cohort>/<cox|xgboost>/landmark_<D>/`
+    — **the two schemes are never pooled into the same directory or KM panel.**
+  - **CTEP OS-risk-adjusted univariate supplement** (`02`, `run_ctep_os_adjusted_supplement`) —
+    adjusts every univariate association for the CTEP (`clinical_text_embedding_project`) OS
+    (death) text-risk score, read **read-only** via the `CTEP_DATA_PATH` env var (default
+    `/data/gusev/USERS/jpconnor/data/clinical_text_embedding_project/`; this repo never imports
+    that project's code). Reads `$CTEP_DATA_PATH/time-to-event_analysis/results/death_met_results/full_cohort_risk_scores/death/text_risk_scores.csv`
+    (`DFCI_MRN`, `outer_fold`, `text_risk_score`) and
+    `$CTEP_DATA_PATH/time-to-event_analysis/cohort_df.parquet` (`first_treatment_date`); both
+    sides of every join cast `DFCI_MRN` to `Int64` first, since the two files come from a
+    different pipeline than COMPASS's own tables. The score is z-scored **within** `outer_fold`
+    into `CTEP_OS_TEXT_RISK_Z` — never across folds, which have their own score scales. **Leakage
+    rule:** per landmark, any patient whose `first_treatment_date` falls after
+    `TREATMENT_ANCHOR_DATE + landmark` is excluded (their covariate is forced to NaN) since their
+    CTEP score reflects notes not yet available at that landmark. Writes
+    `<output_dir>/ctep_os_adjusted/landmark_<D>/both/cox_agg_univariate_nobs_adjusted_{unadjusted,os_adjusted}_landmark<D>.csv`
+    plus a combined file. Caveats (also in the function docstrings): the CTEP score is fixed at
+    first treatment and is not recomputed per landmark; the CTEP cohort requires all three note
+    types (Clinician, Imaging, Pathology), so this is an available-case subset; and the CTEP OS
+    model already includes age, so this adjusts for the risk score, not for age net of it.
 - `03b_multivariate_longitudinal.ipynb` — optional, torch-gated (README invariant #7).
   Follows `ENDPOINT` like `02`/`03`, via its own config registry in
   `survival_common/longitudinal_targets.py` (see
@@ -646,10 +681,19 @@ cohort or a silently-dropped feature further down the pipeline. An all-null
 
 ## Conventions & invariants (preserve these when editing)
 
-1. **Each landmark has its own risk set and split.** `build_prediction_inputs.py` writes the applicable
-   split directly into each `aggregated_landmark{D}.csv` and also writes
-   `split_assignments_landmark{D}.csv`. Models use the aggregated table's split and never re-split.
-   `split_assignments.csv` remains a base-landmark compatibility copy for `build_genomic_inputs.py`.
+1. **Each landmark has its own risk set; the split is shared across landmarks by default.**
+   `build_prediction_inputs.py` builds an independent eligible risk set per landmark, but with the
+   default `--split-mode shared` a single split is derived on the union of MRNs across all landmarks
+   and reindexed onto each landmark's own risk set, so a patient eligible at multiple landmarks keeps
+   the same train/valid/test label everywhere. `--split-mode independent` restores the legacy
+   behavior of deriving a separate split within each landmark's risk set.
+   `assert_split_consistent_across_landmarks` (`survival_common/helper.py`) enforces this in shared
+   mode. The chosen split is written directly into each `aggregated_landmark{D}.csv` and also into
+   `split_assignments_landmark{D}.csv`; models use the aggregated table's split and never re-split.
+   `split_assignments.csv` remains a base-landmark compatibility copy for `build_genomic_inputs.py`,
+   and in shared mode it is written from the shared split over the MRN union rather than from a
+   single landmark. `split_mode` and per-landmark split sizes are recorded in `build_manifest.json`
+   and `landmark_attrition.json`.
 2. **Fit on the training block; never touch test for fitting.** Imputers, `StandardScaler`,
    canonical-lab selection, and Breslow baselines are all fit on train+valid (or fold-train inside CV) and
    applied to eval. Per-fold canonical labs are recomputed inside CV. The leakage guards

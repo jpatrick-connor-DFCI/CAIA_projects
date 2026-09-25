@@ -142,3 +142,39 @@ def test_somatic_gleason_index_cohorts_reject_non_adt_arm(tmp_path):
 
     with pytest.raises(ValueError, match="require the ADT arm"):
         compass_pipeline.build_somatic_gleason_inputs(run, dry_run=True)
+
+
+def test_clinical_stratifiers_output_dir_matches_somatic_gleason_build(monkeypatch, tmp_path):
+    # Plan §4a: clinical_stratifiers_landmark{D}.csv is written by the same
+    # build_somatic_gleason_inputs.py invocation (inside its main()), keyed
+    # off --output-dir/--base-inputs-dir -- there is no separate CLI flag for
+    # it, so the single captured command is the whole contract here. Unlike
+    # the baseline-only sequencing/Gleason index cohorts (--landmark-days is
+    # forced to [0]), the stratifier files are written for every landmark in
+    # the base manifest (0, 90, 180), which run_risk_stratification's callers
+    # depend on -- see clinical_stratifiers_landmark{D}.csv path construction
+    # in compass_pipeline.run_risk_stratification.
+    commands = []
+    monkeypatch.setattr(
+        compass_pipeline,
+        "_run",
+        lambda command, *, dry_run=False: commands.append(command) or 0,
+    )
+
+    run = _run(tmp_path)
+    compass_pipeline.build_somatic_gleason_inputs(run, dry_run=True)
+
+    assert len(commands) == 1
+    command = commands[0]
+    output_dir = Path(command[command.index("--output-dir") + 1])
+    base_inputs_dir = Path(command[command.index("--base-inputs-dir") + 1])
+    assert output_dir == run["inputs_dir"] / "somatic_gleason"
+    assert base_inputs_dir == run["inputs_dir"]
+
+    expected_clinical_dir = output_dir / "clinical_stratifiers"
+    for landmark_day in run["landmarks"]:
+        expected_path = expected_clinical_dir / f"clinical_stratifiers_landmark{landmark_day}.csv"
+        assert expected_path == (
+            run["inputs_dir"] / "somatic_gleason" / "clinical_stratifiers"
+            / f"clinical_stratifiers_landmark{landmark_day}.csv"
+        )

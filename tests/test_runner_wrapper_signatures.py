@@ -32,6 +32,7 @@ WRAPPED_FUNCTIONS = (
     "tune_multivariable_model",
     "fit_final_multivariable_model",
     "compute_out_of_fold_risk_scores",
+    "compute_fixed_feature_out_of_fold_risk_scores",
 )
 
 

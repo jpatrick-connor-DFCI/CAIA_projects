@@ -63,6 +63,12 @@ PROFILE_SOURCES = {
 N_FOLDS = 5
 FORCE_RERUN = True
 REBUILD_PREDICTION_INPUTS = True
+# Plan §3: nested-CV held-out risk for every patient (dataset="cv_oof"),
+# written alongside the always-on held-out test-block score (dataset="test").
+# Costs ~oof-outer-folds times a normal elastic-net/XGBoost run since
+# hyperparameters are re-tuned inside each outer fold. test and cv_oof scores
+# are never pooled -- see survival_common.cox_runners.add_out_of_fold_risk_args.
+OUT_OF_FOLD_RISKS = True
 # Which event is modeled. Must be a key of
 # COMPASS.survival_analysis.cox_aggregated.ENDPOINTS. "platinum" is the
 # original endpoint; "nepc" is time from the ADT anchor to the LLM-adjudicated
@@ -1232,6 +1238,25 @@ PSA_SCALE_SUPPLEMENT_FILENAME = "psa_scale_univariate.csv"
 PSA_RAW_LAB_NAME = "PSA_raw"
 PSA_LOG_LAB_NAME = "PSA_log1p"
 
+# --- CTEP (clinical_text_embedding_project) OS-risk-adjusted univariable
+# supplement (Plan §5). Read-only: this repo never imports that project's
+# code, only reads its data files through CTEP_DATA_PATH, matching the
+# convention already used by build_text_embedding_inputs.py's NOTES_PATH.
+CTEP_DATA_ROOT = Path(
+    os.environ.get(
+        "CTEP_DATA_PATH",
+        "/data/gusev/USERS/jpconnor/data/clinical_text_embedding_project/",
+    )
+)
+CTEP_OS_RISK_SCORES_RELPATH = (
+    "time-to-event_analysis/results/death_met_results/full_cohort_risk_scores/"
+    "death/text_risk_scores.csv"
+)
+CTEP_COHORT_RELPATH = "time-to-event_analysis/cohort_df.parquet"
+CTEP_OS_RISK_COVARIATE = "CTEP_OS_TEXT_RISK_Z"
+CTEP_OS_ADJUSTED_DIR = "ctep_os_adjusted"
+CTEP_OS_ADJUSTED_FILENAME = "ctep_os_adjusted_univariate.csv"
+
 MULTIVARIATE_TASK_SPECS = [
     ("elastic-net", "both", "cox_agg_multivariable_metrics.csv"),
     ("elastic-net", "baseline", "cox_agg_baseline_metrics.csv"),
@@ -1431,6 +1456,8 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
         ]
         if config_dir == "baseline":
             cmd.append("--baseline")
+        if OUT_OF_FOLD_RISKS:
+            cmd.append("--out-of-fold-risks")
         return cmd
     if model in ("dynamic-deephit", "dynamic-deephit-dyn"):
         cmd = [
@@ -1504,6 +1531,8 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
         ]
         if config_dir == "baseline":
             cmd.append("--baseline")
+        if OUT_OF_FOLD_RISKS:
+            cmd.append("--out-of-fold-risks")
         return cmd
     raise ValueError(f"Unknown model: {model}")
 
@@ -1678,6 +1707,231 @@ def run_psa_scale_supplement(run: dict) -> pd.DataFrame:
     return combined
 
 
+def build_ctep_os_risk_covariate(
+    univariate_data: pd.DataFrame,
+    *,
+    landmark_day: int,
+    id_col: str = "DFCI_MRN",
+    ctep_data_root: Path | None = None,
+    treatment_anchors: pd.Series | None = None,
+) -> tuple[pd.DataFrame, int, int]:
+    """Join the CTEP OS (death) text-risk score in as one adjustment covariate.
+
+    Caveats (also apply to every caller of run_ctep_os_adjusted_supplement):
+
+    * The CTEP score is fixed at the patient's first treatment date and is
+      NOT recomputed per landmark -- it is a single number per patient, from
+      a model trained on notes up to that first-treatment date. Joining it at
+      later landmarks re-uses the same score; only the leakage EXCLUSION
+      (below) changes per landmark, not the score's value.
+    * The CTEP cohort requires all three note types (Clinician, Imaging,
+      Pathology) pooled through first treatment, so this join is available-
+      case on a strict subset of the COMPASS cohort -- most patients will
+      have no CTEP score and are dropped from the adjusted fit (but kept, so
+      far as the unadjusted comparison fit uses the identical subset).
+    * The CTEP OS model already includes age as a covariate internally, so
+      CTEP_OS_TEXT_RISK_Z is not an age-independent effect; this supplement
+      adjusts for the risk SCORE, not for age net of it.
+
+    Both sides of the join are cast to Int64 before merging, since the CTEP
+    parquet/CSV pair sources MRNs from a different pipeline than COMPASS's own
+    tables and dtype mismatches (object vs int64 vs float64 from NaNs) would
+    silently produce zero matches.
+
+    Returns (joined_frame, n_no_score, n_leakage_excluded):
+    ``joined_frame`` is ``univariate_data`` (indexed by ``id_col``) with
+    ``CTEP_OS_TEXT_RISK_Z`` added -- NaN for patients with no CTEP score --
+    after leakage-excluded patients have had their score forced back to NaN
+    (they stay in the returned frame with other columns intact; the caller's
+    Cox fit drops NaN rows for whichever feature it is testing).
+    """
+    ctep_root = Path(ctep_data_root) if ctep_data_root is not None else CTEP_DATA_ROOT
+    scores_path = ctep_root / CTEP_OS_RISK_SCORES_RELPATH
+    cohort_path = ctep_root / CTEP_COHORT_RELPATH
+
+    scores = pd.read_csv(scores_path)
+    required = {"DFCI_MRN", "outer_fold", "text_risk_score"}
+    missing = required - set(scores.columns)
+    if missing:
+        raise ValueError(f"{scores_path} is missing columns: {sorted(missing)}")
+    scores = scores.copy()
+    scores["DFCI_MRN"] = pd.to_numeric(scores["DFCI_MRN"], errors="coerce").astype("Int64")
+
+    # Z-score WITHIN outer_fold: each fold's model has its own score scale, so
+    # standardizing across folds first would conflate model-to-model scale
+    # drift with genuine risk differences (mirrors the test/cv_oof separation
+    # rule for COMPASS's own out-of-fold risk scores).
+    def _zscore(group: pd.Series) -> pd.Series:
+        std = group.std(ddof=0)
+        if not np.isfinite(std) or std == 0:
+            return pd.Series(np.nan, index=group.index)
+        return (group - group.mean()) / std
+
+    scores[CTEP_OS_RISK_COVARIATE] = (
+        scores.groupby("outer_fold")["text_risk_score"].transform(_zscore)
+    )
+    scores = scores.dropna(subset=["DFCI_MRN"]).drop_duplicates("DFCI_MRN", keep="first")
+
+    cohort = pd.read_parquet(cohort_path, columns=["DFCI_MRN", "first_treatment_date"])
+    cohort = cohort.copy()
+    cohort["DFCI_MRN"] = pd.to_numeric(cohort["DFCI_MRN"], errors="coerce").astype("Int64")
+    cohort["first_treatment_date"] = pd.to_datetime(
+        cohort["first_treatment_date"], errors="coerce"
+    )
+    cohort = cohort.dropna(subset=["DFCI_MRN"]).drop_duplicates("DFCI_MRN", keep="first")
+
+    merged = scores[["DFCI_MRN", CTEP_OS_RISK_COVARIATE]].merge(
+        cohort[["DFCI_MRN", "first_treatment_date"]], on="DFCI_MRN", how="left"
+    )
+
+    frame = univariate_data.copy()
+    frame_ids = pd.to_numeric(
+        pd.Series(frame.index, index=frame.index), errors="coerce"
+    ).astype("Int64")
+    merged = merged.set_index(
+        pd.Index(merged["DFCI_MRN"], name=frame.index.name)
+    )
+
+    n_no_score = int(frame_ids[~frame_ids.isin(merged.index)].notna().sum())
+
+    joined = frame.join(merged[[CTEP_OS_RISK_COVARIATE, "first_treatment_date"]], how="left")
+
+    n_leakage_excluded = 0
+    if treatment_anchors is not None:
+        anchors = treatment_anchors.reindex(joined.index)
+        cutoff = anchors + pd.Timedelta(days=landmark_day)
+        leaks = (
+            joined["first_treatment_date"].notna()
+            & cutoff.notna()
+            & (joined["first_treatment_date"] > cutoff)
+        )
+        n_leakage_excluded = int(leaks.sum())
+        joined.loc[leaks, CTEP_OS_RISK_COVARIATE] = np.nan
+
+    joined = joined.drop(columns=["first_treatment_date"])
+    return joined, n_no_score, n_leakage_excluded
+
+
+def run_ctep_os_adjusted_supplement(run: dict) -> pd.DataFrame:
+    """Univariate associations adjusted for the CTEP OS (death) text-risk score.
+
+    Modeled on run_psa_scale_supplement: one row set per landmark, an
+    "unadjusted" fit and an "os_adjusted" fit (baseline covariates = panel-
+    version dummies + CTEP_OS_TEXT_RISK_Z), both restricted to the SAME
+    CTEP-scoreable, non-leakage-excluded subset so the two are comparable.
+    See build_ctep_os_risk_covariate's docstring for the three caveats this
+    supplement inherits (score fixed at first treatment, CTEP-cohort subset,
+    OS model already includes age).
+    """
+    supplement_root = run["output_dir"] / CTEP_OS_ADJUSTED_DIR
+    combined_path = supplement_root / CTEP_OS_ADJUSTED_FILENAME
+    manifest = _ca._load_build_manifest(run["inputs_dir"])
+    min_patient_coverage = float(manifest["min_patient_coverage"])
+    id_col = run.get("id_col", "DFCI_MRN")
+    longitudinal_path = run["inputs_dir"] / "somatic_gleason" / "gleason_available_case" / "aggregated_landmark0.csv"
+    if not longitudinal_path.exists():
+        # Any prebuilt aggregated landmark file carries TREATMENT_ANCHOR_DATE;
+        # fall back to the base cohort's own landmark-0 file if the
+        # somatic_gleason tree was never built.
+        from build_prediction_inputs import aggregated_filename as _aggregated_filename
+        longitudinal_path = run["inputs_dir"] / _aggregated_filename(0)
+    from build_somatic_gleason_inputs import load_treatment_anchors
+    treatment_anchors = load_treatment_anchors(longitudinal_path)
+
+    for landmark_day in run["landmarks"]:
+        output_dir = supplement_root / f"landmark_{landmark_day}" / "both"
+        output_path = output_dir / CTEP_OS_ADJUSTED_FILENAME
+        if output_path.exists() and not FORCE_RERUN:
+            print(
+                f"[skip] {run['label']} CTEP OS-adjusted supplement landmark_{landmark_day} "
+                f"-> {output_path.relative_to(run['output_dir'])} exists"
+            )
+            continue
+
+        ctx = _ca.prepare_landmark_context(
+            run["inputs_dir"],
+            landmark_day,
+            min_patient_coverage=min_patient_coverage,
+        )
+        joined, n_no_score, n_leakage_excluded = build_ctep_os_risk_covariate(
+            ctx.univariate_data,
+            landmark_day=landmark_day,
+            id_col=id_col,
+            treatment_anchors=treatment_anchors,
+        )
+        print(
+            f"[ctep] landmark +{landmark_day}d: {n_no_score} patients with no CTEP score, "
+            f"{n_leakage_excluded} excluded for post-landmark first treatment"
+        )
+        scored = joined.loc[joined[CTEP_OS_RISK_COVARIATE].notna()].copy()
+        if scored.empty:
+            print(
+                f"[warn] {run['label']} CTEP OS-adjusted supplement landmark_{landmark_day} "
+                "-> no patients have a usable CTEP score; skipping this landmark."
+            )
+            continue
+
+        baseline_covariate_cols = tuple(_ca.panel_version_covariate_columns(scored))
+        feature_cols = [
+            c for c in scored.columns
+            if c not in _ca.non_feature_columns(scored) and c != CTEP_OS_RISK_COVARIATE
+        ]
+
+        unadjusted = _ca.run_univariate_nobs_adjusted_associations(
+            scored,
+            feature_cols=feature_cols,
+            endpoint=run.get("endpoint", ENDPOINT),
+            min_events_per_feature=_ca.DEFAULT_MIN_EVENTS_PER_FEATURE,
+            fallback_penalizer=0.05,
+            baseline_covariate_cols=baseline_covariate_cols,
+        )
+        unadjusted.insert(0, "landmark_days", landmark_day)
+        unadjusted.insert(1, "cohort", run.get("cohort", DEFAULT_COHORT))
+        unadjusted.insert(2, "ctep_adjustment", "unadjusted")
+
+        os_adjusted = _ca.run_univariate_nobs_adjusted_associations(
+            scored,
+            feature_cols=feature_cols,
+            endpoint=run.get("endpoint", ENDPOINT),
+            min_events_per_feature=_ca.DEFAULT_MIN_EVENTS_PER_FEATURE,
+            fallback_penalizer=0.05,
+            baseline_covariate_cols=baseline_covariate_cols + (CTEP_OS_RISK_COVARIATE,),
+        )
+        os_adjusted.insert(0, "landmark_days", landmark_day)
+        os_adjusted.insert(1, "cohort", run.get("cohort", DEFAULT_COHORT))
+        os_adjusted.insert(2, "ctep_adjustment", "os_adjusted")
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        unadjusted.to_csv(
+            output_dir / f"cox_agg_univariate_nobs_adjusted_unadjusted_landmark{landmark_day}.csv",
+            index=False,
+        )
+        os_adjusted.to_csv(
+            output_dir / f"cox_agg_univariate_nobs_adjusted_os_adjusted_landmark{landmark_day}.csv",
+            index=False,
+        )
+        both = pd.concat([unadjusted, os_adjusted], ignore_index=True)
+        both.to_csv(output_path, index=False)
+        print(
+            f"[done] {run['label']} CTEP OS-adjusted supplement landmark_{landmark_day} "
+            f"-> {output_path.relative_to(run['output_dir'])} (n={len(scored)})"
+        )
+
+    frames = []
+    for landmark_day in run["landmarks"]:
+        path = supplement_root / f"landmark_{landmark_day}" / "both" / CTEP_OS_ADJUSTED_FILENAME
+        if path.exists():
+            frames.append(pd.read_csv(path, low_memory=False))
+    if not frames:
+        raise FileNotFoundError(
+            f"No CTEP OS-adjusted supplement results were produced under {supplement_root}."
+        )
+    combined = pd.concat(frames, ignore_index=True)
+    combined.to_csv(combined_path, index=False)
+    print(f"[done] combined CTEP OS-adjusted supplement -> {combined_path}")
+    return combined
+
+
 def run_somatic_gleason_univariate(run: dict, dry_run: bool = False):
     """Run Gleason-, sequencing-, and ADT-indexed PRS Cox analyses."""
     _require_adt_index_run(run)
@@ -1779,6 +2033,394 @@ def run_multivariate_available_case_sensitivity(run: dict, dry_run: bool = False
             status = "ok" if rc == 0 else f"FAILED (rc={rc})"
             print(f"[done] {tag} -> {status} ({elapsed/60:.1f} min)\n")
             summary.append((tag, status, elapsed))
+    return summary
+
+
+# --- 03d: Gleason / somatic / labs component combinations --------------------
+# Cohort -> arms, following FEATURE_SET_COMPONENTS's tokens (cox_aggregated.py).
+# "labs" is the reference arm in both cohorts; summarize_clinical_combinations
+# bootstraps every other arm against it.
+CLINICAL_COMBINATION_SPECS = {
+    "gleason": ("labs", "gleason", "gleason-labs"),
+    "gleason_somatic": (
+        "labs",
+        "gleason",
+        "somatic",
+        "gleason-labs",
+        "somatic-labs",
+        "gleason-somatic",
+        "gleason-somatic-labs",
+    ),
+}
+# cohort -> input subdirectory under inputs_dir/somatic_gleason, written by
+# build_somatic_gleason_inputs.py (gleason_available_case / gleason_somatic_available_case).
+CLINICAL_COMBINATION_INPUT_DIRNAMES = {
+    "gleason": "gleason_available_case",
+    "gleason_somatic": "gleason_somatic_available_case",
+}
+CLINICAL_COMBINATIONS_METRICS_FILENAME = "clinical_combinations_metrics.csv"
+
+
+def run_multivariate_clinical_combinations(run: dict, dry_run: bool = False):
+    """Fit every Gleason/somatic/labs component combination, both model families.
+
+    Follows run_multivariate_available_case_sensitivity's pattern: each arm
+    gets its own output directory and resumes independently under
+    FORCE_RERUN=False. Unlike that function's fixed 4 arms x 2 cohorts, the
+    arm list here is per-cohort (CLINICAL_COMBINATION_SPECS), since the
+    gleason_somatic cohort tests all 7 non-empty component combinations while
+    the gleason cohort only has gleason to combine with labs.
+    """
+    _require_adt_index_run(run)
+    inputs_root = run["inputs_dir"] / "somatic_gleason"
+    summary = []
+    for landmark_day in run["landmarks"]:
+        for cohort, arms in CLINICAL_COMBINATION_SPECS.items():
+            input_dirname = CLINICAL_COMBINATION_INPUT_DIRNAMES[cohort]
+            inputs_dir = inputs_root / input_dirname
+            for model, model_dir, metrics_name in (
+                ("elastic-net", "cox", "cox_agg_multivariable_metrics.csv"),
+                ("xgboost", "xgboost", "landmark_xgboost_metrics.csv"),
+            ):
+                for arm in arms:
+                    row_output_dir = (
+                        run["output_dir"] / "clinical_combinations" / cohort / arm
+                        / model_dir / f"landmark_{landmark_day}" / "both"
+                    )
+                    metrics_path = row_output_dir / metrics_name
+                    tag = f"{run['label']:28s} {model:11s} +{landmark_day}d {cohort}/{arm}"
+                    if metrics_path.exists() and not FORCE_RERUN:
+                        print(f"[skip] {tag} -> {metrics_path.relative_to(run['output_dir'])} exists")
+                        summary.append((tag, "skipped", 0.0))
+                        continue
+                    if not inputs_dir.exists():
+                        print(
+                            f"[warn] {tag} -> missing inputs {inputs_dir}.\n"
+                            "       Run build_somatic_gleason_inputs.py first."
+                        )
+                        summary.append((tag, "missing inputs", 0.0))
+                        continue
+                    if not dry_run:
+                        row_output_dir.mkdir(parents=True, exist_ok=True)
+                    cmd = [
+                        PYTHON, SURVIVAL_DIR / "multivariate_analysis.py",
+                        "--model", model,
+                        "--inputs-dir", inputs_dir,
+                        "--output-dir", row_output_dir,
+                        "--landmark-days", str(landmark_day),
+                        "--endpoints", run.get("endpoint", ENDPOINT),
+                        "--n-folds", str(N_FOLDS),
+                        "--feature-set", arm,
+                        "--cohort", f"{run.get('cohort', DEFAULT_COHORT)}_{cohort}_available_case",
+                        "--overwrite" if FORCE_RERUN else "--no-overwrite",
+                    ]
+                    if OUT_OF_FOLD_RISKS:
+                        cmd.append("--out-of-fold-risks")
+                    print(f"[run ] {tag}")
+                    t0 = time.time()
+                    rc = _run(cmd, dry_run=dry_run)
+                    elapsed = time.time() - t0
+                    status = "ok" if rc == 0 else f"FAILED (rc={rc})"
+                    print(f"[done] {tag} -> {status} ({elapsed/60:.1f} min)\n")
+                    summary.append((tag, status, elapsed))
+    return summary
+
+
+def _clinical_combination_dir(run: dict, cohort: str, arm: str, model_dir: str, landmark: int) -> Path:
+    return (
+        run["output_dir"] / "clinical_combinations" / cohort / arm
+        / model_dir / f"landmark_{landmark}" / "both"
+    )
+
+
+def _paired_bootstrap_delta_c_index(
+    arm_risks: pd.DataFrame,
+    labs_risks: pd.DataFrame,
+    *,
+    id_col: str,
+    n_boot: int = 1000,
+    seed: int = 0,
+) -> tuple[float, float, float, int]:
+    """Bootstrap CI for (arm C-index - labs C-index) on their shared patients.
+
+    Both frames come from the SAME cohort's test-block patient-risk file, so
+    every patient in one is in the other; only their two models differ. Each
+    bootstrap draw resamples patient indices once and recomputes both arms'
+    C-index on that draw, keeping the pairing (same resampled patients score
+    both models), which is what makes the resulting interval a paired
+    comparison rather than two independent ones.
+
+    Returns (observed_delta, ci_low, ci_high, n_patients).
+    """
+    from lifelines.utils import concordance_index
+
+    merged = arm_risks[[id_col, "duration_days", "event", "risk_score"]].merge(
+        labs_risks[[id_col, "risk_score"]],
+        on=id_col,
+        suffixes=("_arm", "_labs"),
+    )
+    n = len(merged)
+    if n == 0:
+        return float("nan"), float("nan"), float("nan"), 0
+
+    duration = merged["duration_days"].to_numpy(dtype=float)
+    event = merged["event"].to_numpy(dtype=int)
+    risk_arm = merged["risk_score_arm"].to_numpy(dtype=float)
+    risk_labs = merged["risk_score_labs"].to_numpy(dtype=float)
+
+    def _delta(idx: np.ndarray) -> float:
+        d, e = duration[idx], event[idx]
+        if e.sum() == 0:
+            return float("nan")
+        c_arm = concordance_index(d, -risk_arm[idx], e)
+        c_labs = concordance_index(d, -risk_labs[idx], e)
+        return c_arm - c_labs
+
+    observed = _delta(np.arange(n))
+    rng = np.random.default_rng(seed)
+    draws = [
+        _delta(rng.integers(0, n, size=n)) for _ in range(n_boot)
+    ]
+    draws = [d for d in draws if np.isfinite(d)]
+    if not draws:
+        return observed, float("nan"), float("nan"), n
+    ci_low, ci_high = np.percentile(draws, [2.5, 97.5])
+    return observed, float(ci_low), float(ci_high), n
+
+
+def summarize_clinical_combinations(run: dict) -> pd.DataFrame:
+    """One row per (cohort, arm, model, landmark): metrics plus a delta vs labs.
+
+    `delta_c_index`/`delta_c_index_ci_low`/`delta_c_index_ci_high` come from a
+    paired bootstrap on the shared test-block patients (Plan §2c) -- the
+    patients are identical across arms within one cohort/landmark/model,
+    because every arm there is fit on the same available-case cohort, so the
+    pairing is exact rather than approximate. NaN for the labs row itself and
+    wherever either arm's patient-risk file is missing.
+    """
+    endpoint = run.get("endpoint", ENDPOINT)
+    rows = []
+    for landmark_day in run["landmarks"]:
+        for cohort, arms in CLINICAL_COMBINATION_SPECS.items():
+            for model, model_dir, metrics_name, risks_name in (
+                ("elastic-net", "cox", "cox_agg_multivariable_metrics.csv", "cox_agg_multivariable_patient_risks.csv"),
+                ("xgboost", "xgboost", "landmark_xgboost_metrics.csv", "landmark_xgboost_patient_risks.csv"),
+            ):
+                for arm in arms:
+                    row_dir = _clinical_combination_dir(run, cohort, arm, model_dir, landmark_day)
+                    base = {
+                        "run": run["label"], "cohort": cohort, "arm": arm,
+                        "model": model, "landmark": landmark_day, "endpoint": endpoint,
+                    }
+                    metrics_path = row_dir / metrics_name
+                    if not metrics_path.exists():
+                        rows.append({**base, **_missing_metric_fields("missing")})
+                        continue
+                    frame = pd.read_csv(metrics_path)
+                    matched = frame.loc[frame["endpoint"] == endpoint]
+                    if matched.empty:
+                        rows.append({**base, **_missing_metric_fields(f"no {endpoint} row")})
+                        continue
+                    rows.append({**base, **_canonical_metric_fields(matched.iloc[0]), "_risks_path": str(row_dir / risks_name)})
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    if "_risks_path" not in out.columns:
+        out["_risks_path"] = pd.NA
+
+    id_col = run.get("id_col", "DFCI_MRN")
+    delta = pd.Series(pd.NA, index=out.index, dtype="Float64")
+    ci_low = pd.Series(pd.NA, index=out.index, dtype="Float64")
+    ci_high = pd.Series(pd.NA, index=out.index, dtype="Float64")
+    n_paired = pd.Series(pd.NA, index=out.index, dtype="Int64")
+
+    for (cohort, model, landmark_day), group in out.groupby(["cohort", "model", "landmark"]):
+        labs_rows = group.loc[group["arm"] == "labs"]
+        labs_path = labs_rows["_risks_path"].iloc[0] if not labs_rows.empty else None
+        if labs_path is None or pd.isna(labs_path) or not Path(labs_path).exists():
+            continue
+        labs_risks = pd.read_csv(labs_path)
+        labs_risks = labs_risks.loc[labs_risks.get("endpoint", endpoint) == endpoint]
+        if "dataset" in labs_risks.columns:
+            labs_risks = labs_risks.loc[labs_risks["dataset"].astype(str) == "test"]
+        for idx, arm_row in group.iterrows():
+            if arm_row["arm"] == "labs":
+                continue
+            arm_path = arm_row.get("_risks_path")
+            if pd.isna(arm_path) or not Path(arm_path).exists():
+                continue
+            arm_risks = pd.read_csv(arm_path)
+            arm_risks = arm_risks.loc[arm_risks.get("endpoint", endpoint) == endpoint]
+            if "dataset" in arm_risks.columns:
+                arm_risks = arm_risks.loc[arm_risks["dataset"].astype(str) == "test"]
+            observed, lo, hi, n = _paired_bootstrap_delta_c_index(
+                arm_risks, labs_risks, id_col=id_col
+            )
+            delta.loc[idx] = observed
+            ci_low.loc[idx] = lo
+            ci_high.loc[idx] = hi
+            n_paired.loc[idx] = n
+
+    out["delta_c_index"] = delta
+    out["delta_c_index_ci_low"] = ci_low
+    out["delta_c_index_ci_high"] = ci_high
+    out["n_paired"] = n_paired
+    out = out.drop(columns="_risks_path")
+    return out.sort_values(["run", "cohort", "landmark", "model", "arm"]).reset_index(drop=True)
+
+
+# --- 03e: Stratification of the labs risk score by held-out clinical/genomic
+# features (Plan §4) -----------------------------------------------------------
+RISK_STRATIFICATION_DIRNAME = "risk_stratification"
+# Schemes are never pooled: each gets its own subdirectory (Plan hard
+# constraint carried over from run_multivariate's --out-of-fold-risks).
+RISK_STRATIFICATION_SCHEMES = ("test", "cv_oof")
+# cohort -> arms compared against "labs" within that available-case cohort,
+# reusing CLINICAL_COMBINATION_SPECS's arm lists (Plan §2c/§4c) so the same
+# clinical/somatic arms already fit there are what gets compared here.
+RISK_STRATIFICATION_MATCHED_COHORTS = {
+    cohort: tuple(arm for arm in arms if arm != "labs")
+    for cohort, arms in CLINICAL_COMBINATION_SPECS.items()
+}
+
+
+def run_risk_stratification(run: dict, dry_run: bool = False):
+    """Stratify the labs risk score by Gleason/stage/TP53-PTEN-RB1 (Plan §4c).
+
+    Two independent stages, run once per scoring scheme ("test": held-out test
+    block scored by the final model; "cv_oof": full cohort, each patient
+    scored by the outer fold that excluded them -- never pooled, hence the
+    separate `risk_stratification/<scheme>/...` subdirectories):
+
+    1. Full-cohort labs model vs. its own clinical stratifiers (Gleason,
+       stage, TP53/PTEN/RB1 trio, from build_somatic_gleason_inputs.py's §4a
+       clinical_stratifiers_landmark{D}.csv, left-joined so a patient missing
+       one stratifier still keeps the others and the risk-score panel).
+    2. Within each available-case cohort that has a matched clinical/somatic
+       arm (gleason, gleason_somatic -- see CLINICAL_COMBINATION_SPECS), the
+       labs arm's risk file against every other arm's risk file from that same
+       cohort via --comparison-risks, so the within-stratum comparison is
+       "how does the labs score split patients whose Gleason/somatic-informed
+       score also splits them" rather than just labs vs. raw clinical values.
+
+    cv_oof requires the run to have been fit with OUT_OF_FOLD_RISKS=True;
+    scheme iterations with nothing to read are skipped with a printed warning
+    rather than raising, since a run may only have out-of-fold scores for some
+    task families.
+    """
+    _require_adt_index_run(run)
+    endpoint = run.get("endpoint", ENDPOINT)
+    id_col = run.get("id_col", "DFCI_MRN")
+    strat_root = run["output_dir"] / RISK_STRATIFICATION_DIRNAME
+    summary = []
+
+    for scheme in RISK_STRATIFICATION_SCHEMES:
+        for landmark_day in run["landmarks"]:
+            # --- Stage 1: full-cohort labs model vs. its own clinical strata.
+            labs_risks_path = patient_risk_path(run, "elastic-net", landmark_day, "both")
+            clinical_path = (
+                run["inputs_dir"] / "somatic_gleason" / "clinical_stratifiers"
+                / f"clinical_stratifiers_landmark{landmark_day}.csv"
+            )
+            row_output_dir = strat_root / scheme / "full_cohort" / f"landmark_{landmark_day}"
+            tag = f"{run['label']:28s} risk-strat  {scheme:6s} +{landmark_day}d full_cohort"
+            table_path = row_output_dir / f"risk_stratified_discrimination_{endpoint}_landmark{landmark_day}.csv"
+            if table_path.exists() and not FORCE_RERUN:
+                print(f"[skip] {tag} -> {table_path.relative_to(run['output_dir'])} exists")
+                summary.append((tag, "skipped", 0.0))
+            elif labs_risks_path is None or not labs_risks_path.exists():
+                print(f"[warn] {tag} -> missing labs risk file {labs_risks_path}.\n       Run run_multivariate(run) first.")
+                summary.append((tag, "missing labs risks", 0.0))
+            elif not clinical_path.exists():
+                print(f"[warn] {tag} -> missing {clinical_path}.\n       Run build_somatic_gleason_inputs.py's main() first.")
+                summary.append((tag, "missing clinical stratifiers", 0.0))
+            else:
+                if not dry_run:
+                    row_output_dir.mkdir(parents=True, exist_ok=True)
+                cmd = [
+                    PYTHON, SURVIVAL_DIR / "risk_score_stratified_figures.py",
+                    "--patient-risks", labs_risks_path,
+                    "--clinical-features", clinical_path,
+                    "--output-dir", row_output_dir,
+                    "--endpoint", endpoint,
+                    "--landmark-days", str(landmark_day),
+                    "--id-col", id_col,
+                    "--dataset", scheme,
+                ]
+                print(f"[run ] {tag}")
+                t0 = time.time()
+                rc = _run(cmd, dry_run=dry_run)
+                elapsed = time.time() - t0
+                status = "ok" if rc == 0 else f"FAILED (rc={rc})"
+                print(f"[done] {tag} -> {status} ({elapsed/60:.1f} min)\n")
+                summary.append((tag, status, elapsed))
+
+            # --- Stage 2: matched-cohort labs-vs-clinical/somatic comparisons.
+            for cohort, arms in RISK_STRATIFICATION_MATCHED_COHORTS.items():
+                for model, model_dir in (("elastic-net", "cox"), ("xgboost", "xgboost")):
+                    labs_dir = _clinical_combination_dir(run, cohort, "labs", model_dir, landmark_day)
+                    labs_filename = PATIENT_RISK_FILENAMES.get((model, "both"))
+                    labs_path = labs_dir / labs_filename if labs_filename else None
+                    matched_output_dir = (
+                        strat_root / scheme / "matched" / cohort / model_dir
+                        / f"landmark_{landmark_day}"
+                    )
+                    matched_table_path = (
+                        matched_output_dir
+                        / f"risk_stratified_discrimination_{endpoint}_landmark{landmark_day}.csv"
+                    )
+                    matched_tag = (
+                        f"{run['label']:28s} risk-strat  {scheme:6s} +{landmark_day}d "
+                        f"matched/{cohort}/{model_dir}"
+                    )
+                    if matched_table_path.exists() and not FORCE_RERUN:
+                        print(f"[skip] {matched_tag} -> {matched_table_path.relative_to(run['output_dir'])} exists")
+                        summary.append((matched_tag, "skipped", 0.0))
+                        continue
+                    if labs_path is None or not labs_path.exists():
+                        print(
+                            f"[warn] {matched_tag} -> missing {labs_path}.\n"
+                            "       Run run_multivariate_clinical_combinations(run) first."
+                        )
+                        summary.append((matched_tag, "missing labs risks", 0.0))
+                        continue
+
+                    comparison_args = []
+                    missing_arms = []
+                    for arm in arms:
+                        arm_dir = _clinical_combination_dir(run, cohort, arm, model_dir, landmark_day)
+                        arm_filename = PATIENT_RISK_FILENAMES.get((model, "both"))
+                        arm_path = arm_dir / arm_filename if arm_filename else None
+                        if arm_path is None or not arm_path.exists():
+                            missing_arms.append(arm)
+                            continue
+                        comparison_args.extend(["--comparison-risks", f"{arm}={arm_path}"])
+                    if missing_arms:
+                        print(
+                            f"[warn] {matched_tag} -> missing comparison risks for arms "
+                            f"{missing_arms}; continuing with the rest."
+                        )
+                    if not dry_run:
+                        matched_output_dir.mkdir(parents=True, exist_ok=True)
+                    cmd = [
+                        PYTHON, SURVIVAL_DIR / "risk_score_stratified_figures.py",
+                        "--patient-risks", labs_path,
+                        "--output-dir", matched_output_dir,
+                        "--endpoint", endpoint,
+                        "--landmark-days", str(landmark_day),
+                        "--id-col", id_col,
+                        "--dataset", scheme,
+                        *comparison_args,
+                    ]
+                    print(f"[run ] {matched_tag}")
+                    t0 = time.time()
+                    rc = _run(cmd, dry_run=dry_run)
+                    elapsed = time.time() - t0
+                    status = "ok" if rc == 0 else f"FAILED (rc={rc})"
+                    print(f"[done] {matched_tag} -> {status} ({elapsed/60:.1f} min)\n")
+                    summary.append((matched_tag, status, elapsed))
+
     return summary
 
 

@@ -737,3 +737,42 @@ def assert_disjoint_folds(
         raise RuntimeError(
             f"Fold {fold}: train/val MRN overlap of {len(overlap)} MRNs (e.g. {sample})."
         )
+
+
+def assert_split_consistent_across_landmarks(
+    splits_by_landmark: "dict[int, object]",
+) -> None:
+    """Hard guard for shared-split mode: every MRN gets the same label everywhere it appears.
+
+    ``build_prediction_inputs.py``'s shared split mode derives one train/valid/
+    test assignment on the union of MRNs eligible at any requested landmark,
+    then reindexes it onto each landmark's own risk set. This guard is the
+    cheap way to confirm that reindexing never produced a landmark-specific
+    disagreement (e.g. from a bug that re-derives rather than reindexes): an
+    MRN present at more than one landmark must carry the identical split label
+    at every one of them. It does not check that every landmark contains the
+    same MRNs -- landmarks are independent risk sets by design (see
+    README invariant "Each landmark has its own risk set and split.").
+    """
+    landmark_days = sorted(splits_by_landmark)
+    if len(landmark_days) < 2:
+        return
+    label_by_mrn: dict = {}
+    conflicts: list[tuple] = []
+    for landmark_day in landmark_days:
+        split = splits_by_landmark[landmark_day]
+        for mrn, label in split.items():
+            mrn = _normalize_mrn(mrn)
+            if mrn in label_by_mrn:
+                if label_by_mrn[mrn] != label:
+                    conflicts.append((mrn, label_by_mrn[mrn], label, landmark_day))
+            else:
+                label_by_mrn[mrn] = label
+    if conflicts:
+        sample = conflicts[:5]
+        raise RuntimeError(
+            f"Shared split is inconsistent across landmarks: {len(conflicts)} MRNs "
+            f"have a different split label at a later landmark than at an earlier "
+            f"one (e.g. mrn/earlier_label/later_label/later_landmark: {sample}). "
+            "The shared split must be reindexed, never re-derived, per landmark."
+        )

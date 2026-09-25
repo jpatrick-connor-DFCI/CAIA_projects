@@ -127,7 +127,10 @@ def select_feature_columns(
 
     feature_meta = pd.DataFrame(
         {
-            "feature": raw_feature_cols,
+            # dtype=object so an empty raw_feature_cols (baseline arms with no
+            # static covariates) still gives a .str-accessor-safe Series below,
+            # instead of the default float64 inferred from an empty list.
+            "feature": pd.Series(raw_feature_cols, dtype=object),
             "coverage": coverage.reindex(raw_feature_cols).values,
             "unique_non_missing": unique_non_missing.reindex(raw_feature_cols).values,
         }
@@ -1047,6 +1050,145 @@ def compute_out_of_fold_risk_scores(
     print(
         f"  OOF risk scores[{endpoint}]: {n_scored}/{len(predictions)} patients scored "
         f"across {len(outer_partitions)} outer folds"
+    )
+    return predictions
+
+
+def compute_fixed_feature_out_of_fold_risk_scores(
+    cohort: pd.DataFrame,
+    *,
+    feature_cols: list[str],
+    endpoint: str,
+    penalizer: float,
+    l1_ratio: float,
+    outer_folds: int,
+    seed: int,
+    endpoint_map: EndpointMap,
+    static_covariate_cols: tuple[str, ...] = (),
+    id_col: str = DEFAULT_ID_COL,
+    age_col: str = DEFAULT_AGE_COL,
+) -> pd.DataFrame:
+    """Held-out risk for every patient from a FIXED feature set/hyperparameters.
+
+    `compute_out_of_fold_risk_scores` re-tunes (penalizer, l1_ratio) and
+    reselects features inside each outer fold, because it exists to score
+    arms whose feature set is itself chosen by CV. The baseline arm has no
+    such choice to protect from leakage -- age (+ a fixed static-covariate
+    panel) is never searched, so there is nothing for an inner CV loop to
+    re-tune, and `select_feature_columns`'s coverage/variability gate would
+    reject the baseline's typical zero-feature case outright (it requires
+    >=1 feature to "pass"). A single level of outer CV is therefore both
+    sufficient and correct here: each fold fits on its training rows with
+    the caller's fixed (feature_cols, penalizer, l1_ratio) and scores the
+    fold's held-out rows.
+
+    Returns one row per patient with `dataset="cv_oof"`, matching
+    `compute_out_of_fold_risk_scores`'s column contract plus `outer_fold`.
+    """
+    require_sksurv()
+    duration_col, event_col = _endpoint_columns(endpoint_map, endpoint)
+
+    splitter, strat_labels, _ = make_cv_splitter(
+        cohort,
+        n_folds=outer_folds,
+        seed=seed,
+        event_col=event_col,
+    )
+    split_args = (
+        (np.arange(len(cohort)), strat_labels)
+        if strat_labels is not None
+        else (np.arange(len(cohort)),)
+    )
+
+    risk = pd.Series(np.nan, index=cohort.index, dtype=float)
+    assigned_fold = pd.Series(-1, index=cohort.index, dtype=int)
+    notes: dict[int, str] = {}
+
+    outer_partitions = list(enumerate(splitter.split(*split_args), 1))
+    outer_bar = tqdm(
+        total=len(outer_partitions),
+        desc=f"coxnet baseline OOF[{endpoint}]",
+        dynamic_ncols=True,
+    )
+    for outer_fold, (tr_idx, te_idx) in outer_partitions:
+        outer_train = cohort.iloc[tr_idx]
+        outer_test = cohort.iloc[te_idx]
+        assigned_fold.iloc[te_idx] = outer_fold
+        assert_disjoint_folds(
+            fold_train_mrns=outer_train.index,
+            fold_val_mrns=outer_test.index,
+            fold=outer_fold,
+        )
+        try:
+            train_mdf, test_mdf, covariate_cols = build_model_matrices(
+                outer_train,
+                outer_test,
+                feature_cols=feature_cols,
+                duration_col=duration_col,
+                event_col=event_col,
+                static_covariate_cols=static_covariate_cols,
+                age_col=age_col,
+            )
+            model, _, note = fit_coxnet_with_fallback(
+                train_mdf,
+                duration_col=duration_col,
+                event_col=event_col,
+                penalizers=[float(penalizer)],
+                l1_ratio=float(l1_ratio),
+                covariate_cols=covariate_cols,
+                unpenalized_cols=["age", *static_covariate_cols],
+            )
+            if model is None:
+                notes[outer_fold] = f"outer_fold_failed: {note}"
+            else:
+                _, fold_pred = score_coxnet_model(
+                    model,
+                    test_mdf,
+                    duration_col=duration_col,
+                    event_col=event_col,
+                    covariate_cols=covariate_cols,
+                )
+                risk.loc[test_mdf.index] = np.asarray(fold_pred, dtype=float).reshape(-1)
+                notes[outer_fold] = note
+        except (*_FOLD_FIT_ERRORS, RuntimeError) as exc:
+            notes[outer_fold] = f"outer_fold_failed: {exc}"
+            if outer_fold == len(outer_partitions) and risk.notna().sum() == 0:
+                raise RuntimeError(
+                    f"Every outer fold failed for endpoint '{endpoint}'; the last "
+                    f"error is re-raised above as the likely cause. This is more "
+                    f"often a configuration problem than {len(outer_partitions)} "
+                    f"independent numerical failures."
+                ) from exc
+        outer_bar.update(1)
+    outer_bar.close()
+
+    if (assigned_fold < 0).any():
+        raise RuntimeError(
+            f"Outer CV did not assign a fold to every patient for endpoint "
+            f"'{endpoint}': {int((assigned_fold < 0).sum())} of {len(cohort)} unassigned."
+        )
+
+    predictions = pd.DataFrame(
+        {
+            id_col: cohort.index,
+            "endpoint": endpoint,
+            "dataset": "cv_oof",
+            "outer_fold": assigned_fold.to_numpy(),
+            "duration_days": cohort[duration_col].to_numpy(dtype=float),
+            "event": cohort[event_col].to_numpy(dtype=int),
+            "risk_score": risk.to_numpy(),
+        }
+    )
+    n_scored = int(predictions["risk_score"].notna().sum())
+    if n_scored == 0:
+        failures = "; ".join(f"fold {k}: {v}" for k, v in sorted(notes.items()))
+        raise RuntimeError(
+            f"Baseline out-of-fold scoring produced no risk scores for endpoint "
+            f"'{endpoint}'. Per-fold notes: {failures}"
+        )
+    print(
+        f"  baseline OOF risk scores[{endpoint}]: {n_scored}/{len(predictions)} patients "
+        f"scored across {len(outer_partitions)} outer folds"
     )
     return predictions
 

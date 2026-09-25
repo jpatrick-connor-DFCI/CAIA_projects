@@ -7,8 +7,13 @@ For each requested landmark, this script:
   2. Builds a separate eligible risk set for each requested landmark. Patients
      do not have to survive/event-free to a later landmark to enter an earlier
      one, avoiding an immortal-time restriction on the day-0 cohort.
-  3. Derives an independent 3-way train/valid/test split within each landmark
-     cohort.
+  3. Derives a 3-way train/valid/test split. By default (--split-mode shared)
+     the split is derived once on the union of MRNs across all landmarks and
+     then reindexed onto each landmark's own risk set, so a patient who is
+     eligible at multiple landmarks keeps the same split label at all of them.
+     Risk-set membership stays independent per landmark; only the split label
+     is shared. --split-mode independent restores the legacy behavior of
+     deriving a separate split within each landmark cohort.
      Cox / XGBoost union train+valid into their train_val block; DeepHit
      uses train and valid directly for early stopping.
   4. Writes per-landmark:
@@ -65,12 +70,18 @@ from survival_common.helper import (  # noqa: E402
     DEFAULT_AUC_MAX_TIME_UNITS,
     DEFAULT_AUC_QUANTILES,
     assert_no_test_leakage,
+    assert_split_consistent_across_landmarks,
     choose_stratification_labels,
     compute_horizon_grid,
     select_canonical_labs,
 )
 DEFAULT_OUTPUT_SUBDIR = "prediction_inputs"
 DEFAULT_VAL_FRAC = 0.20
+# 'shared': one split derived on the union of MRNs across every requested
+# landmark (see derive_shared_split); 'independent': the legacy per-landmark
+# split (see derive_three_way_split), where the same MRN can fall in test at
+# one landmark and train at another.
+DEFAULT_SPLIT_MODE = "shared"
 DEFAULT_TIME_UNIT_DAYS = 7
 DEFAULT_MIN_PSA_COUNT = 5
 DEFAULT_LONG_MIN_COVERAGE = 0.1
@@ -301,8 +312,14 @@ def derive_three_way_split(
     test_frac: float,
     val_frac: float,
     seed: int,
+    event_col: str = "PLATINUM",
 ) -> tuple[pd.Series, str, str]:
     """Stratified 80/20 train_val/test, then 80/20 train/valid carved out of train_val.
+
+    ``event_col`` selects the binary event used for stratification (default
+    "PLATINUM"). Callers building a non-platinum endpoint cohort (nepc, avpc)
+    should pass that endpoint's own event column so the split is stratified on
+    the event actually being modeled rather than always on platinum.
 
     Returns (split_series indexed by DFCI_MRN with values train/valid/test,
              test stratification label, valid stratification label).
@@ -310,7 +327,7 @@ def derive_three_way_split(
     test_labels, test_stratification = choose_stratification_labels(
         base_merged,
         min_count=2,
-        event_col="PLATINUM",
+        event_col=event_col,
     )
     try:
         train_val_idx, test_idx = train_test_split(
@@ -331,7 +348,7 @@ def derive_three_way_split(
     val_labels, val_stratification = choose_stratification_labels(
         train_val_block,
         min_count=2,
-        event_col="PLATINUM",
+        event_col=event_col,
     )
     try:
         train_offsets, valid_offsets = train_test_split(
@@ -356,6 +373,58 @@ def derive_three_way_split(
     if split.isna().any():
         raise ValueError("Split assignment failed to cover every MRN in the base cohort.")
     return split, test_stratification, val_stratification
+
+
+def derive_shared_split(
+    merged_by_landmark: dict[int, pd.DataFrame],
+    *,
+    test_frac: float,
+    val_frac: float,
+    seed: int,
+    event_col: str = "PLATINUM",
+) -> tuple[pd.Series, str, str]:
+    """One train/valid/test split shared across every requested landmark.
+
+    Each landmark otherwise gets its own eligible risk set (a patient does not
+    have to survive/event-free to a later landmark to enter an earlier one),
+    but that means the legacy independent-per-landmark split assigns a given
+    MRN to test at one landmark and to train at another -- held-out results
+    then cannot be compared across landmarks. This builds ONE split on the
+    union of MRNs eligible at any requested landmark, so every landmark's
+    split is a reindex of the same assignment and the held-out test set is a
+    single, fixed set of patients.
+
+    Each MRN's stratification row is taken from the EARLIEST landmark at which
+    it is eligible (landmark keys are iterated in the order given, which
+    callers pass sorted ascending), since that is the landmark where the
+    patient first entered the cohort and therefore carries its own outcome
+    label rather than one inherited from a later landmark's re-basing.
+
+    Returns (split_series indexed by DFCI_MRN with values train/valid/test,
+             test stratification label, valid stratification label) --
+    identical shape/contract to derive_three_way_split. A caller reindexes
+    this Series onto each landmark's own MRN index to get that landmark's
+    split.
+    """
+    if not merged_by_landmark:
+        raise ValueError("derive_shared_split requires at least one landmark cohort.")
+
+    union_rows: dict = {}
+    for landmark_day in sorted(merged_by_landmark):
+        frame = merged_by_landmark[landmark_day]
+        for mrn, row in frame.iterrows():
+            if mrn not in union_rows:
+                union_rows[mrn] = row
+    union_merged = pd.DataFrame.from_dict(union_rows, orient="index")
+    union_merged.index.name = next(iter(merged_by_landmark.values())).index.name
+
+    return derive_three_way_split(
+        union_merged,
+        test_frac=test_frac,
+        val_frac=val_frac,
+        seed=seed,
+        event_col=event_col,
+    )
 
 
 AGGREGATED_DROP_COLUMNS = (
@@ -619,16 +688,48 @@ def main(args: argparse.Namespace) -> None:
                 print(f"[debug]   +{earlier}d-only MRNs (first 20): {list(only_earlier)[:20]}")
 
     base_landmark_day = landmark_days[0]
+    split_mode = str(getattr(args, "split_mode", DEFAULT_SPLIT_MODE)).lower()
+    split_event_col = ENDPOINTS[endpoint]["event_col"]
     splits_by_landmark: dict[int, pd.Series] = {}
     stratification_by_landmark: dict[str, dict[str, str]] = {}
     split_sizes_by_landmark: dict[str, dict[str, int]] = {}
-    for landmark_day in landmark_days:
-        split, test_stratification, val_stratification = derive_three_way_split(
-            merged_by_landmark[landmark_day],
+
+    if split_mode == "shared":
+        shared_split, shared_test_stratification, shared_val_stratification = derive_shared_split(
+            merged_by_landmark,
             test_frac=args.test_frac,
             val_frac=args.val_frac,
             seed=args.seed,
+            event_col=split_event_col,
         )
+        print(
+            f"Shared split (test={shared_test_stratification}, "
+            f"validation={shared_val_stratification}) derived on "
+            f"{len(shared_split)} MRNs eligible at any requested landmark."
+        )
+    elif split_mode != "independent":
+        raise ValueError(f"Unsupported --split-mode {split_mode!r}; expected 'shared' or 'independent'.")
+
+    for landmark_day in landmark_days:
+        if split_mode == "shared":
+            split = shared_split.reindex(merged_by_landmark[landmark_day].index)
+            if split.isna().any():
+                missing = split.index[split.isna()].tolist()[:10]
+                raise ValueError(
+                    f"Shared split is missing {int(split.isna().sum())} MRNs eligible at "
+                    f"landmark +{landmark_day}d; first few: {missing}. Every landmark's "
+                    "risk set must be a subset of the union the shared split was derived on."
+                )
+            test_stratification = shared_test_stratification
+            val_stratification = shared_val_stratification
+        else:
+            split, test_stratification, val_stratification = derive_three_way_split(
+                merged_by_landmark[landmark_day],
+                test_frac=args.test_frac,
+                val_frac=args.val_frac,
+                seed=args.seed,
+                event_col=split_event_col,
+            )
         splits_by_landmark[landmark_day] = split
         counts = split.value_counts().to_dict()
         split_sizes_by_landmark[str(landmark_day)] = {
@@ -639,7 +740,7 @@ def main(args: argparse.Namespace) -> None:
             "validation": val_stratification,
         }
         print(
-            f"Landmark +{landmark_day}d split "
+            f"Landmark +{landmark_day}d split [{split_mode}] "
             f"(test={test_stratification}, validation={val_stratification}): "
             f"train={counts.get('train', 0)} valid={counts.get('valid', 0)} "
             f"test={counts.get('test', 0)}"
@@ -649,9 +750,18 @@ def main(args: argparse.Namespace) -> None:
         print(f"Wrote {landmark_split_path}")
         availability[f"split_landmark_{landmark_day}"] = availability[ID_COL].map(split)
 
-    # Preserve the historical filename as a base-landmark copy for the optional
-    # genomic arm and any external consumers that expect one split file.
-    base_split = splits_by_landmark[base_landmark_day]
+    if split_mode == "shared":
+        assert_split_consistent_across_landmarks(splits_by_landmark)
+
+    # Preserve the historical filename as a compatibility copy for the optional
+    # genomic arm and any external consumers that expect one split file. In
+    # shared mode this is the one split over the union of MRNs (identical to
+    # every landmark's own file, just reindexed); in independent mode it
+    # remains the base-landmark's split only, as before.
+    if split_mode == "shared":
+        base_split = shared_split
+    else:
+        base_split = splits_by_landmark[base_landmark_day]
     split_path = output_dir / SPLIT_ASSIGNMENTS_FILENAME
     base_split.rename_axis(ID_COL).reset_index().to_csv(split_path, index=False)
     print(f"Wrote base-landmark compatibility split to {split_path}")
@@ -672,6 +782,7 @@ def main(args: argparse.Namespace) -> None:
             for lm in landmark_days
         },
         "n_common_across_landmarks_descriptive_only": int(len(common_mrns)),
+        "split_mode": split_mode,
         "split_sizes_by_landmark": split_sizes_by_landmark,
     }
     attrition_path = output_dir / LANDMARK_ATTRITION_FILENAME
@@ -911,7 +1022,15 @@ def main(args: argparse.Namespace) -> None:
         "require_nepc": endpoint == "nepc",
         "time_unit_days": int(args.time_unit_days),
         "cohort_mode": "independent_by_landmark",
+        # 'shared' (default): one train/valid/test split derived on the union of
+        # MRNs eligible at any requested landmark, reindexed onto each
+        # landmark's own risk set -- the held-out test set is the same patients
+        # at every landmark. 'independent': the legacy per-landmark split.
+        # Orthogonal to cohort_mode, which is always independent_by_landmark:
+        # risk-set membership and split assignment are two separate axes.
+        "split_mode": split_mode,
         "stratification_by_landmark": stratification_by_landmark,
+        "split_sizes_by_landmark": split_sizes_by_landmark,
         "n_patients_by_landmark": {
             str(lm): int(len(merged_by_landmark[lm])) for lm in landmark_days
         },
@@ -1033,6 +1152,19 @@ if __name__ == "__main__":
         type=float,
         default=DEFAULT_VAL_FRAC,
         help="Fraction of train+val carved out as the validation set.",
+    )
+    parser.add_argument(
+        "--split-mode",
+        choices=["shared", "independent"],
+        default=DEFAULT_SPLIT_MODE,
+        help=(
+            "'shared' (default): derive ONE train/valid/test split on the union "
+            "of MRNs across every requested landmark, so held-out test patients "
+            "are the same set at every landmark and results are comparable "
+            "across landmarks. 'independent': the legacy behavior, where each "
+            "landmark's risk set gets its own independent split (a patient can "
+            "be test at one landmark and train at another)."
+        ),
     )
     parser.add_argument(
         "--min-patient-coverage",

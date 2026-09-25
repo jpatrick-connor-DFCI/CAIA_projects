@@ -94,6 +94,21 @@ INDEX_ANALYSES = ("gleason", "sequencing", "prs")
 # from INDEX_ANALYSES: those arms rebase follow-up to an observation date and
 # therefore are not directly comparable with the lab model.
 AVAILABLE_CASE_SENSITIVITIES = ("gleason_available_case", "somatic_available_case")
+GLEASON_SOMATIC_AVAILABLE_CASE = "gleason_somatic_available_case"
+# Plan §4a: clinical-stratifier inputs for risk_score_stratified_figures.py.
+# These are stratifiers only, never model features, so the trio columns are
+# read from the UNFILTERED somatic matrix (every alteration class), unlike
+# the SNV-only genomic arm (README invariant #8).
+CLINICAL_STRATIFIERS_DIRNAME = "clinical_stratifiers"
+CLINICAL_STRATIFIERS_TRIO_GENES = ("TP53", "PTEN", "RB1")
+CLINICAL_STRATIFIERS_ALTERATION_CLASSES = ("SNV", "DEL", "AMP", "SV")
+STAGE_COLUMN = "DERIVED_STAGE_MERGED"
+DEFAULT_REGEX_STAGE_PATH = Path(
+    os.environ.get(
+        "COMPASS_REGEX_STAGE_PATH",
+        str(PROFILE_DATA_ROOT / "CANCER_ANNOTATIONS" / "CANCER_STAGE_NOTE_LEVEL.parquet"),
+    )
+)
 PRS_SAMPLE_ID_COL = "cbio_sample_id"
 
 # Exact PGS IDs from the user-supplied complete_germline_data_df column list.
@@ -763,8 +778,11 @@ def build_available_case_sensitivity(
     Each source-specific cohort has its own matched labs comparator. A datum
     must be available by the requested ADT-relative landmark. Gleason selects
     the score date closest to that landmark (among available values); somatic
-    selects the latest available specimen. Outcome, split assignment, and lab
-    summaries remain exactly those from the standard input at that landmark.
+    selects the latest available specimen. 'gleason_somatic' inner-joins both,
+    matching the Gleason ∩ somatic cohort (Plan §2b) used to compare labs
+    against the combined feature set on patients who have both sources.
+    Outcome, split assignment, and lab summaries remain exactly those from
+    the standard input at that landmark.
     """
     base = _normalize_mrn(base, source="landmark +0 base inputs")
     cutoff_dates = treatment_anchors + pd.to_timedelta(int(landmark_day), unit="D")
@@ -788,8 +806,25 @@ def build_available_case_sensitivity(
             value_cols=somatic_features,
             combine_latest_ties_with_max=True,
         )
+    elif analysis == "gleason_somatic":
+        gleason_features = closest_available_by_landmark(
+            gleason,
+            cutoffs,
+            date_col="gleason_date",
+            available_date_col=GLEASON_AVAILABLE_DATE,
+            value_cols=[GLEASON_FEATURE],
+        ).dropna(subset=[GLEASON_FEATURE])
+        somatic_feature_frame = latest_available_by_landmark(
+            somatic,
+            cutoffs,
+            date_col=SOMATIC_AVAILABLE_DATE,
+            order_col=SEQUENCING_DATE,
+            value_cols=somatic_features,
+            combine_latest_ties_with_max=True,
+        )
+        features = gleason_features.join(somatic_feature_frame, how="inner")
     else:
-        raise ValueError("analysis must be 'gleason' or 'somatic'.")
+        raise ValueError("analysis must be 'gleason', 'somatic', or 'gleason_somatic'.")
     out = base.set_index(ca.ID_COL).join(features, how="inner")
     if out.empty:
         raise ValueError(
@@ -846,6 +881,97 @@ def _available_case_manifest(
         }
     )
     return manifest
+
+
+def load_stage(stage_path: Path) -> pd.DataFrame:
+    """Load the note-level regex stage table used by prepare_figure_data.py.
+
+    Reads the same parquet as `METASTATIC_SOURCES["stage"]` in
+    04_prep_figure_data.ipynb (columns DFCI_MRN, EVENT_DATE,
+    DERIVED_STAGE_MERGED). Read directly rather than imported from
+    prepare_figure_data.py, since both files live in this repo -- the
+    no-cross-repo-imports rule is only about the separate CTEP repo.
+    """
+    stage = _normalize_mrn(
+        _read_table(stage_path, columns=[ca.ID_COL, "EVENT_DATE", STAGE_COLUMN]),
+        source=str(stage_path),
+    )
+    stage["EVENT_DATE"] = pd.to_datetime(stage["EVENT_DATE"], errors="coerce")
+    stage = stage.dropna(subset=["EVENT_DATE", STAGE_COLUMN])
+    return stage[[ca.ID_COL, "EVENT_DATE", STAGE_COLUMN]]
+
+
+def build_clinical_stratifiers(
+    base: pd.DataFrame,
+    somatic_unfiltered: pd.DataFrame,
+    trio_columns: list[str],
+    gleason: pd.DataFrame,
+    stage: pd.DataFrame,
+    *,
+    treatment_anchors: pd.Series,
+    landmark_day: int = 0,
+) -> pd.DataFrame:
+    """Build one row per patient of clinical-only stratifier columns.
+
+    These columns (Gleason, the TP53/PTEN/RB1 trio, and overall stage) are
+    used only to stratify held-out risk-score figures (Plan §4) -- never as
+    model features -- so the trio is taken from the unfiltered somatic wide
+    table (every alteration class), not the SNV-only genomic arm.
+
+    Every column is independently left-joined onto the full landmark cohort,
+    so a patient missing one clinical stratifier still gets the others rather
+    than being dropped entirely.
+    """
+    base = _normalize_mrn(base, source="landmark base inputs")
+    cutoff_dates = treatment_anchors + pd.to_timedelta(int(landmark_day), unit="D")
+    cutoffs = pd.DataFrame(
+        {ca.ID_COL: cutoff_dates.index, "_landmark_date": cutoff_dates.values}
+    )
+
+    gleason_values = closest_available_by_landmark(
+        gleason,
+        cutoffs,
+        date_col="gleason_date",
+        available_date_col=GLEASON_AVAILABLE_DATE,
+        value_cols=[GLEASON_FEATURE],
+    ).dropna(subset=[GLEASON_FEATURE])
+
+    trio_values = latest_available_by_landmark(
+        somatic_unfiltered,
+        cutoffs,
+        date_col=SOMATIC_AVAILABLE_DATE,
+        order_col=SEQUENCING_DATE,
+        value_cols=trio_columns,
+        combine_latest_ties_with_max=True,
+    ) if trio_columns else pd.DataFrame(
+        index=pd.Index([], name=ca.ID_COL), columns=trio_columns
+    )
+
+    stage_candidates = stage.merge(cutoffs, on=ca.ID_COL, how="inner")
+    stage_candidates = stage_candidates.loc[
+        stage_candidates["EVENT_DATE"].notna()
+        & stage_candidates["_landmark_date"].notna()
+        & stage_candidates["EVENT_DATE"].le(stage_candidates["_landmark_date"])
+    ]
+    if stage_candidates.empty:
+        stage_values = pd.DataFrame(
+            index=pd.Index([], name=ca.ID_COL), columns=[STAGE_COLUMN]
+        )
+    else:
+        stage_candidates = stage_candidates.sort_values(
+            [ca.ID_COL, "EVENT_DATE"], kind="mergesort"
+        )
+        stage_values = (
+            stage_candidates.groupby(ca.ID_COL, sort=False)
+            .tail(1)
+            .set_index(ca.ID_COL)[[STAGE_COLUMN]]
+        )
+
+    out = base[[ca.ID_COL]].set_index(ca.ID_COL)
+    out = out.join(gleason_values, how="left")
+    out = out.join(trio_values, how="left")
+    out = out.join(stage_values, how="left")
+    return out.rename_axis(ca.ID_COL).reset_index()
 
 
 def main(args: argparse.Namespace) -> None:
@@ -990,7 +1116,9 @@ def main(args: argparse.Namespace) -> None:
     # somatic-vs-labs never conflate a feature comparison with a cohort shift.
     sensitivity_landmarks = [int(value) for value in base_manifest["landmark_days"]]
     sensitivity_cases: dict[str, dict[int, pd.DataFrame]] = {}
-    for analysis, sensitivity_name in zip(("gleason", "somatic"), AVAILABLE_CASE_SENSITIVITIES):
+    all_analyses = ("gleason", "somatic", "gleason_somatic")
+    all_sensitivity_names = AVAILABLE_CASE_SENSITIVITIES + (GLEASON_SOMATIC_AVAILABLE_CASE,)
+    for analysis, sensitivity_name in zip(all_analyses, all_sensitivity_names):
         sensitivity_dir = output_dir / sensitivity_name
         sensitivity_dir.mkdir(parents=True, exist_ok=True)
         available_cases: dict[int, pd.DataFrame] = {}
@@ -1021,14 +1149,19 @@ def main(args: argparse.Namespace) -> None:
                 f"{sensitivity_name} +{landmark_day}d: {len(available):,} patients "
                 f"with {analysis} data available by the landmark"
             )
-        feature_rows = (
-            [{"feature": GLEASON_FEATURE, "feature_kind": "gleason_continuous", "source": str(args.gleason_path)}]
-            if analysis == "gleason"
-            else [
-                {"feature": feature, "feature_kind": "somatic_binary", "source": str(args.somatic_path)}
-                for feature in somatic_features
-            ]
-        )
+        gleason_feature_rows = [
+            {"feature": GLEASON_FEATURE, "feature_kind": "gleason_continuous", "source": str(args.gleason_path)}
+        ]
+        somatic_feature_rows = [
+            {"feature": feature, "feature_kind": "somatic_binary", "source": str(args.somatic_path)}
+            for feature in somatic_features
+        ]
+        if analysis == "gleason":
+            feature_rows = gleason_feature_rows
+        elif analysis == "somatic":
+            feature_rows = somatic_feature_rows
+        else:
+            feature_rows = gleason_feature_rows + somatic_feature_rows
         pd.DataFrame(feature_rows).to_csv(sensitivity_dir / FEATURE_MANIFEST_FILENAME, index=False)
         sensitivity_manifest = _available_case_manifest(base_manifest, available_cases)
         sensitivity_manifest.update(
@@ -1045,6 +1178,64 @@ def main(args: argparse.Namespace) -> None:
         )
         sensitivity_cases[analysis] = available_cases
 
+    # Plan §4a: clinical stratifier inputs for risk_score_stratified_figures.py.
+    # Read the trio columns from the UNFILTERED somatic wide table (every
+    # alteration class), never the SNV-only genomic arm -- these are
+    # stratifiers only, never model features, so invariant #8 does not apply.
+    stratifiers_dir = output_dir / CLINICAL_STRATIFIERS_DIRNAME
+    stratifiers_dir.mkdir(parents=True, exist_ok=True)
+    raw_somatic = _normalize_mrn(
+        _read_table(Path(args.somatic_path)), source=str(args.somatic_path)
+    )
+    raw_somatic[SEQUENCING_DATE] = pd.to_datetime(
+        raw_somatic["SAMPLE_COLLECTION_DT"], errors="coerce"
+    )
+    raw_somatic[SOMATIC_AVAILABLE_DATE] = raw_somatic[SEQUENCING_DATE]
+    trio_columns = [
+        f"{gene}_{alteration}"
+        for gene in CLINICAL_STRATIFIERS_TRIO_GENES
+        for alteration in CLINICAL_STRATIFIERS_ALTERATION_CLASSES
+        if f"{gene}_{alteration}" in raw_somatic.columns
+    ]
+    for column in trio_columns:
+        raw_somatic[column] = pd.to_numeric(raw_somatic[column], errors="coerce")
+    missing_trio = [
+        f"{gene}_{alteration}"
+        for gene in CLINICAL_STRATIFIERS_TRIO_GENES
+        for alteration in CLINICAL_STRATIFIERS_ALTERATION_CLASSES
+        if f"{gene}_{alteration}" not in raw_somatic.columns
+    ]
+    if missing_trio:
+        print(
+            f"[clinical-stratifiers] {len(missing_trio)} trio columns absent from "
+            f"{args.somatic_path}; skipping: {missing_trio}"
+        )
+
+    stage_path = Path(args.regex_stage_path)
+    if stage_path.exists():
+        stage = load_stage(stage_path)
+    else:
+        print(f"[clinical-stratifiers] stage source not found at {stage_path}; skipping stage.")
+        stage = pd.DataFrame(columns=[ca.ID_COL, "EVENT_DATE", STAGE_COLUMN])
+
+    for landmark_day in sensitivity_landmarks:
+        landmark_base_path = base_inputs_dir / aggregated_filename(landmark_day)
+        landmark_base = pd.read_csv(landmark_base_path, low_memory=False)
+        clinical = build_clinical_stratifiers(
+            landmark_base,
+            raw_somatic,
+            trio_columns,
+            gleason,
+            stage,
+            treatment_anchors=treatment_anchors,
+            landmark_day=landmark_day,
+        )
+        clinical_path = stratifiers_dir / f"clinical_stratifiers_landmark{landmark_day}.csv"
+        clinical.to_csv(clinical_path, index=False)
+        print(
+            f"clinical_stratifiers +{landmark_day}d: {len(clinical):,} patients -> {clinical_path}"
+        )
+
     root_manifest = {
         "feature_set": "somatic_gleason_indexed",
         "analyses": list(INDEX_ANALYSES),
@@ -1058,7 +1249,7 @@ def main(args: argparse.Namespace) -> None:
                 },
                 "comparison": f"labs versus {analysis}, same available cases at each landmark",
             }
-            for analysis, sensitivity_name in zip(("gleason", "somatic"), AVAILABLE_CASE_SENSITIVITIES)
+            for analysis, sensitivity_name in zip(all_analyses, all_sensitivity_names)
         },
         "prs_included": True,
     }
@@ -1094,6 +1285,17 @@ if __name__ == "__main__":
         "--require-all-prs",
         action="store_true",
         help="Fail if any allowlisted PGS ID is absent from the matrix.",
+    )
+    parser.add_argument(
+        "--regex-stage-path",
+        type=Path,
+        default=DEFAULT_REGEX_STAGE_PATH,
+        help=(
+            "Note-level regex stage parquet (DFCI_MRN, EVENT_DATE, "
+            "DERIVED_STAGE_MERGED), same source as prepare_figure_data.py's "
+            "metastatic_sources['stage']. Used for the Plan §4a clinical "
+            "stratifier's stage column."
+        ),
     )
     parser.add_argument("--landmark-days", nargs="+", type=int, default=None)
     main(parser.parse_args())
