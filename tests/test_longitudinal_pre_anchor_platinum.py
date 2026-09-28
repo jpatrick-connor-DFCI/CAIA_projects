@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_R = (
     REPO_ROOT / "COMPASS" / "survival_analysis" / "COMPASS_generate_figures_pipeline.R"
 )
-FIGURES_RMD = REPO_ROOT / "COMPASS" / "survival_analysis" / "05_figures.Rmd"
+FIGURES_SCRIPT = REPO_ROOT / "COMPASS" / "survival_analysis" / "05_figures.R"
 
 
 def test_descriptive_longitudinal_uses_exact_base_cohort():
@@ -94,7 +94,7 @@ def test_plotting_gams_are_fit_in_r_with_reml_tuning():
 
 
 def test_figure_notebook_toggles_gam_fitting_off_without_removing_it():
-    notebook = FIGURES_RMD.read_text()
+    notebook = FIGURES_SCRIPT.read_text()
     pipeline = PIPELINE_R.read_text()
     assert "PLOT_GAM_TRAJECTORIES <- FALSE" in notebook
     assert "plot_gam_trajectories = PLOT_GAM_TRAJECTORIES" in notebook
@@ -104,7 +104,7 @@ def test_figure_notebook_toggles_gam_fitting_off_without_removing_it():
 
 
 def test_figure_notebook_toggles_adt_intent_supplement_off_without_removing_it():
-    notebook = FIGURES_RMD.read_text()
+    notebook = FIGURES_SCRIPT.read_text()
     pipeline = PIPELINE_R.read_text()
     assert "PLOT_ADT_INTENT_SUPPLEMENT <- FALSE" in notebook
     assert "plot_adt_intent_supplement = PLOT_ADT_INTENT_SUPPLEMENT" in notebook
@@ -227,7 +227,7 @@ def test_output_artifact_names_drop_redundant_parent_tokens():
 
 
 def test_figure_notebook_defaults_to_two_cell_workers():
-    source = FIGURES_RMD.read_text()
+    source = FIGURES_SCRIPT.read_text()
     assert 'Sys.getenv("COMPASS_RENDER_WORKERS", "2")' in source
     assert "render_grid <- tidyr::crossing(COHORT = COHORTS, ENDPOINT = ENDPOINTS)" in source
     assert "n_workers <- min(RENDER_WORKERS, nrow(render_grid))" in source
@@ -236,7 +236,7 @@ def test_figure_notebook_defaults_to_two_cell_workers():
 
 
 def test_figure_notebook_preloads_shared_data_before_forking():
-    source = FIGURES_RMD.read_text()
+    source = FIGURES_SCRIPT.read_text()
     preload = source.index("invisible(cached_profile_patient_and_labs(")
     fork = source.index("parallel::mclapply(")
     assert preload < fork
@@ -248,7 +248,7 @@ def test_figure_notebook_preloads_shared_data_before_forking():
 
 def test_png_is_default_and_pdf_is_opt_in():
     pipeline = PIPELINE_R.read_text()
-    notebook = FIGURES_RMD.read_text()
+    notebook = FIGURES_SCRIPT.read_text()
     assert "save_pdf = FALSE" in pipeline
     assert 'ggsave(temporary, plot = plot' in pipeline
     assert "need_pdf <- save_pdf &&" in pipeline
@@ -260,7 +260,7 @@ def test_png_is_default_and_pdf_is_opt_in():
 
 def test_render_reuses_completed_outputs_with_explicit_overwrite():
     pipeline = PIPELINE_R.read_text()
-    notebook = FIGURES_RMD.read_text()
+    notebook = FIGURES_SCRIPT.read_text()
     setup = pipeline[pipeline.index("COHORT_ARM_DIR <-"):pipeline.index("COHORT_LEAF <-")]
     save = pipeline[pipeline.index("save_fig <- function"):pipeline.index("COHORT_LABEL <-")]
     assert "list.files(" not in setup

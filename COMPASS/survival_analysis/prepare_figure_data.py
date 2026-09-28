@@ -173,7 +173,7 @@ def federated_within_site_file(federated_path: Path, filename: str) -> Path:
 
 def code_version() -> str:
     here = Path(__file__).parent
-    paths = sorted(here.glob("*.R")) + [here / "05_figures.Rmd", Path(__file__)]
+    paths = sorted(here.glob("*.R")) + [Path(__file__)]
     return digest({p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths})
 
 
@@ -187,7 +187,7 @@ def atomic_json(path: Path, value) -> None:
 
 @contextmanager
 def preparation_lock(root: Path):
-    # Cluster workers and simultaneous knits must not publish partial caches.
+    # Cluster workers and simultaneous 05_figures.R runs must not publish partial caches.
     import fcntl
     root.mkdir(parents=True, exist_ok=True)
     with (root / ".prepare.lock").open("a") as stream:

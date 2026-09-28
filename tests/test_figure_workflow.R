@@ -143,7 +143,7 @@ local({
   stopifnot(all(vapply(third$rendered, function(x) x$rendered == 0L, logical(1))))
   stale <- tryCatch(figure_notebook_manifest(cfg), error = identity)
   stopifnot(inherits(stale, "error"), grepl("04_prep_figure_data.ipynb", conditionMessage(stale), fixed = TRUE))
-  # Execute the actual Rmd chunks with a federation-only scope and raw patient
+  # Run the actual 05_figures.R with a federation-only scope and raw patient
   # input hidden. This verifies configuration wiring as well as the helper API.
   variables <- c(COMPASS_DATA_ROOT = root, COMPASS_FIG_ROOT = cfg$fig_root,
     COMPASS_FIGURE_DATA_ROOT = cfg$cache_root, COMPASS_FIGURE_SCOPE = "federated",
@@ -157,15 +157,8 @@ local({
   # Federated forests do not require a matching local result tree.
   stopifnot(file.rename(file.path(root, "survival_analysis", "local_runs_adt"),
                         file.path(root, "local_runs_hidden")))
-  rmd <- readLines(file.path(dirname(pipeline_path), "05_figures.Rmd"))
-  inside <- FALSE; code <- character()
-  for (line in rmd) {
-    if (grepl("^```\\{r", line)) { inside <- TRUE; next }
-    if (line == "```") { inside <- FALSE; next }
-    if (inside) code <- c(code, line)
-  }
   env <- new.env(parent = globalenv())
-  eval(parse(text = code), env)
+  source(file.path(dirname(pipeline_path), "05_figures.R"), local = env)
   stopifnot(identical(names(env$figure_run$prepared), "federated"))
   stopifnot(identical(vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem"),
                       c("psa_forest", "testosterone_forest", "site_incidence_lm000",

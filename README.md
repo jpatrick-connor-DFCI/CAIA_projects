@@ -11,7 +11,7 @@ ICD-C61 cohort: `arpi` (anchored at first ARPI/chemo exposure) and `adt` (anchor
 exposure, years earlier in the treatment sequence). Entry requires a dated prostate diagnosis, male
 sex, at least five PSA measurements, and ADT on/after diagnosis; PARPi exposure, platinum before
 diagnosis, and bladder (C67), lung (C34), head-and-neck (C00-C14/C30-C32), or testicular (C62)
-cancer diagnosed strictly after first ADT are excluded. The paired, R-only `05_figures.Rmd` emits
+cancer diagnosed strictly after first ADT are excluded. The paired, R-only `05_figures.R` script emits
 manuscript figures for both.
 
 **Arm, cohort, and endpoint are three orthogonal axes.** The *arm* sets time 0 (the index-date
@@ -86,7 +86,7 @@ COMPASS/
     ├── 02_univariate.ipynb               # univariate arms + nominal-significance filter
     ├── 03_multivariate.ipynb             # elastic-net + XGBoost + summary tables
     ├── 03b_multivariate_longitudinal.ipynb # Dynamic-DeepHit (torch, optional; SurvLatent ODE off by default)
-    ├── 05_figures.Rmd                    # R figures from merged profile_data outputs
+    ├── 05_figures.R                      # R figures from merged profile_data outputs (Rscript)
     ├── 06_abstract_numbers.ipynb         # read-only: abstract/manuscript counts from built artifacts
     ├── 07_cohort_comparison.ipynb        # read-only: 6 cohorts x 2 endpoints, landmark +180d
     ├── multivariate_longitudinal/
@@ -132,7 +132,7 @@ reporting notebooks: they read already-generated artifacts and refit nothing.
            survival_analysis/multivariate_analysis.py
  local_runs_<arm>/ , local_runs_<arm>_nepc/
         │
-        ├──► 05_figures.Rmd (R; 2 cohort arms: arpi, adt)
+        ├──► 05_figures.R (R; 2 cohort arms: arpi, adt)
         │    figures/
         │
         ▼  07_cohort_comparison.ipynb (read-only; 6 cohorts x 2 endpoints)
@@ -486,7 +486,8 @@ notebook. All operate on the merged `profile_data` run:
   collected and reported rather than raising. Its header restates the two caveats that govern
   reading it — the cohorts are not the same patients, and the strict NEPC label is narrower than
   the Figure 2 classifier definition.
-- `05_figures.Rmd` — the sole COMPASS figure document, using R Markdown and
+- `05_figures.R` — the sole COMPASS figure script (`Rscript COMPASS/survival_analysis/05_figures.R`,
+  configured by `COMPASS_*` environment variables), using
   `COMPASS_generate_figures_pipeline.R`. It renders both arms' overview, LLM-label, univariate,
   multivariate, KM, and per-lab distribution/trajectory figures at landmarks 0 and 90. Figure 1A reads
   `mrn_lists/icd_prostate_mrn_flags.csv` and displays cumulative ICD-C61 cohort selection through
@@ -494,7 +495,7 @@ notebook. All operate on the merged `profile_data` run:
   platinum exclusion, and the requested post-ADT cancer exclusion; the ARPI arm additionally
   displays its post-diagnosis ARPI/docetaxel exposure criterion. Axis and table labels throughout
   name the arm's anchor ("ARPI/chemo initiation" vs. "ADT initiation") via `ANCHOR_LABEL`.
-  The cached `05_figures.Rmd` workflow exports lettered multipanel figures alongside
+  The cached `05_figures.R` workflow exports lettered multipanel figures alongside
   all individual Figure 1 and Figure 2v3 panels: `compiled/cohort/figure1_cohort__<identity>`
   combines cohort selection, survival, and three timing distributions, while
   `compiled/labels/figure2v3_llm__platinum__all__incl` combines all four classifier/subtype
@@ -998,7 +999,7 @@ patient subsets with `COHORTS`, and the event(s) with `ENDPOINTS`
 6. `python COMPASS/survival_analysis/adt_intent_comparison.py` (read-only; writes the
    localized-vs-metastatic tables the figure supplement reads — run **before** step 7, and only
    after steps 2-3 have been run for both stratified cohorts)
-7. `COMPASS/survival_analysis/05_figures.Rmd`
+7. `Rscript COMPASS/survival_analysis/05_figures.R`
 8. `COMPASS/survival_analysis/06_abstract_numbers.ipynb` (read-only; abstract/manuscript counts)
 9. `COMPASS/survival_analysis/07_cohort_comparison.ipynb` (read-only; only after steps 1-3 have
    been run for **all** cohorts and endpoints being compared)

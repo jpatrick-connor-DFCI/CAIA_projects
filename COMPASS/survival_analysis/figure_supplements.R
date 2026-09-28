@@ -6,12 +6,12 @@
 # ============================================================================
 # ---- PSA/testosterone forest across ADT cohorts (+ notebook 07 CLI) --------
 # ============================================================================
-# Shared by 05_figures.Rmd and the forest section of 07_cohort_comparison.ipynb.
+# Shared by 05_figures.R and the forest section of 07_cohort_comparison.ipynb.
 # One faceted figure per endpoint: PSA and testosterone rows, no delta column.
 
 # Sized to drop into a 16:9 PowerPoint slide (13.33 x 7.5 in) as a single
 # full-bleed figure, leaving ~0.4 in of margin on each edge. Both save sites --
-# the Rmd pipeline and the notebook adapter below -- use this one constant so a
+# the 05_figures.R pipeline and the notebook adapter below -- use this one constant so a
 # deck never receives two differently-shaped copies of the same forest.
 COHORT_FOREST_SLIDE_SIZE <- c(width = 12.5, height = 6.8)
 cohort_forest_labels <- c(
@@ -278,13 +278,13 @@ render_cohort_overview <- function(manifest, config, forest_config=NULL) {
 # ============================================================================
 # ---- metastatic-label preparation (R fallback for notebook 04's Polars prep) 
 # ============================================================================
-# R-only preparation for 05_figures.Rmd. Uses the existing intent labels,
+# R-only preparation for 05_figures.R. Uses the existing intent labels,
 # metastatic-diagnosis LLM task and dated regex stages; no model refits.
 metastatic_parquet_backend <- function() {
   if (requireNamespace("arrow", quietly = TRUE)) return("arrow")
   if (requireNamespace("nanoparquet", quietly = TRUE)) return("nanoparquet")
   stop('Metastatic figures need an R Parquet reader. Run install.packages("nanoparquet") ',
-       'in this R environment, then re-knit. The R package arrow is also supported.', call. = FALSE)
+       'in this R environment, then rerun 05_figures.R. The R package arrow is also supported.', call. = FALSE)
 }
 
 read_metastatic_parquet <- function(path, columns) {
@@ -430,7 +430,7 @@ prepare_metastatic_figure_labels <- function(config, analysis_anchors = NULL) {
 # ============================================================================
 # ---- metastatic-label diagnostics ------------------------------------------
 # ============================================================================
-# Standalone ADT/LLM/regex diagnostics used by 05_figures.Rmd. All writes use
+# Standalone ADT/LLM/regex diagnostics used by 05_figures.R. All writes use
 # the main pipeline's save_fig, so progress, atomic saves and overwrite apply.
 # The three requested confusion matrices: each of the LLM and ADT metastatic
 # labels against the regex maximum stage across the record, plus ADT vs LLM.
@@ -616,7 +616,7 @@ render_metastatic_supplements <- function(config, patient_df, labs, save_panel,
 # ---- notebook 07 forest CLI ------------------------------------------------
 # ============================================================================
 # Notebook adapter: Rscript figure_supplements.R input.csv output_root landmark dpi overwrite
-# The notebook and Rmd deliberately share the same renderer and destinations.
+# The notebook and 05_figures.R deliberately share the same renderer and destinations.
 if (sys.nframe() == 0L) {
   suppressPackageStartupMessages({library(ggplot2); library(dplyr); library(tidyr)})
   args <- commandArgs(trailingOnly = TRUE)

@@ -1,5 +1,5 @@
 # COMPASS figure workflow: presentation helpers, federated and manuscript
-# figures, the cached prepare/render bridge used by 05_figures.Rmd, and the
+# figures, the cached prepare/render bridge used by 05_figures.R, and the
 # downloaded-PNG reformatter. Source after COMPASS_generate_figures_pipeline.R.
 # Standalone CLI: Rscript figure_workflow.R <downloaded-ADT-dir> <new-parent>/ADT [0|90|180]
 
@@ -1815,7 +1815,7 @@ figure_parallel <- function(items, fun, workers) {
 }
 
 figure_notebook_manifest <- function(config, check_sources = TRUE) {
-  guidance <- "Run 04_prep_figure_data.ipynb with the requested settings, then rerun 05_figures.Rmd."
+  guidance <- "Run 04_prep_figure_data.ipynb with the requested settings, then rerun 05_figures.R."
   fail <- function(detail) stop(detail, "\n", guidance, call. = FALSE)
   path <- file.path(config$cache_root, "manifest.json")
   if (!file.exists(path)) fail(paste("Missing notebook-prepared manifest:", path))
@@ -1964,7 +1964,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
       manuscript_root=if(job$name %in% c("adt__platinum","cohort_overview","federated"))
         file.path(config$fig_root,"ADT","manuscript figures") else NULL)
   }
-  # Only pending jobs warm tables. A resumed all-mode knit reads no patient
+  # Only pending jobs warm tables. A resumed all-mode run reads no patient
   # Parquet at all when every scene snapshot is current.
   if (stage != "render") {
     pending <- Filter(function(job) !job$name %in% c("federated", "cohort_overview") &&

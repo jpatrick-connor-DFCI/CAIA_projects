@@ -62,7 +62,7 @@ failure <- tryCatch(build_metastatic_labels(intent,notes,llm,bind_rows(anchors,a
 stopifnot(inherits(failure,"error"), grepl("one row per patient",conditionMessage(failure)))
 
 # Python runs only in the 04 notebook; all R figure stages use its cache.
-active <- paste(readLines("COMPASS/survival_analysis/05_figures.Rmd"),
+active <- paste(readLines("COMPASS/survival_analysis/05_figures.R"),
                 collapse="\n")
 renderer <- paste(readLines("COMPASS/survival_analysis/figure_supplements.R"),collapse="\n")
 stopifnot(grepl("run_cached_figure_workflow", active),

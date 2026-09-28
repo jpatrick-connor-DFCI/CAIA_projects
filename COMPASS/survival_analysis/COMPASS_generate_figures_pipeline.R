@@ -1,4 +1,4 @@
-# Per-cohort figure-generation pipeline called from 05_figures.Rmd once per
+# Per-cohort figure-generation pipeline called from 05_figures.R once per
 # cohort in the same R session.
 #
 # Required packages (install once on the cluster):
@@ -228,12 +228,12 @@ normalize_classifier_primary_labels <- function(primary_label, reported_biomarke
 # ---------------------------------------------------------------------------
 # Loop-invariant read cache.
 #
-# 05_figures.Rmd calls generate_figures() once per cohort x endpoint -- 6 x 2 =
+# 05_figures.R calls generate_figures() once per cohort x endpoint -- 6 x 2 =
 # 12 passes. Several inputs do not vary across that loop at all (the LLM label
 # set, the platinum MRN list, the ICD flag table) and one varies only with the
 # treatment arm (the longitudinal labs CSV, by far the largest file the
 # pipeline reads). Without a cache the longitudinal table alone is parsed 24
-# times per knit: twice per pass, once for the patient/lab split and again for
+# times per run: twice per pass, once for the patient/lab split and again for
 # the Figure 7 canonical-lab loader, neither of which knows about the other.
 #
 # cached_read_csv() memoizes on the resolved path plus the readr arguments that
@@ -242,9 +242,9 @@ normalize_classifier_primary_labels <- function(primary_label, reported_biomarke
 # rather than copied: every consumer below treats them as read-only, and dplyr
 # verbs copy on modify anyway.
 #
-# Correctness note: the cache lives for the R session, so a knit that
+# Correctness note: the cache lives for the R session, so a run that
 # regenerates an input mid-run would serve a stale frame. That does not happen
-# here -- 01/02/03 finish before this document is knit -- but clear_read_cache()
+# here -- 01/02/03 finish before 05_figures.R runs -- but clear_read_cache()
 # exists for interactive use after rebuilding inputs.
 .read_cache <- new.env(parent = emptyenv())
 
