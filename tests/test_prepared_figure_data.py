@@ -106,7 +106,10 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     within_path = site_path.with_name("cox_within_site_all_sites_results.csv")
     xgb_dir = site_path.parent.parent / "federated_xgboost"
     xgb_paths = [xgb_dir / f"xgboost_federated_{kind}_adt.csv" for kind in ("metrics", "importance")]
-    assert [item["path"] for item in result["federated_sources"]] == [config["federated_path"], str(site_path), str(within_path), *map(str, xgb_paths)]
+    transfer_dir = Path(config["data_root"]) / "federated_transfer_adt_w_MSK"
+    transfer_paths = [transfer_dir / name for name in ("transfer_metrics.csv", "transfer_auc_t.csv")]
+    assert [item["path"] for item in result["federated_sources"]] == [
+        config["federated_path"], str(site_path), str(within_path), *map(str, xgb_paths), *map(str, transfer_paths)]
     assert result["federated_sources"][1]["missing"]
     site_path.parent.mkdir()
     pl.DataFrame({"site_name": ["site_a"], "n_patients": [10], "n_events": [2]}).write_csv(site_path)
@@ -130,6 +133,24 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
         updated_xgb = prep.prepare(config)
         assert updated_xgb["federated"] != delivered["federated"]
         previous = updated_xgb
+    # 09 transfer outputs are optional; their delivery or change reruns the federated job.
+    transfer_dir.mkdir()
+    for index, path in enumerate(transfer_paths, start=5):
+        assert previous["federated_sources"][index]["missing"]
+        pl.DataFrame({"endpoint": ["nepc"]}).write_csv(path)
+        delivered = prep.prepare(config)
+        assert delivered["federated"] != previous["federated"]
+        assert "missing" not in delivered["federated_sources"][index]
+        previous = delivered
+
+
+def test_federated_transfer_path_override(tmp_path):
+    config = make_config(tmp_path, "federated")
+    config["federated"] = True
+    config["federated_transfer_path"] = str(tmp_path / "elsewhere")
+    sources = prep.prepare(config)["federated_sources"]
+    assert [s["path"] for s in sources[-2:]] == [
+        str(tmp_path / "elsewhere" / name) for name in ("transfer_metrics.csv", "transfer_auc_t.csv")]
 
 
 def test_federated_within_site_accepts_legacy_folder(tmp_path):

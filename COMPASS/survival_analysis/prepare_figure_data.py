@@ -171,6 +171,14 @@ def federated_within_site_file(federated_path: Path, filename: str) -> Path:
     return next((p for p in candidates if p.exists()), candidates[0])
 
 
+# 09_federated_transfer.ipynb outputs; mirrors federated_transfer_dir() in figure_workflow.R.
+FEDERATED_TRANSFER_FILES = ("transfer_metrics.csv", "transfer_auc_t.csv")
+
+
+def federated_transfer_dir(config: dict) -> Path:
+    return Path(config.get("federated_transfer_path") or Path(config["data_root"]) / "federated_transfer_adt_w_MSK")
+
+
 def code_version() -> str:
     here = Path(__file__).parent
     paths = sorted(here.glob("*.R")) + [Path(__file__)]
@@ -526,6 +534,8 @@ def prepare(config: dict) -> dict:
         # absent paths too so later XGBoost deliveries invalidate preparation.
         federated_sources += [fingerprint(federated_path.parent / "federated_xgboost" /
             f"xgboost_federated_{kind}_adt.csv") for kind in ("metrics", "importance")]
+        federated_sources += [fingerprint(federated_transfer_dir(config) / name)
+            for name in FEDERATED_TRANSFER_FILES]
         manifest["federated"] = digest({"code": version, "force": manifest["force_version"],
             "files": federated_sources})
         if config.get("federated", False):

@@ -137,4 +137,36 @@ local({
     pooled_only,fixed=TRUE),grepl("not verified",pooled_only,fixed=TRUE),
     grepl("unverified",federated_population_note(mutate(across,n_patients_used=351),counts)))
 })
+local({
+  # 09 transfer outputs: optional CI/ΔC columns become gaps, bad inputs fail loudly.
+  directory <- tempfile("transfer-"); dir.create(directory)
+  on.exit(unlink(directory,recursive=TRUE))
+  stopifnot(identical(federated_transfer_dir(list(data_root="/x")),file.path("/x","federated_transfer_adt_w_MSK")),
+    identical(federated_transfer_dir(list(data_root="/x",federated_transfer_path="/y")),"/y"))
+  absent <- withCallingHandlers(load_federated_transfer(directory),warning=function(w) invokeRestart("muffleWarning"))
+  stopifnot(is.null(absent))
+  metrics <- tidyr::expand_grid(endpoint=c("NEPC","avpc","platinum","other"),
+      bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt","custom_bundle"),
+      landmark_days=c(0,180),config=c("both","baseline")) %>%
+    mutate(model_family=case_when(startsWith(bundle,"xgboost")~"xgboost_cox",
+      startsWith(bundle,"cox")~"elastic_net_cox",TRUE~NA_character_),
+      n_patients=1000,n_events=30,c_index=.6)
+  path <- file.path(directory,"transfer_metrics.csv")
+  readr::write_csv(metrics,path)
+  loaded <- load_federated_transfer(directory)
+  stopifnot(nrow(loaded)==36,!"other" %in% loaded$endpoint,all(is.na(loaded$c_index_lo)),all(is.na(loaded$mean_auc)))
+  d <- prepare_federated_transfer(loaded)
+  stopifnot(identical(levels(d$model),c("XGBoost","Elastic-net Cox","custom_bundle")),
+    identical(levels(d$landmark),c("0 days","+180 days")),
+    nrow(d)==36+18+36,!any(d$metric=="ΔC vs. age only" & d$features=="Age only"))
+  note <- federated_transfer_count_note(loaded)
+  stopifnot(grepl("^PLATINUM: 0d 1,000/30, 180d 1,000/30; NEPC:",note))
+  b <- ggplot_build(plot_federated_transfer(d,note))
+  stopifnot(length(b$layout$panel_params)==9)
+  for(bad in list(mutate(metrics,c_index=1.2),mutate(metrics,n_events=2000),bind_rows(metrics,metrics[1,]),
+                  select(metrics,-c_index))) {
+    readr::write_csv(bad,path)
+    stopifnot(inherits(tryCatch(load_federated_transfer(directory),error=identity),"error"))
+  }
+})
 cat("Publication compilation, paths, catalog, recoverable archives and federated data checks passed.\n")

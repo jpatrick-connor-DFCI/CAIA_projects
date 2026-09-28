@@ -1187,6 +1187,14 @@ bundle's pooled means; a flagged row (>3x off) almost always means a unit
 mismatch between the DFCI and OMOP lab pipelines. Resolve those before you read
 the C-index.
 
+The figure pipeline picks up `transfer_metrics.csv` and `transfer_auc_t.csv`
+from `COMPASS_FEDERATED_TRANSFER` (default
+`$COMPASS_DATA_ROOT/federated_transfer_adt_w_MSK`). Rerun
+`04_prep_figure_data.ipynb` after 09, then
+`COMPASS_FIGURE_SCOPE=federated Rscript COMPASS/survival_analysis/05_figures.R`
+to render `figures/ADT/federated/transfer_discrimination__platinum.{png,csv}`.
+The figure shows C-index, ΔC vs. age only, and mean AUC(t) by endpoint.
+
 ### Invariants (these change predictions silently if broken)
 
 - **The bundle's preprocessing is pooled across the federation and is reused

@@ -67,6 +67,17 @@ local({
       test_c_index=.7,test_mean_auc_t=.75,n_test=20,n_events_test=5),xgb_metrics_path)
   write_csv(expand_grid(landmark_days=c(0,90,180),feature=c("PSA__mean","Testosterone__last","age")) %>%
     mutate(analysis_label="adt",endpoint="platinum",gain=seq_len(n())),xgb_importance_path)
+  transfer_dir <- file.path(root,"federated_transfer_adt_w_MSK"); dir.create(transfer_dir)
+  transfer_metrics_path <- file.path(transfer_dir,"transfer_metrics.csv")
+  write_csv(expand_grid(endpoint=c("nepc","avpc","platinum"),
+      bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),
+      landmark_days=c(0,90,180),config=c("both","baseline")) %>%
+    mutate(model_family=if_else(startsWith(bundle,"xgboost"),"xgboost_cox","elastic_net_cox"),
+      n_patients=40,n_events=8,c_index=if_else(config=="both",.66,.55),c_index_lo=c_index-.05,c_index_hi=c_index+.05,
+      delta_c_vs_baseline=if_else(config=="both",.11,NA_real_),delta_c_lo=delta_c_vs_baseline-.04,
+      delta_c_hi=delta_c_vs_baseline+.04,mean_auc=.68),transfer_metrics_path)
+  write_csv(expand_grid(endpoint="nepc",bundle="xgboost_federated_model_adt",landmark_days=0,config="both",
+    horizon_days=c(365,730)) %>% mutate(auc=.7,n_cases=4),file.path(transfer_dir,"transfer_auc_t.csv"))
   pipeline_path <- normalizePath("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
   cfg <- list(data_root = root, cache_root = file.path(root, "cache"), fig_root = file.path(root, "figures"),
     cohorts = "adt", endpoints = c("platinum", "nepc"), scope = "all", labs = ANDROGEN,
@@ -163,7 +174,11 @@ local({
   stopifnot(identical(vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem"),
                       c("psa_forest", "testosterone_forest", "site_incidence_lm000",
                         "xgboost_performance", "xgboost_importance",
-                        "08_federated_xgboost")))
+                        "transfer_discrimination", "08_federated_xgboost")))
+  transfer_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated",
+    "transfer_discrimination__platinum.csv"), show_col_types = FALSE)
+  stopifnot(nrow(transfer_export) == 36L, file.exists(file.path(cfg$fig_root, "ADT", "federated",
+    "transfer_auc_t__platinum.csv")))
   # Both forest scenes keep widescreen slide dimensions through 05's cache;
   # the day-zero incidence layout is unchanged.
   for(scene in env$figure_run$prepared$federated$scenes[1:2]) {
@@ -178,8 +193,8 @@ local({
             !dir.exists(file.path(cfg$fig_root,"ADT","by_figure")))
   stopifnot(nrow(site_export) == 2L, all(site_export$landmark_days == 0))
   federated_cfg <- cfg; federated_cfg$scope <- "federated"
-  # Both XGBoost files require a refreshed 04 manifest after source changes.
-  for(path in c(xgb_metrics_path,xgb_importance_path)) {
+  # XGBoost and 09 transfer files require a refreshed 04 manifest after source changes.
+  for(path in c(xgb_metrics_path,xgb_importance_path,transfer_metrics_path)) {
     original_time <- file.info(path)$mtime
     Sys.setFileTime(path,original_time+5)
     changed <- tryCatch(figure_notebook_manifest(federated_cfg),error=identity)

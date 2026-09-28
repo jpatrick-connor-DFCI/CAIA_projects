@@ -830,8 +830,131 @@ render_federated_xgboost <- function(root,federated_path,dpi,overwrite) {
   invisible(NULL)
 }
 
+# Platinum-trained federated bundles scored on local endpoints by
+# 09_federated_transfer.ipynb. Dana-Farber is a federated training site, so
+# this is a cross-endpoint check, not external validation.
+FEDERATED_TRANSFER_FILES <- c("transfer_metrics.csv","transfer_auc_t.csv")
+FEDERATED_TRANSFER_ENDPOINTS <- c(platinum="Platinum (training endpoint)",nepc="NEPC",avpc="AVPC")
+FEDERATED_TRANSFER_MODELS <- c(xgboost_cox="XGBoost",elastic_net_cox="Elastic-net Cox")
+
+# Mirrors federated_transfer_dir() in prepare_figure_data.py.
+federated_transfer_dir <- function(config) {
+  path <- config$federated_transfer_path
+  if(length(path)==1L && !is.na(path) && nzchar(path)) path
+  else file.path(config$data_root,"federated_transfer_adt_w_MSK")
+}
+
+load_federated_transfer <- function(directory, kind=c("metrics","auc_t")) {
+  kind <- match.arg(kind)
+  path <- file.path(directory,paste0("transfer_",kind,".csv"))
+  if(!file.exists(path)) {
+    warning("Federated transfer ",kind," unavailable; missing: ",path)
+    return(NULL)
+  }
+  d <- readr::read_csv(path,show_col_types=FALSE)
+  needed <- c("endpoint","bundle","landmark_days","config",if(kind=="metrics")
+    c("model_family","n_patients","n_events","c_index") else c("horizon_days","auc","n_cases"))
+  missing <- setdiff(needed,names(d))
+  if(length(missing)) stop("Federated transfer ",kind," input is missing: ",paste(missing,collapse=", "))
+  # Bootstrap CIs, the age-only comparison and IPCW summaries are absent when
+  # 09 ran without them; keep the columns so plots show gaps, not errors.
+  optional <- if(kind=="metrics") c("c_index_lo","c_index_hi","c_index_baseline","delta_c_vs_baseline",
+    "delta_c_lo","delta_c_hi","mean_auc") else character()
+  for(column in setdiff(optional,names(d))) d[[column]] <- NA_real_
+  d <- mutate(d,endpoint=tolower(endpoint),config=as.character(config)) %>%
+    filter(endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS))
+  bounded <- if(kind=="metrics") c("c_index","c_index_lo","c_index_hi","c_index_baseline","mean_auc") else "auc"
+  for(column in bounded) {
+    if(!is.numeric(d[[column]]) && !all(is.na(d[[column]]))) stop("Non-numeric transfer metric: ",column)
+    if(any(!is.na(d[[column]]) & (!is.finite(d[[column]]) | d[[column]]<0 | d[[column]]>1)))
+      stop("Invalid transfer metric: ",column)
+  }
+  if(kind=="metrics" && (any(!is.finite(d$n_patients) | d$n_patients<0) ||
+     any(!is.finite(d$n_events) | d$n_events<0 | d$n_events>d$n_patients)))
+    stop("Invalid transfer patient/event counts")
+  keys <- c("endpoint","bundle","landmark_days","config",if(kind=="auc_t") "horizon_days")
+  if(anyDuplicated(d[keys])) stop("Duplicate ",paste(keys,collapse="/")," rows in federated transfer ",kind," input")
+  if(!nrow(d)) warning("No platinum/NEPC/AVPC rows in federated transfer ",kind," input: ",path)
+  d
+}
+
+prepare_federated_transfer <- function(metrics) {
+  landmarks <- sort(unique(metrics$landmark_days))
+  known <- unname(FEDERATED_TRANSFER_MODELS)
+  d <- metrics %>% mutate(
+    endpoint_label=factor(FEDERATED_TRANSFER_ENDPOINTS[endpoint],levels=FEDERATED_TRANSFER_ENDPOINTS),
+    model=coalesce(unname(FEDERATED_TRANSFER_MODELS[tolower(model_family)]),bundle),
+    model=factor(model,levels=c(intersect(known,model),sort(setdiff(unique(model),known)))),
+    features=factor(if_else(config=="baseline","Age only","Full model"),levels=c("Full model","Age only")),
+    landmark=factor(sprintf("%s%d days",if_else(landmark_days>0,"+",""),landmark_days),
+      levels=sprintf("%s%d days",ifelse(landmarks>0,"+",""),landmarks)))
+  metric_levels <- c("Harrell C-index","ΔC vs. age only","Mean AUC(t)")
+  bind_rows(
+    mutate(d,metric=metric_levels[1],value=c_index,lo=c_index_lo,hi=c_index_hi),
+    mutate(filter(d,config!="baseline"),metric=metric_levels[2],
+      value=delta_c_vs_baseline,lo=delta_c_lo,hi=delta_c_hi),
+    mutate(d,metric=metric_levels[3],value=mean_auc,lo=NA_real_,hi=NA_real_)) %>%
+    mutate(metric=factor(metric,levels=metric_levels))
+}
+
+federated_transfer_count_note <- function(metrics) {
+  metrics %>% distinct(endpoint,landmark_days,n_patients,n_events) %>%
+    mutate(endpoint=factor(endpoint,levels=names(FEDERATED_TRANSFER_ENDPOINTS))) %>%
+    arrange(endpoint,landmark_days) %>%
+    group_by(endpoint) %>%
+    summarise(note=paste0(toupper(first(as.character(endpoint))),": ",paste(sprintf("%dd %s/%s",
+      as.integer(landmark_days),scales::comma(n_patients),scales::comma(n_events)),collapse=", ")),.groups="drop") %>%
+    pull(note) %>% paste(collapse="; ")
+}
+
+plot_federated_transfer <- function(d, caption) {
+  models <- levels(d$model)
+  palette <- c(XGBoost="#B58900",`Elastic-net Cox`="#2a78d6")
+  extra <- setdiff(models,names(palette))
+  colors <- c(palette,setNames(rep_len(c("#1baf7a","#eb6834","#7f8c8d"),length(extra)),extra))
+  references <- tibble(metric=factor(levels(d$metric),levels=levels(d$metric)),reference=c(.5,0,.5))
+  dodge <- position_dodge(width=.7)
+  ggplot(d,aes(landmark,value,color=model,shape=features,group=interaction(model,features))) +
+    geom_hline(data=references,aes(yintercept=reference),inherit.aes=FALSE,color="grey55",linetype="dotted",linewidth=.8) +
+    geom_linerange(aes(ymin=lo,ymax=hi),position=dodge,linewidth=.8,na.rm=TRUE) +
+    geom_point(position=dodge,size=2.8,stroke=1.1,fill="white",na.rm=TRUE) +
+    scale_color_manual(values=colors,name=NULL,drop=FALSE) +
+    scale_shape_manual(values=c(`Full model`=16,`Age only`=21),name=NULL,drop=FALSE) +
+    facet_grid(metric~endpoint_label,scales="free_y",switch="y") +
+    labs(x="Landmark after ADT start",y=NULL,caption=caption,
+      title="Federated platinum models applied to local Dana-Farber endpoints",
+      subtitle="Cross-endpoint check: Dana-Farber is a federated training site, so this is not external validation") +
+    theme_fig() +
+    theme(strip.placement="outside",strip.background=element_blank(),strip.text=element_text(face="bold"),
+      legend.position="top",legend.justification="left",panel.grid.minor=element_blank(),
+      panel.spacing=grid::unit(.8,"lines"),plot.title.position="plot",plot.caption.position="plot",
+      plot.caption=element_text(hjust=0,size=10))
+}
+
+render_federated_transfer <- function(root, directory, dpi, overwrite) {
+  metrics <- load_federated_transfer(directory,"metrics")
+  if(is.null(metrics) || !nrow(metrics)) return(invisible(NULL))
+  auc_t <- load_federated_transfer(directory,"auc_t")
+  capture <- getOption("compass.figure_table_capture")
+  write_table <- function(data,stem) {
+    path <- file.path(root,paste0(stem,"__platinum.csv"))
+    readr::write_csv(data,path)
+    if(is.function(capture)) capture(path)
+  }
+  caption <- paste(
+    "Platinum-trained federated bundles scored on the local ADT cohort; platinum rows are partly in-sample (Dana-Farber contributed training data).",
+    "Bars: 95% bootstrap CIs over patients; ΔC pairs full and age-only models on the same resamples. Mean AUC(t): IPCW cumulative/dynamic AUC over estimable horizons.",
+    paste0("Patients/events by landmark — ",federated_transfer_count_note(metrics),"."),sep="\n")
+  d <- prepare_federated_transfer(metrics)
+  write_table(metrics,"transfer_discrimination")
+  if(!is.null(auc_t) && nrow(auc_t)) write_table(auc_t,"transfer_auc_t")
+  save_federated_panel(plot_federated_transfer(d,caption),
+    file.path(root,"transfer_discrimination__platinum.png"),13,9.5,dpi,overwrite)
+  invisible(metrics)
+}
+
 render_federated_supplement <- function(data_root, fig_root, federated_path,
-                                                dpi = 200, overwrite = FALSE) {
+                                                dpi = 200, overwrite = FALSE, transfer_dir = NULL) {
   d <- load_federated_forest(federated_path)
   root <- file.path(fig_root, "ADT", "federated")
   dir.create(root, recursive = TRUE, showWarnings = FALSE)
@@ -861,6 +984,7 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
       file.path(root, "site_incidence_lm000__platinum.png"), 14, 5.5, dpi, overwrite)
   }
   render_federated_xgboost(root,federated_path,dpi,overwrite)
+  if (!is.null(transfer_dir)) render_federated_transfer(root, transfer_dir, dpi, overwrite)
   invisible(d)
 }
 
@@ -1851,6 +1975,9 @@ figure_notebook_manifest <- function(config, check_sources = TRUE) {
       function(filename) federated_within_site_file(config$federated_path, filename), character(1)),
       file.path(dirname(config$federated_path), "federated_xgboost",
         c("xgboost_federated_metrics_adt.csv","xgboost_federated_importance_adt.csv")))
+    registered_inputs <- c(registered_inputs, file.path(federated_transfer_dir(config), FEDERATED_TRANSFER_FILES))
+    if (!same_path(federated_transfer_dir(prepared), federated_transfer_dir(config)))
+      fail("Prepared federated transfer path does not match.")
     for (site_path in registered_inputs) {
       filename <- basename(site_path)
       if (!any(vapply(manifest$federated_sources, function(item)
@@ -1939,7 +2066,8 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
         return(list(skipped = TRUE))
       }
       build <- function() render_federated_supplement(config$data_root, config$fig_root,
-        federated_config$results, dpi = dpi, overwrite = TRUE)
+        federated_config$results, dpi = dpi, overwrite = TRUE,
+        transfer_dir = federated_transfer_dir(config))
     } else {
       build <- function() {
         message("Preparing figure set: ", job$name)

@@ -32,7 +32,7 @@
 # normal updates and `render` for DPI/PDF changes.
 #
 # `COMPASS_FIGURE_SCOPE=federated` processes only the federated forests, site cohort report,
-# and XGBoost performance/importance figures without
+# XGBoost performance/importance, and platinum-to-NEPC/AVPC transfer figures without
 # requiring longitudinal data or running other figure families.
 #
 # The site report reads `nvflare_within_site_univariate_cox/cox_within_site_all_sites_cohort.csv`
@@ -260,6 +260,18 @@
 # CSV sidecars retain source metadata, counts, all feature gains, and display flags.
 # Identifier features with nonzero gain trigger a warning and a figure caption;
 # they are not silently removed or treated as validated predictors.
+#
+# Federated transfer (`COMPASS_FEDERATED_TRANSFER`, default
+# `federated_transfer_adt_w_MSK/`) reads `transfer_metrics.csv` and
+# `transfer_auc_t.csv` written by `09_federated_transfer.ipynb`: the
+# platinum-trained federated XGBoost and elastic-net bundles scored on the local
+# ADT cohort for platinum, NEPC, and AVPC. `federated/transfer_discrimination__platinum`
+# shows Harrell's C with 95% bootstrap CIs, the paired gain over the age-only
+# model, and IPCW mean AUC(t) by landmark, faceted by endpoint. Dana-Farber is a
+# federated training site, so this is a cross-endpoint check, not external
+# validation; platinum rows are partly in-sample. CSV sidecars keep all metrics
+# (`transfer_discrimination__platinum.csv`) and per-horizon AUC(t)
+# (`transfer_auc_t__platinum.csv`). Missing transfer outputs are reported and skipped.
 # Missing optional XGBoost files are reported and skipped independently. Run `04`
 # again after this update to register both files (including absent paths), then
 # run `05_figures.R` with stage `all`. All Python remains in `04`; graphics caches stay in data.
@@ -322,7 +334,8 @@ METASTATIC_SUPPLEMENT <- list(
   icd = file.path(NEPC_PROJ_PATH, "prostate_icd_data.csv"))
 FEDERATED_SUPPLEMENT <- list(
   results = Sys.getenv("COMPASS_FEDERATED_RESULTS", file.path(
-    NEPC_PROJ_PATH, "federated_results_w_MSK", "cox_federated_univariate_adt.csv")))
+    NEPC_PROJ_PATH, "federated_results_w_MSK", "cox_federated_univariate_adt.csv")),
+  transfer = Sys.getenv("COMPASS_FEDERATED_TRANSFER", file.path(NEPC_PROJ_PATH, "federated_transfer_adt_w_MSK")))
 RENDER_PROFILE <- match.arg(tolower(Sys.getenv("COMPASS_RENDER_PROFILE", "fast")), c("fast", "publication"))
 RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 200
 RENDER_PDF <- env_flag("COMPASS_RENDER_PDF")
@@ -342,7 +355,8 @@ figure_config <- list(
   metastatic = PLOT_METASTATIC_LABEL_SUPPLEMENT, metastatic_extra = metastatic_extra_panels_enabled(),
   metastatic_sources = METASTATIC_SUPPLEMENT[c("intent", "stage", "llm", "icd")],
   federated = PLOT_FEDERATED_SUPPLEMENT,
-  federated_path = FEDERATED_SUPPLEMENT$results)
+  federated_path = FEDERATED_SUPPLEMENT$results,
+  federated_transfer_path = FEDERATED_SUPPLEMENT$transfer)
 
 # ---- Prepare and render -----------------------------------------------------
 figure_run <- run_cached_figure_workflow(
