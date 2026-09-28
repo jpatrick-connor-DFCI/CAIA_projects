@@ -372,7 +372,7 @@ figure_archive_old_exports <- function(config, prepared) {
 # ============================================================================
 # ---- federated figures -----------------------------------------------------
 # ============================================================================
-# Federated PSA/testosterone forests, site counts, and XGBoost Figure 4 reports.
+# Federated PSA/testosterone forests, site counts, and elastic-net/XGBoost Figure 4 reports.
 # Covers all participating sites, including MSK.
 # Significance uses the supplied
 # p/q values, never an FDR recalculation on this selected subset.
@@ -389,6 +389,8 @@ federated_lab_label <- function(raw) {
   mapped <- unname(aliases[short])
   short[!is.na(mapped)] <- mapped[!is.na(mapped)]
   short[grepl("^Erythrocyte__DistWidth", raw)] <- "RDW"
+  short[grepl("^aPTT_", raw)] <- "aPTT"
+  short[short == "Lactate dehydrogenase"] <- "LDH"
   short
 }
 
@@ -719,66 +721,110 @@ plot_federated_comparison <- function(estimates, analyte, population_note) {
       plot.margin=margin(12,18,12,12))
 }
 
-load_federated_xgboost <- function(path, kind=c("metrics","importance")) {
-  kind <- match.arg(kind)
+# Federated multivariable models (elastic-net Cox and XGBoost) share one export
+# schema: held-out test metrics per landmark/config plus per-feature values.
+FEDERATED_MULTIVARIABLE <- list(
+  elastic_net=list(label="Elastic-net Cox",directory="federated_cox_multivariate",
+    files=c(metrics="cox_federated_elasticnet_metrics_adt.csv",
+      features="cox_federated_elasticnet_coefficients_adt.csv"),
+    model="elastic_net_cox",value="coefficient",kind="cox",
+    stems=c(metrics="elasticnet_performance",features="elasticnet_coefficients"),
+    series=c(both="Elastic-Net Cox",baseline="Cox baseline (age)")),
+  xgboost=list(label="XGBoost",directory="federated_xgboost",
+    files=c(metrics="xgboost_federated_metrics_adt.csv",
+      features="xgboost_federated_importance_adt.csv"),
+    model="xgboost_cox",value="gain",kind="xgb",
+    stems=c(metrics="xgboost_performance",features="xgboost_importance"),
+    series=c(both="XGBoost Survival",baseline="XGBoost baseline (age)")))
+# Local Figure 4 series colors; age baselines are the lighter twins.
+FEDERATED_MODEL_COLORS <- c("Elastic-Net Cox"="#4C72B0","Cox baseline (age)"="#9DB3D6",
+  "XGBoost Survival"="#B58900","XGBoost baseline (age)"="#E0CC8A")
+FEDERATED_FEATURE_STATS <- c("mean","min","max","last","delta","n_observations")
+
+federated_multivariable_files <- function(federated_path, family) {
+  spec <- FEDERATED_MULTIVARIABLE[[family]]
+  setNames(file.path(dirname(federated_path),spec$directory,spec$files),names(spec$files))
+}
+
+# OMOP names contain internal double underscores, and missingness indicators
+# follow the statistic ("__delta__missing" -> "delta missing"). Unknown
+# suffixes fall back to the last "__" component.
+federated_feature_stat <- function(feature) {
+  pattern <- paste0("^.*__(",paste(FEDERATED_FEATURE_STATS,collapse="|"),")(__missing)?$")
+  stat <- sub("__missing$"," missing",sub(pattern,"\\1\\2",feature))
+  if_else(grepl(pattern,feature),stat,
+    if_else(grepl("__",feature,fixed=TRUE),sub("^.*__","",feature),""))
+}
+
+load_federated_multivariable <- function(path, family=names(FEDERATED_MULTIVARIABLE),
+                                         kind=c("metrics","features")) {
+  family <- match.arg(family); kind <- match.arg(kind)
+  spec <- FEDERATED_MULTIVARIABLE[[family]]
+  what <- paste("Federated",spec$label,if(kind=="metrics") "metrics" else
+    if(spec$kind=="cox") "coefficients" else "importance")
   if (!file.exists(path)) {
-    warning("Federated XGBoost ",kind," unavailable; missing: ",path)
+    warning(what," unavailable; missing: ",path)
     return(NULL)
   }
   d <- readr::read_csv(path,show_col_types=FALSE)
   needed <- c("analysis_label","endpoint","landmark_days",if(kind=="metrics")
-    c("model","cohort","config","test_c_index","test_mean_auc_t","n_test","n_events_test") else c("feature","gain"))
+    c("model","cohort","config","test_c_index","test_mean_auc_t","n_test","n_events_test") else c("feature",spec$value))
   missing <- setdiff(needed,names(d))
-  if(length(missing)) stop("Federated XGBoost ",kind," input is missing: ",paste(missing,collapse=", "))
+  if(length(missing)) stop(what," input is missing: ",paste(missing,collapse=", "))
   d <- filter(d,tolower(analysis_label)=="adt",tolower(endpoint)=="platinum",landmark_days %in% c(0,90,180))
   if(kind=="metrics") {
-    d <- filter(d,tolower(model)=="xgboost_cox",tolower(cohort)=="all",config %in% c("both","baseline"))
+    d <- filter(d,tolower(model)==spec$model,tolower(cohort)=="all",config %in% c("both","baseline"))
     keys <- c("landmark_days","config")
     for(column in c("test_c_index","test_mean_auc_t")) {
-      if(!is.numeric(d[[column]]) && !all(is.na(d[[column]]))) stop("Non-numeric XGBoost metric: ",column)
+      if(!is.numeric(d[[column]]) && !all(is.na(d[[column]]))) stop("Non-numeric ",spec$label," metric: ",column)
       if(any(!is.na(d[[column]]) & (!is.finite(d[[column]]) | d[[column]]<0 | d[[column]]>1)))
-        stop("Invalid XGBoost metric: ",column)
+        stop("Invalid ",spec$label," metric: ",column)
     }
     if(any(!is.na(d$n_test) & (!is.finite(d$n_test) | d$n_test<0)) ||
        any(!is.na(d$n_events_test) & (!is.finite(d$n_events_test) | d$n_events_test<0 | d$n_events_test>d$n_test),na.rm=TRUE))
-      stop("Invalid XGBoost test counts")
+      stop("Invalid ",spec$label," test counts")
   } else {
     keys <- c("landmark_days","feature")
-    if(any(is.na(d$feature) | !nzchar(trimws(d$feature)))) stop("Missing XGBoost feature name")
-    if(!is.numeric(d$gain) || any(!is.finite(d$gain) | d$gain<0)) stop("Invalid XGBoost gain")
-    # OMOP names contain internal double underscores: the statistic is the LAST
-    # suffix, unlike the short local names. Keep original names/gains in CSV.
-    d <- mutate(d,lab_name=federated_lab_label(feature),
-      feature_stat=if_else(grepl("__",feature,fixed=TRUE),sub("^.*__","",feature),""),
+    if(any(is.na(d$feature) | !nzchar(trimws(d$feature)))) stop("Missing ",spec$label," feature name")
+    value <- d[[spec$value]]
+    if(!is.numeric(value) || any(!is.finite(value)) || (spec$kind=="xgb" && any(value<0)))
+      stop("Invalid ",spec$label," ",spec$value)
+    # Keep original names and values in the CSV; labels are display-only.
+    d <- mutate(d,lab_name=federated_lab_label(feature),feature_stat=federated_feature_stat(feature),
       identifier_feature=tolower(feature) %in% c("person_id","patient_id","dfci_mrn","mrn"))
+    if(spec$kind=="cox") d$coef <- d$coefficient
   }
   if(anyDuplicated(d[keys])) stop("Duplicate landmark/",if(kind=="metrics") "config" else "feature",
-    " rows in federated XGBoost ",kind," input")
-  if(!nrow(d)) warning("No ADT/platinum rows in federated XGBoost ",kind," input: ",path)
+    " rows in ",what," input")
+  if(!nrow(d)) warning("No ADT/platinum rows in ",what," input: ",path)
   d
 }
 
-prepare_federated_xgboost_performance <- function(metrics) {
+prepare_federated_performance <- function(metrics, family) {
+  series <- FEDERATED_MULTIVARIABLE[[family]]$series
   metrics %>% complete(landmark_days=c(0,90,180),config=c("both","baseline")) %>%
-    mutate(name=factor(if_else(config=="both","XGBoost Survival","XGBoost baseline (age)"),
-      levels=c("XGBoost Survival","XGBoost baseline (age)")),
+    mutate(family=.env$family,name=factor(unname(series[config]),levels=unname(series)),
       landmark=landmark_days,auc=test_mean_auc_t,cindex=test_c_index)
 }
 
-federated_xgboost_audit_note <- function(importance) {
-  if(is.null(importance)) return("Feature-input audit unavailable: importance file missing.")
-  ids <- filter(importance,identifier_feature,gain>0)
+federated_input_audit_note <- function(features, family) {
+  spec <- FEDERATED_MULTIVARIABLE[[family]]
+  noun <- if(spec$kind=="cox") "coefficients" else "importance"
+  if(is.null(features)) return(paste0("Feature-input audit unavailable: ",spec$label," ",noun," file missing."))
+  ids <- features[features$identifier_feature & features[[spec$value]]!=0,,drop=FALSE]
   if(!nrow(ids)) return("")
   paste0("CAUTION: identifier feature(s) ",paste(unique(ids$feature),collapse=", "),
-    " have nonzero gain at landmark(s) ",paste(sort(unique(ids$landmark_days)),collapse=", "),
-    " days; audit model inputs before interpreting performance or importance.")
+    " have nonzero ",spec$label," ",if(spec$kind=="cox") "coefficients" else "gain",
+    " at landmark(s) ",paste(sort(unique(ids$landmark_days)),collapse=", "),
+    " days; audit model inputs before interpreting performance or ",noun,".")
 }
 
-render_federated_xgboost <- function(root,federated_path,dpi,overwrite) {
-  directory <- file.path(dirname(federated_path),"federated_xgboost")
-  metrics <- load_federated_xgboost(file.path(directory,"xgboost_federated_metrics_adt.csv"),"metrics")
-  importance <- load_federated_xgboost(file.path(directory,"xgboost_federated_importance_adt.csv"),"importance")
-  audit <- federated_xgboost_audit_note(importance)
+render_federated_multivariable <- function(root,federated_path,family,dpi,overwrite) {
+  spec <- FEDERATED_MULTIVARIABLE[[family]]
+  paths <- federated_multivariable_files(federated_path,family)
+  metrics <- load_federated_multivariable(paths[["metrics"]],family,"metrics")
+  features <- load_federated_multivariable(paths[["features"]],family,"features")
+  audit <- federated_input_audit_note(features,family)
   if(startsWith(audit,"CAUTION")) warning(audit)
   capture <- getOption("compass.figure_table_capture")
   write_table <- function(data,stem) {
@@ -788,8 +834,8 @@ render_federated_xgboost <- function(root,federated_path,dpi,overwrite) {
   }
   context <- "ADT · platinum endpoint · federated (all sites)"
   if(!is.null(metrics) && nrow(metrics)) {
-    d <- prepare_federated_xgboost_performance(metrics)
-    colors <- c("XGBoost Survival"="#B58900","XGBoost baseline (age)"="#E0CC8A")
+    d <- prepare_federated_performance(metrics,family)
+    colors <- FEDERATED_MODEL_COLORS[unname(spec$series)]
     count_note <- d %>% arrange(landmark_days,config) %>%
       transmute(note=sprintf("%dd %s: n=%s, events=%s",landmark_days,
         if_else(config=="both","labs","baseline"),scales::comma(n_test),scales::comma(n_events_test))) %>%
@@ -801,31 +847,41 @@ render_federated_xgboost <- function(root,federated_path,dpi,overwrite) {
       list(plot=plot_model_discrimination(d,metric,if(metric=="auc") "Test Mean AUC(t)" else "Test C-index",
         colors,show_legend=TRUE)+labs(caption=caption),stem=stem,destination=file.path(root,"platinum"))
     })
-    spec <- figure_compilation_spec(items[[1]]$stem)
-    spec$title <- "Federated XGBoost: labs vs. age baseline"; spec$context <- context
-    p <- figure_combine(items,spec,tempdir())
-    write_table(mutate(d,input_audit_note=audit),"xgboost_performance")
-    save_federated_panel(p,file.path(root,"xgboost_performance__platinum.png"),spec$width,spec$height,dpi,overwrite)
+    figure <- figure_compilation_spec(items[[1]]$stem)
+    figure$title <- paste0("Federated ",spec$label,": labs vs. age baseline"); figure$context <- context
+    p <- figure_combine(items,figure,tempdir())
+    write_table(mutate(d,input_audit_note=audit),spec$stems[["metrics"]])
+    save_federated_panel(p,file.path(root,paste0(spec$stems[["metrics"]],"__platinum.png")),
+      figure$width,figure$height,dpi,overwrite)
   }
-  if(!is.null(importance) && nrow(importance)) {
-    caption <- paste("Top 15 positive-gain features per landmark; age and body height excluded from display, as in local plots.",
+  if(!is.null(features) && nrow(features)) {
+    caption <- if(spec$kind=="cox") paste(
+      "Top 15 nonzero coefficients by absolute value per landmark; age and body height excluded from display, as in local plots.",
+      "Coefficients are signed log hazard-ratio coefficients, conditional on the other selected features. All source features remain in the CSV.",
+      audit,sep="\n") else paste(
+      "Top 15 positive-gain features per landmark; age and body height excluded from display, as in local plots.",
       "Gains are supplied model split gains, not signed effects or SHAP values. All source features remain in the CSV.",audit,sep="\n")
     items <- lapply(c(0,90,180),function(lm) {
-      d <- filter(importance,landmark_days==lm,tolower(feature)!="age",gain>0)
-      stem <- paste0("figure4b_importance_platinum_xgb_landmark",lm)
-      p <- plot_model_importance(d,"xgb",paste("Landmark",lm,"days"))+labs(caption=caption)
-      if(!any(importance$landmark_days==lm)) p <- p+labs(subtitle="Importance unavailable")
+      d <- features[features$landmark_days==lm & tolower(features$feature)!="age" &
+        features[[spec$value]]!=0,,drop=FALSE]
+      stem <- paste0("figure4b_importance_platinum_",spec$kind,"_landmark",lm)
+      p <- plot_model_importance(d,spec$kind,paste("Landmark",lm,"days"))+labs(caption=caption)
+      if(!any(features$landmark_days==lm))
+        p <- p+labs(subtitle=paste(if(spec$kind=="cox") "Coefficients" else "Importance","unavailable"))
       list(plot=p,stem=stem,destination=file.path(root,"platinum"))
     })
     shown <- bind_rows(tibble(landmark_days=numeric(),feature=character()),
       Filter(is.data.frame,lapply(items,function(item) item$plot$data)))
-    exported <- importance %>% mutate(displayed=paste(landmark_days,feature) %in% paste(shown$landmark_days,shown$feature),
+    exported <- features %>% mutate(displayed=paste(landmark_days,feature) %in% paste(shown$landmark_days,shown$feature),
       input_audit_note=audit)
-    spec <- figure_compilation_spec(items[[1]]$stem)
-    spec$title <- "Federated XGBoost feature importance"; spec$context <- context
-    p <- figure_combine(items,spec,tempdir())
-    write_table(exported,"xgboost_importance")
-    save_federated_panel(p,file.path(root,"xgboost_importance__platinum.png"),spec$width,spec$height,dpi,overwrite)
+    figure <- figure_compilation_spec(items[[1]]$stem)
+    figure$title <- if(spec$kind=="cox") "Federated elastic-net Cox coefficients" else
+      "Federated XGBoost feature importance"
+    figure$context <- context
+    p <- figure_combine(items,figure,tempdir())
+    write_table(exported,spec$stems[["features"]])
+    save_federated_panel(p,file.path(root,paste0(spec$stems[["features"]],"__platinum.png")),
+      figure$width,figure$height,dpi,overwrite)
   }
   invisible(NULL)
 }
@@ -983,7 +1039,8 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
     save_federated_panel(plot_federated_sites(sites),
       file.path(root, "site_incidence_lm000__platinum.png"), 14, 5.5, dpi, overwrite)
   }
-  render_federated_xgboost(root,federated_path,dpi,overwrite)
+  for(family in names(FEDERATED_MULTIVARIABLE))
+    render_federated_multivariable(root,federated_path,family,dpi,overwrite)
   if (!is.null(transfer_dir)) render_federated_transfer(root, transfer_dir, dpi, overwrite)
   invisible(d)
 }
@@ -1057,10 +1114,10 @@ manuscript_captions <- function() {
       "Figure 7. Site-specific platinum incidence and federated PSA and testosterone associations.",
       "The Dana-Farber, Fred Hutch, and Johns Hopkins ADT cohorts are shown at treatment initiation. (a) Observed platinum-event fractions during follow-up with 95% Wilson confidence intervals. (b) Pale bars show analyzed patients and solid bars show observed platinum events; labels give events/patients. (c,d) Natural-log hazard ratios per standard-deviation increase and 95% confidence intervals for PSA (c) and testosterone (d) at the three sites with within-site results and in the supplied pooled federated analysis, which also includes Memorial Sloan Kettering (MSK). Columns show the mean, minimum, maximum, and last observed value; rows show landmarks at 0, 90, and 180 days. Dashed lines at 0 mark the null. Open circles indicate nonsignificant associations, filled circles indicate nominal P < 0.05 without false-discovery-rate significance, and diamonds indicate supplied q < 0.05.",
       "Site-specific fractions are observed event proportions rather than censoring-adjusted cumulative incidence estimates. For PSA, federated modeled/observed sample sizes were 22,138/16,840 at day 0, 21,791/20,707 at day 90, and 21,216/20,643 at day 180. Corresponding testosterone sample sizes were 22,138/9,483, 21,791/14,206, and 21,216/14,359. Federated patient/event counts exceed the combined Dana-Farber, Fred Hutch, and Johns Hopkins counts by 9,939/308 at day 0, 9,741/277 at day 90, and 9,395/252 at day 180, attributed to MSK, which supplied no within-site results; site membership was not independently verified. Supplied q values were not recalculated. ADT, androgen-deprivation therapy; PSA, prostate-specific antigen; SD, standard deviation."),
-    `08_federated_xgboost`=caption(
-      "Figure 8. Federated XGBoost performance and feature importance for prediction of platinum treatment.",
-      "(a,b) Held-out test mean AUC(t) (a) and Harrell C-index (b) for the XGBoost survival model and age-only XGBoost baseline at 0, 90, and 180 days after ADT initiation; the dotted horizontal line marks 0.5. (c-e) Positive split-gain feature importances at day 0 (c), day 90 (d), and day 180 (e), with up to 15 features displayed per landmark. Colors identify laboratory categories.",
-      "Models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data. Test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180 for both model configurations. Performance values are from held-out test sets rather than training or tuning cross-validation. Gains are unsigned measures of split improvement and are not signed effects or SHAP values. abs., absolute; ADT, androgen-deprivation therapy; ALP, alkaline phosphatase; ALT, alanine aminotransferase; AST, aspartate aminotransferase; AUC(t), time-dependent area under the receiver-operating-characteristic curve; C-index, concordance index; MCH, mean corpuscular hemoglobin; MCV, mean corpuscular volume; PSA, prostate-specific antigen; RDW, red-cell distribution width; SHAP, Shapley additive explanations; TSH, thyroid-stimulating hormone.")
+    `08_federated_multivariable`=caption(
+      "Figure 8. Federated multivariable laboratory models for prediction of platinum treatment.",
+      "(a,b) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t) (a), and Harrell concordance index (b) for federated Elastic-Net Cox and XGBoost survival models at 0, 90, and 180 days after ADT initiation. Laboratory models are compared with age-only baselines; the dotted horizontal line marks 0.5. (c) Nonzero Elastic-Net Cox coefficients at each landmark, with up to 15 coefficients of largest absolute value displayed. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (d) XGBoost split-gain feature importance at each landmark, with up to 15 positive-gain features displayed. Colors in c and d identify laboratory categories.",
+      "Models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data. Test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180 for all model configurations. Performance values are from held-out test sets rather than training or tuning cross-validation. Age and body height are not displayed. Feature labels give the measurement and summary statistic; \"missing\" marks an indicator that the statistic was unavailable. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and are not signed effects or SHAP values. abs., absolute; ADT, androgen-deprivation therapy; ALP, alkaline phosphatase; ALT, alanine aminotransferase; AST, aspartate aminotransferase; AUC(t), time-dependent area under the receiver-operating-characteristic curve; C-index, concordance index; DBP, diastolic blood pressure; MCH, mean corpuscular hemoglobin; MCV, mean corpuscular volume; n obs., number of observations; PSA, prostate-specific antigen; PT, prothrombin time; RBC, red blood cell count; RDW, red-cell distribution width; SBP, systolic blood pressure; SHAP, Shapley additive explanations; TSH, thyroid-stimulating hormone; WBC, white blood cell count.")
   )
 }
 
@@ -1419,38 +1476,44 @@ manuscript_federated_incidence_associations <- function(incidence,labs) {
     legend=paste(incidence$legend,labs$legend,sep="\n"))
 }
 
-manuscript_federated_xgb <- function(metrics,importance) {
-  d <- prepare_federated_xgboost_performance(metrics)
-  colors <- c("XGBoost Survival"="#B58900","XGBoost baseline (age)"="#E0CC8A")
+manuscript_federated_feature_label <- function(x) {
+  x <- gsub("Alkaline phosphatase","ALP",x,fixed=TRUE)
+  x <- gsub("Diastolic blood pressure","DBP",x,fixed=TRUE)
+  x <- gsub("Systolic blood pressure","SBP",x,fixed=TRUE)
+  x <- gsub(" absolute"," abs.",x,fixed=TRUE)
+  gsub("n_observations","n obs.",x,fixed=TRUE)
+}
+
+# Mirrors local Figure 4: four-series discrimination (a,b), elastic-net
+# coefficients (c) and XGBoost gains (d), from the captured supplement CSVs.
+manuscript_federated_multivariable <- function(performance,coefficients,importance) {
+  d <- performance %>% mutate(name=factor(name,levels=names(FEDERATED_MODEL_COLORS)))
+  stopifnot(!anyNA(d$name),!anyDuplicated(d[c("name","landmark")]))
   plots <- lapply(c("auc","cindex"),function(metric)
     plot_model_discrimination(d,metric,if(metric=="auc") "Test mean AUC(t)" else "Test C-index",
-      colors,show_legend=TRUE))
-  for(lm in c(0,90,180)) {
-    selected <- importance[importance$landmark_days==lm & importance$displayed %in% TRUE,,drop=FALSE]
-    plots[[length(plots)+1L]] <- plot_model_importance(selected,"xgb",NULL) +
-      ggplot2::scale_y_discrete(labels=function(x) {
-        x <- gsub("Alkaline phosphatase","ALP",x,fixed=TRUE)
-        gsub("Neutrophils absolute","Neutrophils (abs.)",x,fixed=TRUE)
-      }) + ggplot2::guides(fill=ggplot2::guide_legend(nrow=1))
+      FEDERATED_MODEL_COLORS,show_legend=TRUE))
+  for(kind in c("cox","xgb")) for(lm in c(0,90,180)) {
+    features <- if(kind=="cox") coefficients else importance
+    selected <- features[features$landmark_days==lm & features$displayed %in% TRUE,,drop=FALSE]
+    plots[[length(plots)+1L]] <- plot_model_importance(selected,kind,NULL) +
+      ggplot2::scale_y_discrete(labels=manuscript_federated_feature_label)
   }
-  spec <- list(key="08_federated_xgboost",width=7.2,height=10.2,
-    layout=rbind(c(1,1,2,2),c(3,3,3,3),c(4,4,4,4),c(5,5,5,5)),
-    row_heights=c(.85,.65,1,1.2),
-    titles=c("Test mean AUC(t)","Test C-index","Feature importance: day 0",
-      "Feature importance: day 90","Feature importance: day 180"))
-  # Share the category legend across importance panels. Keep the performance
-  # legend in A/B because its colors encode model configuration, not lab class.
-  for(i in 3:4) plots[[i]] <- plots[[i]] + ggplot2::guides(fill="none")
-  p <- manuscript_combine(plots,spec)
-  audit <- unique(c(metrics$input_audit_note,importance$input_audit_note))
+  spec <- list(key="08_federated_multivariable",width=8.5,height=11.8,layout=matrix(1:4,4),
+    row_heights=c(.9,.9,1,1),
+    titles=c("Test mean AUC(t)","Test C-index","Elastic-Net coefficients","XGBoost feature importance"))
+  p <- manuscript_multivariable_labs(plots,spec)
+  audit <- unique(as.character(c(performance$input_audit_note,coefficients$input_audit_note,
+    importance$input_audit_note)))
   audit <- audit[!is.na(audit)&nzchar(audit)]
-  counts <- paste(sprintf("Day %d, %s: test n=%s; events=%s",metrics$landmark_days,
-    metrics$config,metrics$n_test,metrics$n_events_test),collapse="\n")
-  list(plot=p,spec=spec,data=metrics,legend=paste(
-    "a: test mean AUC(t). b: test C-index. c–e: feature importance at days 0, 90 and 180.",
-    "Held-out test metrics, not training or tuning CV. Original gold model/baseline bars and lab-category importance colors.",
-    "Up to 15 positive-gain features per landmark, using the original display exclusions. ALP: alkaline phosphatase; abs.: absolute count.",
-    "Gains are supplied split gains, not signed effects or SHAP values.",counts,paste(audit,collapse="\n"),sep="\n"))
+  d <- arrange(d,name,landmark)
+  counts <- paste(sprintf("Day %s, %s: test n=%s; events=%s",d$landmark,as.character(d$name),
+    d$n_test,d$n_events_test),collapse="\n")
+  list(plot=p,spec=spec,data=d,legend=paste(
+    "a: test mean AUC(t). b: test C-index. c: Elastic-Net coefficients at days 0, 90 and 180. d: XGBoost feature importance at days 0, 90 and 180.",
+    "Held-out test metrics, not training or tuning CV. Local Figure 4 model colors (hatched age baselines) and lab-category colors.",
+    "Up to 15 nonzero coefficients (by absolute value) or positive-gain features per landmark, using the local display exclusions (age, body height).",
+    "Coefficients are signed log hazard ratios; gains are supplied split gains, not signed effects or SHAP values.",
+    counts,paste(audit,collapse="\n"),sep="\n"))
 }
 
 manuscript_build <- function(items,tables,root) {
@@ -1561,8 +1624,18 @@ manuscript_build <- function(items,tables,root) {
     result[["07"]] <- manuscript_federated_incidence_associations(
       manuscript_federated_incidence(site_incidence),
       manuscript_federated_labs(dplyr::bind_rows(psa,testosterone)))
-  metrics <- read("^xgboost_performance__platinum[.]csv$"); importance <- read("^xgboost_importance__platinum[.]csv$")
-  if(!is.null(metrics)&&!is.null(importance)) result[["08"]] <- manuscript_federated_xgb(metrics,importance)
+  federated <- lapply(c(elasticnet_performance="elasticnet_performance",xgboost_performance="xgboost_performance",
+    coefficients="elasticnet_coefficients",importance="xgboost_importance"),
+    function(stem) read(paste0("^",stem,"__platinum[.]csv$")))
+  available <- !vapply(federated,is.null,logical(1))
+  if(all(available)) {
+    # An all-empty audit column reads back as logical; align before binding.
+    performance <- dplyr::bind_rows(lapply(federated[1:2],function(d)
+      mutate(d,input_audit_note=as.character(input_audit_note))))
+    result[["08"]] <- manuscript_federated_multivariable(performance,federated$coefficients,federated$importance)
+  } else if(any(available))
+    message("Skipping manuscript Figure 8: missing captured federated ",
+      paste(names(federated)[!available],collapse=", "))
   result
 }
 
@@ -1973,8 +2046,8 @@ figure_notebook_manifest <- function(config, check_sources = TRUE) {
       fail("Requested federated results were not prepared.")
     registered_inputs <- c(vapply(c("cox_within_site_all_sites_cohort.csv", "cox_within_site_all_sites_results.csv"),
       function(filename) federated_within_site_file(config$federated_path, filename), character(1)),
-      file.path(dirname(config$federated_path), "federated_xgboost",
-        c("xgboost_federated_metrics_adt.csv","xgboost_federated_importance_adt.csv")))
+      unlist(lapply(names(FEDERATED_MULTIVARIABLE), function(family)
+        federated_multivariable_files(config$federated_path, family)), use.names = FALSE))
     registered_inputs <- c(registered_inputs, file.path(federated_transfer_dir(config), FEDERATED_TRANSFER_FILES))
     if (!same_path(federated_transfer_dir(prepared), federated_transfer_dir(config)))
       fail("Prepared federated transfer path does not match.")
@@ -2203,7 +2276,8 @@ reformat_downloaded_figures <- function(input, output, landmark=0L) {
   pattern <- paste0("^(figure1_cohort|figure2v3_llm|classifier_validation|subtype_platinum|",
     "metastatic_label_agreement|labs_univariate_all_landmarks|somatic_carrier_km_page[0-9]+|",
     "discrimination|sensitivity_(gleason|somatic)|importance_(cox|xgb)|km_extremes|",
-    "xgboost_(performance|importance)|event_incidence_lm[0-9]+|metastatic_label_overlap)__")
+    "xgboost_(performance|importance)|elasticnet_(performance|coefficients)|",
+    "event_incidence_lm[0-9]+|metastatic_label_overlap)__")
   selected <- files[grepl(pattern,basename(files)) & !startsWith(files,"compiled/")]
   for(relative in selected) {
     p <- download_read_panel(file.path(input,relative))
@@ -2212,7 +2286,8 @@ reformat_downloaded_figures <- function(input, output, landmark=0L) {
     incidence <- startsWith(stem,"event_incidence_")
     overlap <- stem=="metastatic_label_overlap"
     p <- download_remove_header(p,lines=if(count_line || incidence) 3L else 2L,
-      retain=if(incidence) 2:3 else if(count_line || overlap || startsWith(stem,"xgboost_")) 2L else integer())
+      retain=if(incidence) 2:3 else if(count_line || overlap ||
+        grepl("^(xgboost|elasticnet)_",stem)) 2L else integer())
     destination <- file.path(output,"compiled",relative)
     dir.create(dirname(destination),recursive=TRUE,showWarnings=FALSE)
     png::writePNG(download_native_raster(p),destination,dpi=200)

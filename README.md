@@ -1195,6 +1195,14 @@ from `COMPASS_FEDERATED_TRANSFER` (default
 to render `figures/ADT/federated/transfer_discrimination__platinum.{png,csv}`.
 The figure shows C-index, ΔC vs. age only, and mean AUC(t) by endpoint.
 
+The same federated run also renders the pooled federated models themselves from
+`federated_cox_multivariate/` (elastic-net) and `federated_xgboost/`, next to
+the across-site results CSV. The outputs are
+`figures/ADT/federated/{elasticnet,xgboost}_performance__platinum`,
+`elasticnet_coefficients__platinum`, and `xgboost_importance__platinum`.
+Manuscript Figure 8 (`08_federated_multivariable`) puts them in the local
+Figure 4 layout.
+
 ### Invariants (these change predictions silently if broken)
 
 - **The bundle's preprocessing is pooled across the federation and is reused

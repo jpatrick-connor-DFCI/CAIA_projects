@@ -39,13 +39,14 @@ captions <- manuscript_captions()
 stopifnot(length(captions)==8,identical(names(captions),sprintf("%02d_%s",1:8,c(
   "cohort_overview","llm_nepc_avpc","dfci_univariable","multivariable_labs",
   "gleason_sensitivity","dfci_cohort_sensitivity","federated_incidence_associations",
-  "federated_xgboost"))),
+  "federated_multivariable"))),
   all(startsWith(unname(captions),paste0("Figure ",1:8,". "))),
   grepl("180-day landmark",captions[["03_dfci_univariable"]],fixed=TRUE),
   grepl("≤0.2453",captions[["03_dfci_univariable"]],fixed=TRUE),
   !grepl("day-0 landmark",captions[["03_dfci_univariable"]],fixed=TRUE),
-  grepl("4,429/133",captions[["08_federated_xgboost"]],fixed=TRUE),
-  !grepl("person_id",captions[["08_federated_xgboost"]],fixed=TRUE),
+  grepl("4,429/133",captions[["08_federated_multivariable"]],fixed=TRUE),
+  grepl("Elastic-Net",captions[["08_federated_multivariable"]],fixed=TRUE),
+  !grepl("person_id",captions[["08_federated_multivariable"]],fixed=TRUE),
   grepl("9,939/308",captions[["07_federated_incidence_associations"]],fixed=TRUE))
 caption_root <- tempfile("manuscript-caption-test-")
 caption_paths <- manuscript_write_captions(caption_root)
@@ -114,19 +115,34 @@ stopifnot(federated_combined$spec$key=="07_federated_incidence_associations",
 duplicate <- tryCatch(manuscript_federated_labs(bind_rows(labs,labs[1,])),error=identity)
 stopifnot(inherits(duplicate,"error"))
 
-# A flagged identifier remains in the supplied importance input and audit note.
-metrics <- expand_grid(landmark_days=c(0,90,180),config=c("both","baseline")) %>%
-  mutate(test_mean_auc_t=.7,test_c_index=.65,n_test=20,n_events_test=4,
-    input_audit_note="CAUTION: person_id has nonzero gain; audit before interpretation.")
+# Figure 8 mirrors local Figure 4 from the captured federated CSVs. A flagged
+# identifier remains in the supplied importance input and audit note.
+performance <- bind_rows(lapply(c("elastic_net","xgboost"),function(family)
+  expand_grid(landmark_days=c(0,90,180),config=c("both","baseline")) %>%
+    mutate(test_mean_auc_t=.7,test_c_index=.65,n_test=20,n_events_test=4) %>%
+    prepare_federated_performance(family) %>%
+    mutate(name=as.character(name),input_audit_note=if(family=="xgboost")
+      "CAUTION: person_id has nonzero gain; audit before interpretation." else NA_character_)))
+coefficients <- expand_grid(landmark_days=c(0,90,180),feature=c("PSA__max","Testosterone__mean")) %>%
+  mutate(lab_name=sub("__.*$","",feature),feature_stat=sub("^.*__","",feature),
+    coefficient=rep(c(.2,-.3),3),coef=coefficient,displayed=TRUE,identifier_feature=FALSE,input_audit_note=NA)
 importance <- expand_grid(landmark_days=c(0,90,180),feature=c("PSA__max","person_id")) %>%
   mutate(lab_name=if_else(feature=="person_id","person_id","PSA"),feature_stat="max",
     gain=10,displayed=TRUE,identifier_feature=feature=="person_id",
-    input_audit_note=metrics$input_audit_note[1])
-xgb <- manuscript_federated_xgb(metrics,importance)
-stopifnot(grepl("person_id",xgb$legend,fixed=TRUE),
-  xgb$spec$height==10.2,
-  identical(xgb$data$test_mean_auc_t,metrics$test_mean_auc_t),
-  sum(importance$identifier_feature)==3)
+    input_audit_note=performance$input_audit_note[7])
+federated_models <- manuscript_federated_multivariable(performance,coefficients,importance)
+stopifnot(grepl("person_id",federated_models$legend,fixed=TRUE),
+  federated_models$spec$key=="08_federated_multivariable",
+  federated_models$spec$width==8.5,federated_models$spec$height==11.8,
+  inherits(federated_models$plot,"gtable"),nrow(federated_models$data)==12,
+  identical(levels(federated_models$data$name),names(FEDERATED_MODEL_COLORS)),
+  grepl("Day 90, Cox baseline (age)",federated_models$legend,fixed=TRUE),
+  identical(manuscript_federated_feature_label(c("Alkaline phosphatase (max)",
+    "Neutrophils absolute (n_observations)","Diastolic blood pressure (min)")),
+    c("ALP (max)","Neutrophils abs. (n obs.)","DBP (min)")))
+unknown_series <- tryCatch(manuscript_federated_multivariable(
+  mutate(performance,name=if_else(row_number()==1,"Other",name)),coefficients,importance),error=identity)
+stopifnot(inherits(unknown_series,"error"))
 original <- plot_federated_comparison(labs,"PSA","Test")
 stopifnot(identical(original$scales$get_scales("colour")$palette(2),
   c(`Dana-Farber`="#0072B2",`Federated*`="#222222")))

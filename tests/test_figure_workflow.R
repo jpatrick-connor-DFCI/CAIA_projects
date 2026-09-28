@@ -67,6 +67,14 @@ local({
       test_c_index=.7,test_mean_auc_t=.75,n_test=20,n_events_test=5),xgb_metrics_path)
   write_csv(expand_grid(landmark_days=c(0,90,180),feature=c("PSA__mean","Testosterone__last","age")) %>%
     mutate(analysis_label="adt",endpoint="platinum",gain=seq_len(n())),xgb_importance_path)
+  cox_dir <- file.path(root,"federated_cox_multivariate"); dir.create(cox_dir)
+  cox_metrics_path <- file.path(cox_dir,"cox_federated_elasticnet_metrics_adt.csv")
+  cox_coefficients_path <- file.path(cox_dir,"cox_federated_elasticnet_coefficients_adt.csv")
+  write_csv(expand_grid(landmark_days=c(0,90,180),config=c("both","baseline")) %>%
+    mutate(analysis_label="adt",endpoint="platinum",model="elastic_net_cox",cohort="all",
+      test_c_index=.68,test_mean_auc_t=.72,n_test=20,n_events_test=5),cox_metrics_path)
+  write_csv(expand_grid(landmark_days=c(0,90,180),feature=c("PSA__mean","Testosterone__last__missing","age")) %>%
+    mutate(analysis_label="adt",endpoint="platinum",coefficient=rep(c(.2,-.1,.3),3)),cox_coefficients_path)
   transfer_dir <- file.path(root,"federated_transfer_adt_w_MSK"); dir.create(transfer_dir)
   transfer_metrics_path <- file.path(transfer_dir,"transfer_metrics.csv")
   write_csv(expand_grid(endpoint=c("nepc","avpc","platinum"),
@@ -173,8 +181,13 @@ local({
   stopifnot(identical(names(env$figure_run$prepared), "federated"))
   stopifnot(identical(vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem"),
                       c("psa_forest", "testosterone_forest", "site_incidence_lm000",
+                        "elasticnet_performance", "elasticnet_coefficients",
                         "xgboost_performance", "xgboost_importance",
-                        "transfer_discrimination", "08_federated_xgboost")))
+                        "transfer_discrimination", "08_federated_multivariable")))
+  coefficient_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated",
+    "elasticnet_coefficients__platinum.csv"), show_col_types = FALSE)
+  stopifnot(nrow(coefficient_export) == 9L, sum(coefficient_export$displayed) == 6L,
+    "last missing" %in% coefficient_export$feature_stat)
   transfer_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated",
     "transfer_discrimination__platinum.csv"), show_col_types = FALSE)
   stopifnot(nrow(transfer_export) == 36L, file.exists(file.path(cfg$fig_root, "ADT", "federated",
@@ -193,8 +206,9 @@ local({
             !dir.exists(file.path(cfg$fig_root,"ADT","by_figure")))
   stopifnot(nrow(site_export) == 2L, all(site_export$landmark_days == 0))
   federated_cfg <- cfg; federated_cfg$scope <- "federated"
-  # XGBoost and 09 transfer files require a refreshed 04 manifest after source changes.
-  for(path in c(xgb_metrics_path,xgb_importance_path,transfer_metrics_path)) {
+  # Elastic-net, XGBoost and 09 transfer files require a refreshed 04 manifest after source changes.
+  for(path in c(xgb_metrics_path,xgb_importance_path,cox_metrics_path,cox_coefficients_path,
+                transfer_metrics_path)) {
     original_time <- file.info(path)$mtime
     Sys.setFileTime(path,original_time+5)
     changed <- tryCatch(figure_notebook_manifest(federated_cfg),error=identity)

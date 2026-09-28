@@ -173,6 +173,14 @@ def federated_within_site_file(federated_path: Path, filename: str) -> Path:
 
 # 09_federated_transfer.ipynb outputs; mirrors federated_transfer_dir() in figure_workflow.R.
 FEDERATED_TRANSFER_FILES = ("transfer_metrics.csv", "transfer_auc_t.csv")
+# Federated multivariable exports beside the across-site results CSV
+# (mirrors FEDERATED_MULTIVARIABLE in figure_workflow.R).
+FEDERATED_MULTIVARIABLE_FILES = (
+    ("federated_xgboost", "xgboost_federated_metrics_adt.csv"),
+    ("federated_xgboost", "xgboost_federated_importance_adt.csv"),
+    ("federated_cox_multivariate", "cox_federated_elasticnet_metrics_adt.csv"),
+    ("federated_cox_multivariate", "cox_federated_elasticnet_coefficients_adt.csv"),
+)
 
 
 def federated_transfer_dir(config: dict) -> Path:
@@ -531,9 +539,9 @@ def prepare(config: dict) -> dict:
             fingerprint(federated_within_site_file(federated_path, name))
             for name in ("cox_within_site_all_sites_cohort.csv", "cox_within_site_all_sites_results.csv")]
         # Small fitted-result tables are read by R, like the Cox exports. Track
-        # absent paths too so later XGBoost deliveries invalidate preparation.
-        federated_sources += [fingerprint(federated_path.parent / "federated_xgboost" /
-            f"xgboost_federated_{kind}_adt.csv") for kind in ("metrics", "importance")]
+        # absent paths too so later XGBoost/elastic-net deliveries invalidate preparation.
+        federated_sources += [fingerprint(federated_path.parent / directory / name)
+            for directory, name in FEDERATED_MULTIVARIABLE_FILES]
         federated_sources += [fingerprint(federated_transfer_dir(config) / name)
             for name in FEDERATED_TRANSFER_FILES]
         manifest["federated"] = digest({"code": version, "force": manifest["force_version"],

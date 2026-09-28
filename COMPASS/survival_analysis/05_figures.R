@@ -141,13 +141,14 @@
 # day-180 PSA/testosterone associations),
 # `07_federated_incidence_associations` (landmark-0 site incidence and counts plus
 # PSA/testosterone associations on natural-log hazard-ratio axes), and
-# `08_federated_xgboost` (test performance and feature importance). The cohort
+# `08_federated_multivariable` (the local Figure 4 layout for the federated
+# elastic-net Cox and XGBoost models: test performance, coefficients, and gains). The cohort
 # sensitivity components are assembled into one continuous multipanel figure for
 # each analysis setting. Federated manuscript plots reuse the original subplot
 # renderers: forests retain site colors and landmark/statistic facets; panel c
 # labels only the outer log-hazard-ratio ticks because its four facets repeat the
-# same scale, plus 0 at the dashed null line; XGBoost
-# retains gold model/baseline bars and lab-category importance colors. Incomplete source groups are not assembled. The DFCI
+# same scale, plus 0 at the dashed null line; elastic-net and XGBoost
+# retain the local blue/gold model/baseline bars and lab-category colors. Incomplete source groups are not assembled. The DFCI
 # overview uses the same configurable extreme-quintile KM landmark as its larger
 # compiled counterpart. Figure titles remain in filenames/legends, not supertitles.
 # The cohort overview uses a 7.2 × 7.2-inch canvas; panels b–e omit their
@@ -246,20 +247,24 @@
 # is `federated`. Missing optional sources are reported and skipped. Failures in
 # one figure set do not prevent preparation/rendering of other available sets.
 #
-# Federated XGBoost uses `federated_xgboost/xgboost_federated_metrics_adt.csv` and
-# `xgboost_federated_importance_adt.csv` beside the Cox results. Two additional
-# compiled figures share the local PROFILE Figure 4 plotting functions:
-# `federated/xgboost_performance__platinum` pairs held-out test mean AUC(t)
-# and C-index for labs versus the age baseline at days 0/90/180;
-# `xgboost_importance__platinum` combines the three landmarks' top 15 positive-gain
-# features, using the same labels, clinical-category colors, and age/body-height
-# display exclusions as local runs. Unlike the selected HR forests, importance
-# includes all supplied feature statistics, including deltas and observation counts.
+# Federated multivariable models are read beside the Cox results: elastic-net Cox
+# from `federated_cox_multivariate/cox_federated_elasticnet_{metrics,coefficients}_adt.csv`
+# and XGBoost from `federated_xgboost/xgboost_federated_{metrics,importance}_adt.csv`.
+# Each model gets two compiled figures built with the local PROFILE Figure 4
+# plotting functions. `federated/{elasticnet,xgboost}_performance__platinum` pairs
+# held-out test mean AUC(t) and C-index for labs versus the age baseline at days
+# 0/90/180. `elasticnet_coefficients__platinum` shows the three landmarks' top 15
+# nonzero coefficients by absolute value, and `xgboost_importance__platinum` the top
+# 15 positive-gain features. Both use the local labels, clinical-category colors,
+# and age/body-height display exclusions. Unlike the selected HR forests, these
+# panels include all supplied feature statistics, including deltas, observation
+# counts, and `__<stat>__missing` indicators (shown as "<stat> missing").
 # No models are refitted; training/tuning-CV metrics are not substituted for test
-# performance. The horizon export lacks a train/test identifier and is not plotted.
-# CSV sidecars retain source metadata, counts, all feature gains, and display flags.
-# Identifier features with nonzero gain trigger a warning and a figure caption;
-# they are not silently removed or treated as validated predictors.
+# performance. The horizon exports lack a train/test identifier and are not plotted.
+# CSV sidecars retain source metadata, counts, all feature values, and display flags.
+# Identifier features with nonzero gain or coefficients trigger a warning and a
+# figure caption; they are not silently removed or treated as validated predictors.
+# Manuscript Figure 8 requires all four captured CSVs.
 #
 # Federated transfer (`COMPASS_FEDERATED_TRANSFER`, default
 # `federated_transfer_adt_w_MSK/`) reads `transfer_metrics.csv` and
