@@ -44,7 +44,9 @@ stopifnot(length(captions)==8,identical(names(captions),sprintf("%02d_%s",1:8,c(
   grepl("180-day landmark",captions[["03_dfci_univariable"]],fixed=TRUE),
   grepl("≤0.2453",captions[["03_dfci_univariable"]],fixed=TRUE),
   !grepl("day-0 landmark",captions[["03_dfci_univariable"]],fixed=TRUE),
-  grepl("person_id",captions[["08_federated_xgboost"]],fixed=TRUE))
+  grepl("4,429/133",captions[["08_federated_xgboost"]],fixed=TRUE),
+  !grepl("person_id",captions[["08_federated_xgboost"]],fixed=TRUE),
+  grepl("9,939/308",captions[["07_federated_incidence_associations"]],fixed=TRUE))
 caption_root <- tempfile("manuscript-caption-test-")
 caption_paths <- manuscript_write_captions(caption_root)
 stopifnot(length(caption_paths)==16,all(file.exists(caption_paths)))

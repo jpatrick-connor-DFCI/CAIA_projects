@@ -162,6 +162,15 @@ def fingerprint(path: Path) -> dict:
     return {"path": str(path), "bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 
+# Newest export name first; mirrors federated_within_site_file() in figure_workflow.R.
+FEDERATED_WITHIN_SITE_DIRS = ("nvflare_within_site_univariate_cox", "nvflare_within_site_cox_univariate")
+
+
+def federated_within_site_file(federated_path: Path, filename: str) -> Path:
+    candidates = [federated_path.parent / d / filename for d in FEDERATED_WITHIN_SITE_DIRS]
+    return next((p for p in candidates if p.exists()), candidates[0])
+
+
 def code_version() -> str:
     here = Path(__file__).parent
     paths = sorted(here.glob("*.R")) + [here / "05_figures.Rmd", Path(__file__)]
@@ -510,10 +519,9 @@ def prepare(config: dict) -> dict:
                     "arm": manifest["arms"][arm]["key"], "code": version, "force": manifest["force_version"],
                     "settings": {k: config.get(k) for k in ["gam", "metastatic", "metastatic_extra", "adt_intent", "forest_cohorts", "forest_landmark"]}})
         federated_path = Path(config["federated_path"])
-        federated_sources = [fingerprint(federated_path), fingerprint(federated_path.parent /
-            "nvflare_within_site_cox_univariate" / "cox_within_site_all_sites_cohort.csv"),
-            fingerprint(federated_path.parent / "nvflare_within_site_cox_univariate" /
-                        "cox_within_site_all_sites_results.csv")]
+        federated_sources = [fingerprint(federated_path)] + [
+            fingerprint(federated_within_site_file(federated_path, name))
+            for name in ("cox_within_site_all_sites_cohort.csv", "cox_within_site_all_sites_results.csv")]
         # Small fitted-result tables are read by R, like the Cox exports. Track
         # absent paths too so later XGBoost deliveries invalidate preparation.
         federated_sources += [fingerprint(federated_path.parent / "federated_xgboost" /

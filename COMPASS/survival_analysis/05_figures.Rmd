@@ -35,7 +35,8 @@ normal updates and `render` for DPI/PDF changes.
 and XGBoost performance/importance figures without
 requiring longitudinal data or running other figure families.
 
-The site report reads `nvflare_within_site_cox_univariate/cox_within_site_all_sites_cohort.csv`
+The site report reads `nvflare_within_site_univariate_cox/cox_within_site_all_sites_cohort.csv`
+(legacy name `nvflare_within_site_cox_univariate/` is still accepted)
 beside the federated results CSV. It exports cohort sizes, event counts, and observed
 event percentages at landmark 0 only in `federated/site_incidence_lm000__platinum.{png,csv}`.
 The figure matches the cohort-comparison layout: incidence with 95% Wilson CIs
@@ -231,14 +232,16 @@ Finite positive HR estimates are retained; missing/invalid estimates or CIs are
 explicitly marked instead of applying the former volcano magnitude filters.
 Both across-site and individual within-site HRs are plotted, without re-pooling
 site estimates. Within-site forests read
-`nvflare_within_site_cox_univariate/cox_within_site_all_sites_results.csv` beside
+`nvflare_within_site_univariate_cox/cox_within_site_all_sites_results.csv` beside
 the across-site results CSV. Each uses its own supplied p/q values.
 No matching local results are required. Outputs are
 `federated/{psa,testosterone}_forest__platinum.{png,csv}` plus the day-0
 incidence figure/table. Supplied p/q values are not recomputed or pooled.
 The federated population is not assumed to include every displayed site: matching
 patient/event counts across landmarks are reported as inferred membership only;
-ambiguous or unavailable membership is explicitly unverified.
+ambiguous or unavailable membership is explicitly unverified. When pooled counts
+exceed the sum over every within-site export at each landmark (a site such as MSK
+that pooled but has no within-site results), the excess is reported as unattributed.
 These forests run when canonical ADT/platinum is selected, or scope
 is `federated`. Missing optional sources are reported and skipped. Failures in
 one figure set do not prevent preparation/rendering of other available sets.
@@ -315,7 +318,7 @@ METASTATIC_SUPPLEMENT <- list(
   icd = file.path(NEPC_PROJ_PATH, "prostate_icd_data.csv"))
 FEDERATED_SUPPLEMENT <- list(
   results = Sys.getenv("COMPASS_FEDERATED_RESULTS", file.path(
-    NEPC_PROJ_PATH, "federated_results_with_MSK", "cox_federated_univariate_adt.csv")))
+    NEPC_PROJ_PATH, "federated_results_w_MSK", "cox_federated_univariate_adt.csv")))
 RENDER_PROFILE <- match.arg(tolower(Sys.getenv("COMPASS_RENDER_PROFILE", "fast")), c("fast", "publication"))
 RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 200
 RENDER_PDF <- env_flag("COMPASS_RENDER_PDF")

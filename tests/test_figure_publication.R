@@ -131,5 +131,10 @@ local({
   note <- federated_population_note(across,counts)
   stopifnot(grepl("Fred Hutch + Johns Hopkins",note,fixed=TRUE),grepl("not verified",note,fixed=TRUE),
     grepl("unverified",federated_population_note(mutate(across,n_events_used=16),counts)))
+  pooled_only <- federated_population_note(tibble(landmark_days=c(0,90,180),
+    n_patients_used=c(10350,360,351),n_events_used=c(345,48,45)),counts)
+  stopifnot(grepl("exceed Dana-Farber + Fred Hutch + Johns Hopkins by 10,000/300 (0d), 10/3 (90d), 1/0 (180d)",
+    pooled_only,fixed=TRUE),grepl("not verified",pooled_only,fixed=TRUE),
+    grepl("unverified",federated_population_note(mutate(across,n_patients_used=351),counts)))
 })
 cat("Publication compilation, paths, catalog, recoverable archives and federated data checks passed.\n")

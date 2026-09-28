@@ -1154,13 +1154,24 @@ against the local LLM-derived NEPC and AVPC timelines, with platinum as the
 reference:
 
 ```bash
+FED=/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/federated_results_w_MSK
 python -m survival_common.federated_endpoint_transfer \
-    --bundle xgboost_federated_model_adt.json \
-             cox_federated_elasticnet_model_adt.json \
+    --bundle $FED/federated_xgboost/xgboost_federated_model_adt.json \
+             $FED/federated_cox_multivariate/cox_federated_elasticnet_model_adt.json \
     --data /data/gusev/USERS/jpconnor/data/CAIA/COMPASS/longitudinal_prediction_data_adt.csv \
-    --output-dir federated_transfer_adt/ \
+    --output-dir federated_transfer_adt_w_MSK/ \
     --n-bootstrap 1000
 ```
+
+`COMPASS/survival_analysis/09_federated_transfer.ipynb` wraps the same call and
+picks up both bundles from `federated_results_w_MSK/federated_*/`. That export
+was trained on Dana-Farber, Fred Hutch, Johns Hopkins and MSK. **DFCI is one of
+the training sites**, so the platinum rows are partly in-sample, and NEPC/AVPC
+are scored on patients the model was fitted on. Treat the results as a
+cross-endpoint check, not external validation. The notebook compares the local
+cohort with DFCI's row in
+`nvflare_within_site_univariate_cox/cox_within_site_all_sites_cohort.csv` and
+shows the federated held-out test C-index next to the local platinum C-index.
 
 It maps local `LAB_NAME` to the OMOP names via `OMOP_to_DFCI_lab_ids.csv`, puts
 each endpoint's date in the federated chain's event slot, and reuses

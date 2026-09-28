@@ -102,7 +102,7 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     result = prep.prepare(config)
     assert result["arms"] == {} and result["cells"] == {}
     assert result["federated"]
-    site_path = Path(config["federated_path"]).parent / "nvflare_within_site_cox_univariate" / "cox_within_site_all_sites_cohort.csv"
+    site_path = Path(config["federated_path"]).parent / "nvflare_within_site_univariate_cox" / "cox_within_site_all_sites_cohort.csv"
     within_path = site_path.with_name("cox_within_site_all_sites_results.csv")
     xgb_dir = site_path.parent.parent / "federated_xgboost"
     xgb_paths = [xgb_dir / f"xgboost_federated_{kind}_adt.csv" for kind in ("metrics", "importance")]
@@ -130,6 +130,18 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
         updated_xgb = prep.prepare(config)
         assert updated_xgb["federated"] != delivered["federated"]
         previous = updated_xgb
+
+
+def test_federated_within_site_accepts_legacy_folder(tmp_path):
+    config = make_config(tmp_path, "federated")
+    config["federated"] = True
+    legacy = Path(config["federated_path"]).parent / "nvflare_within_site_cox_univariate"
+    legacy.mkdir()
+    for name in ("cohort", "results"):
+        pl.DataFrame({"site_name": ["site_a"]}).write_csv(legacy / f"cox_within_site_all_sites_{name}.csv")
+    sources = prep.prepare(config)["federated_sources"]
+    assert [Path(s["path"]).parent.name for s in sources[1:3]] == [legacy.name] * 2
+    assert not any(s.get("missing") for s in sources[1:3])
 
 
 def test_arpi_preparation_does_not_require_adt(tmp_path):

@@ -627,7 +627,7 @@ save_federated_panel <- function(plot, path, width, height, dpi, overwrite) {
 federated_population_note <- function(across, cohorts) {
   unknown <- "Federated*: participating sites unverified; not assumed to include all displayed sites."
   if(is.null(cohorts) || !all(c("n_patients_used","n_events_used") %in% names(across))) return(unknown)
-  targets <- distinct(across,landmark_days,n_patients_used,n_events_used)
+  targets <- arrange(distinct(across,landmark_days,n_patients_used,n_events_used),landmark_days)
   if(anyDuplicated(targets$landmark_days) || anyNA(targets)) return(unknown)
   sites <- sort(unique(cohorts$site_name))
   if(!length(sites) || length(sites)>10) return(unknown)
@@ -639,6 +639,21 @@ federated_population_note <- function(across, cohorts) {
         sum(rows$n_events)==targets$n_events_used[i]
     },logical(1)))
   },candidates)
+  if(!length(matches)) {
+    # A pooled-only site (e.g. MSK without a within-site export) leaves a
+    # consistent excess over every exported site at each landmark.
+    excess <- lapply(seq_len(nrow(targets)),function(i) {
+      rows <- filter(cohorts,landmark_days==targets$landmark_days[i])
+      if(!setequal(rows$site_name,sites) || nrow(rows)!=length(sites)) return(NULL)
+      c(targets$n_patients_used[i]-sum(rows$n_patients),targets$n_events_used[i]-sum(rows$n_events))
+    })
+    if(all(vapply(excess,function(x) length(x)==2 && x[1]>0 && x[2]>=0,logical(1))))
+      return(paste0("Federated*: pooled counts exceed ",paste(federated_site_label(sites),collapse=" + "),
+        " by ",paste(vapply(seq_along(excess),function(i) sprintf("%s/%s (%gd)",
+          scales::comma(excess[[i]][1]),scales::comma(excess[[i]][2]),targets$landmark_days[i]),
+          character(1)),collapse=", "),
+        "\npatients/events from site(s) without within-site results; membership inferred, not verified."))
+  }
   if(length(matches)!=1) return(unknown)
   paste0("Federated*: patient/event counts match ",paste(federated_site_label(matches[[1]]),collapse=" + "),
          "; membership inferred, not verified.")
@@ -916,12 +931,12 @@ manuscript_captions <- function() {
       "Cohort definitions overlap. Event fractions are observed proportions rather than censoring-adjusted cumulative incidence estimates. Change-from-baseline and observation-count features are excluded from c. 'No prior castrate' denotes the source no-previous-castration restriction. CI, confidence interval; PSA, prostate-specific antigen; SD, standard deviation."),
     `07_federated_incidence_associations`=caption(
       "Figure 7. Site-specific platinum incidence and federated PSA and testosterone associations.",
-      "The Dana-Farber, Fred Hutch, and Johns Hopkins ADT cohorts are shown at treatment initiation. (a) Observed platinum-event fractions during follow-up with 95% Wilson confidence intervals. (b) Pale bars show analyzed patients and solid bars show observed platinum events; labels give events/patients. (c,d) Natural-log hazard ratios per standard-deviation increase and 95% confidence intervals for PSA (c) and testosterone (d) at the three sites and in the supplied federated analysis. Columns show the mean, minimum, maximum, and last observed value; rows show landmarks at 0, 90, and 180 days. Dashed lines at 0 mark the null. Open circles indicate nonsignificant associations, filled circles indicate nominal P < 0.05 without false-discovery-rate significance, and diamonds indicate supplied q < 0.05.",
-      "Site-specific fractions are observed event proportions rather than censoring-adjusted cumulative incidence estimates. For PSA, federated modeled/observed sample sizes were 6,346/4,250 at day 0, 6,272/5,516 at day 90, and 6,125/5,753 at day 180. Corresponding testosterone sample sizes were 6,346/734, 6,272/1,419, and 6,125/1,567. Federated patient and event counts match the combined Fred Hutch and Johns Hopkins counts, but membership was inferred and not independently verified. Supplied q values were not recalculated. ADT, androgen-deprivation therapy; PSA, prostate-specific antigen; SD, standard deviation."),
+      "The Dana-Farber, Fred Hutch, and Johns Hopkins ADT cohorts are shown at treatment initiation. (a) Observed platinum-event fractions during follow-up with 95% Wilson confidence intervals. (b) Pale bars show analyzed patients and solid bars show observed platinum events; labels give events/patients. (c,d) Natural-log hazard ratios per standard-deviation increase and 95% confidence intervals for PSA (c) and testosterone (d) at the three sites with within-site results and in the supplied pooled federated analysis, which also includes Memorial Sloan Kettering (MSK). Columns show the mean, minimum, maximum, and last observed value; rows show landmarks at 0, 90, and 180 days. Dashed lines at 0 mark the null. Open circles indicate nonsignificant associations, filled circles indicate nominal P < 0.05 without false-discovery-rate significance, and diamonds indicate supplied q < 0.05.",
+      "Site-specific fractions are observed event proportions rather than censoring-adjusted cumulative incidence estimates. For PSA, federated modeled/observed sample sizes were 22,138/16,840 at day 0, 21,791/20,707 at day 90, and 21,216/20,643 at day 180. Corresponding testosterone sample sizes were 22,138/9,483, 21,791/14,206, and 21,216/14,359. Federated patient/event counts exceed the combined Dana-Farber, Fred Hutch, and Johns Hopkins counts by 9,939/308 at day 0, 9,741/277 at day 90, and 9,395/252 at day 180, attributed to MSK, which supplied no within-site results; site membership was not independently verified. Supplied q values were not recalculated. ADT, androgen-deprivation therapy; PSA, prostate-specific antigen; SD, standard deviation."),
     `08_federated_xgboost`=caption(
       "Figure 8. Federated XGBoost performance and feature importance for prediction of platinum treatment.",
       "(a,b) Held-out test mean AUC(t) (a) and Harrell C-index (b) for the XGBoost survival model and age-only XGBoost baseline at 0, 90, and 180 days after ADT initiation; the dotted horizontal line marks 0.5. (c-e) Positive split-gain feature importances at day 0 (c), day 90 (d), and day 180 (e), with up to 15 features displayed per landmark. Colors identify laboratory categories.",
-      "Test-set sample sizes/events were 1,270/25 at day 0, 1,255/23 at day 90, and 1,226/22 at day 180 for both model configurations. Performance values are from held-out test sets rather than training or tuning cross-validation. Gains are unsigned measures of split improvement and are not signed effects or SHAP values. The supplied model-input audit reports nonzero gain for person_id at days 90 and 180; model inputs require audit before performance or importance is interpreted. ADT, androgen-deprivation therapy; ALP, alkaline phosphatase; AUC(t), time-dependent area under the receiver-operating-characteristic curve; BUN, blood urea nitrogen; C-index, concordance index; MCV, mean corpuscular volume; PSA, prostate-specific antigen; RDW, red-cell distribution width; SHAP, Shapley additive explanations.")
+      "Models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data. Test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180 for both model configurations. Performance values are from held-out test sets rather than training or tuning cross-validation. Gains are unsigned measures of split improvement and are not signed effects or SHAP values. abs., absolute; ADT, androgen-deprivation therapy; ALP, alkaline phosphatase; ALT, alanine aminotransferase; AST, aspartate aminotransferase; AUC(t), time-dependent area under the receiver-operating-characteristic curve; C-index, concordance index; MCH, mean corpuscular hemoglobin; MCV, mean corpuscular volume; PSA, prostate-specific antigen; RDW, red-cell distribution width; SHAP, Shapley additive explanations; TSH, thyroid-stimulating hormone.")
   )
 }
 
@@ -1832,11 +1847,12 @@ figure_notebook_manifest <- function(config, check_sources = TRUE) {
   if (isTRUE(config$federated)) {
     if (!isTRUE(prepared$federated) || !same_path(prepared$federated_path, config$federated_path))
       fail("Requested federated results were not prepared.")
-    registered_inputs <- c(file.path("nvflare_within_site_cox_univariate",
-      c("cox_within_site_all_sites_cohort.csv", "cox_within_site_all_sites_results.csv")),
-      file.path("federated_xgboost",c("xgboost_federated_metrics_adt.csv","xgboost_federated_importance_adt.csv")))
-    for (filename in registered_inputs) {
-      site_path <- file.path(dirname(config$federated_path), filename)
+    registered_inputs <- c(vapply(c("cox_within_site_all_sites_cohort.csv", "cox_within_site_all_sites_results.csv"),
+      function(filename) federated_within_site_file(config$federated_path, filename), character(1)),
+      file.path(dirname(config$federated_path), "federated_xgboost",
+        c("xgboost_federated_metrics_adt.csv","xgboost_federated_importance_adt.csv")))
+    for (site_path in registered_inputs) {
+      filename <- basename(site_path)
       if (!any(vapply(manifest$federated_sources, function(item)
         identical(figure_absolute_path(item$path), figure_absolute_path(site_path)), logical(1))))
         fail(paste("Federated input was not registered by the notebook:", filename))
