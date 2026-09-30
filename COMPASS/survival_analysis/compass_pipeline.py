@@ -2135,6 +2135,23 @@ def _clinical_combination_dir(run: dict, cohort: str, arm: str, model_dir: str, 
     )
 
 
+def _load_test_block_risks(path, endpoint: str) -> pd.DataFrame:
+    """Read one patient-risk file, restricted to `endpoint`'s test-block rows.
+
+    The XGBoost writer names the time column `duration` (and `landmark_day`)
+    where the elastic-net Cox writer uses `duration_days`; both are days from
+    the landmark, so normalize to the Cox names (as risk_score_stratified_figures
+    .load_patient_risks does) so the paired bootstrap reads either model.
+    """
+    risks = pd.read_csv(path).rename(
+        columns={"duration": "duration_days", "landmark_day": "landmark_days"}
+    )
+    risks = risks.loc[risks.get("endpoint", endpoint) == endpoint]
+    if "dataset" in risks.columns:
+        risks = risks.loc[risks["dataset"].astype(str) == "test"]
+    return risks
+
+
 def _paired_bootstrap_delta_c_index(
     arm_risks: pd.DataFrame,
     labs_risks: pd.DataFrame,
@@ -2242,20 +2259,14 @@ def summarize_clinical_combinations(run: dict) -> pd.DataFrame:
         labs_path = labs_rows["_risks_path"].iloc[0] if not labs_rows.empty else None
         if labs_path is None or pd.isna(labs_path) or not Path(labs_path).exists():
             continue
-        labs_risks = pd.read_csv(labs_path)
-        labs_risks = labs_risks.loc[labs_risks.get("endpoint", endpoint) == endpoint]
-        if "dataset" in labs_risks.columns:
-            labs_risks = labs_risks.loc[labs_risks["dataset"].astype(str) == "test"]
+        labs_risks = _load_test_block_risks(labs_path, endpoint)
         for idx, arm_row in group.iterrows():
             if arm_row["arm"] == "labs":
                 continue
             arm_path = arm_row.get("_risks_path")
             if pd.isna(arm_path) or not Path(arm_path).exists():
                 continue
-            arm_risks = pd.read_csv(arm_path)
-            arm_risks = arm_risks.loc[arm_risks.get("endpoint", endpoint) == endpoint]
-            if "dataset" in arm_risks.columns:
-                arm_risks = arm_risks.loc[arm_risks["dataset"].astype(str) == "test"]
+            arm_risks = _load_test_block_risks(arm_path, endpoint)
             observed, lo, hi, n = _paired_bootstrap_delta_c_index(
                 arm_risks, labs_risks, id_col=id_col
             )

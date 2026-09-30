@@ -141,6 +141,34 @@ def test_summarize_computes_paired_bootstrap_delta_against_labs(tmp_path):
     assert gleason_row["delta_c_index_ci_low"] <= gleason_row["delta_c_index"] <= gleason_row["delta_c_index_ci_high"]
 
 
+def test_summarize_reads_xgboost_risk_schema(tmp_path):
+    """XGBoost risk files name the time column `duration`, not `duration_days`."""
+    run = _run(tmp_path, tmp_path / "inputs")
+    rng = np.random.default_rng(3)
+    n = 60
+    mrns = [str(i) for i in range(n)]
+    duration = np.linspace(50, 500, n)
+    event = rng.binomial(1, 0.6, size=n)
+
+    for arm, scores in (("labs", rng.normal(size=n)), ("gleason", -duration)):
+        arm_dir = cp._clinical_combination_dir(run, "gleason", arm, "xgboost", 0)
+        arm_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({
+            "endpoint": ["platinum"], "n_test": [n], "n_events_test": [int(event.sum())],
+            "test_c_index": [0.6], "test_mean_auc_t": [0.6], "test_integrated_brier": [0.2],
+        }).to_csv(arm_dir / "landmark_xgboost_metrics.csv", index=False)
+        pd.DataFrame({
+            "landmark_day": 0, "endpoint": "platinum", "DFCI_MRN": mrns,
+            "dataset": "test", "outer_fold": -1, "duration": duration,
+            "event": event, "risk_score": scores,
+        }).to_csv(arm_dir / "landmark_xgboost_patient_risks.csv", index=False)
+
+    table = cp.summarize_clinical_combinations(run)
+    row = table.query("cohort == 'gleason' and arm == 'gleason' and model == 'xgboost'").iloc[0]
+    assert row["n_paired"] == n
+    assert row["delta_c_index"] > 0
+
+
 def test_bootstrap_delta_is_paired_on_shared_patients():
     rng = np.random.default_rng(2)
     n = 60
