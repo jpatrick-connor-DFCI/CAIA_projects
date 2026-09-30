@@ -283,16 +283,11 @@
 
 # ---- Configuration ----------------------------------------------------------
 options(readr.num_threads = 1L, readr.read_lazy = FALSE)
-script_dir <- local({
-  file_arg <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE))
-  sourced <- tryCatch(sys.frame(1)$ofile, error = function(e) NULL)
-  candidates <- c(if (length(sourced)) dirname(sourced), if (length(file_arg)) dirname(file_arg),
-                  getwd(), file.path(getwd(), "COMPASS", "survival_analysis"))
-  found <- candidates[file.exists(file.path(candidates, "COMPASS_generate_figures_pipeline.R"))]
-  if (!length(found)) stop("Cannot find COMPASS_generate_figures_pipeline.R; run from the repo root or COMPASS/survival_analysis.")
-  found[1]
-})
-pipeline_path <- normalizePath(file.path(script_dir, "COMPASS_generate_figures_pipeline.R"), mustWork = TRUE)
+# Absolute code root (same as GAM/04_gam.ipynb) so the script runs from any
+# working directory; set CAIA_PROJECT_ROOT to use a different checkout.
+PROJECT_ROOT <- Sys.getenv("CAIA_PROJECT_ROOT", "/data/gusev/USERS/jpconnor/code/CAIA")
+pipeline_path <- normalizePath(file.path(PROJECT_ROOT, "COMPASS", "survival_analysis",
+                                         "COMPASS_generate_figures_pipeline.R"), mustWork = TRUE)
 source(pipeline_path)
 source(file.path(dirname(pipeline_path), "figure_workflow.R"))
 

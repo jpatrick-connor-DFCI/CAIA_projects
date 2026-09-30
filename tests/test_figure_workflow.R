@@ -164,7 +164,8 @@ local({
   stopifnot(inherits(stale, "error"), grepl("04_prep_figure_data.ipynb", conditionMessage(stale), fixed = TRUE))
   # Run the actual 05_figures.R with a federation-only scope and raw patient
   # input hidden. This verifies configuration wiring as well as the helper API.
-  variables <- c(COMPASS_DATA_ROOT = root, COMPASS_FIG_ROOT = cfg$fig_root,
+  variables <- c(CAIA_PROJECT_ROOT = normalizePath("."),
+    COMPASS_DATA_ROOT = root, COMPASS_FIG_ROOT = cfg$fig_root,
     COMPASS_FIGURE_DATA_ROOT = cfg$cache_root, COMPASS_FIGURE_SCOPE = "federated",
     COMPASS_FEDERATED_RESULTS = fed_path)
   previous <- Sys.getenv(names(variables), unset = NA)

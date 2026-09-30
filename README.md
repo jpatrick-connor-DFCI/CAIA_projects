@@ -488,7 +488,9 @@ notebook. All operate on the merged `profile_data` run:
   the Figure 2 classifier definition.
 - `05_figures.R` — the sole COMPASS figure script (`Rscript COMPASS/survival_analysis/05_figures.R`,
   configured by `COMPASS_*` environment variables), using
-  `COMPASS_generate_figures_pipeline.R`. It renders both arms' overview, LLM-label, univariate,
+  `COMPASS_generate_figures_pipeline.R`. Its sibling scripts are loaded from the absolute code root
+  `/data/gusev/USERS/jpconnor/code/CAIA` (override with `CAIA_PROJECT_ROOT`), so it runs from any
+  working directory. It renders both arms' overview, LLM-label, univariate,
   multivariate, KM, and per-lab distribution/trajectory figures at landmarks 0 and 90. Figure 1A reads
   `mrn_lists/icd_prostate_mrn_flags.csv` and displays cumulative ICD-C61 cohort selection through
   dated diagnosis, male sex, ≥5 PSA tests, post-diagnosis ADT, PARPi exclusion, pre-diagnosis
