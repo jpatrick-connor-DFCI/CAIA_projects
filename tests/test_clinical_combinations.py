@@ -207,3 +207,17 @@ def test_bootstrap_returns_nan_on_disjoint_patients():
     )
     assert n_paired == 0
     assert np.isnan(observed) and np.isnan(lo) and np.isnan(hi)
+
+
+def test_bootstrap_skips_draws_without_admissible_pairs():
+    # One event at the longest duration: any draw containing it has events but
+    # no admissible pairs, which lifelines reports as ZeroDivisionError.
+    frame = pd.DataFrame({
+        "DFCI_MRN": ["1", "2", "3"], "duration_days": [10.0, 20.0, 30.0],
+        "event": [0, 0, 1], "risk_score": [0.1, 0.2, 0.3],
+    })
+    observed, lo, hi, n_paired = cp._paired_bootstrap_delta_c_index(
+        frame, frame, id_col="DFCI_MRN", n_boot=50, seed=0
+    )
+    assert n_paired == 3
+    assert np.isnan(observed) and np.isnan(lo) and np.isnan(hi)

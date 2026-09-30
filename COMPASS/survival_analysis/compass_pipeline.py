@@ -2191,8 +2191,14 @@ def _paired_bootstrap_delta_c_index(
         d, e = duration[idx], event[idx]
         if e.sum() == 0:
             return float("nan")
-        c_arm = concordance_index(d, -risk_arm[idx], e)
-        c_labs = concordance_index(d, -risk_labs[idx], e)
+        # A small test block can resample into a draw with events but no
+        # admissible pairs (e.g. every event tied at the longest duration);
+        # lifelines raises there, so treat it like the no-event draw above.
+        try:
+            c_arm = concordance_index(d, -risk_arm[idx], e)
+            c_labs = concordance_index(d, -risk_labs[idx], e)
+        except ZeroDivisionError:
+            return float("nan")
         return c_arm - c_labs
 
     observed = _delta(np.arange(n))
