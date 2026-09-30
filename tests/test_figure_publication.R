@@ -169,4 +169,42 @@ local({
     stopifnot(inherits(tryCatch(load_federated_transfer(directory),error=identity),"error"))
   }
 })
+local({
+  # 09 arm B: no-Dana-Farber directory, paired ΔC loader and the with/without ablation panel.
+  directory <- tempfile("transfer-no-dfci-"); dir.create(directory)
+  on.exit(unlink(directory,recursive=TRUE))
+  stopifnot(identical(federated_transfer_no_dfci_dir(list(data_root="/x")),file.path("/x","federated_transfer_adt_no_DFCI")),
+    identical(federated_transfer_no_dfci_dir(list(data_root="/x",federated_transfer_no_dfci_path="/z")),"/z"))
+  absent <- withCallingHandlers(load_federated_transfer_pairs(directory),warning=function(w) invokeRestart("muffleWarning"))
+  stopifnot(is.null(absent))
+  metrics <- tidyr::expand_grid(endpoint=c("nepc","avpc","platinum"),
+      bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),
+      landmark_days=c(0,180),config=c("both","baseline")) %>%
+    mutate(model_family=if_else(startsWith(bundle,"xgboost"),"xgboost_cox","elastic_net_cox"),
+      n_patients=1000,n_events=30,c_index=.6,c_index_lo=.55,c_index_hi=.65)
+  pairs <- tidyr::expand_grid(endpoint=c("NEPC","avpc","platinum","other"),landmark_days=c(0,180),
+      bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),config=c("both","baseline")) %>%
+    mutate(n_patients=1000,n_events=30,C_with_dfci=.6,C_no_dfci=.57,delta_c=-.03,delta_c_lo=-.06,delta_c_hi=0)
+  path <- file.path(directory,"transfer_with_vs_without_dfci.csv")
+  readr::write_csv(pairs,path)
+  loaded <- load_federated_transfer_pairs(directory)
+  # "other" endpoints and baseline rows are dropped.
+  stopifnot(nrow(loaded)==12,all(loaded$config=="both"),!"other" %in% loaded$endpoint)
+  d <- prepare_federated_transfer_ablation(metrics,mutate(metrics,c_index=.57),loaded)
+  stopifnot(nrow(d)==12+12+12,identical(levels(d$model),c("XGBoost","Elastic-net Cox")),
+    identical(levels(d$arm),FEDERATED_TRANSFER_ARM_LABELS),
+    all(d$arm[d$metric=="ΔC, without − with Dana-Farber"]=="Paired difference"),
+    !any(is.na(d$model)))
+  b <- ggplot_build(plot_federated_transfer_ablation(d,federated_transfer_count_note(loaded)))
+  stopifnot(length(b$layout$panel_params)==6)
+  arm_b <- plot_federated_transfer(prepare_federated_transfer(metrics),"note",
+    FEDERATED_TRANSFER_ARMS$no_dfci$title,FEDERATED_TRANSFER_ARMS$no_dfci$subtitle)
+  title <- if("get_labs" %in% getNamespaceExports("ggplot2")) ggplot2::get_labs(arm_b)$title else arm_b$labels$title
+  stopifnot(grepl("without Dana-Farber",title,fixed=TRUE),length(ggplot_build(arm_b)$layout$panel_params)==9)
+  for(bad in list(mutate(pairs,delta_c=-1.5),mutate(pairs,C_no_dfci=1.2),mutate(pairs,n_events=2000),
+                  bind_rows(pairs,pairs[1,]),select(pairs,-delta_c))) {
+    readr::write_csv(bad,path)
+    stopifnot(inherits(tryCatch(load_federated_transfer_pairs(directory),error=identity),"error"))
+  }
+})
 cat("Publication compilation, paths, catalog, recoverable archives and federated data checks passed.\n")

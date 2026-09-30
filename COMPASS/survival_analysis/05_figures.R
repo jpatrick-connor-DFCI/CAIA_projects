@@ -277,6 +277,13 @@
 # validation; platinum rows are partly in-sample. CSV sidecars keep all metrics
 # (`transfer_discrimination__platinum.csv`) and per-horizon AUC(t)
 # (`transfer_auc_t__platinum.csv`). Missing transfer outputs are reported and skipped.
+# The no-Dana-Farber arm (`COMPASS_FEDERATED_TRANSFER_NO_DFCI`, default
+# `federated_transfer_adt_no_DFCI/`, 09's `OUTPUT_DIR_NO_DFCI`) scores the same
+# bundles refit without Dana-Farber, an external validation. It renders
+# `federated/transfer_discrimination_no_dfci__platinum` in the same layout and
+# `federated/transfer_dfci_ablation__platinum`: full-model C-index with vs. without
+# Dana-Farber in training, plus the paired ΔC from `transfer_with_vs_without_dfci.csv`.
+# Either arm is skipped with a warning when its files are missing.
 # Missing optional XGBoost files are reported and skipped independently. Run `04`
 # again after this update to register both files (including absent paths), then
 # run `05_figures.R` with stage `all`. All Python remains in `04`; graphics caches stay in data.
@@ -335,7 +342,9 @@ METASTATIC_SUPPLEMENT <- list(
 FEDERATED_SUPPLEMENT <- list(
   results = Sys.getenv("COMPASS_FEDERATED_RESULTS", file.path(
     NEPC_PROJ_PATH, "federated_results_w_MSK", "cox_federated_univariate_adt.csv")),
-  transfer = Sys.getenv("COMPASS_FEDERATED_TRANSFER", file.path(NEPC_PROJ_PATH, "federated_transfer_adt_w_MSK")))
+  transfer = Sys.getenv("COMPASS_FEDERATED_TRANSFER", file.path(NEPC_PROJ_PATH, "federated_transfer_adt_w_MSK")),
+  transfer_no_dfci = Sys.getenv("COMPASS_FEDERATED_TRANSFER_NO_DFCI",
+    file.path(NEPC_PROJ_PATH, "federated_transfer_adt_no_DFCI")))
 RENDER_PROFILE <- match.arg(tolower(Sys.getenv("COMPASS_RENDER_PROFILE", "fast")), c("fast", "publication"))
 RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 200
 RENDER_PDF <- env_flag("COMPASS_RENDER_PDF")
@@ -356,7 +365,8 @@ figure_config <- list(
   metastatic_sources = METASTATIC_SUPPLEMENT[c("intent", "stage", "llm", "icd")],
   federated = PLOT_FEDERATED_SUPPLEMENT,
   federated_path = FEDERATED_SUPPLEMENT$results,
-  federated_transfer_path = FEDERATED_SUPPLEMENT$transfer)
+  federated_transfer_path = FEDERATED_SUPPLEMENT$transfer,
+  federated_transfer_no_dfci_path = FEDERATED_SUPPLEMENT$transfer_no_dfci)
 
 # ---- Prepare and render -----------------------------------------------------
 figure_run <- run_cached_figure_workflow(

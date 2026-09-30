@@ -86,6 +86,14 @@ local({
       delta_c_hi=delta_c_vs_baseline+.04,mean_auc=.68),transfer_metrics_path)
   write_csv(expand_grid(endpoint="nepc",bundle="xgboost_federated_model_adt",landmark_days=0,config="both",
     horizon_days=c(365,730)) %>% mutate(auc=.7,n_cases=4),file.path(transfer_dir,"transfer_auc_t.csv"))
+  # 09 arm B: same bundles refit without Dana-Farber, plus the paired with/without comparison.
+  no_dfci_dir <- file.path(root,"federated_transfer_adt_no_DFCI"); dir.create(no_dfci_dir)
+  file.copy(file.path(transfer_dir,c("transfer_metrics.csv","transfer_auc_t.csv")),no_dfci_dir)
+  no_dfci_pairs_path <- file.path(no_dfci_dir,"transfer_with_vs_without_dfci.csv")
+  write_csv(expand_grid(endpoint=c("avpc","nepc","platinum"),landmark_days=c(0,90,180),
+      bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),config="both") %>%
+    mutate(n_patients=40,n_events=8,C_with_dfci=.66,C_no_dfci=.62,score_spearman=.9,
+      delta_c=-.04,delta_c_lo=-.08,delta_c_hi=0),no_dfci_pairs_path)
   pipeline_path <- normalizePath("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
   cfg <- list(data_root = root, cache_root = file.path(root, "cache"), fig_root = file.path(root, "figures"),
     cohorts = "adt", endpoints = c("platinum", "nepc"), scope = "all", labs = ANDROGEN,
@@ -184,7 +192,8 @@ local({
                       c("psa_forest", "testosterone_forest", "site_incidence_lm000",
                         "elasticnet_performance", "elasticnet_coefficients",
                         "xgboost_performance", "xgboost_importance",
-                        "transfer_discrimination", "08_federated_multivariable")))
+                        "transfer_discrimination", "transfer_discrimination_no_dfci",
+                        "transfer_dfci_ablation", "08_federated_multivariable")))
   coefficient_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated",
     "elasticnet_coefficients__platinum.csv"), show_col_types = FALSE)
   stopifnot(nrow(coefficient_export) == 9L, sum(coefficient_export$displayed) == 6L,
@@ -193,6 +202,13 @@ local({
     "transfer_discrimination__platinum.csv"), show_col_types = FALSE)
   stopifnot(nrow(transfer_export) == 36L, file.exists(file.path(cfg$fig_root, "ADT", "federated",
     "transfer_auc_t__platinum.csv")))
+  stopifnot(file.exists(file.path(cfg$fig_root, "ADT", "federated", c(
+    "transfer_discrimination_no_dfci__platinum.csv", "transfer_auc_t_no_dfci__platinum.csv"))))
+  ablation_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated",
+    "transfer_dfci_ablation__platinum.csv"), show_col_types = FALSE)
+  # 18 full-model C-index points per arm plus 18 paired ΔC points.
+  stopifnot(nrow(ablation_export) == 54L, sum(ablation_export$arm == "Paired difference") == 18L,
+    all(!is.na(ablation_export$model_family)))
   # Both forest scenes keep widescreen slide dimensions through 05's cache;
   # the day-zero incidence layout is unchanged.
   for(scene in env$figure_run$prepared$federated$scenes[1:2]) {
@@ -209,7 +225,7 @@ local({
   federated_cfg <- cfg; federated_cfg$scope <- "federated"
   # Elastic-net, XGBoost and 09 transfer files require a refreshed 04 manifest after source changes.
   for(path in c(xgb_metrics_path,xgb_importance_path,cox_metrics_path,cox_coefficients_path,
-                transfer_metrics_path)) {
+                transfer_metrics_path,no_dfci_pairs_path)) {
     original_time <- file.info(path)$mtime
     Sys.setFileTime(path,original_time+5)
     changed <- tryCatch(figure_notebook_manifest(federated_cfg),error=identity)

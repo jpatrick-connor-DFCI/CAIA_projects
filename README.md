@@ -1197,6 +1197,17 @@ from `COMPASS_FEDERATED_TRANSFER` (default
 to render `figures/ADT/federated/transfer_discrimination__platinum.{png,csv}`.
 The figure shows C-index, ΔC vs. age only, and mean AUC(t) by endpoint.
 
+09's arm B scores the same bundles refit without Dana-Farber
+(`federated_results_w_MSK/federated_*_no_DFCI/`), which is an external validation. It writes
+the same files plus `transfer_with_vs_without_dfci.csv` (paired full-model ΔC,
+without − with Dana-Farber, on the same patients and bootstrap resamples) to
+`COMPASS_FEDERATED_TRANSFER_NO_DFCI` (default
+`$COMPASS_DATA_ROOT/federated_transfer_adt_no_DFCI`). The same 04 → 05 rerun
+renders `figures/ADT/federated/transfer_discrimination_no_dfci__platinum.{png,csv}`
+(same layout as arm A) and `transfer_dfci_ablation__platinum.{png,csv}` (with vs.
+without Dana-Farber C-index, plus the paired ΔC, by endpoint and landmark). Either
+arm is skipped with a warning when its files are missing.
+
 The same federated run also renders the pooled federated models themselves from
 `federated_cox_multivariate/` (elastic-net) and `federated_xgboost/`, next to
 the across-site results CSV. The outputs are
