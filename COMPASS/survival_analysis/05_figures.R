@@ -118,7 +118,7 @@
 # Clinical combinations and risk stratification (ADT runs, under `prediction/`):
 # `combinations_<gleason|gleason_somatic>_cindex__...` shows the raw held-out test
 # C-index of every combination arm by landmark and model (no paired deltas; CSV
-# alongside). `compiled/prediction/riskstrat_<test|cv_oof>_<source>_lm<N>__...`
+# in `prediction/data/`). `compiled/prediction/riskstrat_<test|cv_oof>_<source>_lm<N>__...`
 # pages the KM curves for the labs risk score and each clinical or comparison-arm
 # stratifier (source `full` or `<cohort>_<cox|xgboost>` matched cohorts);
 # `withinstrat_<scheme>_<stratifier>_lm<N>` shows labs high vs low inside each
@@ -131,7 +131,10 @@
 # Exports use shallow topic folders: `cohort/`, `labels/`, `associations/`,
 # `prediction/`, `trajectories/<lab>/`, and `federated/`. There is no
 # main/supplement split or per-plot directory. Local filenames are
-# `<figure>__<endpoint>__<subset>__<exclusion>.png`; CSV/Markdown tables live alongside.
+# `<figure>__<endpoint>__<subset>__<exclusion>.png`. Every export folder holds only
+# PNG/PDF figures: CSV/Markdown tables and legends go in a `data/` subfolder of the
+# same folder (e.g. `prediction/data/`), and older tables left beside figures are
+# moved there when the catalog is rewritten.
 # Compiled figures have their own `compiled/<topic>/` tree under each arm,
 # including `compiled/trajectories/<lab>/` to keep PSA/testosterone filenames distinct.
 # They retain panel letters, with no descriptive panel titles or overall supertitle. Counts formerly in a
@@ -193,7 +196,7 @@
 # uses a 7.2 × 10.2-inch canvas; its model-input audit remains in the external
 # legend rather than as a caution footer on the plotted page. Downloaded PNGs alone cannot provide vector
 # replacements for the original source plots.
-# Each arm gets a thumbnail `index.html` and a `manifest.csv` with relative paths,
+# Each arm gets a thumbnail `data/index.html` and `data/manifest.csv` with relative paths,
 # titles, endpoint, cohort, and landmark metadata. No duplicate thumbnail files are made.
 #
 # R compiles classifier validation into one figure and subtype/enrichment into one;

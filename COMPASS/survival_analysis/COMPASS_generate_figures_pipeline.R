@@ -1781,6 +1781,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     output_dir <- output_dir_for_stem(stem)
     out_base <- file.path(output_dir, COHORT_LEAF)
     if(exists("figure_public_path",mode="function")) out_base <- figure_public_path(out_base)
+    if(exists("figure_sidecar_path",mode="function")) out_base <- figure_sidecar_path(out_base)
     dir.create(dirname(out_base),recursive=TRUE,showWarnings=FALSE)
     csv <- paste0(out_base, ".csv"); md_p <- paste0(out_base, ".md")
     write_csv(table1, csv)

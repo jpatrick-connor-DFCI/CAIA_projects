@@ -162,4 +162,21 @@ page_spec <- figure_compilation_spec(items[[1]]$stem)
 page_spec$height <- page_spec[["page_row_height"]] * ceiling(length(items) / page_spec$cols)
 compiled <- figure_combine(items, page_spec, tempdir())
 stopifnot(isTRUE(attr(compiled, "compass_compiled")), page_spec$height == 6.5)
+# Tables sit in a data/ folder beside the figures; legacy tables are moved there
+# and the catalog lives in <arm>/data/ with links back up to the figures.
+stopifnot(figure_sidecar_path("/x/ADT/prediction/a__p.csv") == "/x/ADT/prediction/data/a__p.csv",
+          figure_sidecar_path("/x/ADT/prediction/data/a__p.csv") == "/x/ADT/prediction/data/a__p.csv")
+fig_root <- file.path(root, "export"); arm <- file.path(fig_root, "ADT")
+dir.create(file.path(arm, "prediction"), recursive = TRUE); dir.create(file.path(arm, "by_figure"))
+file.create(file.path(arm, "prediction", c("comutation_lm90__p.png", "comutation_lm90__p.pdf",
+  "comutation_lm90__p.csv", "comutation_lm90__p.md")), file.path(arm, c("manifest.csv", "index.html")),
+  file.path(arm, "by_figure", "old.csv"))
+figure_write_catalog(list(fig_root = fig_root), list())
+stopifnot(setequal(list.files(file.path(arm, "prediction")), c("comutation_lm90__p.png", "comutation_lm90__p.pdf", "data")),
+          setequal(list.files(file.path(arm, "prediction", "data")), c("comutation_lm90__p.csv", "comutation_lm90__p.md")),
+          setequal(list.files(arm), c("by_figure", "data", "prediction")),
+          file.exists(file.path(arm, "by_figure", "old.csv")))
+html <- paste(readLines(file.path(arm, "data", "index.html")), collapse = "\n")
+stopifnot(grepl('href="../prediction/data/comutation_lm90__p.csv"', html, fixed = TRUE),
+          grepl('src="../prediction/comutation_lm90__p.png"', html, fixed = TRUE))
 cat("risk stratification figure tests passed\n")

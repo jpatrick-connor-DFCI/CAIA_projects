@@ -133,7 +133,7 @@ local({
     unlist(lapply(first$prepared,`[[`,"scenes"),recursive=FALSE))
   stopifnot(length(manuscript_scenes)>=7L,
     all(vapply(manuscript_scenes,function(s) file.exists(paste0(s$destination,".pdf")) &&
-      file.exists(paste0(s$destination,".md")) && s$width==7.2,logical(1))))
+      file.exists(figure_sidecar_path(paste0(s$destination,".md"))) && s$width==7.2,logical(1))))
   overview_stems <- vapply(first$prepared$cohort_overview$scenes,`[[`,character(1),"stem")
   stopifnot("06_dfci_cohort_sensitivity" %in% overview_stems)
   platinum_stems <- vapply(first$prepared$adt__platinum$scenes, `[[`, character(1), "stem")
@@ -194,17 +194,17 @@ local({
                         "xgboost_performance", "xgboost_importance",
                         "transfer_discrimination", "transfer_discrimination_no_dfci",
                         "transfer_dfci_ablation", "08_federated_multivariable")))
-  coefficient_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated",
+  coefficient_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated", "data",
     "elasticnet_coefficients__platinum.csv"), show_col_types = FALSE)
   stopifnot(nrow(coefficient_export) == 9L, sum(coefficient_export$displayed) == 6L,
     "last missing" %in% coefficient_export$feature_stat)
-  transfer_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated",
+  transfer_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated", "data",
     "transfer_discrimination__platinum.csv"), show_col_types = FALSE)
-  stopifnot(nrow(transfer_export) == 36L, file.exists(file.path(cfg$fig_root, "ADT", "federated",
+  stopifnot(nrow(transfer_export) == 36L, file.exists(file.path(cfg$fig_root, "ADT", "federated", "data",
     "transfer_auc_t__platinum.csv")))
-  stopifnot(file.exists(file.path(cfg$fig_root, "ADT", "federated", c(
+  stopifnot(file.exists(file.path(cfg$fig_root, "ADT", "federated", "data", c(
     "transfer_discrimination_no_dfci__platinum.csv", "transfer_auc_t_no_dfci__platinum.csv"))))
-  ablation_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated",
+  ablation_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated", "data",
     "transfer_dfci_ablation__platinum.csv"), show_col_types = FALSE)
   # 18 full-model C-index points per arm plus 18 paired ΔC points.
   stopifnot(nrow(ablation_export) == 54L, sum(ablation_export$arm == "Paired difference") == 18L,
@@ -216,10 +216,10 @@ local({
   }
   incidence_scene <- env$figure_run$prepared$federated$scenes[[3]]
   stopifnot(incidence_scene$width == 14, incidence_scene$height == 5.5)
-  site_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated",
+  site_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated", "data",
                                     "site_incidence_lm000__platinum.csv"), show_col_types = FALSE)
-  stopifnot(file.exists(file.path(cfg$fig_root,"ADT","index.html")),
-            file.exists(file.path(cfg$fig_root,"ADT","manifest.csv")),
+  stopifnot(file.exists(file.path(cfg$fig_root,"ADT","data","index.html")),
+            file.exists(file.path(cfg$fig_root,"ADT","data","manifest.csv")),
             !dir.exists(file.path(cfg$fig_root,"ADT","by_figure")))
   stopifnot(nrow(site_export) == 2L, all(site_export$landmark_days == 0))
   federated_cfg <- cfg; federated_cfg$scope <- "federated"

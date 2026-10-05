@@ -72,7 +72,7 @@ local({
   scenes <- prepare_figure_scenes(file.path(root,"data"),"test",function()
     suppressWarnings(render_federated_multivariable(output,file.path(root,"fed.csv"),"xgboost",60,TRUE)))
   stopifnot(length(scenes$scenes)==1,scenes$scenes[[1]]$stem=="xgboost_importance")
-  exported <- read_csv(file.path(output,"xgboost_importance__platinum.csv"),show_col_types=FALSE)
+  exported <- read_csv(file.path(output,"data","xgboost_importance__platinum.csv"),show_col_types=FALSE)
   stopifnot(nrow(exported)==7,sum(exported$displayed)==5,
     all(exported$input_audit_note==federated_input_audit_note(filter(imp,landmark_days==0),"xgboost")))
   metric_root <- file.path(root,"metrics-only")
@@ -130,10 +130,10 @@ local({
     render_federated_multivariable(output,file.path(root,"fed.csv"),"elastic_net",60,TRUE))
   stopifnot(identical(vapply(scenes$scenes,`[[`,character(1),"stem"),
     c("elasticnet_performance","elasticnet_coefficients")))
-  exported <- read_csv(file.path(output,"elasticnet_coefficients__platinum.csv"),show_col_types=FALSE)
+  exported <- read_csv(file.path(output,"data","elasticnet_coefficients__platinum.csv"),show_col_types=FALSE)
   stopifnot(nrow(exported)==15,sum(exported$displayed)==9,
     !any(exported$displayed[exported$feature %in% c("age","Body_height__mean")]))
-  performance <- read_csv(file.path(output,"elasticnet_performance__platinum.csv"),show_col_types=FALSE)
+  performance <- read_csv(file.path(output,"data","elasticnet_performance__platinum.csv"),show_col_types=FALSE)
   stopifnot(nrow(performance)==6,setequal(performance$name,c("Elastic-Net Cox","Cox baseline (age)")))
 })
 cat("Federated elastic-net/XGBoost: test-only metrics, isolation, feature parsing, shared styling, audit, missing inputs and validation passed.\n")

@@ -67,13 +67,13 @@ local({
   prepared <- list(adt__platinum=m)
   config <- list(fig_root=output,cache_root=cache)
   figure_write_catalog(config,prepared)
-  registry <- read_csv(file.path(output,"ADT","manifest.csv"),show_col_types=FALSE)
+  registry <- read_csv(file.path(output,"ADT","data","manifest.csv"),show_col_types=FALSE)
   stopifnot(nrow(registry)==32,all(file.exists(file.path(output,"ADT",registry$path))),
-    !any(grepl(root,registry$path,fixed=TRUE)),file.exists(file.path(output,"ADT","index.html")))
-  html <- paste(readLines(file.path(output,"ADT","index.html")),collapse="\n")
+    !any(grepl(root,registry$path,fixed=TRUE)),file.exists(file.path(output,"ADT","data","index.html")))
+  html <- paste(readLines(file.path(output,"ADT","data","index.html")),collapse="\n")
   urls <- regmatches(html,gregexpr('(?:href|src)="[^"]+"',html,perl=TRUE))[[1]]
   urls <- sub('^[^=]+="(.*)"$',"\\1",urls)
-  stopifnot(all(file.exists(file.path(output,"ADT",utils::URLdecode(urls[!startsWith(urls,"#")])))),
+  stopifnot(all(file.exists(file.path(output,"ADT","data",utils::URLdecode(urls[!startsWith(urls,"#")])))),
     identical(figure_href("trajectories/PSA test/a.png"),"trajectories/PSA%20test/a.png"))
   # Known regenerated identities archive without losing bytes; unselected
   # endpoints stay untouched. Index generation does not copy PNG thumbnails.

@@ -9,6 +9,14 @@
 # Presentation-only compilation. Statistical inputs and cached RDS stay in data.
 figure_slug <- function(x) tolower(gsub("^_|_$", "", gsub("[^A-Za-z0-9]+", "_", x)))
 
+# Tables, legends, manifests and the HTML index sit in a "data" folder beside
+# the figures they describe, so each export folder lists only PNG/PDF figures.
+FIGURE_SIDECAR_DIR <- "data"
+figure_sidecar_path <- function(path) {
+  if (basename(dirname(path)) == FIGURE_SIDECAR_DIR) return(path)
+  file.path(dirname(path), FIGURE_SIDECAR_DIR, basename(path))
+}
+
 figure_public_path <- function(path) {
   if (!grepl("/by_figure/", path, fixed = TRUE)) return(path)
   root <- sub("/by_figure/.*$", "", path)
@@ -286,11 +294,30 @@ figure_html_escape <- function(x) {
 figure_href <- function(path) paste(vapply(strsplit(path,"/",fixed=TRUE)[[1]],
   utils::URLencode,character(1),reserved=TRUE),collapse="/")
 
+# Move tables/notes left beside figures by earlier exports into the sidecar
+# folder. When both copies exist the newer one wins. by_figure/ is left to the
+# archiver, and manuscript captions already have their own folder.
+figure_relocate_sidecars <- function(root) {
+  paths <- list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(csv|md|txt|html)$")
+  rel <- substring(paths,nchar(root)+2)
+  stray <- !grepl("(^|/)(by_figure|main|supplements)/",rel) &
+    !basename(dirname(paths)) %in% c(FIGURE_SIDECAR_DIR,"captions")
+  for(path in paths[stray]) {
+    target <- figure_sidecar_path(path)
+    dir.create(dirname(target),recursive=TRUE,showWarnings=FALSE)
+    if(file.exists(target) && file.mtime(target) >= file.mtime(path)) {
+      if(unlink(path)!=0) stop("Cannot remove superseded table: ",path)
+    } else if(!file.rename(path,target)) stop("Cannot move table into ",FIGURE_SIDECAR_DIR,"/: ",path)
+  }
+  invisible(paths[stray])
+}
+
 figure_write_catalog <- function(config, prepared) {
   scenes <- unlist(lapply(prepared,function(m) m$scenes),recursive=FALSE)
   for (arm in c("ADT","ARPI")) {
     root <- file.path(config$fig_root,arm)
     if(!dir.exists(root)) next
+    figure_relocate_sidecars(root)
     paths <- list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(png|pdf|csv|md)$")
     paths <- paths[!grepl("/by_figure/|/main/|/supplements/",paths) & basename(paths)!="manifest.csv"]
     if(!length(paths)) next
@@ -307,7 +334,7 @@ figure_write_catalog <- function(config, prepared) {
     })
     registry <- do.call(rbind,records)
     # Keep metadata for previously rendered cohorts outside this run's scope.
-    old_path <- file.path(root,"manifest.csv")
+    old_path <- file.path(root,FIGURE_SIDECAR_DIR,"manifest.csv")
     if(file.exists(old_path)) {
       previous <- readr::read_csv(old_path,show_col_types=FALSE,col_types=readr::cols(.default="c"))
       for(i in seq_len(nrow(registry))) {
@@ -317,11 +344,15 @@ figure_write_catalog <- function(config, prepared) {
         }
       }
     }
+    dir.create(dirname(old_path),showWarnings=FALSE)
     readr::write_csv(registry,old_path)
     cards <- vapply(which(registry$format=="png"),function(i) {
       row <- registry[i,]; stem <- tools::file_path_sans_ext(row$path)
-      sidecars <- registry$path[tools::file_path_sans_ext(registry$path)==stem & registry$format!="png"]
-      href <- figure_href
+      figure_stem <- sub(paste0("(^|/)",FIGURE_SIDECAR_DIR,"/([^/]+)$"),"\\1\\2",
+        tools::file_path_sans_ext(registry$path))
+      sidecars <- registry$path[figure_stem==stem & registry$format!="png"]
+      # The index lives in <arm>/data/, one level below the figures it links.
+      href <- function(p) paste0("../",figure_href(p))
       paste0('<article><a href="',href(row$path),'"><img loading="lazy" src="',href(row$path),
         '" alt="',figure_html_escape(row$title),'"></a><h3>',figure_html_escape(row$title),'</h3><p>',
         figure_html_escape(paste(row$topic,row$endpoint,row$cohort,row$landmark,sep=" · ")),'</p>',
@@ -337,9 +368,9 @@ figure_write_catalog <- function(config, prepared) {
       '<style>body{font:16px system-ui;margin:2rem;background:#f7f8fa;color:#20242a}main{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:1rem}article{background:white;padding:1rem;border:1px solid #ddd;border-radius:8px}img{width:100%;height:260px;object-fit:contain}h3{font-size:1rem}p{color:#555}a{color:#165b91}</style></head><body>',
       paste0('<h1>',arm,' figures</h1><p>Click a figure for full resolution. <a href="manifest.csv">Download manifest</a>.</p>'),
       paste(vapply(unique(png_topics),function(topic) paste0('<a href="#',topic,'">',figure_html_escape(topic),'</a>'),character(1)),collapse=" · "),sections,
-      '<h2>Tables</h2><ul>',vapply(tables,function(p) paste0('<li><a href="',figure_href(p),'">',figure_html_escape(p),'</a></li>'),character(1)),
+      '<h2>Tables</h2><ul>',vapply(tables,function(p) paste0('<li><a href="../',figure_href(p),'">',figure_html_escape(p),'</a></li>'),character(1)),
       '</ul></body></html>')
-    writeLines(html,file.path(root,"index.html"))
+    writeLines(html,file.path(root,FIGURE_SIDECAR_DIR,"index.html"))
   }
 }
 
@@ -849,7 +880,8 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
   if(startsWith(audit,"CAUTION")) warning(audit)
   capture <- getOption("compass.figure_table_capture")
   write_table <- function(data,stem) {
-    path <- file.path(root,paste0(stem,"__platinum.csv"))
+    path <- figure_sidecar_path(file.path(root,paste0(stem,"__platinum.csv")))
+    dir.create(dirname(path),recursive=TRUE,showWarnings=FALSE)
     readr::write_csv(data,path)
     if(is.function(capture)) capture(path)
   }
@@ -1100,7 +1132,8 @@ plot_federated_transfer_ablation <- function(d, caption) {
 }
 
 write_federated_transfer_table <- function(root, data, stem) {
-  path <- file.path(root,paste0(stem,"__platinum.csv"))
+  path <- figure_sidecar_path(file.path(root,paste0(stem,"__platinum.csv")))
+  dir.create(dirname(path),recursive=TRUE,showWarnings=FALSE)
   readr::write_csv(data,path)
   capture <- getOption("compass.figure_table_capture")
   if(is.function(capture)) capture(path)
@@ -1154,13 +1187,15 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
   estimates$population_note <- ifelse(estimates$source_kind=="across_sites",note,"Within-site model")
   for(analyte in c("PSA","Testosterone")) {
     base <- file.path(root,paste0(tolower(analyte),"_forest__platinum"))
-    readr::write_csv(filter(estimates,lab_name==analyte),paste0(base,".csv"))
-    if(is.function(capture)) capture(paste0(base,".csv"))
+    table <- figure_sidecar_path(paste0(base,".csv"))
+    dir.create(dirname(table),recursive=TRUE,showWarnings=FALSE)
+    readr::write_csv(filter(estimates,lab_name==analyte),table)
+    if(is.function(capture)) capture(table)
     save_federated_panel(plot_federated_comparison(estimates,analyte,note),paste0(base,".png"),
       FEDERATED_FOREST_SLIDE_SIZE[["width"]],FEDERATED_FOREST_SLIDE_SIZE[["height"]],dpi,overwrite)
   }
   if (!is.null(sites)) {
-    site_path <- file.path(root, "site_incidence_lm000__platinum.csv")
+    site_path <- figure_sidecar_path(file.path(root, "site_incidence_lm000__platinum.csv"))
     dir.create(dirname(site_path), recursive = TRUE, showWarnings = FALSE)
     readr::write_csv(prepare_federated_site_incidence(sites), site_path)
     if (is.function(capture)) capture(site_path)
@@ -1913,6 +1948,7 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
     for(path in paths) {
       target <- figure_public_path(path)
       if(!identical(path,target)) {
+        target <- figure_sidecar_path(target)
         dir.create(dirname(target),recursive=TRUE,showWarnings=FALSE)
         if(!file.copy(path,target,overwrite=TRUE) ||
            !identical(unname(tools::md5sum(path)),unname(tools::md5sum(target)))) stop("Cannot publish figure table: ",path)
@@ -1973,13 +2009,14 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
     for(item in manuscripts) {
       destination <- file.path(manuscript_root,item$spec$key)
       dir.create(manuscript_root,recursive=TRUE,showWarnings=FALSE)
-      legend_path <- paste0(destination,".md")
+      legend_path <- figure_sidecar_path(paste0(destination,".md"))
+      dir.create(dirname(legend_path),recursive=TRUE,showWarnings=FALSE)
       writeLines(c(paste0("# ",gsub("_"," ",item$spec$key)),"",
         sprintf("Source-rendered manuscript figure: %.1f-inch width; 600-dpi PNG and vector PDF.",
           item$spec$width),"",item$legend),legend_path)
       table_capture(legend_path)
       if(is.data.frame(item$data)) {
-        data_path <- paste0(destination,".csv")
+        data_path <- figure_sidecar_path(paste0(destination,".csv"))
         readr::write_csv(item$data,data_path); table_capture(data_path)
       }
       publish(item$plot,destination,item$spec$width,item$spec$height,item$spec$key)
@@ -2468,7 +2505,10 @@ reformat_downloaded_figures <- function(input, output, landmark=0L) {
   tryCatch(draw(),finally=grDevices::dev.off())
   grDevices::cairo_pdf(paste0(target,".pdf"),width=width,height=height)
   tryCatch(draw(),finally=grDevices::dev.off())
-  metadata <- readr::read_csv(file.path(output,"manifest.csv"),show_col_types=FALSE,
+  manifest <- file.path(output,FIGURE_SIDECAR_DIR,"manifest.csv")
+  # Downloads made before tables moved into data/ keep the manifest at the root.
+  if(!file.exists(manifest)) manifest <- file.path(output,"manifest.csv")
+  metadata <- readr::read_csv(manifest,show_col_types=FALSE,
     col_types=readr::cols(.default="c"))
   moved <- metadata$path %in% selected
   metadata$path[moved] <- paste0("compiled/",metadata$path[moved])
@@ -2482,7 +2522,9 @@ reformat_downloaded_figures <- function(input, output, landmark=0L) {
     row$format <- format
     metadata <- rbind(metadata,row)
   }
-  readr::write_csv(metadata,file.path(output,"manifest.csv"))
+  dir.create(file.path(output,FIGURE_SIDECAR_DIR),showWarnings=FALSE)
+  readr::write_csv(metadata,file.path(output,FIGURE_SIDECAR_DIR,"manifest.csv"))
+  unlink(file.path(output,c("manifest.csv","index.html")))
   figure_write_catalog(list(fig_root=dirname(output)),list())
   invisible(list(selected=selected,new_figure=target))
 }
