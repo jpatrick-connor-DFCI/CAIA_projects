@@ -24,7 +24,7 @@ figure_public_path <- function(path) {
     topic <- file.path("trajectories", figure_slug(parts[3]))
     artifact <- paste(parts[4:(length(parts)-1)], collapse = "_")
   }
-  artifact <- sub("^[abcd]_", "", artifact)
+  artifact <- sub("^[a-h]_", "", artifact)
   artifact <- sub("^sequencing_", "somatic_", artifact)
   artifact <- sub("gleason_platinum_km_gleason_score", "gleason_km", artifact)
   artifact <- gsub("(^|_)(platinum|nepc)(_|$)", "_", artifact)
@@ -102,6 +102,24 @@ figure_compilation_spec <- function(stem) {
       if (grepl("somatic", key)) "Somatic vs. labs sensitivity" else "Labs vs. age baseline"
     return(list(key=sub("^figure4[a-z]_", "", key), title=title, width=16, height=6.5, cols=2,
       shared_caption=TRUE, shared_legend=TRUE))
+  }
+  # Risk-score stratification KMs: one page per scheme x source x landmark,
+  # and one per clinical stratifier for the within-level panels.
+  if (grepl("^figure4f_riskstrat_", stem)) {
+    key <- sub("^figure4f_(riskstrat_(test|cv_oof)_(full|gleason_somatic_(cox|xgboost)|gleason_(cox|xgboost)))_.*_landmark([0-9]+)$",
+               "\\1_lm\\6", stem, perl=TRUE)
+    return(list(key=key, title="Labs risk score vs. clinical stratifiers: KM", width=21, page_row_height=6.5,
+      cols=3, page_size=9, shared_caption=TRUE, shared_legend=FALSE))
+  }
+  if (grepl("^figure4g_withinstrat_", stem)) {
+    # Stratifier slugs are known; level slugs vary, so match the stratifier.
+    strat <- sub("^(gleason|stage|tp53_rb1|tp53|pten|rb1|trio_burden|trio_combinations)_.*$", "\\1",
+      sub("^figure4g_withinstrat_(test|cv_oof)_", "", stem), perl=TRUE)
+    scheme <- sub("^figure4g_withinstrat_(test|cv_oof)_.*$", "\\1", stem)
+    landmark <- sub("^.*_landmark([0-9]+)$", "\\1", stem)
+    return(list(key=paste0("withinstrat_", scheme, "_", strat, "_lm", landmark),
+      title="Labs risk within clinical strata: KM", width=21, page_row_height=6.5,
+      cols=3, page_size=9, shared_caption=TRUE, shared_legend=FALSE))
   }
   if (grepl("^figure4b_importance_", stem)) {
     model <- sub("^.*_(cox|xgb)_landmark.*$", "\\1", stem)
@@ -184,6 +202,9 @@ figure_combine <- function(items, spec, directory) {
           if(is_overview) title <- paste(if(lab=="psa") "PSA" else "Testosterone",
             "bottom vs top 20%",paste0("(day ",sub("^.*landmark","",stem),")"))
         }
+      } else if (grepl("^figure4[fg]_",stem)) {
+        # Compiled titles are dropped; the stratifier/level must stay on the panel.
+        p <- p + ggplot2::labs(subtitle=paste(c(title,p$labels$subtitle),collapse=" \u2014 "))
       } else if (grepl("^figure3b_.*_km_",stem)) {
         title <- sub(" carrier status: time to platinum$", "", title)
       } else if (stem=="figure2v3_confusion_matrix") {
@@ -1926,6 +1947,8 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
     pages <- split(seq_along(items),ceiling(seq_along(items)/page_size))
     for(page in seq_along(pages)) {
       selected <- items[pages[[page]]]
+      # Variable-length bundles size their height to the rows actually used.
+      if(!is.null(spec[["page_row_height"]])) spec$height <- spec[["page_row_height"]]*ceiling(length(selected)/spec$cols)
       compiled <- figure_combine(selected,spec,generation)
       destination <- figure_public_path(selected[[1]]$destination)
       identity <- basename(selected[[1]]$destination)

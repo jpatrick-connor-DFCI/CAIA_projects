@@ -100,6 +100,7 @@ class TestFullCohortStage:
         row_output_dir = tmp_path / cp.RISK_STRATIFICATION_DIRNAME / "test" / "full_cohort" / "landmark_0"
         row_output_dir.mkdir(parents=True, exist_ok=True)
         (row_output_dir / "risk_stratified_discrimination_platinum_landmark0.csv").write_text("x\n")
+        (row_output_dir / "risk_stratified_patients_platinum_landmark0.csv").write_text("x\n")
 
         summary = cp.run_risk_stratification(run, dry_run=True)
         full_cohort_test_rows = [
@@ -108,6 +109,25 @@ class TestFullCohortStage:
             if "full_cohort" in tag and "test" in tag.split()[2]
         ]
         assert any(status == "skipped" for _tag, status in full_cohort_test_rows)
+
+
+    def test_reruns_when_patients_file_missing(self, tmp_path, monkeypatch):
+        # Older runs wrote the discrimination table but not the per-patient
+        # strata file the R KM figures read; those must be regenerated.
+        monkeypatch.setattr(cp, "FORCE_RERUN", False)
+        run = _run(tmp_path, tmp_path / "inputs")
+        row_output_dir = tmp_path / cp.RISK_STRATIFICATION_DIRNAME / "test" / "full_cohort" / "landmark_0"
+        row_output_dir.mkdir(parents=True, exist_ok=True)
+        (row_output_dir / "risk_stratified_discrimination_platinum_landmark0.csv").write_text("x\n")
+
+        summary = cp.run_risk_stratification(run, dry_run=True)
+        full_cohort_test_rows = [
+            (tag, status)
+            for tag, status, _elapsed in summary
+            if "full_cohort" in tag and "test" in tag.split()[2]
+        ]
+        assert full_cohort_test_rows
+        assert all(status != "skipped" for _tag, status in full_cohort_test_rows)
 
 
 class TestMatchedCohortStage:

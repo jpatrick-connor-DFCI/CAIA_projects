@@ -115,6 +115,19 @@
 # The overview requires all seven source panels and is restricted to platinum.
 # Individual KM panels and the three-landmark KM sheets are also retained.
 #
+# Clinical combinations and risk stratification (ADT runs, under `prediction/`):
+# `combinations_<gleason|gleason_somatic>_cindex__...` shows the raw held-out test
+# C-index of every combination arm by landmark and model (no paired deltas; CSV
+# alongside). `compiled/prediction/riskstrat_<test|cv_oof>_<source>_lm<N>__...`
+# pages the KM curves for the labs risk score and each clinical or comparison-arm
+# stratifier (source `full` or `<cohort>_<cox|xgboost>` matched cohorts);
+# `withinstrat_<scheme>_<stratifier>_lm<N>` shows labs high vs low inside each
+# clinical level. The test and cv_oof schemes are never pooled.
+# `comutation_<trio_combinations|tp53_rb1|trio_burden>_lm<N>` gives TP53/PTEN/RB1
+# co-mutation KMs on the full landmark cohort (cv_oof file, falling back to test).
+# All read `risk_stratified_patients_*.csv` from run_risk_stratification; rerun it
+# if those files are missing, since older runs did not write them.
+#
 # Exports use shallow topic folders: `cohort/`, `labels/`, `associations/`,
 # `prediction/`, `trajectories/<lab>/`, and `federated/`. There is no
 # main/supplement split or per-plot directory. Local filenames are

@@ -266,6 +266,42 @@ class TestEndToEnd:
         manifest = pd.read_csv(out_dir / "risk_stratified_gene_sources_platinum_landmark180.csv")
         assert set(manifest["gene"]) == set(rsf.TRIO_GENES)
 
+    def test_writes_per_patient_strata_for_r_figures(self, tmp_path):
+        risks = _risks(12)
+        clinical = pd.DataFrame({
+            ID: [str(i) for i in range(12)],
+            rsf.GLEASON_FEATURE: [6, 7, 8, 9] * 3,
+            "TP53_SNV": [0, 1] * 6,
+            "RB1_SNV": [0, 0, 1, 1] * 3,
+            "PTEN_DEL": [1, 1, 0] * 4,
+        })
+        risk_path = _write(tmp_path, risks)
+        clin_path = tmp_path / "clinical.csv"
+        clinical.to_csv(clin_path, index=False)
+        out_dir = tmp_path / "out"
+        rsf.main([
+            "--patient-risks", str(risk_path),
+            "--clinical-features", str(clin_path),
+            "--output-dir", str(out_dir),
+            "--endpoint", "platinum",
+            "--landmark-days", "180",
+            "--id-col", ID,
+            "--no-plot",
+        ])
+        patients = pd.read_csv(out_dir / "risk_stratified_patients_platinum_landmark180.csv")
+        assert len(patients) == 12
+        assert {ID, "duration_days", "event", "risk_score", "risk_score",
+                "gleason", "trio_combinations", "tp53_rb1"} <= set(patients.columns)
+        assert set(patients["risk_score"].dropna()) != set()
+        meta = pd.read_csv(
+            out_dir / "risk_stratified_strata_platinum_landmark180.csv"
+        ).set_index("stratifier")
+        combos = meta.loc["trio_combinations", "order"].split("|")
+        assert combos[0] == "None altered" and combos[-1] == "TP53+PTEN+RB1"
+        assert len(combos) == 8
+        assert not bool(meta.loc["trio_combinations", "ordinal"])
+        assert meta.loc["risk_score", "order"].split("|") == [rsf.RISK_HIGH, rsf.RISK_LOW]
+
     def test_runs_with_risk_scores_alone(self, tmp_path):
         out_dir = tmp_path / "out"
         rsf.main([

@@ -110,7 +110,8 @@ figure_platinum_strata <- function(frame, groups) {
 }
 
 plot_stratified_platinum <- function(d, title, origin, group_order = unique(d$stratum),
-                                     note = NULL) {
+                                     note = NULL, colors = NULL, ci = TRUE,
+                                     ylab = "Platinum-free probability", legend_ncol = 1) {
   if (!nrow(d) || length(unique(d$stratum)) < 2L) return(NULL)
   group_order <- group_order[group_order %in% d$stratum]
   d$stratum <- factor(d$stratum, levels = group_order)
@@ -124,23 +125,75 @@ plot_stratified_platinum <- function(d, title, origin, group_order = unique(d$st
     summarise(n = n(), events = sum(event), .groups = "drop")
   legend_labels <- setNames(sprintf("%s (n=%s; events=%s)", counts$stratum,
                                     counts$n, counts$events), as.character(counts$stratum))
-  colors <- setNames(c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00")[seq_along(group_order)], group_order)
+  default_colors <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00",
+                      "#56B4E9", "#F0E442", "#000000")
+  colors <- if (is.null(colors)) setNames(default_colors[seq_along(group_order)], group_order) else {
+    # Named overrides first; unnamed groups fall back to the default sequence.
+    fill <- setdiff(default_colors, colors[names(colors) %in% group_order])
+    missing <- setdiff(group_order, names(colors))
+    c(colors[names(colors) %in% group_order], setNames(fill[seq_along(missing)], missing))[group_order]
+  }
   logrank <- tryCatch({
     test <- survival::survdiff(survival::Surv(time, event) ~ stratum, data = d)
     pchisq(test$chisq, length(test$n) - 1, lower.tail = FALSE)
   }, error = function(e) NA_real_)
   ggplot(curves, aes(time, survival, color = stratum, fill = stratum)) +
-    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = .08, color = NA,
-                show.legend = FALSE, na.rm = TRUE) +
+    (if (ci) geom_ribbon(aes(ymin = lower, ymax = upper), alpha = .08, color = NA,
+                         show.legend = FALSE, na.rm = TRUE)) +
     geom_step(linewidth = .85) +
     scale_color_manual(values = colors, breaks = group_order, labels = legend_labels, name = NULL) +
     scale_fill_manual(values = colors, guide = "none") +
     coord_cartesian(ylim = c(0, 1.02)) +
-    labs(x = paste("Days from", origin), y = "Platinum-free probability", title = title,
+    labs(x = paste("Days from", origin), y = ylab, title = title,
          subtitle = if (is.finite(logrank)) sprintf("Log-rank p = %.3g", logrank) else "Log-rank p unavailable",
          caption = note) + theme_fig() +
-    guides(color = guide_legend(ncol = 1)) +
+    guides(color = guide_legend(ncol = legend_ncol)) +
     theme(legend.position = "bottom", legend.text = element_text(size = 10))
+}
+
+# Risk-score stratification outputs (risk_score_stratified_figures.py, run by
+# compass_pipeline.run_risk_stratification). Group labels are read from the
+# per-patient file rather than rederived, so the KMs show exactly the groups
+# that script analysed. Colors mirror its STRATUM_COLORS.
+RISK_STRATUM_COLORS <- c(
+  "High risk (above median)" = "#b2182b", "Low risk (at or below median)" = "#2166ac",
+  "Gleason <=6" = "#92c5de", "Gleason 7" = "#f4a582", "Gleason 8-10" = "#b2182b",
+  "Stage I-II" = "#92c5de", "Stage III" = "#f4a582", "Stage IV" = "#b2182b",
+  "Altered" = "#b2182b", "Wild-type" = "#2166ac",
+  "0 altered" = "#2166ac", "1 altered" = "#f4a582", "2+ altered" = "#b2182b",
+  "Neither" = "#2166ac", "TP53 only" = "#f4a582", "RB1 only" = "#92c5de", "TP53+RB1" = "#b2182b",
+  # Eight TP53/PTEN/RB1 combinations; TP53+RB1 keeps its pairwise red.
+  "None altered" = "#7f7f7f", "TP53" = "#E69F00", "PTEN" = "#56B4E9", "RB1" = "#009E73",
+  "TP53+PTEN" = "#CC79A7", "PTEN+RB1" = "#0072B2", "TP53+PTEN+RB1" = "#000000"
+)
+RISK_STRATIFICATION_SCHEMES <- c(test = "held-out test block", cv_oof = "out-of-fold (nested CV), full cohort")
+RISK_STRATIFICATION_MATCHED <- c("gleason", "gleason_somatic")
+
+# NULL when the run predates the per-patient export or the stage was not run.
+read_risk_strata <- function(directory, endpoint, landmark) {
+  suffix <- sprintf("_%s_landmark%s", endpoint, landmark)
+  patients_path <- file.path(directory, paste0("risk_stratified_patients", suffix, ".csv"))
+  meta_path <- file.path(directory, paste0("risk_stratified_strata", suffix, ".csv"))
+  if (!file.exists(patients_path) || !file.exists(meta_path)) return(NULL)
+  meta <- read_csv(meta_path, show_col_types = FALSE,
+                   col_types = cols(.default = col_character()))
+  patients <- read_csv(patients_path, show_col_types = FALSE,
+                       col_types = cols(.default = col_character()))
+  patients$time <- suppressWarnings(as.numeric(patients$duration_days))
+  patients$event <- suppressWarnings(as.numeric(patients$event))
+  meta <- meta[meta$stratifier %in% names(patients), , drop = FALSE]
+  list(patients = patients, meta = meta)
+}
+
+risk_strata_frame <- function(patients, column, keep = rep(TRUE, nrow(patients))) {
+  groups <- patients[[column]]
+  ok <- keep & is.finite(patients$time) & patients$time >= 0 &
+    patients$event %in% c(0, 1) & !is.na(groups) & nzchar(groups)
+  tibble(time = patients$time[ok], event = patients$event[ok], stratum = groups[ok])
+}
+
+risk_stratum_order <- function(meta, key) {
+  strsplit(meta$order[match(key, meta$stratifier)], "|", fixed = TRUE)[[1]]
 }
 
 prepare_figure_text <- function(plot, width) {
@@ -2871,6 +2924,167 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                sub("figure4a_discrimination_", paste0(panel_prefix, "_sensitivity_", sensitivity_analysis, "_"), dp[[1]]),
                width = 8.5, height = 5.5)
       if (show) print(p)
+    }
+  }
+
+  # Clinical combinations (compass_pipeline.run_multivariate_clinical_combinations):
+  # raw held-out test C-index for every arm. Each combination cohort is its own
+  # available-case population with one shared split, so arms within a panel are
+  # comparable; nothing here is paired or differenced against labs.
+  COMBINATION_ARMS <- list(
+    gleason = c("labs", "gleason", "gleason-labs"),
+    gleason_somatic = c("labs", "gleason", "somatic", "gleason-labs", "somatic-labs",
+                        "gleason-somatic", "gleason-somatic-labs"))
+  COMBINATION_ARM_LABELS <- c(
+    labs = "Labs", gleason = "Gleason", somatic = "Somatic",
+    "gleason-labs" = "Gleason + labs", "somatic-labs" = "Somatic + labs",
+    "gleason-somatic" = "Gleason + somatic", "gleason-somatic-labs" = "Gleason + somatic + labs")
+  COMBINATION_ARM_COLORS <- c(
+    Labs = "#4C72B0", Gleason = "#8DA0CB", Somatic = "#A6D854",
+    "Gleason + labs" = "#2A9D8F", "Somatic + labs" = "#66A61E",
+    "Gleason + somatic" = "#E5C494", "Gleason + somatic + labs" = "#D55E00")
+  COMBINATION_MODELS <- c(cox = "Elastic-Net Cox", xgboost = "XGBoost")
+  COMBINATION_METRIC_FILES <- c(cox = "cox_agg_multivariable_metrics.csv",
+                                xgboost = "landmark_xgboost_metrics.csv")
+  for (combo_cohort in names(COMBINATION_ARMS)) {
+    arms <- COMBINATION_ARMS[[combo_cohort]]
+    combo <- bind_rows(lapply(names(COMBINATION_MODELS), function(model) {
+      bind_rows(lapply(LANDMARKS, function(lm) bind_rows(lapply(arms, function(arm) {
+        v <- read_endpoint_performance(file.path(BASE, "clinical_combinations", combo_cohort, arm, model,
+          sprintf("landmark_%s", lm), "both", COMBINATION_METRIC_FILES[[model]]), ENDPOINT)
+        tibble(cohort = combo_cohort, model = COMBINATION_MODELS[[model]], landmark_days = lm,
+               arm = arm, arm_label = COMBINATION_ARM_LABELS[[arm]], cindex = v[["cindex"]],
+               n_train_val = v[["n_train_val"]], n_test = v[["n_test"]])
+      }))))
+    }))
+    if (!any(is.finite(combo$cindex))) {
+      message("Clinical-combination C-index skipped: no metrics under ",
+              file.path(BASE, "clinical_combinations", combo_cohort))
+      next
+    }
+    combo_stem <- sprintf("figure4e_combinations_%s_cindex_%s", combo_cohort, ENDPOINT)
+    write_table1(combo, file.path(OUT_DIR, combo_stem))
+    # Arms share one available-case split per landmark; report that n once.
+    combo_n <- combo %>% filter(is.finite(cindex)) %>% group_by(landmark_days) %>%
+      summarise(n = paste(sort(unique(n_train_val + n_test)), collapse = "/"),
+                n_test = paste(sort(unique(n_test)), collapse = "/"), .groups = "drop")
+    landmark_levels <- sprintf("%s%d days", ifelse(LANDMARKS > 0, "+", ""), LANDMARKS)
+    d_combo <- combo %>% mutate(
+      landmark = factor(sprintf("%s%d days", ifelse(landmark_days > 0, "+", ""), landmark_days),
+                        levels = landmark_levels),
+      arm_label = factor(arm_label, levels = unname(COMBINATION_ARM_LABELS[arms])),
+      model = factor(model, levels = unname(COMBINATION_MODELS)))
+    p_combo <- ggplot(d_combo, aes(landmark, cindex, fill = arm_label)) +
+      geom_col(position = position_dodge(width = 0.88), width = 0.84, color = "white", na.rm = TRUE) +
+      geom_text(aes(label = ifelse(is.finite(cindex), sprintf("%.3f", cindex), "")),
+                position = position_dodge(width = 0.88), vjust = -0.35, size = 2.3,
+                show.legend = FALSE, na.rm = TRUE) +
+      geom_hline(yintercept = 0.5, color = "grey", linetype = "dotted", linewidth = 0.9) +
+      facet_wrap(~model, ncol = 1) +
+      scale_fill_manual(values = COMBINATION_ARM_COLORS, name = NULL, drop = FALSE) +
+      coord_cartesian(ylim = c(0, 1.04)) +
+      labs(x = NULL, y = "Held-out C-index",
+           title = sprintf("Clinical combinations (%s cohort) — %s",
+                           if (combo_cohort == "gleason") "Gleason" else "Gleason + somatic", ENDPOINT),
+           subtitle = paste(sprintf("%s%dd: n=%s (test n=%s)", ifelse(combo_n$landmark_days > 0, "+", ""),
+                                    combo_n$landmark_days, combo_n$n, combo_n$n_test), collapse = "; "),
+           caption = paste(COHORT_DISPLAY, "Raw held-out test C-index per arm; available-case cohort with source data by each landmark.")) +
+      theme_fig() +
+      guides(fill = guide_legend(nrow = 2, byrow = TRUE)) +
+      theme(legend.position = "top", legend.text = element_text(size = 9),
+            panel.grid.major.x = element_blank(), strip.text = element_text(face = "bold"),
+            plot.title = element_text(face = "bold", size = 11))
+    save_fig(p_combo, OUT_DIR, combo_stem, width = 9.5, height = 8)
+    if (show) print(p_combo)
+  }
+
+  # Risk-score stratification KMs (compass_pipeline.run_risk_stratification).
+  # test and cv_oof are separate scoring schemes and are never pooled; each gets
+  # its own panels. Durations count from the landmark.
+  RISK_KM_YLAB <- if (ENDPOINT == "platinum") "Platinum-free probability" else
+    paste0("Event-free probability (", ENDPOINT_DISPLAY, ")")
+  risk_km_origin <- function(lm) if (lm > 0) sprintf("landmark (%s + %s days)", ANCHOR_LABEL, lm) else ANCHOR_LABEL
+  risk_km_title <- function(meta, key) {
+    if (startsWith(key, "comparison__")) {
+      arm <- sub("^comparison__", "", key)
+      return(paste(if (arm %in% names(COMBINATION_ARM_LABELS)) COMBINATION_ARM_LABELS[[arm]] else arm,
+                   "risk score"))
+    }
+    if (key == "risk_score") return("Labs risk score")
+    meta$title[match(key, meta$stratifier)]
+  }
+  risk_km_plot <- function(d, title, lm, group_order, note) {
+    many <- length(intersect(group_order, d$stratum)) > 4L
+    plot_stratified_platinum(d, title, risk_km_origin(lm), group_order, note,
+                             colors = RISK_STRATUM_COLORS, ci = !many, ylab = RISK_KM_YLAB,
+                             legend_ncol = if (many) 2 else 1)
+  }
+  risk_sources <- c(full = "full_cohort", setNames(
+    as.vector(outer(RISK_STRATIFICATION_MATCHED, c("cox", "xgboost"), function(cohort, model)
+      file.path("matched", cohort, model))),
+    as.vector(outer(RISK_STRATIFICATION_MATCHED, c("cox", "xgboost"), paste, sep = "_"))))
+  for (scheme in names(RISK_STRATIFICATION_SCHEMES)) for (lm in LANDMARKS) {
+    for (source in names(risk_sources)) {
+      strata <- read_risk_strata(file.path(BASE, "risk_stratification", scheme, risk_sources[[source]],
+                                           sprintf("landmark_%s", lm)), ENDPOINT, lm)
+      if (is.null(strata)) next
+      source_label <- if (source == "full") "full landmark cohort" else
+        paste("matched", sub("_(cox|xgboost)$", "", source), "cohort,",
+              if (endsWith(source, "_cox")) "Elastic-Net Cox" else "XGBoost")
+      note <- sprintf("%s Labs risk from %s, %s. Risk groups split at that scheme's median.",
+                      COHORT_DISPLAY, RISK_STRATIFICATION_SCHEMES[[scheme]], source_label)
+      for (key in strata$meta$stratifier) {
+        d <- risk_strata_frame(strata$patients, key)
+        p_km <- risk_km_plot(d, risk_km_title(strata$meta, key), lm, risk_stratum_order(strata$meta, key), note)
+        if (is.null(p_km)) next
+        save_fig(p_km, OUT_DIR, sprintf("figure4f_riskstrat_%s_%s_%s_landmark%s", scheme, source,
+                                        lab_stem_slug(key), lm), 8, 7)
+      }
+      # Labs risk high vs low inside each clinical level, at the scheme's one
+      # global cutpoint (never re-split per level), as in risk_within_stratum.
+      if (source != "full") next
+      clinical_keys <- setdiff(strata$meta$stratifier, "risk_score")
+      clinical_keys <- clinical_keys[!startsWith(clinical_keys, "comparison__")]
+      risk_order <- risk_stratum_order(strata$meta, "risk_score")
+      for (key in clinical_keys) for (level in risk_stratum_order(strata$meta, key)) {
+        in_level <- !is.na(strata$patients[[key]]) & strata$patients[[key]] == level
+        if (!any(in_level)) next
+        d <- risk_strata_frame(strata$patients, "risk_score", keep = in_level)
+        p_km <- risk_km_plot(d, sprintf("%s: %s", risk_km_title(strata$meta, key), level), lm, risk_order,
+                             paste(note, "Within-level panels keep the whole-cohort cutpoint."))
+        if (is.null(p_km)) next
+        save_fig(p_km, OUT_DIR, sprintf("figure4g_withinstrat_%s_%s_%s_landmark%s", scheme,
+                                        lab_stem_slug(key), lab_stem_slug(level), lm), 8, 7)
+      }
+    }
+  }
+
+  # TP53/PTEN/RB1 co-mutation KMs on the full landmark cohort. Group labels do
+  # not depend on the risk score, so the out-of-fold file (every landmark
+  # patient) is preferred; the held-out test block is the fallback.
+  for (lm in LANDMARKS) {
+    strata <- NULL; scheme_used <- NA_character_
+    for (scheme in c("cv_oof", "test")) {
+      strata <- read_risk_strata(file.path(BASE, "risk_stratification", scheme, "full_cohort",
+                                           sprintf("landmark_%s", lm)), ENDPOINT, lm)
+      if (!is.null(strata)) { scheme_used <- scheme; break }
+    }
+    if (is.null(strata)) {
+      message("Co-mutation KM skipped at landmark ", lm, ": no risk-stratification patient file")
+      next
+    }
+    population <- if (scheme_used == "cv_oof") "Full landmark cohort" else "Held-out test block only"
+    for (key in intersect(c("trio_combinations", "tp53_rb1", "trio_burden"), strata$meta$stratifier)) {
+      d <- risk_strata_frame(strata$patients, key)
+      p_km <- risk_km_plot(d, sprintf("%s: time to %s", strata$meta$title[match(key, strata$meta$stratifier)],
+                                      if (ENDPOINT == "platinum") "platinum" else ENDPOINT_DISPLAY),
+                           lm, risk_stratum_order(strata$meta, key),
+                           sprintf("%s %s. Patients need all genes in the grouping observed by the landmark; untested genes are never assumed wild-type.",
+                                   COHORT_DISPLAY, population))
+      if (is.null(p_km)) next
+      save_fig(p_km, OUT_DIR, sprintf("figure4h_comutation_%s_landmark%s", key, lm), 9,
+               if (key == "trio_combinations") 8 else 7)
+      if (show) print(p_km)
     }
   }
 

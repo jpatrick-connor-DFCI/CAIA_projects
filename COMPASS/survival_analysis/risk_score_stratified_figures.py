@@ -400,6 +400,49 @@ def _trio_combinations(frame: pd.DataFrame) -> pd.Series:
     return out
 
 
+def _trio_combination_order() -> tuple[str, ...]:
+    """Display order for the eight trio combinations: by burden, then gene order."""
+    from itertools import combinations
+
+    labels = ["None altered"]
+    for size in range(1, len(TRIO_GENES) + 1):
+        labels.extend("+".join(combo) for combo in combinations(TRIO_GENES, size))
+    return tuple(labels)
+
+
+def stratified_patients_table(
+    frame: pd.DataFrame, stratifiers: Sequence[Stratifier], *, id_col: str
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Per-patient group labels for every usable stratifier, plus their metadata.
+
+    The first frame has one row per scored patient (id, duration_days, event,
+    risk_score) and one label column per stratifier key, so downstream KM
+    figures (05_figures.R) draw exactly the groups this script analysed. The
+    second records each stratifier's title, display order ("|"-joined), and
+    whether that order is ordinal. Unordered stratifiers (trio combinations)
+    get a deterministic display order but stay flagged ordinal=False.
+    """
+    base = frame[[id_col, "duration_days", "event", "risk_score"]].copy()
+    meta_rows = []
+    for strat in stratifiers:
+        labels = strat.build(frame)
+        base[strat.key] = labels
+        if strat.order:
+            order = strat.order
+        elif strat.key == "trio_combinations":
+            order = _trio_combination_order()
+        else:
+            order = tuple(sorted(labels.dropna().unique(), key=str))
+        meta_rows.append({
+            "stratifier": strat.key,
+            "title": strat.title,
+            "order": "|".join(order),
+            "ordinal": bool(strat.order),
+            "n": int(labels.notna().sum()),
+        })
+    return base, pd.DataFrame(meta_rows)
+
+
 def risk_group(frame: pd.DataFrame, *, cutpoint: float) -> pd.Series:
     """Split held-out risk scores at `cutpoint` (the held-out median by default).
 
@@ -954,6 +997,15 @@ def run(args: argparse.Namespace) -> None:
         within_table_path = output_dir / f"risk_within_stratum{suffix}.csv"
         within_table.to_csv(within_table_path, index=False)
         print(f"Saved {within_table_path.name}")
+
+    patients, strata_meta = stratified_patients_table(
+        frame, stratifiers, id_col=args.id_col
+    )
+    patients_path = output_dir / f"risk_stratified_patients{suffix}.csv"
+    patients.to_csv(patients_path, index=False)
+    strata_path = output_dir / f"risk_stratified_strata{suffix}.csv"
+    strata_meta.to_csv(strata_path, index=False)
+    print(f"Saved {patients_path.name}, {strata_path.name}")
 
     if args.no_plot:
         return

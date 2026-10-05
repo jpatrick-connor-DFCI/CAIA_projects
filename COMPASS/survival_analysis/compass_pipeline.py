@@ -2345,7 +2345,10 @@ def run_risk_stratification(run: dict, dry_run: bool = False):
             row_output_dir = strat_root / scheme / "full_cohort" / f"landmark_{landmark_day}"
             tag = f"{run['label']:28s} risk-strat  {scheme:6s} +{landmark_day}d full_cohort"
             table_path = row_output_dir / f"risk_stratified_discrimination_{endpoint}_landmark{landmark_day}.csv"
-            if table_path.exists() and not FORCE_RERUN:
+            # The per-patient strata file feeds the R KM figures; runs from
+            # before it existed are redone rather than skipped.
+            patients_path = row_output_dir / f"risk_stratified_patients_{endpoint}_landmark{landmark_day}.csv"
+            if table_path.exists() and patients_path.exists() and not FORCE_RERUN:
                 print(f"[skip] {tag} -> {table_path.relative_to(run['output_dir'])} exists")
                 summary.append((tag, "skipped", 0.0))
             elif labs_risks_path is None or not labs_risks_path.exists():
@@ -2393,7 +2396,11 @@ def run_risk_stratification(run: dict, dry_run: bool = False):
                         f"{run['label']:28s} risk-strat  {scheme:6s} +{landmark_day}d "
                         f"matched/{cohort}/{model_dir}"
                     )
-                    if matched_table_path.exists() and not FORCE_RERUN:
+                    matched_patients_path = (
+                        matched_output_dir
+                        / f"risk_stratified_patients_{endpoint}_landmark{landmark_day}.csv"
+                    )
+                    if matched_table_path.exists() and matched_patients_path.exists() and not FORCE_RERUN:
                         print(f"[skip] {matched_tag} -> {matched_table_path.relative_to(run['output_dir'])} exists")
                         summary.append((matched_tag, "skipped", 0.0))
                         continue
