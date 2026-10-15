@@ -97,11 +97,15 @@ AVAILABLE_CASE_SENSITIVITIES = ("gleason_available_case", "somatic_available_cas
 GLEASON_SOMATIC_AVAILABLE_CASE = "gleason_somatic_available_case"
 # Plan §4a: clinical-stratifier inputs for risk_score_stratified_figures.py.
 # These are stratifiers only, never model features, so the trio columns are
-# read from the UNFILTERED somatic matrix (every alteration class), unlike
-# the SNV-only genomic arm (README invariant #8).
+# read from the UNFILTERED somatic matrix (every alteration class, one column
+# per class) rather than the collapsed <GENE>_ANY model features.
 CLINICAL_STRATIFIERS_DIRNAME = "clinical_stratifiers"
 CLINICAL_STRATIFIERS_TRIO_GENES = ("TP53", "PTEN", "RB1")
 CLINICAL_STRATIFIERS_ALTERATION_CLASSES = ("SNV", "DEL", "AMP", "SV")
+# Somatic model features for these genes collapse every alteration class into
+# one <GENE>_ANY indicator; every other gene stays SNV-only (README invariant #8).
+ANY_ALTERATION_GENES = CLINICAL_STRATIFIERS_TRIO_GENES
+ANY_ALTERATION_SUFFIX = "ANY"
 STAGE_COLUMN = "DERIVED_STAGE_MERGED"
 DEFAULT_REGEX_STAGE_PATH = Path(
     os.environ.get(
@@ -219,30 +223,54 @@ def load_somatic_features(
     if not declared:
         raise ValueError(f"Somatic manifest {manifest_path} contains no features.")
 
-    # The genomic arm is standardized to SNV-only. The manifest enumerates every
-    # variant class the panel calls, so copy-number and structural features
+    # Somatic features are SNV-only except for the TP53/PTEN/RB1 trio, which is
+    # tested as one any-alteration indicator per gene (<GENE>_ANY: SNV, DEL,
+    # AMP, or SV). PTEN and RB1 are canonically lost by deletion, so an SNV-only
+    # call misses most of their carriers. The manifest enumerates every variant
+    # class the panel calls, so non-trio copy-number and structural features
     # would otherwise enter this indexed-analysis path unconditionally -- unlike
     # build_genomic_inputs.py, this builder has no --variant-types gate.
     features = []
+    any_alteration_sources: dict[str, list[str]] = {}
     dropped = []
     for feature in declared:
         match = GENE_VARIANT_RE.match(feature)
-        (features if match and match.group(2) == "SNV" else dropped).append(feature)
+        if match and match.group(1).upper() in ANY_ALTERATION_GENES:
+            any_feature = f"{match.group(1).upper()}_{ANY_ALTERATION_SUFFIX}"
+            if any_feature not in any_alteration_sources:
+                any_alteration_sources[any_feature] = []
+                features.append(any_feature)
+            any_alteration_sources[any_feature].append(feature)
+        elif match and match.group(2) == "SNV":
+            features.append(feature)
+        else:
+            dropped.append(feature)
     if not features:
         raise ValueError(
             f"Somatic manifest {manifest_path} declares {len(declared)} features "
-            "but none are <GENE>_SNV columns; the SNV-only genomic arm has "
-            "nothing to test."
+            "but none are <GENE>_SNV columns or TP53/PTEN/RB1 alterations; the "
+            "somatic arm has nothing to test."
         )
     if dropped:
         print(
-            f"[snv-only] dropped {len(dropped)} non-SNV somatic features of "
+            f"[somatic-features] dropped {len(dropped)} non-SNV somatic features of "
             f"{len(declared)} declared; kept {len(features)}. "
             f"First dropped: {dropped[:5]}"
         )
+    for any_feature, sources in any_alteration_sources.items():
+        print(f"[somatic-features] {any_feature} = any of {sources}")
 
     somatic = _normalize_mrn(_read_table(somatic_path), source=str(somatic_path))
-    missing = [column for column in features if column not in somatic.columns]
+    collision = [f for f in any_alteration_sources if f in somatic.columns]
+    if collision:
+        raise ValueError(
+            f"Somatic matrix {somatic_path} already has columns {collision}; "
+            "refusing to overwrite them with the derived any-alteration indicators."
+        )
+    source_columns = [
+        column for column in features if column not in any_alteration_sources
+    ] + [column for sources in any_alteration_sources.values() for column in sources]
+    missing = [column for column in source_columns if column not in somatic.columns]
     if missing:
         raise ValueError(
             f"Somatic matrix is missing {len(missing)} manifest features; "
@@ -260,8 +288,12 @@ def load_somatic_features(
     # is now explicitly the specimen collection/index date rather than report
     # availability.
     somatic[SOMATIC_AVAILABLE_DATE] = somatic[SEQUENCING_DATE]
-    for feature in features:
-        somatic[feature] = pd.to_numeric(somatic[feature], errors="coerce")
+    for column in source_columns:
+        somatic[column] = pd.to_numeric(somatic[column], errors="coerce")
+    # Altered if any class is called; wild-type only if every observed class is
+    # 0; missing only when no class was observed (max skips NaN).
+    for any_feature, sources in any_alteration_sources.items():
+        somatic[any_feature] = somatic[sources].max(axis=1)
     return somatic[
         [ca.ID_COL, SEQUENCING_DATE, SOMATIC_AVAILABLE_DATE, *features]
     ], features
@@ -947,7 +979,8 @@ def build_clinical_stratifiers(
     These columns (Gleason, the TP53/PTEN/RB1 trio, and overall stage) are
     used only to stratify held-out risk-score figures (Plan §4) -- never as
     model features -- so the trio is taken from the unfiltered somatic wide
-    table (every alteration class), not the SNV-only genomic arm.
+    table (one column per alteration class), not the collapsed <GENE>_ANY
+    model features.
 
     Every column is independently left-joined onto the full landmark cohort,
     so a patient missing one clinical stratifier still gets the others rather
@@ -1218,8 +1251,8 @@ def main(args: argparse.Namespace) -> None:
 
     # Plan §4a: clinical stratifier inputs for risk_score_stratified_figures.py.
     # Read the trio columns from the UNFILTERED somatic wide table (every
-    # alteration class), never the SNV-only genomic arm -- these are
-    # stratifiers only, never model features, so invariant #8 does not apply.
+    # alteration class, one column per class), never the collapsed <GENE>_ANY
+    # model features -- these are stratifiers only, never model features.
     stratifiers_dir = output_dir / CLINICAL_STRATIFIERS_DIRNAME
     stratifiers_dir.mkdir(parents=True, exist_ok=True)
     raw_somatic = _normalize_mrn(

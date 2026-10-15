@@ -741,7 +741,13 @@ cohort or a silently-dropped feature further down the pipeline. An all-null
 8. **The genomic arm is SNV-only.** Both `build_genomic_inputs.py` files pin
    `--variant-types` to `SNV`, and `build_somatic_gleason_inputs.py` filters the
    `SOMATIC_FEATURE_MANIFEST.parquet` feature list through the `<GENE>_SNV` regex before use —
-   that was the one path where CNV/SV features entered with no opt-in at all. `GLEASON_SCORE` and
+   that was the one path where CNV/SV features entered with no opt-in at all. **Exception:** in
+   `build_somatic_gleason_inputs.py` (the sequencing-indexed somatic screen, the somatic
+   available-case sensitivities, and their figures), TP53, PTEN, and RB1 are not SNV-only. Each is
+   one `<GENE>_ANY` indicator, the max over every declared `SNV`/`DEL`/`AMP`/`SV` column for
+   that gene. It is 1 if any class is called, 0 if every observed class is 0, and missing only if
+   no class was observed. It replaces `<GENE>_SNV` for those three genes. PTEN and RB1 are
+   canonically lost by deletion, so an SNV-only call misses most carriers. `GLEASON_SCORE` and
    the PRS features carry different `feature_kind` values and pass through untouched; only the
    `somatic_binary` block is filtered. On the consumer side, `cox_aggregated.py` splits the two
    regexes it needs: `GENOMIC_FEATURE_RE` (`_SNV$`) selects the genomic feature set, and the

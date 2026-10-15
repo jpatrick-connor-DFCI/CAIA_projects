@@ -518,40 +518,57 @@ def _write_somatic_fixture(tmp_path):
     """Somatic matrix + manifest declaring a mix of variant classes."""
     manifest_path = tmp_path / "manifest.csv"
     somatic_path = tmp_path / "somatic.csv"
-    declared = ["TP53_SNV", "RB1_SNV", "PTEN_DEL", "AR_AMP", "TMPRSS2_SV"]
+    declared = [
+        "TP53_SNV", "AR_SNV", "RB1_SNV", "PTEN_DEL", "RB1_DEL", "TP53_SV",
+        "AR_AMP", "TMPRSS2_SV",
+    ]
     pd.DataFrame({"FEATURE": declared}).to_csv(manifest_path, index=False)
     pd.DataFrame(
         {
-            "DFCI_MRN": [1, 2],
-            "SAMPLE_COLLECTION_DT": ["2020-01-01", "2020-02-01"],
-            **{feature: [1, 0] for feature in declared},
+            "DFCI_MRN": [1, 2, 3, 4],
+            "SAMPLE_COLLECTION_DT": ["2020-01-01", "2020-02-01", "2020-03-01", "2020-04-01"],
+            "TP53_SNV": [1, 0, 0, np.nan],
+            "AR_SNV": [1, 0, 0, 0],
+            "RB1_SNV": [0, 0, 0, np.nan],
+            "PTEN_DEL": [0, 1, 0, np.nan],
+            "RB1_DEL": [0, 1, 0, np.nan],
+            "TP53_SV": [0, 1, 0, np.nan],
+            "AR_AMP": [1, 1, 1, 1],
+            "TMPRSS2_SV": [1, 1, 1, 1],
         }
     ).to_csv(somatic_path, index=False)
     return somatic_path, manifest_path
 
 
-def test_load_somatic_features_keeps_only_snv(tmp_path):
+def test_load_somatic_features_trio_is_any_alteration_others_snv_only(tmp_path):
     somatic_path, manifest_path = _write_somatic_fixture(tmp_path)
 
     frame, features = load_somatic_features(somatic_path, manifest_path)
 
-    # The genomic arm is SNV-only: copy-number and structural calls declared by
-    # the manifest must not reach the feature matrix.
-    assert features == ["TP53_SNV", "RB1_SNV"]
-    for dropped in ("PTEN_DEL", "AR_AMP", "TMPRSS2_SV"):
+    # TP53/PTEN/RB1 collapse every declared class into one <GENE>_ANY
+    # indicator; every other gene stays SNV-only.
+    assert features == ["TP53_ANY", "AR_SNV", "RB1_ANY", "PTEN_ANY"]
+    for dropped in ("TP53_SNV", "RB1_SNV", "PTEN_DEL", "RB1_DEL", "TP53_SV",
+                    "AR_AMP", "TMPRSS2_SV"):
         assert dropped not in frame.columns
-    assert "TP53_SNV" in frame.columns
+    frame = frame.set_index("DFCI_MRN")
+    # Patient 2 is altered only by DEL/SV calls -- missed by an SNV-only arm.
+    assert frame.loc[1, ["TP53_ANY", "RB1_ANY", "PTEN_ANY"]].tolist() == [1, 0, 0]
+    assert frame.loc[2, ["TP53_ANY", "RB1_ANY", "PTEN_ANY"]].tolist() == [1, 1, 1]
+    assert frame.loc[3, ["TP53_ANY", "RB1_ANY", "PTEN_ANY"]].tolist() == [0, 0, 0]
+    # No class observed -> missing, not wild-type.
+    assert frame.loc[4, ["TP53_ANY", "RB1_ANY", "PTEN_ANY"]].isna().all()
 
 
-def test_load_somatic_features_errors_when_manifest_has_no_snv(tmp_path):
+def test_load_somatic_features_errors_when_manifest_has_nothing_testable(tmp_path):
     manifest_path = tmp_path / "manifest.csv"
     somatic_path = tmp_path / "somatic.csv"
-    pd.DataFrame({"FEATURE": ["PTEN_DEL", "AR_AMP"]}).to_csv(manifest_path, index=False)
+    pd.DataFrame({"FEATURE": ["TMPRSS2_SV", "AR_AMP"]}).to_csv(manifest_path, index=False)
     pd.DataFrame(
         {
             "DFCI_MRN": [1],
             "SAMPLE_COLLECTION_DT": ["2020-01-01"],
-            "PTEN_DEL": [1],
+            "TMPRSS2_SV": [1],
             "AR_AMP": [0],
         }
     ).to_csv(somatic_path, index=False)

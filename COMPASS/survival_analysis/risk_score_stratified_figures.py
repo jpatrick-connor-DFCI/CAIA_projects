@@ -53,8 +53,10 @@ import pandas as pd
 TRIO_GENES = ("TP53", "PTEN", "RB1")
 GENE_ALTERATION_CLASSES = ("SNV", "DEL", "AMP", "SV")
 GENE_COLUMN_RE = re.compile(
-    r"^(?P<gene>[A-Za-z0-9.\-]+)_(?P<klass>SNV|DEL|AMP|SV)$"
+    r"^(?P<gene>[A-Za-z0-9.\-]+)_(?P<klass>SNV|DEL|AMP|SV|ANY)$"
 )
+# ANY is the collapsed any-alteration indicator that build_somatic_gleason_inputs.py
+# writes as the somatic model feature for the trio (e.g. a somatic-gleason table).
 
 GLEASON_FEATURE = "GLEASON_SCORE"
 STAGE_COLUMN = "DERIVED_STAGE_MERGED"

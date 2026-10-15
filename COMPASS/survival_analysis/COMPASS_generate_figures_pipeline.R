@@ -93,7 +93,7 @@ figure_gleason_groups <- function(values) {
 significant_mutation_features <- function(results) {
   if (!all(c("feature", "q_value") %in% names(results))) return(character())
   selected <- !is.na(results$q_value) & results$q_value < .05 &
-    grepl("_(SNV|SV|AMP|DEL)$", as.character(results$feature))
+    grepl("_(SNV|SV|AMP|DEL|ANY)$", as.character(results$feature))
   unique(as.character(results$feature[selected]))
 }
 
@@ -2724,7 +2724,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
             }
             groups <- ifelse(is.na(values), NA_character_, ifelse(values == 1, "Carrier", "Non-carrier"))
             group_order <- c("Non-carrier", "Carrier")
-            title_km <- paste(gsub("_", " ", feature), "carrier status: time to platinum")
+            # <GENE>_ANY (TP53/PTEN/RB1) = any SNV, CNV, or SV call.
+            title_km <- paste(gsub("_", " ", sub("_ANY$", "_any alteration", feature)),
+                              "carrier status: time to platinum")
             note <- "Descriptive: variant selected using this cohort's Cox q<0.05. Missing calls excluded. Shading: 95% CI."
           }
           d <- figure_platinum_strata(indexed, groups)

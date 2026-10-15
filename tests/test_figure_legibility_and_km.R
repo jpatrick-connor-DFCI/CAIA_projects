@@ -42,9 +42,9 @@ stopifnot(identical(figure_gleason_groups(c(2:10,0,11,NA,6.5,Inf,-Inf)),
   c(rep("Gleason ≤7", 6), rep("Gleason ≥8", 3), rep(NA_character_, 6))),
   identical(figure_gleason_groups(c("6", "7", "8", "10", "unknown")),
             c("Gleason ≤7", "Gleason ≤7", "Gleason ≥8", "Gleason ≥8", NA_character_)))
-results <- tibble(feature = c("TP53_SNV", "PTEN_DEL", "RB1_SNV", "PSA__mean", "ALK_SNV"),
-                  q_value = c(.01,.04,.051,.001,NA))
-stopifnot(identical(significant_mutation_features(results), c("TP53_SNV", "PTEN_DEL")))
+results <- tibble(feature = c("TP53_SNV", "PTEN_DEL", "RB1_SNV", "PSA__mean", "ALK_SNV", "RB1_ANY"),
+                  q_value = c(.01,.04,.051,.001,NA,.02))
+stopifnot(identical(significant_mutation_features(results), c("TP53_SNV", "PTEN_DEL", "RB1_ANY")))
 frame <- tibble(DFCI_MRN = 1:8, t_platinum = c(100,200,300,0,-30,NA,400,500),
                 PLATINUM = c(1,0,1,1,1,0,NA,0), t_death = rep(1,8))
 g <- c("Carrier","Non-carrier",NA,"Carrier","Carrier","Carrier","Carrier","Non-carrier")
