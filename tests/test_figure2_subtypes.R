@@ -29,10 +29,11 @@ stopifnot(cm$n[cm$truth=="NEPC" & cm$pred=="Non-NEPC"]==2,
 
 labels <- tibble(
   primary_label = factor(c(rep("avpc", 4), rep("nepc", 2),
-                           rep("conventional", 6), rep("biomarker", 2), NA),
+                           rep("conventional", 6), NA, NA, NA),
                          levels = pipeline$CLASS_ORDER),
   is_platinum = c(rep(TRUE, 4), rep(FALSE, 2), TRUE, rep(FALSE, 5), TRUE, TRUE, TRUE)
 )
+stopifnot(identical(pipeline$CLASS_ORDER, c("conventional", "avpc", "nepc")))
 enrichment <- pipeline$compute_enrichment(labels)
 expected <- matrix(c(4L, 2L, 1L, 5L), nrow = 2, byrow = TRUE)
 ft <- fisher.test(expected, alternative = "greater")
@@ -51,7 +52,7 @@ positive <- pipeline$count_labels(filter(classified, is_platinum)) %>%
   mutate(platinum_status = "positive")
 negative <- pipeline$count_labels(filter(classified, !is_platinum)) %>%
   mutate(platinum_status = "negative")
-stopifnot(sum(positive$count) == 7L, sum(negative$count) == 7L,
+stopifnot(sum(positive$count) == 5L, sum(negative$count) == 7L,
           abs(sum(positive$frac) - 1) < 1e-12,
           abs(sum(negative$frac) - 1) < 1e-12)
 landscape <- pipeline$render_landscape_panel(bind_rows(positive, negative), 7, 7)

@@ -2,7 +2,7 @@
 
 The federated bundles (caia-project-compass/rhino_scripts) are trained on time
 to platinum only -- NEPC and AVPC are not annotated at the federated sites.
-DFCI has fine-grained LLM-derived AVPC/NEPC criteria timelines, so this module
+DFCI has fine-grained LLM-derived NEPC and AVPC labels and dates, so this module
 asks: does the platinum-trained risk score also rank patients by time to NEPC
 and time to AVPC on the full local ADT cohort?
 

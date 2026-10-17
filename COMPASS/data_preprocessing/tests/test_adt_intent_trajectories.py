@@ -607,7 +607,7 @@ class TestMaxStagePlots(unittest.TestCase):
         import matplotlib
         matplotlib.use("Agg")
         frame = self._frame().with_columns(
-            pl.Series("LLM_PRIMARY_LABEL", ["nepc", "nepc", "avpc", "biomarker", "conventional"])
+            pl.Series("LLM_PRIMARY_LABEL", ["nepc", "nepc", "avpc", "avpc", "conventional"])
         )
         dist = max_stage_distribution_by_intent(
             frame, class_col="LLM_PRIMARY_LABEL"
@@ -616,7 +616,7 @@ class TestMaxStagePlots(unittest.TestCase):
         fig, axes = plot_max_stage_panel(
             frame,
             class_col="LLM_PRIMARY_LABEL",
-            class_order=("conventional", "biomarker", "avpc", "nepc"),
+            class_order=("conventional", "avpc", "nepc"),
         )
         self.assertEqual(len(axes), 2)
         fig.clf()

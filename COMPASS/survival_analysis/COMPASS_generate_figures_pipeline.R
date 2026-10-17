@@ -264,20 +264,22 @@ COLOR_PLATINUM_POS <- "#2a78d6"   # blue
 COLOR_PLATINUM_NEG <- "#eb6834"   # orange
 COLOR_NEUTRAL_INK  <- "#52514e"   # secondary ink, for annotations/text only
 
-# Root for the newer classifier-derived LLM NEPC labels (LLM_NEPC_classifier_labels.tsv).
-# Deliberately a different root than NEPC_PROJ_PATH: this file lives under the
-# user's data/LLM_annotations/ tree, not the CAIA/COMPASS project tree, and is
-# is the sole LLM label source for Figure 2 v3 and the Section 4-5
-# stratifications. Overridable per-call by generate_figures(); this default matches
-# the path used everywhere else in the pipeline invocation.
-DEFAULT_LLM_ANNOTATIONS_PATH <- "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_NEPC_labels"
+# Root for the per-patient primary-subtype labels (primary_subtype_labels.parquet,
+# written by LLM_clinical_annotations notebooks/primary_subtype.ipynb from the
+# per-note NEPC and AVPC pipelines). Deliberately a different root than
+# NEPC_PROJ_PATH: this file lives under the user's data/LLM_annotations/ tree,
+# not the CAIA/COMPASS project tree, and is the sole LLM label source for
+# Figure 2 v3 and the Section 4-5 stratifications. It is the same file Stage 1
+# reads for the nepc/avpc endpoints. Overridable per-call by generate_figures().
+DEFAULT_LLM_ANNOTATIONS_PATH <- "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_primary_subtype"
+LLM_SUBTYPE_LABELS_FILE <- "primary_subtype_labels.parquet"
 
 # Figure 2 uses primary subtypes for landscape/enrichment panels. Longitudinal
 # lab figures use only the binary NEPC stratum in FIGURE_LLM_STRATA below.
 LLM_STRATA <- list(
   primary_label = list(
     col = "primary_label",
-    levels = c("conventional", "avpc", "nepc", "biomarker")
+    levels = c("conventional", "avpc", "nepc")
   ),
   has_nepc = list(
     col = "has_nepc",
@@ -292,32 +294,8 @@ LLM_STRATA <- list(
 )
 FIGURE_LLM_STRATA <- LLM_STRATA["has_nepc"]
 
-# A biomarker primary label is reserved for these prostate-relevant genes.
-# Token boundaries prevent partial matches inside unrelated gene/text strings.
-BIOMARKER_PRIMARY_GENES <- c("BRCA1", "BRCA2", "PTEN", "TP53", "RB1")
-BIOMARKER_PRIMARY_PATTERN <- paste0(
-  "(^|[^A-Z0-9])(",
-  paste(BIOMARKER_PRIMARY_GENES, collapse = "|"),
-  ")([^A-Z0-9]|$)"
-)
-
-normalize_classifier_primary_labels <- function(primary_label, reported_biomarkers,
-                                                has_nepc, has_avpc) {
-  labels <- str_to_lower(str_trim(as.character(primary_label)))
-  biomarker_text <- toupper(ifelse(is.na(reported_biomarkers), "",
-                                   as.character(reported_biomarkers)))
-  qualifying_biomarker <- grepl(BIOMARKER_PRIMARY_PATTERN, biomarker_text, perl = TRUE)
-  needs_fallback <- !is.na(labels) & labels == "biomarker" & !qualifying_biomarker
-
-  labels[needs_fallback & !is.na(has_nepc) & has_nepc == 1] <- "nepc"
-  labels[needs_fallback & labels == "biomarker" &
-           !is.na(has_avpc) & has_avpc == 1] <- "avpc"
-  labels[needs_fallback & labels == "biomarker"] <- "conventional"
-  labels
-}
-
-# load_llm_strata: read LLM_NEPC_classifier_labels.tsv and normalize biomarker
-# primary labels using the reported biomarker field. Returns NULL with a
+# load_llm_strata: read primary_subtype_labels.parquet and derive the
+# has_nepc/has_avpc strata from the NEPC and AVPC runners. Returns NULL with a
 # message if the file is absent, so every downstream stratified-plot loop can
 # skip cleanly rather than erroring.
 # ---------------------------------------------------------------------------
@@ -387,21 +365,23 @@ cached_read_csv <- function(path, ...) {
   value
 }
 
-# TSV twin of cached_read_csv, for the LLM classifier label table.
-cached_read_tsv <- function(path, ...) {
-  args <- list(...)
+# Parquet twin of cached_read_csv, for the LLM primary-subtype label table.
+cached_read_parquet <- function(path) {
   resolved <- tryCatch(normalizePath(path, mustWork = TRUE),
                        error = function(e) path)
-  key <- paste0("tsv:", resolved, "|",
-                paste(names(args), vapply(args, function(a)
-                  paste(format(a), collapse = ","), character(1)),
-                  sep = "=", collapse = "|"))
+  key <- paste0("parquet:", resolved)
   if (!is.null(.read_cache[[key]])) {
     st <- .read_cache[[".stats"]]; st$hits <- st$hits + 1L
     .read_cache[[".stats"]] <- st
     return(.read_cache[[key]])
   }
-  value <- read_tsv(path, ...)
+  value <- if (requireNamespace("arrow", quietly = TRUE)) {
+    as_tibble(arrow::read_parquet(path))
+  } else if (requireNamespace("nanoparquet", quietly = TRUE)) {
+    as_tibble(nanoparquet::read_parquet(path))
+  } else {
+    stop('Reading LLM labels requires R package "arrow" or "nanoparquet".')
+  }
   .read_cache[[key]] <- value
   st <- .read_cache[[".stats"]]
   if (is.null(st)) st <- list(hits = 0L, misses = 0L)
@@ -509,48 +489,22 @@ cached_profile_patient_and_labs <- function(path, id_col = "DFCI_MRN") {
 }
 
 load_llm_strata <- function(llm_annotations_path) {
-  path <- file.path(llm_annotations_path, "LLM_NEPC_classifier_labels.tsv")
+  path <- file.path(llm_annotations_path, LLM_SUBTYPE_LABELS_FILE)
   if (!file.exists(path)) {
     message(sprintf("load_llm_strata: %s not found -- skipping LLM-strata plots", path))
     return(NULL)
   }
-  strata <- cached_read_tsv(path, show_col_types = FALSE)
-  required <- c("DFCI_MRN", "primary_label", "has_nepc", "has_avpc")
+  strata <- cached_read_parquet(path)
+  required <- c("DFCI_MRN", "primary_label", "nepc_status", "is_avpc")
   missing <- setdiff(required, names(strata))
   if (length(missing) > 0) {
     stop(sprintf("%s is missing required columns: %s", path, paste(missing, collapse = ", ")))
   }
-  biomarker_candidates <- c(
-    "biomarker_genes",
-    "reported_biomarkers",
-    "biomarkers_reported",
-    "reported_biomarker",
-    "biomarkers",
-    "biomarker"
-  )
-  candidate_index <- match(tolower(biomarker_candidates), tolower(names(strata)))
-  candidate_index <- candidate_index[!is.na(candidate_index)]
-  biomarker_col <- if (length(candidate_index) > 0) names(strata)[candidate_index[1]] else NULL
-
-  raw_primary <- str_to_lower(str_trim(as.character(strata$primary_label)))
-  if (is.null(biomarker_col) && any(raw_primary == "biomarker", na.rm = TRUE)) {
-    stop(sprintf(
-      paste0(
-        "%s contains primary_label='biomarker' but no reported-biomarker column. ",
-        "Expected one of: %s"
-      ),
-      path,
-      paste(biomarker_candidates, collapse = ", ")
-    ))
-  }
-  strata$reported_biomarkers <- if (is.null(biomarker_col)) {
-    NA_character_
-  } else {
-    as.character(strata[[biomarker_col]])
-  }
+  # has_nepc/has_avpc are NA when that pipeline never resolved the patient
+  # (review_status failed/not_run), so binary metrics exclude them.
   strata <- strata %>%
-    select(all_of(required), reported_biomarkers) %>%
-    mutate(
+    transmute(
+      DFCI_MRN = suppressWarnings(as.numeric(sub("\\.0$", "", str_trim(as.character(DFCI_MRN))))),
       primary_label = str_to_lower(str_trim(as.character(primary_label))),
       primary_label = if_else(
         is.na(primary_label) |
@@ -558,30 +512,10 @@ load_llm_strata <- function(llm_annotations_path) {
         NA_character_,
         primary_label
       ),
-      has_nepc = suppressWarnings(as.numeric(has_nepc)),
-      has_avpc = suppressWarnings(as.numeric(has_avpc))
+      has_nepc = if_else(is.na(nepc_status), NA_real_,
+                         as.numeric(as.character(nepc_status) == "nepc")),
+      has_avpc = as.numeric(as.logical(is_avpc))
     )
-  original_primary <- strata$primary_label
-  strata$primary_label <- normalize_classifier_primary_labels(
-    strata$primary_label,
-    strata$reported_biomarkers,
-    strata$has_nepc,
-    strata$has_avpc
-  )
-  n_reclassified <- sum(
-    !is.na(original_primary) &
-      original_primary == "biomarker" &
-      strata$primary_label != "biomarker",
-    na.rm = TRUE
-  )
-  message(sprintf(
-    paste0(
-      "load_llm_strata: retained biomarker only for %s; ",
-      "reclassified %s non-qualifying biomarker-primary row(s)"
-    ),
-    paste(BIOMARKER_PRIMARY_GENES, collapse = "/"),
-    format(n_reclassified, big.mark = ",")
-  ))
   n_missing_category <- sum(is.na(strata$primary_label))
   if (n_missing_category > 0) {
     message(sprintf(
@@ -2149,7 +2083,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # The only Figure 2 variant retained. Earlier variants (v0: unrestricted
   # LLM_v3_labels.tsv; v1: those labels narrowed to the ADT landmark-0
   # prediction cohort; v2: the classifier labels on that same prediction
-  # cohort) have been removed. v3 uses LLM_NEPC_classifier_labels.tsv over
+  # cohort) have been removed. v3 uses primary_subtype_labels.parquet over
   # every MRN with ADT_EXPOSED == 1 in the ICD prostate workflow flags -- the
   # "ADT entry requirement" step of the Figure 1 CONSORT, before any
   # downstream prediction-cohort filtering.
@@ -2162,9 +2096,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
     # Panels B/C restored from 3c4efc4 (before their removal in fec33f4).
     # Fixed class order groups the two aggressive classes together for readability.
-    CLASS_ORDER <- c("conventional", "avpc", "nepc", "biomarker")
-    CLASS_LABELS <- c(conventional = "Conventional", avpc = "AVPC", nepc = "NEPC",
-                      biomarker = "Biomarker")
+    CLASS_ORDER <- c("conventional", "avpc", "nepc")
+    CLASS_LABELS <- c(conventional = "Conventional", avpc = "AVPC", nepc = "NEPC")
 
     count_labels <- function(df) {
       df %>% count(primary_label, name = "count") %>%
@@ -2234,7 +2167,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                      sprintf("Platinum- (n=%s)", format(n_neg, big.mark = ","))),
           name = NULL) +
         coord_cartesian(ylim = c(0, 1.0)) +
-        # Dodged pairs leave each class only ~1/4 of the panel, so wrap the class
+        # Dodged pairs leave each class only ~1/3 of the panel, so wrap the class
         # names rather than letting neighbouring labels collide at this text size.
         scale_x_discrete(labels = function(x) str_wrap(x, 12)) +
         labs(x = NULL, y = "Fraction within platinum group", title = str_wrap(title, 65)) +
@@ -2351,7 +2284,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     metrics_v3 <- binary_metrics(merged_v3$manual_NEPC, merged_v3$has_nepc)
     n_total_v3 <- metrics_v3$N
     n_nepc_manual_v3 <- metrics_v3$TP + metrics_v3$FN
-    caption_a_v3 <- sprintf("All ADT-exposed patients (N=%s total, no prediction-cohort restriction); %s chart-reviewed/labeled patients; %s manual-NEPC positive (LLM_NEPC_classifier_labels.tsv).",
+    caption_a_v3 <- sprintf("All ADT-exposed patients (N=%s total, no prediction-cohort restriction); %s chart-reviewed/labeled patients; %s manual-NEPC positive (primary_subtype_labels.parquet).",
                             format(length(adt_exposed_mrns_v3), big.mark = ","),
                             format(n_total_v3, big.mark = ","), format(n_nepc_manual_v3, big.mark = ","))
     pA1_v3 <- render_confusion_panel(
@@ -2366,14 +2299,14 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (show) print(pA1_v3)
     if (show) print(pA2_v3)
 
-    ## Panel B -- subtype landscape by platinum status (4-class primary_label).
-    # load_llm_strata coerces primary_label values outside the four modeled
+    ## Panel B -- subtype landscape by platinum status (3-class primary_label).
+    # load_llm_strata coerces primary_label values outside the three modeled
     # classes to NA, and those rows would draw an "NA" bar.
     v3_labels_classified <- v3_labels_all %>% filter(!is.na(primary_label))
     n_unclassified_v3 <- nrow(v3_labels_all) - nrow(v3_labels_classified)
     if (n_unclassified_v3 > 0) {
       message(sprintf(
-        "figure2v3 Panel B: dropped %s row(s) without one of the four primary_label classes",
+        "figure2v3 Panel B: dropped %s row(s) without one of the three primary_label classes",
         format(n_unclassified_v3, big.mark = ",")
       ))
     }
@@ -2388,7 +2321,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                             format(nrow(v3_labels_classified), big.mark = ","),
                             format(length(adt_exposed_mrns_v3), big.mark = ","),
                             if (n_unclassified_v3 > 0)
-                              sprintf(" (%s labeled row(s) outside the four classes excluded)",
+                              sprintf(" (%s labeled row(s) outside the three classes excluded)",
                                       format(n_unclassified_v3, big.mark = ","))
                             else "",
                             format(n_pos, big.mark = ","), format(n_neg, big.mark = ","))
@@ -2403,7 +2336,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     enrichment_v3 <- compute_enrichment(v3_labels_all)
     cat(sprintf("figure2v3 enrichment: OR = %.2f, Fisher p = %.3g\n",
                 enrichment_v3$OR, enrichment_v3$p_value))
-    caption_c_v3 <- sprintf("All ADT-exposed patients; excludes biomarker/unclassified labels (%s rows). Error bars are 95%% Wilson intervals. OR=%.1f, one-sided Fisher p=%.1e.",
+    caption_c_v3 <- sprintf("All ADT-exposed patients; excludes unclassified labels (%s rows). Error bars are 95%% Wilson intervals. OR=%.1f, one-sided Fisher p=%.1e.",
                             format(enrichment_v3$n_excluded, big.mark = ","),
                             enrichment_v3$OR, enrichment_v3$p_value)
     pC_v3 <- render_enrichment_panel(enrichment_v3) + labs(caption = str_wrap(caption_c_v3, 58)) +

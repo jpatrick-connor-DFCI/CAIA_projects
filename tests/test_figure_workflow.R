@@ -102,10 +102,11 @@ local({
     federated = TRUE, federated_path = fed_path)
   dir.create(cfg$classifier_path)
   classifier <- tibble(DFCI_MRN = ids, primary_label = if_else(patient$NEPC == 1, "nepc", "conventional"),
-    has_nepc = patient$NEPC, has_avpc = 0)
+    nepc_status = if_else(patient$NEPC == 1, "nepc", "non_nepc"), is_avpc = FALSE)
   # Repeated consistent NEPC labels must not abort the cached trajectory path.
-  write_tsv(bind_rows(classifier, classifier[1:3, ]),
-    file.path(cfg$classifier_path, "LLM_NEPC_classifier_labels.tsv"))
+  write_labels <- if (requireNamespace("arrow", quietly = TRUE)) arrow::write_parquet else nanoparquet::write_parquet
+  write_labels(bind_rows(classifier, classifier[1:3, ]),
+    file.path(cfg$classifier_path, "primary_subtype_labels.parquet"))
   write_csv(tibble(DFCI_MRN = ids, ADT_INTENT = rep(c("METASTATIC", "LOCALIZED_ADJUVANT"), 20)),
     file.path(root, "mrn_lists", "adt_intent_labels_model_cohort.csv"))
   write_csv(tibble(DFCI_MRN = ids[-1], LLM_METASTATIC = patient$NEPC[-1] == 1),

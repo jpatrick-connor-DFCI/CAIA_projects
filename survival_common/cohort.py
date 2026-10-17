@@ -43,8 +43,8 @@ OPTIONAL_LONGITUDINAL_CAUSES = {
 # either, or neither) -- presence is detected per-key, not
 # via a single shared flag. `platinum` is not in this registry: it has its
 # own bespoke, always-present derivation path feeding t_either/EITHER below.
-# `nepc` and `avpc` are independently modeled components sourced from the same
-# AVPC/NEPC criteria-timeline labels file.
+# `nepc` and `avpc` are independently modeled endpoints sourced from the same
+# primary_subtype_labels.parquet (the per-note LLM NEPC and AVPC pipelines).
 OPTIONAL_ENDPOINT_SPECS = {
     "nepc": ("NEPC", "t_nepc", "NEPC_DATE"),
     "avpc": ("AVPC", "t_avpc", "AVPC_DATE"),
@@ -189,15 +189,19 @@ def make_outcome_df(
         "AVPC_NEPC_DATE_SOURCE",
         "AVPC_NEPC_DATE_PRECISION",
         "AVPC_NEPC_LABEL_SOURCE",
-        # AVPC endpoint (>=3 Aparicio criteria alone, independent of any NEPC
+        # AVPC endpoint (is_avpc from the AVPC runner, independent of any NEPC
         # feature). Absent unless the cohort was built with the LLM
         # annotations mounted; every use below is guarded on presence.
         "AVPC",
         "AVPC_DATE",
         "t_avpc",
         "AVPC_N_CRITERIA",
-        "NEPC_TIMELINE",
-        "NEPC_TIMELINE_DATE",
+        "AVPC_CRITERIA",
+        "AVPC_LABEL_SOURCE",
+        # Audit-only label fields from the primary-subtype file.
+        "NEPC_STATED_DX",
+        "NEPC_STATED_DX_DATE",
+        "PRIMARY_LABEL",
         *extra_anchor_cols,
     ]
     available_cols = [col for col in patient_level_cols if col in df.columns]
@@ -363,12 +367,12 @@ def make_outcome_df(
             # Preserve the "(require_nepc)" substring some callers/tests
             # match on for the one endpoint that predates this generic
             # registry; the rest of the text reflects the current label
-            # source (the avpc_nepc criteria-timeline file, not the old
-            # strict NEPC diagnosis labels).
+            # source (primary_subtype_labels.parquet from the per-note LLM
+            # NEPC/AVPC pipelines).
             raise ValueError(
                 "make_outcome_df: endpoint='nepc' (require_nepc) but the input carries no NEPC "
-                "columns. Rebuild the survival cohort with the LLM AVPC/NEPC "
-                "criteria-timeline labels (--nepc-labels) before running the nepc endpoint."
+                "columns. Rebuild the survival cohort with the LLM primary-subtype "
+                "labels (--subtype-labels) before running the nepc endpoint."
             )
         raise ValueError(
             f"make_outcome_df: endpoint={endpoint!r} but the input carries no "

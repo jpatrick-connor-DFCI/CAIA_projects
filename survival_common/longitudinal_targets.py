@@ -22,14 +22,14 @@ cause of interest, optionally paired with death as a competing cause:
                          whichever has the smaller post-landmark duration
                          (argmin ties break toward the first listed cause,
                          i.e. platinum).
-  nepc                -- the platinum config's analogue for the NEPC-only
-                         component of the AVPC/NEPC criteria-timeline endpoint
-                         (any NEPC feature, independent of AVPC criteria).
+  nepc                -- the platinum config's analogue for the LLM NEPC
+                         endpoint (nepc_status == "nepc": any gated NE
+                         finding, independent of AVPC).
                          Same cause-specific censoring.
   nepc_competing      -- the competing analogue: label 1 = NEPC, 2 = death.
-  avpc                -- the platinum config's analogue for the AVPC-only
-                         component of the same timeline (>=3 Aparicio
-                         criteria, independent of any NEPC feature). Same
+  avpc                -- the platinum config's analogue for the LLM AVPC
+                         endpoint (is_avpc from the AVPC runner, independent
+                         of any NEPC feature). Same
                          cause-specific censoring.
   avpc_competing      -- the competing analogue: label 1 = AVPC, 2 = death.
 The nepc/avpc configs each read a cohort built with their own incident gate

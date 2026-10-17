@@ -83,26 +83,26 @@ def _stage_notes(d: str) -> str:
 
 
 def _llm_labels(d: str) -> str:
-    path = str(Path(d) / "LLM_NEPC_classifier_labels.tsv")
+    path = str(Path(d) / "primary_subtype_labels.parquet")
     pl.DataFrame(
         {
-            "DFCI_MRN": list(range(1, 13)),
-            "primary_label": ["conventional", "biomarker", "biomarker"]
-            + ["nepc"] * 9,
-            "has_nepc": [0, 0, 1] + [1] * 9,
-            "has_avpc": [0] * 12,
-            "reported_biomarkers": [None, "BRCA2", "KRAS"] + [None] * 9,
+            "DFCI_MRN": [str(i) for i in range(1, 13)],
+            "primary_label": ["conventional", "avpc", None] + ["nepc"] * 9,
+            "nepc_status": ["non_nepc", "non_nepc", None] + ["nepc"] * 9,
+            "is_avpc": [False, True, None] + [False] * 9,
         }
-    ).write_csv(path, separator="\t")
+    ).write_parquet(path)
     return path
 
 
 class TestLlmPrimaryLabels(unittest.TestCase):
-    def test_biomarker_normalization_matches_figure_pipeline(self):
+    def test_labels_load_and_unresolved_are_dropped(self):
         with tempfile.TemporaryDirectory() as d:
             got = load_llm_primary_labels(_llm_labels(d)).sort("DFCI_MRN")
+        self.assertEqual(got["DFCI_MRN"].dtype, pl.Int64)
+        self.assertNotIn(3, got["DFCI_MRN"].to_list())
         self.assertEqual(got[LLM_LABEL_COL][:3].to_list(), [
-            "conventional", "biomarker", "nepc"
+            "conventional", "avpc", "nepc"
         ])
 
 

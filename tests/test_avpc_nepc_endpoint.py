@@ -1,7 +1,7 @@
 """Regression guards for the retired joint AVPC_NEPC model endpoint.
 
-The Stage-1 cohort may retain AVPC_NEPC fields as audit metadata because the
-shared criteria-timeline source emits them. They must not be selectable by any
+The Stage-1 cohort retains AVPC_NEPC fields (the NEPC/AVPC union) as audit
+metadata. They must not be selectable by any
 modeling registry or carried as a longitudinal cause.
 """
 

@@ -98,72 +98,37 @@ DEFAULT_STAGE_NOTE_LEVEL_PATH = (
 )
 DEFAULT_LLM_LABELS_PATH = Path(
     os.environ.get(
-        "LLM_NEPC_CLASSIFIER_LABELS_PATH",
-        "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_NEPC_labels/"
-        "LLM_NEPC_classifier_labels.tsv",
+        "LLM_PRIMARY_SUBTYPE_LABELS_PATH",
+        "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_primary_subtype/"
+        "primary_subtype_labels.parquet",
     )
 )
 LLM_LABEL_COL = "LLM_PRIMARY_LABEL"
-LLM_LABEL_ORDER = ("conventional", "biomarker", "avpc", "nepc")
+LLM_LABEL_ORDER = ("conventional", "avpc", "nepc")
 
 FIGURE_DPI = 200
 
 
 def load_llm_primary_labels(path: str | Path) -> pl.DataFrame:
-    """Load and normalize the classifier's mutually exclusive primary label.
+    """Load the mutually exclusive primary label (nepc > avpc > conventional).
 
-    This mirrors the normalization used by the R figure pipeline: a raw
-    ``biomarker`` label is retained only when the reported biomarker text names
-    BRCA1/2, PTEN, TP53, or RB1; otherwise NEPC and then AVPC take precedence,
-    with conventional as the final fallback.
+    Reads primary_subtype_labels.parquet from LLM_clinical_annotations
+    notebooks/primary_subtype.ipynb, the same file the R figure pipeline and
+    Stage 1 use. Patients with no resolved label (a pipeline failed or never
+    ran on them) are dropped, matching the figures.
     """
     path = Path(path)
-    labels = pl.read_csv(path, separator="\t", infer_schema_length=0)
-    required = {ID_COL, "primary_label", "has_nepc", "has_avpc"}
+    labels = pl.read_parquet(path)
+    required = {ID_COL, "primary_label"}
     missing = required - set(labels.columns)
     if missing:
         raise ValueError(f"{path} is missing required columns: {sorted(missing)}")
 
-    biomarker_candidates = (
-        "biomarker_genes", "reported_biomarkers", "biomarkers_reported",
-        "reported_biomarker", "biomarkers", "biomarker",
-    )
-    by_lower = {col.lower(): col for col in labels.columns}
-    biomarker_col = next(
-        (by_lower[name] for name in biomarker_candidates if name in by_lower), None
-    )
-    raw = pl.col("primary_label").cast(pl.Utf8).str.strip_chars().str.to_lowercase()
     labels = labels.with_columns(
-        pl.col(ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False),
-        pl.when(raw.is_in(["", "nan", "na", "null", "none"]))
-        .then(None).otherwise(raw).alias(LLM_LABEL_COL),
-        pl.col("has_nepc").cast(pl.Float64, strict=False).alias("_has_nepc"),
-        pl.col("has_avpc").cast(pl.Float64, strict=False).alias("_has_avpc"),
-    )
-
-    has_raw_biomarker = labels.filter(pl.col(LLM_LABEL_COL) == "biomarker").height > 0
-    if biomarker_col is None and has_raw_biomarker:
-        raise ValueError(
-            f"{path} contains primary_label='biomarker' but has no reported-biomarker column"
-        )
-    qualifying = (
-        pl.col(biomarker_col)
-        .cast(pl.Utf8, strict=False)
-        .str.to_uppercase()
-        .str.contains(r"(^|[^A-Z0-9])(BRCA1|BRCA2|PTEN|TP53|RB1)([^A-Z0-9]|$)")
-        .fill_null(False)
-        if biomarker_col is not None else pl.lit(False)
-    )
-    needs_fallback = (pl.col(LLM_LABEL_COL) == "biomarker") & ~qualifying
-    labels = labels.with_columns(
-        pl.when(needs_fallback & (pl.col("_has_nepc") == 1))
-        .then(pl.lit("nepc"))
-        .when(needs_fallback & (pl.col("_has_avpc") == 1))
-        .then(pl.lit("avpc"))
-        .when(needs_fallback)
-        .then(pl.lit("conventional"))
-        .otherwise(pl.col(LLM_LABEL_COL))
-        .alias(LLM_LABEL_COL)
+        pl.col(ID_COL).cast(pl.Utf8, strict=False).str.strip_chars()
+        .str.replace(r"\.0$", "").cast(pl.Int64, strict=False),
+        pl.col("primary_label").cast(pl.Utf8).str.strip_chars().str.to_lowercase()
+        .alias(LLM_LABEL_COL),
     ).filter(
         pl.col(ID_COL).is_not_null() & pl.col(LLM_LABEL_COL).is_in(LLM_LABEL_ORDER)
     )
@@ -480,7 +445,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--llm-labels-path", default=str(DEFAULT_LLM_LABELS_PATH),
-        help=("LLM_NEPC_classifier_labels.tsv; when present, writes the "
+        help=("primary_subtype_labels.parquet; when present, writes the "
               "alternate max_stage_llm.png panel"),
     )
     parser.add_argument(

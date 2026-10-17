@@ -165,19 +165,22 @@ eligible base cohort feeds the ARPI/chemo-anchored and ADT-anchored survival dat
   The two `*-source` flags default to `<--oncdrs-path>/{MEDICATIONS,PT_INFO_STATUS_REGISTRATION}.csv`,
   so existing invocations are unchanged. `load_patient_status()` takes a **file** path, not a
   directory.
-  `--nepc-labels` and `--avpc-nepc-labels` both point at the same per-patient AVPC/NEPC
-  criteria-timeline labels by default
-  (`LLM_annotations/LLM_avpc_nepc_timeline/avpc_nepc_labels.parquet`, one row per patient, written
-  by the sibling `LLM_clinical_annotations` repo's `tasks/longitudinal_NEPC/build_avpc_nepc_labels.py`).
-  `--nepc-labels` supplies the NEPC-only `NEPC`/`NEPC_DATE` columns (the timeline's
-  `has_nepc_timeline`/`nepc_timeline_date` component); `--avpc-nepc-labels` supplies the
-  modeled AVPC-only `AVPC`/`AVPC_DATE` columns and joint `AVPC_NEPC` audit columns. A stricter,
-  veto-gated per-patient NEPC diagnosis file also exists
-  (`NEPC_DX_LABELS_PATH`, `LLM_annotations/LLM_nepc_diagnosis/nepc_dx_labels.parquet`) but is not
-  read by any endpoint by default any more — it remains available for ad hoc scripts. A **missing
-  file is non-fatal**: the stage warns and emits no NEPC/AVPC/AVPC_NEPC columns, leaving the
-  platinum pipeline unaffected. Note the timeline's date columns arrive as ISO **strings**, not a
-  date type, with partial dates already normalized (year → Jan 1, year-month → the 1st).
+  `--subtype-labels` points at the per-patient LLM primary-subtype labels
+  (`SUBTYPE_LABELS_PATH`, `LLM_annotations/LLM_primary_subtype/primary_subtype_labels.parquet`, one
+  row per patient, written by the sibling `LLM_clinical_annotations` repo's
+  `notebooks/primary_subtype.ipynb`, which full-joins the `tasks/nepc` and `tasks/avpc` runner
+  outputs). `load_subtype_labels()` emits `NEPC`/`NEPC_DATE` (`nepc_status == "nepc"`,
+  `nepc_date`) and `AVPC`/`AVPC_DATE` (the AVPC runner's `is_avpc`/`avpc_date`, taken as-is — no
+  criteria-count threshold is applied here), plus the joint `AVPC_NEPC` audit columns. Patients the
+  upstream runners left unresolved (null status, review failed/not run) or that are absent from
+  the file are **censored as 0**; their review status rides along in
+  `NEPC_LABEL_SOURCE`/`AVPC_LABEL_SOURCE` (`missing_from_labels` for join misses). Positives with
+  no parseable date are demoted to 0 and counted in the log. `NEPC_STATED_DX`/`NEPC_STATED_DX_DATE`
+  (the stricter stated-diagnosis tier), `AVPC_N_CRITERIA`/`AVPC_CRITERIA` and `PRIMARY_LABEL` are
+  audit-only. A **missing file is non-fatal**: the stage warns and emits no NEPC/AVPC/AVPC_NEPC
+  columns, leaving the platinum pipeline unaffected. Note the date columns arrive as ISO
+  **strings**, not a date type, with partial dates already normalized upstream (precision is in
+  `nepc_date_precision`).
 - **Outputs (under `NEPC_PROJ_PATH = DATA_PATH/CAIA/COMPASS/`, or `--out-dir`; all outputs including
   `prostate_icd_data.csv` honour it):** `prostate_arpi_survival_cohort_arpi.csv`
   and `prostate_adt_survival_cohort_adt.csv` (ARPI-treatment-anchor-restricted and
@@ -270,7 +273,7 @@ prostate lab frame used by the current treatment-anchored analyses.
   the last-contact proxy for dead patients with no recorded date); it is not itself a registered
   model endpoint. `t_nepc`/`t_avpc` are each built exactly like `t_platinum` (days
   from anchor to the endpoint's date column for positives, else `t_last_contact`) and are emitted
-  only when the upstream AVPC/NEPC criteria-timeline labels were available at Stage 1.
+  only when the upstream LLM primary-subtype labels were available at Stage 1.
 
 ### 2.2 — `data_preprocessing/build_prediction_inputs.py` → `prediction_inputs/`
 
@@ -323,7 +326,7 @@ split within each landmark's risk set instead.
 
 All read prebuilt inputs and the `split` column; none re-derive the split. COMPASS models default to
 the `platinum` endpoint (time to first platinum) and additionally support `nepc` and `avpc`
-(time to the corresponding component of the AVPC/NEPC criteria timeline) — see
+(time to the LLM NEPC / AVPC date from `primary_subtype_labels.parquet`) — see
 [Arms, cohorts, and endpoints](#arms-cohorts-and-endpoints). `--endpoints` is built from `cox.ENDPOINTS`, so every
 runner gets the choice for free. Both ARPI- and ADT-anchored
 arms use landmarks `[0, 90, 180]`. Metrics: Harrell C-index, IPCW
@@ -518,17 +521,15 @@ notebook. All operate on the merged `profile_data` run:
   integrated Brier score. If optional `03b_multivariate_longitudinal.ipynb` results are absent, the
   figure and data CSV mark Dynamic-DeepHit as missing instead of suppressing the supplement.
   - **LLM label strata:** alongside the existing `LLM_v3_labels.tsv`-driven Figure 2, the pipeline
-    loads `LLM_NEPC_classifier_labels.tsv` from
-    `/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_NEPC_labels/` (`DFCI_MRN`, `primary_label`
-    [conventional/avpc/nepc/biomarker], `has_nepc`, `has_avpc`, and a reported-biomarker field) via
-    `load_llm_strata()`, re-deriving
-    `is_platinum` from `mrn_lists/platinum_MRN_list.csv`. If the file is absent, all LLM-strata plots
-    are skipped with a `message()` rather than failing. **Primary-label normalization:**
-    `primary_label = biomarker` is retained only when the reported biomarkers contain a
-    token-matched BRCA1, BRCA2, PTEN, TP53, or RB1. Otherwise the label falls back in order to
-    NEPC when `has_nepc = 1`, AVPC when `has_avpc = 1`, and conventional. Rows whose category is
-    missing, blank, `NaN`, `NA`, `null`, or `none` are removed from all classifier-derived LLM
-    plots. This file drives:
+    loads `primary_subtype_labels.parquet` from
+    `/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_primary_subtype/` (the same file Stage 1
+    reads for the `nepc`/`avpc` endpoints) via `load_llm_strata()`, keeping `DFCI_MRN`,
+    `primary_label` [conventional/avpc/nepc; nepc > avpc > conventional], and deriving
+    `has_nepc = (nepc_status == "nepc")` (NA when unresolved) and `has_avpc = is_avpc`. It
+    re-derives `is_platinum` from `mrn_lists/platinum_MRN_list.csv`. If the file is absent, all
+    LLM-strata plots are skipped with a `message()` rather than failing. Rows whose category is
+    missing (unresolved upstream), blank, `NaN`, `NA`, `null`, or `none` are removed from all
+    classifier-derived LLM plots. This file drives:
     - **Figure 2 v2** (`ADT/figure2v2_llm/`, ADT cohort only) — a parallel confusion matrix / metric bar / subtype
       landscape / platinum-enrichment panel set (`figure2v2_confusion_matrix`,
       `figure2v2_metric_bar`, `figure2v2_confusion_has_nepc`, `figure2v2_confusion_has_avpc`,
@@ -867,14 +868,14 @@ Localized event counts are thin for the incident endpoints. Read Stage
 | Endpoint | Duration / event | Source of the event date |
 | --- | --- | --- |
 | `platinum` | `t_platinum` / `PLATINUM` | First carboplatin/cisplatin exposure in `MEDICATIONS` |
-| `nepc` | `t_nepc` / `NEPC` | `LLM_annotations/LLM_avpc_nepc_timeline/avpc_nepc_labels.parquet`, NEPC-only component (any NEPC feature, independent of AVPC criteria) |
-| `avpc` | `t_avpc` / `AVPC` | Same file, AVPC-only component (≥3 Aparicio AVPC criteria, independent of any NEPC feature) |
+| `nepc` | `t_nepc` / `NEPC` | `LLM_annotations/LLM_primary_subtype/primary_subtype_labels.parquet`: `nepc_status == "nepc"` dated by `nepc_date` (any gated NE finding, independent of AVPC) |
+| `avpc` | `t_avpc` / `AVPC` | Same file: the AVPC runner's `is_avpc` dated by `avpc_date` (no criteria-count threshold applied here; independent of NEPC) |
 
-`nepc` and `avpc` read the **same** criteria-timeline labels file — each keeps a different
-component/pair of columns from it (`compile_COMPASS_cohort_data.py`'s
-`load_nepc_dx_labels` / `load_avpc_nepc_labels`). `nepc` used to source from a separate, stricter
-`nepc_dx_labels.parquet` (veto-gated LLM diagnosis); that narrower file still exists
-(`NEPC_DX_LABELS_PATH`) for ad hoc scripts, but no endpoint below reads it by default any more.
+`nepc` and `avpc` read the **same** primary-subtype labels file, a full join of the
+`LLM_clinical_annotations` `tasks/nepc` and `tasks/avpc` runner outputs, through a single loader
+(`compile_COMPASS_cohort_data.py`'s `load_subtype_labels`). A patient who is NEPC and also
+`is_avpc` counts as an event for both endpoints. Unresolved or absent patients are censored (0),
+with the upstream review status kept in `NEPC_LABEL_SOURCE`/`AVPC_LABEL_SOURCE`.
 
 Four properties of `nepc`/`avpc` differ from `platinum` and matter for interpretation:
 
@@ -886,20 +887,22 @@ Four properties of `nepc`/`avpc` differ from `platinum` and matter for interpret
   passes it only when the endpoint matches. The consequence is that these endpoints' cohorts are
   **not the same patients** as `platinum`'s, nor as each other's; per-landmark attrition is
   reported in the Stage 3 build log.
-- **The label definitions are narrower than the classifier used in Figure 2.** The timeline's
-  per-criterion evidence is more literal than the Figure 2 `has_nepc` strata, which come from the
-  broader "any NE feature → NEPC" binary classifier. They are not interchangeable — name which
-  definition is in play in any resulting text.
+- **The endpoints and the Figure 2 strata share one label snapshot.** Figure 2's `has_nepc` /
+  `has_avpc` / `primary_label` strata are derived from the same `primary_subtype_labels.parquet`
+  (`has_nepc = nepc_status == "nepc"`, `has_avpc = is_avpc`). The only differences are that the
+  endpoints censor unresolved patients as 0 and demote undated positives, whereas the figures drop
+  unresolved patients and do not need dates.
 - **Event counts may be low**, especially for `nepc`. Check
   the Stage 1 summary and the `07` notebook's count table *before* spending modelling time; `07`
   prints an explicit underpowered warning below 50 events.
 - **Date provenance is carried, not filtered.** Endpoint-specific NEPC provenance rides through
   to prediction inputs; joint AVPC_NEPC provenance remains in the Stage-1 audit cohort only. Two are
   worth knowing: `date_source = note_date` means *earliest documentation*, not onset; and
-  `label_source = auto_negative_no_evidence` patients were never seen by an LLM — legitimate
-  censored observations, but distinct from adjudicated negatives.
+  censored patients whose `NEPC_LABEL_SOURCE`/`AVPC_LABEL_SOURCE` is `failed`, `not_run` or
+  `missing_from_labels` were never resolved by an LLM — kept as censored observations, but
+  distinct from adjudicated negatives.
 
-If `avpc_nepc_labels.parquet` is not mounted, Stage 1 warns and emits no NEPC/AVPC/AVPC_NEPC
+If `primary_subtype_labels.parquet` is not mounted, Stage 1 warns and emits no NEPC/AVPC/AVPC_NEPC
 columns. Every downstream touchpoint for the two modeled LLM-derived endpoints is presence-guarded, so the
 platinum path runs unchanged.
 
@@ -1046,8 +1049,8 @@ surprised by them.
   Finding 10's genomic-prevalence floor should be interpreted at later landmarks (a feature's measured
   prevalence, and hence whether it clears the floor, shifts as the cohort composition shifts).
 - **`nepc` and `avpc` are likely event-poor, and neither's cohort is the platinum cohort.** Both
-  are single-criterion slices of the same `avpc_nepc_labels.parquet` criteria timeline (`nepc` =
-  any NEPC feature; `avpc` = ≥3 Aparicio criteria). Each endpoint's incident gate
+  come from the same `primary_subtype_labels.parquet` (`nepc` = `nepc_status == "nepc"`; `avpc` =
+  the AVPC runner's `is_avpc`). Each endpoint's incident gate
   (`--endpoint nepc|avpc`, or the deprecated
   `--require-nepc` alias for `nepc`) further removes prevalent events, so event counts can be far
   smaller than platinum's at the same landmark. Two consequences: multivariate results may be
@@ -1055,18 +1058,15 @@ surprised by them.
   metric differences are confounded by cohort composition** — they are not a
   like-for-like model comparison. Check each endpoint's own event count against the 50-event floor
   before treating it as adequately powered.
-- **Several NEPC-adjacent definitions are in play in this repo.** The `nepc` and `avpc`
-  endpoints read the same criteria-timeline file
-  (`avpc_nepc_labels.parquet`, built by `tasks/longitudinal_NEPC/build_avpc_nepc_labels.py` in the
-  sibling `LLM_clinical_annotations` repo), each keeping a different component: NEPC-only or
-  AVPC-only. The union remains audit metadata, not a model endpoint. A separate, stricter, veto-gated
-  per-patient NEPC diagnosis file also exists (`nepc_dx_labels.parquet`,
-  `NEPC_DX_LABELS_PATH`) but is not read by any endpoint by default any more — it remains available
-  for ad hoc scripts and is a narrower, more precision-biased definition than the timeline's
-  NEPC-only component. The Figure 2 / Figure 2v2 / Figure 2v3 `has_nepc` *strata* use a fourth,
-  separate "any NE feature → NEPC" binary classifier from
-  `LLM_NEPC_labels/LLM_NEPC_classifier_labels.tsv`. None of these definitions are interchangeable
-  and none will agree on patient counts. Always name which one a given number came from.
+- **One LLM subtype source, two NEPC tiers.** The `nepc` and `avpc` endpoints and the Figure 2 /
+  Figure 2v2 / Figure 2v3 strata all read `primary_subtype_labels.parquet` (built by
+  `notebooks/primary_subtype.ipynb` in the sibling `LLM_clinical_annotations` repo). The AVPC_NEPC
+  union remains audit metadata, not a model endpoint. The file also carries a stricter
+  stated-diagnosis NEPC tier (`has_stated_nepc_dx`, surfaced as the audit column
+  `NEPC_STATED_DX`); it is narrower and more precision-biased than `nepc_status == "nepc"` and is
+  not used by any endpoint or figure. Endpoint and figure counts still differ (censored vs dropped
+  unresolved patients, undated demotion, landmark gating), so always name which one a given
+  number came from.
 - **Competing-config Brier is the binary cause-of-interest Brier, not the cumulative-incidence
   Brier — and so is the competing-risks IPCW AUC(t).** Both the Brier score and the `cumulative_dynamic_auc`
   IPCW reference distribution binarize on `event = (label == cause)`, folding any competing event

@@ -536,7 +536,7 @@ def prepare(config: dict) -> dict:
         shared_paths = [root / "LLM_NEPC_labels" / "baca_lab_annotations.csv",
                         root / "mrn_lists" / "platinum_MRN_list.csv",
                         root / "mrn_lists" / "icd_prostate_mrn_flags.csv",
-                        Path(config["classifier_path"]) / "LLM_NEPC_classifier_labels.tsv"]
+                        Path(config["classifier_path"]) / "primary_subtype_labels.parquet"]
         shared = [fingerprint(p) for p in shared_paths]
         if arms:
             manifest["source_fingerprints"].extend(shared)

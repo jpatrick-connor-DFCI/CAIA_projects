@@ -159,15 +159,15 @@ ENDPOINTS = {
         "duration_col": "t_nepc",
         "event_col": "NEPC",
         "description": "Time from the treatment anchor (first ADT exposure = time 0) to the "
-                        "first documented NEPC criterion (NEPC-only, independent of AVPC "
-                        "criteria), from the longitudinal AVPC/NEPC criteria timeline",
+                        "first documented NEPC finding (any gated NE finding, independent of "
+                        "AVPC), from the per-note LLM NEPC pipeline",
     },
     "avpc": {
         "duration_col": "t_avpc",
         "event_col": "AVPC",
         "description": "Time from the treatment anchor (first ADT exposure = time 0) to "
-                        "first meeting AVPC (>=4 Aparicio criteria, independent of any NEPC "
-                        "feature), from the longitudinal AVPC/NEPC criteria timeline",
+                        "first meeting AVPC (is_avpc from the per-note LLM AVPC pipeline, "
+                        "independent of any NEPC feature)",
     },
 }
 
@@ -217,8 +217,11 @@ OUTCOME_METADATA_COLUMNS = {
     "t_avpc",
     "t_avpc_from_first_record",
     "AVPC_N_CRITERIA",
-    "NEPC_TIMELINE",
-    "NEPC_TIMELINE_DATE",
+    "AVPC_CRITERIA",
+    "AVPC_LABEL_SOURCE",
+    "NEPC_STATED_DX",
+    "NEPC_STATED_DX_DATE",
+    "PRIMARY_LABEL",
     # Panel version is an adjustment covariate, never a tested feature. The raw
     # string column is listed here; the reference-coded PANEL_VERSION_* dummies
     # are stripped from the feature universe by outcome_columns() below.

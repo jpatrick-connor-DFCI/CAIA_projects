@@ -223,8 +223,8 @@ def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFram
         keep_cols.append("death_date")
     # NEPC/AVPC endpoint columns, absent when the cohort was built
     # without the LLM annotations mounted. Optional so the platinum-only path
-    # still works. NEPC and AVPC are each read from their own component of the
-    # same AVPC/NEPC criteria-timeline file. Joint AVPC_NEPC fields remain in
+    # still works. NEPC and AVPC come from the per-note NEPC and AVPC pipelines,
+    # merged in primary_subtype_labels.parquet. Joint AVPC_NEPC fields remain in
     # the Stage-1 cohort as audit metadata but are not propagated as an endpoint.
     keep_cols.extend(
         col
@@ -651,8 +651,8 @@ def build_longitudinal_prediction_data(
         pred_df["t_nepc"] = pred_df["t_nepc"].fillna(pred_df["t_last_contact"])
 
     # AVPC endpoint, built the same way: days from the treatment anchor to
-    # first meeting AVPC (>=4 Aparicio criteria, independent of any NEPC
-    # feature) for AVPC-positive patients, otherwise days from the anchor to
+    # first meeting AVPC (is_avpc from the AVPC runner, independent of any
+    # NEPC feature) for AVPC-positive patients, otherwise days from the anchor to
     # last contact (censored). Absent when the survival cohort was built
     # without the LLM annotations mounted, in which case the avpc endpoint
     # simply isn't runnable and the platinum/nepc paths are unaffected.

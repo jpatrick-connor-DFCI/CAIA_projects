@@ -436,7 +436,7 @@ AGGREGATED_DROP_COLUMNS = (
     "NEPC_DATE",
     "AVPC_NEPC_DATE",
     "AVPC_DATE",
-    "NEPC_TIMELINE_DATE",
+    "NEPC_STATED_DX_DATE",
     "TREATMENT_ANCHOR_DATE",
     # Pre-rebase duration duplicates kept for debugging by make_outcome_df.
     "t_platinum_from_first_record",

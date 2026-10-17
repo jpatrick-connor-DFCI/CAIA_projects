@@ -1024,7 +1024,7 @@ def compile_cohort(
     arms=("adt",),
     dry_run: bool = False,
     *,
-    avpc_nepc_labels_path: str | Path | None = None,
+    subtype_labels_path: str | Path | None = None,
 ) -> None:
     data_root = _PROFILE_OUTPUT_ROOT
     cmd = [
@@ -1037,8 +1037,8 @@ def compile_cohort(
         "--mrn-lists-dir", data_root / "mrn_lists",
         "--survival-arms", *arms,
     ]
-    if avpc_nepc_labels_path is not None:
-        cmd += ["--avpc-nepc-labels", avpc_nepc_labels_path]
+    if subtype_labels_path is not None:
+        cmd += ["--subtype-labels", subtype_labels_path]
     rc = _run(cmd, dry_run=dry_run)
     if not dry_run and rc != 0:
         raise RuntimeError(f"compile_COMPASS_cohort_data.py failed with rc={rc}")
