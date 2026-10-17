@@ -1163,20 +1163,29 @@ against the local LLM-derived NEPC and AVPC timelines, with platinum as the
 reference:
 
 ```bash
-FED=/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/federated_results_w_MSK
+RHINO=/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/rhino_results
+FED=$RHINO/federated_model_results
 python -m survival_common.federated_endpoint_transfer \
-    --bundle $FED/federated_xgboost/xgboost_federated_model_adt.json \
-             $FED/federated_cox_multivariate/cox_federated_elasticnet_model_adt.json \
+    --bundle $FED/federated_xgboost_no_DFCI/xgboost_federated_model_adt.json \
+             $FED/federated_cox_multivariate_no_DFCI/cox_federated_elasticnet_model_adt.json \
     --data /data/gusev/USERS/jpconnor/data/CAIA/COMPASS/longitudinal_prediction_data_adt.csv \
-    --output-dir federated_transfer_adt_w_MSK/ \
+    --output-dir $RHINO/federated_transfer_adt_no_DFCI/ \
     --n-bootstrap 1000
 ```
 
+All federated inputs live in the `rhino_results/` delivery under the COMPASS
+data root (override with `COMPASS_RHINO_ROOT`): `federated_model_results/` (the
+pooled univariate Cox CSV, within-site Cox, and the bundles trained with and
+without DFCI), `federated_transfer_adt_no_DFCI/` (09's arm B output) and
+`misc_figure_data/` (aggregate KM curves and trajectories; see below).
+
 `COMPASS/survival_analysis/09_federated_transfer.ipynb` wraps the same call and
-picks up both bundles from `federated_results_w_MSK/federated_*/`. That export
-was trained on Dana-Farber, Fred Hutch, Johns Hopkins and MSK. **DFCI is one of
-the training sites**, so the platinum rows are partly in-sample, and NEPC/AVPC
-are scored on patients the model was fitted on. Treat the results as a
+picks up the bundles from `rhino_results/federated_model_results/federated_*/`.
+By default it runs only arm B, the bundles refit without Dana-Farber
+(`RUN_WITH_DFCI = False`). Set `RUN_WITH_DFCI = True` to also run arm A, the
+bundles trained on Dana-Farber, Fred Hutch, Johns Hopkins and MSK. For arm A,
+**DFCI is one of the training sites**, so the platinum rows are partly in-sample, and NEPC/AVPC
+are scored on patients the model was fitted on. Treat arm A as a
 cross-endpoint check, not external validation. The notebook compares the local
 cohort with DFCI's row in
 `nvflare_within_site_univariate_cox/cox_within_site_all_sites_cohort.csv` and
@@ -1195,24 +1204,23 @@ bundle's pooled means; a flagged row (>3x off) almost always means a unit
 mismatch between the DFCI and OMOP lab pipelines. Resolve those before you read
 the C-index.
 
-The figure pipeline picks up `transfer_metrics.csv` and `transfer_auc_t.csv`
-from `COMPASS_FEDERATED_TRANSFER` (default
-`$COMPASS_DATA_ROOT/federated_transfer_adt_w_MSK`). Rerun
+Arm B (`federated_*_no_DFCI/`) never saw a DFCI patient, so it is an external
+validation on all three endpoints. It writes `transfer_metrics.csv` and
+`transfer_auc_t.csv` to `COMPASS_FEDERATED_TRANSFER_NO_DFCI` (default
+`$COMPASS_RHINO_ROOT/federated_transfer_adt_no_DFCI`). Rerun
 `04_prep_figure_data.ipynb` after 09, then
 `COMPASS_FIGURE_SCOPE=federated Rscript COMPASS/survival_analysis/05_figures.R`
-to render `figures/ADT/federated/transfer_discrimination__platinum.{png,csv}`.
-The figure shows C-index, ΔC vs. age only, and mean AUC(t) by endpoint.
+to render `figures/ADT/federated/transfer_discrimination_no_dfci__platinum.{png,csv}`
+(C-index, ΔC vs. age only, and mean AUC(t) by endpoint) and federated manuscript
+Figure 5.
 
-09's arm B scores the same bundles refit without Dana-Farber
-(`federated_results_w_MSK/federated_*_no_DFCI/`), which is an external validation. It writes
-the same files plus `transfer_with_vs_without_dfci.csv` (paired full-model ΔC,
-without − with Dana-Farber, on the same patients and bootstrap resamples) to
-`COMPASS_FEDERATED_TRANSFER_NO_DFCI` (default
-`$COMPASS_DATA_ROOT/federated_transfer_adt_no_DFCI`). The same 04 → 05 rerun
-renders `figures/ADT/federated/transfer_discrimination_no_dfci__platinum.{png,csv}`
-(same layout as arm A) and `transfer_dfci_ablation__platinum.{png,csv}` (with vs.
-without Dana-Farber C-index, plus the paired ΔC, by endpoint and landmark). Either
-arm is skipped with a warning when its files are missing.
+With `RUN_WITH_DFCI = True`, arm A writes the same files to
+`COMPASS_FEDERATED_TRANSFER` (default `$COMPASS_RHINO_ROOT/federated_transfer_adt_w_MSK`),
+rendered as `transfer_discrimination__platinum`, and arm B also writes
+`transfer_with_vs_without_dfci.csv` (paired full-model ΔC, without − with
+Dana-Farber, on the same patients and bootstrap resamples), rendered as
+`transfer_dfci_ablation__platinum`. Arm A and the comparison are skipped
+when their files are missing.
 
 The same federated run also renders the pooled federated models themselves from
 `federated_cox_multivariate/` (elastic-net) and `federated_xgboost/`, next to
@@ -1220,7 +1228,28 @@ the across-site results CSV. The outputs are
 `figures/ADT/federated/{elasticnet,xgboost}_performance__platinum`,
 `elasticnet_coefficients__platinum`, and `xgboost_importance__platinum`.
 Manuscript Figure 8 (`08_federated_multivariable`) puts them in the local
-Figure 4 layout.
+Figure 4 layout. The same exports refit without DFCI (`*_no_DFCI/`) render as
+`*_no_dfci__platinum`.
+
+`misc_figure_data/` holds aggregate KM curves (`cohort_km.csv`,
+`lab_extreme_{km,summary}.csv`) and binned PSA/testosterone trajectories
+(`lab_trajector{ies,y_cohort}.csv`), each pooled across the four sites and, in
+the `within_site_*` twins, per site, plus a `manifest.json` with the binning
+settings and per-site counts. There are no patient-level rows. The federated run
+draws them with the local trajectory and KM plotters as
+`federated_trajectory_<lab>`, `federated_km_quintile_<lab>_landmark<N>` and
+per-site `_by_site` pages (`COMPASS_FEDERATED_FIGURE_DATA` overrides the folder).
+
+The federated job also writes a separate manuscript set to
+`figures/ADT/manuscript figures/`, with captions in `captions/federated_figureN.{md,txt}`:
+
+| File | Content |
+|---|---|
+| `federated_03_univariable` | Figure 3 layout: pooled univariable Cox volcanoes at days 0/90/180, pooled PSA/testosterone trajectories and day-180 extreme-quintile KM curves |
+| `federated_04_multivariable` | Figure 8 layout, with the full models refit without DFCI added to the AUC(t)/C-index rows |
+| `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/NEPC/AVPC: C-index, ΔC vs. age only, and AUC(t) by horizon |
+
+The local Figure 3 (`03_dfci_univariable`) still uses DFCI patient-level data.
 
 ### Invariants (these change predictions silently if broken)
 

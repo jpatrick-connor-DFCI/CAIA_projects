@@ -141,7 +141,10 @@ local({
   # 09 transfer outputs: optional CI/ΔC columns become gaps, bad inputs fail loudly.
   directory <- tempfile("transfer-"); dir.create(directory)
   on.exit(unlink(directory,recursive=TRUE))
-  stopifnot(identical(federated_transfer_dir(list(data_root="/x")),file.path("/x","federated_transfer_adt_w_MSK")),
+  stopifnot(identical(federated_transfer_dir(list(data_root="/x")),file.path("/x","rhino_results","federated_transfer_adt_w_MSK")),
+    identical(federated_transfer_dir(list(data_root="/x",federated_rhino_root="/r")),file.path("/r","federated_transfer_adt_w_MSK")),
+    identical(federated_figure_data_dir(list(data_root="/x")),file.path("/x","rhino_results","misc_figure_data")),
+    identical(federated_figure_data_dir(list(data_root="/x",federated_figure_data_path="/m")),"/m"),
     identical(federated_transfer_dir(list(data_root="/x",federated_transfer_path="/y")),"/y"))
   absent <- withCallingHandlers(load_federated_transfer(directory),warning=function(w) invokeRestart("muffleWarning"))
   stopifnot(is.null(absent))
@@ -173,7 +176,7 @@ local({
   # 09 arm B: no-Dana-Farber directory, paired ΔC loader and the with/without ablation panel.
   directory <- tempfile("transfer-no-dfci-"); dir.create(directory)
   on.exit(unlink(directory,recursive=TRUE))
-  stopifnot(identical(federated_transfer_no_dfci_dir(list(data_root="/x")),file.path("/x","federated_transfer_adt_no_DFCI")),
+  stopifnot(identical(federated_transfer_no_dfci_dir(list(data_root="/x")),file.path("/x","rhino_results","federated_transfer_adt_no_DFCI")),
     identical(federated_transfer_no_dfci_dir(list(data_root="/x",federated_transfer_no_dfci_path="/z")),"/z"))
   absent <- withCallingHandlers(load_federated_transfer_pairs(directory),warning=function(w) invokeRestart("muffleWarning"))
   stopifnot(is.null(absent))

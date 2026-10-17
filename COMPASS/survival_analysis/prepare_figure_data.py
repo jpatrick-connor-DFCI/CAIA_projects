@@ -176,22 +176,44 @@ FEDERATED_TRANSFER_FILES = ("transfer_metrics.csv", "transfer_auc_t.csv")
 # 09's arm B (bundles refit without Dana-Farber) adds the paired with/without comparison.
 FEDERATED_TRANSFER_NO_DFCI_FILES = FEDERATED_TRANSFER_FILES + ("transfer_with_vs_without_dfci.csv",)
 # Federated multivariable exports beside the across-site results CSV
-# (mirrors FEDERATED_MULTIVARIABLE in figure_workflow.R).
-FEDERATED_MULTIVARIABLE_FILES = (
-    ("federated_xgboost", "xgboost_federated_metrics_adt.csv"),
-    ("federated_xgboost", "xgboost_federated_importance_adt.csv"),
-    ("federated_cox_multivariate", "cox_federated_elasticnet_metrics_adt.csv"),
-    ("federated_cox_multivariate", "cox_federated_elasticnet_coefficients_adt.csv"),
+# (mirrors FEDERATED_MULTIVARIABLE in figure_workflow.R). Each bundle also has
+# a refit without Dana-Farber in "<directory>_no_DFCI".
+FEDERATED_NO_DFCI_SUFFIX = "_no_DFCI"
+FEDERATED_MULTIVARIABLE_FILES = tuple(
+    (directory + suffix, name)
+    for suffix in ("", FEDERATED_NO_DFCI_SUFFIX)
+    for directory, name in (
+        ("federated_xgboost", "xgboost_federated_metrics_adt.csv"),
+        ("federated_xgboost", "xgboost_federated_importance_adt.csv"),
+        ("federated_cox_multivariate", "cox_federated_elasticnet_metrics_adt.csv"),
+        ("federated_cox_multivariate", "cox_federated_elasticnet_coefficients_adt.csv"),
+    )
 )
+# Aggregate KM/trajectory export (no patient rows); mirrors FEDERATED_FIGURE_DATA_FILES in figure_workflow.R.
+FEDERATED_FIGURE_DATA_FILES = ("manifest.json", "cohort_km.csv") + tuple(
+    prefix + name for prefix in ("", "within_site_") for name in (
+        "lab_extreme_km.csv", "lab_extreme_summary.csv", "lab_trajectories.csv", "lab_trajectory_cohort.csv"))
+
+
+def federated_rhino_root(config: dict) -> Path:
+    """Root of the federated delivery (rhino_results) under the COMPASS data root."""
+    return Path(config.get("federated_rhino_root") or Path(config["data_root"]) / "rhino_results")
 
 
 def federated_transfer_dir(config: dict) -> Path:
-    return Path(config.get("federated_transfer_path") or Path(config["data_root"]) / "federated_transfer_adt_w_MSK")
+    # Arm A (bundles trained with Dana-Farber) is optional; 09 skips it by default.
+    return Path(config.get("federated_transfer_path")
+                or federated_rhino_root(config) / "federated_transfer_adt_w_MSK")
 
 
 def federated_transfer_no_dfci_dir(config: dict) -> Path:
     return Path(config.get("federated_transfer_no_dfci_path")
-                or Path(config["data_root"]) / "federated_transfer_adt_no_DFCI")
+                or federated_rhino_root(config) / "federated_transfer_adt_no_DFCI")
+
+
+def federated_figure_data_dir(config: dict) -> Path:
+    return Path(config.get("federated_figure_data_path")
+                or federated_rhino_root(config) / "misc_figure_data")
 
 
 def code_version() -> str:
@@ -553,6 +575,8 @@ def prepare(config: dict) -> dict:
             for name in FEDERATED_TRANSFER_FILES]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / name)
             for name in FEDERATED_TRANSFER_NO_DFCI_FILES]
+        federated_sources += [fingerprint(federated_figure_data_dir(config) / name)
+            for name in FEDERATED_FIGURE_DATA_FILES]
         manifest["federated"] = digest({"code": version, "force": manifest["force_version"],
             "files": federated_sources})
         if config.get("federated", False):

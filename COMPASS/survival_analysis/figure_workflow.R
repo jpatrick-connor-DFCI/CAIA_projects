@@ -793,9 +793,19 @@ FEDERATED_MODEL_COLORS <- c("Elastic-Net Cox"="#4C72B0","Cox baseline (age)"="#9
   "XGBoost Survival"="#B58900","XGBoost baseline (age)"="#E0CC8A")
 FEDERATED_FEATURE_STATS <- c("mean","min","max","last","delta","n_observations")
 
-federated_multivariable_files <- function(federated_path, family) {
+# The same bundles refit without Dana-Farber sit in "<directory>_no_DFCI".
+FEDERATED_MULTIVARIABLE_VARIANTS <- list(
+  pooled=list(suffix="",stem="",label="",
+    note="Trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins and MSK data."),
+  no_dfci=list(suffix="_no_DFCI",stem="_no_dfci",label=" (trained without Dana-Farber)",
+    note="Refit without Dana-Farber; trained and tested on Fred Hutch, Johns Hopkins and MSK data."))
+# Darker twins of the pooled full-model colors, used where both variants share a panel.
+FEDERATED_NO_DFCI_MODEL_COLORS <- c("Elastic-Net Cox, no DFCI"="#1F3D73",
+  "XGBoost Survival, no DFCI"="#6E5200")
+
+federated_multivariable_files <- function(federated_path, family, suffix="") {
   spec <- FEDERATED_MULTIVARIABLE[[family]]
-  setNames(file.path(dirname(federated_path),spec$directory,spec$files),names(spec$files))
+  setNames(file.path(dirname(federated_path),paste0(spec$directory,suffix),spec$files),names(spec$files))
 }
 
 # OMOP names contain internal double underscores, and missingness indicators
@@ -871,9 +881,11 @@ federated_input_audit_note <- function(features, family) {
     " days; audit model inputs before interpreting performance or ",noun,".")
 }
 
-render_federated_multivariable <- function(root,federated_path,family,dpi,overwrite) {
+render_federated_multivariable <- function(root,federated_path,family,dpi,overwrite,variant="pooled") {
   spec <- FEDERATED_MULTIVARIABLE[[family]]
-  paths <- federated_multivariable_files(federated_path,family)
+  version <- FEDERATED_MULTIVARIABLE_VARIANTS[[variant]]
+  spec$stems <- setNames(paste0(spec$stems,version$stem),names(spec$stems))
+  paths <- federated_multivariable_files(federated_path,family,version$suffix)
   metrics <- load_federated_multivariable(paths[["metrics"]],family,"metrics")
   features <- load_federated_multivariable(paths[["features"]],family,"features")
   audit <- federated_input_audit_note(features,family)
@@ -885,7 +897,8 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
     readr::write_csv(data,path)
     if(is.function(capture)) capture(path)
   }
-  context <- "ADT · platinum endpoint · federated (all sites)"
+  context <- paste0("ADT · platinum endpoint · federated ",
+    if(variant=="pooled") "(all sites)" else "(without Dana-Farber)")
   if(!is.null(metrics) && nrow(metrics)) {
     d <- prepare_federated_performance(metrics,family)
     colors <- FEDERATED_MODEL_COLORS[unname(spec$series)]
@@ -893,7 +906,7 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
       transmute(note=sprintf("%dd %s: n=%s, events=%s",landmark_days,
         if_else(config=="both","labs","baseline"),scales::comma(n_test),scales::comma(n_events_test))) %>%
       pull(note) %>% paste(collapse="; ")
-    caption <- paste("Held-out test metrics (not training or tuning CV). Gaps indicate unavailable metrics.",
+    caption <- paste(version$note,"Held-out test metrics (not training or tuning CV). Gaps indicate unavailable metrics.",
       paste0("Test counts — ",count_note,"."),audit,sep="\n")
     items <- lapply(c("auc","cindex"),function(metric) {
       stem <- paste0("figure4a_discrimination_",metric,"_platinum")
@@ -901,7 +914,7 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
         colors,show_legend=TRUE)+labs(caption=caption),stem=stem,destination=file.path(root,"platinum"))
     })
     figure <- figure_compilation_spec(items[[1]]$stem)
-    figure$title <- paste0("Federated ",spec$label,": labs vs. age baseline"); figure$context <- context
+    figure$title <- paste0("Federated ",spec$label,version$label,": labs vs. age baseline"); figure$context <- context
     p <- figure_combine(items,figure,tempdir())
     write_table(mutate(d,input_audit_note=audit),spec$stems[["metrics"]])
     save_federated_panel(p,file.path(root,paste0(spec$stems[["metrics"]],"__platinum.png")),
@@ -911,9 +924,10 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
     caption <- if(spec$kind=="cox") paste(
       "Top 15 nonzero coefficients by absolute value per landmark; age and body height excluded from display, as in local plots.",
       "Coefficients are signed log hazard-ratio coefficients, conditional on the other selected features. All source features remain in the CSV.",
-      audit,sep="\n") else paste(
+      version$note,audit,sep="\n") else paste(
       "Top 15 positive-gain features per landmark; age and body height excluded from display, as in local plots.",
-      "Gains are supplied model split gains, not signed effects or SHAP values. All source features remain in the CSV.",audit,sep="\n")
+      "Gains are supplied model split gains, not signed effects or SHAP values. All source features remain in the CSV.",
+      version$note,audit,sep="\n")
     items <- lapply(c(0,90,180),function(lm) {
       d <- features[features$landmark_days==lm & tolower(features$feature)!="age" &
         features[[spec$value]]!=0,,drop=FALSE]
@@ -928,8 +942,8 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
     exported <- features %>% mutate(displayed=paste(landmark_days,feature) %in% paste(shown$landmark_days,shown$feature),
       input_audit_note=audit)
     figure <- figure_compilation_spec(items[[1]]$stem)
-    figure$title <- if(spec$kind=="cox") "Federated elastic-net Cox coefficients" else
-      "Federated XGBoost feature importance"
+    figure$title <- paste0(if(spec$kind=="cox") "Federated elastic-net Cox coefficients" else
+      "Federated XGBoost feature importance",version$label)
     figure$context <- context
     p <- figure_combine(items,figure,tempdir())
     write_table(exported,spec$stems[["features"]])
@@ -960,19 +974,23 @@ FEDERATED_TRANSFER_ARMS <- list(
     source="Platinum-trained federated bundles refit without Dana-Farber and scored on the local ADT cohort; every endpoint, platinum included, is out of sample."))
 FEDERATED_TRANSFER_ARM_LABELS <- c("Trained with Dana-Farber","Trained without Dana-Farber","Paired difference")
 
-# Mirrors federated_transfer_dir() in prepare_figure_data.py.
-federated_transfer_dir <- function(config) {
-  path <- config$federated_transfer_path
-  if(length(path)==1L && !is.na(path) && nzchar(path)) path
-  else file.path(config$data_root,"federated_transfer_adt_w_MSK")
+# Path helpers mirror their namesakes in prepare_figure_data.py. Every federated
+# input defaults to the rhino_results delivery under the COMPASS data root.
+federated_config_path <- function(config, key, default) {
+  path <- config[[key]]
+  if(length(path)==1L && !is.na(path) && nzchar(path)) path else default
 }
-
-# Mirrors federated_transfer_no_dfci_dir() in prepare_figure_data.py.
-federated_transfer_no_dfci_dir <- function(config) {
-  path <- config$federated_transfer_no_dfci_path
-  if(length(path)==1L && !is.na(path) && nzchar(path)) path
-  else file.path(config$data_root,"federated_transfer_adt_no_DFCI")
-}
+federated_rhino_root <- function(config)
+  federated_config_path(config,"federated_rhino_root",file.path(config$data_root,"rhino_results"))
+federated_transfer_dir <- function(config)
+  federated_config_path(config,"federated_transfer_path",
+    file.path(federated_rhino_root(config),"federated_transfer_adt_w_MSK"))
+federated_transfer_no_dfci_dir <- function(config)
+  federated_config_path(config,"federated_transfer_no_dfci_path",
+    file.path(federated_rhino_root(config),"federated_transfer_adt_no_DFCI"))
+federated_figure_data_dir <- function(config)
+  federated_config_path(config,"federated_figure_data_path",
+    file.path(federated_rhino_root(config),"misc_figure_data"))
 
 load_federated_transfer <- function(directory, kind=c("metrics","auc_t")) {
   kind <- match.arg(kind)
@@ -1102,7 +1120,9 @@ federated_transfer_theme <- function() {
 
 plot_federated_transfer <- function(d, caption, title=FEDERATED_TRANSFER_ARMS$with_dfci$title,
                                     subtitle=FEDERATED_TRANSFER_ARMS$with_dfci$subtitle) {
-  references <- tibble(metric=factor(levels(d$metric),levels=levels(d$metric)),reference=c(.5,0,.5))
+  null_values <- c(`Harrell C-index`=.5,`ΔC vs. age only`=0,`Mean AUC(t)`=.5)
+  references <- tibble(metric=factor(levels(d$metric),levels=levels(d$metric)),
+    reference=unname(null_values[levels(d$metric)]))
   dodge <- position_dodge(width=.7)
   ggplot(d,aes(landmark,value,color=model,shape=features,group=interaction(model,features))) +
     geom_hline(data=references,aes(yintercept=reference),inherit.aes=FALSE,color="grey55",linetype="dotted",linewidth=.8) +
@@ -1169,9 +1189,190 @@ render_federated_transfer_ablation <- function(root, with_metrics, no_metrics, d
   invisible(d)
 }
 
+# Aggregate KM curves and binned trajectories exported by the federated run
+# (rhino_results/misc_figure_data): pooled across sites and within each site,
+# no patient-level rows. Drawn with the local plotters so the panels match.
+FEDERATED_FIGURE_DATA_FILES <- c(manifest="manifest.json",cohort_km="cohort_km.csv",
+  km="lab_extreme_km.csv",km_summary="lab_extreme_summary.csv",
+  trajectories="lab_trajectories.csv",trajectory_cohort="lab_trajectory_cohort.csv",
+  within_km="within_site_lab_extreme_km.csv",within_km_summary="within_site_lab_extreme_summary.csv",
+  within_trajectories="within_site_lab_trajectories.csv",
+  within_trajectory_cohort="within_site_lab_trajectory_cohort.csv")
+FEDERATED_FIGURE_DATA_COLUMNS <- list(
+  cohort_km=c("landmark_days","time","n_risk","events","survival","lower","upper"),
+  km=c("cutoff_scope","landmark_days","lab","stratum","time","survival","lower","upper"),
+  km_summary=c("cutoff_scope","landmark_days","lab","q20","q80","status",
+    "n_bottom","n_top","events_bottom","events_top","logrank_p"),
+  trajectories=c("lab_name","scale","platinum_status","t_mid","n_patients","mean","ci_lower","ci_upper"),
+  trajectory_cohort=c("lab_name","scale","platinum_status","n_patients"))
+FEDERATED_FIGURE_LABS <- c("PSA","Testosterone")
+
+load_federated_figure_data <- function(directory) {
+  paths <- setNames(file.path(directory,FEDERATED_FIGURE_DATA_FILES),names(FEDERATED_FIGURE_DATA_FILES))
+  if(!file.exists(paths[["manifest"]])) {
+    warning("Federated KM/trajectory data unavailable; missing: ",paths[["manifest"]])
+    return(NULL)
+  }
+  manifest <- jsonlite::read_json(paths[["manifest"]],simplifyVector=FALSE)
+  read <- function(name) {
+    kind <- sub("^within_","",name)
+    needed <- c("scope","site_name",FEDERATED_FIGURE_DATA_COLUMNS[[kind]])
+    if(!file.exists(paths[[name]])) {
+      # An empty table with the expected columns: dependent panels are skipped.
+      warning("Federated figure data unavailable; missing: ",paths[[name]])
+      return(as_tibble(setNames(rep(list(logical()),length(needed)),needed)))
+    }
+    d <- readr::read_csv(paths[[name]],show_col_types=FALSE,
+      col_types=readr::cols(site_name=readr::col_character(),.default=readr::col_guess()))
+    missing <- setdiff(needed,names(d))
+    if(length(missing)) stop("Federated figure data ",basename(paths[[name]])," is missing: ",
+      paste(missing,collapse=", "))
+    if("analysis_label" %in% names(d)) d <- filter(d,tolower(analysis_label)=="adt")
+    if("endpoint" %in% names(d)) d <- filter(d,tolower(endpoint)=="platinum")
+    if(any(d$scope=="within_site" & is.na(d$site_name))) stop("Within-site figure data without a site name")
+    d
+  }
+  tables <- lapply(setdiff(names(FEDERATED_FIGURE_DATA_FILES),"manifest"),read)
+  names(tables) <- setdiff(names(FEDERATED_FIGURE_DATA_FILES),"manifest")
+  join <- function(kind) bind_rows(tables[[kind]],tables[[paste0("within_",kind)]])
+  config <- manifest$config
+  list(config=list(pre_days=as.numeric(config$pre_days),post_days=as.numeric(config$post_days),
+      bin_width=as.numeric(config$bin_width_days),min_bin_patients=as.numeric(config$min_bin_patients)),
+    sites=as.character(unlist(manifest$sites)),site_stats=manifest$site_cohort_stats,
+    cohort_km=tables$cohort_km,km=join("km"),km_summary=join("km_summary"),
+    trajectories=join("trajectories"),trajectory_cohort=join("trajectory_cohort"))
+}
+
+# NULL site = the pooled (all-site) rows; never pool within-site rows here.
+federated_figure_scope <- function(d, site=NULL) {
+  if(is.null(site)) filter(d,scope=="pooled") else filter(d,scope=="within_site",site_name==site)
+}
+federated_figure_scope_label <- function(site=NULL)
+  if(is.null(site)) "Federated (all sites)" else paste("Within site:",federated_site_label(site))
+
+plot_federated_trajectory <- function(fig, lab, site=NULL, scale="log1p") {
+  rows <- federated_figure_scope(fig$trajectories,site) %>%
+    filter(lab_name==lab,.data$scale==.env$scale,n_patients>=fig$config$min_bin_patients,is.finite(mean))
+  if(!nrow(rows)) return(NULL)
+  binned <- transmute(rows,t_mid,mean,ci_lo=ci_lower,ci_hi=ci_upper,stratum=as.character(platinum_status))
+  n <- federated_figure_scope(fig$trajectory_cohort,site) %>%
+    filter(lab_name==lab,.data$scale==.env$scale) %>% pull(n_patients) %>% sum()
+  plot_trajectory_ci(binned,lab,sprintf("%s trajectories by platinum status",lab),
+    log_scale=scale=="log1p",pre_days=fig$config$pre_days,post_days=fig$config$post_days,
+    bin_width=fig$config$bin_width,min_bin_patients=fig$config$min_bin_patients) +
+    labs(subtitle=sprintf("%s · n=%s · %s scale",federated_figure_scope_label(site),
+      scales::comma(n),scale))
+}
+
+# Within-site panels default to site-specific quintile cutoffs; the export also
+# carries each site's patients split at the pooled cutoffs (cutoff_scope="pooled").
+plot_federated_lab_km <- function(fig, lab, landmark, site=NULL,
+                                  cutoff_scope=if(is.null(site)) "pooled" else "within_site") {
+  pick <- function(d) federated_figure_scope(d,site) %>%
+    filter(.data$lab==.env$lab,landmark_days==landmark,.data$cutoff_scope==.env$cutoff_scope)
+  summary <- pick(fig$km_summary)
+  curves <- pick(fig$km)
+  if(nrow(summary)!=1L || !identical(summary$status,"ok") || !nrow(curves)) return(NULL)
+  counts <- tibble(stratum=c("Bottom 20%","Top 20%"),n=c(summary$n_bottom,summary$n_top),
+    events=c(summary$events_bottom,summary$events_top))
+  note <- sprintf("%s. Pre-landmark mean; %s cutoffs: bottom 20%% at %.4g, top 20%% at %.4g (middle 60%% not shown). Shading: 95%% CI.",
+    federated_figure_scope_label(site),if(cutoff_scope=="pooled") "pooled" else "site-specific",
+    summary$q20,summary$q80)
+  plot_km_curves(select(curves,stratum,time,survival,lower,upper),counts,summary$logrank_p,
+    paste(lab,"bottom vs top 20%: time to platinum"),sprintf("the +%d-day treatment landmark",landmark),
+    c("Bottom 20%","Top 20%"),note)
+}
+
+plot_federated_cohort_km <- function(fig, site=NULL) {
+  curves <- federated_figure_scope(fig$cohort_km,site)
+  if(!nrow(curves)) return(NULL)
+  curves <- mutate(curves,stratum=sprintf("Day %d landmark",as.integer(landmark_days)))
+  counts <- curves %>% group_by(stratum) %>%
+    summarise(n=n_risk[which.min(time)],events=sum(events),.groups="drop")
+  plot_km_curves(select(curves,stratum,time,survival,lower,upper),counts,NA_real_,
+    "Platinum-free survival by landmark","each treatment landmark",
+    sprintf("Day %d landmark",c(0,90,180)),federated_figure_scope_label(site)) +
+    labs(subtitle=NULL)
+}
+
+# Pooled univariable Cox results drawn as the local Figure 3 volcanoes, with the
+# local display filters (finite estimates, |log HR| <= 4, CI ratio < 100).
+federated_volcano_data <- function(federated_path) {
+  d <- readr::read_csv(federated_path,show_col_types=FALSE)
+  needed <- c("landmark_days","endpoint","lab_name","feature_stat","coef_feature",
+    "ci_lower","ci_upper","p_value","q_value")
+  missing <- setdiff(needed,names(d))
+  if(length(missing)) stop("Federated univariable input is missing: ",paste(missing,collapse=", "))
+  for(column in c("landmark_days","coef_feature","ci_lower","ci_upper","p_value","q_value"))
+    d[[column]] <- suppressWarnings(as.numeric(d[[column]]))
+  if("analysis_label" %in% names(d)) d <- filter(d,tolower(analysis_label)=="adt")
+  d %>% filter(tolower(endpoint)=="platinum",landmark_days %in% c(0,90,180)) %>%
+    mutate(raw_lab_name=lab_name,lab_name=federated_lab_label(lab_name)) %>%
+    filter(is.finite(coef_feature),is.finite(p_value),is.finite(q_value),
+      abs(coef_feature)<=4,is.finite(ci_upper/ci_lower),ci_upper/ci_lower<100)
+}
+
+# Within-site panels for one lab, one page with a panel per site.
+federated_site_grid <- function(fig, make, title) {
+  plots <- lapply(fig$sites,function(site) {
+    p <- make(site)
+    if(is.null(p)) return(NULL)
+    p + labs(title=federated_site_label(site))
+  })
+  plots <- Filter(Negate(is.null),plots)
+  if(!length(plots)) return(NULL)
+  gridExtra::arrangeGrob(grobs=lapply(plots,ggplot2::ggplotGrob),ncol=2,
+    top=grid::textGrob(title,gp=grid::gpar(fontsize=15,fontface="bold")),
+    padding=grid::unit(1.5,"lines"))
+}
+
+render_federated_figure_data <- function(root, federated_path, figure_data_dir, dpi, overwrite) {
+  manuscript <- getOption("compass.manuscript_capture")
+  keep <- function(plot, stem) if(is.function(manuscript) && !is.null(plot)) manuscript(plot,stem)
+  publish <- function(plot, stem, data, width, height) {
+    if(is.null(plot)) return(invisible(FALSE))
+    write_federated_transfer_table(root,data,stem)
+    save_federated_panel(plot,file.path(root,paste0(stem,"__platinum.png")),width,height,dpi,overwrite)
+  }
+  volcano <- federated_volcano_data(federated_path)
+  for(lm in c(0,90,180)) {
+    sub <- filter(volcano,landmark_days==lm)
+    if(!nrow(sub)) { warning("No federated univariable rows at landmark ",lm); next }
+    p <- plot_volcano_panel(sub,if(lm>0) sprintf("+%d days",lm) else "0 days")
+    publish(p,paste0("federated_volcano_landmark",lm),sub,9,7)
+    keep(p,paste0("fed3_volcano_landmark",lm))
+  }
+  fig <- load_federated_figure_data(figure_data_dir)
+  if(is.null(fig)) return(invisible(NULL))
+  publish(plot_federated_cohort_km(fig),"federated_cohort_km",
+    federated_figure_scope(fig$cohort_km),8,6.5)
+  for(lab in FEDERATED_FIGURE_LABS) {
+    slug <- figure_slug(lab)
+    rows <- filter(fig$trajectories,lab_name==lab,scale=="log1p")
+    p <- plot_federated_trajectory(fig,lab)
+    publish(p,paste0("federated_trajectory_",slug),filter(rows,scope=="pooled"),9.5,5.5)
+    keep(p,paste0("fed3_trajectory_",slug))
+    publish(federated_site_grid(fig,function(site) plot_federated_trajectory(fig,lab,site),
+        paste(lab,"trajectories by platinum status, within each site (log1p scale)")),
+      paste0("federated_trajectory_",slug,"_by_site"),filter(rows,scope=="within_site"),19,11)
+    for(lm in c(0,90,180)) {
+      stem <- sprintf("federated_km_quintile_%s_landmark%d",slug,lm)
+      curves <- filter(fig$km,lab==.env$lab,landmark_days==lm)
+      p <- plot_federated_lab_km(fig,lab,lm)
+      publish(p,stem,filter(curves,scope=="pooled"),8,6.5)
+      if(lm==manuscript_dfci_km_landmark) keep(p,sprintf("fed3_km_quintile_%s_landmark%d",slug,lm))
+      publish(federated_site_grid(fig,function(site) plot_federated_lab_km(fig,lab,lm,site),
+          sprintf("%s bottom vs top 20%% within each site (site-specific cutoffs), +%d-day landmark",lab,lm)),
+        paste0(stem,"_by_site"),filter(curves,scope=="within_site"),16,13)
+    }
+  }
+  if(nrow(fig$km_summary)) write_federated_transfer_table(root,fig$km_summary,"federated_km_quintile_summary")
+  invisible(fig)
+}
+
 render_federated_supplement <- function(data_root, fig_root, federated_path,
                                                 dpi = 200, overwrite = FALSE, transfer_dir = NULL,
-                                                transfer_no_dfci_dir = NULL) {
+                                                transfer_no_dfci_dir = NULL, figure_data_dir = NULL) {
   d <- load_federated_forest(federated_path)
   root <- file.path(fig_root, "ADT", "federated")
   dir.create(root, recursive = TRUE, showWarnings = FALSE)
@@ -1202,9 +1403,13 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
     save_federated_panel(plot_federated_sites(sites),
       file.path(root, "site_incidence_lm000__platinum.png"), 14, 5.5, dpi, overwrite)
   }
-  for(family in names(FEDERATED_MULTIVARIABLE))
-    render_federated_multivariable(root,federated_path,family,dpi,overwrite)
-  with_dfci <- if (!is.null(transfer_dir)) render_federated_transfer(root, transfer_dir, dpi, overwrite)
+  for(variant in names(FEDERATED_MULTIVARIABLE_VARIANTS)) for(family in names(FEDERATED_MULTIVARIABLE))
+    render_federated_multivariable(root,federated_path,family,dpi,overwrite,variant)
+  if (!is.null(figure_data_dir))
+    render_federated_figure_data(root, federated_path, figure_data_dir, dpi, overwrite)
+  # Arm A (bundles trained with Dana-Farber) is optional; 09 runs it only with RUN_WITH_DFCI.
+  with_dfci <- if (!is.null(transfer_dir) && all(file.exists(file.path(transfer_dir, FEDERATED_TRANSFER_FILES))))
+    render_federated_transfer(root, transfer_dir, dpi, overwrite)
   if (!is.null(transfer_no_dfci_dir)) {
     no_dfci <- render_federated_transfer(root, transfer_no_dfci_dir, dpi, overwrite, arm = "no_dfci")
     if (!is.null(with_dfci) && !is.null(no_dfci))
@@ -1248,8 +1453,19 @@ manuscript_specs <- function() {
       11.8, matrix(1:4,4), c("Mean AUC(t)","C-index","Elastic-Net coefficients","XGBoost feature importance"),
       row_heights=c(.9,.9,1,1),width=8.5),
     spec("05_gleason_sensitivity", paste0("figure4c_sensitivity_gleason_",c("auc","cindex"),"_platinum"),
-      5.6, matrix(1:2,2), c("Mean AUC(t)","C-index")))
+      5.6, matrix(1:2,2), c("Mean AUC(t)","C-index")),
+    # Federated Figure 3: the local Figure 3 layout drawn from pooled federated results.
+    spec("federated_03_univariable", c(paste0("fed3_volcano_landmark",c(0,90,180)),
+      "fed3_trajectory_psa",paste0("fed3_km_quintile_psa_landmark",manuscript_dfci_km_landmark),
+      "fed3_trajectory_testosterone",paste0("fed3_km_quintile_testosterone_landmark",manuscript_dfci_km_landmark)), 8.6,
+      rbind(c(1,1,2,2,3,3),rep(8,6),c(4,4,4,5,5,5),c(6,6,6,7,7,7)),
+      c("Day 0","Day 90","Day 180","PSA trajectory","PSA: extreme quintiles",
+        "Testosterone trajectory","Testosterone: extreme quintiles"),
+      row_heights=c(1.5,.18,1,1), shared_legend_panels=1:3))
 }
+
+# Keys sharing the Figure 3 layout and restyling (manuscript_univariable_restyle).
+MANUSCRIPT_UNIVARIABLE_KEYS <- c("03_dfci_univariable","federated_03_univariable")
 
 manuscript_captions <- function() {
   caption <- function(...) paste(c(...),collapse="\n\n")
@@ -1285,7 +1501,20 @@ manuscript_captions <- function() {
     `08_federated_multivariable`=caption(
       "Figure 8. Federated multivariable laboratory models for prediction of platinum treatment.",
       "(a,b) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t) (a), and Harrell concordance index (b) for federated Elastic-Net Cox and XGBoost survival models at 0, 90, and 180 days after ADT initiation. Laboratory models are compared with age-only baselines; the dotted horizontal line marks 0.5. (c) Nonzero Elastic-Net Cox coefficients at each landmark, with up to 15 coefficients of largest absolute value displayed. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (d) XGBoost split-gain feature importance at each landmark, with up to 15 positive-gain features displayed. Colors in c and d identify laboratory categories.",
-      "Models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data. Test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180 for all model configurations. Performance values are from held-out test sets rather than training or tuning cross-validation. Age and body height are not displayed. Feature labels give the measurement and summary statistic; \"missing\" marks an indicator that the statistic was unavailable. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and are not signed effects or SHAP values. abs., absolute; ADT, androgen-deprivation therapy; ALP, alkaline phosphatase; ALT, alanine aminotransferase; AST, aspartate aminotransferase; AUC(t), time-dependent area under the receiver-operating-characteristic curve; C-index, concordance index; DBP, diastolic blood pressure; MCH, mean corpuscular hemoglobin; MCV, mean corpuscular volume; n obs., number of observations; PSA, prostate-specific antigen; PT, prothrombin time; RBC, red blood cell count; RDW, red-cell distribution width; SBP, systolic blood pressure; SHAP, Shapley additive explanations; TSH, thyroid-stimulating hormone; WBC, white blood cell count.")
+      "Models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data. Test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180 for all model configurations. Performance values are from held-out test sets rather than training or tuning cross-validation. Age and body height are not displayed. Feature labels give the measurement and summary statistic; \"missing\" marks an indicator that the statistic was unavailable. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and are not signed effects or SHAP values. abs., absolute; ADT, androgen-deprivation therapy; ALP, alkaline phosphatase; ALT, alanine aminotransferase; AST, aspartate aminotransferase; AUC(t), time-dependent area under the receiver-operating-characteristic curve; C-index, concordance index; DBP, diastolic blood pressure; MCH, mean corpuscular hemoglobin; MCV, mean corpuscular volume; n obs., number of observations; PSA, prostate-specific antigen; PT, prothrombin time; RBC, red blood cell count; RDW, red-cell distribution width; SBP, systolic blood pressure; SHAP, Shapley additive explanations; TSH, thyroid-stimulating hormone; WBC, white blood cell count."),
+    # The federated manuscript set is numbered separately (federated_figure<N>).
+    federated_03_univariable=caption(
+      "Federated Figure 3. Pooled univariable laboratory associations with platinum treatment and longitudinal PSA and testosterone patterns across four sites.",
+      "Results pool the Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering (MSK) ADT cohorts. (a-c) Federated univariable Cox associations at ADT initiation (a), 90 days (b), and 180 days (c). The horizontal axis gives the log hazard ratio per standard-deviation increase and the vertical axis gives -log10(P); values above 30 are drawn at 30 as triangles. The solid vertical line denotes no association, dashed vertical lines mark log hazard ratios of -0.5 and 0.5, and the dotted horizontal line is the landmark-specific threshold corresponding to a Benjamini-Hochberg false-discovery rate below 0.05. Colors identify laboratory categories. At the three landmarks, 93 of 261, 121 of 258, and 126 of 260 displayed features, respectively, had q < 0.05. (d,f) Pooled mean log1p-transformed PSA (d) and testosterone (f) trajectories by subsequent platinum status; points and shading denote the mean and 95% confidence interval, and only bins containing at least 10 patients per stratum are shown. The dotted vertical line denotes ADT initiation. (e,g) Pooled Kaplan-Meier platinum-free survival from the 180-day landmark comparing the bottom and top 20% of the pre-landmark mean PSA (e) or testosterone (g) distribution, with quintile cutoffs computed across all four sites. Middle quintiles are omitted, shading denotes pointwise 95% confidence intervals, and P values are from log-rank tests.",
+      "Panels a-c display features with finite estimates, absolute log hazard ratios of at most 4, and confidence-interval upper-to-lower ratios below 100; supplied q values were not recalculated. Panels d-g were drawn from aggregate site exports (binned means and Kaplan-Meier curves) without patient-level data. Cohorts included 22,138 patients (664 platinum events) at day 0, 21,791 (608) at day 90, and 21,216 (564) at day 180; by site at day 0, Dana-Farber contributed 5,853 (231 events), Fred Hutch 3,277 (90), Johns Hopkins 3,069 (35), and MSK 9,939 (308). The trajectory analyses include 22,035 patients for PSA and 17,937 for testosterone. For PSA, the bottom group was ≤0.4184 (n=4,129; 68 events) and the top group was >11.31 (n=4,129; 209 events); log-rank P=2.61 × 10^-30. For testosterone, the bottom group was ≤23.0 (n=2,875; 146 events) and the top group was >348.6 (n=2,872; 41 events); log-rank P=1.34 × 10^-16. Within-site versions are provided as supplementary figures. ADT, androgen-deprivation therapy; CBC, complete blood count; CMP, comprehensive metabolic panel; LFT, liver-function test; PSA, prostate-specific antigen; SD, standard deviation."),
+    federated_04_multivariable=caption(
+      "Federated Figure 4. Federated multivariable laboratory models for prediction of platinum treatment, with and without Dana-Farber training data.",
+      "(a,b) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t) (a), and Harrell concordance index (b) at 0, 90, and 180 days after ADT initiation for Elastic-Net Cox and XGBoost survival models trained on all four sites, the same full models refit without Dana-Farber (darker bars, \"no DFCI\"), and age-only baselines (hatched). The dotted horizontal line marks 0.5. (c) Nonzero Elastic-Net Cox coefficients of the four-site model at each landmark, with up to 15 coefficients of largest absolute value displayed. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (d) XGBoost split-gain feature importance of the four-site model at each landmark, with up to 15 positive-gain features displayed. Colors in c and d identify laboratory categories.",
+      "Four-site models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering (MSK) data; test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180. Models without Dana-Farber were trained and tested on Fred Hutch, Johns Hopkins, and MSK data; test-set sample sizes/events were 3,258/87, 3,204/78, and 3,105/72. Because the test sets differ, the two model versions are not compared on the same patients here; Federated Figure 5 evaluates the models without Dana-Farber on Dana-Farber patients. Performance values are from held-out test sets rather than training or tuning cross-validation. Age and body height are not displayed. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and are not signed effects or SHAP values. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; C-index, concordance index; DFCI, Dana-Farber Cancer Institute; SHAP, Shapley additive explanations."),
+    federated_05_transfer_no_dfci=caption(
+      "Federated Figure 5. External validation at Dana-Farber of federated platinum models trained without Dana-Farber.",
+      "Elastic-Net Cox and XGBoost survival models trained for platinum treatment on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data were applied unchanged to the Dana-Farber ADT cohort and evaluated against three local endpoints: platinum treatment (the training endpoint), neuroendocrine prostate cancer (NEPC), and aggressive-variant prostate cancer (AVPC). (a) Harrell concordance index (top) and the paired difference in C-index relative to the age-only model (bottom) at 0, 90, and 180 days after ADT initiation. Filled points denote full laboratory models and open points age-only models; bars denote 95% bootstrap confidence intervals over patients, with full and age-only models scored on the same resamples. Dotted lines mark 0.5 (C-index) and 0 (difference). (b) Inverse-probability-of-censoring-weighted cumulative/dynamic AUC(t) by prediction horizon; solid lines denote full models and dashed lines age-only models, and the dotted line marks 0.5.",
+      "No Dana-Farber patient contributed to model training, so every endpoint, including platinum, is out of sample. Patients/events were 2,267/182 at day 0, 2,233/166 at day 90, and 2,197/158 at day 180 for platinum; 2,218/92, 2,200/87, and 2,164/85 for NEPC; and 1,968/463, 1,891/397, and 1,842/373 for AVPC. Horizons without estimable AUC(t) are omitted. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; C-index, concordance index; IPCW, inverse probability of censoring weighting.")
   )
 }
 
@@ -1297,9 +1526,13 @@ manuscript_write_captions <- function(root,keys=names(manuscript_captions()),cap
   dir.create(caption_root,recursive=TRUE,showWarnings=FALSE)
   paths <- character()
   for(key in keys) {
-    number <- match(key,names(captions))
+    # Federated keys carry their own number ("federated_03_..." -> federated_figure3);
+    # the local set is numbered by caption order.
+    name <- if(startsWith(key,"federated_")) paste0("federated_figure",
+      as.integer(sub("^federated_0*([0-9]+)_.*$","\\1",key))) else
+      paste0("figure",match(key,names(captions)))
     for(extension in c("md","txt")) {
-      path <- file.path(caption_root,sprintf("figure%d.%s",number,extension))
+      path <- file.path(caption_root,paste0(name,".",extension))
       writeLines(captions[[key]],path,useBytes=TRUE)
       paths <- c(paths,path)
       if(is.function(capture)) capture(path)
@@ -1364,7 +1597,7 @@ manuscript_combine <- function(plots,spec,shared_legend=FALSE,tag_offset=0L) {
   for(i in seq_along(plots)) {
     p <- manuscript_style(plots[[i]],spec$titles[i],
       if(length(plots)>1) letters[i+tag_offset] else NULL)
-    if(identical(spec$key,"03_dfci_univariable") && i<=3) p <- p + ggplot2::theme(
+    if(spec$key %in% MANUSCRIPT_UNIVARIABLE_KEYS && i<=3) p <- p + ggplot2::theme(
       plot.subtitle=ggplot2::element_text(size=8,face="bold",hjust=.5,
         margin=ggplot2::margin(b=2)),
       plot.margin=ggplot2::margin(4,1,4,1))
@@ -1405,13 +1638,13 @@ manuscript_center_landmark_header <- function(p) p + ggplot2::theme(
   plot.subtitle=ggplot2::element_text(size=8,face="bold",hjust=.5,
     margin=ggplot2::margin(b=3)))
 
-manuscript_multivariable_labs <- function(plots,spec) {
+manuscript_multivariable_labs <- function(plots,spec,legend_nrow=1) {
   stopifnot(length(plots)==8)
   performance <- vector("list",2)
   model_legend <- NULL
   for(i in 1:2) {
     p <- manuscript_style(plots[[i]] + ggplot2::labs(subtitle=NULL),spec$titles[i],letters[i]) +
-      ggplot2::guides(fill=ggplot2::guide_legend(nrow=1,byrow=TRUE))
+      ggplot2::guides(fill=ggplot2::guide_legend(nrow=legend_nrow,byrow=TRUE))
     if(is.null(model_legend)) model_legend <- manuscript_legend(p,spec$width,spec$height)
     performance[[i]] <- manuscript_grob(p + ggplot2::theme(legend.position="none"),
       spec$width,spec$height*.18)
@@ -1654,22 +1887,24 @@ manuscript_federated_feature_label <- function(x) {
 
 # Mirrors local Figure 4: four-series discrimination (a,b), elastic-net
 # coefficients (c) and XGBoost gains (d), from the captured supplement CSVs.
-manuscript_federated_multivariable <- function(performance,coefficients,importance) {
-  d <- performance %>% mutate(name=factor(name,levels=names(FEDERATED_MODEL_COLORS)))
+manuscript_federated_multivariable <- function(performance,coefficients,importance,
+                                               key="08_federated_multivariable",colors=FEDERATED_MODEL_COLORS,
+                                               legend_nrow=1,note=NULL) {
+  d <- performance %>% mutate(name=factor(name,levels=names(colors)))
   stopifnot(!anyNA(d$name),!anyDuplicated(d[c("name","landmark")]))
   plots <- lapply(c("auc","cindex"),function(metric)
     plot_model_discrimination(d,metric,if(metric=="auc") "Test mean AUC(t)" else "Test C-index",
-      FEDERATED_MODEL_COLORS,show_legend=TRUE))
+      colors,show_legend=TRUE))
   for(kind in c("cox","xgb")) for(lm in c(0,90,180)) {
     features <- if(kind=="cox") coefficients else importance
     selected <- features[features$landmark_days==lm & features$displayed %in% TRUE,,drop=FALSE]
     plots[[length(plots)+1L]] <- plot_model_importance(selected,kind,NULL) +
       ggplot2::scale_y_discrete(labels=manuscript_federated_feature_label)
   }
-  spec <- list(key="08_federated_multivariable",width=8.5,height=11.8,layout=matrix(1:4,4),
+  spec <- list(key=key,width=8.5,height=11.8,layout=matrix(1:4,4),
     row_heights=c(.9,.9,1,1),
     titles=c("Test mean AUC(t)","Test C-index","Elastic-Net coefficients","XGBoost feature importance"))
-  p <- manuscript_multivariable_labs(plots,spec)
+  p <- manuscript_multivariable_labs(plots,spec,legend_nrow)
   audit <- unique(as.character(c(performance$input_audit_note,coefficients$input_audit_note,
     importance$input_audit_note)))
   audit <- audit[!is.na(audit)&nzchar(audit)]
@@ -1681,7 +1916,109 @@ manuscript_federated_multivariable <- function(performance,coefficients,importan
     "Held-out test metrics, not training or tuning CV. Local Figure 4 model colors (hatched age baselines) and lab-category colors.",
     "Up to 15 nonzero coefficients (by absolute value) or positive-gain features per landmark, using the local display exclusions (age, body height).",
     "Coefficients are signed log hazard ratios; gains are supplied split gains, not signed effects or SHAP values.",
-    counts,paste(audit,collapse="\n"),sep="\n"))
+    note,counts,paste(audit,collapse="\n"),sep="\n"))
+}
+
+# Federated Figure 4: the pooled four-site models of Figure 8, with the full
+# models refit without Dana-Farber added to the discrimination rows. Each
+# variant is scored on its own held-out test sites, so the sets differ.
+FEDERATED_FIG4_LEVELS <- c("Elastic-Net Cox","Elastic-Net Cox, no DFCI","Cox baseline (age)",
+  "XGBoost Survival","XGBoost Survival, no DFCI","XGBoost baseline (age)")
+manuscript_federated_multivariable_no_dfci <- function(performance,no_dfci_performance,coefficients,importance) {
+  renamed <- c(`Elastic-Net Cox`="Elastic-Net Cox, no DFCI",`XGBoost Survival`="XGBoost Survival, no DFCI")
+  no_dfci <- no_dfci_performance %>% filter(config=="both",as.character(name) %in% names(renamed)) %>%
+    mutate(name=unname(renamed[as.character(name)]))
+  colors <- c(FEDERATED_MODEL_COLORS,FEDERATED_NO_DFCI_MODEL_COLORS)[FEDERATED_FIG4_LEVELS]
+  manuscript_federated_multivariable(bind_rows(mutate(performance,name=as.character(name)),no_dfci),
+    coefficients,importance,key="federated_04_multivariable",colors=colors,legend_nrow=2,
+    note=paste("Darker bars (\"no DFCI\"): full models refit without Dana-Farber and tested on held-out Fred Hutch, Johns Hopkins and MSK patients;",
+      "the other bars are the pooled four-site models on their own test set. Panels c and d show the pooled models."))
+}
+
+# Federated Figure 5: platinum models trained without Dana-Farber, scored on the
+# local Dana-Farber NEPC, AVPC and platinum endpoints (09 arm B). All endpoints
+# are out of sample.
+manuscript_federated_transfer_no_dfci <- function(metrics,auc_t) {
+  d <- prepare_federated_transfer(metrics) %>%
+    filter(metric %in% c("Harrell C-index","ΔC vs. age only")) %>% mutate(metric=droplevels(metric))
+  discrimination <- plot_federated_transfer(d,NULL,NULL,NULL) + ggplot2::labs(x="Landmark after ADT initiation")
+  plots <- list(discrimination)
+  if(!is.null(auc_t) && nrow(auc_t)) {
+    families <- distinct(metrics,bundle,model_family) %>% distinct(bundle,.keep_all=TRUE)
+    curves <- auc_t %>% mutate(endpoint=tolower(endpoint),config=as.character(config)) %>%
+      filter(endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS),is.finite(auc)) %>%
+      left_join(families,by="bundle") %>%
+      label_federated_transfer(sort(unique(metrics$landmark_days))) %>%
+      mutate(features=factor(if_else(config=="baseline","Age only","Full model"),levels=c("Full model","Age only")),
+        years=horizon_days/365.25)
+    plots[[2]] <- ggplot2::ggplot(curves,ggplot2::aes(years,auc,color=model,linetype=features,
+        group=interaction(model,features))) +
+      ggplot2::geom_hline(yintercept=.5,color="grey55",linetype="dotted",linewidth=.6) +
+      ggplot2::geom_line(linewidth=.6) + ggplot2::geom_point(size=.9) +
+      ggplot2::scale_color_manual(values=federated_transfer_colors(levels(curves$model)),name=NULL,drop=FALSE) +
+      ggplot2::scale_linetype_manual(values=c(`Full model`="solid",`Age only`="dashed"),name=NULL,drop=FALSE) +
+      ggplot2::facet_grid(landmark~endpoint_label) +
+      ggplot2::labs(x="Years after landmark",y="AUC(t)") + federated_transfer_theme()
+  }
+  spec <- list(key="federated_05_transfer_no_dfci",width=7.2,height=if(length(plots)==2) 9 else 4.8,
+    layout=matrix(seq_along(plots),length(plots)),titles=c("Discrimination","Time-dependent AUC")[seq_along(plots)],
+    row_heights=if(length(plots)==2) c(1,1.15) else 1,shared_legend_panels=integer())
+  counts <- federated_transfer_count_note(metrics)
+  list(plot=manuscript_combine(plots,spec),spec=spec,data=metrics,legend=paste(
+    "a: Harrell C-index (top) and paired ΔC versus the age-only model (bottom) by endpoint and landmark; bars are 95% bootstrap CIs over patients.",
+    if(length(plots)==2) "b: IPCW cumulative/dynamic AUC(t) by prediction horizon; solid lines are full models, dashed lines age-only models." else "b: AUC(t) unavailable.",
+    FEDERATED_TRANSFER_ARMS$no_dfci$source,
+    paste0("Patients/events by landmark — ",counts,"."),sep="\n"))
+}
+
+# Figure 3 manuscript styling, shared by the local (DFCI) and federated versions:
+# common volcano axes, centered landmark headers, trajectory/KM axis labels and
+# an in-panel log-rank annotation. The local volcanoes are displayed through
+# -log10(p) = 20; pooled federated p values are far smaller, so the federated
+# panels share the range their own (capped) data need.
+manuscript_univariable_restyle <- function(plots, federated=FALSE) {
+  axes <- lapply(plots[1:3],function(p) p$coordinates$limits)
+  if(all(vapply(axes,function(x) length(x$x)==2 && length(x$y)==2,logical(1)))) {
+    ylim <- if(federated) range(unlist(lapply(axes,`[[`,"y"))) else manuscript_dfci_volcano_ylim
+    for(i in 1:3) plots[[i]] <- plots[[i]] + ggplot2::coord_cartesian(
+      xlim=range(unlist(lapply(axes,`[[`,"x"))),ylim=ylim)
+  }
+  for(i in 1:3) {
+    plots[[i]]$layers <- lapply(plots[[i]]$layers,function(layer) {
+      copy <- ggplot2::ggproto(NULL,layer)
+      if(inherits(layer$geom,"GeomTextRepel")) {
+        copy$aes_params$size <- 2.2
+        copy$aes_params$point.size <- 1
+        copy$geom_params$box.padding <- grid::unit(.18,"lines")
+        copy$geom_params$point.padding <- grid::unit(.12,"lines")
+      }
+      if(inherits(layer$geom,"GeomPoint")) copy$aes_params$stroke <- .3
+      copy
+    })
+    plots[[i]] <- plots[[i]] + ggplot2::scale_size_manual(
+      values=c(`TRUE`=1.8,`FALSE`=1.2),guide="none")
+  }
+  for(i in 1:3) {
+    plots[[i]] <- plots[[i]] + ggplot2::labs(
+      subtitle=manuscript_dfci_landmark_headers[i],y=if(i==1) expression(-log[10](p)) else NULL) +
+      ggplot2::guides(color="none",fill=ggplot2::guide_legend(nrow=1,byrow=TRUE,
+        override.aes=list(shape=21,size=1.8,alpha=1)))
+    if(i>1) plots[[i]] <- plots[[i]] + ggplot2::theme(
+      axis.text.y=ggplot2::element_blank(),axis.ticks.y=ggplot2::element_blank())
+  }
+  for(i in c(4,6)) plots[[i]] <- plots[[i]] + ggplot2::labs(subtitle=NULL,
+    x="Years from ADT initiation",y=paste0("Mean log1p(",if(i==4) "PSA" else "testosterone", ")\n(95% CI)"))
+  for(i in c(5,7)) {
+    logrank <- plots[[i]]$labels$subtitle
+    plots[[i]] <- plots[[i]] + ggplot2::labs(subtitle=NULL,
+      x=paste0("Days from day-",manuscript_dfci_km_landmark," landmark"),y=manuscript_km_y_label)
+    if(is.character(logrank) && length(logrank)==1 && nzchar(logrank))
+      plots[[i]] <- plots[[i]] + ggplot2::annotate("text",x=Inf,y=.05,label=logrank,
+        hjust=1.08,vjust=0,size=2.3,color="#52514e")
+  }
+  list(plots=plots,legend=if(federated)
+    "Panels a-c share one -log10(p) display range (values above 30 drawn as triangles at 30) and centered landmark headers." else
+    "Panels a-c share a -log10(p) display range through 20 and centered landmark headers.")
 }
 
 manuscript_build <- function(items,tables,root) {
@@ -1707,46 +2044,10 @@ manuscript_build <- function(items,tables,root) {
       plots[[3]] <- plots[[3]] + ggplot2::labs(y="Fraction within\nplatinum group")
       plots[[4]] <- plots[[4]] + ggplot2::labs(y="Platinum-positive fraction")
     }
-    if(spec$key=="03_dfci_univariable") {
-      axes <- lapply(plots[1:3],function(p) p$coordinates$limits)
-      if(all(vapply(axes,function(x) length(x$x)==2,logical(1))))
-        for(i in 1:3) plots[[i]] <- plots[[i]] + ggplot2::coord_cartesian(
-          xlim=range(unlist(lapply(axes,`[[`,"x"))),ylim=manuscript_dfci_volcano_ylim)
-      for(i in 1:3) {
-        plots[[i]]$layers <- lapply(plots[[i]]$layers,function(layer) {
-          copy <- ggplot2::ggproto(NULL,layer)
-          if(inherits(layer$geom,"GeomTextRepel")) {
-            copy$aes_params$size <- 2.2
-            copy$aes_params$point.size <- 1
-            copy$geom_params$box.padding <- grid::unit(.18,"lines")
-            copy$geom_params$point.padding <- grid::unit(.12,"lines")
-          }
-          if(inherits(layer$geom,"GeomPoint")) copy$aes_params$stroke <- .3
-          copy
-        })
-        plots[[i]] <- plots[[i]] + ggplot2::scale_size_manual(
-          values=c(`TRUE`=1.8,`FALSE`=1.2),guide="none")
-      }
-      for(i in 1:3) {
-        plots[[i]] <- plots[[i]] + ggplot2::labs(
-          subtitle=manuscript_dfci_landmark_headers[i],y=if(i==1) expression(-log[10](p)) else NULL) +
-          ggplot2::guides(color="none",fill=ggplot2::guide_legend(nrow=1,byrow=TRUE,
-            override.aes=list(shape=21,size=1.8,alpha=1)))
-        if(i>1) plots[[i]] <- plots[[i]] + ggplot2::theme(
-          axis.text.y=ggplot2::element_blank(),axis.ticks.y=ggplot2::element_blank())
-      }
-      for(i in c(4,6)) plots[[i]] <- plots[[i]] + ggplot2::labs(subtitle=NULL,
-        x="Years from ADT initiation",y=paste0("Mean log1p(",if(i==4) "PSA" else "testosterone", ")\n(95% CI)"))
-      for(i in c(5,7)) {
-        logrank <- plots[[i]]$labels$subtitle
-        plots[[i]] <- plots[[i]] + ggplot2::labs(subtitle=NULL,
-          x=paste0("Days from day-",manuscript_dfci_km_landmark," landmark"),y=manuscript_km_y_label)
-        if(is.character(logrank) && length(logrank)==1 && nzchar(logrank))
-          plots[[i]] <- plots[[i]] + ggplot2::annotate("text",x=Inf,y=.05,label=logrank,
-            hjust=1.08,vjust=0,size=2.3,color="#52514e")
-      }
-      legend <- c(legend,
-        "Panels a-c share a -log10(p) display range through 20 and centered landmark headers.")
+    if(spec$key %in% MANUSCRIPT_UNIVARIABLE_KEYS) {
+      restyled <- manuscript_univariable_restyle(plots,federated=spec$key!="03_dfci_univariable")
+      plots <- restyled$plots
+      legend <- c(legend,restyled$legend)
     }
     if(spec$key=="01_cohort_overview") {
       # Patient counts stay in the external legend; omit them from panels B-E.
@@ -1804,6 +2105,18 @@ manuscript_build <- function(items,tables,root) {
   } else if(any(available))
     message("Skipping manuscript Figure 8: missing captured federated ",
       paste(names(federated)[!available],collapse=", "))
+  no_dfci <- lapply(c(elasticnet="elasticnet_performance_no_dfci",xgboost="xgboost_performance_no_dfci"),
+    function(stem) read(paste0("^",stem,"__platinum[.]csv$")))
+  if(all(available) && all(!vapply(no_dfci,is.null,logical(1)))) {
+    no_dfci_performance <- dplyr::bind_rows(lapply(no_dfci,function(d)
+      mutate(d,input_audit_note=as.character(input_audit_note))))
+    result[["federated_04"]] <- manuscript_federated_multivariable_no_dfci(performance,no_dfci_performance,
+      federated$coefficients,federated$importance)
+  } else if(all(available)) message("Skipping federated manuscript Figure 4: missing no-DFCI performance tables")
+  transfer <- read("^transfer_discrimination_no_dfci__platinum[.]csv$")
+  if(!is.null(transfer) && nrow(transfer))
+    result[["federated_05"]] <- manuscript_federated_transfer_no_dfci(transfer,
+      read("^transfer_auc_t_no_dfci__platinum[.]csv$"))
   result
 }
 
@@ -2218,14 +2531,18 @@ figure_notebook_manifest <- function(config, check_sources = TRUE) {
       fail("Requested federated results were not prepared.")
     registered_inputs <- c(vapply(c("cox_within_site_all_sites_cohort.csv", "cox_within_site_all_sites_results.csv"),
       function(filename) federated_within_site_file(config$federated_path, filename), character(1)),
-      unlist(lapply(names(FEDERATED_MULTIVARIABLE), function(family)
-        federated_multivariable_files(config$federated_path, family)), use.names = FALSE))
+      unlist(lapply(FEDERATED_MULTIVARIABLE_VARIANTS, function(variant)
+        lapply(names(FEDERATED_MULTIVARIABLE), function(family)
+          federated_multivariable_files(config$federated_path, family, variant$suffix))), use.names = FALSE))
     registered_inputs <- c(registered_inputs, file.path(federated_transfer_dir(config), FEDERATED_TRANSFER_FILES),
-      file.path(federated_transfer_no_dfci_dir(config), FEDERATED_TRANSFER_NO_DFCI_FILES))
+      file.path(federated_transfer_no_dfci_dir(config), FEDERATED_TRANSFER_NO_DFCI_FILES),
+      file.path(federated_figure_data_dir(config), FEDERATED_FIGURE_DATA_FILES))
     if (!same_path(federated_transfer_dir(prepared), federated_transfer_dir(config)))
       fail("Prepared federated transfer path does not match.")
     if (!same_path(federated_transfer_no_dfci_dir(prepared), federated_transfer_no_dfci_dir(config)))
       fail("Prepared no-Dana-Farber federated transfer path does not match.")
+    if (!same_path(federated_figure_data_dir(prepared), federated_figure_data_dir(config)))
+      fail("Prepared federated KM/trajectory data path does not match.")
     for (site_path in registered_inputs) {
       filename <- basename(site_path)
       if (!any(vapply(manifest$federated_sources, function(item)
@@ -2316,7 +2633,8 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
       build <- function() render_federated_supplement(config$data_root, config$fig_root,
         federated_config$results, dpi = dpi, overwrite = TRUE,
         transfer_dir = federated_transfer_dir(config),
-        transfer_no_dfci_dir = federated_transfer_no_dfci_dir(config))
+        transfer_no_dfci_dir = federated_transfer_no_dfci_dir(config),
+        figure_data_dir = federated_figure_data_dir(config))
     } else {
       build <- function() {
         message("Preparing figure set: ", job$name)

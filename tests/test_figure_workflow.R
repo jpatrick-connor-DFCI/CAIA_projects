@@ -75,7 +75,7 @@ local({
       test_c_index=.68,test_mean_auc_t=.72,n_test=20,n_events_test=5),cox_metrics_path)
   write_csv(expand_grid(landmark_days=c(0,90,180),feature=c("PSA__mean","Testosterone__last__missing","age")) %>%
     mutate(analysis_label="adt",endpoint="platinum",coefficient=rep(c(.2,-.1,.3),3)),cox_coefficients_path)
-  transfer_dir <- file.path(root,"federated_transfer_adt_w_MSK"); dir.create(transfer_dir)
+  transfer_dir <- file.path(root,"rhino_results","federated_transfer_adt_w_MSK"); dir.create(transfer_dir,recursive=TRUE)
   transfer_metrics_path <- file.path(transfer_dir,"transfer_metrics.csv")
   write_csv(expand_grid(endpoint=c("nepc","avpc","platinum"),
       bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),
@@ -87,7 +87,7 @@ local({
   write_csv(expand_grid(endpoint="nepc",bundle="xgboost_federated_model_adt",landmark_days=0,config="both",
     horizon_days=c(365,730)) %>% mutate(auc=.7,n_cases=4),file.path(transfer_dir,"transfer_auc_t.csv"))
   # 09 arm B: same bundles refit without Dana-Farber, plus the paired with/without comparison.
-  no_dfci_dir <- file.path(root,"federated_transfer_adt_no_DFCI"); dir.create(no_dfci_dir)
+  no_dfci_dir <- file.path(root,"rhino_results","federated_transfer_adt_no_DFCI"); dir.create(no_dfci_dir)
   file.copy(file.path(transfer_dir,c("transfer_metrics.csv","transfer_auc_t.csv")),no_dfci_dir)
   no_dfci_pairs_path <- file.path(no_dfci_dir,"transfer_with_vs_without_dfci.csv")
   write_csv(expand_grid(endpoint=c("avpc","nepc","platinum"),landmark_days=c(0,90,180),
@@ -192,8 +192,10 @@ local({
                       c("psa_forest", "testosterone_forest", "site_incidence_lm000",
                         "elasticnet_performance", "elasticnet_coefficients",
                         "xgboost_performance", "xgboost_importance",
+                        paste0("federated_volcano_landmark", c(0, 90, 180)),
                         "transfer_discrimination", "transfer_discrimination_no_dfci",
-                        "transfer_dfci_ablation", "08_federated_multivariable")))
+                        "transfer_dfci_ablation", "08_federated_multivariable",
+                        "federated_05_transfer_no_dfci")))
   coefficient_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated", "data",
     "elasticnet_coefficients__platinum.csv"), show_col_types = FALSE)
   stopifnot(nrow(coefficient_export) == 9L, sum(coefficient_export$displayed) == 6L,

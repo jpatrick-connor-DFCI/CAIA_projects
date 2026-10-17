@@ -36,11 +36,15 @@ stopifnot(landmark_header$theme$plot.subtitle$face=="bold",
 # Captions mirror the paired Markdown/text layout used by the clinical text
 # embedding project and retain figure-specific audit language.
 captions <- manuscript_captions()
-stopifnot(length(captions)==8,identical(names(captions),sprintf("%02d_%s",1:8,c(
+federated_keys <- c("federated_03_univariable","federated_04_multivariable","federated_05_transfer_no_dfci")
+stopifnot(length(captions)==11,identical(names(captions),c(sprintf("%02d_%s",1:8,c(
   "cohort_overview","llm_nepc_avpc","dfci_univariable","multivariable_labs",
   "gleason_sensitivity","dfci_cohort_sensitivity","federated_incidence_associations",
-  "federated_multivariable"))),
-  all(startsWith(unname(captions),paste0("Figure ",1:8,". "))),
+  "federated_multivariable")),federated_keys)),
+  all(startsWith(unname(captions[1:8]),paste0("Figure ",1:8,". "))),
+  all(startsWith(unname(captions[federated_keys]),paste0("Federated Figure ",3:5,". "))),
+  grepl("22,138 patients (664 platinum events)",captions[["federated_03_univariable"]],fixed=TRUE),
+  grepl("without Dana-Farber",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
   grepl("180-day landmark",captions[["03_dfci_univariable"]],fixed=TRUE),
   grepl("≤0.2453",captions[["03_dfci_univariable"]],fixed=TRUE),
   !grepl("day-0 landmark",captions[["03_dfci_univariable"]],fixed=TRUE),
@@ -50,10 +54,13 @@ stopifnot(length(captions)==8,identical(names(captions),sprintf("%02d_%s",1:8,c(
   grepl("9,939/308",captions[["07_federated_incidence_associations"]],fixed=TRUE))
 caption_root <- tempfile("manuscript-caption-test-")
 caption_paths <- manuscript_write_captions(caption_root)
-stopifnot(length(caption_paths)==16,all(file.exists(caption_paths)))
-for(i in 1:8) stopifnot(identical(
-  readLines(file.path(caption_root,"captions",paste0("figure",i,".md")),warn=FALSE),
-  readLines(file.path(caption_root,"captions",paste0("figure",i,".txt")),warn=FALSE)))
+stopifnot(length(caption_paths)==22,all(file.exists(caption_paths)))
+# The federated set is numbered on its own and never overwrites local figure3-5.
+for(name in c(paste0("figure",1:8),paste0("federated_figure",3:5))) stopifnot(identical(
+  readLines(file.path(caption_root,"captions",paste0(name,".md")),warn=FALSE),
+  readLines(file.path(caption_root,"captions",paste0(name,".txt")),warn=FALSE)))
+stopifnot(startsWith(readLines(file.path(caption_root,"captions","figure3.md"),n=1,warn=FALSE),"Figure 3. "),
+  startsWith(readLines(file.path(caption_root,"captions","federated_figure3.md"),n=1,warn=FALSE),"Federated Figure 3. "))
 unlink(caption_root,recursive=TRUE)
 
 site_incidence <- tibble(site_name=c("dana_farber_caia_1_1","fred_hutch_caia_1_1","jhu_caia_1_1"),

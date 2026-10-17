@@ -123,6 +123,20 @@ plot_stratified_platinum <- function(d, title, origin, group_order = unique(d$st
   }))
   counts <- d %>% group_by(stratum, .drop = TRUE) %>%
     summarise(n = n(), events = sum(event), .groups = "drop")
+  logrank <- tryCatch({
+    test <- survival::survdiff(survival::Surv(time, event) ~ stratum, data = d)
+    pchisq(test$chisq, length(test$n) - 1, lower.tail = FALSE)
+  }, error = function(e) NA_real_)
+  plot_km_curves(curves, counts, logrank, title, origin, group_order, note, colors, ci, ylab, legend_ncol)
+}
+
+# Draws already-estimated KM curves (stratum, time, survival, lower, upper), e.g.
+# the federated aggregate export, in the same style as locally fitted ones.
+plot_km_curves <- function(curves, counts, logrank, title, origin, group_order = unique(curves$stratum),
+                           note = NULL, colors = NULL, ci = TRUE,
+                           ylab = "Platinum-free probability", legend_ncol = 1) {
+  group_order <- group_order[group_order %in% curves$stratum]
+  curves$stratum <- factor(curves$stratum, levels = group_order)
   legend_labels <- setNames(sprintf("%s (n=%s; events=%s)", counts$stratum,
                                     counts$n, counts$events), as.character(counts$stratum))
   default_colors <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00",
@@ -133,10 +147,6 @@ plot_stratified_platinum <- function(d, title, origin, group_order = unique(d$st
     missing <- setdiff(group_order, names(colors))
     c(colors[names(colors) %in% group_order], setNames(fill[seq_along(missing)], missing))[group_order]
   }
-  logrank <- tryCatch({
-    test <- survival::survdiff(survival::Surv(time, event) ~ stratum, data = d)
-    pchisq(test$chisq, length(test$n) - 1, lower.tail = FALSE)
-  }, error = function(e) NA_real_)
   ggplot(curves, aes(time, survival, color = stratum, fill = stratum)) +
     (if (ci) geom_ribbon(aes(ymin = lower, ymax = upper), alpha = .08, color = NA,
                          show.legend = FALSE, na.rm = TRUE)) +
@@ -149,6 +159,38 @@ plot_stratified_platinum <- function(d, title, origin, group_order = unique(d$st
          caption = note) + theme_fig() +
     guides(color = guide_legend(ncol = legend_ncol)) +
     theme(legend.position = "bottom", legend.text = element_text(size = 10))
+}
+
+# Binned mean +/- 95% CI trajectories (t_mid, mean, ci_lo, ci_hi, stratum).
+# Shared by the local patient-level panels and the federated aggregate export.
+PLATINUM_TRAJECTORY_COLORS <- c(`0` = "#1f3a93", `1` = "#8e1c2b")
+plot_trajectory_ci <- function(binned, lab_group, title, stratum_legend = NULL,
+                               stratum_colors = NULL, log_scale = FALSE,
+                               pre_days = 365.25, post_days = 5 * 365.25, bin_width = 180,
+                               min_bin_patients = 10, anchor_label = "ADT initiation") {
+  if (is.null(stratum_legend)) stratum_legend <- c(`0` = "Non-platinum", `1` = "Platinum")
+  if (is.null(stratum_colors)) stratum_colors <- PLATINUM_TRAJECTORY_COLORS
+  binned <- binned %>% mutate(stratum = factor(stratum)) %>% arrange(t_mid)
+  ggplot(binned, aes(t_mid, mean, color = stratum, fill = stratum)) +
+    geom_vline(xintercept = 0, color = "#2c3e50", linetype = "dotted", linewidth = 1, alpha = 0.6) +
+    geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi), alpha = 0.2, color = NA) +
+    geom_line(linewidth = 0.8) + geom_point(size = 1.6) +
+    scale_color_manual(values = stratum_colors, labels = stratum_legend, name = NULL) +
+    scale_fill_manual(values = stratum_colors, guide = "none") +
+    scale_x_continuous(
+      breaks = seq(-pre_days, post_days, by = 365.25),
+      labels = function(d) sprintf("%g", round(d / 365.25))
+    ) +
+    labs(x = sprintf("Years from %s (binned, %dd windows)", anchor_label, as.integer(bin_width)),
+         y = sprintf("%s%s (mean +/- 95%% CI)",
+                     if (isTRUE(log_scale)) "log1p(" else "",
+                     if (isTRUE(log_scale)) paste0(lab_group, ")") else lab_group),
+         title = title,
+         caption = sprintf("Only bins with at least %d patients in a stratum are shown.",
+                           as.integer(min_bin_patients))) +
+    theme_fig() +
+    theme(plot.title = element_text(face = "bold", size = 11),
+          plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0))
 }
 
 # Risk-score stratification outputs (risk_score_stratified_figures.py, run by
@@ -3873,30 +3915,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (is.null(binned) || nrow(binned) == 0)
       return(ggplot() + annotate("text", x = 0, y = 0, label = "(no data)", color = "#7f8c8d") +
                theme_void() + labs(title = title))
-    if (is.null(stratum_legend)) stratum_legend <- c(`0` = "Non-platinum", `1` = "Platinum")
-    if (is.null(stratum_colors)) stratum_colors <- setNames(PLAT_COLORS, c("0","1"))
-    binned <- binned %>% mutate(stratum = factor(stratum)) %>% arrange(t_mid)
-    ggplot(binned, aes(t_mid, mean, color = stratum, fill = stratum)) +
-      geom_vline(xintercept = 0, color = "#2c3e50", linetype = "dotted", linewidth = 1, alpha = 0.6) +
-      geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi), alpha = 0.2, color = NA) +
-      geom_line(linewidth = 0.8) + geom_point(size = 1.6) +
-      scale_color_manual(values = stratum_colors, labels = stratum_legend, name = NULL) +
-      scale_fill_manual(values = stratum_colors, guide = "none") +
-      scale_x_continuous(
-        breaks = seq(-PRE_DAYS, POST_DAYS, by = 365.25),
-        labels = function(d) sprintf("%g", round(d / 365.25))
-      ) +
-      labs(x = sprintf("Years from %s (binned, %dd windows)",
-                       ANCHOR_LABEL, BIN_WIDTH_DAYS),
-           y = sprintf("%s%s (mean +/- 95%% CI)",
-                       if (isTRUE(log_scale)) "log1p(" else "",
-                       if (isTRUE(log_scale)) paste0(lab_group, ")") else lab_group),
-           title = title,
-           caption = sprintf("Only bins with at least %d patients in a stratum are shown.",
-                             MIN_BIN_PATIENTS)) +
-      theme_fig() +
-      theme(plot.title = element_text(face = "bold", size = 11),
-            plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0))
+    plot_trajectory_ci(binned, lab_group, title, stratum_legend, stratum_colors, log_scale,
+      pre_days = PRE_DAYS, post_days = POST_DAYS, bin_width = BIN_WIDTH_DAYS,
+      min_bin_patients = MIN_BIN_PATIENTS, anchor_label = ANCHOR_LABEL)
   }
 
   if (is.null(canonical_long_df)) {
