@@ -10,12 +10,15 @@ from survival_common.config import CoxProjectConfig
 
 
 def _static_covariates(ctx: Any, _args: argparse.Namespace, cox: Any) -> tuple[str, ...]:
-    """Panel-version dummies, adjusted for in every fit but never tested.
+    """Panel-version dummies and the somatic burden count, adjusted for in every fit but never tested.
 
-    Empty for lab-only runs and for genomic inputs built before panel version
-    was carried through, so those runs are unchanged.
+    Each is empty unless the inputs carry it: panel version for genomic inputs
+    built after it was carried through, the burden count only for the
+    any-alteration sequencing screen. Every other run is unchanged.
     """
-    return tuple(cox.panel_version_covariate_columns(ctx.merged))
+    return tuple(cox.panel_version_covariate_columns(ctx.merged)) + tuple(
+        cox.somatic_burden_covariate_columns(ctx.merged)
+    )
 
 
 def _prepare_context_kwargs(args: argparse.Namespace) -> dict:
@@ -29,8 +32,6 @@ def _add_cli_args(parser: argparse.ArgumentParser, _cox) -> None:
             "labs",
             "somatic-gleason",
             "genomic",
-            "text",
-            "labs-text",
             "gleason",
             "somatic",
             "gleason-labs",
@@ -42,12 +43,10 @@ def _add_cli_args(parser: argparse.ArgumentParser, _cox) -> None:
         help=(
             "Run the standard lab features, the separate somatic + Gleason "
             "feature inputs (legacy 'somatic-gleason', every manifest feature "
-            "together), the SNV-only genomic arm, pooled clinical-note "
-            "embeddings ('text'), labs plus embeddings ('labs-text'), or one "
-            "of the component-based Gleason/somatic/labs arms ('gleason', "
+            "together), the SNV-only genomic arm, or one of the "
+            "component-based Gleason/somatic/labs arms ('gleason', "
             "'somatic', 'gleason-labs', 'somatic-labs', 'gleason-somatic', "
-            "'gleason-somatic-labs'). The two text arms read inputs from "
-            "build_text_embedding_inputs.py; the Gleason/somatic arms read "
+            "'gleason-somatic-labs'). The Gleason/somatic arms read "
             "somatic_gleason_features.csv from build_somatic_gleason_inputs.py."
         ),
     )

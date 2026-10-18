@@ -622,8 +622,8 @@ def tune_multivariable_model(
 
     `restrict_to_canonical_labs` (default True, i.e. unchanged behavior) gates
     candidate features to the fold's canonical lab set. Pass False for a feature
-    set that models no lab summaries at all -- e.g. COMPASS's pooled
-    note-embedding arm, whose column names carry no "__" stat suffix and so
+    set that models no lab summaries at all -- e.g. COMPASS's Gleason- or
+    somatic-only arms, whose column names carry no "__" stat suffix and so
     would every one be read as a non-canonical "lab" and dropped. Per-fold
     canonical labs are still computed and reported either way, so the fold
     audit output is identical.

@@ -134,7 +134,7 @@ FEATURE_SET_COMPONENTS: dict[str, frozenset[str]] = {
 # selection and the lab coverage gate must be skipped entirely rather than
 # just failing to find a canonical lab.
 NO_LABS_FEATURE_SETS: frozenset[str] = frozenset(
-    {"somatic_gleason", "text"}
+    {"somatic_gleason"}
     | {token for token, components in FEATURE_SET_COMPONENTS.items() if "labs" not in components}
 )
 
@@ -143,7 +143,7 @@ def feature_set_has_labs_component(feature_set: str) -> bool:
     """True if `feature_set` tests lab summary columns at all.
 
     Used to decide whether canonical-lab selection and the lab coverage gate
-    apply, generalizing the old `feature_set in {"somatic_gleason", "text"}`
+    apply, generalizing the old `feature_set == "somatic_gleason"`
     check to the new component-based tokens.
     """
     token = str(feature_set).lower().replace("-", "_")
@@ -243,6 +243,17 @@ def panel_version_covariate_columns(df: pd.DataFrame) -> list[str]:
     )
 
 
+# Per-patient count of altered genes, written only into the any-alteration
+# sequencing inputs by build_somatic_gleason_inputs.py. Like the panel-version
+# dummies it is an adjustment covariate in every fit, never a tested feature.
+SOMATIC_BURDEN_COL = "SOMATIC_N_GENES_ALTERED"
+
+
+def somatic_burden_covariate_columns(df: pd.DataFrame) -> list[str]:
+    """The somatic burden covariate if this frame carries it, else empty."""
+    return [SOMATIC_BURDEN_COL] if SOMATIC_BURDEN_COL in df.columns else []
+
+
 def outcome_columns() -> set[str]:
     """Non-feature columns, including the currently configured age column.
 
@@ -253,8 +264,12 @@ def outcome_columns() -> set[str]:
 
 
 def non_feature_columns(df: pd.DataFrame) -> set[str]:
-    """outcome_columns() plus this frame's panel-version covariate dummies."""
-    return outcome_columns() | set(panel_version_covariate_columns(df))
+    """outcome_columns() plus this frame's adjustment covariates."""
+    return (
+        outcome_columns()
+        | set(panel_version_covariate_columns(df))
+        | set(somatic_burden_covariate_columns(df))
+    )
 
 
 def normalize_endpoints(raw_endpoints: list[str]) -> list[str]:
@@ -587,7 +602,7 @@ def prepare_landmark_context(
 
     feature_set = str(feature_set).lower().replace("-", "_")
     _known_feature_sets = (
-        {"labs", "somatic_gleason", "genomic", "text", "labs_text"}
+        {"labs", "somatic_gleason", "genomic"}
         | set(FEATURE_SET_COMPONENTS)
     )
     if feature_set not in _known_feature_sets:
@@ -624,8 +639,7 @@ def prepare_landmark_context(
         # The manifest's 'feature_kind' column (written by
         # build_somatic_gleason_inputs.py) distinguishes genuine binary
         # somatic mutation indicators ("somatic_binary") from the Gleason
-        # score ("gleason_continuous"), the tested-coverage flag, and PRS
-        # rows -- so unlike IPIO's naming-convention regex, COMPASS can read
+        # score ("gleason_continuous") and the tested-coverage flag -- so unlike IPIO's naming-convention regex, COMPASS can read
         # the genomic subset directly off the manifest (Finding 10).
         if "feature_kind" in feature_manifest.columns:
             genomic_feature_cols = tuple(
@@ -662,49 +676,6 @@ def prepare_landmark_context(
                 "the genomic feature set has nothing to test. Confirm "
                 "build_genomic_inputs.py wrote genomic_aggregated.csv here."
             )
-    elif feature_set in {"text", "labs_text"}:
-        # Pooled note-embedding columns, declared by the manifest that
-        # build_text_embedding_inputs.py writes beside the landmark frames.
-        #
-        # always_include is load-bearing here, not a convenience. The pooled
-        # columns are named <TYPE>_EMBEDDING_<i> with no "__" separator, so
-        # parse_feature_name() reads each as a lab named after the whole column
-        # with stat "value". select_feature_columns' restrict_to_labs gate would
-        # then drop all of them silently -- leaving an age-only model that looks
-        # like a successful text fit. Exempting them from the lab gate is what
-        # prevents that; coverage and variability filters still apply.
-        manifest_path = inputs_dir / "text_embedding_features.csv"
-        if not manifest_path.exists():
-            raise FileNotFoundError(
-                f"Missing {manifest_path}. Run build_text_embedding_inputs.py first."
-            )
-        feature_manifest = pd.read_csv(manifest_path)
-        if "feature" not in feature_manifest.columns:
-            raise ValueError(f"{manifest_path} is missing the 'feature' column.")
-        text_features = [
-            str(feature)
-            for feature in feature_manifest["feature"].dropna().drop_duplicates()
-        ]
-        missing_text = [f for f in text_features if f not in merged.columns]
-        if missing_text:
-            raise ValueError(
-                f"Landmark +{landmark_day} inputs are missing {len(missing_text)} "
-                f"declared text features; first values: {missing_text[:10]}"
-            )
-        if feature_set == "text":
-            raw_feature_cols = text_features
-        else:
-            lab_cols = [
-                c
-                for c in merged.columns
-                if c not in non_feature_columns(merged) and c not in set(text_features)
-            ]
-            raw_feature_cols = lab_cols + text_features
-        always_include_feature_cols = tuple(text_features)
-        # genomic_feature_cols stays empty: DEFAULT_MIN_GENOMIC_PREVALENCE is a
-        # floor on binary mutation indicators (value == 1 in >= X% of patients).
-        # Applied to dense continuous embedding dimensions it would be
-        # meaningless and would drop essentially every column.
     elif feature_set in FEATURE_SET_COMPONENTS:
         # Component-based Gleason/somatic/labs arms (Plan §2a). Unlike the
         # legacy "somatic_gleason" token (every manifest feature together),
@@ -778,7 +749,7 @@ def prepare_landmark_context(
 
     if not feature_set_has_labs_component(feature_set):
         # This arm models no lab summaries, so there is no canonical lab set
-        # to select. "labs_text" and the "*_labs" component tokens DO carry
+        # to select. The "*_labs" component tokens DO carry
         # labs and therefore fall through to the normal coverage-based
         # selection below.
         canonical_labs = []
@@ -819,8 +790,6 @@ def prepare_landmark_context(
     print(f"Canonical labs (train_val): {len(canonical_labs)}")
     feature_label = {
         "somatic_gleason": "static somatic/Gleason",
-        "text": "pooled note-embedding",
-        "labs_text": "summary-lab + note-embedding",
         "gleason": "Gleason",
         "somatic": "somatic",
         "gleason_labs": "Gleason + summary-lab",

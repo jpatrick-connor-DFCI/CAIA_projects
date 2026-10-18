@@ -71,7 +71,7 @@ COMPASS/
 │   ├── longitudinal_data_processing.py   # ENTRY: raw exports -> longitudinal_prediction_data.csv
 │   ├── build_prediction_inputs.py        # ENTRY: landmark cohorts, split, canonical labs, horizons
 │   ├── build_genomic_inputs.py           # legacy sample-anchored genomic + lab arm
-│   └── build_somatic_gleason_inputs.py   # sequencing, Gleason, and PRS inputs
+│   └── build_somatic_gleason_inputs.py   # sequencing and Gleason inputs
 │
 └── survival_analysis/
     ├── compass_pipeline.py               # shared setup/helper logic behind the 4 Python notebooks
@@ -350,7 +350,7 @@ the input builder must be rerun after this change.
 
 | Script | Model | CLI notes |
 |---|---|---|
-| `univariate_analysis.py` | Cox: univariate n_obs-adjusted lab associations, or separate sequencing, Gleason, and PRS COMPASS associations | `--landmark-days`, `--endpoints`; sequencing/Gleason use the observation nearest ADT as origin, while PRS uses ADT start; IPIO supports `--feature-subset {labs,genomics,all}` |
+| `univariate_analysis.py` | Cox: univariate n_obs-adjusted lab associations, or separate sequencing (SNV-only; any-alteration + altered-gene count) and Gleason COMPASS associations | `--landmark-days`, `--endpoints`; sequencing/Gleason use the observation nearest ADT as origin; IPIO supports `--feature-subset {labs,genomics,all}` |
 | `multivariate_analysis.py --model elastic-net` | Elastic-net Cox multivariable model (sksurv `CoxnetSurvivalAnalysis`, 5-fold CV, AGE unpenalized) | `--landmark-days`, `--endpoints`, `--n-folds`; IPIO also supports `--feature-subset {labs,genomics,all}` |
 | `multivariate_analysis.py --model xgboost` | XGBoost `survival:cox`, 5-fold CV grid (`max_depth × eta × min_child_weight`) | `--landmark-days`, `--endpoints`, `--max-features`; IPIO also supports `--feature-subset {labs,genomics,all}` |
 | `gam_trajectory_features.R` (COMPASS only) | Hierarchical GAM (`mgcv::bam`, `bs="fs"` factor-smooth per patient, shrinking sparse patients toward the population curve) per canonical lab, replacing the two-point `__delta` with `__gam_level` / `__gam_slope` / `__gam_curvature` / `__gam_auc` / `__gam_dev` evaluated at the landmark boundary | `--inputs-dir`, `--landmark-days`, `--k-pop`, `--k-pat`, `--trailing-window-days`, `--nthreads`, `--fit-split {all,train_val}` |
@@ -418,43 +418,28 @@ notebook. All operate on the merged `profile_data` run:
   (cohort, endpoint).
 - `02_univariate.ipynb` / `03_multivariate.ipynb` — read `01`'s prediction inputs and run
   univariate, elastic-net, and XGBoost models independently of preprocessing.
+  `02`'s sequencing and Gleason univariate screens (`gleason`, `sequencing_snv`,
+  `sequencing_any`, landmark 0) run once per endpoint on the full cohort only (cohort `all`,
+  no exclusion); metastatic and pre-ADT-castrate runs skip them.
   `03` also runs an available-case sensitivity at 0, +90, and +180 days:
-  separate Gleason-versus-labs and somatic-versus-labs models, each among its
-  own identical available patients (the Figure 4C/D AUC/C-index panels).
+  Gleason-versus-labs models among identical Gleason-available patients (the Figure 4C
+  AUC/C-index panels).
   (`tasks_for_run(run)` builds the per-run task grid from `run["landmarks"]`); either can be
   re-run alone without touching Stage 1-3 outputs.
   - **Clinical/somatic component combinations** (`03`, `run_multivariate_clinical_combinations` /
     `summarize_clinical_combinations`) — every non-empty combination of {labs, gleason, somatic}
-    on the two matched available-case cohorts, written under
+    on the matched `gleason_somatic_available_case` cohort, written under
     `<output_dir>/clinical_combinations/<cohort>/<arm>/<cox|xgboost>/landmark_<D>/both/`.
     `summarize_clinical_combinations` adds a paired bootstrap `delta_c_index` against each
     cohort's `labs` arm on the shared test-block patients.
   - **Risk-score stratification** (`03`, `run_risk_stratification`) — stratifies the full-cohort
     labs risk score by Gleason/stage/TP53-PTEN-RB1 (from `build_somatic_gleason_inputs.py`'s
     `somatic_gleason/clinical_stratifiers/clinical_stratifiers_landmark{D}.csv`), and separately
-    compares the labs arm against every other matched arm within the `gleason_available_case` /
-    `gleason_somatic_available_case` cohorts via `risk_score_stratified_figures.py --comparison-risks`.
+    compares the labs arm against every other matched arm within the
+    `gleason_somatic_available_case` cohort via `risk_score_stratified_figures.py --comparison-risks`.
     Runs once per scoring scheme, written to `<output_dir>/risk_stratification/<test|cv_oof>/full_cohort/landmark_<D>/`
     and `<output_dir>/risk_stratification/<test|cv_oof>/matched/<cohort>/<cox|xgboost>/landmark_<D>/`
     — **the two schemes are never pooled into the same directory or KM panel.**
-  - **CTEP OS-risk-adjusted univariate supplement** (`02`, `run_ctep_os_adjusted_supplement`) —
-    adjusts every univariate association for the CTEP (`clinical_text_embedding_project`) OS
-    (death) text-risk score, read **read-only** via the `CTEP_DATA_PATH` env var (default
-    `/data/gusev/USERS/jpconnor/data/clinical_text_embedding_project/`; this repo never imports
-    that project's code). Reads `$CTEP_DATA_PATH/time-to-event_analysis/results/death_met_results/full_cohort_risk_scores/death/text_risk_scores.csv`
-    (`DFCI_MRN`, `outer_fold`, `text_risk_score`) and
-    `$CTEP_DATA_PATH/time-to-event_analysis/cohort_df.parquet` (`first_treatment_date`); both
-    sides of every join cast `DFCI_MRN` to `Int64` first, since the two files come from a
-    different pipeline than COMPASS's own tables. The score is z-scored **within** `outer_fold`
-    into `CTEP_OS_TEXT_RISK_Z` — never across folds, which have their own score scales. **Leakage
-    rule:** per landmark, any patient whose `first_treatment_date` falls after
-    `TREATMENT_ANCHOR_DATE + landmark` is excluded (their covariate is forced to NaN) since their
-    CTEP score reflects notes not yet available at that landmark. Writes
-    `<output_dir>/ctep_os_adjusted/landmark_<D>/both/cox_agg_univariate_nobs_adjusted_{unadjusted,os_adjusted}_landmark<D>.csv`
-    plus a combined file. Caveats (also in the function docstrings): the CTEP score is fixed at
-    first treatment and is not recomputed per landmark; the CTEP cohort requires all three note
-    types (Clinician, Imaging, Pathology), so this is an available-case subset; and the CTEP OS
-    model already includes age, so this adjusts for the risk score, not for age net of it.
 - `03b_multivariate_longitudinal.ipynb` — optional, torch-gated (README invariant #7).
   Follows `ENDPOINT` like `02`/`03`, via its own config registry in
   `survival_common/longitudinal_targets.py` (see
@@ -514,8 +499,8 @@ notebook. All operate on the merged `profile_data` run:
   combines the three DFCI landmark volcanoes with PSA/testosterone log1p trajectories
   by platinum status and bottom-versus-top-20% KM curves. KM defaults to day 0;
   `COMPASS_COMBINED_KM_LANDMARK=90` or `180` selects another landmark.
-  Figure 4 additionally emits `figure4{c,d}_sensitivity_{gleason,somatic}_{auc,cindex}`, the held-out
-  source-specific available-case comparisons of labs against Gleason or somatic features at every landmark, alongside
+  Figure 4 additionally emits `figure4c_sensitivity_gleason_{auc,cindex}`, the held-out
+  available-case comparison of labs against Gleason features at every landmark, alongside
   `figure4s_multivariate_all_models`, a supplemental held-out comparison
   of elastic-net Cox, XGBoost, and death-censored Dynamic-DeepHit using mean AUC(t), C-index, and
   integrated Brier score. If optional `03b_multivariate_longitudinal.ipynb` results are absent, the
@@ -743,17 +728,21 @@ cohort or a silently-dropped feature further down the pipeline. An all-null
    `--variant-types` to `SNV`, and `build_somatic_gleason_inputs.py` filters the
    `SOMATIC_FEATURE_MANIFEST.parquet` feature list through the `<GENE>_SNV` regex before use —
    that was the one path where CNV/SV features entered with no opt-in at all. **Exception:** in
-   `build_somatic_gleason_inputs.py` (the sequencing-indexed somatic screen, the somatic
-   available-case sensitivities, and their figures), TP53, PTEN, and RB1 are not SNV-only. Each is
+   `build_somatic_gleason_inputs.py` (the Gleason + somatic available-case cohort, multivariate
+   arms, clinical stratifiers, and their figures), TP53, PTEN, and RB1 are not SNV-only. Each is
    one `<GENE>_ANY` indicator, the max over every declared `SNV`/`DEL`/`AMP`/`SV` column for
    that gene. It is 1 if any class is called, 0 if every observed class is 0, and missing only if
    no class was observed. It replaces `<GENE>_SNV` for those three genes. PTEN and RB1 are
-   canonically lost by deletion, so an SNV-only call misses most carriers. `GLEASON_SCORE` and
-   the PRS features carry different `feature_kind` values and pass through untouched; only the
+   canonically lost by deletion, so an SNV-only call misses most carriers. `GLEASON_SCORE`
+   carries a different `feature_kind` value and passes through untouched; only the
    `somatic_binary` block is filtered. On the consumer side, `cox_aggregated.py` splits the two
    regexes it needs: `GENOMIC_FEATURE_RE` (`_SNV$`) selects the genomic feature set, and the
    broader `ANY_VARIANT_RE` (`SV|SNV|AMP|DEL`) excludes every variant column from the `labs`
    subset — narrowing only the first would have let CNV columns fall *into* the lab arm.
+   The sequencing-indexed univariate screen does not use this hybrid: it runs twice, as
+   `sequencing_snv` (`<GENE>_SNV` for every gene, unadjusted) and `sequencing_any`
+   (`<GENE>_ANY` for every gene, with the per-patient altered-gene count
+   `SOMATIC_N_GENES_ALTERED` added to every base Cox model).
    `ALL_VARIANT_TYPES` survives for the detection regex, and `genomic_variant_types` stays in the
    build manifest as provenance.
 

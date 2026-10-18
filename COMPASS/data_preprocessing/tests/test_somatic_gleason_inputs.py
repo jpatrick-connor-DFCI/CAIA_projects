@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -19,11 +18,11 @@ from build_somatic_gleason_inputs import (  # noqa: E402
     INDEX_TO_ADT_DAYS,
     SEQUENCING_DATE,
     SOMATIC_AVAILABLE_DATE,
+    SOMATIC_BURDEN_COVARIATE,
     build_available_case_sensitivity,
     build_indexed_feature_sets,
     closest_observation_to_adt,
     latest_available_by_landmark,
-    load_biomarker_prs,
     load_somatic_features,
 )
 
@@ -184,21 +183,12 @@ def test_indexed_feature_sets_use_distinct_dates_and_followup_clocks():
             GLEASON_FEATURE: [7, 9, 8, 10],
         }
     )
-    prs = pd.DataFrame(
-        {"DFCI_MRN": [1, 2], "PROSTATE_PRS": [0.4, -0.2]}
-    )
 
     result = build_indexed_feature_sets(
-        base,
-        somatic,
-        ["TP53_SNV"],
-        gleason,
-        prs=prs,
-        prs_features=["PROSTATE_PRS"],
+        base, {"sequencing_snv": (somatic, ["TP53_SNV"])}, gleason
     )
-    sequencing = result["sequencing"].set_index("DFCI_MRN")
+    sequencing = result["sequencing_snv"].set_index("DFCI_MRN")
     gleason_out = result["gleason"].set_index("DFCI_MRN")
-    prs_out = result["prs"].set_index("DFCI_MRN")
 
     assert sequencing.loc[1, INDEX_DATE] == pd.Timestamp("2020-01-05")
     assert sequencing.loc[1, "t_platinum"] == 106
@@ -211,12 +201,8 @@ def test_indexed_feature_sets_use_distinct_dates_and_followup_clocks():
     # excluded rather than selecting a different observation using the outcome.
     assert 3 not in sequencing.index
     assert 3 not in gleason_out.index
-    # PRS keeps the original ADT-start clock and baseline risk set.
-    assert prs_out.loc[1, INDEX_DATE] == pd.Timestamp("2020-01-10")
-    assert prs_out.loc[1, INDEX_TO_ADT_DAYS] == 0
-    assert prs_out.loc[1, "t_platinum"] == 101
-    assert prs_out.loc[1, "PROSTATE_PRS"] == 0.4
-    assert np.isnan(prs_out.loc[3, "PROSTATE_PRS"])
+    # The SNV run carries no burden adjustment covariate.
+    assert SOMATIC_BURDEN_COVARIATE not in sequencing.columns
 
 
 def test_nepc_indexed_feature_sets_ignore_pre_anchor_platinum():
@@ -241,10 +227,10 @@ def test_nepc_indexed_feature_sets_ignore_pre_anchor_platinum():
     )
 
     result = build_indexed_feature_sets(
-        base, somatic, ["TP53_SNV"], gleason, endpoint="nepc"
+        base, {"sequencing_snv": (somatic, ["TP53_SNV"])}, gleason, endpoint="nepc"
     )
 
-    assert result["sequencing"].loc[0, "t_nepc"] == 90
+    assert result["sequencing_snv"].loc[0, "t_nepc"] == 90
     assert result["gleason"].loc[0, "t_nepc"] == 90
 
 
@@ -283,13 +269,13 @@ def test_every_endpoint_rebases_from_dropped_date_columns(
     )
 
     result = build_indexed_feature_sets(
-        base, somatic, ["TP53_SNV"], gleason, endpoint=endpoint
+        base, {"sequencing_snv": (somatic, ["TP53_SNV"])}, gleason, endpoint=endpoint
     )
 
     # Index date is 10 days after the ADT anchor, so the event clock loses 10 days.
-    assert result["sequencing"].loc[0, duration_col] == 90
+    assert result["sequencing_snv"].loc[0, duration_col] == 90
     assert result["gleason"].loc[0, duration_col] == 90
-    assert result["sequencing"].loc[0, event_col] == 1
+    assert result["sequencing_snv"].loc[0, event_col] == 1
 
 
 def test_censored_patient_rebases_to_last_contact_not_event_date():
@@ -316,84 +302,11 @@ def test_censored_patient_rebases_to_last_contact_not_event_date():
     )
 
     result = build_indexed_feature_sets(
-        base, somatic, ["TP53_SNV"], gleason, endpoint="avpc"
+        base, {"sequencing_snv": (somatic, ["TP53_SNV"])}, gleason, endpoint="avpc"
     )
 
-    assert result["sequencing"].loc[0, "AVPC"] == 0
-    assert result["sequencing"].loc[0, "t_avpc"] == 290
-
-
-def test_prs_loader_bridges_sample_keyed_matrix_through_idmap():
-    with tempfile.TemporaryDirectory() as directory:
-        prs_path = Path(directory) / "pgs_matrix_with_avg.tsv"
-        idmap_path = Path(directory) / "PROFILE_2024_idmap.csv"
-        score = "PSA_PGS_CSx_Prostate_specific_antigen__PSA__levels_PGS003379"
-        pd.DataFrame(
-            {
-                "IID": ["S1", "S2", "S3", "S_unmapped"],
-                score: [0.2, 0.6, -0.1, 5.0],
-            }
-        ).to_csv(prs_path, sep="\t", index=False)
-        # MRN 1 has two genotyped samples; MRN 2 has one. S_unmapped has no MRN.
-        pd.DataFrame(
-            {
-                "DFCI_MRN": [1, 1, 2],
-                "cbio_sample_id": ["S1", "S2", "S3"],
-            }
-        ).to_csv(idmap_path, index=False)
-
-        prs, manifest = load_biomarker_prs(prs_path, idmap_path=idmap_path)
-
-    prs = prs.set_index("DFCI_MRN")
-    assert len(prs) == 2
-    # Multiple samples per patient are averaged.
-    assert np.isclose(prs.loc[1, score], 0.4)
-    assert np.isclose(prs.loc[2, score], -0.1)
-    # A sample absent from the idmap is unreachable and contributes nothing.
-    assert 5.0 not in prs[score].to_numpy()
-    assert {row["pgs_id"] for row in manifest} == {"PGS003379"}
-
-
-def test_prs_loader_requires_idmap_for_sample_keyed_matrix():
-    with tempfile.TemporaryDirectory() as directory:
-        prs_path = Path(directory) / "pgs_matrix_with_avg.tsv"
-        score = "PSA_PGS_CSx_Prostate_specific_antigen__PSA__levels_PGS003379"
-        pd.DataFrame({"IID": ["S1"], score: [0.2]}).to_csv(
-            prs_path, sep="\t", index=False
-        )
-
-        with pytest.raises(ValueError, match="needs an idmap"):
-            load_biomarker_prs(prs_path, idmap_path=None)
-
-
-def test_prs_loader_rejects_sample_mapped_to_multiple_mrns():
-    with tempfile.TemporaryDirectory() as directory:
-        prs_path = Path(directory) / "pgs_matrix_with_avg.tsv"
-        idmap_path = Path(directory) / "PROFILE_2024_idmap.csv"
-        score = "PSA_PGS_CSx_Prostate_specific_antigen__PSA__levels_PGS003379"
-        pd.DataFrame({"IID": ["S1"], score: [0.2]}).to_csv(
-            prs_path, sep="\t", index=False
-        )
-        pd.DataFrame(
-            {"DFCI_MRN": [1, 2], "cbio_sample_id": ["S1", "S1"]}
-        ).to_csv(idmap_path, index=False)
-
-        with pytest.raises(ValueError, match="more than one"):
-            load_biomarker_prs(prs_path, idmap_path=idmap_path)
-
-
-def test_prs_loader_missing_ids_degrade_unless_require_all():
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "complete_germline_data_df.csv.gz"
-        score = "PSA_PGS_CSx_Prostate_specific_antigen__PSA__levels_PGS003379"
-        pd.DataFrame({"DFCI_MRN": [1], score: [0.2]}).to_csv(path, index=False)
-
-        prs, manifest = load_biomarker_prs(path)
-        assert len(manifest) == 1
-        assert list(prs.columns) == ["DFCI_MRN", score]
-
-        with pytest.raises(ValueError, match="missing"):
-            load_biomarker_prs(path, require_all=True)
+    assert result["sequencing_snv"].loc[0, "AVPC"] == 0
+    assert result["sequencing_snv"].loc[0, "t_avpc"] == 290
 
 
 def test_gleason_selection_uses_score_date_not_source_note_date():
@@ -449,69 +362,12 @@ def test_indexed_features_can_recover_anchor_dropped_from_base_inputs():
 
     result = build_indexed_feature_sets(
         base,
-        somatic,
-        ["TP53_SNV"],
+        {"sequencing_snv": (somatic, ["TP53_SNV"])},
         gleason,
         treatment_anchors=anchors,
-    )["sequencing"].set_index("DFCI_MRN")
+    )["sequencing_snv"].set_index("DFCI_MRN")
 
     assert result.loc[1, "TP53_SNV"] == 1
-
-
-def test_prs_loader_uses_supplied_ids_and_preserves_full_column_names():
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "complete_germline_data_df.csv.gz"
-        psa = "PSA_PGS_CSx_Prostate_specific_antigen__PSA__levels_PGS003379"
-        testosterone_male = (
-            "snpnet_Testosterone_male_specific_"
-            "Serum_testosterone_levels_in_males_PGS000323"
-        )
-        testosterone_female = (
-            "snpnet_Testosterone_female_specific_"
-            "Serum_testosterone_levels_in_females_PGS000322"
-        )
-        pd.DataFrame(
-            {
-                "DFCI_MRN": [1, 2],
-                psa: [0.1, 0.2],
-                testosterone_male: [-0.1, 0.4],
-                testosterone_female: [9.0, 9.0],
-                "unrelated_trait_PGS999999": [8.0, 8.0],
-            }
-        ).to_csv(path, index=False)
-
-        prs, manifest = load_biomarker_prs(path)
-
-    assert set(prs.columns) == {
-        "DFCI_MRN",
-        psa,
-        testosterone_male,
-        testosterone_female,
-    }
-    assert {row["pgs_id"] for row in manifest} == {
-        "PGS003379",
-        "PGS000322",
-        "PGS000323",
-    }
-
-
-def test_prs_loader_averages_conflicting_sample_rows_within_mrn():
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "complete_germline_data_df.csv.gz"
-        score = "PSA_PGS_128_Prostate_specific_antigen__PSA__levels_PGS003378"
-        pd.DataFrame(
-            {
-                "DFCI_MRN": [1, 1, 2],
-                score: [0.2, 0.6, -0.1],
-            }
-        ).to_csv(path, index=False)
-
-        prs, _manifest = load_biomarker_prs(path)
-
-    prs = prs.set_index("DFCI_MRN")
-    assert len(prs) == 2
-    assert np.isclose(prs.loc[1, score], 0.4)
-    assert np.isclose(prs.loc[2, score], -0.1)
 
 
 def _write_somatic_fixture(tmp_path):
@@ -573,5 +429,124 @@ def test_load_somatic_features_errors_when_manifest_has_nothing_testable(tmp_pat
         }
     ).to_csv(somatic_path, index=False)
 
-    with pytest.raises(ValueError, match="none are <GENE>_SNV"):
+    with pytest.raises(ValueError, match="none are testable"):
         load_somatic_features(somatic_path, manifest_path)
+
+
+def test_load_somatic_features_snv_mode_is_snv_only_for_every_gene(tmp_path):
+    somatic_path, manifest_path = _write_somatic_fixture(tmp_path)
+
+    frame, features = load_somatic_features(
+        somatic_path, manifest_path, variant_mode="snv"
+    )
+
+    # The trio is no longer special-cased: every gene is tested by its SNV call.
+    assert features == ["TP53_SNV", "AR_SNV", "RB1_SNV"]
+    assert not [column for column in frame.columns if column.endswith("_ANY")]
+    for dropped in ("PTEN_DEL", "RB1_DEL", "TP53_SV", "AR_AMP", "TMPRSS2_SV"):
+        assert dropped not in frame.columns
+    frame = frame.set_index("DFCI_MRN")
+    assert frame.loc[2, ["TP53_SNV", "RB1_SNV"]].tolist() == [0, 0]
+
+
+def test_load_somatic_features_any_mode_collapses_every_gene(tmp_path):
+    somatic_path, manifest_path = _write_somatic_fixture(tmp_path)
+
+    frame, features = load_somatic_features(
+        somatic_path, manifest_path, variant_mode="any"
+    )
+
+    assert features == ["TP53_ANY", "AR_ANY", "RB1_ANY", "PTEN_ANY", "TMPRSS2_ANY"]
+    assert not [
+        column for column in frame.columns
+        if column.endswith(("_SNV", "_DEL", "_AMP", "_SV"))
+    ]
+    frame = frame.set_index("DFCI_MRN")
+    # AR_ANY collapses AR_SNV and AR_AMP; TMPRSS2 enters only through its SV call.
+    assert frame.loc[1, features].tolist() == [1, 1, 0, 0, 1]
+    assert frame.loc[2, features].tolist() == [1, 1, 1, 1, 1]
+    assert frame.loc[3, features].tolist() == [0, 1, 0, 0, 1]
+    assert frame.loc[4, ["TP53_ANY", "RB1_ANY", "PTEN_ANY"]].isna().all()
+    assert frame.loc[4, "AR_ANY"] == 1
+
+
+def test_load_somatic_features_rejects_unknown_variant_mode(tmp_path):
+    somatic_path, manifest_path = _write_somatic_fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="Unknown somatic variant_mode"):
+        load_somatic_features(somatic_path, manifest_path, variant_mode="cnv")
+
+
+def test_any_alteration_run_carries_burden_of_all_tested_genes():
+    base = pd.DataFrame(
+        {
+            "DFCI_MRN": [1, 2, 3],
+            "TREATMENT_ANCHOR_DATE": ["2020-01-10"] * 3,
+            "AGE_AT_TREATMENTSTART": [70, 65, 72],
+            "PLATINUM": [1, 0, 0],
+            "t_platinum": [200, 300, 300],
+            "t_last_contact": [300, 300, 300],
+            "split": ["train", "train", "test"],
+        }
+    )
+    snv = pd.DataFrame(
+        {
+            "DFCI_MRN": [1, 2, 3],
+            SEQUENCING_DATE: pd.to_datetime(["2020-01-20"] * 3),
+            "TP53_SNV": [1, 0, 0],
+        }
+    )
+    any_alteration = pd.DataFrame(
+        {
+            "DFCI_MRN": [1, 2, 3],
+            SEQUENCING_DATE: pd.to_datetime(["2020-01-20"] * 3),
+            "TP53_ANY": [1, 1, 0],
+            "PTEN_ANY": [1, 0, np.nan],
+            "AR_ANY": [1, 0, 0],
+        }
+    )
+    gleason = pd.DataFrame(
+        {"DFCI_MRN": [1], "gleason_date": pd.to_datetime(["2020-01-20"]), GLEASON_FEATURE: [9]}
+    )
+    any_features = ["TP53_ANY", "PTEN_ANY", "AR_ANY"]
+
+    result = build_indexed_feature_sets(
+        base,
+        {
+            "sequencing_snv": (snv, ["TP53_SNV"]),
+            "sequencing_any": (any_alteration, any_features),
+        },
+        gleason,
+    )
+
+    snv_out = result["sequencing_snv"]
+    any_out = result["sequencing_any"].set_index("DFCI_MRN")
+    assert SOMATIC_BURDEN_COVARIATE not in snv_out.columns
+    assert SOMATIC_BURDEN_COVARIATE not in result["gleason"].columns
+    # One count across every tested gene (missing calls count as unaltered),
+    # identical for every per-gene fit.
+    assert any_out[SOMATIC_BURDEN_COVARIATE].to_dict() == {1: 3, 2: 1, 3: 0}
+    assert (any_out[SOMATIC_BURDEN_COVARIATE] == any_out[any_features].sum(axis=1)).all()
+
+
+def test_indexed_feature_sets_reject_unknown_sequencing_analysis():
+    base = pd.DataFrame(
+        {
+            "DFCI_MRN": [1],
+            "TREATMENT_ANCHOR_DATE": ["2020-01-10"],
+            "AGE_AT_TREATMENTSTART": [70],
+            "PLATINUM": [0],
+            "t_platinum": [300],
+            "t_last_contact": [300],
+            "split": ["train"],
+        }
+    )
+    somatic = pd.DataFrame(
+        {"DFCI_MRN": [1], SEQUENCING_DATE: pd.to_datetime(["2020-01-20"]), "TP53_SNV": [1]}
+    )
+    gleason = pd.DataFrame(
+        {"DFCI_MRN": [1], "gleason_date": pd.to_datetime(["2020-01-20"]), GLEASON_FEATURE: [9]}
+    )
+
+    with pytest.raises(ValueError):
+        build_indexed_feature_sets(base, {"sequencing": (somatic, ["TP53_SNV"])}, gleason)

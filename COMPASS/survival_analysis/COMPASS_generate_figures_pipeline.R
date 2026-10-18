@@ -209,7 +209,7 @@ RISK_STRATUM_COLORS <- c(
   "TP53+PTEN" = "#CC79A7", "PTEN+RB1" = "#0072B2", "TP53+PTEN+RB1" = "#000000"
 )
 RISK_STRATIFICATION_SCHEMES <- c(test = "held-out test block", cv_oof = "out-of-fold (nested CV), full cohort")
-RISK_STRATIFICATION_MATCHED <- c("gleason", "gleason_somatic")
+RISK_STRATIFICATION_MATCHED <- c("gleason_somatic")
 
 # NULL when the run predates the per-patient export or the stage was not run.
 read_risk_strata <- function(directory, endpoint, landmark) {
@@ -1919,7 +1919,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
   SUPP_BASE <- BASE
   # Univariate arms: the lab screen at every landmark, plus the three
-  # somatic/Gleason/PRS screens, which are ADT-only and landmark-0 only
+  # somatic/Gleason screens, which are ADT-only and landmark-0 only
   # (SOMATIC_GLEASON_LANDMARKS = (0,) in build_somatic_gleason_inputs.py).
   supp_univariate <- map_dfr(LANDMARKS, function(lm) {
     summarise_univariate_set(
@@ -1927,9 +1927,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                 "cox_agg_univariate_nobs_adjusted.csv"),
       "Labs", lm)
   })
-  SUPP_SG_LABELS <- c(gleason    = "Gleason score",
-                      sequencing = "Somatic alterations",
-                      prs        = "Polygenic risk scores")
+  SUPP_SG_LABELS <- c(gleason        = "Gleason score",
+                      sequencing_snv = "Somatic SNVs (uncorrected)",
+                      sequencing_any = "Somatic any-alteration (burden-adjusted)")
   # Arms evaluated at only a subset of LANDMARKS. Anything absent here is
   # assumed to be run at every landmark, so a blank cell means "not found".
   ARM_LANDMARKS <- setNames(rep(list(0L), length(SUPP_SG_LABELS)),
@@ -2022,7 +2022,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (nrow(d) == 0)
       return(ggplot() + annotate("text", x = 0, y = 0, label = "(no results found)") +
                theme_void() + labs(title = title))
-    # An arm evaluated at only some landmarks (the somatic/Gleason/PRS screens
+    # An arm evaluated at only some landmarks (the somatic/Gleason screens
     # are landmark-0 only) should leave the other columns blank rather than
     # drawing a tile that implies a run was attempted and lost.
     d <- d %>%
@@ -2479,10 +2479,12 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   notify_progress("stage", "Figure 3b: somatic and Gleason-score associations")
   # Separate plots from the lab volcanoes above: these come from
   # build_somatic_gleason_inputs.py / run_somatic_gleason_univariate(), which
-  # build three DIFFERENT cohorts with three different index dates
-  # (sequencing = specimen collection, gleason = the Gleason score date nearest
-  # ADT start, prs = ADT start). Pooling them into one panel would mix index
-  # dates and patient sets, so each index analysis gets its own figure.
+  # build two DIFFERENT cohorts with different index dates (sequencing =
+  # specimen collection, gleason = the Gleason score date nearest ADT start).
+  # Pooling them into one panel would mix index dates and patient sets, so each
+  # index analysis gets its own figure. The sequencing cohort is screened twice:
+  # sequencing_snv (SNV-only calls, unadjusted) and sequencing_any (any
+  # alteration per gene, adjusted for the patient's altered-gene count).
   #
   # Only ADT is built (the index dates are defined relative to ADT start) and
   # only at landmark 0 (SOMATIC_GLEASON_LANDMARKS = (0,)). A missing tree is
@@ -2490,14 +2492,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   OUT_DIR <- fig_dir("figure3b_somatic_gleason")
 
   SG_LANDMARK  <- 0L
-  SG_ANALYSES  <- c("sequencing", "gleason")
+  SG_ANALYSES  <- c("sequencing_snv", "sequencing_any", "gleason")
   SG_LABELS <- c(
-    sequencing = "Somatic alterations",
+    sequencing_snv = "Somatic SNVs (uncorrected)",
+    sequencing_any = "Somatic any-alteration (adjusted for genes altered)",
     gleason = "Gleason score"
   )
   # Each analysis' prediction time origin, from build_somatic_gleason_inputs.py.
   SG_ORIGINS <- c(
-    sequencing = "sequencing specimen collection date",
+    sequencing_snv = "sequencing specimen collection date",
+    sequencing_any = "sequencing specimen collection date",
     gleason = "Gleason score date nearest ADT initiation"
   )
   SG_TOP_N <- 25   # forest plots show at most this many features, ranked by p
@@ -2546,7 +2550,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         # HR scale to match coef_feature (= log HR per SD).
         lo    = log(ci_lower),
         hi    = log(ci_upper),
-        # Somatic/Gleason/PRS rows carry an empty feature_stat, which readr
+        # Somatic/Gleason rows carry an empty feature_stat, which readr
         # parses as an all-NA logical column when no row has a value; coerce
         # before testing so the label does not collapse to NA.
         .stat = ifelse(is.na(feature_stat), "", as.character(feature_stat)),
@@ -2583,10 +2587,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
 
   # Volcano for the analyses that test many features at once (somatic binary
-  # indicators, PRS). Reuses the significance-only styling of the lab volcano
+  # indicators). Reuses the significance-only styling of the lab volcano
   # -- lab CATEGORY_COLORS do not apply to genomic features. Axis limits are
-  # data-driven rather than the labs' fixed PANEL_XLIM, because somatic
-  # indicators and PRS live on different effect-size scales.
+  # data-driven rather than the labs' fixed PANEL_XLIM, because binary somatic
+  # indicators live on a different effect-size scale from per-SD lab effects.
   plot_sg_volcano <- function(sub, title, subtitle, top_k = 8) {
     d <- sub %>%
       mutate(
@@ -2699,7 +2703,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
             }
             groups <- ifelse(is.na(values), NA_character_, ifelse(values == 1, "Carrier", "Non-carrier"))
             group_order <- c("Non-carrier", "Carrier")
-            # <GENE>_ANY (TP53/PTEN/RB1) = any SNV, CNV, or SV call.
+            # <GENE>_ANY (sequencing_any run) = any SNV, CNV, or SV call.
             title_km <- paste(gsub("_", " ", sub("_ANY$", "_any alteration", feature)),
                               "carrier status: time to platinum")
             note <- "Descriptive: variant selected using this cohort's Cox q<0.05. Missing calls excluded. Shading: 95% CI."
@@ -2827,9 +2831,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (show) print(p)
   }
 
-  # Source-specific available-case sensitivities. Each source (Gleason or
-  # somatic) has its own matched labs comparator, preserving the original
-  # ADT-relative outcome clock and held-out split within every landmark.
+  # Gleason available-case sensitivity: labs, Gleason, and Gleason + labs on the
+  # matched Gleason cohort, preserving the original ADT-relative outcome clock
+  # and held-out split within every landmark.
   sensitivity_metric_path <- function(analysis, feature_set, model, landmark, filename) {
     file.path(BASE, "sensitivity_available_case", analysis, feature_set, model,
               sprintf("landmark_%s", landmark), "both", filename)
@@ -2876,41 +2880,47 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
             panel.grid.major.x = element_blank(),
             plot.title = element_text(face = "bold", size = 11))
   }
-  for (sensitivity_analysis in c("gleason", "somatic")) {
-    analysis_label <- ifelse(sensitivity_analysis == "gleason", "Gleason", "Somatic")
-    source_label <- ifelse(sensitivity_analysis == "gleason", "Gleason", "Somatic")
-    SENSITIVITY_SERIES <- tibble::tribble(
-      ~name,                         ~loader, ~color,
-      "Elastic-Net Cox: labs",      list(function(lm) read_endpoint_performance(sensitivity_metric_path(sensitivity_analysis, "labs", "cox", lm, "cox_agg_multivariable_metrics.csv"), ENDPOINT)), "#4C72B0",
-      paste("Elastic-Net Cox:", source_label), list(function(lm) read_endpoint_performance(sensitivity_metric_path(sensitivity_analysis, "somatic-gleason", "cox", lm, "cox_agg_multivariable_metrics.csv"), ENDPOINT)), "#2A9D8F",
-      "XGBoost: labs",              list(function(lm) read_endpoint_performance(sensitivity_metric_path(sensitivity_analysis, "labs", "xgboost", lm, "landmark_xgboost_metrics.csv"), ENDPOINT)), "#B58900",
-      paste("XGBoost:", source_label), list(function(lm) read_endpoint_performance(sensitivity_metric_path(sensitivity_analysis, "somatic-gleason", "xgboost", lm, "landmark_xgboost_metrics.csv"), ENDPOINT)), "#D55E00"
-    )
-    sensitivity_data <- SENSITIVITY_SERIES %>% rowwise() %>% do({
-      s <- .
-      map_dfr(LANDMARKS, function(lm) {
-        v <- s$loader[[1]](lm)
-        tibble(name = s$name, landmark = lm, auc = v[["auc"]], cindex = v[["cindex"]],
-               n_train_val = v[["n_train_val"]], n_test = v[["n_test"]])
-      })
-    }) %>% ungroup() %>% mutate(name = factor(name, levels = SENSITIVITY_SERIES$name))
-    panel_prefix <- ifelse(sensitivity_analysis == "gleason", "figure4c", "figure4d")
-    for (dp in disc_panels) {
-      p <- render_available_case_sensitivity(sensitivity_data, SENSITIVITY_SERIES,
-                                               analysis_label, dp[[2]], dp[[3]])
-      save_fig(p, OUT_DIR,
-               sub("figure4a_discrimination_", paste0(panel_prefix, "_sensitivity_", sensitivity_analysis, "_"), dp[[1]]),
-               width = 8.5, height = 5.5)
-      if (show) print(p)
-    }
+  # Gleason is the only available-case sensitivity: somatic calls are compared
+  # with labs only in the Gleason + somatic clinical combinations below.
+  sensitivity_analysis <- "gleason"
+  analysis_label <- "Gleason"
+  sensitivity_loader <- function(feature_set, model) {
+    metrics_name <- if (model == "cox") "cox_agg_multivariable_metrics.csv" else "landmark_xgboost_metrics.csv"
+    list(function(lm) read_endpoint_performance(
+      sensitivity_metric_path(sensitivity_analysis, feature_set, model, lm, metrics_name), ENDPOINT))
+  }
+  SENSITIVITY_SERIES <- tibble::tribble(
+    ~name,                              ~loader,                                     ~color,
+    "Elastic-Net Cox: labs",           sensitivity_loader("labs", "cox"),            "#4C72B0",
+    "Elastic-Net Cox: Gleason",        sensitivity_loader("gleason", "cox"),         "#8DA0CB",
+    "Elastic-Net Cox: Gleason + labs", sensitivity_loader("gleason-labs", "cox"),    "#2A9D8F",
+    "XGBoost: labs",                   sensitivity_loader("labs", "xgboost"),        "#B58900",
+    "XGBoost: Gleason",                sensitivity_loader("gleason", "xgboost"),     "#E5C494",
+    "XGBoost: Gleason + labs",         sensitivity_loader("gleason-labs", "xgboost"), "#D55E00"
+  )
+  sensitivity_data <- SENSITIVITY_SERIES %>% rowwise() %>% do({
+    s <- .
+    map_dfr(LANDMARKS, function(lm) {
+      v <- s$loader[[1]](lm)
+      tibble(name = s$name, landmark = lm, auc = v[["auc"]], cindex = v[["cindex"]],
+             n_train_val = v[["n_train_val"]], n_test = v[["n_test"]])
+    })
+  }) %>% ungroup() %>% mutate(name = factor(name, levels = SENSITIVITY_SERIES$name))
+  for (dp in disc_panels) {
+    p <- render_available_case_sensitivity(sensitivity_data, SENSITIVITY_SERIES,
+                                             analysis_label, dp[[2]], dp[[3]])
+    save_fig(p, OUT_DIR,
+             sub("figure4a_discrimination_", "figure4c_sensitivity_gleason_", dp[[1]]),
+             width = 8.5, height = 5.5)
+    if (show) print(p)
   }
 
   # Clinical combinations (compass_pipeline.run_multivariate_clinical_combinations):
-  # raw held-out test C-index for every arm. Each combination cohort is its own
-  # available-case population with one shared split, so arms within a panel are
-  # comparable; nothing here is paired or differenced against labs.
+  # raw held-out test C-index for every arm. Only the Gleason + somatic
+  # available-case cohort is fit (all 7 combinations); it has one shared split,
+  # so arms within a panel are comparable; nothing here is paired or
+  # differenced against labs.
   COMBINATION_ARMS <- list(
-    gleason = c("labs", "gleason", "gleason-labs"),
     gleason_somatic = c("labs", "gleason", "somatic", "gleason-labs", "somatic-labs",
                         "gleason-somatic", "gleason-somatic-labs"))
   COMBINATION_ARM_LABELS <- c(
@@ -2962,8 +2972,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       scale_fill_manual(values = COMBINATION_ARM_COLORS, name = NULL, drop = FALSE) +
       coord_cartesian(ylim = c(0, 1.04)) +
       labs(x = NULL, y = "Held-out C-index",
-           title = sprintf("Clinical combinations (%s cohort) — %s",
-                           if (combo_cohort == "gleason") "Gleason" else "Gleason + somatic", ENDPOINT),
+           title = sprintf("Clinical combinations (Gleason + somatic cohort) — %s", ENDPOINT),
            subtitle = paste(sprintf("%s%dd: n=%s (test n=%s)", ifelse(combo_n$landmark_days > 0, "+", ""),
                                     combo_n$landmark_days, combo_n$n, combo_n$n_test), collapse = "; "),
            caption = paste(COHORT_DISPLAY, "Raw held-out test C-index per arm; available-case cohort with source data by each landmark.")) +

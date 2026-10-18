@@ -29,7 +29,7 @@ local({
       c("auc_platinum","cindex_platinum"),paste,sep="_")),
     as.vector(outer(c("figure4b_importance_platinum_cox","figure4b_importance_platinum_xgb"),
       c("landmark0","landmark90","landmark180"),paste,sep="_")),
-    paste0("figure3b_sequencing_platinum_km_gene",1:7,"_snv_landmark0"),
+    paste0("figure3b_sequencing_snv_platinum_km_gene",1:7,"_snv_landmark0"),
     as.vector(outer(c("km_quintile_psa","km_quintile_testosterone"),c("landmark0","landmark90","landmark180"),paste,sep="_")))
   old_paths <- character()
   build <- function() for(stem in stems) {
@@ -46,7 +46,7 @@ local({
   stopifnot(length(stems)==37, length(m$scenes)==32,
     !anyDuplicated(vapply(m$scenes,`[[`,character(1),"destination")),
     !any(grepl("/by_figure/",vapply(m$scenes,`[[`,character(1),"destination"))))
-  stopifnot(sum(grepl("somatic_carrier_km_page",vapply(m$scenes,`[[`,character(1),"stem")))==2)
+  stopifnot(sum(grepl("somatic_snv_carrier_km_page",vapply(m$scenes,`[[`,character(1),"stem")))==2)
   for(key in c("figure1_cohort","figure2v3_llm","metastatic_label_agreement")) {
     scene <- Filter(function(s) s$stem==key,m$scenes)[[1]]
     grob <- readRDS(scene$path)

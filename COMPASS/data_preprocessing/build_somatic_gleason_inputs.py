@@ -1,27 +1,28 @@
-"""Build sequencing-, Gleason-, and PRS-indexed univariate Cox inputs.
+"""Build sequencing- and Gleason-indexed univariate Cox inputs.
 
 The baseline ADT cohort and train/valid/test assignments are inherited from
 the standard COMPASS landmark-0 inputs. Three distinct analyses are built:
 
-* ``sequencing`` selects the sample-collection date closest to ADT start and
-  predicts from that collection date to platinum (or last contact).
+* ``sequencing_snv`` selects the sample-collection date closest to ADT start
+  and predicts from that collection date to platinum (or last contact). Every
+  gene is tested as its SNV indicator only, with no burden adjustment.
+* ``sequencing_any`` uses the same index date and cohort but tests every gene
+  as one any-alteration indicator (SNV, DEL, AMP, or SV), and carries the
+  per-patient count of altered genes across the tested set
+  (``SOMATIC_N_GENES_ALTERED``) as an adjustment covariate, never a feature.
 * ``gleason`` selects the Gleason score date closest to ADT start and predicts
   from that score date to platinum (or last contact).
-* ``prs`` uses ADT start as time zero and predicts from ADT start to platinum
-  (or last contact), because germline scores have no observation-date clock.
 
 Closest means minimum absolute calendar distance, so an observation may fall
 before or after ADT. An exact-distance tie prefers the earlier date. Patients
 whose selected index date is on/after platinum or last contact are excluded;
 the builder never substitutes a different observation based on the outcome.
 
-The PRS matrix is bridged from sample ID to MRN and duplicate sample rows are
-averaged per patient, as in the prior implementation.
-
-Additionally, ``gleason_available_case`` and ``somatic_available_case``
+Additionally, ``gleason_available_case`` and ``gleason_somatic_available_case``
 preserve the ADT time origin and original split while retaining the patients
-with the respective data source. They support separate matched multivariable
-Gleason-versus-labs and somatic-versus-labs sensitivity analyses.
+with Gleason (respectively Gleason and sequencing) data. They support the
+matched multivariable Gleason-versus-labs sensitivity and the Gleason/somatic/labs
+clinical combinations.
 """
 
 from __future__ import annotations
@@ -65,20 +66,9 @@ CLINICAL_EMBEDDINGS_ROOT = Path(
         "/data/gusev/USERS/jpconnor/data/clinical_text_embedding_project/",
     )
 )
-PROFILE_CLINICAL_ROOT = Path(
-    os.environ.get("PROFILE_CLINICAL_PATH", "/data/gusev/PROFILE/CLINICAL/")
-)
 DEFAULT_SOMATIC_PATH = PROFILE_DATA_ROOT / "SOMATIC_WIDE_BY_SAMPLE.parquet"
 DEFAULT_SOMATIC_MANIFEST_PATH = PROFILE_DATA_ROOT / "SOMATIC_FEATURE_MANIFEST.parquet"
 DEFAULT_GLEASON_PATH = LLM_ANNOTATIONS_ROOT / "LLM_gleason_timeline/gleason_timeline.parquet"
-# Raw PGS catalog matrix, keyed on IID (== cbio_sample_id), not DFCI_MRN.
-DEFAULT_PRS_PATH = Path(
-    os.environ.get(
-        "PRS_MATRIX_FILE",
-        "/data/gusev/USERS/mjsaleh/PRS_PGScatalog/pgs_matrix_with_avg.tsv",
-    )
-)
-DEFAULT_IDMAP_PATH = PROFILE_CLINICAL_ROOT / "PROFILE_2024_idmap.csv"
 
 FEATURE_MANIFEST_FILENAME = "somatic_gleason_features.csv"
 GLEASON_FEATURE = "GLEASON_SCORE"
@@ -88,12 +78,23 @@ SOMATIC_TESTED_FEATURE = "HAS_SOMATIC_TEST"  # legacy compatibility constant
 SEQUENCING_DATE = "SEQUENCING_DATE"
 INDEX_DATE = "INDEX_DATE"
 INDEX_TO_ADT_DAYS = "INDEX_TO_ADT_DAYS"
-INDEX_ANALYSES = ("gleason", "sequencing", "prs")
+INDEX_ANALYSES = ("gleason", "sequencing_snv", "sequencing_any")
+# Somatic feature encodings accepted by load_somatic_features. "hybrid" (SNV
+# for every gene except the TP53/PTEN/RB1 any-alteration trio) feeds the
+# multivariable available-case arms; "snv" and "any" feed the two
+# sequencing-indexed univariate screens.
+SOMATIC_VARIANT_MODES = ("hybrid", "snv", "any")
+SEQUENCING_ANALYSIS_VARIANT_MODES = {"sequencing_snv": "snv", "sequencing_any": "any"}
+# Per-patient count of altered genes across the tested set in the
+# any-alteration screen. An adjustment covariate in every per-gene Cox fit
+# (cox_aggregated.somatic_burden_covariate_columns), never a tested feature,
+# so it is deliberately absent from the feature manifest.
+SOMATIC_BURDEN_COVARIATE = "SOMATIC_N_GENES_ALTERED"
 # Treatment-anchored, complete-availability cohort used to compare baseline
 # labs with baseline Gleason + somatic calls.  This is deliberately distinct
 # from INDEX_ANALYSES: those arms rebase follow-up to an observation date and
 # therefore are not directly comparable with the lab model.
-AVAILABLE_CASE_SENSITIVITIES = ("gleason_available_case", "somatic_available_case")
+AVAILABLE_CASE_SENSITIVITIES = ("gleason_available_case",)
 GLEASON_SOMATIC_AVAILABLE_CASE = "gleason_somatic_available_case"
 # Plan §4a: clinical-stratifier inputs for risk_score_stratified_figures.py.
 # These are stratifiers only, never model features, so the trio columns are
@@ -112,37 +113,6 @@ DEFAULT_REGEX_STAGE_PATH = Path(
         "COMPASS_REGEX_STAGE_PATH",
         str(PROFILE_DATA_ROOT / "CANCER_ANNOTATIONS" / "CANCER_STAGE_NOTE_LEVEL.parquet"),
     )
-)
-PRS_SAMPLE_ID_COL = "cbio_sample_id"
-
-# Exact PGS IDs from the user-supplied complete_germline_data_df column list.
-# Matching on the terminal PGS ID is less brittle than repeating the long
-# human-readable prefix, while still selecting exactly those columns because
-# each PGS ID occurs once in the matrix. Original column names are preserved in
-# model outputs and in the feature manifest.
-PRS_PGS_IDS_OF_INTEREST = (
-    "PGS000030", "PGS000044", "PGS000049", "PGS000067", "PGS000084",
-    "PGS000086", "PGS000160", "PGS000198", "PGS000321", "PGS000322",
-    "PGS000323", "PGS000333", "PGS000342", "PGS000348",
-    *(f"PGS{value:06d}" for value in range(565, 593)),
-    *(f"PGS{value:06d}" for value in range(595, 605)),
-    "PGS000662", "PGS000696", "PGS000714", "PGS000719", "PGS000733",
-    "PGS000741", "PGS000742", "PGS000751", "PGS000795", "PGS000796",
-    "PGS000878", "PGS000881", "PGS000940", "PGS000997", "PGS001015",
-    "PGS001164", "PGS001291", "PGS001292", "PGS001338", "PGS001516",
-    "PGS001805", "PGS001806", "PGS001865", "PGS001914", "PGS001988",
-    "PGS002016", "PGS002076", "PGS002130", "PGS002205", "PGS002240",
-    "PGS002241", "PGS002268", "PGS002747", "PGS002791", "PGS002792",
-    "PGS002793", "PGS002796", "PGS002797", "PGS002798", "PGS002799",
-    "PGS003331", "PGS003378", "PGS003379", "PGS003383", "PGS003415",
-    "PGS003418", "PGS003419", "PGS003460", "PGS003507", "PGS003559",
-    "PGS003743", "PGS003765", "PGS003766", "PGS003985", "PGS004001",
-    "PGS004027", "PGS004042", "PGS004055", "PGS004071", "PGS004085",
-    "PGS004099", "PGS004109", "PGS004125", "PGS004139", "PGS004155",
-    "PGS004251", "PGS004320", "PGS004474", "PGS004475", "PGS004500",
-    "PGS004544", "PGS004545", "PGS004570", "PGS004581", "PGS004599",
-    "PGS004601", "PGS004694", "PGS004815", "PGS004816", "PGS004872",
-    "PGS005107",
 )
 
 
@@ -164,26 +134,6 @@ def _read_table(path: Path, *, columns: list[str] | None = None) -> pd.DataFrame
     separator = _delimited_separator(path)
     if separator is not None:
         return pd.read_csv(path, sep=separator, usecols=columns)
-    raise ValueError(
-        f"Unsupported input format for {path}; expected Parquet, CSV, or TSV."
-    )
-
-
-def _table_columns(path: Path) -> list[str]:
-    """Read a table schema without materializing the potentially wide PRS matrix."""
-    if not path.exists():
-        raise FileNotFoundError(f"Input file not found: {path}")
-    separator = _delimited_separator(path)
-    if separator is not None:
-        return pd.read_csv(path, sep=separator, nrows=0).columns.tolist()
-    if path.suffix.lower() in {".parquet", ".pq"}:
-        try:
-            import pyarrow.parquet as pq
-        except ModuleNotFoundError as exc:
-            raise ModuleNotFoundError(
-                "pyarrow is required to inspect a Parquet PRS matrix."
-            ) from exc
-        return pq.ParquetFile(path).schema.names
     raise ValueError(
         f"Unsupported input format for {path}; expected Parquet, CSV, or TSV."
     )
@@ -214,8 +164,33 @@ def _normalize_mrn(frame: pd.DataFrame, *, source: str) -> pd.DataFrame:
 
 
 def load_somatic_features(
-    somatic_path: Path, manifest_path: Path
+    somatic_path: Path,
+    manifest_path: Path,
+    *,
+    variant_mode: str = "hybrid",
+    somatic_table: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
+    """Load per-sample somatic indicators under one feature encoding.
+
+    ``variant_mode`` selects the encoding (SOMATIC_VARIANT_MODES):
+
+    * ``hybrid`` -- <GENE>_SNV for every gene except TP53/PTEN/RB1, which are
+      tested as one any-alteration indicator per gene (<GENE>_ANY: SNV, DEL,
+      AMP, or SV). PTEN and RB1 are canonically lost by deletion, so an
+      SNV-only call misses most of their carriers.
+    * ``snv`` -- <GENE>_SNV for every gene, the trio included; a gene the
+      panel calls only by copy number or SV drops out.
+    * ``any`` -- one <GENE>_ANY indicator per gene, collapsing every variant
+      class the manifest declares for it.
+
+    ``somatic_table`` lets a caller that needs several encodings read the wide
+    matrix once; it is copied, never mutated.
+    """
+    if variant_mode not in SOMATIC_VARIANT_MODES:
+        raise ValueError(
+            f"Unknown somatic variant_mode {variant_mode!r}; expected one of "
+            f"{SOMATIC_VARIANT_MODES}."
+        )
     manifest = _read_table(manifest_path)
     if "FEATURE" not in manifest.columns:
         raise ValueError(f"Somatic manifest {manifest_path} is missing 'FEATURE'.")
@@ -223,44 +198,57 @@ def load_somatic_features(
     if not declared:
         raise ValueError(f"Somatic manifest {manifest_path} contains no features.")
 
-    # Somatic features are SNV-only except for the TP53/PTEN/RB1 trio, which is
-    # tested as one any-alteration indicator per gene (<GENE>_ANY: SNV, DEL,
-    # AMP, or SV). PTEN and RB1 are canonically lost by deletion, so an SNV-only
-    # call misses most of their carriers. The manifest enumerates every variant
-    # class the panel calls, so non-trio copy-number and structural features
-    # would otherwise enter this indexed-analysis path unconditionally -- unlike
+    # The manifest enumerates every variant class the panel calls, so
+    # copy-number and structural features the encoding does not use would
+    # otherwise enter this indexed-analysis path unconditionally -- unlike
     # build_genomic_inputs.py, this builder has no --variant-types gate.
     features = []
     any_alteration_sources: dict[str, list[str]] = {}
     dropped = []
     for feature in declared:
         match = GENE_VARIANT_RE.match(feature)
-        if match and match.group(1).upper() in ANY_ALTERATION_GENES:
-            any_feature = f"{match.group(1).upper()}_{ANY_ALTERATION_SUFFIX}"
+        if match is None:
+            dropped.append(feature)
+            continue
+        gene, variant = match.group(1).upper(), match.group(2)
+        collapse = variant_mode == "any" or (
+            variant_mode == "hybrid" and gene in ANY_ALTERATION_GENES
+        )
+        if collapse:
+            any_feature = f"{gene}_{ANY_ALTERATION_SUFFIX}"
             if any_feature not in any_alteration_sources:
                 any_alteration_sources[any_feature] = []
                 features.append(any_feature)
             any_alteration_sources[any_feature].append(feature)
-        elif match and match.group(2) == "SNV":
+        elif variant == "SNV":
             features.append(feature)
         else:
             dropped.append(feature)
     if not features:
         raise ValueError(
             f"Somatic manifest {manifest_path} declares {len(declared)} features "
-            "but none are <GENE>_SNV columns or TP53/PTEN/RB1 alterations; the "
+            f"but none are testable under variant_mode={variant_mode!r}; the "
             "somatic arm has nothing to test."
         )
     if dropped:
         print(
-            f"[somatic-features] dropped {len(dropped)} non-SNV somatic features of "
-            f"{len(declared)} declared; kept {len(features)}. "
+            f"[somatic-features:{variant_mode}] dropped {len(dropped)} somatic "
+            f"features of {len(declared)} declared; kept {len(features)}. "
             f"First dropped: {dropped[:5]}"
         )
-    for any_feature, sources in any_alteration_sources.items():
-        print(f"[somatic-features] {any_feature} = any of {sources}")
+    if variant_mode == "any":
+        print(
+            f"[somatic-features:any] {len(any_alteration_sources)} genes collapsed "
+            f"from {sum(map(len, any_alteration_sources.values()))} variant columns"
+        )
+    else:
+        for any_feature, sources in any_alteration_sources.items():
+            print(f"[somatic-features:{variant_mode}] {any_feature} = any of {sources}")
 
-    somatic = _normalize_mrn(_read_table(somatic_path), source=str(somatic_path))
+    somatic = _normalize_mrn(
+        _read_table(somatic_path) if somatic_table is None else somatic_table,
+        source=str(somatic_path),
+    )
     collision = [f for f in any_alteration_sources if f in somatic.columns]
     if collision:
         raise ValueError(
@@ -342,181 +330,6 @@ def load_treatment_anchors(data_path: Path) -> pd.Series:
             f"MRNs; first values: {conflicts.tolist()[:10]}"
         )
     return non_null.groupby(ca.ID_COL)["TREATMENT_ANCHOR_DATE"].first()
-
-
-def _prs_id_in_column(column: str, pgs_id: str) -> bool:
-    normalized = str(column).upper().replace("-", "_").replace(".", "_")
-    return normalized == pgs_id or normalized.endswith(f"_{pgs_id}")
-
-
-def _prs_trait_group(column: str) -> str:
-    normalized = str(column).lower()
-    if "testosterone" in normalized:
-        return "TESTOSTERONE"
-    if "prostate_specific_antigen" in normalized or "psa_pgs" in normalized:
-        return "PSA"
-    if "psoriatic_arthritis" in normalized:
-        return "PSORIATIC_ARTHRITIS"
-    if "testis" in normalized or "testicular" in normalized:
-        return "TESTICULAR"
-    if "prostate" in normalized or "prca" in normalized or "pca" in normalized:
-        return "PROSTATE"
-    return "OTHER"
-
-
-def load_prs_idmap(idmap_path: Path) -> pd.DataFrame:
-    """Load the cbio_sample_id -> DFCI_MRN bridge for the raw PGS matrix.
-
-    The PGS matrix is keyed on a sample identifier that carries no MRN, so this
-    map is the only route to a patient. Rows lacking either key are unusable
-    and dropped.
-    """
-    idmap = _read_table(idmap_path, columns=[ca.ID_COL, PRS_SAMPLE_ID_COL])
-    missing = {ca.ID_COL, PRS_SAMPLE_ID_COL} - set(idmap.columns)
-    if missing:
-        raise ValueError(f"Idmap {idmap_path} is missing columns: {sorted(missing)}")
-    idmap = _normalize_mrn(idmap, source=str(idmap_path))
-    idmap[PRS_SAMPLE_ID_COL] = idmap[PRS_SAMPLE_ID_COL].astype(str).str.strip()
-    idmap = idmap.loc[idmap[PRS_SAMPLE_ID_COL].ne("")]
-    # One sample belongs to exactly one patient; a sample mapped to several MRNs
-    # would fan rows out in the join below and silently duplicate scores.
-    conflicting = idmap.groupby(PRS_SAMPLE_ID_COL)[ca.ID_COL].nunique()
-    conflicts = conflicting.index[conflicting.gt(1)]
-    if len(conflicts):
-        raise ValueError(
-            f"Idmap {idmap_path} maps {len(conflicts)} sample id(s) to more than one "
-            f"{ca.ID_COL}; first values: {conflicts.tolist()[:10]}"
-        )
-    return idmap.drop_duplicates([PRS_SAMPLE_ID_COL, ca.ID_COL])
-
-
-def load_biomarker_prs(
-    prs_path: Path,
-    *,
-    require_all: bool = False,
-    idmap_path: Path | None = None,
-) -> tuple[pd.DataFrame, list[dict[str, str]]]:
-    """Load the supplied PGS allowlist and collapse sample rows by patient.
-
-    The raw PGS catalog matrix is keyed on ``IID`` (a cbio sample id), so it is
-    bridged to ``DFCI_MRN`` through ``idmap_path``; patients absent from the
-    idmap have no reachable germline data. A matrix already keyed on
-    ``DFCI_MRN`` is accepted as-is and needs no bridge.
-
-    One patient may have several genotyped samples. PRSs are continuous
-    germline estimates, so repeated sample rows are reduced to their per-score
-    arithmetic mean. This is a no-op for identical duplicates and avoids
-    choosing an arbitrary sample when technical estimates differ slightly.
-    """
-    header = _table_columns(prs_path)
-    keyed_by_mrn = ca.ID_COL in header
-    sample_key = next(
-        (column for column in ("IID", PRS_SAMPLE_ID_COL) if column in header), None
-    )
-    if not keyed_by_mrn and sample_key is None:
-        raise ValueError(
-            f"PRS input {prs_path} has neither {ca.ID_COL!r} nor a sample key "
-            f"('IID'/{PRS_SAMPLE_ID_COL!r}); cannot identify patients."
-        )
-
-    selected: list[tuple[str, str]] = []
-    missing_ids = []
-    for pgs_id in PRS_PGS_IDS_OF_INTEREST:
-        matches = [column for column in header if _prs_id_in_column(column, pgs_id)]
-        if len(matches) > 1:
-            raise ValueError(
-                f"PRS input has multiple columns matching {pgs_id}: {matches}. "
-                "Provide a matrix with one score column per PGS ID."
-            )
-        if matches:
-            selected.append((matches[0], pgs_id))
-        else:
-            missing_ids.append(pgs_id)
-    if not selected:
-        raise ValueError(
-            f"PRS input {prs_path} has none of the {len(PRS_PGS_IDS_OF_INTEREST)} "
-            "allowlisted PGS IDs."
-        )
-    if missing_ids:
-        if require_all:
-            raise ValueError(
-                f"PRS input {prs_path} is missing {len(missing_ids)} allowlisted PGS IDs: "
-                f"{missing_ids}"
-            )
-        print(
-            f"WARNING: {len(missing_ids)} of {len(PRS_PGS_IDS_OF_INTEREST)} allowlisted "
-            f"PGS IDs are absent from {prs_path} and will be omitted; "
-            f"first values: {missing_ids[:10]}"
-        )
-
-    raw_columns = [source for source, _ in selected]
-    if keyed_by_mrn:
-        prs = _normalize_mrn(
-            _read_table(prs_path, columns=[ca.ID_COL, *raw_columns]),
-            source=str(prs_path),
-        )
-    else:
-        if idmap_path is None:
-            raise ValueError(
-                f"PRS input {prs_path} is keyed on {sample_key!r} and needs an idmap "
-                "to reach DFCI_MRN, but no idmap path was supplied."
-            )
-        idmap = load_prs_idmap(idmap_path)
-        prs = _read_table(prs_path, columns=[sample_key, *raw_columns])
-        prs = prs.rename(columns={sample_key: PRS_SAMPLE_ID_COL})
-        prs[PRS_SAMPLE_ID_COL] = prs[PRS_SAMPLE_ID_COL].astype(str).str.strip()
-        n_samples = prs[PRS_SAMPLE_ID_COL].nunique()
-        # Inner join: an unmapped sample cannot be attributed to a patient, and
-        # an unmapped patient has no germline data to attribute.
-        prs = prs.merge(idmap, on=PRS_SAMPLE_ID_COL, how="inner", validate="many_to_one")
-        print(
-            f"PRS idmap join: {n_samples:,} genotyped samples -> "
-            f"{prs[ca.ID_COL].nunique():,} patients via {idmap_path}."
-        )
-        if prs.empty:
-            raise ValueError(
-                f"PRS idmap join produced no rows; {prs_path} and {idmap_path} share "
-                "no sample identifiers."
-            )
-        prs = prs.drop(columns=[PRS_SAMPLE_ID_COL])
-    manifest_rows = []
-    for source, pgs_id in selected:
-        manifest_rows.append(
-            {
-                "feature": source,
-                "feature_kind": "prs_continuous",
-                "source": str(prs_path),
-                "pgs_id": pgs_id,
-                "reported_trait_group": _prs_trait_group(source),
-                "source_column": source,
-            }
-        )
-    feature_cols = [row["feature"] for row in manifest_rows]
-    numeric_scores = prs[feature_cols].apply(pd.to_numeric, errors="coerce")
-    # Reassemble once so assigning 133 converted columns cannot leave a highly
-    # fragmented frame before the duplicate-MRN groupby.
-    prs = pd.concat(
-        [prs[[ca.ID_COL]].reset_index(drop=True), numeric_scores.reset_index(drop=True)],
-        axis=1,
-    )
-
-    if prs[ca.ID_COL].duplicated().any():
-        row_counts = prs.groupby(ca.ID_COL).size()
-        duplicate_mrns = row_counts.index[row_counts.gt(1)]
-        conflicts = (
-            prs.loc[prs[ca.ID_COL].isin(duplicate_mrns)]
-            .groupby(ca.ID_COL)[feature_cols]
-            .nunique(dropna=True)
-            .gt(1)
-            .any(axis=1)
-        )
-        print(
-            f"PRS duplicate resolution: averaging sample rows for "
-            f"{len(duplicate_mrns):,} MRNs; {int(conflicts.sum()):,} have at least "
-            "one discordant score."
-        )
-        prs = prs.groupby(ca.ID_COL, as_index=False)[feature_cols].mean()
-    return prs, manifest_rows
 
 
 def latest_available_by_landmark(
@@ -742,16 +555,26 @@ def _materialize_absolute_followup_dates(
 
 def build_indexed_feature_sets(
     base: pd.DataFrame,
-    somatic: pd.DataFrame,
-    somatic_features: list[str],
+    sequencing_inputs: dict[str, tuple[pd.DataFrame, list[str]]],
     gleason: pd.DataFrame,
     *,
-    prs: pd.DataFrame | None = None,
-    prs_features: list[str] | None = None,
     treatment_anchors: pd.Series | None = None,
     endpoint: str = "platinum",
 ) -> dict[str, pd.DataFrame]:
-    """Build Gleason-, sequencing-, and ADT-indexed PRS cohorts."""
+    """Build the Gleason-indexed cohort and one sequencing-indexed cohort per encoding.
+
+    ``sequencing_inputs`` maps each sequencing analysis name (a key of
+    SEQUENCING_ANALYSIS_VARIANT_MODES) to its ``load_somatic_features`` output.
+    Every encoding selects the same specimen, so the sequencing cohorts share
+    patients and index dates and differ only in their feature columns. The
+    any-alteration cohort also carries SOMATIC_BURDEN_COVARIATE.
+    """
+    unknown = set(sequencing_inputs) - set(SEQUENCING_ANALYSIS_VARIANT_MODES)
+    if unknown:
+        raise ValueError(
+            f"Unknown sequencing analyses {sorted(unknown)}; expected keys of "
+            f"{sorted(SEQUENCING_ANALYSIS_VARIANT_MODES)}."
+        )
     base = _normalize_mrn(base, source="landmark +0 base inputs")
     if "TREATMENT_ANCHOR_DATE" in base.columns:
         anchors = pd.Series(
@@ -774,39 +597,38 @@ def build_indexed_feature_sets(
         )
     base = _materialize_absolute_followup_dates(base, anchors)
 
-    selected_somatic = closest_observation_to_adt(
-        somatic,
-        anchors,
-        date_col=SEQUENCING_DATE,
-        value_cols=somatic_features,
-        combine_date_ties_with_max=True,
-    )
+    outputs: dict[str, pd.DataFrame] = {}
+    for analysis, (somatic, somatic_features) in sequencing_inputs.items():
+        selected_somatic = closest_observation_to_adt(
+            somatic,
+            anchors,
+            date_col=SEQUENCING_DATE,
+            value_cols=somatic_features,
+            combine_date_ties_with_max=True,
+        )
+        sequencing = _rebase_endpoint_from_index(
+            base, selected_somatic, feature_cols=somatic_features, endpoint=endpoint
+        )
+        for feature in somatic_features:
+            sequencing[feature] = sequencing[feature].fillna(0)
+        if SEQUENCING_ANALYSIS_VARIANT_MODES[analysis] == "any":
+            # Counted across every tested gene (after the wild-type fill), so
+            # each per-gene fit is adjusted for the same overall burden.
+            sequencing[SOMATIC_BURDEN_COVARIATE] = (
+                sequencing[somatic_features].sum(axis=1).astype(int)
+            )
+        outputs[analysis] = sequencing
+
     selected_gleason = closest_observation_to_adt(
         gleason,
         anchors,
         date_col="gleason_date",
         value_cols=[GLEASON_FEATURE],
     )
-    sequencing = _rebase_endpoint_from_index(
-        base, selected_somatic, feature_cols=somatic_features, endpoint=endpoint
-    )
-    for feature in somatic_features:
-        sequencing[feature] = sequencing[feature].fillna(0)
-    gleason_out = _rebase_endpoint_from_index(
+    outputs["gleason"] = _rebase_endpoint_from_index(
         base, selected_gleason, feature_cols=[GLEASON_FEATURE], endpoint=endpoint
     )
-
-    prs_features = list(prs_features or [])
-    metadata = [ca.ID_COL]
-    metadata += [column for column in base.columns if column in ca.outcome_columns()]
-    prs_out = base[metadata].set_index(ca.ID_COL)
-    prs_out[INDEX_DATE] = anchors
-    prs_out[INDEX_TO_ADT_DAYS] = 0
-    if prs is not None and prs_features:
-        prs_out = prs_out.join(prs.set_index(ca.ID_COL)[prs_features], how="left")
-    prs_out = prs_out.rename_axis(ca.ID_COL).reset_index()
-
-    return {"gleason": gleason_out, "sequencing": sequencing, "prs": prs_out}
+    return outputs
 
 
 def build_available_case_sensitivity(
@@ -1071,20 +893,34 @@ def main(args: argparse.Namespace) -> None:
             "--landmark-days must be exactly 0."
         )
 
+    # Read the wide somatic matrix once and derive every encoding from it: the
+    # hybrid features feed the multivariable available-case arms below, the
+    # snv/any encodings feed the two sequencing-indexed univariate screens.
+    somatic_table = _read_table(Path(args.somatic_path))
     somatic, somatic_features = load_somatic_features(
-        Path(args.somatic_path), Path(args.somatic_manifest_path)
+        Path(args.somatic_path),
+        Path(args.somatic_manifest_path),
+        somatic_table=somatic_table,
     )
+    sequencing_inputs = {
+        analysis: load_somatic_features(
+            Path(args.somatic_path),
+            Path(args.somatic_manifest_path),
+            variant_mode=variant_mode,
+            somatic_table=somatic_table,
+        )
+        for analysis, variant_mode in SEQUENCING_ANALYSIS_VARIANT_MODES.items()
+    }
+    del somatic_table
     gleason = load_gleason(Path(args.gleason_path))
-    prs, prs_manifest_rows = load_biomarker_prs(
-        Path(args.prs_path),
-        require_all=args.require_all_prs,
-        idmap_path=Path(args.idmap_path),
-    )
-    prs_features = [row["feature"] for row in prs_manifest_rows]
     print(
-        f"Loaded {len(somatic):,} somatic testing groups with {len(somatic_features):,} features; "
-        f"{gleason[ca.ID_COL].nunique():,} patients have Gleason timeline rows; "
-        f"{prs[ca.ID_COL].nunique():,} patients have {len(prs_features)} selected PRSs."
+        f"Loaded {len(somatic):,} somatic testing groups with {len(somatic_features):,} "
+        "hybrid features ("
+        + ", ".join(
+            f"{analysis}: {len(features):,}"
+            for analysis, (_frame, features) in sequencing_inputs.items()
+        )
+        + f"); {gleason[ca.ID_COL].nunique():,} patients have Gleason timeline rows."
     )
 
     base_path = base_inputs_dir / aggregated_filename(0)
@@ -1095,33 +931,32 @@ def main(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"Missing base pre-landmark lab input: {source_labs}")
     feature_sets = build_indexed_feature_sets(
         pd.read_csv(base_path, low_memory=False),
-        somatic,
-        somatic_features,
+        sequencing_inputs,
         gleason,
-        prs=prs,
-        prs_features=prs_features,
         treatment_anchors=treatment_anchors,
         endpoint=args.endpoint,
     )
 
+    # SOMATIC_BURDEN_COVARIATE is deliberately absent from every feature
+    # manifest: it is an adjustment covariate, never a tested feature.
     feature_rows_by_analysis = {
-        "sequencing": [
+        analysis: [
             {
                 "feature": feature,
                 "feature_kind": "somatic_binary",
                 "source": str(args.somatic_path),
             }
-            for feature in somatic_features
-        ],
-        "gleason": [
-            {
-                "feature": GLEASON_FEATURE,
-                "feature_kind": "gleason_continuous",
-                "source": str(args.gleason_path),
-            }
-        ],
-        "prs": prs_manifest_rows,
+            for feature in features
+        ]
+        for analysis, (_frame, features) in sequencing_inputs.items()
     }
+    feature_rows_by_analysis["gleason"] = [
+        {
+            "feature": GLEASON_FEATURE,
+            "feature_kind": "gleason_continuous",
+            "source": str(args.gleason_path),
+        }
+    ]
 
     cohort_sizes: dict[str, int] = {}
     for analysis in INDEX_ANALYSES:
@@ -1138,6 +973,8 @@ def main(args: argparse.Namespace) -> None:
             analysis_dir / pre_treatment_lab_filename(0), index=False
         )
 
+        index_source = "sequencing" if analysis in SEQUENCING_ANALYSIS_VARIANT_MODES else analysis
+        variant_mode = SEQUENCING_ANALYSIS_VARIANT_MODES.get(analysis)
         manifest = dict(base_manifest)
         manifest.update(
             {
@@ -1151,27 +988,18 @@ def main(args: argparse.Namespace) -> None:
                 "landmark_days": [0],
                 "n_patients_by_landmark": {"0": len(built)},
                 "n_patients": len(built),
-                "prediction_time_origin": (
-                    "ADT start" if analysis == "prs" else INDEX_DATE
-                ),
-                "index_selection": (
-                    "ADT start"
-                    if analysis == "prs"
-                    else "minimum absolute days from ADT start; earlier date wins exact tie"
-                ),
-                "outcome": (
-                    f"days from ADT start to {args.endpoint} or last contact"
-                    if analysis == "prs"
-                    else f"days from selected index date to {args.endpoint} or last contact"
-                ),
+                "prediction_time_origin": INDEX_DATE,
+                "index_selection": "minimum absolute days from ADT start; earlier date wins exact tie",
+                "outcome": f"days from selected index date to {args.endpoint} or last contact",
                 "endpoint_description": (
-                    f"Time from ADT start to {args.endpoint}"
-                    if analysis == "prs"
-                    else f"Time from the selected {analysis} index date to {args.endpoint}"
+                    f"Time from the selected {index_source} index date to {args.endpoint}"
                 ),
                 "endpoint": args.endpoint,
                 "patients_with_nonpositive_followup_excluded": True,
-                "prs_included": analysis == "prs",
+                "somatic_variant_mode": variant_mode,
+                "burden_covariate": (
+                    SOMATIC_BURDEN_COVARIATE if variant_mode == "any" else None
+                ),
             }
         )
         (analysis_dir / BUILD_MANIFEST_FILENAME).write_text(
@@ -1183,11 +1011,12 @@ def main(args: argparse.Namespace) -> None:
 
     # Unlike the three observation-indexed univariate analyses above, these
     # inputs preserve the standard outcome clock and split assignment. Each
-    # source gets its own labs comparator, so Gleason-vs-labs and
-    # somatic-vs-labs never conflate a feature comparison with a cohort shift.
+    # cohort carries its own labs comparator, so Gleason-vs-labs (and the
+    # Gleason/somatic combinations) never conflate a feature comparison with a
+    # cohort shift.
     sensitivity_landmarks = [int(value) for value in base_manifest["landmark_days"]]
     sensitivity_cases: dict[str, dict[int, pd.DataFrame]] = {}
-    all_analyses = ("gleason", "somatic", "gleason_somatic")
+    all_analyses = ("gleason", "gleason_somatic")
     all_sensitivity_names = AVAILABLE_CASE_SENSITIVITIES + (GLEASON_SOMATIC_AVAILABLE_CASE,)
     for analysis, sensitivity_name in zip(all_analyses, all_sensitivity_names):
         sensitivity_dir = output_dir / sensitivity_name
@@ -1322,7 +1151,6 @@ def main(args: argparse.Namespace) -> None:
             }
             for analysis, sensitivity_name in zip(all_analyses, all_sensitivity_names)
         },
-        "prs_included": True,
     }
     (output_dir / BUILD_MANIFEST_FILENAME).write_text(
         json.dumps(root_manifest, indent=2)
@@ -1340,23 +1168,6 @@ if __name__ == "__main__":
         "--somatic-manifest-path", type=Path, default=DEFAULT_SOMATIC_MANIFEST_PATH
     )
     parser.add_argument("--gleason-path", type=Path, default=DEFAULT_GLEASON_PATH)
-    parser.add_argument(
-        "--prs-path",
-        type=Path,
-        default=DEFAULT_PRS_PATH,
-        help="Raw PGS matrix keyed on IID, or a matrix already keyed on DFCI_MRN.",
-    )
-    parser.add_argument(
-        "--idmap-path",
-        type=Path,
-        default=DEFAULT_IDMAP_PATH,
-        help="cbio_sample_id to DFCI_MRN bridge for a sample-keyed PGS matrix.",
-    )
-    parser.add_argument(
-        "--require-all-prs",
-        action="store_true",
-        help="Fail if any allowlisted PGS ID is absent from the matrix.",
-    )
     parser.add_argument(
         "--regex-stage-path",
         type=Path,

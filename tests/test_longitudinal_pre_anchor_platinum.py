@@ -201,7 +201,7 @@ def test_requested_figure_families_remain_retired_without_output_cleanup():
     source = PIPELINE_R.read_text()
     assert "Retired: Figure 1 analysis-set-size supplement" in source
     assert "Retired: supplemental all-model comparison" in source
-    assert 'SG_ANALYSES  <- c("sequencing", "gleason")' in source
+    assert 'SG_ANALYSES  <- c("sequencing_snv", "sequencing_any", "gleason")' in source
     assert "figure3_univariate_%s_significance_landmark%d" not in source
     assert "plot_volcano_panel_by_significance(sub" not in source
 

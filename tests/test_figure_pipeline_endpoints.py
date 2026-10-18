@@ -205,12 +205,14 @@ def test_missing_file_returns_na(tmp_path):
     assert _run_r(script, tmp_path).strip() == "TRUE"
 
 
-def test_figure4_includes_available_case_labs_vs_somatic_sensitivity():
+def test_figure4_includes_only_the_gleason_available_case_sensitivity():
     source = _pipeline_source()
     assert "sensitivity_available_case" in source
-    assert '"gleason", "somatic"' in source
-    assert '"figure4c", "figure4d"' in source
-    assert 'paste0(panel_prefix, "_sensitivity_", sensitivity_analysis, "_")' in source
+    assert '"figure4c_sensitivity_gleason_"' in source
+    assert "figure4d" not in source
+    for feature_set in ('"labs"', '"gleason"', '"gleason-labs"'):
+        assert f'sensitivity_loader({feature_set}, "cox")' in source
+        assert f'sensitivity_loader({feature_set}, "xgboost")' in source
 
 
 def test_figure_roots_do_not_collide():

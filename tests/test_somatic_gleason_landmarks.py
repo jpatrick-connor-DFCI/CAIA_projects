@@ -95,10 +95,28 @@ def test_somatic_gleason_univariate_runs_three_index_cohorts_at_zero(monkeypatch
     inputs = {str(command[command.index("--inputs-dir") + 1]) for command in commands}
     assert inputs == {
         str(tmp_path / "prediction_inputs_adt" / "somatic_gleason" / "gleason"),
-        str(tmp_path / "prediction_inputs_adt" / "somatic_gleason" / "sequencing"),
-        str(tmp_path / "prediction_inputs_adt" / "somatic_gleason" / "prs"),
+        str(tmp_path / "prediction_inputs_adt" / "somatic_gleason" / "sequencing_snv"),
+        str(tmp_path / "prediction_inputs_adt" / "somatic_gleason" / "sequencing_any"),
     }
     assert len(summary) == 3
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"cohort": "metastatic_adt"}, {"cohort": "metastatic_llm"}, {"exclusion": "pre_adt_castrate"}],
+)
+def test_somatic_gleason_univariate_skips_non_full_cohort_runs(monkeypatch, tmp_path, overrides):
+    commands = []
+    monkeypatch.setattr(
+        compass_pipeline,
+        "_run",
+        lambda command, *, dry_run=False: commands.append(command) or 0,
+    )
+    run = {**_run(tmp_path), **overrides}
+
+    assert compass_pipeline.run_somatic_gleason_univariate(run, dry_run=True) == []
+    assert commands == []
+    assert not compass_pipeline.is_full_cohort_run(run)
 
 
 def test_available_case_multivariate_sensitivity_runs_matched_feature_sets(monkeypatch, tmp_path):
@@ -113,26 +131,28 @@ def test_available_case_multivariate_sensitivity_runs_matched_feature_sets(monke
         _run(tmp_path), dry_run=True
     )
 
-    assert len(commands) == 24
-    assert len(summary) == 24
+    # Gleason only: labs / gleason / gleason-labs x 2 models x 3 landmarks.
+    assert len(commands) == 18
+    assert len(summary) == 18
     assert {command[command.index("--model") + 1] for command in commands} == {
         "elastic-net", "xgboost"
     }
     assert {command[command.index("--feature-set") + 1] for command in commands} == {
-        "labs", "somatic-gleason"
+        "labs", "gleason", "gleason-labs"
     }
+    gleason_sets = {
+        command[command.index("--feature-set") + 1]
+        for command in commands
+        if str(command[command.index("--inputs-dir") + 1]).endswith("/gleason_available_case")
+    }
+    assert gleason_sets == {"labs", "gleason", "gleason-labs"}
     assert {command[command.index("--landmark-days") + 1] for command in commands} == {
         "0", "90", "180"
     }
     inputs = {str(command[command.index("--inputs-dir") + 1]) for command in commands}
     assert inputs == {
         str(tmp_path / "prediction_inputs_adt" / "somatic_gleason" / "gleason_available_case"),
-        str(tmp_path / "prediction_inputs_adt" / "somatic_gleason" / "somatic_available_case"),
     }
-    for command in commands:
-        assert str(command[command.index("--inputs-dir") + 1]).endswith(
-            ("gleason_available_case", "somatic_available_case")
-        )
 
 
 def test_somatic_gleason_index_cohorts_reject_non_adt_arm(tmp_path):

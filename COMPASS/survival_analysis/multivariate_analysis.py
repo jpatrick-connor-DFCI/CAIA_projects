@@ -200,10 +200,10 @@ def cv_one_endpoint(
             fold_train,
             raw_feature_cols,
             min_patient_coverage=args.min_patient_coverage,
-            # "text" carries no lab features, so the canonical-lab gate would
-            # drop every embedding column (see prepare_landmark_context).
-            # "labs_text" keeps the gate: its lab columns are still gated, and
-            # its embedding columns ride in via always_include.
+            # Arms with no lab component (e.g. "gleason", "somatic") skip the
+            # canonical-lab gate, which would otherwise drop every static
+            # column; "*_labs" arms keep it for their lab columns, and their
+            # static columns ride in via always_include.
             restrict_to_labs=(
                 canonical if feature_set_has_labs_component(feature_set) else []
             ),

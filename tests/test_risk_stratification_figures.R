@@ -79,10 +79,12 @@ base <- file.path(root, "local_runs_adt")
 dir.create(base)
 invisible(file.rename(file.path(root, "risk_stratification"), file.path(base, "risk_stratification")))
 write_strata(file.path(base, "risk_stratification", "test", "full_cohort", "landmark_90"), "platinum", 90, n = 40)
-write_strata(file.path(base, "risk_stratification", "test", "matched", "gleason", "cox", "landmark_90"),
+write_strata(file.path(base, "risk_stratification", "test", "matched", "gleason_somatic", "cox", "landmark_90"),
              "platinum", 90, n = 40, comparison = TRUE)
-for (arm in c("labs", "gleason", "gleason-labs")) for (model in c("cox", "xgboost")) {
-  directory <- file.path(base, "clinical_combinations", "gleason", arm, model, "landmark_90", "both")
+combo_arms <- c("labs", "gleason", "somatic", "gleason-labs", "somatic-labs",
+                "gleason-somatic", "gleason-somatic-labs")
+for (arm in combo_arms) for (model in c("cox", "xgboost")) {
+  directory <- file.path(base, "clinical_combinations", "gleason_somatic", arm, model, "landmark_90", "both")
   dir.create(directory, recursive = TRUE)
   write_csv(tibble(endpoint = "platinum", test_c_index = .6 + nchar(arm) / 100,
                    test_mean_auc_t = .7, n_train_val = 300, n_test = 100),
@@ -106,19 +108,19 @@ for (expr in block) eval(expr, env)
 stems <- ls(saved)
 
 # Raw C-index only: one figure per combination cohort that has metrics, no deltas.
-stopifnot("figure4e_combinations_gleason_cindex_platinum" %in% stems,
-          !"figure4e_combinations_gleason_somatic_cindex_platinum" %in% stems)
-combo <- tables[["figure4e_combinations_gleason_cindex_platinum"]]
-stopifnot(nrow(combo) == 2 * 2 * 3, !any(grepl("delta|diff", names(combo))),
-          sum(is.finite(combo$cindex)) == 6)
-combo_plot <- saved[["figure4e_combinations_gleason_cindex_platinum"]]
+stopifnot("figure4e_combinations_gleason_somatic_cindex_platinum" %in% stems,
+          !"figure4e_combinations_gleason_cindex_platinum" %in% stems)
+combo <- tables[["figure4e_combinations_gleason_somatic_cindex_platinum"]]
+stopifnot(nrow(combo) == 2 * 2 * 7, !any(grepl("delta|diff", names(combo))),
+          sum(is.finite(combo$cindex)) == 14)
+combo_plot <- saved[["figure4e_combinations_gleason_somatic_cindex_platinum"]]
 stopifnot(all(na.omit(combo_plot$data$cindex) == combo$cindex[is.finite(combo$cindex)]))
 
 # Each scheme/source gets its own KMs; test and cv_oof never share a stem.
 stopifnot(all(c("figure4f_riskstrat_cv_oof_full_risk_score_landmark90",
                 "figure4f_riskstrat_test_full_trio_combinations_landmark90",
-                "figure4f_riskstrat_test_gleason_cox_comparison_gleason_labs_landmark90") %in% stems),
-          saved[["figure4f_riskstrat_test_gleason_cox_comparison_gleason_labs_landmark90"]]$labels$title ==
+                "figure4f_riskstrat_test_gleason_somatic_cox_comparison_gleason_labs_landmark90") %in% stems),
+          saved[["figure4f_riskstrat_test_gleason_somatic_cox_comparison_gleason_labs_landmark90"]]$labels$title ==
             "Gleason + labs risk score",
           !any(grepl("landmark0$", stems)))
 # Within-level panels for full cohorts only, split by the labs risk groups.

@@ -137,9 +137,12 @@ figure_compilation_spec <- function(stem) {
   if (grepl("^km_quintile_", stem))
     return(list(key=sub("_landmark[0-9]+$", "", stem), title="Lab extremes: time to platinum",
       width=24, height=7.5, cols=3, keep_individuals=TRUE, shared_caption=TRUE, shared_legend=FALSE))
-  if (grepl("^figure3b_sequencing_.*_km_", stem))
-    return(list(key="somatic_carrier_km", title="Mutation carrier status: time to platinum",
+  if (grepl("^figure3b_sequencing_(snv|any)_.*_km_", stem)) {
+    variant_mode <- sub("^figure3b_sequencing_(snv|any)_.*$", "\\1", stem)
+    return(list(key=paste0("somatic_", variant_mode, "_carrier_km"),
+      title=paste(if (variant_mode == "snv") "SNV" else "Any-alteration", "carrier status: time to platinum"),
       width=16, height=12, cols=2, page_size=4, shared_caption=TRUE, shared_legend=FALSE))
+  }
   NULL
 }
 
@@ -2768,7 +2771,7 @@ reformat_downloaded_figures <- function(input, output, landmark=0L) {
   stopifnot(all(file.copy(list.files(input,full.names=TRUE),output,recursive=TRUE)))
   files <- list.files(input,pattern="\\.png$",recursive=TRUE)
   pattern <- paste0("^(figure1_cohort|figure2v3_llm|classifier_validation|subtype_platinum|",
-    "metastatic_label_agreement|labs_univariate_all_landmarks|somatic_carrier_km_page[0-9]+|",
+    "metastatic_label_agreement|labs_univariate_all_landmarks|somatic_(snv|any)_carrier_km_page[0-9]+|",
     "discrimination|sensitivity_(gleason|somatic)|importance_(cox|xgb)|km_extremes|",
     "xgboost_(performance|importance)|elasticnet_(performance|coefficients)|",
     "event_incidence_lm[0-9]+|metastatic_label_overlap)__")

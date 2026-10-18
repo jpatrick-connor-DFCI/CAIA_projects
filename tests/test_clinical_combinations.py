@@ -52,7 +52,7 @@ def _run(tmp_path: Path, inputs_dir: Path) -> dict:
 
 
 def test_arm_lists_match_the_plans_table():
-    assert cp.CLINICAL_COMBINATION_SPECS["gleason"] == ("labs", "gleason", "gleason-labs")
+    assert set(cp.CLINICAL_COMBINATION_SPECS) == {"gleason_somatic"}
     assert set(cp.CLINICAL_COMBINATION_SPECS["gleason_somatic"]) == {
         "labs", "gleason", "somatic",
         "gleason-labs", "somatic-labs", "gleason-somatic", "gleason-somatic-labs",
@@ -70,8 +70,8 @@ def test_dry_run_reports_missing_inputs_without_raising(tmp_path, monkeypatch):
     summary = cp.run_multivariate_clinical_combinations(run, dry_run=True)
     statuses = {status for _tag, status, _elapsed in summary}
     assert statuses == {"missing inputs"}
-    # 1 landmark x (3 gleason arms + 7 gleason_somatic arms) x 2 models = 20
-    assert len(summary) == 20
+    # 1 landmark x 7 gleason_somatic arms x 2 models = 14
+    assert len(summary) == 14
 
 
 def _write_risks(path: Path, mrns, risk_scores, *, seed_events=None, endpoint="platinum"):
@@ -93,7 +93,7 @@ def test_summarize_reports_missing_when_no_metrics(tmp_path):
     run = _run(tmp_path, tmp_path / "inputs")
     table = cp.summarize_clinical_combinations(run)
     assert (table["status"] == "missing").all()
-    assert len(table) == 1 * (3 + 7) * 2  # landmarks x arms x models
+    assert len(table) == 1 * 7 * 2  # landmarks x arms x models
 
 
 def test_summarize_computes_paired_bootstrap_delta_against_labs(tmp_path):
@@ -103,8 +103,8 @@ def test_summarize_computes_paired_bootstrap_delta_against_labs(tmp_path):
     mrns = [str(i) for i in range(n)]
     event = rng.binomial(1, 0.6, size=n)
 
-    labs_dir = cp._clinical_combination_dir(run, "gleason", "labs", "cox", 0)
-    gleason_dir = cp._clinical_combination_dir(run, "gleason", "gleason", "cox", 0)
+    labs_dir = cp._clinical_combination_dir(run, "gleason_somatic", "labs", "cox", 0)
+    gleason_dir = cp._clinical_combination_dir(run, "gleason_somatic", "gleason", "cox", 0)
     labs_dir.mkdir(parents=True, exist_ok=True)
     gleason_dir.mkdir(parents=True, exist_ok=True)
 
@@ -132,8 +132,8 @@ def test_summarize_computes_paired_bootstrap_delta_against_labs(tmp_path):
     )
 
     table = cp.summarize_clinical_combinations(run)
-    labs_row = table.query("cohort == 'gleason' and arm == 'labs' and model == 'elastic-net'").iloc[0]
-    gleason_row = table.query("cohort == 'gleason' and arm == 'gleason' and model == 'elastic-net'").iloc[0]
+    labs_row = table.query("cohort == 'gleason_somatic' and arm == 'labs' and model == 'elastic-net'").iloc[0]
+    gleason_row = table.query("cohort == 'gleason_somatic' and arm == 'gleason' and model == 'elastic-net'").iloc[0]
 
     assert pd.isna(labs_row["delta_c_index"])
     assert not pd.isna(gleason_row["delta_c_index"])
@@ -151,7 +151,7 @@ def test_summarize_reads_xgboost_risk_schema(tmp_path):
     event = rng.binomial(1, 0.6, size=n)
 
     for arm, scores in (("labs", rng.normal(size=n)), ("gleason", -duration)):
-        arm_dir = cp._clinical_combination_dir(run, "gleason", arm, "xgboost", 0)
+        arm_dir = cp._clinical_combination_dir(run, "gleason_somatic", arm, "xgboost", 0)
         arm_dir.mkdir(parents=True, exist_ok=True)
         pd.DataFrame({
             "endpoint": ["platinum"], "n_test": [n], "n_events_test": [int(event.sum())],
@@ -164,7 +164,7 @@ def test_summarize_reads_xgboost_risk_schema(tmp_path):
         }).to_csv(arm_dir / "landmark_xgboost_patient_risks.csv", index=False)
 
     table = cp.summarize_clinical_combinations(run)
-    row = table.query("cohort == 'gleason' and arm == 'gleason' and model == 'xgboost'").iloc[0]
+    row = table.query("cohort == 'gleason_somatic' and arm == 'gleason' and model == 'xgboost'").iloc[0]
     assert row["n_paired"] == n
     assert row["delta_c_index"] > 0
 

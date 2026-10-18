@@ -141,7 +141,7 @@ class TestMatchedCohortStage:
         assert all(status == "missing labs risks" for _tag, status in matched_rows)
 
     def test_matched_cohorts_follow_clinical_combination_specs(self, tmp_path):
-        assert cp.RISK_STRATIFICATION_MATCHED_COHORTS["gleason"] == ("gleason", "gleason-labs")
+        assert set(cp.RISK_STRATIFICATION_MATCHED_COHORTS) == {"gleason_somatic"}
         assert set(cp.RISK_STRATIFICATION_MATCHED_COHORTS["gleason_somatic"]) == {
             "gleason", "somatic", "gleason-labs", "somatic-labs",
             "gleason-somatic", "gleason-somatic-labs",
@@ -149,18 +149,18 @@ class TestMatchedCohortStage:
 
     def test_warns_but_continues_when_some_comparison_arms_are_missing(self, tmp_path, capsys):
         run = _run(tmp_path, tmp_path / "inputs")
-        labs_dir = cp._clinical_combination_dir(run, "gleason", "labs", "cox", 0)
+        labs_dir = cp._clinical_combination_dir(run, "gleason_somatic", "labs", "cox", 0)
         labs_dir.mkdir(parents=True, exist_ok=True)
         (labs_dir / "cox_agg_multivariable_patient_risks.csv").write_text(
             "DFCI_MRN,endpoint,dataset,duration_days,event,risk_score\n"
         )
-        # No gleason/gleason-labs arm risk files -> both comparison arms missing,
+        # No comparison-arm risk files -> every comparison arm missing,
         # but the labs-only run should still be attempted (not skipped outright).
         summary = cp.run_risk_stratification(run, dry_run=True)
         matched_gleason_cox = [
             (tag, status)
             for tag, status, _elapsed in summary
-            if "matched/gleason/cox" in tag and "gleason_somatic" not in tag
+            if "matched/gleason_somatic/cox" in tag
         ]
         assert matched_gleason_cox
         captured = capsys.readouterr()
