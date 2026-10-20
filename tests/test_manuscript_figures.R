@@ -24,9 +24,11 @@ stopifnot(dfci_spec$key=="03_dfci_univariable",identical(dfci_spec$row_heights,c
   identical(manuscript_km_y_label,"Platinum-free\nprobability"),
   identical(ALBUMIN_DAY180_NUDGE,c(x=-.8,y=1.7)))
 multivariable_spec <- manuscript_specs()[[4]]
-stopifnot(multivariable_spec$key=="04_multivariable_labs",length(multivariable_spec$members)==8,
-  multivariable_spec$width==8.5,multivariable_spec$height==11.8,
-  identical(multivariable_spec$row_heights,c(.9,.9,1,1)),
+stopifnot(multivariable_spec$key=="04_multivariable_labs",length(multivariable_spec$members)==7,
+  multivariable_spec$members[1]=="figure4a_discrimination_auc_platinum",
+  !any(grepl("cindex",multivariable_spec$members,fixed=TRUE)),
+  multivariable_spec$width==8.5,multivariable_spec$height==9,
+  identical(multivariable_spec$row_heights,c(.9,1,1)),
   manuscript_multivariable_legend_height==.14)
 landmark_header <- manuscript_center_landmark_header(ggplot()+labs(subtitle="+90 days"))
 stopifnot(landmark_header$theme$plot.subtitle$face=="bold",
@@ -45,6 +47,9 @@ stopifnot(length(captions)==11,identical(names(captions),c(sprintf("%02d_%s",1:8
   all(startsWith(unname(captions[federated_keys]),paste0("Federated Figure ",3:5,". "))),
   grepl("22,138 patients (664 platinum events)",captions[["federated_03_univariable"]],fixed=TRUE),
   grepl("without Dana-Farber",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
+  grepl("Gleason score and age (b)",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
+  grepl("AUC(t)",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
+  !any(grepl("C-index",unname(captions),fixed=TRUE)),
   grepl("180-day landmark",captions[["03_dfci_univariable"]],fixed=TRUE),
   grepl("≤0.2453",captions[["03_dfci_univariable"]],fixed=TRUE),
   !grepl("day-0 landmark",captions[["03_dfci_univariable"]],fixed=TRUE),
@@ -140,7 +145,8 @@ importance <- expand_grid(landmark_days=c(0,90,180),feature=c("PSA__max","person
 federated_models <- manuscript_federated_multivariable(performance,coefficients,importance)
 stopifnot(grepl("person_id",federated_models$legend,fixed=TRUE),
   federated_models$spec$key=="08_federated_multivariable",
-  federated_models$spec$width==8.5,federated_models$spec$height==11.8,
+  federated_models$spec$width==8.5,federated_models$spec$height==9,
+  length(federated_models$spec$titles)==3,
   inherits(federated_models$plot,"gtable"),nrow(federated_models$data)==12,
   identical(levels(federated_models$data$name),names(FEDERATED_MODEL_COLORS)),
   grepl("Day 90, Cox baseline (age)",federated_models$legend,fixed=TRUE),
@@ -153,4 +159,45 @@ stopifnot(inherits(unknown_series,"error"))
 original <- plot_federated_comparison(labs,"PSA","Test")
 stopifnot(identical(original$scales$get_scales("colour")$palette(2),
   c(`Dana-Farber`="#0072B2",`Federated*`="#222222")))
+clinical_fixture <- function() tidyr::expand_grid(endpoint=c("NEPC","avpc","platinum"),landmark_days=c(0,180),
+    subpopulation=c("gleason","trio","other"),
+    bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),
+    model=c("transferred_labs","transferred_age","clinical_cox")) %>%
+  mutate(model_family=if_else(startsWith(bundle,"xgboost"),"xgboost_cox","elastic_net_cox"),
+    n_patients=if_else(subpopulation=="gleason",400,150),n_events=20,n_scored=n_patients,n_scored_events=n_events,
+    c_index=case_when(model=="clinical_cox"~.7,model=="transferred_labs"~.62,TRUE~.55),
+    c_index_lo=c_index-.05,c_index_hi=c_index+.05,
+    delta_c_vs_transferred=if_else(model=="transferred_labs",NA_real_,c_index-.62),
+    delta_lo=delta_c_vs_transferred-.04,delta_hi=delta_c_vs_transferred+.04,
+    mean_auc=c_index+.02,mean_auc_lo=mean_auc-.05,mean_auc_hi=mean_auc+.05,
+    delta_auc_vs_transferred=if_else(model=="transferred_labs",NA_real_,mean_auc-.64),
+    delta_auc_lo=delta_auc_vs_transferred-.04,delta_auc_hi=delta_auc_vs_transferred+.04,
+    c_index_apparent=NA_real_,mean_auc_apparent=NA_real_,n_folds=5,n_failed_folds=0,n_convergence_warnings=0,
+    note=NA_character_)
+# Federated Figure 5: a = full-cohort discrimination, b/c = vs Gleason and TP53/RB1/PTEN Cox.
+transfer_metrics <- tidyr::expand_grid(endpoint=c("nepc","avpc","platinum"),
+    bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),
+    landmark_days=c(0,180),config=c("both","baseline")) %>%
+  mutate(model_family=if_else(startsWith(bundle,"xgboost"),"xgboost_cox","elastic_net_cox"),
+    n_patients=1000,n_events=30,c_index=.6,c_index_lo=.55,c_index_hi=.65,
+    delta_c_vs_baseline=if_else(config=="both",.05,NA_real_),delta_c_lo=.01,delta_c_hi=.09,
+    mean_auc=.62,mean_auc_lo=.57,mean_auc_hi=.67,
+    delta_auc_vs_baseline=if_else(config=="both",.06,NA_real_),delta_auc_lo=.02,delta_auc_hi=.1)
+transfer_clinical <- mutate(filter(clinical_fixture(),subpopulation!="other"),endpoint=tolower(endpoint))
+fig5 <- manuscript_federated_transfer_no_dfci(transfer_metrics,transfer_clinical)
+stopifnot(fig5$spec$key=="federated_05_transfer_no_dfci",inherits(fig5$plot,"gtable"),
+  identical(fig5$spec$titles,c("Discrimination","vs. Gleason score","vs. TP53/RB1/PTEN")),
+  fig5$spec$height==10.5,nrow(fig5$spec$layout)==3,
+  grepl("b: patients with a Gleason score",fig5$legend,fixed=TRUE),
+  grepl("c: patients with sequencing",fig5$legend,fixed=TRUE),
+  grepl("PLATINUM: 0d 400/20",fig5$legend,fixed=TRUE),grepl("paired ΔAUC(t)",fig5$legend,fixed=TRUE),
+  !grepl("ΔC",fig5$legend,fixed=TRUE))
+fig5_trio <- manuscript_federated_transfer_no_dfci(transfer_metrics,filter(transfer_clinical,subpopulation=="trio"))
+stopifnot(identical(fig5_trio$spec$titles,c("Discrimination","vs. TP53/RB1/PTEN")),
+  grepl("b: patients with sequencing",fig5_trio$legend,fixed=TRUE))
+fallback_message <- NULL
+fig5_a <- withCallingHandlers(manuscript_federated_transfer_no_dfci(transfer_metrics,NULL),
+  message=function(m) {fallback_message <<- c(fallback_message,conditionMessage(m)); invokeRestart("muffleMessage")})
+stopifnot(length(fig5_a$spec$titles)==1,fig5_a$spec$height==4.8,
+  any(grepl("clinical comparison unavailable",fallback_message,fixed=TRUE)))
 cat("Manuscript data fidelity, missing cells, audit notes and isolated styling passed.\n")

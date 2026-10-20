@@ -18,9 +18,10 @@ Pipeline:
    filter, the incident gate (events at/before the landmark are dropped) and
    the 3650-day administrative censoring are identical across endpoints.
 3. Score every bundle model with the pooled preprocessing (never refit).
-4. Evaluate: Harrell's C with a patient bootstrap CI, the paired C-index gain
-   of the full model over the age-only baseline, Uno's C, cumulative/dynamic
-   AUC(t), and a Cox slope of the endpoint on the standardized risk score.
+4. Evaluate: Harrell's C and IPCW cumulative/dynamic mean AUC(t), each with a
+   patient bootstrap CI and the paired gain of the full model over the
+   age-only baseline; Uno's C, per-horizon AUC(t), and a Cox slope of the
+   endpoint on the standardized risk score.
 
 Death is not a competing event here: NEPC/AVPC follow-up ends at last contact,
 which is the death date for patients who died.  Platinum is scored alongside as
@@ -216,12 +217,39 @@ def harrell_c(duration, event, risk) -> float:
     return float(concordance_index(duration, -np.asarray(risk), event_observed=event))
 
 
-def bootstrap_c(duration, event, risks: dict[str, np.ndarray], n_boot: int, seed: int):
-    """Patient-bootstrap Harrell's C for each score, resampling rows jointly.
+def estimable_horizons(duration, event, horizons_days) -> list:
+    """Horizons with an event at or before them and follow-up beyond them."""
+    duration = np.asarray(duration, dtype=float)
+    event = np.asarray(event).astype(bool)
+    if not len(duration):
+        return []
+    return [h for h in horizons_days
+            if (event & (duration <= h)).any() and h < duration.max()]
 
-    Joint resampling makes the paired differences between scores valid.
-    Returns ``{name: array of n_boot C values}``.
+
+def mean_auc(duration, event, risk, horizons_days) -> float:
+    """IPCW cumulative/dynamic mean AUC(t) over ``horizons_days``.
+
+    Censoring is estimated on this sample. NaN when any horizon is
+    inestimable here, so every score in a sample shares the same horizons.
     """
+    from sksurv.metrics import cumulative_dynamic_auc
+    from sksurv.util import Surv
+
+    duration = np.asarray(duration, dtype=float)
+    event = np.asarray(event).astype(bool)
+    horizons = list(horizons_days)
+    if not horizons or estimable_horizons(duration, event, horizons) != horizons:
+        return float("nan")
+    y = Surv.from_arrays(event=event, time=duration)
+    try:
+        return float(cumulative_dynamic_auc(
+            y, y, np.asarray(risk, dtype=float), np.asarray(horizons, dtype=float))[1])
+    except Exception:
+        return float("nan")
+
+
+def _bootstrap(duration, event, risks: dict[str, np.ndarray], n_boot: int, seed: int, metric):
     rng = np.random.default_rng(seed)
     duration = np.asarray(duration, dtype=float)
     event = np.asarray(event, dtype=int)
@@ -232,8 +260,31 @@ def bootstrap_c(duration, event, risks: dict[str, np.ndarray], n_boot: int, seed
         if event[idx].sum() < 1:
             continue
         for k, r in risks.items():
-            out[k][b] = harrell_c(duration[idx], event[idx], np.asarray(r)[idx])
+            out[k][b] = metric(duration[idx], event[idx], np.asarray(r)[idx])
     return out
+
+
+def bootstrap_c(duration, event, risks: dict[str, np.ndarray], n_boot: int, seed: int):
+    """Patient-bootstrap Harrell's C for each score, resampling rows jointly.
+
+    Joint resampling makes the paired differences between scores valid.
+    Returns ``{name: array of n_boot C values}``.
+    """
+    return _bootstrap(duration, event, risks, n_boot, seed, harrell_c)
+
+
+def bootstrap_mean_auc(duration, event, risks: dict[str, np.ndarray], horizons_days,
+                       n_boot: int, seed: int):
+    """Patient-bootstrap mean AUC(t), resampling rows jointly as in bootstrap_c.
+
+    The horizons are fixed (those estimable on the full sample) and censoring
+    is re-estimated in each resample; a resample where a horizon is
+    inestimable is NaN for every score, so paired differences stay paired.
+    The same seed draws the same resamples as bootstrap_c.
+    """
+    horizons = list(horizons_days)
+    return _bootstrap(duration, event, risks, n_boot, seed,
+                      lambda d, e, r: mean_auc(d, e, r, horizons))
 
 
 def _ci(values: np.ndarray) -> tuple[float, float]:
@@ -288,8 +339,7 @@ def ipcw_metrics(duration, event, risk, horizons_days) -> tuple[dict, pd.DataFra
     risk = np.asarray(risk, dtype=float)
     y = Surv.from_arrays(event=event, time=duration)
 
-    ok = [h for h in horizons_days
-          if (event & (duration <= h)).any() and h < duration.max()]
+    ok = estimable_horizons(duration, event, horizons_days)
     summary = {"uno_c": np.nan, "mean_auc": np.nan, "note": ""}
     if not ok:
         summary["note"] = "no estimable horizon"
@@ -334,7 +384,9 @@ def evaluate_transfer(
 
     Each (endpoint, landmark) frame is built once and shared by every bundle
     and config, so the full and baseline models are compared on the same
-    patients and their bootstrap is paired.
+    patients and their bootstrap is paired. Harrell's C and mean AUC(t) share
+    the same resamples; mean AUC(t) uses the horizons estimable on the full
+    frame, and its baseline difference ``delta_auc_vs_baseline`` is paired.
     """
     all_landmarks = sorted({
         int(m["landmark_days"]) for b in bundles.values() for m in b["models"]
@@ -402,11 +454,14 @@ def evaluate_transfer(
                         uc.insert(0, "bundle", stem)
                         units.append(uc)
 
+            keyed = {f"{s}|{c}": r for (s, c), r in risks.items()}
             boot = bootstrap_c(
-                duration, event,
-                {f"{s}|{c}": r for (s, c), r in risks.items()},
-                n_bootstrap, seed,
+                duration, event, keyed, n_bootstrap, seed,
             ) if n_bootstrap > 0 else {}
+            horizons = estimable_horizons(duration, event, horizons_days)
+            boot_auc = bootstrap_mean_auc(
+                duration, event, keyed, horizons, n_bootstrap, seed,
+            ) if n_bootstrap > 0 and horizons else {}
 
             for (stem, config), risk in risks.items():
                 bundle = bundles[stem]
@@ -436,6 +491,16 @@ def evaluate_transfer(
                 row.update(cox_slope(duration, event, risk))
                 ipcw, auc_df = ipcw_metrics(duration, event, risk, horizons_days)
                 row.update(ipcw)
+                if key in boot_auc:
+                    row["mean_auc_lo"], row["mean_auc_hi"] = _ci(boot_auc[key])
+                if config != "baseline" and (stem, "baseline") in risks:
+                    row["mean_auc_baseline"] = mean_auc(
+                        duration, event, risks[(stem, "baseline")], horizons
+                    )
+                    row["delta_auc_vs_baseline"] = row["mean_auc"] - row["mean_auc_baseline"]
+                    if key in boot_auc and base_key in boot_auc:
+                        diff = boot_auc[key] - boot_auc[base_key]
+                        row["delta_auc_lo"], row["delta_auc_hi"] = _ci(diff)
                 metrics.append(row)
                 if not auc_df.empty:
                     auc_df.insert(0, "config", config)
@@ -454,9 +519,19 @@ def evaluate_transfer(
                         f", vs age-only {delta:+.3f}" if delta is not None
                         and np.isfinite(delta) else ""
                     )
+                    auc_ci = (
+                        f" [{row['mean_auc_lo']:.3f}, {row['mean_auc_hi']:.3f}]"
+                        if np.isfinite(row.get("mean_auc_lo", np.nan)) else ""
+                    )
+                    d_auc = row.get("delta_auc_vs_baseline")
+                    auc_extra = (
+                        f", vs age-only {d_auc:+.3f}" if d_auc is not None
+                        and np.isfinite(d_auc) else ""
+                    )
                     print(
                         f"[transfer]     {stem} {config}: C={row['c_index']:.3f}{ci}"
-                        f"{extra}, HR/SD={row['hr_per_sd']:.2f}"
+                        f"{extra}; mean AUC(t)={row['mean_auc']:.3f}{auc_ci}{auc_extra}"
+                        f", HR/SD={row['hr_per_sd']:.2f}"
                     )
 
     def _cat(frames):

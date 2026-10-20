@@ -423,7 +423,7 @@ notebook. All operate on the merged `profile_data` run:
   no exclusion); metastatic and pre-ADT-castrate runs skip them.
   `03` also runs an available-case sensitivity at 0, +90, and +180 days:
   Gleason-versus-labs models among identical Gleason-available patients (the Figure 4C
-  AUC/C-index panels).
+  mean AUC(t) panel).
   (`tasks_for_run(run)` builds the per-run task grid from `run["landmarks"]`); either can be
   re-run alone without touching Stage 1-3 outputs.
   - **Clinical/somatic component combinations** (`03`, `run_multivariate_clinical_combinations` /
@@ -499,11 +499,12 @@ notebook. All operate on the merged `profile_data` run:
   combines the three DFCI landmark volcanoes with PSA/testosterone log1p trajectories
   by platinum status and bottom-versus-top-20% KM curves. KM defaults to day 0;
   `COMPASS_COMBINED_KM_LANDMARK=90` or `180` selects another landmark.
-  Figure 4 additionally emits `figure4c_sensitivity_gleason_{auc,cindex}`, the held-out
+  Figure 4 additionally emits `figure4c_sensitivity_gleason_auc`, the held-out
   available-case comparison of labs against Gleason features at every landmark, alongside
   `figure4s_multivariate_all_models`, a supplemental held-out comparison
-  of elastic-net Cox, XGBoost, and death-censored Dynamic-DeepHit using mean AUC(t), C-index, and
-  integrated Brier score. If optional `03b_multivariate_longitudinal.ipynb` results are absent, the
+  of elastic-net Cox, XGBoost, and death-censored Dynamic-DeepHit using mean AUC(t) and
+  integrated Brier score. All figures plot discrimination as mean AUC(t); C-index stays in
+  the CSVs. If optional `03b_multivariate_longitudinal.ipynb` results are absent, the
   figure and data CSV mark Dynamic-DeepHit as missing instead of suppressing the supplement.
   - **LLM label strata:** alongside the existing `LLM_v3_labels.tsv`-driven Figure 2, the pipeline
     loads `primary_subtype_labels.parquet` from
@@ -1185,13 +1186,14 @@ each endpoint's date in the federated chain's event slot, and reuses
 `federated_scoring.build_landmark_frame` unchanged, so events at/before the
 landmark are dropped (incident risk set) and follow-up is censored at 3650 days.
 NEPC/AVPC are censored at last contact (death is not a competing event).
-Outputs: `transfer_metrics.csv` (Harrell C + bootstrap CI, paired ΔC vs the
-age-only baseline, Uno's C, mean AUC(t), HR per SD of risk),
+Outputs: `transfer_metrics.csv` (mean AUC(t) + bootstrap CI and paired ΔAUC(t) vs the
+age-only baseline, which the figures plot; Harrell C + CI, paired ΔC, Uno's C, HR per SD
+of risk),
 `transfer_auc_t.csv`, `transfer_scores.csv`, `transfer_coverage.csv`, and
 `transfer_unit_check.csv`. The last one compares local feature means with the
 bundle's pooled means; a flagged row (>3x off) almost always means a unit
 mismatch between the DFCI and OMOP lab pipelines. Resolve those before you read
-the C-index.
+the discrimination metrics.
 
 Arm B (`federated_*_no_DFCI/`) never saw a DFCI patient, so it is an external
 validation on all three endpoints. It writes `transfer_metrics.csv` and
@@ -1200,13 +1202,13 @@ validation on all three endpoints. It writes `transfer_metrics.csv` and
 `04_prep_figure_data.ipynb` after 09, then
 `COMPASS_FIGURE_SCOPE=federated Rscript COMPASS/survival_analysis/05_figures.R`
 to render `figures/ADT/federated/transfer_discrimination_no_dfci__platinum.{png,csv}`
-(C-index, ΔC vs. age only, and mean AUC(t) by endpoint) and federated manuscript
+(mean AUC(t) and paired ΔAUC(t) vs. age only, by endpoint) and federated manuscript
 Figure 5.
 
 With `RUN_WITH_DFCI = True`, arm A writes the same files to
 `COMPASS_FEDERATED_TRANSFER` (default `$COMPASS_RHINO_ROOT/federated_transfer_adt_w_MSK`),
 rendered as `transfer_discrimination__platinum`, and arm B also writes
-`transfer_with_vs_without_dfci.csv` (paired full-model ΔC, without − with
+`transfer_with_vs_without_dfci.csv` (paired full-model ΔAUC(t) and ΔC, without − with
 Dana-Farber, on the same patients and bootstrap resamples), rendered as
 `transfer_dfci_ablation__platinum`. Arm A and the comparison are skipped
 when their files are missing.
@@ -1235,8 +1237,8 @@ The federated job also writes a separate manuscript set to
 | File | Content |
 |---|---|
 | `federated_03_univariable` | Figure 3 layout: pooled univariable Cox volcanoes at days 0/90/180, pooled PSA/testosterone trajectories and day-180 extreme-quintile KM curves |
-| `federated_04_multivariable` | Figure 8 layout, with the full models refit without DFCI added to the AUC(t)/C-index rows |
-| `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/NEPC/AVPC: C-index, ΔC vs. age only, and AUC(t) by horizon |
+| `federated_04_multivariable` | Figure 8 layout, with the full models refit without DFCI added to the AUC(t) row |
+| `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/NEPC/AVPC: (a) mean AUC(t) and paired ΔAUC(t) vs. age only; (b, c) paired ΔAUC(t) vs. local out-of-fold Gleason + age and TP53/RB1/PTEN + altered-gene count + age Cox models |
 
 The local Figure 3 (`03_dfci_univariable`) still uses DFCI patient-level data.
 

@@ -173,8 +173,10 @@ def federated_within_site_file(federated_path: Path, filename: str) -> Path:
 
 # 09_federated_transfer.ipynb outputs; mirrors federated_transfer_dir() in figure_workflow.R.
 FEDERATED_TRANSFER_FILES = ("transfer_metrics.csv", "transfer_auc_t.csv")
-# 09's arm B (bundles refit without Dana-Farber) adds the paired with/without comparison.
-FEDERATED_TRANSFER_NO_DFCI_FILES = FEDERATED_TRANSFER_FILES + ("transfer_with_vs_without_dfci.csv",)
+# 09's arm B (bundles refit without Dana-Farber) adds the paired with/without comparison
+# and the Gleason / TP53-RB1-PTEN Cox comparison (federated Figure 5 b-c).
+FEDERATED_TRANSFER_NO_DFCI_FILES = FEDERATED_TRANSFER_FILES + (
+    "transfer_with_vs_without_dfci.csv", "transfer_clinical_comparison.csv")
 # Federated multivariable exports beside the across-site results CSV
 # (mirrors FEDERATED_MULTIVARIABLE in figure_workflow.R). Each bundle also has
 # a refit without Dana-Farber in "<directory>_no_DFCI".

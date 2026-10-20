@@ -1,4 +1,4 @@
-# Clinical-combination C-index, risk-stratification KM, and TP53/PTEN/RB1
+# Clinical-combination mean AUC(t), risk-stratification KM, and TP53/PTEN/RB1
 # co-mutation figures (Figure 4e-h). Run from the repo root:
 #   Rscript tests/test_risk_stratification_figures.R
 source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
@@ -87,7 +87,7 @@ for (arm in combo_arms) for (model in c("cox", "xgboost")) {
   directory <- file.path(base, "clinical_combinations", "gleason_somatic", arm, model, "landmark_90", "both")
   dir.create(directory, recursive = TRUE)
   write_csv(tibble(endpoint = "platinum", test_c_index = .6 + nchar(arm) / 100,
-                   test_mean_auc_t = .7, n_train_val = 300, n_test = 100),
+                   test_mean_auc_t = .7 + nchar(arm) / 100, n_train_val = 300, n_test = 100),
             file.path(directory, if (model == "cox") "cox_agg_multivariable_metrics.csv" else
               "landmark_xgboost_metrics.csv"))
 }
@@ -107,14 +107,17 @@ with(env, {
 for (expr in block) eval(expr, env)
 stems <- ls(saved)
 
-# Raw C-index only: one figure per combination cohort that has metrics, no deltas.
-stopifnot("figure4e_combinations_gleason_somatic_cindex_platinum" %in% stems,
-          !"figure4e_combinations_gleason_cindex_platinum" %in% stems)
-combo <- tables[["figure4e_combinations_gleason_somatic_cindex_platinum"]]
+# Raw mean AUC(t) only: one figure per combination cohort that has metrics, no deltas.
+# C-index stays in the table but is not plotted.
+stopifnot("figure4e_combinations_gleason_somatic_auc_platinum" %in% stems,
+          !any(grepl("^figure4e_combinations_.*_cindex_", stems)),
+          !"figure4e_combinations_gleason_auc_platinum" %in% stems)
+combo <- tables[["figure4e_combinations_gleason_somatic_auc_platinum"]]
 stopifnot(nrow(combo) == 2 * 2 * 7, !any(grepl("delta|diff", names(combo))),
-          sum(is.finite(combo$cindex)) == 14)
-combo_plot <- saved[["figure4e_combinations_gleason_somatic_cindex_platinum"]]
-stopifnot(all(na.omit(combo_plot$data$cindex) == combo$cindex[is.finite(combo$cindex)]))
+          sum(is.finite(combo$auc)) == 14, sum(is.finite(combo$cindex)) == 14)
+combo_plot <- saved[["figure4e_combinations_gleason_somatic_auc_platinum"]]
+stopifnot(all(na.omit(combo_plot$data$auc) == combo$auc[is.finite(combo$auc)]),
+          rlang::as_label(combo_plot$mapping$y) == "auc")
 
 # Each scheme/source gets its own KMs; test and cv_oof never share a stem.
 stopifnot(all(c("figure4f_riskstrat_cv_oof_full_risk_score_landmark90",
@@ -146,11 +149,11 @@ stopifnot(figure_compilation_spec("figure4g_withinstrat_test_tp53_rb1_tp53_only_
             "withinstrat_cv_oof_tp53_lm0",
           figure_compilation_spec("figure4g_withinstrat_test_trio_combinations_tp53_rb1_landmark0")$key ==
             "withinstrat_test_trio_combinations_lm0")
-stopifnot(is.null(figure_compilation_spec("figure4e_combinations_gleason_cindex_platinum")),
+stopifnot(is.null(figure_compilation_spec("figure4e_combinations_gleason_auc_platinum")),
           is.null(figure_compilation_spec("figure4h_comutation_trio_combinations_landmark90")))
 leaf <- "platinum__all__incl"
-stopifnot(figure_public_path(file.path("/x/ADT/by_figure/figure4/e_combinations_gleason_cindex_platinum", leaf)) ==
-            file.path("/x/ADT/prediction", paste0("combinations_gleason_cindex__", leaf)),
+stopifnot(figure_public_path(file.path("/x/ADT/by_figure/figure4/e_combinations_gleason_auc_platinum", leaf)) ==
+            file.path("/x/ADT/prediction", paste0("combinations_gleason_auc__", leaf)),
           figure_public_path(file.path("/x/ADT/by_figure/figure4/h_comutation_trio_combinations_landmark90", leaf)) ==
             file.path("/x/ADT/prediction", paste0("comutation_trio_combinations_lm90__", leaf)),
           figure_public_path(file.path("/x/ADT/by_figure/figure4/a_discrimination_auc_platinum", leaf)) ==

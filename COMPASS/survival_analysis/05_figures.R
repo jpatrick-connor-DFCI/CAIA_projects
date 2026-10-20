@@ -127,8 +127,8 @@
 # Individual KM panels and the three-landmark KM sheets are also retained.
 #
 # Clinical combinations and risk stratification (ADT runs, under `prediction/`):
-# `combinations_<gleason|gleason_somatic>_cindex__...` shows the raw held-out test
-# C-index of every combination arm by landmark and model (no paired deltas; CSV
+# `combinations_<gleason|gleason_somatic>_auc__...` shows the raw held-out test
+# mean AUC(t) of every combination arm by landmark and model (no paired deltas; CSV
 # in `prediction/data/`). `compiled/prediction/riskstrat_<test|cv_oof>_<source>_lm<N>__...`
 # pages the KM curves for the labs risk score and each clinical or comparison-arm
 # stratifier (source `full` or `<cohort>_<cox|xgboost>` matched cohorts);
@@ -177,7 +177,9 @@
 # `federated_04_multivariable` (the Figure 8 layout, with the full models refit without
 # Dana-Farber added as darker bars in the discrimination rows), and
 # `federated_05_transfer_no_dfci` (the models trained without Dana-Farber scored on
-# Dana-Farber platinum/NEPC/AVPC: C-index and paired ΔC vs. age, plus AUC(t) by horizon).
+# Dana-Farber platinum/NEPC/AVPC: a, mean AUC(t) and paired ΔAUC(t) vs. age; b, c, the full models
+# vs. local out-of-fold Cox models of Gleason + age and of TP53/RB1/PTEN + altered-gene
+# count + age, in the patients with a Gleason score / with sequencing before the landmark).
 # The local Figure 3 stays on Dana-Farber patient-level data. The cohort
 # sensitivity components are assembled into one continuous multipanel figure for
 # each analysis setting. Federated manuscript plots reuse the original subplot
@@ -199,9 +201,9 @@
 # Trajectory patient-count/scale subtitles are kept in the external legend, and
 # KM log-rank values are drawn inside their panels. The manuscript figure fixes
 # both KM panels at the 180-day landmark.
-# The multivariable-labs manuscript figure includes held-out AUC(t) and C-index
-# panels followed by three-landmark Elastic-Net coefficient and XGBoost gain rows;
-# the panel-c and panel-d landmark headers are bold and centered above their
+# The multivariable-labs manuscript figure includes a held-out AUC(t) panel
+# followed by three-landmark Elastic-Net coefficient and XGBoost gain rows;
+# the panel-b and panel-c landmark headers are bold and centered above their
 # corresponding Elastic-Net coefficient and XGBoost importance subplots. The
 # importance rows share the source lab-category colors. Its 8.5-inch canvas
 # provides additional horizontal space for the three-column coefficient and gain rows.
@@ -220,7 +222,7 @@
 # titles, endpoint, cohort, and landmark metadata. No duplicate thumbnail files are made.
 #
 # R compiles classifier validation into one figure and subtype/enrichment into one;
-# AUC/C-index into paired comparisons; importance into one three-landmark sheet per
+# AUC(t) into paired comparisons; importance into one three-landmark sheet per
 # model; lab-extreme KM into one three-landmark sheet per lab; and mutation KM into
 # pages of at most four panels. Model fits, counts, time origins, and tests are unchanged.
 # Local univariate lab volcanoes retain individual day-0/90/180 plots and also
@@ -288,7 +290,7 @@
 # and XGBoost from `federated_xgboost/xgboost_federated_{metrics,importance}_adt.csv`.
 # Each model gets two compiled figures built with the local PROFILE Figure 4
 # plotting functions. `federated/{elasticnet,xgboost}_performance__platinum` pairs
-# held-out test mean AUC(t) and C-index for labs versus the age baseline at days
+# held-out test mean AUC(t) for labs versus the age baseline at days
 # 0/90/180. `elasticnet_coefficients__platinum` shows the three landmarks' top 15
 # nonzero coefficients by absolute value, and `xgboost_importance__platinum` the top
 # 15 positive-gain features. Both use the local labels, clinical-category colors,
@@ -329,9 +331,12 @@
 # `federated_transfer_adt_no_DFCI/`, 09's `OUTPUT_DIR_NO_DFCI`) scores the same
 # bundles refit without Dana-Farber, an external validation. It renders
 # `federated/transfer_discrimination_no_dfci__platinum` in the same layout and
-# `federated/transfer_dfci_ablation__platinum`: full-model C-index with vs. without
-# Dana-Farber in training, plus the paired ΔC from `transfer_with_vs_without_dfci.csv`
-# (only when arm A was also run). Either arm is skipped when its files are missing.
+# `federated/transfer_dfci_ablation__platinum`: full-model mean AUC(t) with vs. without
+# Dana-Farber in training, plus the paired ΔAUC(t) from `transfer_with_vs_without_dfci.csv`
+# (only when arm A was also run). Arm B's `transfer_clinical_comparison.csv`
+# (09's Gleason / TP53-RB1-PTEN section) renders
+# `federated/transfer_clinical_comparison_no_dfci__platinum` and feeds Federated Figure 5 b-c;
+# without it, Figure 5 is drawn with panel a only. Either arm is skipped when its files are missing.
 # Missing optional XGBoost files are reported and skipped independently. Run `04`
 # again after this update to register both files (including absent paths), then
 # run `05_figures.R` with stage `all`. All Python remains in `04`; graphics caches stay in data.

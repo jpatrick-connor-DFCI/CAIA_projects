@@ -2819,9 +2819,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     plot_model_discrimination(discrimination_data,metric,ylabel,SERIES_COLORS,LANDMARKS,show_legend)
   }
 
+  # Mean AUC(t) only; the C-index stays in the metrics CSVs but is not plotted.
   disc_panels <- list(
-    list(sprintf("figure4a_discrimination_auc_%s", ENDPOINT),    "auc",    "Test Mean AUC(t)"),
-    list(sprintf("figure4a_discrimination_cindex_%s", ENDPOINT), "cindex", "Test C-index")
+    list(sprintf("figure4a_discrimination_auc_%s", ENDPOINT), "auc", "Test Mean AUC(t)")
   )
   for (dp in disc_panels) {
     p <- render_discrimination_panel(dp[[2]], dp[[3]], show_legend = TRUE) +
@@ -2916,7 +2916,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
 
   # Clinical combinations (compass_pipeline.run_multivariate_clinical_combinations):
-  # raw held-out test C-index for every arm. Only the Gleason + somatic
+  # raw held-out test mean AUC(t) for every arm. Only the Gleason + somatic
   # available-case cohort is fit (all 7 combinations); it has one shared split,
   # so arms within a panel are comparable; nothing here is paired or
   # differenced against labs.
@@ -2941,19 +2941,20 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         v <- read_endpoint_performance(file.path(BASE, "clinical_combinations", combo_cohort, arm, model,
           sprintf("landmark_%s", lm), "both", COMBINATION_METRIC_FILES[[model]]), ENDPOINT)
         tibble(cohort = combo_cohort, model = COMBINATION_MODELS[[model]], landmark_days = lm,
-               arm = arm, arm_label = COMBINATION_ARM_LABELS[[arm]], cindex = v[["cindex"]],
+               arm = arm, arm_label = COMBINATION_ARM_LABELS[[arm]], auc = v[["auc"]],
+               cindex = v[["cindex"]],
                n_train_val = v[["n_train_val"]], n_test = v[["n_test"]])
       }))))
     }))
-    if (!any(is.finite(combo$cindex))) {
-      message("Clinical-combination C-index skipped: no metrics under ",
+    if (!any(is.finite(combo$auc))) {
+      message("Clinical-combination mean AUC(t) skipped: no metrics under ",
               file.path(BASE, "clinical_combinations", combo_cohort))
       next
     }
-    combo_stem <- sprintf("figure4e_combinations_%s_cindex_%s", combo_cohort, ENDPOINT)
+    combo_stem <- sprintf("figure4e_combinations_%s_auc_%s", combo_cohort, ENDPOINT)
     write_table1(combo, file.path(OUT_DIR, combo_stem))
     # Arms share one available-case split per landmark; report that n once.
-    combo_n <- combo %>% filter(is.finite(cindex)) %>% group_by(landmark_days) %>%
+    combo_n <- combo %>% filter(is.finite(auc)) %>% group_by(landmark_days) %>%
       summarise(n = paste(sort(unique(n_train_val + n_test)), collapse = "/"),
                 n_test = paste(sort(unique(n_test)), collapse = "/"), .groups = "drop")
     landmark_levels <- sprintf("%s%d days", ifelse(LANDMARKS > 0, "+", ""), LANDMARKS)
@@ -2962,20 +2963,20 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                         levels = landmark_levels),
       arm_label = factor(arm_label, levels = unname(COMBINATION_ARM_LABELS[arms])),
       model = factor(model, levels = unname(COMBINATION_MODELS)))
-    p_combo <- ggplot(d_combo, aes(landmark, cindex, fill = arm_label)) +
+    p_combo <- ggplot(d_combo, aes(landmark, auc, fill = arm_label)) +
       geom_col(position = position_dodge(width = 0.88), width = 0.84, color = "white", na.rm = TRUE) +
-      geom_text(aes(label = ifelse(is.finite(cindex), sprintf("%.3f", cindex), "")),
+      geom_text(aes(label = ifelse(is.finite(auc), sprintf("%.3f", auc), "")),
                 position = position_dodge(width = 0.88), vjust = -0.35, size = 2.3,
                 show.legend = FALSE, na.rm = TRUE) +
       geom_hline(yintercept = 0.5, color = "grey", linetype = "dotted", linewidth = 0.9) +
       facet_wrap(~model, ncol = 1) +
       scale_fill_manual(values = COMBINATION_ARM_COLORS, name = NULL, drop = FALSE) +
       coord_cartesian(ylim = c(0, 1.04)) +
-      labs(x = NULL, y = "Held-out C-index",
+      labs(x = NULL, y = "Held-out mean AUC(t)",
            title = sprintf("Clinical combinations (Gleason + somatic cohort) — %s", ENDPOINT),
            subtitle = paste(sprintf("%s%dd: n=%s (test n=%s)", ifelse(combo_n$landmark_days > 0, "+", ""),
                                     combo_n$landmark_days, combo_n$n, combo_n$n_test), collapse = "; "),
-           caption = paste(COHORT_DISPLAY, "Raw held-out test C-index per arm; available-case cohort with source data by each landmark.")) +
+           caption = paste(COHORT_DISPLAY, "Raw held-out test mean AUC(t) per arm; available-case cohort with source data by each landmark.")) +
       theme_fig() +
       guides(fill = guide_legend(nrow = 2, byrow = TRUE)) +
       theme(legend.position = "top", legend.text = element_text(size = 9),
@@ -3108,8 +3109,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   multivariate_supplement_data <- multivariate_supplement_data %>%
     mutate(
       metrics_status = case_when(
-        is.finite(mean_auc_t) & is.finite(c_index) & is.finite(integrated_brier) ~ "available",
-        is.finite(mean_auc_t) | is.finite(c_index) | is.finite(integrated_brier) ~ "partial",
+        is.finite(mean_auc_t) & is.finite(integrated_brier) ~ "available",
+        is.finite(mean_auc_t) | is.finite(integrated_brier) ~ "partial",
         TRUE ~ "missing"
       ),
       source_path = if_else(
@@ -3140,14 +3141,14 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
   supplement_long <- multivariate_supplement_data %>%
     pivot_longer(
-      c(mean_auc_t, c_index, integrated_brier),
+      c(mean_auc_t, integrated_brier),
       names_to = "metric", values_to = "value"
     ) %>%
     mutate(
       metric = factor(
         metric,
-        levels = c("mean_auc_t", "c_index", "integrated_brier"),
-        labels = c("Mean AUC(t)", "C-index", "Integrated Brier score")
+        levels = c("mean_auc_t", "integrated_brier"),
+        labels = c("Mean AUC(t)", "Integrated Brier score")
       ),
       landmark = factor(
         sprintf("%s%d days", ifelse(landmark_days > 0, "+", ""), landmark_days),
@@ -3170,7 +3171,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     geom_hline(
       data = tibble(
         metric = factor(
-          c("Mean AUC(t)", "C-index"),
+          "Mean AUC(t)",
           levels = levels(supplement_long$metric)
         ),
         reference = 0.5
@@ -3198,7 +3199,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       ),
       x = NULL, y = NULL,
       caption = paste0(
-        "Higher AUC(t)/C-index and lower integrated Brier score indicate better performance. ",
+        "Higher AUC(t) and lower integrated Brier score indicate better performance. ",
         "Gaps indicate unavailable metrics."
       )
     ) +
@@ -3212,7 +3213,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     )
 
   supplement_stem <- "figure4s_multivariate_all_models"
-  save_fig(p_supplement, OUT_DIR, supplement_stem, width = 13, height = 5.5)
+  save_fig(p_supplement, OUT_DIR, supplement_stem, width = 9.5, height = 5.5)
   supplement_csv <- file.path(
     output_dir_for_stem(supplement_stem),
     paste0(COHORT_LEAF, "_data.csv")
@@ -4826,13 +4827,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       performance_endpoint <- intent_performance %>%
         filter(.data$endpoint == ENDPOINT)
       delta_cols <- intersect(
-        c("delta_c_index_met_minus_loc", "delta_mean_auc_t_met_minus_loc",
-          "delta_integrated_brier_met_minus_loc"),
+        c("delta_mean_auc_t_met_minus_loc", "delta_integrated_brier_met_minus_loc"),
         names(performance_endpoint)
       )
       if (nrow(performance_endpoint) > 0 && length(delta_cols) > 0) {
         METRIC_LABELS <- c(
-          delta_c_index_met_minus_loc = "C-index",
           delta_mean_auc_t_met_minus_loc = "Mean AUC(t)",
           delta_integrated_brier_met_minus_loc = "Integrated Brier"
         )
@@ -4863,7 +4862,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
               title = sprintf("%s held-out performance: metastatic minus localized",
                               toupper(ENDPOINT)),
               subtitle = paste0(
-                "Positive favors metastatic for C-index and AUC(t); negative\n",
+                "Positive favors metastatic for AUC(t); negative\n",
                 "favors metastatic for integrated Brier. Test cohorts differ, ",
                 "so these are descriptive contrasts, not paired tests."
               ),

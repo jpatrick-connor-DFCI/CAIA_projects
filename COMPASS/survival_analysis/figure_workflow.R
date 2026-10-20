@@ -108,7 +108,8 @@ figure_compilation_spec <- function(stem) {
     key <- sub("_(auc|cindex)_[^_]+$", "", stem)
     title <- if (grepl("gleason", key)) "Gleason vs. labs sensitivity" else
       if (grepl("somatic", key)) "Somatic vs. labs sensitivity" else "Labs vs. age baseline"
-    return(list(key=sub("^figure4[a-z]_", "", key), title=title, width=16, height=6.5, cols=2,
+    # One discrimination panel (mean AUC(t)) per figure; the C-index panel was retired.
+    return(list(key=sub("^figure4[a-z]_", "", key), title=title, width=8.5, height=6.5, cols=1,
       shared_caption=TRUE, shared_legend=TRUE))
   }
   # Risk-score stratification KMs: one page per scheme x source x landmark,
@@ -833,9 +834,11 @@ load_federated_multivariable <- function(path, family=names(FEDERATED_MULTIVARIA
   }
   d <- readr::read_csv(path,show_col_types=FALSE)
   needed <- c("analysis_label","endpoint","landmark_days",if(kind=="metrics")
-    c("model","cohort","config","test_c_index","test_mean_auc_t","n_test","n_events_test") else c("feature",spec$value))
+    c("model","cohort","config","test_mean_auc_t","n_test","n_events_test") else c("feature",spec$value))
   missing <- setdiff(needed,names(d))
   if(length(missing)) stop(what," input is missing: ",paste(missing,collapse=", "))
+  # The C-index is kept in the sidecar when present but is no longer plotted.
+  if(kind=="metrics" && !"test_c_index" %in% names(d)) d$test_c_index <- NA_real_
   d <- filter(d,tolower(analysis_label)=="adt",tolower(endpoint)=="platinum",landmark_days %in% c(0,90,180))
   if(kind=="metrics") {
     d <- filter(d,tolower(model)==spec$model,tolower(cohort)=="all",config %in% c("both","baseline"))
@@ -911,11 +914,8 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
       pull(note) %>% paste(collapse="; ")
     caption <- paste(version$note,"Held-out test metrics (not training or tuning CV). Gaps indicate unavailable metrics.",
       paste0("Test counts — ",count_note,"."),audit,sep="\n")
-    items <- lapply(c("auc","cindex"),function(metric) {
-      stem <- paste0("figure4a_discrimination_",metric,"_platinum")
-      list(plot=plot_model_discrimination(d,metric,if(metric=="auc") "Test Mean AUC(t)" else "Test C-index",
-        colors,show_legend=TRUE)+labs(caption=caption),stem=stem,destination=file.path(root,"platinum"))
-    })
+    items <- list(list(plot=plot_model_discrimination(d,"auc","Test Mean AUC(t)",colors,show_legend=TRUE)+
+      labs(caption=caption),stem="figure4a_discrimination_auc_platinum",destination=file.path(root,"platinum")))
     figure <- figure_compilation_spec(items[[1]]$stem)
     figure$title <- paste0("Federated ",spec$label,version$label,": labs vs. age baseline"); figure$context <- context
     p <- figure_combine(items,figure,tempdir())
@@ -963,7 +963,14 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
 # refit without Dana-Farber: external validation, paired with arm A on the same patients.
 FEDERATED_TRANSFER_FILES <- c("transfer_metrics.csv","transfer_auc_t.csv")
 FEDERATED_TRANSFER_PAIRED_FILE <- "transfer_with_vs_without_dfci.csv"
-FEDERATED_TRANSFER_NO_DFCI_FILES <- c(FEDERATED_TRANSFER_FILES,FEDERATED_TRANSFER_PAIRED_FILE)
+# 09 arm B in the patients with a Gleason score / with sequencing: the transferred
+# labs score vs a local out-of-fold Cox (federated_clinical_comparison.py).
+FEDERATED_TRANSFER_CLINICAL_FILE <- "transfer_clinical_comparison.csv"
+FEDERATED_TRANSFER_NO_DFCI_FILES <- c(FEDERATED_TRANSFER_FILES,FEDERATED_TRANSFER_PAIRED_FILE,
+  FEDERATED_TRANSFER_CLINICAL_FILE)
+FEDERATED_TRANSFER_CLINICAL <- c(gleason="Gleason + age",trio="TP53/RB1/PTEN + age")
+FEDERATED_TRANSFER_CLINICAL_COLORS <- c(`Gleason + age`="#1baf7a",`TP53/RB1/PTEN + age`="#8e44ad")
+FEDERATED_TRANSFER_CLINICAL_SCORES <- c("transferred_labs","transferred_age","clinical_cox")
 FEDERATED_TRANSFER_ENDPOINTS <- c(platinum="Platinum (training endpoint)",nepc="NEPC",avpc="AVPC")
 FEDERATED_TRANSFER_MODELS <- c(xgboost_cox="XGBoost",elastic_net_cox="Elastic-net Cox")
 FEDERATED_TRANSFER_ARMS <- list(
@@ -1004,17 +1011,20 @@ load_federated_transfer <- function(directory, kind=c("metrics","auc_t")) {
   }
   d <- readr::read_csv(path,show_col_types=FALSE)
   needed <- c("endpoint","bundle","landmark_days","config",if(kind=="metrics")
-    c("model_family","n_patients","n_events","c_index") else c("horizon_days","auc","n_cases"))
+    c("model_family","n_patients","n_events","mean_auc") else c("horizon_days","auc","n_cases"))
   missing <- setdiff(needed,names(d))
   if(length(missing)) stop("Federated transfer ",kind," input is missing: ",paste(missing,collapse=", "))
-  # Bootstrap CIs, the age-only comparison and IPCW summaries are absent when
-  # 09 ran without them; keep the columns so plots show gaps, not errors.
-  optional <- if(kind=="metrics") c("c_index_lo","c_index_hi","c_index_baseline","delta_c_vs_baseline",
-    "delta_c_lo","delta_c_hi","mean_auc") else character()
+  # Bootstrap CIs and the age-only comparison are absent when 09 ran without
+  # them (or predates the mean AUC(t) bootstrap); keep the columns so plots
+  # show gaps, not errors. Harrell's C stays in the CSV but is not plotted.
+  optional <- if(kind=="metrics") c("mean_auc_lo","mean_auc_hi","mean_auc_baseline","delta_auc_vs_baseline",
+    "delta_auc_lo","delta_auc_hi","c_index","c_index_lo","c_index_hi","c_index_baseline",
+    "delta_c_vs_baseline","delta_c_lo","delta_c_hi") else character()
   for(column in setdiff(optional,names(d))) d[[column]] <- NA_real_
   d <- mutate(d,endpoint=tolower(endpoint),config=as.character(config)) %>%
     filter(endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS))
-  bounded <- if(kind=="metrics") c("c_index","c_index_lo","c_index_hi","c_index_baseline","mean_auc") else "auc"
+  bounded <- if(kind=="metrics") c("mean_auc","mean_auc_lo","mean_auc_hi","mean_auc_baseline",
+    "c_index","c_index_lo","c_index_hi","c_index_baseline") else "auc"
   for(column in bounded) {
     if(!is.numeric(d[[column]]) && !all(is.na(d[[column]]))) stop("Non-numeric transfer metric: ",column)
     if(any(!is.na(d[[column]]) & (!is.finite(d[[column]]) | d[[column]]<0 | d[[column]]>1)))
@@ -1029,7 +1039,17 @@ load_federated_transfer <- function(directory, kind=c("metrics","auc_t")) {
   d
 }
 
-# 09's paired full-model comparison: C(no DFCI) - C(with DFCI) on the same
+# A transfer CSV written before 09 bootstrapped mean AUC(t) lacks the AUC
+# columns the figures plot: warn and skip it rather than stop the whole run.
+federated_transfer_stale <- function(d, needed, path) {
+  missing <- setdiff(needed,names(d))
+  if(!length(missing)) return(FALSE)
+  warning("Federated transfer input predates the mean AUC(t) columns (rerun 09_federated_transfer.ipynb); missing ",
+    paste(missing,collapse=", "),": ",path)
+  TRUE
+}
+
+# 09's paired full-model comparison: AUC(no DFCI) - AUC(with DFCI) on the same
 # patients and bootstrap resamples. Only the full ("both") config is plotted.
 load_federated_transfer_pairs <- function(directory) {
   path <- file.path(directory,FEDERATED_TRANSFER_PAIRED_FILE)
@@ -1038,13 +1058,14 @@ load_federated_transfer_pairs <- function(directory) {
     return(NULL)
   }
   d <- readr::read_csv(path,show_col_types=FALSE)
-  needed <- c("endpoint","bundle","landmark_days","n_patients","n_events",
-    "C_with_dfci","C_no_dfci","delta_c","delta_c_lo","delta_c_hi")
+  needed <- c("endpoint","bundle","landmark_days","n_patients","n_events")
   missing <- setdiff(needed,names(d))
   if(length(missing)) stop("Federated transfer paired input is missing: ",paste(missing,collapse=", "))
+  metrics <- c("AUC_with_dfci","AUC_no_dfci","delta_auc","delta_auc_lo","delta_auc_hi")
+  if(federated_transfer_stale(d,metrics,path)) return(NULL)
   d <- mutate(d,endpoint=tolower(endpoint)) %>% filter(endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS))
   if("config" %in% names(d)) d <- filter(d,as.character(config)=="both")
-  for(column in c("C_with_dfci","C_no_dfci","delta_c","delta_c_lo","delta_c_hi")) {
+  for(column in metrics) {
     if(!is.numeric(d[[column]]) && !all(is.na(d[[column]]))) stop("Non-numeric transfer metric: ",column)
     low <- if(startsWith(column,"delta")) -1 else 0
     if(any(!is.na(d[[column]]) & (!is.finite(d[[column]]) | d[[column]]<low | d[[column]]>1)))
@@ -1055,6 +1076,61 @@ load_federated_transfer_pairs <- function(directory) {
   if(anyDuplicated(d[c("endpoint","bundle","landmark_days")]))
     stop("Duplicate endpoint/bundle/landmark_days rows in federated transfer paired input")
   d
+}
+
+# 09's clinical comparison: one row per endpoint x landmark x subpopulation x
+# bundle x score. The local Cox rows repeat for each bundle so that each paired
+# ΔAUC(t) (local Cox - that bundle's transferred labs score) has its own row.
+load_federated_transfer_clinical <- function(directory) {
+  path <- file.path(directory,FEDERATED_TRANSFER_CLINICAL_FILE)
+  if(!file.exists(path)) {
+    warning("Federated transfer Gleason/TP53-RB1-PTEN comparison unavailable; missing: ",path)
+    return(NULL)
+  }
+  d <- readr::read_csv(path,show_col_types=FALSE)
+  needed <- c("endpoint","landmark_days","subpopulation","bundle","model_family","model",
+    "n_patients","n_events","n_scored","n_scored_events")
+  missing <- setdiff(needed,names(d))
+  if(length(missing)) stop("Federated transfer clinical input is missing: ",paste(missing,collapse=", "))
+  metrics <- c("mean_auc","mean_auc_lo","mean_auc_hi","delta_auc_vs_transferred","delta_auc_lo","delta_auc_hi")
+  if(federated_transfer_stale(d,metrics,path)) return(NULL)
+  d <- mutate(d,endpoint=tolower(endpoint),subpopulation=as.character(subpopulation),model=as.character(model)) %>%
+    filter(endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS),subpopulation %in% names(FEDERATED_TRANSFER_CLINICAL))
+  unknown <- setdiff(unique(d$model),FEDERATED_TRANSFER_CLINICAL_SCORES)
+  if(length(unknown)) stop("Unknown federated transfer clinical score: ",paste(unknown,collapse=", "))
+  for(column in metrics) {
+    if(!is.numeric(d[[column]]) && !all(is.na(d[[column]]))) stop("Non-numeric transfer metric: ",column)
+    low <- if(startsWith(column,"delta")) -1 else 0
+    if(any(!is.na(d[[column]]) & (!is.finite(d[[column]]) | d[[column]]<low | d[[column]]>1)))
+      stop("Invalid transfer metric: ",column)
+  }
+  if(any(!is.finite(d$n_events) | d$n_events<0 | d$n_events>d$n_patients) ||
+     any(!is.finite(d$n_scored) | d$n_scored>d$n_patients | d$n_scored_events>d$n_scored))
+    stop("Invalid transfer clinical patient/event counts")
+  keys <- c("endpoint","landmark_days","subpopulation","bundle","model")
+  if(anyDuplicated(d[keys])) stop("Duplicate ",paste(keys,collapse="/")," rows in federated transfer clinical input")
+  if(!nrow(d)) warning("No platinum/NEPC/AVPC rows in federated transfer clinical input: ",path)
+  d
+}
+
+# Mean AUC(t) of each transferred full model and the local Cox (one point; it does
+# not depend on the bundle), plus each bundle's paired ΔAUC(t), local Cox - transferred.
+prepare_federated_transfer_clinical <- function(d, subpopulations=names(FEDERATED_TRANSFER_CLINICAL)) {
+  d <- filter(rename(d,score=model),subpopulation %in% subpopulations)
+  d <- label_federated_transfer(d,sort(unique(d$landmark_days)))
+  clinical <- unname(FEDERATED_TRANSFER_CLINICAL[subpopulations])
+  metric_levels <- c("Mean AUC(t)","ΔAUC(t), local Cox − transferred")
+  cox <- filter(d,score=="clinical_cox")
+  bind_rows(
+    mutate(filter(d,score=="transferred_labs"),metric=metric_levels[1],series=as.character(model),
+      value=mean_auc,lo=mean_auc_lo,hi=mean_auc_hi),
+    mutate(distinct(cox,endpoint,landmark_days,subpopulation,.keep_all=TRUE),metric=metric_levels[1],
+      series=unname(FEDERATED_TRANSFER_CLINICAL[subpopulation]),value=mean_auc,lo=mean_auc_lo,hi=mean_auc_hi),
+    mutate(cox,metric=metric_levels[2],series=as.character(model),
+      value=delta_auc_vs_transferred,lo=delta_auc_lo,hi=delta_auc_hi)) %>%
+    mutate(series=factor(series,levels=c(levels(d$model),clinical)),
+      metric=factor(metric,levels=metric_levels),
+      subpopulation_label=factor(unname(FEDERATED_TRANSFER_CLINICAL[subpopulation]),levels=clinical))
 }
 
 label_federated_transfer <- function(d, landmarks=sort(unique(d$landmark_days))) {
@@ -1070,16 +1146,15 @@ label_federated_transfer <- function(d, landmarks=sort(unique(d$landmark_days)))
 prepare_federated_transfer <- function(metrics) {
   d <- label_federated_transfer(metrics) %>% mutate(
     features=factor(if_else(config=="baseline","Age only","Full model"),levels=c("Full model","Age only")))
-  metric_levels <- c("Harrell C-index","ΔC vs. age only","Mean AUC(t)")
+  metric_levels <- c("Mean AUC(t)","ΔAUC(t) vs. age only")
   bind_rows(
-    mutate(d,metric=metric_levels[1],value=c_index,lo=c_index_lo,hi=c_index_hi),
+    mutate(d,metric=metric_levels[1],value=mean_auc,lo=mean_auc_lo,hi=mean_auc_hi),
     mutate(filter(d,config!="baseline"),metric=metric_levels[2],
-      value=delta_c_vs_baseline,lo=delta_c_lo,hi=delta_c_hi),
-    mutate(d,metric=metric_levels[3],value=mean_auc,lo=NA_real_,hi=NA_real_)) %>%
+      value=delta_auc_vs_baseline,lo=delta_auc_lo,hi=delta_auc_hi)) %>%
     mutate(metric=factor(metric,levels=metric_levels))
 }
 
-# Full models from both arms (C-index) plus the paired ΔC, one row per point.
+# Full models from both arms (mean AUC(t)) plus the paired ΔAUC(t), one row per point.
 prepare_federated_transfer_ablation <- function(with_metrics, no_metrics, pairs) {
   arms <- bind_rows(mutate(with_metrics,arm=FEDERATED_TRANSFER_ARM_LABELS[1]),
                     mutate(no_metrics,arm=FEDERATED_TRANSFER_ARM_LABELS[2])) %>%
@@ -1087,12 +1162,12 @@ prepare_federated_transfer_ablation <- function(with_metrics, no_metrics, pairs)
   families <- distinct(arms,bundle,model_family) %>% distinct(bundle,.keep_all=TRUE)
   pairs <- left_join(pairs,families,by="bundle")
   landmarks <- sort(unique(c(arms$landmark_days,pairs$landmark_days)))
-  metric_levels <- c("Harrell C-index","ΔC, without − with Dana-Farber")
+  metric_levels <- c("Mean AUC(t)","ΔAUC(t), without − with Dana-Farber")
   keep <- c("endpoint","bundle","model_family","landmark_days","n_patients","n_events")
   bind_rows(
-    transmute(arms,across(all_of(keep)),arm,metric=metric_levels[1],value=c_index,lo=c_index_lo,hi=c_index_hi),
+    transmute(arms,across(all_of(keep)),arm,metric=metric_levels[1],value=mean_auc,lo=mean_auc_lo,hi=mean_auc_hi),
     transmute(pairs,across(all_of(keep)),arm=FEDERATED_TRANSFER_ARM_LABELS[3],metric=metric_levels[2],
-      value=delta_c,lo=delta_c_lo,hi=delta_c_hi)) %>%
+      value=delta_auc,lo=delta_auc_lo,hi=delta_auc_hi)) %>%
     label_federated_transfer(landmarks) %>%
     mutate(arm=factor(arm,levels=FEDERATED_TRANSFER_ARM_LABELS),metric=factor(metric,levels=metric_levels))
 }
@@ -1123,7 +1198,7 @@ federated_transfer_theme <- function() {
 
 plot_federated_transfer <- function(d, caption, title=FEDERATED_TRANSFER_ARMS$with_dfci$title,
                                     subtitle=FEDERATED_TRANSFER_ARMS$with_dfci$subtitle) {
-  null_values <- c(`Harrell C-index`=.5,`ΔC vs. age only`=0,`Mean AUC(t)`=.5)
+  null_values <- c(`Mean AUC(t)`=.5,`ΔAUC(t) vs. age only`=0)
   references <- tibble(metric=factor(levels(d$metric),levels=levels(d$metric)),
     reference=unname(null_values[levels(d$metric)]))
   dodge <- position_dodge(width=.7)
@@ -1150,8 +1225,33 @@ plot_federated_transfer_ablation <- function(d, caption) {
     facet_grid(metric~endpoint_label,scales="free_y",switch="y") +
     labs(x="Landmark after ADT start",y=NULL,caption=caption,
       title="Federated platinum models with vs. without Dana-Farber in training",
-      subtitle="Full models on the same local patients; a negative ΔC is performance that depended on Dana-Farber's own training data") +
+      subtitle="Full models on the same local patients; a negative ΔAUC(t) is performance that depended on Dana-Farber's own training data") +
     federated_transfer_theme()
+}
+
+plot_federated_transfer_clinical <- function(d, caption, title=NULL, subtitle=NULL) {
+  references <- tibble(metric=factor(levels(d$metric),levels=levels(d$metric)),reference=c(.5,0))
+  series <- levels(d$series)
+  colors <- c(federated_transfer_colors(setdiff(series,FEDERATED_TRANSFER_CLINICAL)),
+    FEDERATED_TRANSFER_CLINICAL_COLORS)[series]
+  shapes <- setNames(if_else(series %in% FEDERATED_TRANSFER_CLINICAL,18,16),series)
+  rows <- if(length(unique(d$subpopulation_label))>1) vars(subpopulation_label,metric) else vars(metric)
+  dodge <- position_dodge(width=.7)
+  ggplot(d,aes(landmark,value,color=series,shape=series,group=series)) +
+    geom_hline(data=references,aes(yintercept=reference),inherit.aes=FALSE,color="grey55",linetype="dotted",linewidth=.8) +
+    geom_linerange(aes(ymin=lo,ymax=hi),position=dodge,linewidth=.8,na.rm=TRUE) +
+    geom_point(position=dodge,size=3,stroke=1.1,na.rm=TRUE) +
+    scale_color_manual(values=colors,name=NULL,drop=FALSE) +
+    scale_shape_manual(values=shapes,name=NULL,drop=FALSE) +
+    facet_grid(rows=rows,cols=vars(endpoint_label),scales="free_y",switch="y") +
+    labs(x="Landmark after ADT start",y=NULL,caption=caption,title=title,subtitle=subtitle) +
+    federated_transfer_theme()
+}
+
+federated_transfer_clinical_count_note <- function(clinical, subpopulation) {
+  d <- clinical[clinical$subpopulation==subpopulation,,drop=FALSE]
+  if(!nrow(d)) return("none")
+  federated_transfer_count_note(d)
 }
 
 write_federated_transfer_table <- function(root, data, stem) {
@@ -1168,7 +1268,7 @@ render_federated_transfer <- function(root, directory, dpi, overwrite, arm=c("wi
   if(is.null(metrics) || !nrow(metrics)) return(invisible(NULL))
   auc_t <- load_federated_transfer(directory,"auc_t")
   caption <- paste(spec$source,
-    "Bars: 95% bootstrap CIs over patients; ΔC pairs full and age-only models on the same resamples. Mean AUC(t): IPCW cumulative/dynamic AUC over estimable horizons.",
+    "Mean AUC(t): IPCW cumulative/dynamic AUC over the estimable 1-, 2-, 3- and 5-year horizons. Bars: 95% bootstrap CIs over patients; ΔAUC(t) pairs full and age-only models on the same resamples.",
     paste0("Patients/events by landmark — ",federated_transfer_count_note(metrics),"."),sep="\n")
   d <- prepare_federated_transfer(metrics)
   write_federated_transfer_table(root,metrics,spec$stem)
@@ -1183,13 +1283,29 @@ render_federated_transfer_ablation <- function(root, with_metrics, no_metrics, d
   if(is.null(pairs) || !nrow(pairs)) return(invisible(NULL))
   caption <- paste(
     "Open: bundles trained with Dana-Farber (platinum partly in-sample). Filled: the same bundles refit without Dana-Farber (external).",
-    "C-index bars: 95% bootstrap CIs over patients. ΔC bars: paired bootstrap, both model sets scored on the same resamples.",
+    "Mean AUC(t) bars: 95% bootstrap CIs over patients. ΔAUC(t) bars: paired bootstrap, both model sets scored on the same resamples.",
     paste0("Patients/events by landmark — ",federated_transfer_count_note(pairs),"."),sep="\n")
   d <- prepare_federated_transfer_ablation(with_metrics,no_metrics,pairs)
   write_federated_transfer_table(root,d %>% select(-endpoint_label,-landmark),"transfer_dfci_ablation")
   save_federated_panel(plot_federated_transfer_ablation(d,caption),
     file.path(root,"transfer_dfci_ablation__platinum.png"),13,7.5,dpi,overwrite)
   invisible(d)
+}
+
+render_federated_transfer_clinical <- function(root, directory, dpi, overwrite) {
+  clinical <- load_federated_transfer_clinical(directory)
+  if(is.null(clinical) || !nrow(clinical)) return(invisible(NULL))
+  caption <- paste(FEDERATED_TRANSFER_ARMS$no_dfci$source,
+    "Transferred full labs models scored unchanged. Local unpenalized Cox models (Gleason score + age; TP53, RB1, PTEN any-alteration indicators + number of altered panel genes + age) are scored out-of-fold (stratified K-fold) on the same patients.",
+    "Clinical data had to be available before the landmark. Mean AUC(t) over the horizons estimable in each subpopulation. Bars: 95% bootstrap CIs over patients; ΔAUC(t) is paired, both scores on the same resamples.",
+    paste0("Gleason subpopulation patients/events — ",federated_transfer_clinical_count_note(clinical,"gleason"),"."),
+    paste0("Sequenced subpopulation patients/events — ",federated_transfer_clinical_count_note(clinical,"trio"),"."),sep="\n")
+  write_federated_transfer_table(root,clinical,"transfer_clinical_comparison_no_dfci")
+  save_federated_panel(plot_federated_transfer_clinical(prepare_federated_transfer_clinical(clinical),caption,
+      "Transferred federated labs models vs. local Gleason and TP53/RB1/PTEN Cox models",
+      "Federated models trained without Dana-Farber; local Cox models fitted on Dana-Farber patients and scored out-of-fold"),
+    file.path(root,"transfer_clinical_comparison_no_dfci__platinum.png"),13,12,dpi,overwrite)
+  invisible(clinical)
 }
 
 # Aggregate KM curves and binned trajectories exported by the federated run
@@ -1417,6 +1533,8 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
     no_dfci <- render_federated_transfer(root, transfer_no_dfci_dir, dpi, overwrite, arm = "no_dfci")
     if (!is.null(with_dfci) && !is.null(no_dfci))
       render_federated_transfer_ablation(root, with_dfci, no_dfci, transfer_no_dfci_dir, dpi, overwrite)
+    if (!is.null(no_dfci))
+      render_federated_transfer_clinical(root, transfer_no_dfci_dir, dpi, overwrite)
   }
   invisible(d)
 }
@@ -1450,13 +1568,13 @@ manuscript_specs <- function() {
         "Testosterone trajectory","Testosterone: extreme quintiles"),
       row_heights=c(1.5,.18,1,1), shared_legend_panels=1:3),
     spec("04_multivariable_labs", c(
-      paste0("figure4a_discrimination_",c("auc","cindex"),"_platinum"),
+      "figure4a_discrimination_auc_platinum",
       paste0("figure4b_importance_platinum_cox_landmark",c(0,90,180)),
       paste0("figure4b_importance_platinum_xgb_landmark",c(0,90,180))),
-      11.8, matrix(1:4,4), c("Mean AUC(t)","C-index","Elastic-Net coefficients","XGBoost feature importance"),
-      row_heights=c(.9,.9,1,1),width=8.5),
-    spec("05_gleason_sensitivity", paste0("figure4c_sensitivity_gleason_",c("auc","cindex"),"_platinum"),
-      5.6, matrix(1:2,2), c("Mean AUC(t)","C-index")),
+      9, matrix(1:3,3), c("Mean AUC(t)","Elastic-Net coefficients","XGBoost feature importance"),
+      row_heights=c(.9,1,1),width=8.5),
+    spec("05_gleason_sensitivity", "figure4c_sensitivity_gleason_auc_platinum",
+      3.2, matrix(1), "Mean AUC(t)"),
     # Federated Figure 3: the local Figure 3 layout drawn from pooled federated results.
     spec("federated_03_univariable", c(paste0("fed3_volcano_landmark",c(0,90,180)),
       "fed3_trajectory_psa",paste0("fed3_km_quintile_psa_landmark",manuscript_dfci_km_landmark),
@@ -1487,12 +1605,12 @@ manuscript_captions <- function() {
       "The trajectory analyses include 2,217 patients for PSA and 2,059 for testosterone. For PSA, the bottom group was ≤0.2453 (n=403; 11 events) and the top group was >9.626 (n=403; 58 events); log-rank P=2.75 × 10^-13. For testosterone, the bottom group was ≤10 (n=317; 41 events) and the top group was >294.3 (n=313; 19 events); log-rank P=6.92 × 10^-6. ADT, androgen-deprivation therapy; CBC, complete blood count; CMP, comprehensive metabolic panel; HR, hazard ratio; LFT, liver-function test; PSA, prostate-specific antigen; SD, standard deviation."),
     `04_multivariable_labs`=caption(
       "Figure 4. Multivariable laboratory models for prediction of platinum treatment.",
-      "(a,b) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t) (a), and Harrell concordance index (b) for Elastic-Net Cox and XGBoost survival models at 0, 90, and 180 days after ADT initiation. Laboratory models are compared with age-only baselines; the dotted horizontal line marks 0.5. (c) Nonzero Elastic-Net Cox coefficients at each landmark. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (d) XGBoost split-gain feature importance at each landmark. Colors in c and d identify laboratory categories.",
-      "Performance values are from held-out test sets rather than training or tuning cross-validation. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and do not encode effect direction. ADT, androgen-deprivation therapy; AUC, area under the curve; PSA, prostate-specific antigen."),
+      "(a) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), for Elastic-Net Cox and XGBoost survival models at 0, 90, and 180 days after ADT initiation. Laboratory models are compared with age-only baselines; the dotted horizontal line marks 0.5. (b) Nonzero Elastic-Net Cox coefficients at each landmark. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (c) XGBoost split-gain feature importance at each landmark. Colors in b and c identify laboratory categories.",
+      "Performance values are from held-out test sets rather than training or tuning cross-validation. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and do not encode effect direction. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; PSA, prostate-specific antigen."),
     `05_gleason_sensitivity`=caption(
       "Figure 5. Gleason-score sensitivity analysis of platinum-treatment prediction.",
-      "Held-out test mean AUC(t) (a) and Harrell C-index (b) for Elastic-Net Cox and XGBoost survival models at 0, 90, and 180 days after ADT initiation. Within each model class, laboratory-feature models are compared with models using Gleason score. Values are printed above the bars, and the dotted horizontal line marks 0.5.",
-      "The source-data cohorts contained 1,144 patients at day 0, 1,173 at day 90, and 1,171 at day 180, including training/validation and test partitions. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; C-index, concordance index."),
+      "Held-out test mean AUC(t) for Elastic-Net Cox and XGBoost survival models at 0, 90, and 180 days after ADT initiation. Within each model class, laboratory-feature models are compared with models using Gleason score. Values are printed above the bars, and the dotted horizontal line marks 0.5.",
+      "The source-data cohorts contained 1,144 patients at day 0, 1,173 at day 90, and 1,171 at day 180, including training/validation and test partitions. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve."),
     `06_dfci_cohort_sensitivity`=caption(
       "Figure 6. Cohort-size, endpoint-incidence, and laboratory-association sensitivity analyses within Dana-Farber.",
       "Patients eligible at the 180-day androgen-deprivation therapy (ADT) landmark are shown across the full ADT cohort, cohorts excluding prior castration, metastatic cohorts defined from ADT treatment intent, and metastatic cohorts defined by the large language model (LLM). (a) Observed platinum and neuroendocrine prostate cancer (NEPC) event fractions during follow-up with 95% Wilson confidence intervals. (b) Pale bars show eligible patients and solid bars show observed events; labels give events/patients. Blue denotes platinum and orange denotes NEPC in a and b; an asterisk denotes fewer than 25 events. (c) Natural-log hazard ratios per standard-deviation increase and 95% confidence intervals for the mean, minimum, maximum, and last PSA or testosterone value through the landmark. The dashed line at 0 marks the null; filled points indicate Benjamini-Hochberg q < 0.05.",
@@ -1503,8 +1621,8 @@ manuscript_captions <- function() {
       "Site-specific fractions are observed event proportions rather than censoring-adjusted cumulative incidence estimates. For PSA, federated modeled/observed sample sizes were 22,138/16,840 at day 0, 21,791/20,707 at day 90, and 21,216/20,643 at day 180. Corresponding testosterone sample sizes were 22,138/9,483, 21,791/14,206, and 21,216/14,359. Federated patient/event counts exceed the combined Dana-Farber, Fred Hutch, and Johns Hopkins counts by 9,939/308 at day 0, 9,741/277 at day 90, and 9,395/252 at day 180, attributed to MSK, which supplied no within-site results; site membership was not independently verified. Supplied q values were not recalculated. ADT, androgen-deprivation therapy; PSA, prostate-specific antigen; SD, standard deviation."),
     `08_federated_multivariable`=caption(
       "Figure 8. Federated multivariable laboratory models for prediction of platinum treatment.",
-      "(a,b) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t) (a), and Harrell concordance index (b) for federated Elastic-Net Cox and XGBoost survival models at 0, 90, and 180 days after ADT initiation. Laboratory models are compared with age-only baselines; the dotted horizontal line marks 0.5. (c) Nonzero Elastic-Net Cox coefficients at each landmark, with up to 15 coefficients of largest absolute value displayed. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (d) XGBoost split-gain feature importance at each landmark, with up to 15 positive-gain features displayed. Colors in c and d identify laboratory categories.",
-      "Models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data. Test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180 for all model configurations. Performance values are from held-out test sets rather than training or tuning cross-validation. Age and body height are not displayed. Feature labels give the measurement and summary statistic; \"missing\" marks an indicator that the statistic was unavailable. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and are not signed effects or SHAP values. abs., absolute; ADT, androgen-deprivation therapy; ALP, alkaline phosphatase; ALT, alanine aminotransferase; AST, aspartate aminotransferase; AUC(t), time-dependent area under the receiver-operating-characteristic curve; C-index, concordance index; DBP, diastolic blood pressure; MCH, mean corpuscular hemoglobin; MCV, mean corpuscular volume; n obs., number of observations; PSA, prostate-specific antigen; PT, prothrombin time; RBC, red blood cell count; RDW, red-cell distribution width; SBP, systolic blood pressure; SHAP, Shapley additive explanations; TSH, thyroid-stimulating hormone; WBC, white blood cell count."),
+      "(a) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), for federated Elastic-Net Cox and XGBoost survival models at 0, 90, and 180 days after ADT initiation. Laboratory models are compared with age-only baselines; the dotted horizontal line marks 0.5. (b) Nonzero Elastic-Net Cox coefficients at each landmark, with up to 15 coefficients of largest absolute value displayed. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (c) XGBoost split-gain feature importance at each landmark, with up to 15 positive-gain features displayed. Colors in b and c identify laboratory categories.",
+      "Models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data. Test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180 for all model configurations. Performance values are from held-out test sets rather than training or tuning cross-validation. Age and body height are not displayed. Feature labels give the measurement and summary statistic; \"missing\" marks an indicator that the statistic was unavailable. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and are not signed effects or SHAP values. abs., absolute; ADT, androgen-deprivation therapy; ALP, alkaline phosphatase; ALT, alanine aminotransferase; AST, aspartate aminotransferase; AUC(t), time-dependent area under the receiver-operating-characteristic curve; DBP, diastolic blood pressure; MCH, mean corpuscular hemoglobin; MCV, mean corpuscular volume; n obs., number of observations; PSA, prostate-specific antigen; PT, prothrombin time; RBC, red blood cell count; RDW, red-cell distribution width; SBP, systolic blood pressure; SHAP, Shapley additive explanations; TSH, thyroid-stimulating hormone; WBC, white blood cell count."),
     # The federated manuscript set is numbered separately (federated_figure<N>).
     federated_03_univariable=caption(
       "Federated Figure 3. Pooled univariable laboratory associations with platinum treatment and longitudinal PSA and testosterone patterns across four sites.",
@@ -1512,12 +1630,12 @@ manuscript_captions <- function() {
       "Panels a-c display features with finite estimates, absolute log hazard ratios of at most 4, and confidence-interval upper-to-lower ratios below 100; supplied q values were not recalculated. Panels d-g were drawn from aggregate site exports (binned means and Kaplan-Meier curves) without patient-level data. Cohorts included 22,138 patients (664 platinum events) at day 0, 21,791 (608) at day 90, and 21,216 (564) at day 180; by site at day 0, Dana-Farber contributed 5,853 (231 events), Fred Hutch 3,277 (90), Johns Hopkins 3,069 (35), and MSK 9,939 (308). The trajectory analyses include 22,035 patients for PSA and 17,937 for testosterone. For PSA, the bottom group was ≤0.4184 (n=4,129; 68 events) and the top group was >11.31 (n=4,129; 209 events); log-rank P=2.61 × 10^-30. For testosterone, the bottom group was ≤23.0 (n=2,875; 146 events) and the top group was >348.6 (n=2,872; 41 events); log-rank P=1.34 × 10^-16. Within-site versions are provided as supplementary figures. ADT, androgen-deprivation therapy; CBC, complete blood count; CMP, comprehensive metabolic panel; LFT, liver-function test; PSA, prostate-specific antigen; SD, standard deviation."),
     federated_04_multivariable=caption(
       "Federated Figure 4. Federated multivariable laboratory models for prediction of platinum treatment, with and without Dana-Farber training data.",
-      "(a,b) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t) (a), and Harrell concordance index (b) at 0, 90, and 180 days after ADT initiation for Elastic-Net Cox and XGBoost survival models trained on all four sites, the same full models refit without Dana-Farber (darker bars, \"no DFCI\"), and age-only baselines (hatched). The dotted horizontal line marks 0.5. (c) Nonzero Elastic-Net Cox coefficients of the four-site model at each landmark, with up to 15 coefficients of largest absolute value displayed. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (d) XGBoost split-gain feature importance of the four-site model at each landmark, with up to 15 positive-gain features displayed. Colors in c and d identify laboratory categories.",
-      "Four-site models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering (MSK) data; test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180. Models without Dana-Farber were trained and tested on Fred Hutch, Johns Hopkins, and MSK data; test-set sample sizes/events were 3,258/87, 3,204/78, and 3,105/72. Because the test sets differ, the two model versions are not compared on the same patients here; Federated Figure 5 evaluates the models without Dana-Farber on Dana-Farber patients. Performance values are from held-out test sets rather than training or tuning cross-validation. Age and body height are not displayed. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and are not signed effects or SHAP values. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; C-index, concordance index; DFCI, Dana-Farber Cancer Institute; SHAP, Shapley additive explanations."),
+      "(a) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), at 0, 90, and 180 days after ADT initiation for Elastic-Net Cox and XGBoost survival models trained on all four sites, the same full models refit without Dana-Farber (darker bars, \"no DFCI\"), and age-only baselines (hatched). The dotted horizontal line marks 0.5. (b) Nonzero Elastic-Net Cox coefficients of the four-site model at each landmark, with up to 15 coefficients of largest absolute value displayed. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (c) XGBoost split-gain feature importance of the four-site model at each landmark, with up to 15 positive-gain features displayed. Colors in b and c identify laboratory categories.",
+      "Four-site models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering (MSK) data; test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180. Models without Dana-Farber were trained and tested on Fred Hutch, Johns Hopkins, and MSK data; test-set sample sizes/events were 3,258/87, 3,204/78, and 3,105/72. Because the test sets differ, the two model versions are not compared on the same patients here; Federated Figure 5 evaluates the models without Dana-Farber on Dana-Farber patients. Performance values are from held-out test sets rather than training or tuning cross-validation. Age and body height are not displayed. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and are not signed effects or SHAP values. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; DFCI, Dana-Farber Cancer Institute; SHAP, Shapley additive explanations."),
     federated_05_transfer_no_dfci=caption(
-      "Federated Figure 5. External validation at Dana-Farber of federated platinum models trained without Dana-Farber.",
-      "Elastic-Net Cox and XGBoost survival models trained for platinum treatment on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data were applied unchanged to the Dana-Farber ADT cohort and evaluated against three local endpoints: platinum treatment (the training endpoint), neuroendocrine prostate cancer (NEPC), and aggressive-variant prostate cancer (AVPC). (a) Harrell concordance index (top) and the paired difference in C-index relative to the age-only model (bottom) at 0, 90, and 180 days after ADT initiation. Filled points denote full laboratory models and open points age-only models; bars denote 95% bootstrap confidence intervals over patients, with full and age-only models scored on the same resamples. Dotted lines mark 0.5 (C-index) and 0 (difference). (b) Inverse-probability-of-censoring-weighted cumulative/dynamic AUC(t) by prediction horizon; solid lines denote full models and dashed lines age-only models, and the dotted line marks 0.5.",
-      "No Dana-Farber patient contributed to model training, so every endpoint, including platinum, is out of sample. Patients/events were 2,267/182 at day 0, 2,233/166 at day 90, and 2,197/158 at day 180 for platinum; 2,218/92, 2,200/87, and 2,164/85 for NEPC; and 1,968/463, 1,891/397, and 1,842/373 for AVPC. Horizons without estimable AUC(t) are omitted. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; C-index, concordance index; IPCW, inverse probability of censoring weighting.")
+      "Federated Figure 5. External validation at Dana-Farber of federated platinum models trained without Dana-Farber, and comparison with Gleason score and TP53/RB1/PTEN status.",
+      "Elastic-Net Cox and XGBoost survival models trained for platinum treatment on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data were applied unchanged to the Dana-Farber ADT cohort and evaluated against three local endpoints: platinum treatment (the training endpoint), neuroendocrine prostate cancer (NEPC), and aggressive-variant prostate cancer (AVPC). (a) Mean time-dependent area under the receiver-operating-characteristic curve, AUC(t) (top), and the paired difference in mean AUC(t) relative to the age-only model (bottom) at 0, 90, and 180 days after ADT initiation. Filled points denote full laboratory models and open points age-only models. (b,c) The same full laboratory models compared with unpenalized Cox models fitted locally at Dana-Farber, among patients with a Gleason score (b) or with tumor sequencing (c) available before the landmark. The local models used Gleason score and age (b), or any alteration (mutation, deletion, amplification, or structural variant) in TP53, RB1, and PTEN plus the number of altered genes on the sequencing panel and age (c). Diamonds denote the local Cox model; the bottom rows give the paired difference in mean AUC(t), local Cox model minus transferred model. In all panels, bars denote 95% bootstrap confidence intervals over patients, with compared models scored on the same resamples, and dotted lines mark 0.5 (AUC(t)) and 0 (difference).",
+      "No Dana-Farber patient contributed to federated model training, so every endpoint, including platinum, is out of sample. Mean AUC(t) is the inverse-probability-of-censoring-weighted cumulative/dynamic AUC averaged over 1, 2, 3, and 5 years after the landmark, with censoring estimated in the evaluated Dana-Farber patients; horizons without an observed event or later follow-up were omitted. The local Cox models were fitted on the Dana-Farber patients they were evaluated on and were scored with stratified 5-fold cross-validated (out-of-fold) predictions. Gleason scores and sequencing results were used only if available before the landmark; for sequencing, the most recent specimen was used. Patients/events in panel a were 2,267/182 at day 0, 2,233/166 at day 90, and 2,197/158 at day 180 for platinum; 2,218/92, 2,200/87, and 2,164/85 for NEPC; and 1,968/463, 1,891/397, and 1,842/373 for AVPC. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve.")
   )
 }
 
@@ -1641,11 +1759,14 @@ manuscript_center_landmark_header <- function(p) p + ggplot2::theme(
   plot.subtitle=ggplot2::element_text(size=8,face="bold",hjust=.5,
     margin=ggplot2::margin(b=3)))
 
+# Discrimination panel(s) first, then three Elastic-Net and three XGBoost
+# importance panels; the importance rows take the letters after them.
 manuscript_multivariable_labs <- function(plots,spec,legend_nrow=1) {
-  stopifnot(length(plots)==8)
-  performance <- vector("list",2)
+  n_perf <- length(plots)-6
+  stopifnot(n_perf>=1)
+  performance <- vector("list",n_perf)
   model_legend <- NULL
-  for(i in 1:2) {
+  for(i in seq_len(n_perf)) {
     p <- manuscript_style(plots[[i]] + ggplot2::labs(subtitle=NULL),spec$titles[i],letters[i]) +
       ggplot2::guides(fill=ggplot2::guide_legend(nrow=legend_nrow,byrow=TRUE))
     if(is.null(model_legend)) model_legend <- manuscript_legend(p,spec$width,spec$height)
@@ -1656,7 +1777,7 @@ manuscript_multivariable_labs <- function(plots,spec,legend_nrow=1) {
   importance <- vector("list",6)
   category_legend <- NULL
   for(i in seq_len(6)) {
-    p <- manuscript_style(plots[[i+2]] + ggplot2::labs(subtitle=landmarks[(i-1)%%3+1]),NULL,NULL) +
+    p <- manuscript_style(plots[[i+n_perf]] + ggplot2::labs(subtitle=landmarks[(i-1)%%3+1]),NULL,NULL) +
       ggplot2::guides(color="none",fill=ggplot2::guide_legend(nrow=1,byrow=TRUE,
         override.aes=list(alpha=1)))
     p <- manuscript_center_landmark_header(p)
@@ -1666,24 +1787,24 @@ manuscript_multivariable_labs <- function(plots,spec,legend_nrow=1) {
   }
   tag <- function(letter) grid::textGrob(tolower(letter),x=grid::unit(0,"npc"),hjust=0,
     gp=grid::gpar(fontfamily="sans",fontsize=11,fontface="bold",col="#222222"))
-  coefficient_row <- gridExtra::arrangeGrob(grobs=importance[1:3],ncol=3,top=tag("C"),
+  coefficient_row <- gridExtra::arrangeGrob(grobs=importance[1:3],ncol=3,top=tag(letters[n_perf+1]),
     padding=grid::unit(1,"pt"))
-  xgboost_row <- gridExtra::arrangeGrob(grobs=importance[4:6],ncol=3,top=tag("D"),
+  xgboost_row <- gridExtra::arrangeGrob(grobs=importance[4:6],ncol=3,top=tag(letters[n_perf+2]),
     padding=grid::unit(1,"pt"))
   grobs <- performance
-  heights <- spec$row_heights[1:2]
+  heights <- spec$row_heights[seq_len(n_perf)]
   if(!is.null(model_legend)) {
     grobs <- c(grobs,list(model_legend))
     heights <- c(heights,manuscript_multivariable_legend_height)
   }
   grobs <- c(grobs,list(coefficient_row))
-  heights <- c(heights,spec$row_heights[3])
+  heights <- c(heights,spec$row_heights[n_perf+1])
   if(!is.null(category_legend)) {
     grobs <- c(grobs,list(category_legend))
     heights <- c(heights,manuscript_multivariable_legend_height)
   }
   grobs <- c(grobs,list(xgboost_row))
-  heights <- c(heights,spec$row_heights[4])
+  heights <- c(heights,spec$row_heights[n_perf+2])
   gridExtra::arrangeGrob(grobs=grobs,ncol=1,heights=heights,
     padding=grid::unit(3,"pt"))
 }
@@ -1888,25 +2009,23 @@ manuscript_federated_feature_label <- function(x) {
   gsub("n_observations","n obs.",x,fixed=TRUE)
 }
 
-# Mirrors local Figure 4: four-series discrimination (a,b), elastic-net
-# coefficients (c) and XGBoost gains (d), from the captured supplement CSVs.
+# Mirrors local Figure 4: four-series mean AUC(t) (a), elastic-net
+# coefficients (b) and XGBoost gains (c), from the captured supplement CSVs.
 manuscript_federated_multivariable <- function(performance,coefficients,importance,
                                                key="08_federated_multivariable",colors=FEDERATED_MODEL_COLORS,
                                                legend_nrow=1,note=NULL) {
   d <- performance %>% mutate(name=factor(name,levels=names(colors)))
   stopifnot(!anyNA(d$name),!anyDuplicated(d[c("name","landmark")]))
-  plots <- lapply(c("auc","cindex"),function(metric)
-    plot_model_discrimination(d,metric,if(metric=="auc") "Test mean AUC(t)" else "Test C-index",
-      colors,show_legend=TRUE))
+  plots <- list(plot_model_discrimination(d,"auc","Test mean AUC(t)",colors,show_legend=TRUE))
   for(kind in c("cox","xgb")) for(lm in c(0,90,180)) {
     features <- if(kind=="cox") coefficients else importance
     selected <- features[features$landmark_days==lm & features$displayed %in% TRUE,,drop=FALSE]
     plots[[length(plots)+1L]] <- plot_model_importance(selected,kind,NULL) +
       ggplot2::scale_y_discrete(labels=manuscript_federated_feature_label)
   }
-  spec <- list(key=key,width=8.5,height=11.8,layout=matrix(1:4,4),
-    row_heights=c(.9,.9,1,1),
-    titles=c("Test mean AUC(t)","Test C-index","Elastic-Net coefficients","XGBoost feature importance"))
+  spec <- list(key=key,width=8.5,height=9,layout=matrix(1:3,3),
+    row_heights=c(.9,1,1),
+    titles=c("Test mean AUC(t)","Elastic-Net coefficients","XGBoost feature importance"))
   p <- manuscript_multivariable_labs(plots,spec,legend_nrow)
   audit <- unique(as.character(c(performance$input_audit_note,coefficients$input_audit_note,
     importance$input_audit_note)))
@@ -1915,7 +2034,7 @@ manuscript_federated_multivariable <- function(performance,coefficients,importan
   counts <- paste(sprintf("Day %s, %s: test n=%s; events=%s",d$landmark,as.character(d$name),
     d$n_test,d$n_events_test),collapse="\n")
   list(plot=p,spec=spec,data=d,legend=paste(
-    "a: test mean AUC(t). b: test C-index. c: Elastic-Net coefficients at days 0, 90 and 180. d: XGBoost feature importance at days 0, 90 and 180.",
+    "a: test mean AUC(t). b: Elastic-Net coefficients at days 0, 90 and 180. c: XGBoost feature importance at days 0, 90 and 180.",
     "Held-out test metrics, not training or tuning CV. Local Figure 4 model colors (hatched age baselines) and lab-category colors.",
     "Up to 15 nonzero coefficients (by absolute value) or positive-gain features per landmark, using the local display exclusions (age, body height).",
     "Coefficients are signed log hazard ratios; gains are supplied split gains, not signed effects or SHAP values.",
@@ -1935,43 +2054,40 @@ manuscript_federated_multivariable_no_dfci <- function(performance,no_dfci_perfo
   manuscript_federated_multivariable(bind_rows(mutate(performance,name=as.character(name)),no_dfci),
     coefficients,importance,key="federated_04_multivariable",colors=colors,legend_nrow=2,
     note=paste("Darker bars (\"no DFCI\"): full models refit without Dana-Farber and tested on held-out Fred Hutch, Johns Hopkins and MSK patients;",
-      "the other bars are the pooled four-site models on their own test set. Panels c and d show the pooled models."))
+      "the other bars are the pooled four-site models on their own test set. Panels b and c show the pooled models."))
 }
 
 # Federated Figure 5: platinum models trained without Dana-Farber, scored on the
 # local Dana-Farber NEPC, AVPC and platinum endpoints (09 arm B). All endpoints
-# are out of sample.
-manuscript_federated_transfer_no_dfci <- function(metrics,auc_t) {
-  d <- prepare_federated_transfer(metrics) %>%
-    filter(metric %in% c("Harrell C-index","ΔC vs. age only")) %>% mutate(metric=droplevels(metric))
+# are out of sample. a: discrimination in the full cohort; b, c: the transferred
+# full models vs local Cox models in the patients with a Gleason score (b) and
+# with sequencing (c). Per-horizon AUC(t) stays on the standalone transfer page.
+manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL) {
+  d <- prepare_federated_transfer(metrics)
   discrimination <- plot_federated_transfer(d,NULL,NULL,NULL) + ggplot2::labs(x="Landmark after ADT initiation")
-  plots <- list(discrimination)
-  if(!is.null(auc_t) && nrow(auc_t)) {
-    families <- distinct(metrics,bundle,model_family) %>% distinct(bundle,.keep_all=TRUE)
-    curves <- auc_t %>% mutate(endpoint=tolower(endpoint),config=as.character(config)) %>%
-      filter(endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS),is.finite(auc)) %>%
-      left_join(families,by="bundle") %>%
-      label_federated_transfer(sort(unique(metrics$landmark_days))) %>%
-      mutate(features=factor(if_else(config=="baseline","Age only","Full model"),levels=c("Full model","Age only")),
-        years=horizon_days/365.25)
-    plots[[2]] <- ggplot2::ggplot(curves,ggplot2::aes(years,auc,color=model,linetype=features,
-        group=interaction(model,features))) +
-      ggplot2::geom_hline(yintercept=.5,color="grey55",linetype="dotted",linewidth=.6) +
-      ggplot2::geom_line(linewidth=.6) + ggplot2::geom_point(size=.9) +
-      ggplot2::scale_color_manual(values=federated_transfer_colors(levels(curves$model)),name=NULL,drop=FALSE) +
-      ggplot2::scale_linetype_manual(values=c(`Full model`="solid",`Age only`="dashed"),name=NULL,drop=FALSE) +
-      ggplot2::facet_grid(landmark~endpoint_label) +
-      ggplot2::labs(x="Years after landmark",y="AUC(t)") + federated_transfer_theme()
+  plots <- list(discrimination); titles <- "Discrimination"
+  legend <- c(
+    "a: mean AUC(t) (top) and paired ΔAUC(t) versus the age-only model (bottom) by endpoint and landmark; bars are 95% bootstrap CIs over patients.",
+    paste0("Patients/events by landmark — ",federated_transfer_count_note(metrics),"."))
+  panel_titles <- c(gleason="vs. Gleason score",trio="vs. TP53/RB1/PTEN")
+  panel_text <- c(
+    gleason="patients with a Gleason score before the landmark. Transferred full models vs. an unpenalized local Cox of Gleason score + age",
+    trio="patients with sequencing before the landmark. Transferred full models vs. an unpenalized local Cox of TP53, RB1 and PTEN any-alteration indicators + number of altered panel genes + age")
+  available <- if(is.null(clinical)) character() else intersect(names(FEDERATED_TRANSFER_CLINICAL),unique(clinical$subpopulation))
+  if(!length(available)) message("Federated Figure 5: clinical comparison unavailable; drawing panel a only")
+  for(sub in available) {
+    plots[[length(plots)+1]] <- plot_federated_transfer_clinical(prepare_federated_transfer_clinical(clinical,sub),
+      NULL) + ggplot2::labs(x="Landmark after ADT initiation")
+    titles <- c(titles,panel_titles[[sub]])
+    legend <- c(legend,paste0(letters[length(plots)],": ",panel_text[[sub]],
+      "; mean AUC(t) (top) and paired ΔAUC(t), local Cox − transferred model (bottom). Local Cox scores are out-of-fold."),
+      paste0("Patients/events by landmark — ",federated_transfer_clinical_count_note(clinical,sub),"."))
   }
-  spec <- list(key="federated_05_transfer_no_dfci",width=7.2,height=if(length(plots)==2) 9 else 4.8,
-    layout=matrix(seq_along(plots),length(plots)),titles=c("Discrimination","Time-dependent AUC")[seq_along(plots)],
-    row_heights=if(length(plots)==2) c(1,1.15) else 1,shared_legend_panels=integer())
-  counts <- federated_transfer_count_note(metrics)
+  n <- length(plots)
+  spec <- list(key="federated_05_transfer_no_dfci",width=7.2,height=c(4.8,8,10.5)[n],
+    layout=matrix(seq_len(n),n),titles=titles,row_heights=rep(1,n),shared_legend_panels=integer())
   list(plot=manuscript_combine(plots,spec),spec=spec,data=metrics,legend=paste(
-    "a: Harrell C-index (top) and paired ΔC versus the age-only model (bottom) by endpoint and landmark; bars are 95% bootstrap CIs over patients.",
-    if(length(plots)==2) "b: IPCW cumulative/dynamic AUC(t) by prediction horizon; solid lines are full models, dashed lines age-only models." else "b: AUC(t) unavailable.",
-    FEDERATED_TRANSFER_ARMS$no_dfci$source,
-    paste0("Patients/events by landmark — ",counts,"."),sep="\n"))
+    c(legend,FEDERATED_TRANSFER_ARMS$no_dfci$source),collapse="\n"))
 }
 
 # Figure 3 manuscript styling, shared by the local (DFCI) and federated versions:
@@ -2036,9 +2152,8 @@ manuscript_build <- function(items,tables,root) {
     if(spec$key=="04_multivariable_labs") {
       legend <- c(
         paste0("a. ",paste(c(plots[[1]]$labels$title,plots[[1]]$labels$subtitle),collapse="\n")),
-        paste0("b. ",paste(c(plots[[2]]$labels$title,plots[[2]]$labels$subtitle),collapse="\n")),
-        "c. Elastic-Net model coefficients at landmark days 0, 90, and 180.",
-        "d. XGBoost feature importances at landmark days 0, 90, and 180. Gains are unsigned split gains.")
+        "b. Elastic-Net model coefficients at landmark days 0, 90, and 180.",
+        "c. XGBoost feature importances at landmark days 0, 90, and 180. Gains are unsigned split gains.")
       result[[spec$key]] <- list(plot=manuscript_multivariable_labs(plots,spec),spec=spec,
         legend=paste(legend,collapse="\n\n"),data=NULL)
       next
@@ -2119,7 +2234,7 @@ manuscript_build <- function(items,tables,root) {
   transfer <- read("^transfer_discrimination_no_dfci__platinum[.]csv$")
   if(!is.null(transfer) && nrow(transfer))
     result[["federated_05"]] <- manuscript_federated_transfer_no_dfci(transfer,
-      read("^transfer_auc_t_no_dfci__platinum[.]csv$"))
+      read("^transfer_clinical_comparison_no_dfci__platinum[.]csv$"))
   result
 }
 

@@ -25,8 +25,7 @@ local({
   stems <- c("figure2v3_confusion_matrix","figure2v3_metric_bar","figure2v3_subtype_landscape","figure2v3_enrichment",
     "figure1a_consort","figure1b_km","figure1c_span","figure1c_dx_to_tx","figure1c_time_to_platinum",
     "adt_labels_llm_vs_regex_max_any","adt_labels_adt_vs_regex_max_any","adt_labels_adt_vs_llm",
-    as.vector(outer(c("figure4a_discrimination","figure4c_sensitivity_gleason","figure4d_sensitivity_somatic"),
-      c("auc_platinum","cindex_platinum"),paste,sep="_")),
+    paste0(c("figure4a_discrimination","figure4c_sensitivity_gleason","figure4d_sensitivity_somatic"),"_auc_platinum"),
     as.vector(outer(c("figure4b_importance_platinum_cox","figure4b_importance_platinum_xgb"),
       c("landmark0","landmark90","landmark180"),paste,sep="_")),
     paste0("figure3b_sequencing_snv_platinum_km_gene",1:7,"_snv_landmark0"),
@@ -43,7 +42,7 @@ local({
     getOption("compass.figure_capture")(p,destination,8,6,stem)
   }
   m <- prepare_figure_scenes(file.path(cache,"scenes"),"test",build)
-  stopifnot(length(stems)==37, length(m$scenes)==32,
+  stopifnot(length(stems)==34, length(m$scenes)==32,
     !anyDuplicated(vapply(m$scenes,`[[`,character(1),"destination")),
     !any(grepl("/by_figure/",vapply(m$scenes,`[[`,character(1),"destination"))))
   stopifnot(sum(grepl("somatic_snv_carrier_km_page",vapply(m$scenes,`[[`,character(1),"stem")))==2)
@@ -138,7 +137,7 @@ local({
     grepl("unverified",federated_population_note(mutate(across,n_patients_used=351),counts)))
 })
 local({
-  # 09 transfer outputs: optional CI/ΔC columns become gaps, bad inputs fail loudly.
+  # 09 transfer outputs: optional CI/ΔAUC(t)/C columns become gaps, bad inputs fail loudly.
   directory <- tempfile("transfer-"); dir.create(directory)
   on.exit(unlink(directory,recursive=TRUE))
   stopifnot(identical(federated_transfer_dir(list(data_root="/x")),file.path("/x","rhino_results","federated_transfer_adt_w_MSK")),
@@ -153,27 +152,27 @@ local({
       landmark_days=c(0,180),config=c("both","baseline")) %>%
     mutate(model_family=case_when(startsWith(bundle,"xgboost")~"xgboost_cox",
       startsWith(bundle,"cox")~"elastic_net_cox",TRUE~NA_character_),
-      n_patients=1000,n_events=30,c_index=.6)
+      n_patients=1000,n_events=30,mean_auc=.6)
   path <- file.path(directory,"transfer_metrics.csv")
   readr::write_csv(metrics,path)
   loaded <- load_federated_transfer(directory)
-  stopifnot(nrow(loaded)==36,!"other" %in% loaded$endpoint,all(is.na(loaded$c_index_lo)),all(is.na(loaded$mean_auc)))
+  stopifnot(nrow(loaded)==36,!"other" %in% loaded$endpoint,all(is.na(loaded$mean_auc_lo)),all(is.na(loaded$c_index)))
   d <- prepare_federated_transfer(loaded)
   stopifnot(identical(levels(d$model),c("XGBoost","Elastic-net Cox","custom_bundle")),
     identical(levels(d$landmark),c("0 days","+180 days")),
-    nrow(d)==36+18+36,!any(d$metric=="ΔC vs. age only" & d$features=="Age only"))
+    nrow(d)==36+18,!any(d$metric=="ΔAUC(t) vs. age only" & d$features=="Age only"))
   note <- federated_transfer_count_note(loaded)
   stopifnot(grepl("^PLATINUM: 0d 1,000/30, 180d 1,000/30; NEPC:",note))
   b <- ggplot_build(plot_federated_transfer(d,note))
-  stopifnot(length(b$layout$panel_params)==9)
-  for(bad in list(mutate(metrics,c_index=1.2),mutate(metrics,n_events=2000),bind_rows(metrics,metrics[1,]),
-                  select(metrics,-c_index))) {
+  stopifnot(length(b$layout$panel_params)==6)
+  for(bad in list(mutate(metrics,mean_auc=1.2),mutate(metrics,c_index=1.2),mutate(metrics,n_events=2000),bind_rows(metrics,metrics[1,]),
+                  select(metrics,-mean_auc))) {
     readr::write_csv(bad,path)
     stopifnot(inherits(tryCatch(load_federated_transfer(directory),error=identity),"error"))
   }
 })
 local({
-  # 09 arm B: no-Dana-Farber directory, paired ΔC loader and the with/without ablation panel.
+  # 09 arm B: no-Dana-Farber directory, paired ΔAUC(t) loader and the with/without ablation panel.
   directory <- tempfile("transfer-no-dfci-"); dir.create(directory)
   on.exit(unlink(directory,recursive=TRUE))
   stopifnot(identical(federated_transfer_no_dfci_dir(list(data_root="/x")),file.path("/x","rhino_results","federated_transfer_adt_no_DFCI")),
@@ -184,30 +183,80 @@ local({
       bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),
       landmark_days=c(0,180),config=c("both","baseline")) %>%
     mutate(model_family=if_else(startsWith(bundle,"xgboost"),"xgboost_cox","elastic_net_cox"),
-      n_patients=1000,n_events=30,c_index=.6,c_index_lo=.55,c_index_hi=.65)
+      n_patients=1000,n_events=30,mean_auc=.6,mean_auc_lo=.55,mean_auc_hi=.65)
   pairs <- tidyr::expand_grid(endpoint=c("NEPC","avpc","platinum","other"),landmark_days=c(0,180),
       bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),config=c("both","baseline")) %>%
-    mutate(n_patients=1000,n_events=30,C_with_dfci=.6,C_no_dfci=.57,delta_c=-.03,delta_c_lo=-.06,delta_c_hi=0)
+    mutate(n_patients=1000,n_events=30,AUC_with_dfci=.6,AUC_no_dfci=.57,delta_auc=-.03,delta_auc_lo=-.06,delta_auc_hi=0)
   path <- file.path(directory,"transfer_with_vs_without_dfci.csv")
   readr::write_csv(pairs,path)
   loaded <- load_federated_transfer_pairs(directory)
   # "other" endpoints and baseline rows are dropped.
   stopifnot(nrow(loaded)==12,all(loaded$config=="both"),!"other" %in% loaded$endpoint)
-  d <- prepare_federated_transfer_ablation(metrics,mutate(metrics,c_index=.57),loaded)
+  d <- prepare_federated_transfer_ablation(metrics,mutate(metrics,mean_auc=.57),loaded)
   stopifnot(nrow(d)==12+12+12,identical(levels(d$model),c("XGBoost","Elastic-net Cox")),
     identical(levels(d$arm),FEDERATED_TRANSFER_ARM_LABELS),
-    all(d$arm[d$metric=="ΔC, without − with Dana-Farber"]=="Paired difference"),
+    all(d$arm[d$metric=="ΔAUC(t), without − with Dana-Farber"]=="Paired difference"),
     !any(is.na(d$model)))
   b <- ggplot_build(plot_federated_transfer_ablation(d,federated_transfer_count_note(loaded)))
   stopifnot(length(b$layout$panel_params)==6)
   arm_b <- plot_federated_transfer(prepare_federated_transfer(metrics),"note",
     FEDERATED_TRANSFER_ARMS$no_dfci$title,FEDERATED_TRANSFER_ARMS$no_dfci$subtitle)
   title <- if("get_labs" %in% getNamespaceExports("ggplot2")) ggplot2::get_labs(arm_b)$title else arm_b$labels$title
-  stopifnot(grepl("without Dana-Farber",title,fixed=TRUE),length(ggplot_build(arm_b)$layout$panel_params)==9)
-  for(bad in list(mutate(pairs,delta_c=-1.5),mutate(pairs,C_no_dfci=1.2),mutate(pairs,n_events=2000),
-                  bind_rows(pairs,pairs[1,]),select(pairs,-delta_c))) {
+  stopifnot(grepl("without Dana-Farber",title,fixed=TRUE),length(ggplot_build(arm_b)$layout$panel_params)==6)
+  for(bad in list(mutate(pairs,delta_auc=-1.5),mutate(pairs,AUC_no_dfci=1.2),mutate(pairs,n_events=2000),
+                  bind_rows(pairs,pairs[1,]),select(pairs,-n_events))) {
     readr::write_csv(bad,path)
     stopifnot(inherits(tryCatch(load_federated_transfer_pairs(directory),error=identity),"error"))
+  }
+  # A C-only file from before the AUC(t) bootstrap warns and is skipped.
+  readr::write_csv(select(pairs,-starts_with("AUC_"),-starts_with("delta_auc")),path)
+  stale <- tryCatch(load_federated_transfer_pairs(directory),warning=identity)
+  stopifnot(inherits(stale,"warning"),grepl("rerun 09",conditionMessage(stale),fixed=TRUE))
+})
+clinical_fixture <- function() tidyr::expand_grid(endpoint=c("NEPC","avpc","platinum"),landmark_days=c(0,180),
+    subpopulation=c("gleason","trio","other"),
+    bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),
+    model=c("transferred_labs","transferred_age","clinical_cox")) %>%
+  mutate(model_family=if_else(startsWith(bundle,"xgboost"),"xgboost_cox","elastic_net_cox"),
+    n_patients=if_else(subpopulation=="gleason",400,150),n_events=20,n_scored=n_patients,n_scored_events=n_events,
+    c_index=case_when(model=="clinical_cox"~.7,model=="transferred_labs"~.62,TRUE~.55),
+    c_index_lo=c_index-.05,c_index_hi=c_index+.05,
+    delta_c_vs_transferred=if_else(model=="transferred_labs",NA_real_,c_index-.62),
+    delta_lo=delta_c_vs_transferred-.04,delta_hi=delta_c_vs_transferred+.04,
+    mean_auc=c_index+.02,mean_auc_lo=mean_auc-.05,mean_auc_hi=mean_auc+.05,
+    delta_auc_vs_transferred=if_else(model=="transferred_labs",NA_real_,mean_auc-.64),
+    delta_auc_lo=delta_auc_vs_transferred-.04,delta_auc_hi=delta_auc_vs_transferred+.04,
+    c_index_apparent=NA_real_,mean_auc_apparent=NA_real_,n_folds=5,n_failed_folds=0,n_convergence_warnings=0,
+    note=NA_character_)
+local({
+  # 09 arm B clinical comparison (Federated Figure 5 b-c): transferred labs vs local Cox.
+  directory <- tempfile("transfer-clinical-"); dir.create(directory)
+  on.exit(unlink(directory,recursive=TRUE))
+  absent <- withCallingHandlers(load_federated_transfer_clinical(directory),warning=function(w) invokeRestart("muffleWarning"))
+  stopifnot(is.null(absent))
+  clinical <- clinical_fixture()
+  path <- file.path(directory,"transfer_clinical_comparison.csv")
+  readr::write_csv(clinical,path)
+  loaded <- load_federated_transfer_clinical(directory)
+  stopifnot(nrow(loaded)==72,!"other" %in% loaded$subpopulation,all(loaded$endpoint %in% c("nepc","avpc","platinum")))
+  d <- prepare_federated_transfer_clinical(loaded)
+  # 24 transferred-labs AUC(t) points, one local Cox AUC(t) per endpoint/landmark/subpopulation, 24 paired ΔAUC(t).
+  stopifnot(nrow(d)==24+12+24,
+    identical(levels(d$series),c("XGBoost","Elastic-net Cox","Gleason + age","TP53/RB1/PTEN + age")),
+    all(d$series[d$metric=="ΔAUC(t), local Cox − transferred"] %in% c("XGBoost","Elastic-net Cox")),
+    all(abs(d$value[d$metric=="ΔAUC(t), local Cox − transferred"]-.08)<1e-9),
+    !any(d$series=="Age only"))
+  b <- ggplot_build(plot_federated_transfer_clinical(d,"note"))
+  stopifnot(length(b$layout$panel_params)==12)
+  one <- prepare_federated_transfer_clinical(loaded,"trio")
+  stopifnot(nrow(one)==30,length(ggplot_build(plot_federated_transfer_clinical(one,NULL))$layout$panel_params)==6)
+  stopifnot(grepl("^PLATINUM: 0d 400/20, 180d 400/20",federated_transfer_clinical_count_note(loaded,"gleason")),
+    federated_transfer_clinical_count_note(loaded[0,],"trio")=="none")
+  for(bad in list(mutate(clinical,mean_auc=1.2),mutate(clinical,delta_auc_vs_transferred=-1.5),
+                  mutate(clinical,n_scored=n_patients+1),mutate(clinical,model=if_else(row_number()==1,"other",model)),
+                  bind_rows(clinical,clinical[1,]),select(clinical,-n_scored))) {
+    readr::write_csv(bad,path)
+    stopifnot(inherits(tryCatch(load_federated_transfer_clinical(directory),error=identity),"error"))
   }
 })
 cat("Publication compilation, paths, catalog, recoverable archives and federated data checks passed.\n")

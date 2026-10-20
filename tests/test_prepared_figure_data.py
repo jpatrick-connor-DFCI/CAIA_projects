@@ -116,7 +116,8 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     transfer_paths = [transfer_dir / name for name in ("transfer_metrics.csv", "transfer_auc_t.csv")]
     no_dfci_dir = rhino / "federated_transfer_adt_no_DFCI"
     no_dfci_paths = [no_dfci_dir / name for name in
-                     ("transfer_metrics.csv", "transfer_auc_t.csv", "transfer_with_vs_without_dfci.csv")]
+                     ("transfer_metrics.csv", "transfer_auc_t.csv", "transfer_with_vs_without_dfci.csv",
+                      "transfer_clinical_comparison.csv")]
     figure_data_dir = rhino / "misc_figure_data"
     figure_data_paths = [figure_data_dir / name for name in ("manifest.json", "cohort_km.csv")] + [
         figure_data_dir / (prefix + name) for prefix in ("", "within_site_") for name in (
@@ -169,10 +170,11 @@ def test_federated_transfer_path_override(tmp_path):
     config["federated_transfer_no_dfci_path"] = str(tmp_path / "external")
     config["federated_figure_data_path"] = str(tmp_path / "aggregates")
     sources = prep.prepare(config)["federated_sources"]
-    assert [s["path"] for s in sources[-15:-10]] == [
+    assert [s["path"] for s in sources[-16:-10]] == [
         *(str(tmp_path / "elsewhere" / name) for name in ("transfer_metrics.csv", "transfer_auc_t.csv")),
         *(str(tmp_path / "external" / name) for name in
-          ("transfer_metrics.csv", "transfer_auc_t.csv", "transfer_with_vs_without_dfci.csv"))]
+          ("transfer_metrics.csv", "transfer_auc_t.csv", "transfer_with_vs_without_dfci.csv",
+           "transfer_clinical_comparison.csv"))]
     assert {Path(s["path"]).parent for s in sources[-10:]} == {tmp_path / "aggregates"}
 
 
@@ -180,7 +182,7 @@ def test_federated_rhino_root_override(tmp_path):
     config = make_config(tmp_path, "federated")
     config["federated"] = True
     config["federated_rhino_root"] = str(tmp_path / "delivery")
-    paths = [Path(s["path"]) for s in prep.prepare(config)["federated_sources"][-15:]]
+    paths = [Path(s["path"]) for s in prep.prepare(config)["federated_sources"][-16:]]
     assert {path.parent.name for path in paths} == {
         "federated_transfer_adt_w_MSK", "federated_transfer_adt_no_DFCI", "misc_figure_data"}
     assert all(path.parent.parent == tmp_path / "delivery" for path in paths)

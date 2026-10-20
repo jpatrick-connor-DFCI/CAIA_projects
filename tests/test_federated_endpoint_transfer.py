@@ -120,6 +120,11 @@ def test_transported_score_is_concordant_and_beats_age_only():
     # age is constant, so the age-only baseline sits at 0.5
     assert both["c_index_baseline"] == pytest.approx(0.5)
     assert both["delta_c_vs_baseline"] > 0.15
+    assert both["mean_auc_lo"] <= both["mean_auc"] <= both["mean_auc_hi"]
+    assert both["delta_auc_vs_baseline"] == pytest.approx(
+        both["mean_auc"] - both["mean_auc_baseline"])
+    assert both["delta_auc_vs_baseline"] > 0.1
+    assert both["delta_auc_lo"] <= both["delta_auc_vs_baseline"] <= both["delta_auc_hi"]
     assert both["hr_per_sd"] > 1
     # AVPC has no events: metrics are NaN, not an exception
     assert np.isnan(m.loc[("avpc", "both"), "c_index"])
