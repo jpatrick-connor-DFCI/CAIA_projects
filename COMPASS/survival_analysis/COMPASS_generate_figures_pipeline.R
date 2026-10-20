@@ -267,12 +267,19 @@ COLOR_NEUTRAL_INK  <- "#52514e"   # secondary ink, for annotations/text only
 # Root for the per-patient primary-subtype labels (primary_subtype_labels.parquet,
 # written by LLM_clinical_annotations notebooks/primary_subtype.ipynb from the
 # per-note NEPC and AVPC pipelines). Deliberately a different root than
-# NEPC_PROJ_PATH: this file lives under the user's data/LLM_annotations/ tree,
+# NEPC_PROJ_PATH: this file lives under the user's LLM_annotations/ tree,
 # not the CAIA/COMPASS project tree, and is the sole LLM label source for
 # Figure 2 v3 and the Section 4-5 stratifications. It is the same file Stage 1
 # reads for the nepc/avpc endpoints. Overridable per-call by generate_figures().
-DEFAULT_LLM_ANNOTATIONS_PATH <- "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_primary_subtype"
+DEFAULT_LLM_ANNOTATIONS_PATH <- "/data/gusev/USERS/jpconnor/LLM_annotations/LLM_primary_subtype"
 LLM_SUBTYPE_LABELS_FILE <- "primary_subtype_labels.parquet"
+
+# Chart-review truth for Figure 2 Panel A, under NEPC_PROJ_PATH/LLM_NEPC_labels.
+# updated_manual_low_confidence keeps low-confidence calls, so it is the label
+# used here (updated_manual_high_confidence is the stricter alternative).
+MANUAL_ANNOTATIONS_FILE <- "full_manual_annotations.csv"
+MANUAL_LABEL_COL <- "updated_manual_low_confidence"
+MANUAL_LABEL_LEVELS <- c("conventional", "avpc", "nepc")
 
 # Figure 2 uses primary subtypes for landscape/enrichment panels. Longitudinal
 # lab figures use only the binary NEPC stratum in FIGURE_LLM_STRATA below.
@@ -486,6 +493,37 @@ cached_profile_patient_and_labs <- function(path, id_col = "DFCI_MRN") {
   value <- list(patient_df = patient_df, labs_df = labs_df)
   .processed_read_cache[[key]] <- value
   value
+}
+
+# load_manual_annotations: one row per chart-reviewed patient with
+# manual_label in MANUAL_LABEL_LEVELS. Blank labels become NA so binary_metrics
+# excludes them instead of scoring them as non-NEPC.
+load_manual_annotations <- function(path) {
+  manual <- cached_read_csv(path, show_col_types = FALSE)
+  missing <- setdiff(c("DFCI_MRN", MANUAL_LABEL_COL), names(manual))
+  if (length(missing) > 0) {
+    stop(sprintf("%s is missing required columns: %s", path, paste(missing, collapse = ", ")))
+  }
+  manual <- manual %>%
+    transmute(
+      DFCI_MRN = suppressWarnings(as.numeric(sub("\\.0$", "", str_trim(as.character(DFCI_MRN))))),
+      manual_label = str_to_lower(str_trim(as.character(.data[[MANUAL_LABEL_COL]]))),
+      manual_label = if_else(
+        is.na(manual_label) |
+          manual_label %in% c("", "nan", "na", "null", "none"),
+        NA_character_,
+        manual_label
+      )
+    )
+  unknown <- setdiff(unique(na.omit(manual$manual_label)), MANUAL_LABEL_LEVELS)
+  if (length(unknown) > 0) {
+    stop(sprintf("%s has unexpected %s values: %s (expected %s)", path, MANUAL_LABEL_COL,
+                 paste(unknown, collapse = ", "), paste(MANUAL_LABEL_LEVELS, collapse = ", ")))
+  }
+  if (anyNA(manual$DFCI_MRN) || anyDuplicated(manual$DFCI_MRN)) {
+    stop(sprintf("%s must have one row per non-missing DFCI_MRN", path))
+  }
+  manual
 }
 
 load_llm_strata <- function(llm_annotations_path) {
@@ -1451,8 +1489,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
   LLM_LABEL_PATH <- file.path(NEPC_PROJ_PATH, "LLM_NEPC_labels")
   # Cohort- and endpoint-invariant: read once per session, not once per pass.
-  manual_annotations <- cached_read_csv(file.path(LLM_LABEL_PATH, "baca_lab_annotations.csv"),
-                                        show_col_types = FALSE)
+  manual_annotations <- load_manual_annotations(file.path(LLM_LABEL_PATH, MANUAL_ANNOTATIONS_FILE))
   platinum_mrns <- cached_read_csv(file.path(NEPC_PROJ_PATH, "mrn_lists/platinum_MRN_list.csv"),
                                    show_col_types = FALSE)
   platinum_set <- unique(platinum_mrns$DFCI_MRN)
@@ -2092,8 +2129,6 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   } else {
     OUT_DIR_V3 <- fig_dir("figure2v3_llm")
 
-    drop_cols <- function(df, cols) df %>% select(-any_of(cols))
-
     # Panels B/C restored from 3c4efc4 (before their removal in fec33f4).
     # Fixed class order groups the two aggressive classes together for readability.
     CLASS_ORDER <- c("conventional", "avpc", "nepc")
@@ -2273,14 +2308,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     ## Panel A: binary NEPC validation uses has_nepc directly. Panels B/C below
     ## use primary_label for the subtype landscape and aggressive-variant group.
     merged_v3 <- manual_annotations %>%
-      drop_cols(c("pathology_details", "manual_platinum_reason")) %>%
       inner_join(v3_labels_all, by = "DFCI_MRN") %>%
-      mutate(
-        manual_NEPC = simplified_manual_platinum_reason %in% c("nepc", "squamous_transformation")
-      )
+      mutate(manual_NEPC = as.numeric(manual_label == "nepc"))
     cat(sprintf("figure2v3 merged_results: %s rows, %s manual-NEPC positive\n",
                 format(nrow(merged_v3), big.mark = ","),
-                format(sum(merged_v3$manual_NEPC), big.mark = ",")))
+                format(sum(merged_v3$manual_NEPC, na.rm = TRUE), big.mark = ",")))
     metrics_v3 <- binary_metrics(merged_v3$manual_NEPC, merged_v3$has_nepc)
     n_total_v3 <- metrics_v3$N
     n_nepc_manual_v3 <- metrics_v3$TP + metrics_v3$FN

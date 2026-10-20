@@ -535,7 +535,7 @@ def prepare(config: dict) -> dict:
             except Exception as exc:
                 manifest["errors"]["cohort_overview"] = str(exc)
 
-        shared_paths = [root / "LLM_NEPC_labels" / "baca_lab_annotations.csv",
+        shared_paths = [root / "LLM_NEPC_labels" / "full_manual_annotations.csv",
                         root / "mrn_lists" / "platinum_MRN_list.csv",
                         root / "mrn_lists" / "icd_prostate_mrn_flags.csv",
                         Path(config["classifier_path"]) / "primary_subtype_labels.parquet"]

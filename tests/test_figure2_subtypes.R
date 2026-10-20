@@ -2,12 +2,14 @@
 suppressPackageStartupMessages({
   library(dplyr)
   library(ggplot2)
+  library(readr)
   library(stringr)
 })
 pipeline <- new.env(parent = globalenv())
 needed <- c("COLOR_PLATINUM_POS", "COLOR_PLATINUM_NEG", "COLOR_NEUTRAL_INK",
             "theme_fig", "prepare_figure_text", "wilson_ci", "CLASS_ORDER", "CLASS_LABELS", "count_labels",
-            "compute_enrichment", "render_landscape_panel", "render_enrichment_panel", "render_confusion_panel")
+            "compute_enrichment", "render_landscape_panel", "render_enrichment_panel", "render_confusion_panel",
+            ".read_cache", "cached_read_csv", "MANUAL_LABEL_COL", "MANUAL_LABEL_LEVELS", "load_manual_annotations")
 collect <- function(expr) {
   if (missing(expr) || !is.call(expr)) return(invisible(NULL))
   if (identical(expr[[1]], as.name("<-")) && is.symbol(expr[[2]]) &&
@@ -100,6 +102,21 @@ for (subset in list(filter(labels, primary_label == "conventional"), labels[0, ]
   invisible(ggplot_build(pipeline$render_enrichment_panel(result)))
 }
 invisible(ggplot_build(pipeline$render_landscape_panel(positive[0, ], 0, 0)))
+
+# Manual truth uses updated_manual_low_confidence; blanks are unlabelled, not
+# conventional, and unknown labels or repeated MRNs abort.
+manual_csv <- tempfile(fileext = ".csv")
+readr::write_csv(tibble(DFCI_MRN = c("1", "2.0", "3"),
+                        updated_manual_low_confidence = c(" NEPC", "avpc", NA),
+                        updated_manual_high_confidence = c("conventional", "avpc", "nepc")), manual_csv)
+manual <- pipeline$load_manual_annotations(manual_csv)
+stopifnot(identical(manual$DFCI_MRN, c(1, 2, 3)),
+          identical(manual$manual_label, c("nepc", "avpc", NA)))
+for (bad in list(tibble(DFCI_MRN = 1, updated_manual_low_confidence = "squamous"),
+                 tibble(DFCI_MRN = c(1, 1), updated_manual_low_confidence = "nepc"))) {
+  bad_csv <- tempfile(fileext = ".csv"); readr::write_csv(bad, bad_csv)
+  stopifnot(inherits(tryCatch(pipeline$load_manual_annotations(bad_csv), error = identity), "error"))
+}
 
 # Optional local preview of the actual restored plotting functions.
 review_dir <- Sys.getenv("COMPASS_FIGURE2_REVIEW_DIR", "")

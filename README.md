@@ -508,7 +508,7 @@ notebook. All operate on the merged `profile_data` run:
   figure and data CSV mark Dynamic-DeepHit as missing instead of suppressing the supplement.
   - **LLM label strata:** alongside the existing `LLM_v3_labels.tsv`-driven Figure 2, the pipeline
     loads `primary_subtype_labels.parquet` from
-    `/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_primary_subtype/` (the same file Stage 1
+    `/data/gusev/USERS/jpconnor/LLM_annotations/LLM_primary_subtype/` (the same file Stage 1
     reads for the `nepc`/`avpc` endpoints) via `load_llm_strata()`, keeping `DFCI_MRN`,
     `primary_label` [conventional/avpc/nepc; nepc > avpc > conventional], and deriving
     `has_nepc = (nepc_status == "nepc")` (NA when unresolved) and `has_avpc = is_avpc`. It

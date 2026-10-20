@@ -26,9 +26,10 @@ local({
   for (col in c("DATED_PROSTATE_DIAGNOSIS", "MALE", "ARPI_DOCETAXEL_EXPOSED", "ADT_EXPOSED", "HAS_5_OR_MORE_PSA_TESTS", "ELIGIBLE")) flags[[col]] <- 1
   write_csv(flags, file.path(root, "mrn_lists", "icd_prostate_mrn_flags.csv"))
   write_csv(patient %>% filter(PLATINUM == 1) %>% select(DFCI_MRN), file.path(root, "mrn_lists", "platinum_MRN_list.csv"))
-  write_csv(tibble(DFCI_MRN = ids, NEPC = patient$NEPC,
-    simplified_manual_platinum_reason = if_else(patient$NEPC == 1, "nepc", "conventional")),
-    file.path(root, "LLM_NEPC_labels", "baca_lab_annotations.csv"))
+  write_csv(tibble(DFCI_MRN = ids,
+    updated_manual_low_confidence = if_else(patient$NEPC == 1, "nepc", "conventional"),
+    updated_manual_high_confidence = updated_manual_low_confidence),
+    file.path(root, "LLM_NEPC_labels", "full_manual_annotations.csv"))
   federated <- list()
   for (endpoint in c("platinum", "nepc")) {
     suffix <- if (endpoint == "platinum") "" else "_nepc"
