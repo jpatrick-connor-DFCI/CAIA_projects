@@ -267,11 +267,11 @@ COLOR_NEUTRAL_INK  <- "#52514e"   # secondary ink, for annotations/text only
 # Root for the per-patient primary-subtype labels (primary_subtype_labels.parquet,
 # written by LLM_clinical_annotations notebooks/primary_subtype.ipynb from the
 # per-note NEPC and AVPC pipelines). Deliberately a different root than
-# NEPC_PROJ_PATH: this file lives under the user's LLM_annotations/ tree,
+# NEPC_PROJ_PATH: this file lives under the user's data/LLM_annotations/ tree,
 # not the CAIA/COMPASS project tree, and is the sole LLM label source for
 # Figure 2 v3 and the Section 4-5 stratifications. It is the same file Stage 1
 # reads for the nepc/avpc endpoints. Overridable per-call by generate_figures().
-DEFAULT_LLM_ANNOTATIONS_PATH <- "/data/gusev/USERS/jpconnor/LLM_annotations/LLM_primary_subtype"
+DEFAULT_LLM_ANNOTATIONS_PATH <- "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_primary_subtype"
 LLM_SUBTYPE_LABELS_FILE <- "primary_subtype_labels.parquet"
 
 # Chart-review truth for Figure 2 Panel A, under NEPC_PROJ_PATH/LLM_NEPC_labels.

@@ -99,7 +99,7 @@ DEFAULT_STAGE_NOTE_LEVEL_PATH = (
 DEFAULT_LLM_LABELS_PATH = Path(
     os.environ.get(
         "LLM_PRIMARY_SUBTYPE_LABELS_PATH",
-        "/data/gusev/USERS/jpconnor/LLM_annotations/LLM_primary_subtype/"
+        "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_primary_subtype/"
         "primary_subtype_labels.parquet",
     )
 )

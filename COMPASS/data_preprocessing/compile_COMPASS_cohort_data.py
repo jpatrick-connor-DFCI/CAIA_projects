@@ -120,7 +120,7 @@ ONCDRS_PATH = os.path.join(PROFILE_PATH, 'OncDRS/ALL_2025_03/')
 #   is_avpc / avpc_date               -> "avpc" endpoint (taken as-is from the
 #                                        AVPC runner; no criteria-count gate here)
 #   union of the two                  -> AVPC_NEPC joint audit fields
-LLM_ANNOTATIONS_PATH = '/data/gusev/USERS/jpconnor/LLM_annotations/'
+LLM_ANNOTATIONS_PATH = os.path.join(DATA_PATH, 'LLM_annotations/')
 SUBTYPE_LABELS_PATH = os.path.join(
     LLM_ANNOTATIONS_PATH, 'LLM_primary_subtype/primary_subtype_labels.parquet'
 )
