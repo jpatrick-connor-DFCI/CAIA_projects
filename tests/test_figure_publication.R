@@ -171,7 +171,7 @@ local({
   loaded <- load_federated_transfer(directory)
   stopifnot(nrow(loaded)==36,!"other" %in% loaded$endpoint,all(is.na(loaded$mean_auc_lo)),all(is.na(loaded$c_index)))
   d <- prepare_federated_transfer(loaded)
-  stopifnot(identical(levels(d$model),c("XGBoost","Elastic-net Cox","custom_bundle")),
+  stopifnot(identical(levels(d$model),c("Federated XGBoost","Federated elastic-net Cox","custom_bundle")),
     identical(levels(d$landmark),c("0 days","+180 days")),
     nrow(d)==36,identical(levels(d$metric),"Mean AUC(t)"))
   note <- federated_transfer_count_note(loaded)
@@ -217,16 +217,17 @@ local({
   # Per subpopulation: 12 transferred-labs and 12 combined AUC(t) points and one local Cox AUC(t)
   # per endpoint/landmark; the paired ΔAUC(t) stays in the table, not the figure.
   stopifnot(nrow(d)==3*(12+12+6),identical(levels(d$metric),"Mean AUC(t)"),
-    identical(levels(d$series),c("XGBoost","Elastic-net Cox","Gleason + age","TP53/RB1/PTEN + age",
+    identical(levels(d$series),c("Federated XGBoost","Federated elastic-net Cox","Gleason + age","TP53/RB1/PTEN + age",
       "Gleason + TP53/RB1/PTEN + age")),
-    identical(levels(d$score_type),c("Federated score","Local clinical Cox","Federated score + local clinical Cox")),
+    identical(levels(d$score_type),c("Federated score","Local clinical Cox","Federated score + clinical (no age)")),
     all(abs(d$value[d$score_type=="Local clinical Cox"]-.72)<1e-9),
-    all(abs(d$value[d$score_type=="Federated score + local clinical Cox"]-.76)<1e-9),
+    all(abs(d$value[d$score_type=="Federated score + clinical (no age)"]-.76)<1e-9),
     !any(d$series=="Age only"))
   b <- ggplot_build(plot_federated_transfer_clinical(d,"note"))
   stopifnot(length(b$layout$panel_params)==9)
   one <- prepare_federated_transfer_clinical(loaded,"trio_gleason")
-  stopifnot(nrow(one)==30,length(ggplot_build(plot_federated_transfer_clinical(one,NULL))$layout$panel_params)==3)
+  stopifnot(nrow(one)==30,length(ggplot_build(plot_federated_transfer_clinical(one,NULL))$layout$panel_params)==3,
+    identical(levels(one$score_type)[3],"Federated score + Gleason + TP53/RB1/PTEN"))
   # A CSV written before the combined Cox still loads and plots.
   readr::write_csv(select(filter(clinical,model!="combined_cox"),-starts_with("delta_auc_vs_clinical")),path)
   legacy <- prepare_federated_transfer_clinical(load_federated_transfer_clinical(directory),"trio")

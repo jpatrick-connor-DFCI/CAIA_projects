@@ -1247,7 +1247,7 @@ subfolder of its section (`03_univariate/federated/`, `04_multivariate/federated
 |---|---|
 | `federated_03_univariable` | Figure 3 layout: pooled univariable Cox volcanoes at days 0/90/180, pooled PSA/testosterone trajectories and day-180 extreme-quintile KM curves |
 | `federated_04_multivariable` | Figure 8 layout, with the full models refit without DFCI added to the AUC(t) row |
-| `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/NEPC/AVPC: (a) mean AUC(t) and paired ΔAUC(t) vs. age only; (b, c) paired ΔAUC(t) vs. local out-of-fold Gleason + age and TP53/RB1/PTEN + altered-gene count + age Cox models |
+| `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/NEPC/AVPC: (a) mean AUC(t) of the full and age-only models; (b–d) mean AUC(t) of the transferred full models, local out-of-fold Cox models of Gleason + age (b), TP53/RB1/PTEN + age (c) and Gleason + TP53/RB1/PTEN + age (d), and combined Cox models of each transferred score + those covariates without age, in patients with a Gleason score (b), sequenced patients (c) and sequenced patients with a Gleason score (d); c and d on the sequencing-date clock |
 
 The local Figure 3 (`03_dfci_univariable`) still uses DFCI patient-level data.
 

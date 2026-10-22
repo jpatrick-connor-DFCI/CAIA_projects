@@ -204,10 +204,12 @@
 # `federated_04_multivariable` (the Figure 8 layout, with the full models refit without
 # Dana-Farber added as darker bars in the discrimination rows), and
 # `federated_05_transfer_no_dfci` (the models trained without Dana-Farber scored on
-# Dana-Farber platinum/NEPC/AVPC: a, mean AUC(t) of the full and age-only models; b, c, the full models
-# vs. local out-of-fold Cox models of Gleason + age and of TP53/RB1/PTEN + altered-gene
-# count + age, in the patients with a Gleason score before the ADT landmark / in sequenced
-# patients on a sequencing-date clock).
+# Dana-Farber platinum/NEPC/AVPC: a, mean AUC(t) of the full and age-only models; b-d, mean
+# AUC(t) of the full models, local out-of-fold Cox models of Gleason + age (b),
+# TP53/RB1/PTEN + age (c) or Gleason + TP53/RB1/PTEN + age (d), and combined Cox models of
+# each transferred score + the same covariates without age (the full models include age),
+# in patients with a Gleason score before the ADT landmark (b), sequenced patients (c) and
+# sequenced patients with a Gleason score (d); c and d on a sequencing-date clock).
 # The local Figure 3 stays on Dana-Farber patient-level data. The cohort
 # sensitivity components are assembled into one continuous multipanel figure for
 # each analysis setting. Federated manuscript plots reuse the original subplot

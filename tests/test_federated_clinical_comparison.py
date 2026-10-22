@@ -181,6 +181,12 @@ def test_comparison_is_paired_on_the_same_patients():
     score_rows = comb_coefs[comb_coefs["covariate"] == fcc.SCORE_COVARIATE]
     assert len(score_rows) == 3 * 2
     assert set(score_rows["bundle"]) == {"fed_en", "fed_xgb"}
+    # The transferred full model already includes age, so the combined Cox does not add it.
+    assert "AGE" not in set(comb_coefs["covariate"])
+    comb_covs = comb_coefs.groupby("subpopulation")["covariate"].agg(set)
+    assert comb_covs["gleason"] == {fcc.SCORE_COVARIATE, "GLEASON_SCORE"}
+    assert comb_covs["trio"] == {fcc.SCORE_COVARIATE, "TP53_ANY", "RB1_ANY", "PTEN_ANY"}
+    assert comb_covs["trio_gleason"] == {fcc.SCORE_COVARIATE, "GLEASON_SCORE", "TP53_ANY", "RB1_ANY", "PTEN_ANY"}
     assert clin_coefs["bundle"].isna().all()
 
 

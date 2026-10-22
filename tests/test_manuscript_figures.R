@@ -196,7 +196,8 @@ transfer_metrics <- tidyr::expand_grid(endpoint=c("nepc","avpc","platinum"),
 transfer_clinical <- mutate(filter(clinical_fixture(),subpopulation!="other"),endpoint=tolower(endpoint))
 fig5 <- manuscript_federated_transfer_no_dfci(transfer_metrics,transfer_clinical)
 stopifnot(fig5$spec$key=="federated_05_transfer_no_dfci",inherits(fig5$plot,"gtable"),
-  identical(fig5$spec$titles,c("Discrimination","vs. Gleason score","vs. TP53/RB1/PTEN","vs. Gleason + TP53/RB1/PTEN")),
+  identical(fig5$spec$titles,c("Discrimination","Patients with Gleason score","Sequenced patients",
+    "Sequenced patients with Gleason score")),
   fig5$spec$height==10.4,nrow(fig5$spec$layout)==4,
   grepl("b: patients with a Gleason score",fig5$legend,fixed=TRUE),
   grepl("c: sequenced patients,",fig5$legend,fixed=TRUE),
@@ -205,7 +206,7 @@ stopifnot(fig5$spec$key=="federated_05_transfer_no_dfci",inherits(fig5$plot,"gta
   grepl("PLATINUM: 0d 400/20",fig5$legend,fixed=TRUE),!grepl("ΔAUC",fig5$legend,fixed=TRUE),
   !grepl("ΔC",fig5$legend,fixed=TRUE))
 fig5_trio <- manuscript_federated_transfer_no_dfci(transfer_metrics,filter(transfer_clinical,subpopulation=="trio"))
-stopifnot(identical(fig5_trio$spec$titles,c("Discrimination","vs. TP53/RB1/PTEN")),
+stopifnot(identical(fig5_trio$spec$titles,c("Discrimination","Sequenced patients")),
   grepl("b: sequenced patients,",fig5_trio$legend,fixed=TRUE))
 fallback_message <- NULL
 fig5_a <- withCallingHandlers(manuscript_federated_transfer_no_dfci(transfer_metrics,NULL),

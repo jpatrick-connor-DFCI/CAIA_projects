@@ -510,9 +510,8 @@ DH_LABS = ["A", "B"]
 DH_WINDOW = 20
 
 
-def _deephit_bundle(hidden: int = 6, seed: int = 0) -> dict:
+def _deephit_state(d: int, hidden: int, seed: int) -> dict:
     rng = np.random.default_rng(seed)
-    d = 2 * len(DH_LABS) + 1
     shapes = {
         "gru.weight_ih_l0": (3 * hidden, d),
         "gru.weight_hh_l0": (3 * hidden, hidden),
@@ -523,13 +522,18 @@ def _deephit_bundle(hidden: int = 6, seed: int = 0) -> dict:
         "head.4.weight": (DH_WINDOW + 1, hidden),
         "head.4.bias": (DH_WINDOW + 1,),
     }
-    state = {
+    return {
         name: {
             "shape": list(shape),
             "values": rng.normal(0.0, 0.5, shape).astype(np.float32).reshape(-1).tolist(),
         }
         for name, shape in shapes.items()
     }
+
+
+def _deephit_bundle(hidden: int = 6, seed: int = 0) -> dict:
+    d = 2 * len(DH_LABS) + 1
+    state = _deephit_state(d, hidden, seed)
     return {
         "format": "caia-federated-model-bundle",
         "format_version": 1,
@@ -550,6 +554,20 @@ def _deephit_bundle(hidden: int = 6, seed: int = 0) -> dict:
             },
             "n_rounds": 5,
             "state_dict": state,
+        }, {
+            # The age-only baseline: one standardized-age step per patient.
+            "landmark_days": 0,
+            "config": "baseline",
+            "hyperparameters": {"hidden_dim": hidden, "dropout": 0.1, "lr": 1e-3},
+            "architecture": {"input_dim": 1, "hidden_dim": hidden, "dropout": 0.1,
+                             "n_events": 1, "max_pred_window": DH_WINDOW},
+            "preprocessing": {
+                "input_kind": "age", "covariate_cols": ["age"],
+                "centers": {"age": 65.0}, "scales": {"age": 10.0},
+                "source_cols": {"age": "age_at_anchor"}, "time_unit_days": 7,
+            },
+            "n_rounds": 5,
+            "state_dict": _deephit_state(1, hidden, seed + 1),
         }],
     }
 
@@ -689,3 +707,58 @@ def test_deephit_cli_scores_the_whole_cohort(tmp_path):
     np.testing.assert_allclose(out["risk_score"], cif[:, -1])
     # Patients without pre-landmark labs share the anchor-only prediction.
     assert out["risk_score"].iloc[2] == out["risk_score"].iloc[3]
+
+
+def _deephit_cohort() -> pd.DataFrame:
+    return pd.DataFrame({
+        "person_id": ["p1", "p2", "p3", "p4"],
+        "age_at_anchor": [55.0, 65.0, 80.0, np.nan],
+    })
+
+
+def test_deephit_baseline_reads_one_standardized_age_step():
+    model = select_model(_deephit_bundle(), 0, "baseline")
+    ids, cif = predict_cif(_deephit_cohort(), model, ids=["p3", "p1", "p2", "p4"])
+    assert ids == ["p3", "p1", "p2", "p4"]
+    # By hand: the pooled center and scale, never the local cohort's.
+    ref = deephit_cif([np.array([[(a - 65.0) / 10.0]]) for a in (80.0, 55.0, 65.0)], model)
+    np.testing.assert_allclose(cif[:3], ref)
+    # A missing age cannot be scored; the federated cohort drops those.
+    assert np.isnan(cif[3]).all()
+    # --age-col overrides the bundle's source column.
+    renamed = _deephit_cohort().rename(columns={"age_at_anchor": "age"})
+    _, cif2 = predict_cif(renamed, model, age_col="age")
+    np.testing.assert_allclose(cif2[:3], cif[[1, 2, 0]])
+    with pytest.raises(BundleError, match="age column"):
+        predict_cif(renamed, model)
+
+
+def test_deephit_baseline_numpy_forward_matches_profile_torch_module():
+    torch = pytest.importorskip("torch")
+    bundle = _deephit_bundle(hidden=8, seed=3)
+    model = select_model(bundle, 0, "baseline")
+    cohort = _deephit_cohort().iloc[:3]
+    _, cif = predict_cif(cohort, model)
+    net = load_model(bundle, model)
+    x = torch.tensor(((cohort["age_at_anchor"].to_numpy() - 65.0) / 10.0)[:, None, None],
+                     dtype=torch.float32)
+    with torch.no_grad():
+        event_probs, _ = net.probabilities(net(x, torch.ones(3, dtype=torch.long)))
+    np.testing.assert_allclose(cif, np.cumsum(event_probs[:, 0, :].numpy(), axis=1), atol=1e-5)
+
+
+def test_deephit_cli_scores_the_age_baseline(tmp_path):
+    bundle = _deephit_bundle()
+    (tmp_path / "b.json").write_text(json.dumps(bundle))
+    _deephit_cohort().to_csv(tmp_path / "cohort.csv", index=False)
+    rc = main([
+        "--bundle", str(tmp_path / "b.json"), "--data", str(tmp_path / "cohort.csv"),
+        "--landmark", "0", "--config", "baseline", "--horizons", "70",
+        "--output", str(tmp_path / "out.csv"),
+    ])
+    assert rc == 0
+    out = pd.read_csv(tmp_path / "out.csv")
+    assert out["person_id"].tolist() == ["p1", "p2", "p3", "p4"]
+    assert (out["config"] == "baseline").all()
+    _, cif = predict_cif(_deephit_cohort(), bundle["models"][1])
+    np.testing.assert_allclose(out["risk_score"].iloc[:3], cif[:3, -1])

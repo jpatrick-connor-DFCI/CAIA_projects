@@ -19,7 +19,9 @@ whether it adds to that model:
   unpenalized Cox of GLEASON_SCORE + the trio + age at sequencing.
 
 In each subpopulation a third, combined Cox adds the bundle's transferred
-labs score (z-scored within the subpopulation) to the clinical covariates.
+labs score (z-scored within the subpopulation) to the clinical covariates
+other than age: Gleason, the trio, or Gleason + the trio. The transferred
+full model already takes age as an input, so age is not added again.
 
 The transferred score is never refit. The clinical and combined Cox models
 are fit on the same DFCI patients they are scored on, so each patient's score
@@ -73,22 +75,27 @@ HAS_SEQUENCING = "HAS_SEQUENCING"
 TRIO_GENES = sg.CLINICAL_STRATIFIERS_TRIO_GENES
 TRIO_FEATURES = tuple(f"{gene}_{sg.ANY_ALTERATION_SUFFIX}" for gene in TRIO_GENES)
 
-# Subpopulation -> (display label, membership columns (all non-missing), Cox covariates).
+# Subpopulation -> (display label, membership columns (all non-missing), clinical Cox
+# covariates, covariates the combined Cox adds to the transferred score). The combined
+# Cox leaves out age: the transferred full model already includes it.
 SUBPOPULATIONS = {
     "gleason": {
         "label": "Gleason + age",
         "member": (GLEASON_FEATURE,),
         "covariates": (GLEASON_FEATURE, AGE_COL),
+        "combined": (GLEASON_FEATURE,),
     },
     "trio": {
         "label": "TP53/RB1/PTEN + age",
         "member": (HAS_SEQUENCING,),
         "covariates": (*TRIO_FEATURES, AGE_COL),
+        "combined": TRIO_FEATURES,
     },
     "trio_gleason": {
         "label": "Gleason + TP53/RB1/PTEN + age",
         "member": (HAS_SEQUENCING, GLEASON_FEATURE),
         "covariates": (GLEASON_FEATURE, *TRIO_FEATURES, AGE_COL),
+        "combined": (GLEASON_FEATURE, *TRIO_FEATURES),
     },
 }
 TRANSFERRED_LABS = "transferred_labs"
@@ -318,7 +325,7 @@ def fit_local_cox(frame: pd.DataFrame, covariates, *, n_folds: int, seed: int, h
 
 
 def fit_combined_cox(sub_df: pd.DataFrame, labs: np.ndarray, covariates, **kwargs) -> dict:
-    """fit_local_cox on the transferred labs score (z-scored) + the clinical covariates.
+    """fit_local_cox on the transferred labs score (z-scored) + ``covariates``.
 
     Fit on the patients with a finite score; the others stay NaN. z-scoring
     uses no outcome, so it leaks nothing into the out-of-fold score; the
@@ -376,8 +383,9 @@ def compare_clinical_models(
     does not depend on the bundle; its rows repeat for each bundle so that
     each ΔC and ΔAUC(t) (model − transferred labs, paired bootstrap over the
     same patients) sits on its own row. The combined Cox (that bundle's
-    transferred labs score + the clinical covariates) also carries its paired
-    difference from the clinical Cox (``delta_*_vs_clinical``).
+    transferred labs score + the subpopulation's ``combined`` covariates, the
+    clinical covariates without age) also carries its paired difference from
+    the clinical Cox (``delta_*_vs_clinical``).
     """
     scores = _normalize_ids(scores)
     clinical = _normalize_ids(clinical)
@@ -416,7 +424,8 @@ def compare_clinical_models(
             for bundle in bundles:
                 risks = {m: sub_df.get(f"{bundle}|{CONFIG_FOR_MODEL[m]}", pd.Series(np.nan, index=sub_df.index))
                          .to_numpy(dtype=float) for m in CONFIG_FOR_MODEL}
-                comb = fit_combined_cox(sub_df, risks[TRANSFERRED_LABS], covariates, **fit_kw) if fitted else unfitted
+                comb = (fit_combined_cox(sub_df, risks[TRANSFERRED_LABS], spec["combined"], **fit_kw)
+                        if fitted else unfitted)
                 if comb["cph"] is not None:
                     coefs += _coef_rows(comb["cph"], {**coef_base, "model": COMBINED_COX, "bundle": bundle})
                 risks[CLINICAL_COX] = clin["oof"]

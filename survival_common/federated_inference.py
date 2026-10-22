@@ -29,7 +29,9 @@ history as a sequence.  The bundle's pooled clip bounds, means and standard
 deviations are applied verbatim, the risk score is ``CIF_total`` (the
 probability of the event within the model's window), and survival at a horizon
 is ``1 - CIF(h)``.  Scoring runs the GRU in numpy, so torch is only needed to
-get the trained ``DynamicDeepHitGRU`` back as an object.
+get the trained ``DynamicDeepHitGRU`` back as an object.  The family's
+``config="baseline"`` model is age-only: it reads one standardized-age step per
+patient, so its input is a one-row-per-patient frame with the age column.
 
 Loading the trained object in Python::
 
@@ -125,8 +127,7 @@ def select_model(bundle: dict, landmark_days: int, config: str = "both") -> dict
     """Pick one fitted model out of a bundle.
 
     ``config`` is ``both`` for the full model or ``baseline`` for the age-only
-    comparator, matching the federated result tables.  (``dynamic_deephit``
-    bundles have no baseline.)
+    comparator, matching the federated result tables.
     """
     wanted = [
         m for m in bundle["models"]
@@ -480,6 +481,39 @@ def _load_deephit_module(model: dict):
     return net
 
 
+def _deephit_reads_age(model: dict) -> bool:
+    """True for the age-only baseline; bundles from before it read labs."""
+    return model["preprocessing"].get("input_kind", "labs") == "age"
+
+
+def build_deephit_age_sequences(
+    df: pd.DataFrame,
+    model: dict,
+    *,
+    ids=None,
+    id_col: str = "person_id",
+    age_col: str | None = None,
+) -> tuple[list, list[np.ndarray]]:
+    """The age-only baseline's input: one ``[(age - center) / scale]`` step.
+
+    ``df`` has one row per patient.  ``age_col`` defaults to the bundle's
+    source column; ``ids`` picks and orders the patients (default: every row
+    of ``df``, by ``id_col`` when present).  A missing age scores NaN -- the
+    federated cohort drops those patients.
+    """
+    pre = model["preprocessing"]
+    col = age_col or pre["source_cols"]["age"]
+    if col not in df.columns:
+        raise BundleError(f"the age-only model needs an age column {col!r}")
+    age = pd.to_numeric(df[col], errors="coerce")
+    if id_col in df.columns:
+        age = pd.Series(age.to_numpy(), index=df[id_col].to_numpy())
+    if ids is not None:
+        age = age.reindex(pd.Index(list(ids)))
+    z = (age.to_numpy(dtype=float) - float(pre["centers"]["age"])) / float(pre["scales"]["age"])
+    return list(age.index), [np.array([[v]]) for v in z]
+
+
 def build_deephit_sequences(
     labs: pd.DataFrame,
     model: dict,
@@ -630,9 +664,20 @@ def deephit_cif(xs: list[np.ndarray], model: dict) -> np.ndarray:
     return np.cumsum(probs[:, :window], axis=1)
 
 
-def predict_cif(labs: pd.DataFrame, model: dict, *, ids=None, **cols) -> tuple[list, np.ndarray]:
-    """``(ids, CIF)`` for a long lab frame; see :func:`build_deephit_sequences`."""
-    ids, xs = build_deephit_sequences(labs, model, ids=ids, **cols)
+def predict_cif(
+    labs: pd.DataFrame, model: dict, *, ids=None, age_col: str | None = None, **cols
+) -> tuple[list, np.ndarray]:
+    """``(ids, CIF)`` for a long lab frame; see :func:`build_deephit_sequences`.
+
+    For the age-only baseline ``labs`` is instead a one-row-per-patient frame
+    with the age column; see :func:`build_deephit_age_sequences`.
+    """
+    if _deephit_reads_age(model):
+        ids, xs = build_deephit_age_sequences(
+            labs, model, ids=ids, id_col=cols.get("id_col", "person_id"), age_col=age_col
+        )
+    else:
+        ids, xs = build_deephit_sequences(labs, model, ids=ids, **cols)
     return ids, deephit_cif(xs, model)
 
 
@@ -671,11 +716,12 @@ def predict_risk(
 
     For ``dynamic_deephit`` ``df`` is the long lab frame and the score is
     ``CIF_total``, one per patient in :func:`build_deephit_sequences`'s order
-    (pass ``ids`` to fix it).
+    (pass ``ids`` to fix it).  Its age-only baseline reads ``df``'s age column
+    instead, one row per patient.
     """
     family = bundle.get("model_family")
     if family == DEEPHIT_FAMILY:
-        return predict_cif(df, model, ids=ids)[1][:, -1]
+        return predict_cif(df, model, ids=ids, age_col=age_col)[1][:, -1]
 
     design = build_design_matrix(df, model, age_col=age_col)
 
@@ -758,7 +804,8 @@ def main(argv=None) -> int:
     ap.add_argument("--bundle", required=True, help="model bundle JSON")
     ap.add_argument(
         "--data", required=True,
-        help="wide frame (.csv or .parquet); for dynamic_deephit, the long lab frame",
+        help="wide frame (.csv or .parquet); for dynamic_deephit, the long lab "
+        "frame, or for its age-only baseline a table with --id-col and --age-col",
     )
     ap.add_argument(
         "--cohort", default="",
@@ -786,7 +833,9 @@ def main(argv=None) -> int:
             pd.unique(_read_table(args.cohort)[args.id_col]).tolist()
             if args.cohort else None
         )
-        ids, cif = predict_cif(df, model, ids=ids, id_col=args.id_col)
+        ids, cif = predict_cif(
+            df, model, ids=ids, id_col=args.id_col, age_col=args.age_col
+        )
         out = pd.DataFrame({args.id_col: ids, "risk_score": cif[:, -1]})
         out["landmark_days"] = args.landmark
         out["config"] = args.config
