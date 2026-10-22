@@ -140,7 +140,8 @@ local({
   manuscript_scenes <- Filter(function(s) isTRUE(s$manuscript),
     unlist(lapply(first$prepared,`[[`,"scenes"),recursive=FALSE))
   stopifnot(length(manuscript_scenes)>=7L,
-    all(vapply(manuscript_scenes,function(s) file.exists(paste0(s$destination,".pdf")) &&
+    all(vapply(manuscript_scenes,function(s) grepl("/ADT/0[1-6]_[a-z_]+(/internal|/federated)?/manuscript/",s$destination) &&
+      file.exists(paste0(s$destination,".pdf")) &&
       file.exists(figure_sidecar_path(paste0(s$destination,".md"))) && s$width==7.2,logical(1))))
   overview_stems <- vapply(first$prepared$cohort_overview$scenes,`[[`,character(1),"stem")
   stopifnot("06_dfci_cohort_sensitivity" %in% overview_stems)
@@ -152,7 +153,7 @@ local({
     "figure2v3_enrichment", "classifier_validation", "subtype_platinum") %in% platinum_stems),
     !any(startsWith(nepc_stems,"figure2v3")))
   overview <- Filter(function(s) startsWith(s$stem,"dfci_labs_overview_"),first$prepared$adt__platinum$scenes)
-  stopifnot(length(overview)==1L,grepl("/compiled/associations/",overview[[1]]$destination),
+  stopifnot(length(overview)==1L,grepl("/03_univariate/internal/compiled/",overview[[1]]$destination),
     !any(startsWith(nepc_stems,"dfci_labs_overview_")))
   panels <- Filter(function(g) inherits(g,"gtable"),readRDS(overview[[1]]$path)$grobs)
   stopifnot(length(panels)==7)
@@ -204,16 +205,16 @@ local({
                         "transfer_discrimination_no_dfci", "transfer_clinical_comparison_no_dfci",
                         "08_federated_multivariable",
                         "federated_05_transfer_no_dfci")))
-  coefficient_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated", "data",
+  coefficient_export <- read_csv(file.path(cfg$fig_root, "ADT", "04_multivariate", "federated", "data",
     "elasticnet_coefficients__platinum.csv"), show_col_types = FALSE)
   stopifnot(nrow(coefficient_export) == 9L, sum(coefficient_export$displayed) == 6L,
     "last missing" %in% coefficient_export$feature_stat)
-  transfer_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated", "data",
+  transfer_export <- read_csv(file.path(cfg$fig_root, "ADT", "05_transfer", "data",
     "transfer_discrimination_no_dfci__platinum.csv"), show_col_types = FALSE)
-  stopifnot(nrow(transfer_export) == 36L, file.exists(file.path(cfg$fig_root, "ADT", "federated", "data", c(
+  stopifnot(nrow(transfer_export) == 36L, file.exists(file.path(cfg$fig_root, "ADT", "05_transfer", "data", c(
     "transfer_auc_t_no_dfci__platinum.csv", "transfer_clinical_comparison_no_dfci__platinum.csv"))))
   # Nothing is rendered for the removed with-Dana-Farber arm.
-  stopifnot(!any(file.exists(file.path(cfg$fig_root, "ADT", "federated", "data", c(
+  stopifnot(!any(file.exists(file.path(cfg$fig_root, "ADT", "05_transfer", "data", c(
     "transfer_discrimination__platinum.csv", "transfer_dfci_ablation__platinum.csv")))))
   # Both forest scenes keep widescreen slide dimensions through 07's cache;
   # the day-zero incidence layout is unchanged.
@@ -222,11 +223,12 @@ local({
   }
   incidence_scene <- env$figure_run$prepared$federated$scenes[[3]]
   stopifnot(incidence_scene$width == 14, incidence_scene$height == 5.5)
-  site_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated", "data",
+  site_export <- read_csv(file.path(cfg$fig_root, "ADT", "01_cohort", "data",
                                     "site_incidence_lm000__platinum.csv"), show_col_types = FALSE)
   stopifnot(file.exists(file.path(cfg$fig_root,"ADT","data","index.html")),
             file.exists(file.path(cfg$fig_root,"ADT","data","manifest.csv")),
-            !dir.exists(file.path(cfg$fig_root,"ADT","by_figure")))
+            !dir.exists(file.path(cfg$fig_root,"ADT","by_figure")),
+            !any(dir.exists(file.path(cfg$fig_root,"ADT",FIGURE_RETIRED_FOLDERS))))
   stopifnot(nrow(site_export) == 2L, all(site_export$landmark_days == 0))
   federated_cfg <- cfg; federated_cfg$scope <- "federated"
   # Elastic-net, XGBoost and 04 transfer files require a refreshed 06 manifest after source changes.

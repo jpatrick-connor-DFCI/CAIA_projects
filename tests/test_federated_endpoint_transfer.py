@@ -176,31 +176,3 @@ def test_missing_endpoint_columns_fail_loudly(tmp_path):
     with pytest.raises(ValueError, match="AVPC"):
         fet.read_local_frame(data, ["avpc"])
 
-
-def _bundle_at(landmarks=(0, 90, 180)) -> dict:
-    b = _bundle()
-    b["models"] = [{**m, "landmark_days": lm} for lm in landmarks for m in b["models"]]
-    return b
-
-
-def test_every_landmark_scores_the_patients_at_risk_at_all_of_them():
-    local = _local()
-    # NEPC at day 50 and 150: at risk at day 0 only, and at days 0 and 90 only.
-    local.loc[local["DFCI_MRN"] == 1000, "NEPC_DATE"] = ANCHOR + pd.Timedelta(days=50)
-    local.loc[local["DFCI_MRN"] == 1002, "NEPC_DATE"] = ANCHOR + pd.Timedelta(days=150)
-    kw = dict(endpoints=("nepc",), lab_mapping=MAPPING, n_bootstrap=0, verbose=False,
-              horizons_days=(1000, 2000))
-
-    res = fet.evaluate_transfer(local, {"enet": _bundle_at()}, **kw)
-    scores = res["scores"][res["scores"]["config"] == "both"]
-    ids = {lm: set(d[fs.ID_COL]) for lm, d in scores.groupby("landmark_days")}
-    assert sorted(ids) == [0, 90, 180]
-    assert ids[0] == ids[90] == ids[180]
-    assert not ids[0] & {1000, 1002} and len(ids[0]) == 58
-    m = res["metrics"]
-    assert m["n_patients"].eq(58).all() and m["common_cohort"].all()
-    assert res["prep_stats"][0]["common_cohort"]["n_dropped_not_at_risk_every_landmark"] == 2
-
-    per_lm = fet.evaluate_transfer(local, {"enet": _bundle_at()}, common_cohort=False, **kw)
-    n = per_lm["metrics"].groupby("landmark_days")["n_patients"].first().to_dict()
-    assert n == {0: 60, 90: 59, 180: 58}

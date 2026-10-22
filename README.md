@@ -494,16 +494,16 @@ notebook. All operate on the merged `profile_data` run:
   displays its post-diagnosis ARPI/docetaxel exposure criterion. Axis and table labels throughout
   name the arm's anchor ("ARPI/chemo initiation" vs. "ADT initiation") via `ANCHOR_LABEL`.
   The cached `07_figures.R` workflow exports lettered multipanel figures alongside
-  all individual Figure 1 and Figure 2v3 panels: `compiled/cohort/figure1_cohort__<identity>`
+  all individual Figure 1 and Figure 2v3 panels: `01_cohort/compiled/figure1_cohort__<identity>`
   combines cohort selection, survival, and three timing distributions, while
-  `compiled/labels/figure2v3_llm__platinum__all__incl` combines all four classifier/subtype
+  `02_llm/compiled/figure2v3_llm__platinum__all__incl` combines all four classifier/subtype
   panels. Existing Figure 2v3 paired exports are retained. The three metastatic-label
-  confusion matrices also receive a combined `compiled/labels/metastatic_label_agreement__<identity>`
+  confusion matrices also receive a combined `06_cohort_sensitivity/compiled/metastatic_label_agreement__<identity>`
   export. Filenames use `<identity> = <endpoint>__<subset>__<exclusion>` under each arm;
   Figure 2v3 is emitted only for canonical ADT/platinum. Run the default figure stage
   (`all`) to prepare and render these additions, including PDFs when enabled.
-  All compiled exports use `compiled/<topic>/`, without an overall supertitle.
-  The new `compiled/associations/dfci_labs_overview_km_lm0__platinum__<subset>__<exclusion>`
+  Compiled exports sit in a `compiled/` subfolder of their section, without an overall supertitle.
+  The new `03_univariate/internal/compiled/dfci_labs_overview_km_lm0__platinum__<subset>__<exclusion>`
   combines the three DFCI landmark volcanoes with PSA/testosterone log1p trajectories
   by platinum status and bottom-versus-top-20% KM curves. KM defaults to day 0;
   `COMPASS_COMBINED_KM_LANDMARK=90` or `180` selects another landmark.
@@ -571,48 +571,45 @@ notebook. All operate on the merged `profile_data` run:
       by `adt_intent_comparison.py`; emitted only on the ADT arm, and skipped with a message if
       those CSVs are absent. Stems: `adt_intent_<panel>_<endpoint>`, routed to
       `supplement_adt_intent/`.
-  - **Output layout:** the tree is **figure-major**, so comparing one panel across cohorts is a
-    single directory listing rather than six paths differing mid-string. Each arm keeps its own
-    `FIG_ROOT/ARPI/` or `FIG_ROOT/ADT/` subtree (the two arms are separate deliverables and are
-    never compared panel-to-panel), but the patient-subset and exclusion axes move **out** of the
-    directory name and into the leaf filename:
+  - **Output layout:** each arm (`FIG_ROOT/ADT/`, `FIG_ROOT/ARPI/`) has six numbered
+    section folders, so a file browser and the HTML index list them in reading order:
 
     ```
-    <arm>/by_figure/<group>/<plot-stem>/<endpoint>__<subset>__<exclusion>.png
+    <arm>/
+      01_cohort/                  raw cohort numbers (DFCI Figure 1/Table 1, analysis sets,
+                                  pre-ADT coverage; federated site incidence and cohort KM)
+      02_llm/                     LLM NEPC/AVPC subtype labels and their KM curves
+      03_univariate/internal/     DFCI lab volcanoes, somatic/Gleason/co-mutation associations,
+                                  KM curves, trajectories/<lab>/ (trajectories + lab KM curves)
+      03_univariate/federated/    pooled PSA/testosterone forests, volcanoes, trajectories, KM
+      04_multivariate/internal/   DFCI Elastic-Net/XGBoost discrimination, importance,
+                                  Gleason/somatic sensitivity, combinations, risk strata
+      04_multivariate/federated/  federated models, including the no-DFCI refits
+      05_transfer/                no-DFCI federated models scored at Dana-Farber
+      06_cohort_sensitivity/      cohort forests, endpoint incidence, metastatic-label
+                                  comparisons, and <subset>__<exclusion>/<section>/ for every
+                                  run on a cohort other than all__incl
+      data/                       index.html and manifest.csv
     ```
 
-    so one leaf holds all twelve cohort x endpoint panels, endpoint first so they sort into two
-    contiguous six-cohort blocks:
+    Filenames are `<figure>__<endpoint>__<subset>__<exclusion>.png` (federated:
+    `<figure>__platinum.png`); `__` separates axes, single underscores live inside a slug, and
+    `incl` names the no-exclusion case so every filename has the same shape. Each folder holds
+    only PNG/PDF figures: tables and legends go in its `data/` subfolder, compiled multipanel
+    figures in its `compiled/` subfolder, and manuscript figures in its `manuscript/` subfolder
+    (legends in `manuscript/data/`, captions in `manuscript/captions/`).
 
-    ```
-    ADT/by_figure/figure3/figure3_univariate_landmark180/
-        nepc__all__incl.png                 nepc__all__noprecastrate.png
-        nepc__metastatic_adt__incl.png      nepc__metastatic_adt__noprecastrate.png
-        nepc__metastatic_llm__incl.png      nepc__metastatic_llm__noprecastrate.png
-        platinum__all__incl.png             platinum__all__noprecastrate.png
-        platinum__metastatic_adt__incl.png  platinum__metastatic_adt__noprecastrate.png
-        platinum__metastatic_llm__incl.png  platinum__metastatic_llm__noprecastrate.png
-    ```
-
-    `__` separates axes uniformly; single underscores live inside a slug. `incl` names the
-    no-exclusion case (rather than an empty suffix) so every filename has the same shape and each
-    subset's two variants sort adjacently. Per-lab panels keep their category/lab nesting, since
-    ~40 labs x 4 strata would otherwise flood one directory:
-    `<arm>/by_figure/labs/<lab_category>/<lab_name>/<panel_type>/<endpoint>__<subset>__<exclusion>.png`.
-    A lab-aware branch in `figure_group()` uses `assign_category()` for
-    CBC/CMP/LFT/Vitals/Androgen axis/Other. Any plot stem `figure_group()` can't route still
-    raises `stop("Unmapped figure output stem")`.
-
-    `generate_figures()` also refreshes a **cohort-major view** of symlinks for the cell it just
-    rendered, for the other access pattern ("everything for one cohort", e.g. assembling a
-    manuscript): `<arm>/by_cohort/<subset>__<exclusion>/<endpoint>/<group>/<plot-stem>.png`. Real
-    files live only under `by_figure/`; `by_cohort/` is a view, rebuilt per run and scoped to that
-    run's own **cohort x endpoint** cell, so regenerating one cohort never disturbs another's --
-    and re-rendering one endpoint does not drop the sibling endpoint's links, which that run did
-    not regenerate. On filesystems without
-    symlink support it falls back to copying. Note that the pipeline no longer prunes anything on
-    startup: the old legacy-subdirectory cleanup would delete the endpoint level under this
-    layout, so stale trees are removed by hand.
+    Internally the pipeline still addresses each plot as
+    `<arm>/by_figure/<group>/<plot-stem>/<endpoint>__<subset>__<exclusion>`, and
+    `figure_public_path()` maps that address to the section folder; `by_figure/` is never left
+    on disk by `07_figures.R`. Per-lab panels use
+    `by_figure/labs/<lab_category>/<lab_name>/<panel_type>/...`; a lab-aware branch in
+    `figure_group()` uses `assign_category()` for CBC/CMP/LFT/Vitals/Androgen axis/Other. Any
+    plot stem `figure_group()` can't route still raises `stop("Unmapped figure output stem")`.
+    After a successful render, a job's exports in the retired layout (`cohort/`, `labels/`,
+    `associations/`, `prediction/`, `trajectories/`, `federated/`, top-level `compiled/` and
+    `manuscript figures/`) are checksum-verified into `COMPASS_FIGURE_DATA_ROOT/previous_exports/`
+    and removed; cohorts not selected in that run are left untouched.
   `02_univariate.ipynb`'s final section loads all shared-landmark univariate results for both
   `arpi` and `adt`, filters each to nominal `p_value < 0.05`, displays every hit, and exports a
   separate `cox/nominally_significant_univariate_results.csv` beneath each arm's run directory.
@@ -1191,11 +1188,6 @@ It maps local `LAB_NAME` to the OMOP names via `OMOP_to_DFCI_lab_ids.csv`, puts
 each endpoint's date in the federated chain's event slot, and reuses
 `federated_scoring.build_landmark_frame` unchanged, so events at/before the
 landmark are dropped (incident risk set) and follow-up is censored at 3650 days.
-Every landmark of an endpoint is evaluated on the same patients: those at risk at
-all landmarks (the 180-day risk set), so performance changes across landmarks are
-not changes in the test cohort (`--per-landmark-cohort` turns this off). The
-Gleason/trio subpopulations in Figure 5 b-d are drawn from that cohort, with
-membership taken at each landmark.
 NEPC/AVPC are censored at last contact (death is not a competing event).
 Outputs: `transfer_metrics.csv` (mean AUC(t) + bootstrap CI and paired ΔAUC(t) vs the
 age-only baseline, which the figures plot; Harrell C + CI, paired ΔC, Uno's C, HR per SD
@@ -1212,14 +1204,14 @@ validation on all three endpoints. 04 writes `transfer_metrics.csv` and
 `$COMPASS_RHINO_ROOT/federated_transfer_adt_no_DFCI`). Rerun
 `06_prep_figure_data.ipynb` after 04, then
 `COMPASS_FIGURE_SCOPE=federated Rscript COMPASS/survival_analysis/07_figures.R`
-to render `figures/ADT/federated/transfer_discrimination_no_dfci__platinum.{png,csv}`
+to render `figures/ADT/05_transfer/transfer_discrimination_no_dfci__platinum.{png,csv}`
 (mean AUC(t) and paired ΔAUC(t) vs. age only, by endpoint) and federated manuscript
 Figure 5.
 
 The same federated run also renders the pooled federated models themselves from
 `federated_cox_multivariate/` (elastic-net) and `federated_xgboost/`, next to
 the across-site results CSV. The outputs are
-`figures/ADT/federated/{elasticnet,xgboost}_performance__platinum`,
+`figures/ADT/04_multivariate/federated/{elasticnet,xgboost}_performance__platinum`,
 `elasticnet_coefficients__platinum`, and `xgboost_importance__platinum`.
 Manuscript Figure 8 (`08_federated_multivariable`) puts them in the local
 Figure 4 layout. The same exports refit without DFCI (`*_no_DFCI/`) render as
@@ -1234,8 +1226,9 @@ draws them with the local trajectory and KM plotters as
 `federated_trajectory_<lab>`, `federated_km_quintile_<lab>_landmark<N>` and
 per-site `_by_site` pages (`COMPASS_FEDERATED_FIGURE_DATA` overrides the folder).
 
-The federated job also writes a separate manuscript set to
-`figures/ADT/manuscript figures/`, with captions in `captions/federated_figureN.{md,txt}`:
+The federated job also writes a separate manuscript set, each figure in the `manuscript/`
+subfolder of its section (`03_univariate/federated/`, `04_multivariate/federated/`,
+`05_transfer/`), with captions in `manuscript/captions/federated_figureN.{md,txt}`:
 
 | File | Content |
 |---|---|

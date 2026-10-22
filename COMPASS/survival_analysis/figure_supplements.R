@@ -628,7 +628,7 @@ if (sys.nframe() == 0L) {
     d <- prepare_cohort_forest(frame, endpoint, landmark)
     p <- plot_cohort_forest(d, endpoint, landmark)
     if (is.null(p)) next
-    directory <- file.path(args[2], "ADT", "cohort")
+    directory <- file.path(args[2], "ADT", "06_cohort_sensitivity")
     dir.create(directory, recursive = TRUE, showWarnings = FALSE)
     destination <- file.path(directory, sprintf("cohort_forest_lm%d__%s__all__incl.png", landmark, endpoint))
     # PIL-style header and end marker check without loading a graphics device.

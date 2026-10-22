@@ -87,6 +87,19 @@ local({
   stopifnot(!file.exists(old_paths[1]),!file.exists(retired),file.exists(unknown),
     length(list.files(file.path(cache,"previous_exports"),recursive=TRUE,pattern="png$"))==2,
     length(list.files(output,recursive=TRUE,pattern="rds$"))==0)
+  # The pre-section layout is retired per job: the re-rendered ADT/platinum
+  # identity and its manuscript figures go; other cohorts and jobs stay.
+  legacy <- file.path(output,"ADT",c("associations/labs_univariate__platinum__all__incl.png",
+    "associations/data/labs_univariate__platinum__all__incl.csv",
+    "manuscript figures/03_dfci_univariable.png","manuscript figures/captions/figure3.md",
+    "associations/labs_univariate__platinum__metastatic_llm__incl.png",
+    "manuscript figures/federated_03_univariable.png","federated/psa_forest__platinum.png",
+    "cohort/cohort_forest_lm180__platinum__all__incl.png"))
+  for(path in legacy) { dir.create(dirname(path),recursive=TRUE,showWarnings=FALSE); writeLines("legacy",path) }
+  figure_archive_old_exports(config,prepared)
+  stopifnot(!any(file.exists(legacy[1:4])),all(file.exists(legacy[5:8])),
+    !dir.exists(file.path(output,"ADT","associations","data")),
+    length(list.files(file.path(cache,"previous_exports"),recursive=TRUE,pattern="png$"))==4)
   # Grouping stays within arm/cohort/endpoint. An incomplete cell retains its
   # subpanels, and complete figures follow the declared order of their panels.
   capture_mixed <- function() {

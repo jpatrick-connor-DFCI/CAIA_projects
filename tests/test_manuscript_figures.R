@@ -60,12 +60,19 @@ stopifnot(length(captions)==11,identical(names(captions),c(sprintf("%02d_%s",1:8
 caption_root <- tempfile("manuscript-caption-test-")
 caption_paths <- manuscript_write_captions(caption_root)
 stopifnot(length(caption_paths)==22,all(file.exists(caption_paths)))
-# The federated set is numbered on its own and never overwrites local figure3-5.
-for(name in c(paste0("figure",1:8),paste0("federated_figure",3:5))) stopifnot(identical(
-  readLines(file.path(caption_root,"captions",paste0(name,".md")),warn=FALSE),
-  readLines(file.path(caption_root,"captions",paste0(name,".txt")),warn=FALSE)))
-stopifnot(startsWith(readLines(file.path(caption_root,"captions","figure3.md"),n=1,warn=FALSE),"Figure 3. "),
-  startsWith(readLines(file.path(caption_root,"captions","federated_figure3.md"),n=1,warn=FALSE),"Federated Figure 3. "))
+# The federated set is numbered on its own and never overwrites local figure3-5;
+# each caption sits in the manuscript folder of its figure's section.
+caption_md <- caption_paths[endsWith(caption_paths,".md")]
+stopifnot(setequal(basename(caption_md),paste0(c(paste0("figure",1:8),paste0("federated_figure",3:5)),".md")))
+for(path in caption_md) stopifnot(identical(readLines(path,warn=FALSE),
+  readLines(sub("[.]md$",".txt",path),warn=FALSE)))
+caption_file <- function(section,name) file.path(caption_root,section,"manuscript","captions",paste0(name,".md"))
+stopifnot(startsWith(readLines(caption_file("03_univariate/internal","figure3"),n=1,warn=FALSE),"Figure 3. "),
+  startsWith(readLines(caption_file("03_univariate/federated","federated_figure3"),n=1,warn=FALSE),"Federated Figure 3. "),
+  file.exists(caption_file("01_cohort","figure1")),file.exists(caption_file("02_llm","figure2")),
+  file.exists(caption_file("04_multivariate/internal","figure5")),file.exists(caption_file("06_cohort_sensitivity","figure6")),
+  file.exists(caption_file("04_multivariate/federated","figure8")),file.exists(caption_file("05_transfer","federated_figure5")),
+  setequal(names(MANUSCRIPT_SECTIONS),names(captions)))
 unlink(caption_root,recursive=TRUE)
 
 site_incidence <- tibble(site_name=c("dana_farber_caia_1_1","fred_hutch_caia_1_1","jhu_caia_1_1"),

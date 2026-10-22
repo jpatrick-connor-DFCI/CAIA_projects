@@ -153,11 +153,24 @@ stopifnot(is.null(figure_compilation_spec("figure4e_combinations_gleason_auc_pla
           is.null(figure_compilation_spec("figure4h_comutation_trio_combinations_landmark90")))
 leaf <- "platinum__all__incl"
 stopifnot(figure_public_path(file.path("/x/ADT/by_figure/figure4/e_combinations_gleason_auc_platinum", leaf)) ==
-            file.path("/x/ADT/prediction", paste0("combinations_gleason_auc__", leaf)),
+            file.path("/x/ADT/04_multivariate/internal", paste0("combinations_gleason_auc__", leaf)),
           figure_public_path(file.path("/x/ADT/by_figure/figure4/h_comutation_trio_combinations_landmark90", leaf)) ==
-            file.path("/x/ADT/prediction", paste0("comutation_trio_combinations_lm90__", leaf)),
+            file.path("/x/ADT/03_univariate/internal", paste0("comutation_trio_combinations_lm90__", leaf)),
           figure_public_path(file.path("/x/ADT/by_figure/figure4/a_discrimination_auc_platinum", leaf)) ==
-            file.path("/x/ADT/prediction", paste0("discrimination_auc__", leaf)))
+            file.path("/x/ADT/04_multivariate/internal", paste0("discrimination_auc__", leaf)),
+          # Non-canonical cohorts nest their usual section under cohort sensitivity.
+          figure_public_path("/x/ADT/by_figure/figure4/a_discrimination_auc_platinum/platinum__metastatic_llm__incl") ==
+            "/x/ADT/06_cohort_sensitivity/metastatic_llm__incl/04_multivariate/internal/discrimination_auc__platinum__metastatic_llm__incl",
+          figure_public_path("/x/ADT/by_figure/cohort_comparison/lm180/nepc__all__incl") ==
+            "/x/ADT/06_cohort_sensitivity/cohort_forest_lm180__nepc__all__incl",
+          figure_compiled_path("/x/ADT/03_univariate/internal/trajectories/psa/km__p", "/x/ADT") ==
+            "/x/ADT/03_univariate/internal/trajectories/psa/compiled/km__p",
+          federated_output_path("/x/ADT", "xgboost_importance_no_dfci", ".png") ==
+            "/x/ADT/04_multivariate/federated/xgboost_importance_no_dfci__platinum.png",
+          federated_output_path("/x/ADT", "transfer_auc_t_no_dfci") == "/x/ADT/05_transfer/transfer_auc_t_no_dfci__platinum",
+          federated_output_path("/x/ADT", "site_incidence_lm000") == "/x/ADT/01_cohort/site_incidence_lm000__platinum",
+          federated_output_path("/x/ADT", "federated_km_quintile_psa_landmark0_by_site") ==
+            "/x/ADT/03_univariate/federated/federated_km_quintile_psa_landmark0_by_site__platinum")
 
 # Compiled pages keep the stratifier on each panel and size to the rows used.
 items <- lapply(c("risk_score", "tp53"), function(key) list(
@@ -169,19 +182,22 @@ compiled <- figure_combine(items, page_spec, tempdir())
 stopifnot(isTRUE(attr(compiled, "compass_compiled")), page_spec$height == 6.5)
 # Tables sit in a data/ folder beside the figures; legacy tables are moved there
 # and the catalog lives in <arm>/data/ with links back up to the figures.
-stopifnot(figure_sidecar_path("/x/ADT/prediction/a__p.csv") == "/x/ADT/prediction/data/a__p.csv",
-          figure_sidecar_path("/x/ADT/prediction/data/a__p.csv") == "/x/ADT/prediction/data/a__p.csv")
+stopifnot(figure_sidecar_path("/x/ADT/05_transfer/a__p.csv") == "/x/ADT/05_transfer/data/a__p.csv",
+          figure_sidecar_path("/x/ADT/05_transfer/data/a__p.csv") == "/x/ADT/05_transfer/data/a__p.csv")
 fig_root <- file.path(root, "export"); arm <- file.path(fig_root, "ADT")
-dir.create(file.path(arm, "prediction"), recursive = TRUE); dir.create(file.path(arm, "by_figure"))
-file.create(file.path(arm, "prediction", c("comutation_lm90__p.png", "comutation_lm90__p.pdf",
+section <- file.path(arm, "03_univariate", "internal")
+dir.create(section, recursive = TRUE); dir.create(file.path(arm, "by_figure"))
+file.create(file.path(section, c("comutation_lm90__p.png", "comutation_lm90__p.pdf",
   "comutation_lm90__p.csv", "comutation_lm90__p.md")), file.path(arm, c("manifest.csv", "index.html")),
   file.path(arm, "by_figure", "old.csv"))
 figure_write_catalog(list(fig_root = fig_root), list())
-stopifnot(setequal(list.files(file.path(arm, "prediction")), c("comutation_lm90__p.png", "comutation_lm90__p.pdf", "data")),
-          setequal(list.files(file.path(arm, "prediction", "data")), c("comutation_lm90__p.csv", "comutation_lm90__p.md")),
-          setequal(list.files(arm), c("by_figure", "data", "prediction")),
+stopifnot(setequal(list.files(section), c("comutation_lm90__p.png", "comutation_lm90__p.pdf", "data")),
+          setequal(list.files(file.path(section, "data")), c("comutation_lm90__p.csv", "comutation_lm90__p.md")),
+          setequal(list.files(arm), c("by_figure", "data", "03_univariate")),
           file.exists(file.path(arm, "by_figure", "old.csv")))
 html <- paste(readLines(file.path(arm, "data", "index.html")), collapse = "\n")
-stopifnot(grepl('href="../prediction/data/comutation_lm90__p.csv"', html, fixed = TRUE),
-          grepl('src="../prediction/comutation_lm90__p.png"', html, fixed = TRUE))
+manifest <- readr::read_csv(file.path(arm, "data", "manifest.csv"), show_col_types = FALSE)
+stopifnot(grepl('href="../03_univariate/internal/data/comutation_lm90__p.csv"', html, fixed = TRUE),
+          grepl('src="../03_univariate/internal/comutation_lm90__p.png"', html, fixed = TRUE),
+          all(manifest$topic == "03_univariate/internal"))
 cat("risk stratification figure tests passed\n")

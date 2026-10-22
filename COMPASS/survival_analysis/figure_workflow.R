@@ -17,21 +17,41 @@ figure_sidecar_path <- function(path) {
   file.path(dirname(path), FIGURE_SIDECAR_DIR, basename(path))
 }
 
+# Export sections under each arm root, numbered so file browsers and the HTML
+# index list them in reading order. Univariate and multivariate results are
+# split into DFCI-only ("internal") and pooled-site ("federated") halves;
+# models refit without DFCI count as multivariate, and only their scoring at
+# DFCI is a transfer. Every non-canonical cohort is a cohort sensitivity.
+FIGURE_SECTIONS <- c(cohort = "01_cohort", llm = "02_llm",
+  univariate_internal = "03_univariate/internal", univariate_federated = "03_univariate/federated",
+  multivariate_internal = "04_multivariate/internal", multivariate_federated = "04_multivariate/federated",
+  transfer = "05_transfer", cohort_sensitivity = "06_cohort_sensitivity")
+FIGURE_CANONICAL_COHORT <- "all__incl"
+# Pre-restructure top-level folders, archived once their job re-renders.
+FIGURE_RETIRED_FOLDERS <- c("cohort", "labels", "associations", "prediction",
+  "trajectories", "federated", "compiled", "manuscript figures")
+
 figure_public_path <- function(path) {
   if (!grepl("/by_figure/", path, fixed = TRUE)) return(path)
   root <- sub("/by_figure/.*$", "", path)
   parts <- strsplit(sub("^.*?/by_figure/", "", path), "/", fixed = TRUE)[[1]]
   group <- parts[1]; leaf <- tail(parts, 1)
   artifact <- paste(parts[seq.int(2, length(parts)-1)], collapse = "_")
-  topic <- switch(group, figure1 = "cohort", cohort_comparison = "cohort",
-    androgen_pre_adt_coverage = "cohort", supplement_adt_intent = "cohort", figure1s_analysis_sets = "cohort",
-    figure2v3_llm = "labels", metastatic_labels = "labels",
-    figure3 = "associations", figure3b = "associations", figure4 = "prediction",
-    federated = "federated", "associations")
+  section <- switch(group, figure1 = , androgen_pre_adt_coverage = , figure1s_analysis_sets = "cohort",
+    figure2v3_llm = , km_llm = "llm",
+    cohort_comparison = , supplement_adt_intent = , metastatic_labels = "cohort_sensitivity",
+    # Co-mutation KM curves are somatic univariate associations; the rest of
+    # Figure 4 is multivariable models and their sensitivity analyses.
+    figure4 = if (grepl("^h_comutation", artifact)) "univariate_internal" else "multivariate_internal",
+    federated = "univariate_federated", "univariate_internal")
+  topic <- FIGURE_SECTIONS[[section]]
   if (group == "labs") {
-    topic <- file.path("trajectories", figure_slug(parts[3]))
+    topic <- file.path(topic, "trajectories", figure_slug(parts[3]))
     artifact <- paste(parts[4:(length(parts)-1)], collapse = "_")
   }
+  cohort <- paste(strsplit(leaf, "__", fixed = TRUE)[[1]][-1], collapse = "__")
+  if (nzchar(cohort) && cohort != FIGURE_CANONICAL_COHORT && section != "cohort_sensitivity")
+    topic <- file.path(FIGURE_SECTIONS[["cohort_sensitivity"]], cohort, topic)
   artifact <- sub("^[a-h]_", "", artifact)
   artifact <- sub("^sequencing_", "somatic_", artifact)
   artifact <- sub("gleason_platinum_km_gleason_score", "gleason_km", artifact)
@@ -49,13 +69,36 @@ figure_public_path <- function(path) {
   file.path(root, topic, paste0(artifact, "__", leaf))
 }
 
+# Compiled multi-panel figures sit in a "compiled" folder beside their panels.
 figure_compiled_path <- function(path, arm_root) {
   public <- figure_public_path(path)
-  prefix <- paste0(arm_root,"/")
-  stopifnot(startsWith(public,prefix))
-  relative <- substring(public,nchar(prefix)+1L)
-  if(startsWith(relative,"compiled/")) return(public)
-  file.path(arm_root,"compiled",relative)
+  stopifnot(startsWith(public,paste0(arm_root,"/")))
+  if(basename(dirname(public))=="compiled") return(public)
+  file.path(dirname(public),"compiled",basename(public))
+}
+
+# Federated outputs are written by stem rather than through by_figure.
+figure_federated_section <- function(stem) {
+  section <- if (grepl("^transfer_", stem)) "transfer" else
+    if (grepl("^(elasticnet|xgboost)_", stem)) "multivariate_federated" else
+    if (grepl("^(site_incidence|federated_cohort_km)", stem)) "cohort" else "univariate_federated"
+  FIGURE_SECTIONS[[section]]
+}
+federated_output_path <- function(arm_root, stem, extension = "") {
+  file.path(arm_root, figure_federated_section(stem), paste0(stem, "__platinum", extension))
+}
+
+# Manuscript figures sit in a "manuscript" folder of the section they summarize.
+MANUSCRIPT_SECTIONS <- c(`01_cohort_overview` = "cohort", `02_llm_nepc_avpc` = "llm",
+  `03_dfci_univariable` = "univariate_internal", `04_multivariable_labs` = "multivariate_internal",
+  `05_gleason_sensitivity` = "multivariate_internal", `06_dfci_cohort_sensitivity` = "cohort_sensitivity",
+  `07_federated_incidence_associations` = "univariate_federated",
+  `08_federated_multivariable` = "multivariate_federated",
+  federated_03_univariable = "univariate_federated", federated_04_multivariable = "multivariate_federated",
+  federated_05_transfer_no_dfci = "transfer")
+manuscript_folder <- function(arm_root, key) {
+  if (!key %in% names(MANUSCRIPT_SECTIONS)) stop("No manuscript section defined for: ", key)
+  file.path(arm_root, FIGURE_SECTIONS[[MANUSCRIPT_SECTIONS[[key]]]], "manuscript")
 }
 
 figure_overview_km_landmark <- function() {
@@ -326,12 +369,17 @@ figure_write_catalog <- function(config, prepared) {
     paths <- paths[!grepl("/by_figure/|/main/|/supplements/",paths) & basename(paths)!="manifest.csv"]
     if(!length(paths)) next
     rel <- substring(paths,nchar(root)+2)
+    # Index sections are the export sections, internal/federated kept apart.
+    split_sections <- unique(dirname(FIGURE_SECTIONS[grepl("/",FIGURE_SECTIONS)]))
     records <- lapply(seq_along(paths),function(i) {
       stem <- tools::file_path_sans_ext(basename(paths[i]))
+      segments <- strsplit(rel[i],"/",fixed=TRUE)[[1]]
+      topic <- if(segments[1] %in% split_sections && length(segments)>2)
+        paste(segments[1:2],collapse="/") else segments[1]
       fields <- strsplit(stem,"__",fixed=TRUE)[[1]]
       matches <- Filter(function(s) identical(s$destination,tools::file_path_sans_ext(paths[i])),scenes)
       title <- if(length(matches)) matches[[1]]$title else gsub("_"," ",fields[1])
-      data.frame(path=rel[i],topic=strsplit(rel[i],"/",fixed=TRUE)[[1]][1],figure_id=fields[1],
+      data.frame(path=rel[i],topic=topic,figure_id=fields[1],
         endpoint=if(length(fields)>1) fields[2] else "",cohort=if(length(fields)>2) paste(fields[-c(1,2)],collapse="__") else "",
         landmark=if(length(matches)) matches[[1]]$landmark else "",title=title,
         format=tools::file_ext(paths[i]),stringsAsFactors=FALSE)
@@ -365,7 +413,7 @@ figure_write_catalog <- function(config, prepared) {
     tables <- registry$path[registry$format %in% c("csv","md")]
     png_topics <- registry$topic[registry$format=="png"]
     sections <- unlist(lapply(unique(png_topics),function(topic) c(
-      paste0('<h2 id="',figure_html_escape(topic),'">',figure_html_escape(tools::toTitleCase(gsub("_"," ",topic))),'</h2><main>'),
+      paste0('<h2 id="',figure_html_escape(topic),'">',figure_html_escape(tools::toTitleCase(gsub("/"," / ",gsub("_"," ",topic)))),'</h2><main>'),
       cards[png_topics==topic],'</main>')))
     html <- c('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">',
       paste0('<title>',arm,' figure index</title>'),
@@ -392,21 +440,45 @@ figure_archive_old_exports <- function(config, prepared) {
       if(file.exists(previous) && file.exists(replacement)) paths <- c(paths,previous)
     }
   }
+  # A cohort job owns exports whose name ends in its <endpoint>__<leaf> identity.
+  cohort_job_owns <- function(path,arm) {
+    name <- sub("[.][^.]+$","",basename(path))
+    any(vapply(successful,function(job) {
+      bits <- strsplit(job,"__",fixed=TRUE)[[1]]
+      if(length(bits)!=2 || toupper(cohort_arm(bits[1]))!=arm) return(FALSE)
+      identity <- paste0(bits[2],"__",cohort_leaf_slug(bits[1]))
+      name==identity || endsWith(name,paste0("__",identity))
+    },logical(1)))
+  }
   for(arm in c("ADT","ARPI")) {
     root <- file.path(config$fig_root,arm,"by_figure")
-    if(!dir.exists(root)) next
-    candidates <- list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(png|pdf|csv|md)$")
+    candidates <- if(dir.exists(root)) list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(png|pdf|csv|md)$") else character()
     for(path in candidates) {
       rel <- substring(path,nchar(root)+2); group <- strsplit(rel,"/",fixed=TRUE)[[1]][1]
       special <- if(group=="federated") "federated" else if(group=="cohort_comparison") "cohort_overview" else NULL
-      keep <- if(length(special)) special %in% successful else any(vapply(successful,function(job) {
-        bits <- strsplit(job,"__",fixed=TRUE)[[1]]
-        length(bits)==2 && toupper(cohort_arm(bits[1]))==arm &&
-          startsWith(basename(path),paste0(bits[2],"__",cohort_leaf_slug(bits[1]),"."))
-      },logical(1)))
+      keep <- if(length(special)) special %in% successful else cohort_job_owns(path,arm)
       if(keep) paths <- c(paths,path)
     }
+    # The pre-section layout (topic folders, top-level compiled/ and
+    # "manuscript figures/") is retired per job once that job has re-rendered.
+    for(folder in FIGURE_RETIRED_FOLDERS) {
+      root <- file.path(config$fig_root,arm,folder)
+      if(!dir.exists(root)) next
+      for(path in list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(png|pdf|csv|md|txt)$")) {
+        segments <- strsplit(substring(path,nchar(file.path(config$fig_root,arm))+2),"/",fixed=TRUE)[[1]]
+        if(segments[1]=="compiled") segments <- segments[-1]
+        name <- tools::file_path_sans_ext(basename(path))
+        job <- if(folder=="manuscript figures") {
+          if(grepl("^(federated|0[78]_|figure[78]$)",name)) "federated" else
+            if(grepl("^(06_|figure6$)",name)) "cohort_overview" else "adt__platinum"
+        } else if(segments[1]=="federated") "federated" else
+          if(segments[1]=="cohort" && grepl("^(cohort_forest_|event_incidence_|metastatic_label_overlap)",name)) "cohort_overview" else NULL
+        keep <- if(length(job)) job %in% successful else cohort_job_owns(path,arm)
+        if(keep) paths <- c(paths,path)
+      }
+    }
   }
+  paths <- unique(paths)
   archive <- tempfile("export-",tmpdir=file.path(config$cache_root,"previous_exports"))
   for(path in paths) {
     target <- file.path(archive,substring(path,nchar(config$fig_root)+2))
@@ -415,8 +487,8 @@ figure_archive_old_exports <- function(config, prepared) {
       stop("Cannot verify archived export; original retained: ",path)
   }
   for(path in paths) if(unlink(path)!=0) stop("Cannot remove verified legacy export: ",path)
-  for(arm in c("ADT","ARPI")) {
-    root <- file.path(config$fig_root,arm,"by_figure")
+  for(arm in c("ADT","ARPI")) for(folder in c("by_figure",FIGURE_RETIRED_FOLDERS)) {
+    root <- file.path(config$fig_root,arm,folder)
     if(!dir.exists(root)) next
     dirs <- list.dirs(root,recursive=TRUE)
     for(dir in dirs[order(nchar(dirs),decreasing=TRUE)])
@@ -898,7 +970,7 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
   if(startsWith(audit,"CAUTION")) warning(audit)
   capture <- getOption("compass.figure_table_capture")
   write_table <- function(data,stem) {
-    path <- figure_sidecar_path(file.path(root,paste0(stem,"__platinum.csv")))
+    path <- figure_sidecar_path(federated_output_path(root,stem,".csv"))
     dir.create(dirname(path),recursive=TRUE,showWarnings=FALSE)
     readr::write_csv(data,path)
     if(is.function(capture)) capture(path)
@@ -920,7 +992,7 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
     figure$title <- paste0("Federated ",spec$label,version$label,": labs vs. age baseline"); figure$context <- context
     p <- figure_combine(items,figure,tempdir())
     write_table(mutate(d,input_audit_note=audit),spec$stems[["metrics"]])
-    save_federated_panel(p,file.path(root,paste0(spec$stems[["metrics"]],"__platinum.png")),
+    save_federated_panel(p,federated_output_path(root,spec$stems[["metrics"]],".png"),
       figure$width,figure$height,dpi,overwrite)
   }
   if(!is.null(features) && nrow(features)) {
@@ -950,7 +1022,7 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
     figure$context <- context
     p <- figure_combine(items,figure,tempdir())
     write_table(exported,spec$stems[["features"]])
-    save_federated_panel(p,file.path(root,paste0(spec$stems[["features"]],"__platinum.png")),
+    save_federated_panel(p,federated_output_path(root,spec$stems[["features"]],".png"),
       figure$width,figure$height,dpi,overwrite)
   }
   invisible(NULL)
@@ -1201,7 +1273,7 @@ federated_transfer_clinical_count_note <- function(clinical, subpopulation) {
 }
 
 write_federated_transfer_table <- function(root, data, stem) {
-  path <- figure_sidecar_path(file.path(root,paste0(stem,"__platinum.csv")))
+  path <- figure_sidecar_path(federated_output_path(root,stem,".csv"))
   dir.create(dirname(path),recursive=TRUE,showWarnings=FALSE)
   readr::write_csv(data,path)
   capture <- getOption("compass.figure_table_capture")
@@ -1220,7 +1292,7 @@ render_federated_transfer <- function(root, directory, dpi, overwrite) {
   write_federated_transfer_table(root,metrics,spec$stem)
   if(!is.null(auc_t) && nrow(auc_t)) write_federated_transfer_table(root,auc_t,spec$auc_stem)
   save_federated_panel(plot_federated_transfer(d,caption,spec$title,spec$subtitle),
-    file.path(root,paste0(spec$stem,"__platinum.png")),13,9.5,dpi,overwrite)
+    federated_output_path(root,spec$stem,".png"),13,9.5,dpi,overwrite)
   invisible(metrics)
 }
 
@@ -1229,7 +1301,7 @@ render_federated_transfer_clinical <- function(root, directory, dpi, overwrite) 
   if(is.null(clinical) || !nrow(clinical)) return(invisible(NULL))
   caption <- paste(FEDERATED_TRANSFER_SPEC$source,
     "Transferred full labs models scored unchanged. Local unpenalized Cox models (Gleason score + age; TP53, RB1, PTEN any-alteration indicators + age; Gleason + TP53/RB1/PTEN + age) and combined Cox models (each transferred score, standardized, + the same clinical covariates) are scored out-of-fold (stratified K-fold) on the same patients.",
-    "Gleason: ADT-initiation clock. TP53/RB1/PTEN with or without Gleason: sequencing-date clock (sequenced patients; transferred models rescored on labs before sequencing + landmark). Clinical data had to be available before the landmark. Subpopulations are drawn from the patients at risk at every landmark, with membership taken at each landmark. Mean AUC(t) over the horizons estimable in each subpopulation. Bars: 95% bootstrap CIs over patients; ΔAUC(t) vs. the federated score is paired, all scores on the same resamples.",
+    "Gleason: ADT-initiation clock. TP53/RB1/PTEN with or without Gleason: sequencing-date clock (sequenced patients; transferred models rescored on labs before sequencing + landmark). Clinical data had to be available before the landmark. Mean AUC(t) over the horizons estimable in each subpopulation. Bars: 95% bootstrap CIs over patients; ΔAUC(t) vs. the federated score is paired, all scores on the same resamples.",
     paste0("Gleason subpopulation patients/events — ",federated_transfer_clinical_count_note(clinical,"gleason"),"."),
     paste0("Sequenced subpopulation patients/events — ",federated_transfer_clinical_count_note(clinical,"trio"),"."),
     paste0("Sequenced with Gleason subpopulation patients/events — ",
@@ -1238,7 +1310,7 @@ render_federated_transfer_clinical <- function(root, directory, dpi, overwrite) 
   save_federated_panel(plot_federated_transfer_clinical(prepare_federated_transfer_clinical(clinical),caption,
       "Transferred federated labs models vs. local Gleason and TP53/RB1/PTEN Cox models",
       "Federated models trained without Dana-Farber; local and combined Cox models fitted on Dana-Farber patients and scored out-of-fold"),
-    file.path(root,"transfer_clinical_comparison_no_dfci__platinum.png"),13,16,dpi,overwrite)
+    federated_output_path(root,"transfer_clinical_comparison_no_dfci",".png"),13,16,dpi,overwrite)
   invisible(clinical)
 }
 
@@ -1385,7 +1457,7 @@ render_federated_figure_data <- function(root, federated_path, figure_data_dir, 
   publish <- function(plot, stem, data, width, height) {
     if(is.null(plot)) return(invisible(FALSE))
     write_federated_transfer_table(root,data,stem)
-    save_federated_panel(plot,file.path(root,paste0(stem,"__platinum.png")),width,height,dpi,overwrite)
+    save_federated_panel(plot,federated_output_path(root,stem,".png"),width,height,dpi,overwrite)
   }
   volcano <- federated_volcano_data(federated_path)
   for(lm in c(0,90,180)) {
@@ -1427,7 +1499,8 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
                                                 dpi = 200, overwrite = FALSE,
                                                 transfer_no_dfci_dir = NULL, figure_data_dir = NULL) {
   d <- load_federated_forest(federated_path)
-  root <- file.path(fig_root, "ADT", "federated")
+  # Arm root; each output is routed to its section by federated_output_path().
+  root <- file.path(fig_root, "ADT")
   dir.create(root, recursive = TRUE, showWarnings = FALSE)
   capture <- getOption("compass.figure_table_capture")
   within <- NULL
@@ -1440,7 +1513,7 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
   note <- federated_population_note(d,sites)
   estimates$population_note <- ifelse(estimates$source_kind=="across_sites",note,"Within-site model")
   for(analyte in c("PSA","Testosterone")) {
-    base <- file.path(root,paste0(tolower(analyte),"_forest__platinum"))
+    base <- federated_output_path(root,paste0(tolower(analyte),"_forest"))
     table <- figure_sidecar_path(paste0(base,".csv"))
     dir.create(dirname(table),recursive=TRUE,showWarnings=FALSE)
     readr::write_csv(filter(estimates,lab_name==analyte),table)
@@ -1449,12 +1522,12 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
       FEDERATED_FOREST_SLIDE_SIZE[["width"]],FEDERATED_FOREST_SLIDE_SIZE[["height"]],dpi,overwrite)
   }
   if (!is.null(sites)) {
-    site_path <- figure_sidecar_path(file.path(root, "site_incidence_lm000__platinum.csv"))
+    site_path <- figure_sidecar_path(federated_output_path(root, "site_incidence_lm000", ".csv"))
     dir.create(dirname(site_path), recursive = TRUE, showWarnings = FALSE)
     readr::write_csv(prepare_federated_site_incidence(sites), site_path)
     if (is.function(capture)) capture(site_path)
     save_federated_panel(plot_federated_sites(sites),
-      file.path(root, "site_incidence_lm000__platinum.png"), 14, 5.5, dpi, overwrite)
+      federated_output_path(root, "site_incidence_lm000", ".png"), 14, 5.5, dpi, overwrite)
   }
   for(variant in names(FEDERATED_MULTIVARIABLE_VARIANTS)) for(family in names(FEDERATED_MULTIVARIABLE))
     render_federated_multivariable(root,federated_path,family,dpi,overwrite,variant)
@@ -1564,18 +1637,19 @@ manuscript_captions <- function() {
     federated_05_transfer_no_dfci=caption(
       "Federated Figure 5. External validation at Dana-Farber of federated platinum models trained without Dana-Farber, alone and combined with Gleason score and TP53/RB1/PTEN status.",
       "Elastic-Net Cox and XGBoost survival models trained for platinum treatment on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data were applied unchanged to the Dana-Farber ADT cohort and evaluated against three local endpoints: platinum treatment (the training endpoint), neuroendocrine prostate cancer (NEPC), and aggressive-variant prostate cancer (AVPC). (a) Mean time-dependent area under the receiver-operating-characteristic curve, AUC(t) (top), and the paired difference in mean AUC(t) relative to the age-only model (bottom) at 0, 90, and 180 days after ADT initiation. Filled points denote full laboratory models and open points age-only models. (b-d) The same full laboratory models compared with unpenalized Cox models fitted locally at Dana-Farber on clinical covariates alone and on the transferred score plus those covariates (combined models), among patients with a Gleason score available before the landmark (b), patients with tumor sequencing, with landmarks measured from the sequencing date (c), and sequenced patients who also had a Gleason score (d). The clinical covariates were Gleason score and age (b), any alteration (mutation, deletion, amplification, or structural variant) in TP53, RB1, and PTEN and age (c), or all of these (d). Circles denote the transferred models, diamonds the local clinical Cox models, and triangles the combined models; the bottom rows give the paired difference in mean AUC(t), local clinical or combined model minus transferred model. In all panels, bars denote 95% bootstrap confidence intervals over patients, with compared models scored on the same resamples, and dotted lines mark 0.5 (AUC(t)) and 0 (difference).",
-      "No Dana-Farber patient contributed to federated model training, so every endpoint, including platinum, is out of sample. Mean AUC(t) is the inverse-probability-of-censoring-weighted cumulative/dynamic AUC averaged over 1, 2, 3, and 5 years after the landmark, with censoring estimated in the evaluated Dana-Farber patients; horizons without an observed event or later follow-up were omitted. The local and combined Cox models were fitted on the Dana-Farber patients they were evaluated on and were scored with stratified 5-fold cross-validated (out-of-fold) predictions; in the combined models, the transferred score was standardized within the evaluated patients. Gleason scores were used only if available before the landmark. To keep differences across landmarks from reflecting changes in the evaluated patients, every landmark was evaluated among the same patients: those event-free and in follow-up at day 180 (in b-d, the subpopulation members among them at each landmark). For c and d, the transferred models were rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation, and age was age at sequencing. Panel a included 2,197 patients for platinum, 2,164 for NEPC, and 1,842 for AVPC at every landmark. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve.")
+      "No Dana-Farber patient contributed to federated model training, so every endpoint, including platinum, is out of sample. Mean AUC(t) is the inverse-probability-of-censoring-weighted cumulative/dynamic AUC averaged over 1, 2, 3, and 5 years after the landmark, with censoring estimated in the evaluated Dana-Farber patients; horizons without an observed event or later follow-up were omitted. The local and combined Cox models were fitted on the Dana-Farber patients they were evaluated on and were scored with stratified 5-fold cross-validated (out-of-fold) predictions; in the combined models, the transferred score was standardized within the evaluated patients. Gleason scores were used only if available before the landmark. For c and d, the transferred models were rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation, and age was age at sequencing. Patients/events in panel a were 2,267/182 at day 0, 2,233/166 at day 90, and 2,197/158 at day 180 for platinum; 2,218/92, 2,200/87, and 2,164/85 for NEPC; and 1,968/463, 1,891/397, and 1,842/373 for AVPC. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve.")
   )
 }
 
+# Captions go to captions/ inside each figure's manuscript folder under the arm root.
 manuscript_write_captions <- function(root,keys=names(manuscript_captions()),capture=NULL) {
   captions <- manuscript_captions()
   unknown <- setdiff(keys,names(captions))
   if(length(unknown)) stop("No manuscript caption defined for: ",paste(unknown,collapse=", "))
-  caption_root <- file.path(root,"captions")
-  dir.create(caption_root,recursive=TRUE,showWarnings=FALSE)
   paths <- character()
   for(key in keys) {
+    caption_root <- file.path(manuscript_folder(root,key),"captions")
+    dir.create(caption_root,recursive=TRUE,showWarnings=FALSE)
     # Federated keys carry their own number ("federated_03_..." -> federated_figure3);
     # the local set is numbered by caption order.
     name <- if(startsWith(key,"federated_")) paste0("federated_figure",
@@ -2257,7 +2331,7 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
   generation <- tempfile("generation-", tmpdir = directory)
   dir.create(generation)
   scenes <- list(); tables <- character(); bundles <- list(); manuscript_items <- list()
-  publish <- function(plot, destination, width, height, stem, title = NULL, landmarks = "") {
+  publish <- function(plot, destination, width, height, stem, title = NULL, landmarks = "", manuscript = FALSE) {
     previous_destination <- NULL
     if(isTRUE(attr(plot,"compass_compiled"))) {
       previous_destination <- figure_public_path(destination)
@@ -2281,7 +2355,7 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
     scenes[[length(scenes) + 1L]] <<- list(path = path, destination = figure_public_path(destination),
       width = width, height = height, stem = stem, title = title, landmark = landmarks,
       previous_destination = previous_destination)
-    scenes[[length(scenes)]]$manuscript <<- grepl("/manuscript figures/",destination,fixed=TRUE)
+    scenes[[length(scenes)]]$manuscript <<- manuscript
   }
   capture <- function(plot, destination, width, height, stem) {
     # Resolve all aesthetics/stats now; renderer needs neither raw data nor fits.
@@ -2371,8 +2445,8 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
   if(!is.null(manuscript_root)) {
     manuscripts <- manuscript_build(manuscript_items,tables,manuscript_root)
     for(item in manuscripts) {
-      destination <- file.path(manuscript_root,item$spec$key)
-      dir.create(manuscript_root,recursive=TRUE,showWarnings=FALSE)
+      destination <- file.path(manuscript_folder(manuscript_root,item$spec$key),item$spec$key)
+      dir.create(dirname(destination),recursive=TRUE,showWarnings=FALSE)
       legend_path <- figure_sidecar_path(paste0(destination,".md"))
       dir.create(dirname(legend_path),recursive=TRUE,showWarnings=FALSE)
       writeLines(c(paste0("# ",gsub("_"," ",item$spec$key)),"",
@@ -2383,7 +2457,7 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
         data_path <- figure_sidecar_path(paste0(destination,".csv"))
         readr::write_csv(item$data,data_path); table_capture(data_path)
       }
-      publish(item$plot,destination,item$spec$width,item$spec$height,item$spec$key)
+      publish(item$plot,destination,item$spec$width,item$spec$height,item$spec$key,manuscript=TRUE)
     }
     manuscript_write_captions(manuscript_root,
       vapply(manuscripts,function(item) item$spec$key,character(1)),table_capture)
@@ -2705,7 +2779,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     }
     prepare_figure_scenes(job$directory, job$signature, build, force = prepare_overwrite,
       manuscript_root=if(job$name %in% c("adt__platinum","cohort_overview","federated"))
-        file.path(config$fig_root,"ADT","manuscript figures") else NULL)
+        file.path(config$fig_root,"ADT") else NULL)
   }
   # Only pending jobs warm tables. A resumed all-mode run reads no patient
   # Parquet at all when every scene snapshot is current.

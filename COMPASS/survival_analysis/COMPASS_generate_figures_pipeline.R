@@ -1423,7 +1423,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
   # Legacy logical addresses, retained as stable inputs to the 07 compiler.
   # figure_workflow.R intercepts these before any image export, compiles
-  # related panels, and routes them to shallow topic folders. Direct legacy
+  # related panels, and routes them to numbered section folders. Direct legacy
   # callers retain the addressing below.
   # Logical layout:
   #   FIG_ROOT/by_figure/<group>/<trimmed-name>/<endpoint>__<subset>__<exclusion>.png

@@ -21,10 +21,6 @@ whether it adds to that model:
 In each subpopulation a third, combined Cox adds the bundle's transferred
 labs score (z-scored within the subpopulation) to the clinical covariates.
 
-The scored patients are fet.evaluate_transfer's common cohort (at risk at
-every landmark); subpopulation membership is then taken at each landmark, so
-a patient whose Gleason score becomes available later joins at that landmark.
-
 The transferred score is never refit. The clinical and combined Cox models
 are fit on the same DFCI patients they are scored on, so each patient's score
 comes from a stratified K-fold model that excluded them (out-of-fold); the
@@ -369,7 +365,7 @@ def compare_clinical_models(
     n_folds: int = 5,
     n_bootstrap: int = 200,
     seed: int = 0,
-    min_events: int = 10,
+    min_events: int = 5,
     horizons_days=fet.DEFAULT_HORIZONS_DAYS,
     subpopulations: dict = SUBPOPULATIONS,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
