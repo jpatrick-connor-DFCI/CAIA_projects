@@ -321,12 +321,34 @@ def run_cell(data, endpoint, landmark, population, config, output_dir):
     return results
 
 
-def run(config, input_dirs, output_dir, *, preflight_only=False, overwrite=False):
+def _check_resumable(previous, manifest):
+    """Refuse to mix completed cells with fits from different settings or data."""
+    if previous.get("schema_version") != manifest["schema_version"]:
+        raise ValueError("Cannot resume: run manifest schema version differs")
+    if previous.get("config") != json.loads(json.dumps(_jsonable(manifest["config"]))):
+        raise ValueError("Cannot resume: run configuration differs from the existing run")
+    if previous.get("source_sha256") != manifest["source_sha256"]:
+        raise ValueError("Cannot resume: predictive_checklists source changed since the existing run")
+    current = {(row["endpoint"], row["landmark_days"]): row for row in manifest["inputs"]}
+    for row in previous.get("inputs", []):
+        match = current.get((row["endpoint"], row["landmark_days"]))
+        if match and any(match[key] != row[key] for key in ("manifest_sha256", "aggregated_sha256")):
+            raise ValueError(f"Cannot resume: {row['endpoint']} landmark {row['landmark_days']} "
+                             "inputs changed since the existing run")
+
+
+def run(config, input_dirs, output_dir, *, preflight_only=False, overwrite=False, resume=False):
     output_dir = Path(output_dir)
     manifest_path = output_dir / "run_manifest.json"
-    if manifest_path.exists() and not overwrite:
-        raise FileExistsError(f"Run already exists: {output_dir}; choose a new directory or --overwrite")
-    if manifest_path.exists():
+    if overwrite and resume:
+        raise ValueError("overwrite and resume are mutually exclusive")
+    previous = None
+    if manifest_path.exists() and resume:
+        previous = json.loads(manifest_path.read_text())
+    elif manifest_path.exists() and not overwrite:
+        raise FileExistsError(f"Run already exists: {output_dir}; choose a new directory, "
+                              "--overwrite or --resume")
+    elif manifest_path.exists():
         # Preserve previous generated artifacts; a reduced rerun must not leave
         # old successful models beside new failure records.
         archive = output_dir / "previous_runs" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -350,7 +372,8 @@ def run(config, input_dirs, output_dir, *, preflight_only=False, overwrite=False
             manifest["packages"][name] = metadata.version(name)
         except metadata.PackageNotFoundError:
             manifest["packages"][name] = None
-    write_json(manifest_path, manifest)
+    if previous is None:
+        write_json(manifest_path, manifest)
     metrics, preflight = [], []
     split_by_endpoint = {}
     pending = []
@@ -382,6 +405,13 @@ def run(config, input_dirs, output_dir, *, preflight_only=False, overwrite=False
                 failed_inputs = True
                 preflight.append({"endpoint": endpoint, "landmark_days": landmark,
                                   "status": "failed", "reason": str(exc)})
+    if previous is not None:
+        # Checked before anything is written so a refused resume leaves the run intact.
+        _check_resumable(previous, manifest)
+        manifest["created_utc"] = previous["created_utc"]
+        manifest["resumed_utc"] = previous.get("resumed_utc", []) + [
+            datetime.now(timezone.utc).isoformat()]
+        write_json(manifest_path, manifest)
     write_json(output_dir / "preflight.json", preflight)
     # Validate every input and cross-landmark split before any model sees data.
     if not failed_inputs and not preflight_only:
@@ -390,8 +420,16 @@ def run(config, input_dirs, output_dir, *, preflight_only=False, overwrite=False
             if endpoint == "nepc" and config.resolved_nepc_sensitivity:
                 populations.append("resolved_nepc")
             for population in populations:
-                metrics.extend(run_cell(data, endpoint, landmark, population, config,
-                    output_dir / endpoint / f"landmark_{landmark}" / population))
+                cell_dir = output_dir / endpoint / f"landmark_{landmark}" / population
+                # run_cell writes its metrics.json last, so it marks a finished cell.
+                if resume and (cell_dir / "metrics.json").exists():
+                    print(f"  {endpoint} landmark={landmark} population={population}: "
+                          "reusing completed cell", flush=True)
+                    metrics.extend(json.loads((cell_dir / "metrics.json").read_text()))
+                    continue
+                if resume and cell_dir.exists():
+                    shutil.rmtree(cell_dir)
+                metrics.extend(run_cell(data, endpoint, landmark, population, config, cell_dir))
     write_json(output_dir / "metrics.json", metrics)
     if metrics:
         pd.json_normalize(_jsonable(metrics)).to_csv(output_dir / "metrics.csv", index=False)

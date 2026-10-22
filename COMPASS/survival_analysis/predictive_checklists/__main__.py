@@ -25,7 +25,10 @@ def main(argv=None):
     parser.add_argument("--no-baselines", action="store_true")
     parser.add_argument("--no-nepc-sensitivity", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
-    parser.add_argument("--overwrite", action="store_true")
+    existing = parser.add_mutually_exclusive_group()
+    existing.add_argument("--overwrite", action="store_true")
+    existing.add_argument("--resume", action="store_true",
+                          help="Reuse completed cells of an interrupted run with identical settings")
     parser.add_argument("--demo", action="store_true", help="Generate clearly labeled synthetic inputs")
     args = parser.parse_args(argv)
     config = RunConfig.load(args.config)
@@ -39,8 +42,9 @@ def main(argv=None):
     if args.no_nepc_sensitivity:
         config.resolved_nepc_sensitivity = False
     config.validate()
-    if (args.output_dir / "run_manifest.json").exists() and not args.overwrite:
-        parser.error("Output run exists; choose a new --output-dir or pass --overwrite (archives prior results)")
+    if (args.output_dir / "run_manifest.json").exists() and not (args.overwrite or args.resume):
+        parser.error("Output run exists; choose a new --output-dir, pass --overwrite (archives prior "
+                     "results) or --resume (reuses completed cells)")
     if args.demo:
         from .demo import build_demo_inputs
         args.inputs_root = args.output_dir / "synthetic_inputs"
@@ -51,7 +55,7 @@ def main(argv=None):
         "nepc": args.nepc_inputs or args.inputs_root / "prediction_inputs_adt_nepc",
     }
     return run(config, input_dirs, args.output_dir, preflight_only=args.preflight_only,
-               overwrite=args.overwrite)
+               overwrite=args.overwrite, resume=args.resume)
 
 
 if __name__ == "__main__":

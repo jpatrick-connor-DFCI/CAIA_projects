@@ -121,3 +121,49 @@ def test_demo_refusal_does_not_modify_existing_inputs(tmp_path):
         main(["--demo", "--output-dir", str(out)])
     assert exc.value.code == 2
     assert not (out / "synthetic_inputs").exists()
+
+
+def test_resume_reuses_completed_cells_and_refits_partial_ones(tmp_path, monkeypatch):
+    import COMPASS.survival_analysis.predictive_checklists.runner as runner
+
+    inputs = build_demo_inputs(tmp_path / "inputs", landmarks=(0, 90), n=160)
+    dirs = {"platinum": inputs / "prediction_inputs_adt"}
+    out = tmp_path / "results"
+    config = small_config(endpoints=("platinum",), landmarks=(0, 90))
+    assert run(config, dirs, out) == 0
+    first = json.loads((out / "metrics.json").read_text())
+    created = json.loads((out / "run_manifest.json").read_text())["created_utc"]
+    # Simulate an interruption inside landmark 90: no cell metrics, stale files.
+    partial = out / "platinum/landmark_90/full"
+    (partial / "metrics.json").unlink()
+    (partial / "horizon_365" / "stale.json").write_text("{}")
+    fitted = []
+    original = runner.run_cell
+    monkeypatch.setattr(runner, "run_cell", lambda data, endpoint, landmark, *rest:
+                        fitted.append(landmark) or original(data, endpoint, landmark, *rest))
+    assert run(config, dirs, out, resume=True) == 0
+    assert fitted == [90]
+    assert not (partial / "horizon_365" / "stale.json").exists()
+    assert (partial / "horizon_365" / "model.json").exists()
+    assert json.loads((out / "metrics.json").read_text()) == first
+    manifest = json.loads((out / "run_manifest.json").read_text())
+    assert manifest["created_utc"] == created and len(manifest["resumed_utc"]) == 1
+    assert manifest["status"] == "complete"
+
+
+def test_resume_refuses_changed_settings_without_touching_run(tmp_path):
+    inputs = build_demo_inputs(tmp_path / "inputs", landmarks=(0,), n=160)
+    dirs = {"platinum": inputs / "prediction_inputs_adt"}
+    out = tmp_path / "results"
+    assert run(small_config(endpoints=("platinum",)), dirs, out) == 0
+    before = (out / "run_manifest.json").read_text()
+    with pytest.raises(ValueError, match="configuration differs"):
+        run(small_config(endpoints=("platinum",), seed=7), dirs, out, resume=True)
+    frame = pd.read_csv(dirs["platinum"] / "aggregated_landmark0.csv")
+    frame.loc[0, "t_platinum"] += 1
+    frame.to_csv(dirs["platinum"] / "aggregated_landmark0.csv", index=False)
+    with pytest.raises(ValueError, match="inputs changed"):
+        run(small_config(endpoints=("platinum",)), dirs, out, resume=True)
+    assert (out / "run_manifest.json").read_text() == before
+    # Without an existing run, resume simply starts one.
+    assert run(small_config(endpoints=("platinum",)), dirs, tmp_path / "fresh", resume=True) == 0
