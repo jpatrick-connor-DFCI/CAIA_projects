@@ -1,17 +1,17 @@
 # COMPASS supplementary figures sourced on demand by the pipeline and the
 # cached workflow: cohort forest, cohort overview, metastatic-label prep and
-# diagnostics. Standalone CLI (notebook 07):
+# diagnostics. Standalone CLI (notebook 05):
 #   Rscript figure_supplements.R input.csv output_root landmark dpi overwrite
 
 # ============================================================================
-# ---- PSA/testosterone forest across ADT cohorts (+ notebook 07 CLI) --------
+# ---- PSA/testosterone forest across ADT cohorts (+ notebook 05 CLI) --------
 # ============================================================================
-# Shared by 05_figures.R and the forest section of 07_cohort_comparison.ipynb.
+# Shared by 07_figures.R and the forest section of 05_cohort_comparison.ipynb.
 # One faceted figure per endpoint: PSA and testosterone rows, no delta column.
 
 # Sized to drop into a 16:9 PowerPoint slide (13.33 x 7.5 in) as a single
 # full-bleed figure, leaving ~0.4 in of margin on each edge. Both save sites --
-# the 05_figures.R pipeline and the notebook adapter below -- use this one constant so a
+# the 07_figures.R pipeline and the notebook adapter below -- use this one constant so a
 # deck never receives two differently-shaped copies of the same forest.
 COHORT_FOREST_SLIDE_SIZE <- c(width = 12.5, height = 6.8)
 cohort_forest_labels <- c(
@@ -240,7 +240,7 @@ plot_stage1_label_overview <- function(d) {
 
 render_cohort_overview <- function(manifest, config, forest_config=NULL) {
   prepared <- manifest$cohort_overview
-  if (is.null(prepared)) stop("Run 04_prep_figure_data.ipynb to prepare the new cohort overview tables.")
+  if (is.null(prepared)) stop("Run 06_prep_figure_data.ipynb to prepare the new cohort overview tables.")
   incidence <- figure_read_parquet(file.path(prepared$directory, "incidence.parquet"))
   overlap <- figure_read_parquet(file.path(prepared$directory, "label_overlap.parquet"))
   landmark <- config$forest_landmark
@@ -277,15 +277,15 @@ render_cohort_overview <- function(manifest, config, forest_config=NULL) {
 }
 
 # ============================================================================
-# ---- metastatic-label preparation (R fallback for notebook 04's Polars prep) 
+# ---- metastatic-label preparation (R fallback for notebook 06's Polars prep) 
 # ============================================================================
-# R-only preparation for 05_figures.R. Uses the existing intent labels,
+# R-only preparation for 07_figures.R. Uses the existing intent labels,
 # metastatic-diagnosis LLM task and dated regex stages; no model refits.
 metastatic_parquet_backend <- function() {
   if (requireNamespace("arrow", quietly = TRUE)) return("arrow")
   if (requireNamespace("nanoparquet", quietly = TRUE)) return("nanoparquet")
   stop('Metastatic figures need an R Parquet reader. Run install.packages("nanoparquet") ',
-       'in this R environment, then rerun 05_figures.R. The R package arrow is also supported.', call. = FALSE)
+       'in this R environment, then rerun 07_figures.R. The R package arrow is also supported.', call. = FALSE)
 }
 
 read_metastatic_parquet <- function(path, columns) {
@@ -431,7 +431,7 @@ prepare_metastatic_figure_labels <- function(config, analysis_anchors = NULL) {
 # ============================================================================
 # ---- metastatic-label diagnostics ------------------------------------------
 # ============================================================================
-# Standalone ADT/LLM/regex diagnostics used by 05_figures.R. All writes use
+# Standalone ADT/LLM/regex diagnostics used by 07_figures.R. All writes use
 # the main pipeline's save_fig, so progress, atomic saves and overwrite apply.
 # The three requested confusion matrices: each of the LLM and ADT metastatic
 # labels against the regex maximum stage across the record, plus ADT vs LLM.
@@ -614,10 +614,10 @@ render_metastatic_supplements <- function(config, patient_df, labs, save_panel,
 }
 
 # ============================================================================
-# ---- notebook 07 forest CLI ------------------------------------------------
+# ---- notebook 05 forest CLI ------------------------------------------------
 # ============================================================================
 # Notebook adapter: Rscript figure_supplements.R input.csv output_root landmark dpi overwrite
-# The notebook and 05_figures.R deliberately share the same renderer and destinations.
+# The notebook and 07_figures.R deliberately share the same renderer and destinations.
 if (sys.nframe() == 0L) {
   suppressPackageStartupMessages({library(ggplot2); library(dplyr); library(tidyr)})
   args <- commandArgs(trailingOnly = TRUE)

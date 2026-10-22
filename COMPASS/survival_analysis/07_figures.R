@@ -1,21 +1,21 @@
 #!/usr/bin/env Rscript
-# COMPASS figures: cached preparation and rendering (stage 05, after notebook 04).
+# COMPASS figures: cached preparation and rendering (stage 07, after notebook 06).
 # Configured entirely through environment variables, e.g.
-#   Rscript COMPASS/survival_analysis/05_figures.R
-#   COMPASS_FIGURE_SCOPE=federated Rscript COMPASS/survival_analysis/05_figures.R
+#   Rscript COMPASS/survival_analysis/07_figures.R
+#   COMPASS_FIGURE_SCOPE=federated Rscript COMPASS/survival_analysis/07_figures.R
 #   COMPASS_FIGURE_STAGE=render COMPASS_RENDER_PROFILE=publication COMPASS_RENDER_PDF=true Rscript ...
 # Converted from 05_figures.Rmd; the former document text follows as comments.
 #
 # ---- Workflow --------------------------------------------------------------
 #
-# Run `04_prep_figure_data.ipynb` first to prepare the Polars tables and manifest.
+# Run `06_prep_figure_data.ipynb` first to prepare the Polars tables and manifest.
 # All Python execution belongs to that notebook. This script and its R helpers
 # never invoke Python: they consume the notebook's prepared data only. Missing,
 # changed, or incompatible inputs stop with instructions to rerun the notebook.
 #
 # Preparation and rendering are separate stages:
 #
-# 1. `04_prep_figure_data.ipynb` uses Polars to scan each selected arm's longitudinal
+# 1. `06_prep_figure_data.ipynb` uses Polars to scan each selected arm's longitudinal
 #    CSV once and cache patient metadata, all-lab record spans, selected lab
 #    measurements, patient/bin raw and log means, and pre-treatment coverage.
 # 2. R consumes those tables, calculates the existing survival statistics and
@@ -40,11 +40,11 @@
 # (default `<COMPASS_DATA_ROOT>/rhino_results`):
 #   federated_model_results/          pooled univariate Cox CSV, within-site Cox, and the
 #                                     elastic-net/XGBoost bundles with and without DFCI
-#   federated_transfer_adt_no_DFCI/   09's arm B (bundles trained without DFCI on DFCI endpoints)
-#   federated_transfer_adt_w_MSK/     09's optional arm A (RUN_WITH_DFCI); skipped when absent
+#   federated_transfer_adt_no_DFCI/   04's arm B (bundles trained without DFCI on DFCI endpoints)
+#   federated_transfer_adt_w_MSK/     04's optional arm A (RUN_WITH_DFCI); skipped when absent
 #   misc_figure_data/                 aggregate KM curves and binned trajectories, pooled and within site
 # `COMPASS_FEDERATED_RESULTS`, `COMPASS_FEDERATED_TRANSFER`, `COMPASS_FEDERATED_TRANSFER_NO_DFCI`
-# and `COMPASS_FEDERATED_FIGURE_DATA` override the individual paths; set the same values for `04`.
+# and `COMPASS_FEDERATED_FIGURE_DATA` override the individual paths; set the same values for `06`.
 #
 # The site report reads `nvflare_within_site_univariate_cox/cox_within_site_all_sites_cohort.csv`
 # (legacy name `nvflare_within_site_cox_univariate/` is still accepted)
@@ -65,7 +65,7 @@
 # The data-cache and figure-output directories must be separate and non-nested.
 # Versioned caches are retained. Source identity uses absolute paths,
 # file sizes and nanosecond modification times, plus code/settings versions.
-# Use `FORCE = True` in `04_prep_figure_data.ipynb` after replacing sources while
+# Use `FORCE = True` in `06_prep_figure_data.ipynb` after replacing sources while
 # preserving timestamps and sizes. Here, `COMPASS_PREPARE_OVERWRITE=true`
 # rebuilds R graphics caches only. Image receipts record the prepared snapshot and DPI;
 # affected formats regenerate automatically. Existing images without a receipt
@@ -98,7 +98,7 @@
 # Cells with fewer than 25 events are hatched/marked; missing cells stay blank.
 # The label figure uses `mrn_lists/adt_intent_labels_model_cohort.csv` and
 # `llm_met_labels_model_cohort.csv`, preserving missing labels explicitly.
-# Run notebook `04` once after this update to prepare these small summary tables.
+# Run notebook `06` once after this update to prepare these small summary tables.
 # Combined outputs are under `compiled/cohort/` (count tables remain in `cohort/`):
 # `event_incidence_lm180__platinum__all__incl` and `metastatic_label_overlap__platinum__all__incl`.
 #
@@ -324,7 +324,7 @@
 #
 # Federated transfer (`COMPASS_FEDERATED_TRANSFER`, default
 # `federated_transfer_adt_w_MSK/`, rendered only when present) reads `transfer_metrics.csv` and
-# `transfer_auc_t.csv` written by `09_federated_transfer.ipynb`: the
+# `transfer_auc_t.csv` written by `04_federated_transfer.ipynb`: the
 # platinum-trained federated XGBoost and elastic-net bundles scored on the local
 # ADT cohort for platinum, NEPC, and AVPC. `federated/transfer_discrimination__platinum`
 # shows Harrell's C with 95% bootstrap CIs, the paired gain over the age-only
@@ -334,18 +334,18 @@
 # (`transfer_discrimination__platinum.csv`) and per-horizon AUC(t)
 # (`transfer_auc_t__platinum.csv`). Missing transfer outputs are reported and skipped.
 # The no-Dana-Farber arm (`COMPASS_FEDERATED_TRANSFER_NO_DFCI`, default
-# `federated_transfer_adt_no_DFCI/`, 09's `OUTPUT_DIR_NO_DFCI`) scores the same
+# `federated_transfer_adt_no_DFCI/`, 04's `OUTPUT_DIR_NO_DFCI`) scores the same
 # bundles refit without Dana-Farber, an external validation. It renders
 # `federated/transfer_discrimination_no_dfci__platinum` in the same layout and
 # `federated/transfer_dfci_ablation__platinum`: full-model mean AUC(t) with vs. without
 # Dana-Farber in training, plus the paired ΔAUC(t) from `transfer_with_vs_without_dfci.csv`
 # (only when arm A was also run). Arm B's `transfer_clinical_comparison.csv`
-# (09's Gleason / TP53-RB1-PTEN section) renders
+# (04's Gleason / TP53-RB1-PTEN section) renders
 # `federated/transfer_clinical_comparison_no_dfci__platinum` and feeds Federated Figure 5 b-c;
 # without it, Figure 5 is drawn with panel a only. Either arm is skipped when its files are missing.
-# Missing optional XGBoost files are reported and skipped independently. Run `04`
+# Missing optional XGBoost files are reported and skipped independently. Run `06`
 # again after this update to register both files (including absent paths), then
-# run `05_figures.R` with stage `all`. All Python remains in `04`; graphics caches stay in data.
+# run `07_figures.R` with stage `all`. All Python remains in `06`; graphics caches stay in data.
 
 # ---- Configuration ----------------------------------------------------------
 options(readr.num_threads = 1L, readr.read_lazy = FALSE)

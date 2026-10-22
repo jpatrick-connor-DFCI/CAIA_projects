@@ -150,7 +150,7 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
         updated_xgb = prep.prepare(config)
         assert updated_xgb["federated"] != delivered["federated"]
         previous = updated_xgb
-    # 09 transfer outputs and the aggregate figure data are optional; their delivery
+    # 04 transfer outputs and the aggregate figure data are optional; their delivery
     # or change reruns the federated job.
     for directory in (transfer_dir, no_dfci_dir, figure_data_dir):
         directory.mkdir(parents=True)
@@ -229,7 +229,7 @@ def test_preparation_notebook_runs_all_python_cells(tmp_path, monkeypatch):
     monkeypatch.setenv("COMPASS_METASTATIC_LABEL_SUPPLEMENT", "false")
     root = Path(__file__).resolve().parents[1]
     monkeypatch.chdir(root)
-    notebook = json.loads((root / "COMPASS/survival_analysis/04_prep_figure_data.ipynb").read_text())
+    notebook = json.loads((root / "COMPASS/survival_analysis/06_prep_figure_data.ipynb").read_text())
     state = {"display": lambda frame: None}
     for i, cell in enumerate(notebook["cells"]):
         if cell["cell_type"] == "code":

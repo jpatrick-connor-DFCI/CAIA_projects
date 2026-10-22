@@ -1,4 +1,4 @@
-# Per-cohort figure-generation pipeline called from 05_figures.R once per
+# Per-cohort figure-generation pipeline called from 07_figures.R once per
 # cohort in the same R session.
 #
 # Required packages (install once on the cluster):
@@ -335,7 +335,7 @@ FIGURE_LLM_STRATA <- LLM_STRATA["has_nepc"]
 # ---------------------------------------------------------------------------
 # Loop-invariant read cache.
 #
-# 05_figures.R calls generate_figures() once per cohort x endpoint -- 6 x 2 =
+# 07_figures.R calls generate_figures() once per cohort x endpoint -- 6 x 2 =
 # 12 passes. Several inputs do not vary across that loop at all (the LLM label
 # set, the platinum MRN list, the ICD flag table) and one varies only with the
 # treatment arm (the longitudinal labs CSV, by far the largest file the
@@ -351,7 +351,7 @@ FIGURE_LLM_STRATA <- LLM_STRATA["has_nepc"]
 #
 # Correctness note: the cache lives for the R session, so a run that
 # regenerates an input mid-run would serve a stale frame. That does not happen
-# here -- 01/02/03 finish before 05_figures.R runs -- but clear_read_cache()
+# here -- 01/02/03 finish before 07_figures.R runs -- but clear_read_cache()
 # exists for interactive use after rebuilding inputs.
 .read_cache <- new.env(parent = emptyenv())
 
@@ -1421,7 +1421,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     }
     NA_character_
   }
-  # Legacy logical addresses, retained as stable inputs to the 05 compiler.
+  # Legacy logical addresses, retained as stable inputs to the 07 compiler.
   # figure_workflow.R intercepts these before any image export, compiles
   # related panels, and routes them to shallow topic folders. Direct legacy
   # callers retain the addressing below.
@@ -2551,7 +2551,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   uni <- uni[mask, ]
   cat(sprintf("%d rows remaining\n", nrow(uni)))
 
-  # Keep solo volcanoes; 05 also compiles these same plots across landmarks.
+  # Keep solo volcanoes; 07 also compiles these same plots across landmarks.
   panels <- lapply(LANDMARKS, function(lm) {
     list(lm, ifelse(lm > 0, sprintf("+%d days", lm), sprintf("%d days", lm)))
   })

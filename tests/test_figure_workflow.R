@@ -89,7 +89,7 @@ local({
       delta_auc_lo=delta_auc_vs_baseline-.04,delta_auc_hi=delta_auc_vs_baseline+.04),transfer_metrics_path)
   write_csv(expand_grid(endpoint="nepc",bundle="xgboost_federated_model_adt",landmark_days=0,config="both",
     horizon_days=c(365,730)) %>% mutate(auc=.7,n_cases=4),file.path(transfer_dir,"transfer_auc_t.csv"))
-  # 09 arm B: same bundles refit without Dana-Farber, plus the paired with/without comparison.
+  # 04 arm B: same bundles refit without Dana-Farber, plus the paired with/without comparison.
   no_dfci_dir <- file.path(root,"rhino_results","federated_transfer_adt_no_DFCI"); dir.create(no_dfci_dir)
   file.copy(file.path(transfer_dir,c("transfer_metrics.csv","transfer_auc_t.csv")),no_dfci_dir)
   no_dfci_pairs_path <- file.path(no_dfci_dir,"transfer_with_vs_without_dfci.csv")
@@ -131,7 +131,7 @@ local({
   # Fixture setup represents the separate notebook preparation stage. Python
   # is then unavailable for every R workflow stage, not just render-only.
   missing <- tryCatch(figure_notebook_manifest(cfg), error = identity)
-  stopifnot(inherits(missing, "error"), grepl("04_prep_figure_data.ipynb", conditionMessage(missing), fixed = TRUE))
+  stopifnot(inherits(missing, "error"), grepl("06_prep_figure_data.ipynb", conditionMessage(missing), fixed = TRUE))
   config_path <- file.path(root, "fixture-config.json")
   jsonlite::write_json(cfg, config_path, auto_unbox = TRUE)
   stopifnot(system2("python3", c(shQuote(file.path(dirname(pipeline_path), "prepare_figure_data.py")),
@@ -139,7 +139,7 @@ local({
   for (name in c("system", "system2")) assign(name, function(...) stop("Process launch forbidden during R figures"), .GlobalEnv)
   on.exit(rm(list = c("system", "system2"), envir = .GlobalEnv), add = TRUE)
   mismatch <- tryCatch(figure_notebook_manifest(modifyList(cfg, list(cohorts = "arpi"))), error = identity)
-  stopifnot(inherits(mismatch, "error"), grepl("04_prep_figure_data.ipynb", conditionMessage(mismatch), fixed = TRUE))
+  stopifnot(inherits(mismatch, "error"), grepl("06_prep_figure_data.ipynb", conditionMessage(mismatch), fixed = TRUE))
   t1 <- system.time(first <- run_cached_figure_workflow(cfg, pipeline_path, "all", dpi = 60,
     prepare_workers = 1L, render_workers = 2L, forest_config = forest, federated_config = fc))[["elapsed"]]
   stopifnot(length(first$prepared) == 4L, length(first$rendered) > 20L,
@@ -185,8 +185,8 @@ local({
     forest_config = forest, federated_config = fc)
   stopifnot(all(vapply(third$rendered, function(x) x$rendered == 0L, logical(1))))
   stale <- tryCatch(figure_notebook_manifest(cfg), error = identity)
-  stopifnot(inherits(stale, "error"), grepl("04_prep_figure_data.ipynb", conditionMessage(stale), fixed = TRUE))
-  # Run the actual 05_figures.R with a federation-only scope and raw patient
+  stopifnot(inherits(stale, "error"), grepl("06_prep_figure_data.ipynb", conditionMessage(stale), fixed = TRUE))
+  # Run the actual 07_figures.R with a federation-only scope and raw patient
   # input hidden. This verifies configuration wiring as well as the helper API.
   variables <- c(CAIA_PROJECT_ROOT = normalizePath("."),
     COMPASS_DATA_ROOT = root, COMPASS_FIG_ROOT = cfg$fig_root,
@@ -202,7 +202,7 @@ local({
   stopifnot(file.rename(file.path(root, "survival_analysis", "local_runs_adt"),
                         file.path(root, "local_runs_hidden")))
   env <- new.env(parent = globalenv())
-  source(file.path(dirname(pipeline_path), "05_figures.R"), local = env)
+  source(file.path(dirname(pipeline_path), "07_figures.R"), local = env)
   stopifnot(identical(names(env$figure_run$prepared), "federated"))
   stopifnot(identical(vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem"),
                       c("psa_forest", "testosterone_forest", "site_incidence_lm000",
@@ -229,7 +229,7 @@ local({
   # 18 full-model mean AUC(t) points per arm plus 18 paired ΔAUC(t) points.
   stopifnot(nrow(ablation_export) == 54L, sum(ablation_export$arm == "Paired difference") == 18L,
     all(!is.na(ablation_export$model_family)))
-  # Both forest scenes keep widescreen slide dimensions through 05's cache;
+  # Both forest scenes keep widescreen slide dimensions through 07's cache;
   # the day-zero incidence layout is unchanged.
   for(scene in env$figure_run$prepared$federated$scenes[1:2]) {
     stopifnot(scene$width == 16, scene$height == 9)
@@ -243,7 +243,7 @@ local({
             !dir.exists(file.path(cfg$fig_root,"ADT","by_figure")))
   stopifnot(nrow(site_export) == 2L, all(site_export$landmark_days == 0))
   federated_cfg <- cfg; federated_cfg$scope <- "federated"
-  # Elastic-net, XGBoost and 09 transfer files require a refreshed 04 manifest after source changes.
+  # Elastic-net, XGBoost and 04 transfer files require a refreshed 06 manifest after source changes.
   for(path in c(xgb_metrics_path,xgb_importance_path,cox_metrics_path,cox_coefficients_path,
                 transfer_metrics_path,no_dfci_pairs_path,no_dfci_clinical_path)) {
     original_time <- file.info(path)$mtime
@@ -261,6 +261,6 @@ local({
   Sys.setFileTime(site_path, file.info(site_path)$mtime + 5)
   changed_sites <- tryCatch(figure_notebook_manifest(federated_cfg), error = identity)
   stopifnot(inherits(changed_sites, "error"),
-            grepl("04_prep_figure_data.ipynb", conditionMessage(changed_sites), fixed = TRUE))
+            grepl("06_prep_figure_data.ipynb", conditionMessage(changed_sites), fixed = TRUE))
   cat(sprintf("Synthetic workflow: first %.2fs; unchanged %.2fs; %d panels\n", t1, t2, length(first$rendered)))
 })

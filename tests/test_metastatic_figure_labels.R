@@ -61,8 +61,8 @@ stopifnot(aligned_burden$N_MET_SITES[aligned_burden$DFCI_MRN=="1"]==3,
 failure <- tryCatch(build_metastatic_labels(intent,notes,llm,bind_rows(anchors,anchors[1,])),error=identity)
 stopifnot(inherits(failure,"error"), grepl("one row per patient",conditionMessage(failure)))
 
-# Python runs only in the 04 notebook; all R figure stages use its cache.
-active <- paste(readLines("COMPASS/survival_analysis/05_figures.R"),
+# Python runs only in the 06 notebook; all R figure stages use its cache.
+active <- paste(readLines("COMPASS/survival_analysis/07_figures.R"),
                 collapse="\n")
 renderer <- paste(readLines("COMPASS/survival_analysis/figure_supplements.R"),collapse="\n")
 stopifnot(grepl("run_cached_figure_workflow", active),

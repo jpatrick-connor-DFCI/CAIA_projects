@@ -1,5 +1,5 @@
 # COMPASS figure workflow: presentation helpers, federated and manuscript
-# figures, the cached prepare/render bridge used by 05_figures.R, and the
+# figures, the cached prepare/render bridge used by 07_figures.R, and the
 # downloaded-PNG reformatter. Source after COMPASS_generate_figures_pipeline.R.
 # Standalone CLI: Rscript figure_workflow.R <downloaded-ADT-dir> <new-parent>/ADT [0|90|180]
 
@@ -957,13 +957,13 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
 }
 
 # Platinum-trained federated bundles scored on local endpoints by
-# 09_federated_transfer.ipynb. Arm A (`federated_transfer_adt_w_MSK/`) includes
+# 04_federated_transfer.ipynb. Arm A (`federated_transfer_adt_w_MSK/`) includes
 # Dana-Farber as a training site, so it is a cross-endpoint check, not external
 # validation. Arm B (`federated_transfer_adt_no_DFCI/`) scores the same bundles
 # refit without Dana-Farber: external validation, paired with arm A on the same patients.
 FEDERATED_TRANSFER_FILES <- c("transfer_metrics.csv","transfer_auc_t.csv")
 FEDERATED_TRANSFER_PAIRED_FILE <- "transfer_with_vs_without_dfci.csv"
-# 09 arm B in the patients with a Gleason score (ADT clock) / sequenced patients
+# 04 arm B in the patients with a Gleason score (ADT clock) / sequenced patients
 # (sequencing-date clock): the transferred labs score vs a local out-of-fold Cox
 # (federated_clinical_comparison.py).
 FEDERATED_TRANSFER_CLINICAL_FILE <- "transfer_clinical_comparison.csv"
@@ -1017,7 +1017,7 @@ load_federated_transfer <- function(directory, kind=c("metrics","auc_t")) {
     c("model_family","n_patients","n_events","mean_auc") else c("horizon_days","auc","n_cases"))
   missing <- setdiff(needed,names(d))
   if(length(missing)) stop("Federated transfer ",kind," input is missing: ",paste(missing,collapse=", "))
-  # Bootstrap CIs and the age-only comparison are absent when 09 ran without
+  # Bootstrap CIs and the age-only comparison are absent when 04 ran without
   # them (or predates the mean AUC(t) bootstrap); keep the columns so plots
   # show gaps, not errors. Harrell's C stays in the CSV but is not plotted.
   optional <- if(kind=="metrics") c("mean_auc_lo","mean_auc_hi","mean_auc_baseline","delta_auc_vs_baseline",
@@ -1042,17 +1042,17 @@ load_federated_transfer <- function(directory, kind=c("metrics","auc_t")) {
   d
 }
 
-# A transfer CSV written before 09 bootstrapped mean AUC(t) lacks the AUC
+# A transfer CSV written before 04 bootstrapped mean AUC(t) lacks the AUC
 # columns the figures plot: warn and skip it rather than stop the whole run.
 federated_transfer_stale <- function(d, needed, path) {
   missing <- setdiff(needed,names(d))
   if(!length(missing)) return(FALSE)
-  warning("Federated transfer input predates the mean AUC(t) columns (rerun 09_federated_transfer.ipynb); missing ",
+  warning("Federated transfer input predates the mean AUC(t) columns (rerun 04_federated_transfer.ipynb); missing ",
     paste(missing,collapse=", "),": ",path)
   TRUE
 }
 
-# 09's paired full-model comparison: AUC(no DFCI) - AUC(with DFCI) on the same
+# 04's paired full-model comparison: AUC(no DFCI) - AUC(with DFCI) on the same
 # patients and bootstrap resamples. Only the full ("both") config is plotted.
 load_federated_transfer_pairs <- function(directory) {
   path <- file.path(directory,FEDERATED_TRANSFER_PAIRED_FILE)
@@ -1081,7 +1081,7 @@ load_federated_transfer_pairs <- function(directory) {
   d
 }
 
-# 09's clinical comparison: one row per endpoint x landmark x subpopulation x
+# 04's clinical comparison: one row per endpoint x landmark x subpopulation x
 # bundle x score. The local Cox rows repeat for each bundle so that each paired
 # ΔAUC(t) (local Cox - that bundle's transferred labs score) has its own row.
 load_federated_transfer_clinical <- function(directory) {
@@ -1529,7 +1529,7 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
     render_federated_multivariable(root,federated_path,family,dpi,overwrite,variant)
   if (!is.null(figure_data_dir))
     render_federated_figure_data(root, federated_path, figure_data_dir, dpi, overwrite)
-  # Arm A (bundles trained with Dana-Farber) is optional; 09 runs it only with RUN_WITH_DFCI.
+  # Arm A (bundles trained with Dana-Farber) is optional; 04 runs it only with RUN_WITH_DFCI.
   with_dfci <- if (!is.null(transfer_dir) && all(file.exists(file.path(transfer_dir, FEDERATED_TRANSFER_FILES))))
     render_federated_transfer(root, transfer_dir, dpi, overwrite)
   if (!is.null(transfer_no_dfci_dir)) {
@@ -2061,7 +2061,7 @@ manuscript_federated_multivariable_no_dfci <- function(performance,no_dfci_perfo
 }
 
 # Federated Figure 5: platinum models trained without Dana-Farber, scored on the
-# local Dana-Farber NEPC, AVPC and platinum endpoints (09 arm B). All endpoints
+# local Dana-Farber NEPC, AVPC and platinum endpoints (04 arm B). All endpoints
 # are out of sample. a: discrimination in the full cohort; b, c: the transferred
 # full models vs local Cox models in the patients with a Gleason score (b, ADT
 # clock) and sequenced patients (c, sequencing-date clock). Per-horizon AUC(t)
@@ -2483,7 +2483,7 @@ figure_flatten_export_layout <- function(fig_root) {
       for (path in paths) moves[[length(moves)+1L]] <- c(from = path,
         to = file.path(base, substring(path, nchar(old)+2L)))
     }
-    # Notebook 07 previously wrote standalone cohort-comparison panels here.
+    # Notebook 05 previously wrote standalone cohort-comparison panels here.
     old <- file.path(fig_root, arm, "supplements")
     if (dir.exists(old)) {
       roots <- c(roots, old)
@@ -2619,7 +2619,7 @@ figure_parallel <- function(items, fun, workers) {
 }
 
 figure_notebook_manifest <- function(config, check_sources = TRUE) {
-  guidance <- "Run 04_prep_figure_data.ipynb with the requested settings, then rerun 05_figures.R."
+  guidance <- "Run 06_prep_figure_data.ipynb with the requested settings, then rerun 07_figures.R."
   fail <- function(detail) stop(detail, "\n", guidance, call. = FALSE)
   path <- file.path(config$cache_root, "manifest.json")
   if (!file.exists(path)) fail(paste("Missing notebook-prepared manifest:", path))

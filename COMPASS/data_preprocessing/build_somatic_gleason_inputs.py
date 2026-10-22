@@ -895,7 +895,7 @@ def load_stage(stage_path: Path) -> pd.DataFrame:
     """Load the note-level regex stage table used by prepare_figure_data.py.
 
     Reads the same parquet as `METASTATIC_SOURCES["stage"]` in
-    04_prep_figure_data.ipynb (columns DFCI_MRN, EVENT_DATE,
+    06_prep_figure_data.ipynb (columns DFCI_MRN, EVENT_DATE,
     DERIVED_STAGE_MERGED). Read directly rather than imported from
     prepare_figure_data.py, since both files live in this repo -- the
     no-cross-repo-imports rule is only about the separate CTEP repo.

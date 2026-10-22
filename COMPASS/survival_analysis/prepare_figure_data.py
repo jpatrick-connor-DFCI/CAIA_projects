@@ -1,6 +1,6 @@
 """Prepare immutable Polars figure tables and source fingerprints for 05_figures.
 
-Imported by 04_prep_figure_data.ipynb. Patient
+Imported by 06_prep_figure_data.ipynb. Patient
 tables stay under the data root, never under the public figure output tree.
 The large longitudinal CSV is scanned once per changed treatment arm. R keeps
 the established survival/GAM/statistical estimators and caches their outputs
@@ -171,9 +171,9 @@ def federated_within_site_file(federated_path: Path, filename: str) -> Path:
     return next((p for p in candidates if p.exists()), candidates[0])
 
 
-# 09_federated_transfer.ipynb outputs; mirrors federated_transfer_dir() in figure_workflow.R.
+# 04_federated_transfer.ipynb outputs; mirrors federated_transfer_dir() in figure_workflow.R.
 FEDERATED_TRANSFER_FILES = ("transfer_metrics.csv", "transfer_auc_t.csv")
-# 09's arm B (bundles refit without Dana-Farber) adds the paired with/without comparison
+# 04's arm B (bundles refit without Dana-Farber) adds the paired with/without comparison
 # and the Gleason / TP53-RB1-PTEN Cox comparison (federated Figure 5 b-c).
 FEDERATED_TRANSFER_NO_DFCI_FILES = FEDERATED_TRANSFER_FILES + (
     "transfer_with_vs_without_dfci.csv", "transfer_clinical_comparison.csv")
@@ -203,7 +203,7 @@ def federated_rhino_root(config: dict) -> Path:
 
 
 def federated_transfer_dir(config: dict) -> Path:
-    # Arm A (bundles trained with Dana-Farber) is optional; 09 skips it by default.
+    # Arm A (bundles trained with Dana-Farber) is optional; 04 skips it by default.
     return Path(config.get("federated_transfer_path")
                 or federated_rhino_root(config) / "federated_transfer_adt_w_MSK")
 
@@ -234,7 +234,7 @@ def atomic_json(path: Path, value) -> None:
 
 @contextmanager
 def preparation_lock(root: Path):
-    # Cluster workers and simultaneous 05_figures.R runs must not publish partial caches.
+    # Cluster workers and simultaneous 07_figures.R runs must not publish partial caches.
     import fcntl
     root.mkdir(parents=True, exist_ok=True)
     with (root / ".prepare.lock").open("a") as stream:
@@ -427,7 +427,7 @@ def prepare_cohort_overview(config: dict) -> dict:
             table.write_parquet(temporary)
             os.replace(temporary, directory / f"{name}.parquet")
         if sources != [fingerprint(p) for p in [*paths.values(), intent, llm]]:
-            raise RuntimeError("Cohort overview inputs changed during preparation; rerun notebook 04")
+            raise RuntimeError("Cohort overview inputs changed during preparation; rerun notebook 06")
         atomic_json(directory / "manifest.json", {"key": key, "outputs": {
             name: fingerprint(directory / f"{name}.parquet") for name in names}})
     outputs = list(json.loads((directory / "manifest.json").read_text())["outputs"].values())

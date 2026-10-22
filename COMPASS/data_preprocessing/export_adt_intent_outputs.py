@@ -1,15 +1,15 @@
 """Build the ADT metastatic-filtering label and write its figures.
 
-This is the whole 08_adt_intent analysis as one callable: classify, cross-check
-against stage / coded metastasis, render the figures. The
-notebook is a thin wrapper over `run()` so that the same outputs can be
+This is the whole ADT-intent label review (Stage 2c of 01_preprocessing.ipynb)
+as one callable: classify, cross-check against stage / coded metastasis, render
+the figures. The notebook stage is a thin wrapper over `run()` so that the same outputs can be
 regenerated from the command line without opening Jupyter.
 
 Everything lands under a single directory, by default
 
     <FIG_ROOT>/ADT_METASTATIC_FILTERING/
 
-with FIG_ROOT matching 05_figures.Rmd's
+with FIG_ROOT matching 07_figures.R's
 `/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS`, overridable via the
 COMPASS_FIG_ROOT environment variable or --fig-root.
 
@@ -84,7 +84,7 @@ from COMPASS.data_preprocessing.validate_adt_intent import (  # noqa: E402
     load_stage_nearest_adt,
 )
 
-# Matches FIG_ROOT in COMPASS/survival_analysis/05_figures.Rmd.
+# Matches FIG_ROOT in COMPASS/survival_analysis/07_figures.R.
 DEFAULT_FIG_ROOT = os.environ.get(
     "COMPASS_FIG_ROOT", "/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS"
 )

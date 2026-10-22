@@ -1,6 +1,6 @@
 """Transferred federated labs score vs local Gleason and TP53/RB1/PTEN Cox models.
 
-Federated Figure 5 b-c. 09_federated_transfer.ipynb scores the frozen federated
+Federated Figure 5 b-c. 04_federated_transfer.ipynb scores the frozen federated
 platinum bundles on every local DFCI patient. This module restricts those
 scores to two clinical subpopulations at each landmark and asks whether the
 transferred multivariable labs model ranks patients better than a model built

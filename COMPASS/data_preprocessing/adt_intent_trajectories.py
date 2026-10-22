@@ -157,13 +157,13 @@ COHORT_ONLY_ENDPOINTS = ("platinum", "nepc", "avpc")
 # ---------------------------------------------------------------------------
 
 def load_labels(path) -> pl.DataFrame:
-    """Load the per-patient intent labels written by the 08 notebook."""
+    """Load the per-patient intent labels written from Stage 2c of 01_preprocessing.ipynb."""
     labels = pl.read_csv(path, infer_schema_length=0)
     missing = {ID_COL, INTENT_COL} - set(labels.columns)
     if missing:
         raise ValueError(
             f"{path} is missing expected columns: {sorted(missing)}. "
-            "Run the classify cell of 08_adt_intent.ipynb first."
+            "Write `labelled` from Stage 2c of 01_preprocessing.ipynb first."
         )
     casts = [
         pl.col(ID_COL).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False),
@@ -1025,7 +1025,7 @@ def main() -> None:
         description="Lab trajectories and KM curves stratified by ADT_INTENT."
     )
     parser.add_argument("--labels", required=True,
-                        help="adt_intent_labels.csv from 08_adt_intent.ipynb")
+                        help="adt_intent_labels.csv written from 01_preprocessing.ipynb Stage 2c")
     parser.add_argument("--longitudinal", required=True,
                         help="Stage 2 longitudinal_prediction_data_adt.csv (adt arm)")
     parser.add_argument("--out-dir", required=True, help="directory for figures and tables")

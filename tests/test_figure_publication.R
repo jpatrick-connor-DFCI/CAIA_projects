@@ -137,7 +137,7 @@ local({
     grepl("unverified",federated_population_note(mutate(across,n_patients_used=351),counts)))
 })
 local({
-  # 09 transfer outputs: optional CI/ΔAUC(t)/C columns become gaps, bad inputs fail loudly.
+  # 04 transfer outputs: optional CI/ΔAUC(t)/C columns become gaps, bad inputs fail loudly.
   directory <- tempfile("transfer-"); dir.create(directory)
   on.exit(unlink(directory,recursive=TRUE))
   stopifnot(identical(federated_transfer_dir(list(data_root="/x")),file.path("/x","rhino_results","federated_transfer_adt_w_MSK")),
@@ -172,7 +172,7 @@ local({
   }
 })
 local({
-  # 09 arm B: no-Dana-Farber directory, paired ΔAUC(t) loader and the with/without ablation panel.
+  # 04 arm B: no-Dana-Farber directory, paired ΔAUC(t) loader and the with/without ablation panel.
   directory <- tempfile("transfer-no-dfci-"); dir.create(directory)
   on.exit(unlink(directory,recursive=TRUE))
   stopifnot(identical(federated_transfer_no_dfci_dir(list(data_root="/x")),file.path("/x","rhino_results","federated_transfer_adt_no_DFCI")),
@@ -211,7 +211,7 @@ local({
   # A C-only file from before the AUC(t) bootstrap warns and is skipped.
   readr::write_csv(select(pairs,-starts_with("AUC_"),-starts_with("delta_auc")),path)
   stale <- tryCatch(load_federated_transfer_pairs(directory),warning=identity)
-  stopifnot(inherits(stale,"warning"),grepl("rerun 09",conditionMessage(stale),fixed=TRUE))
+  stopifnot(inherits(stale,"warning"),grepl("rerun 04",conditionMessage(stale),fixed=TRUE))
 })
 clinical_fixture <- function() tidyr::expand_grid(endpoint=c("NEPC","avpc","platinum"),landmark_days=c(0,180),
     subpopulation=c("gleason","trio","other"),
@@ -229,7 +229,7 @@ clinical_fixture <- function() tidyr::expand_grid(endpoint=c("NEPC","avpc","plat
     c_index_apparent=NA_real_,mean_auc_apparent=NA_real_,n_folds=5,n_failed_folds=0,n_convergence_warnings=0,
     note=NA_character_)
 local({
-  # 09 arm B clinical comparison (Federated Figure 5 b-c): transferred labs vs local Cox.
+  # 04 arm B clinical comparison (Federated Figure 5 b-c): transferred labs vs local Cox.
   directory <- tempfile("transfer-clinical-"); dir.create(directory)
   on.exit(unlink(directory,recursive=TRUE))
   absent <- withCallingHandlers(load_federated_transfer_clinical(directory),warning=function(w) invokeRestart("muffleWarning"))

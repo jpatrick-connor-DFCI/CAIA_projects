@@ -11,7 +11,7 @@ ICD-C61 cohort: `arpi` (anchored at first ARPI/chemo exposure) and `adt` (anchor
 exposure, years earlier in the treatment sequence). Entry requires a dated prostate diagnosis, male
 sex, at least five PSA measurements, and ADT on/after diagnosis; PARPi exposure, platinum before
 diagnosis, and bladder (C67), lung (C34), head-and-neck (C00-C14/C30-C32), or testicular (C62)
-cancer diagnosed strictly after first ADT are excluded. The paired, R-only `05_figures.R` script emits
+cancer diagnosed strictly after first ADT are excluded. The paired, R-only `07_figures.R` script emits
 manuscript figures for both.
 
 **Arm, cohort, and endpoint are three orthogonal axes.** The *arm* sets time 0 (the index-date
@@ -79,16 +79,18 @@ COMPASS/
     ├── univariate_analysis.py            # ENTRY: univariate Cox associations
     ├── multivariate_analysis.py          # ENTRY: elastic-net Cox or XGBoost survival:cox
     ├── COMPASS_generate_figures_pipeline.R # per-cohort figure-generation implementation
-    ├── figure_workflow.R                 # 05 cached prepare/render, federated + manuscript figures, PNG reformat CLI
-    ├── figure_supplements.R              # cohort forest (07 CLI), cohort overview, metastatic-label figures
-    ├── prepare_figure_data.py            # 04 Polars figure tables + metastatic labels
-    ├── 01_preprocessing.ipynb            # cohort compile, preprocessing, diagnostics
+    ├── figure_workflow.R                 # 07 cached prepare/render, federated + manuscript figures, PNG reformat CLI
+    ├── figure_supplements.R              # cohort forest (05 CLI), cohort overview, metastatic-label figures
+    ├── prepare_figure_data.py            # 06 Polars figure tables + metastatic labels
+    ├── 01_preprocessing.ipynb            # cohort compile, ADT-intent strata + label review, preprocessing, diagnostics
     ├── 02_univariate.ipynb               # univariate arms + nominal-significance filter
     ├── 03_multivariate.ipynb             # elastic-net + XGBoost + summary tables
     ├── 03b_multivariate_longitudinal.ipynb # Dynamic-DeepHit (torch, optional; SurvLatent ODE off by default)
-    ├── 05_figures.R                      # R figures from merged profile_data outputs (Rscript)
-    ├── 06_abstract_numbers.ipynb         # read-only: abstract/manuscript counts from built artifacts
-    ├── 07_cohort_comparison.ipynb        # read-only: 6 cohorts x 2 endpoints, landmark +180d
+    ├── 04_federated_transfer.ipynb       # frozen federated bundles scored on local DFCI endpoints
+    ├── 05_cohort_comparison.ipynb        # read-only: 6 cohorts x 2 endpoints, landmark +180d
+    ├── 06_prep_figure_data.ipynb         # Polars figure tables + cache manifest for 07
+    ├── 07_figures.R                      # R figures from merged profile_data outputs (Rscript)
+    ├── 08_abstract_numbers.ipynb         # read-only: abstract/manuscript counts from built artifacts
     ├── multivariate_longitudinal/
     │   ├── dynamic_deephit.py            # ENTRY: thin CLI over survival_common/deephit_engine.py
     │   ├── survlatent_ode.py             # ENTRY: adapter around the bundled editable checkout
@@ -99,10 +101,10 @@ COMPASS/
         └── 04_gam.ipynb                  # R-kernel GAM runner on merged profile_data
 ```
 
-All eight numbered/lettered notebooks use the merged PROFILE_data_processing parquets and the
+All numbered/lettered notebooks use the merged PROFILE_data_processing parquets and the
 standard `COMPASS` data/figure roots. The Python notebooks share `compass_pipeline.py`; no
 single-release baseline run is part of this workflow. `03b` is optional and torch-gated (see
-invariant #7 below) — the other notebooks never require torch. `06` and `07` are read-only
+invariant #7 below) — the other notebooks never require torch. `05` and `08` are read-only
 reporting notebooks: they read already-generated artifacts and refit nothing.
 
 ---
@@ -132,10 +134,10 @@ reporting notebooks: they read already-generated artifacts and refit nothing.
            survival_analysis/multivariate_analysis.py
  local_runs_<arm>/ , local_runs_<arm>_nepc/
         │
-        ├──► 05_figures.R (R; 2 cohort arms: arpi, adt)
+        ├──► 07_figures.R (R; 2 cohort arms: arpi, adt)
         │    figures/
         │
-        ▼  07_cohort_comparison.ipynb (read-only; 6 cohorts x 2 endpoints)
+        ▼  05_cohort_comparison.ipynb (read-only; 6 cohorts x 2 endpoints)
 ```
 
 Everything above `build_prediction_inputs.py` is endpoint-independent and shared: one survival
@@ -404,16 +406,19 @@ from being tested accidentally. The R notebook uses the merged-profile root excl
 ### 2.4 — Notebooks
 
 COMPASS PROFILE has four Python stage notebooks sharing `compass_pipeline.py` (three numbered plus
-`03b`), two read-only Python reporting notebooks (`06`, `07`), one R figure notebook, and one R GAM
+`03b`), two read-only Python reporting notebooks (`05`, `08`), one R figure notebook, and one R GAM
 notebook. All operate on the merged `profile_data` run:
 
 - `01_preprocessing.ipynb` — drives preprocessing (cohort compile, ADT-intent
-  stratum build, longitudinal preprocessing, prediction-input build, diagnostics) for whichever
+  stratum build and label review, longitudinal preprocessing, prediction-input build, diagnostics) for whichever
   arms are selected (`arpi` and/or `adt`, with landmarks 0/90/180), over the common ADT-entry
   eligible cohort. Each arm gets independent prediction inputs at its own landmark list, and
   Stage 2 runs `longitudinal_data_processing.py` once per anchor
   (`--anchor-med-set {arpi,adt}`) via `cp.stage2_runs(RUNS)`. **Stage 1b** writes the
-  medication-derived ADT-intent MRN lists and their preliminary endpoint counts. Stages 0-2 are
+  medication-derived ADT-intent MRN lists and their preliminary endpoint counts; **Stage 2c**
+  (after Stage 2, whose ADT-arm longitudinal file its KMs read) reviews that label over every
+  ADT-exposed patient via `export_adt_intent_outputs.run()`, writing PNGs only to
+  `<COMPASS_FIG_ROOT>/ADT_METASTATIC_FILTERING/`. Stages 0-2 are
   independent of both cohort and endpoint and only need running once; Stage 3 forks per
   (cohort, endpoint).
 - `02_univariate.ipynb` / `03_multivariate.ipynb` — read `01`'s prediction inputs and run
@@ -462,9 +467,9 @@ notebook. All operate on the merged `profile_data` run:
   log-HRs, BH-adjusted within endpoint x landmark), and held-out performance deltas. Writes five
   CSVs under `survival_analysis/adt_intent_comparison/`, which the R figure pipeline's
   supplemental section reads. Run it after `02`/`03`: `python COMPASS/survival_analysis/adt_intent_comparison.py`.
-- `06_abstract_numbers.ipynb` — read-only. Collects the cohort/event/performance counts quoted in
+- `08_abstract_numbers.ipynb` — read-only. Collects the cohort/event/performance counts quoted in
   the abstract and manuscript from already-generated artifacts. Refits nothing.
-- `07_cohort_comparison.ipynb` — read-only. Compares the 6 patient cohorts (3 cohorts `all` /
+- `05_cohort_comparison.ipynb` — read-only. Compares the 6 patient cohorts (3 cohorts `all` /
   `metastatic_adt` / `metastatic_llm` x 2 exclusions `none` / `pre_adt_castrate`) against both
   endpoints at the **+180d landmark only**: cohort and event counts (including how many diagnoses
   the incident gate removed as prevalent, and a loud warning when a cell has too few events to
@@ -474,7 +479,7 @@ notebook. All operate on the merged `profile_data` run:
   collected and reported rather than raising. Its header restates the two caveats that govern
   reading it — the cohorts are not the same patients, and the strict NEPC label is narrower than
   the Figure 2 classifier definition.
-- `05_figures.R` — the sole COMPASS figure script (`Rscript COMPASS/survival_analysis/05_figures.R`,
+- `07_figures.R` — the sole COMPASS figure script (`Rscript COMPASS/survival_analysis/07_figures.R`,
   configured by `COMPASS_*` environment variables), using
   `COMPASS_generate_figures_pipeline.R`. Its sibling scripts are loaded from the absolute code root
   `/data/gusev/USERS/jpconnor/code/CAIA` (override with `CAIA_PROJECT_ROOT`), so it runs from any
@@ -485,7 +490,7 @@ notebook. All operate on the merged `profile_data` run:
   platinum exclusion, and the requested post-ADT cancer exclusion; the ARPI arm additionally
   displays its post-diagnosis ARPI/docetaxel exposure criterion. Axis and table labels throughout
   name the arm's anchor ("ARPI/chemo initiation" vs. "ADT initiation") via `ANCHOR_LABEL`.
-  The cached `05_figures.R` workflow exports lettered multipanel figures alongside
+  The cached `07_figures.R` workflow exports lettered multipanel figures alongside
   all individual Figure 1 and Figure 2v3 panels: `compiled/cohort/figure1_cohort__<identity>`
   combines cohort selection, survival, and three timing distributions, while
   `compiled/labels/figure2v3_llm__platinum__all__incl` combines all four classifier/subtype
@@ -883,7 +888,7 @@ Four properties of `nepc`/`avpc` differ from `platinum` and matter for interpret
   endpoints censor unresolved patients as 0 and demote undated positives, whereas the figures drop
   unresolved patients and do not need dates.
 - **Event counts may be low**, especially for `nepc`. Check
-  the Stage 1 summary and the `07` notebook's count table *before* spending modelling time; `07`
+  the Stage 1 summary and the `05` notebook's count table *before* spending modelling time; `05`
   prints an explicit underpowered warning below 50 events.
 - **Date provenance is carried, not filtered.** Endpoint-specific NEPC provenance rides through
   to prediction inputs; joint AVPC_NEPC provenance remains in the Stage-1 audit cohort only. Two are
@@ -997,13 +1002,17 @@ patient subsets with `COHORTS`, and the event(s) with `ENDPOINTS`
 4. `COMPASS/survival_analysis/03b_multivariate_longitudinal.ipynb` (optional — requires torch;
    see [Dependencies](#dependencies) and `multivariate_longitudinal/README.md`)
 5. `COMPASS/survival_analysis/GAM/04_gam.ipynb`
-6. `python COMPASS/survival_analysis/adt_intent_comparison.py` (read-only; writes the
-   localized-vs-metastatic tables the figure supplement reads — run **before** step 7, and only
-   after steps 2-3 have been run for both stratified cohorts)
-7. `Rscript COMPASS/survival_analysis/05_figures.R`
-8. `COMPASS/survival_analysis/06_abstract_numbers.ipynb` (read-only; abstract/manuscript counts)
-9. `COMPASS/survival_analysis/07_cohort_comparison.ipynb` (read-only; only after steps 1-3 have
+6. `COMPASS/survival_analysis/04_federated_transfer.ipynb` (scores the frozen federated bundles
+   on the local endpoints; needs the `rhino_results/` delivery)
+7. `COMPASS/survival_analysis/05_cohort_comparison.ipynb` (read-only; only after steps 1-3 have
    been run for **all** cohorts and endpoints being compared)
+8. `python COMPASS/survival_analysis/adt_intent_comparison.py` (read-only; writes the
+   localized-vs-metastatic tables the figure supplement reads — run **before** step 10, and only
+   after steps 2-3 have been run for both stratified cohorts)
+9. `COMPASS/survival_analysis/06_prep_figure_data.ipynb` (Polars figure tables; reads step 6's
+   transfer outputs)
+10. `Rscript COMPASS/survival_analysis/07_figures.R`
+11. `COMPASS/survival_analysis/08_abstract_numbers.ipynb` (read-only; abstract/manuscript counts)
 
 The notebooks pass `PROFILE_DATA/*.parquet` paths explicitly to the lower-level scripts. Existing
 hand-curated `LLM_NEPC_labels/` inputs remain under the shared `COMPASS` data root.
@@ -1044,7 +1053,7 @@ surprised by them.
   (`--endpoint nepc|avpc`, or the deprecated
   `--require-nepc` alias for `nepc`) further removes prevalent events, so event counts can be far
   smaller than platinum's at the same landmark. Two consequences: multivariate results may be
-  underpowered rather than negative (`07` warns below 50 events), and **platinum-vs-nepc/avpc
+  underpowered rather than negative (`05` warns below 50 events), and **platinum-vs-nepc/avpc
   metric differences are confounded by cohort composition** — they are not a
   like-for-like model comparison. Check each endpoint's own event count against the 50-event floor
   before treating it as adequately powered.
@@ -1166,10 +1175,10 @@ python -m survival_common.federated_endpoint_transfer \
 All federated inputs live in the `rhino_results/` delivery under the COMPASS
 data root (override with `COMPASS_RHINO_ROOT`): `federated_model_results/` (the
 pooled univariate Cox CSV, within-site Cox, and the bundles trained with and
-without DFCI), `federated_transfer_adt_no_DFCI/` (09's arm B output) and
+without DFCI), `federated_transfer_adt_no_DFCI/` (04's arm B output) and
 `misc_figure_data/` (aggregate KM curves and trajectories; see below).
 
-`COMPASS/survival_analysis/09_federated_transfer.ipynb` wraps the same call and
+`COMPASS/survival_analysis/04_federated_transfer.ipynb` wraps the same call and
 picks up the bundles from `rhino_results/federated_model_results/federated_*/`.
 By default it runs only arm B, the bundles refit without Dana-Farber
 (`RUN_WITH_DFCI = False`). Set `RUN_WITH_DFCI = True` to also run arm A, the
@@ -1199,8 +1208,8 @@ Arm B (`federated_*_no_DFCI/`) never saw a DFCI patient, so it is an external
 validation on all three endpoints. It writes `transfer_metrics.csv` and
 `transfer_auc_t.csv` to `COMPASS_FEDERATED_TRANSFER_NO_DFCI` (default
 `$COMPASS_RHINO_ROOT/federated_transfer_adt_no_DFCI`). Rerun
-`04_prep_figure_data.ipynb` after 09, then
-`COMPASS_FIGURE_SCOPE=federated Rscript COMPASS/survival_analysis/05_figures.R`
+`06_prep_figure_data.ipynb` after 04, then
+`COMPASS_FIGURE_SCOPE=federated Rscript COMPASS/survival_analysis/07_figures.R`
 to render `figures/ADT/federated/transfer_discrimination_no_dfci__platinum.{png,csv}`
 (mean AUC(t) and paired ΔAUC(t) vs. age only, by endpoint) and federated manuscript
 Figure 5.
