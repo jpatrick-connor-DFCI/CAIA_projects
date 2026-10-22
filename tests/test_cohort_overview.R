@@ -14,6 +14,14 @@ withCallingHandlers({
   plot_cohort_event_overview(thin, cohorts)
   plot_stage1_label_overview(bind_rows(labels, tibble(adt_label = "Unlabelled", llm_label = "Local", n = 1)))
 }, warning = function(w) stop(w))
+km <- tibble(cohort = rep(cohorts, each = 40), endpoint = rep(c("platinum", "nepc"), 120),
+  time = rep(seq(10, 400, by = 10), 6), event = rep(c(1L, 0L, 0L, 0L), 60))
+km_plot <- plot_cohort_km_cascade(km, cohorts)
+stopifnot(inherits(km_plot, "gtable"),
+          inherits(plot_cohort_km_cascade(filter(km, endpoint == "platinum"), cohorts), "ggplot"),
+          is.null(plot_cohort_km_cascade(km[0, ], cohorts)),
+          identical(cohort_km_counts(km)$n_patients, rep(20L, 12)))
+plots$km_cascade <- km_plot
 stopifnot(is.null(plot_cohort_event_overview(mutate(counts, status = "missing"), cohorts)),
           is.null(plot_stage1_label_overview(labels[0, ])))
 output <- Sys.getenv("COMPASS_TEST_OVERVIEW_OUTPUT", "")
@@ -21,4 +29,4 @@ if (nzchar(output)) {
   dir.create(output, recursive = TRUE, showWarnings = FALSE)
   for (name in names(plots)) ggsave(file.path(output, paste0(name, ".png")), plots[[name]], width = 16, height = 7.5, dpi = 120, bg = "white")
 }
-cat("Cohort overview plots: complete, thin/zero-event, missing cells and unlabelled patients passed.\n")
+cat("Cohort overview plots: complete, thin/zero-event, missing cells, unlabelled patients and KM cascade passed.\n")

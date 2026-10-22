@@ -238,7 +238,9 @@ def test_overview_counts_use_endpoint_inputs_and_keep_missing_labels(tmp_path):
     config["forest_cohorts"] = ["adt", "adt_noprecastrate"]
     root = Path(config["data_root"])
     for suffix, event, values in [("", "PLATINUM", [1, 0, 1]), ("_nepc", "NEPC", [1, 0])]:
-        pl.DataFrame({"DFCI_MRN": [str(i) for i in range(len(values))], event: values}).write_csv(
+        durations = [str(10 * i) for i in range(len(values))]  # first patient has t=0
+        pl.DataFrame({"DFCI_MRN": [str(i) for i in range(len(values))], event: values,
+                      f"t_{event.lower()}": durations}).write_csv(
             root / "survival_analysis" / f"prediction_inputs_adt{suffix}" / "aggregated_landmark180.csv")
     mrns = root / "mrn_lists"
     mrns.mkdir()
@@ -250,6 +252,10 @@ def test_overview_counts_use_endpoint_inputs_and_keep_missing_labels(tmp_path):
     d = pl.read_parquet(Path(result["directory"]) / "incidence.parquet")
     assert d["n_patients"].to_list() == [3, 2, None, None]
     assert d["n_events"].to_list() == [2, 1, None, None]
+    km = pl.read_parquet(Path(result["directory"]) / "cohort_km.parquet")
+    # Non-positive durations are dropped, as in the landmark KM; missing cohorts add no rows.
+    assert km.sort("endpoint", "time").rows() == [
+        ("adt", "nepc", 10.0, 0), ("adt", "platinum", 10.0, 0), ("adt", "platinum", 20.0, 1)]
     labels = pl.read_parquet(Path(result["directory"]) / "label_overlap.parquet")
     assert labels["n"].sum() == 3
     assert labels.filter(pl.col("adt_label") == "Unlabelled")["llm_label"].to_list() == ["Unlabelled"]

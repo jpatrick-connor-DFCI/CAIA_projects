@@ -88,10 +88,13 @@
 # full renders. ARPI uses its own input file.
 # Retired AVPC endpoints and localized-adjuvant cohorts remain unavailable.
 #
-# Canonical ADT/platinum also generates two combined cohort-comparison figures:
+# Canonical ADT/platinum also generates three combined cohort-comparison figures:
 # event incidence with 95% Wilson intervals plus patient/event counts across all
 # six ADT definitions and both endpoints at day 180; and Stage-1 ADT-intent/LLM
-# label overlap plus the four agreement-cell counts. The incidence denominator
+# label overlap plus the four agreement-cell counts; and day-180 event-free KM
+# curves for all six ADT definitions, one panel per endpoint (nested cohorts, so
+# no log-rank). `05_cohort_comparison.ipynb` draws none of these; it reports
+# the underlying tables only. The incidence denominator
 # is each endpoint's aggregated landmark input, not a feature-specific Cox fit.
 # It is the observed follow-up event fraction, not cumulative risk by day 180.
 # Cells with fewer than 25 events are hatched/marked; missing cells stay blank.
@@ -99,7 +102,8 @@
 # `llm_met_labels_model_cohort.csv`, preserving missing labels explicitly.
 # Run notebook `06` once after this update to prepare these small summary tables.
 # Combined outputs are under `06_cohort_sensitivity/compiled/` (count tables in `06_cohort_sensitivity/data/`):
-# `event_incidence_lm180__platinum__all__incl` and `metastatic_label_overlap__platinum__all__incl`.
+# `event_incidence_lm180__platinum__all__incl`, `metastatic_label_overlap__platinum__all__incl`
+# and `cohort_km_cascade_lm180__platinum__all__incl`.
 #
 # Figure 1 also exports `01_cohort/compiled/figure1_cohort__<endpoint>__<subset>__<exclusion>`:
 # a five-panel figure with the cohort-selection flow spanning the left column,

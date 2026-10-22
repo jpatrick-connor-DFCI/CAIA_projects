@@ -1,18 +1,14 @@
 # COMPASS supplementary figures sourced on demand by the pipeline and the
 # cached workflow: cohort forest, cohort overview, metastatic-label prep and
-# diagnostics. Standalone CLI (notebook 05):
-#   Rscript figure_supplements.R input.csv output_root landmark dpi overwrite
+# diagnostics.
 
 # ============================================================================
-# ---- PSA/testosterone forest across ADT cohorts (+ notebook 05 CLI) --------
+# ---- PSA/testosterone forest across ADT cohorts ----------------------------
 # ============================================================================
-# Shared by 07_figures.R and the forest section of 05_cohort_comparison.ipynb.
 # One faceted figure per endpoint: PSA and testosterone rows, no delta column.
 
 # Sized to drop into a 16:9 PowerPoint slide (13.33 x 7.5 in) as a single
-# full-bleed figure, leaving ~0.4 in of margin on each edge. Both save sites --
-# the 07_figures.R pipeline and the notebook adapter below -- use this one constant so a
-# deck never receives two differently-shaped copies of the same forest.
+# full-bleed figure, leaving ~0.4 in of margin on each edge.
 COHORT_FOREST_SLIDE_SIZE <- c(width = 12.5, height = 6.8)
 cohort_forest_labels <- c(
   adt = "All ADT", adt_noprecastrate = "All ADT; no pre-ADT castrate",
@@ -139,6 +135,47 @@ overview_combine <- function(a, b, title, subtitle) {
   combined
 }
 
+overview_cohort_labels <- function(cohorts) {
+  labels <- sub("^adt$", "all", cohorts)
+  labels <- sub("^adt_", "", labels)
+  labels <- sub("^noprecastrate$", "all +noprecastrate", labels)
+  sub("_noprecastrate$", " +noprecastrate", labels)
+}
+
+# Event-free survival for every ADT cohort definition, one panel per endpoint.
+# The cohorts are nested, so curves are descriptive and no log-rank is drawn.
+plot_cohort_km_cascade <- function(d, cohorts, landmark = 180L) {
+  labels <- setNames(overview_cohort_labels(cohorts), cohorts)
+  panel <- function(endpoint) {
+    z <- d[d$endpoint == endpoint & d$cohort %in% cohorts, , drop = FALSE]
+    if (!nrow(z)) return(NULL)
+    present <- cohorts[cohorts %in% z$cohort]
+    curves <- bind_rows(lapply(present, function(cohort) {
+      fit <- survival::survfit(survival::Surv(time, event) ~ 1, data = z[z$cohort == cohort, ])
+      tibble(stratum = labels[[cohort]], time = c(0, fit$time), survival = c(1, fit$surv),
+             lower = c(1, fit$lower), upper = c(1, fit$upper))
+    }))
+    counts <- z %>% group_by(cohort) %>% summarise(n = n(), events = sum(event), .groups = "drop") %>%
+      mutate(stratum = unname(labels[cohort]))
+    plot_km_curves(curves, counts, NA_real_, sprintf("%s-free survival", toupper(endpoint)),
+                   "ADT start", unname(labels[present]), ci = FALSE,
+                   ylab = "Event-free probability", legend_ncol = 2) +
+      labs(subtitle = sprintf("Landmark +%dd; nested cohorts, no log-rank test", landmark))
+  }
+  plots <- Filter(Negate(is.null), lapply(c("platinum", "nepc"), panel))
+  if (!length(plots)) return(NULL)
+  if (length(plots) == 1L) return(plots[[1]])
+  overview_combine(plots[[1]], plots[[2]],
+    sprintf("Event-free survival down the cohort cascade | landmark +%dd", landmark),
+    "Cohorts overlap (metastatic and +noprecastrate are subsets of all); curves are descriptive.")
+}
+
+# Per-cohort counts: the publishable companion of the patient-level KM table.
+cohort_km_counts <- function(d) {
+  d %>% group_by(cohort, endpoint) %>%
+    summarise(n_patients = n(), n_events = sum(event), .groups = "drop")
+}
+
 plot_cohort_event_overview <- function(d, cohorts, landmark = 180L) {
   d <- d %>% mutate(cohort = as.character(cohort), endpoint = as.character(endpoint))
   good <- d %>% filter(status == "ok", n_patients > 0)
@@ -153,10 +190,7 @@ plot_cohort_event_overview <- function(d, cohorts, landmark = 180L) {
     y = length(cohorts) + 1 - match(cohort, cohorts) + if_else(endpoint == "platinum", .19, -.19),
     thin = n_events < 25, rate_label = sprintf("%.1f%s", rate, if_else(thin, "*", "")))
   colors <- c(platinum = "#2a78d6", nepc = "#eb6834")
-  labels <- sub("^adt$", "all", cohorts)
-  labels <- sub("^adt_", "", labels)
-  labels <- sub("^noprecastrate$", "all +noprecastrate", labels)
-  labels <- sub("_noprecastrate$", " +noprecastrate", labels)
+  labels <- overview_cohort_labels(cohorts)
   yscale <- function(show = TRUE) scale_y_continuous(breaks = rev(seq_along(cohorts)),
     labels = if (show) labels else NULL, limits = c(.4, length(cohorts)+.6))
   a <- ggplot(good, aes(y = y, fill = endpoint)) +
@@ -243,20 +277,26 @@ render_cohort_overview <- function(manifest, config, forest_config=NULL) {
   if (is.null(prepared)) stop("Run 06_prep_figure_data.ipynb to prepare the new cohort overview tables.")
   incidence <- figure_read_parquet(file.path(prepared$directory, "incidence.parquet"))
   overlap <- figure_read_parquet(file.path(prepared$directory, "label_overlap.parquet"))
+  km_path <- file.path(prepared$directory, "cohort_km.parquet")
+  if (!file.exists(km_path)) stop("Run 06_prep_figure_data.ipynb to prepare the cohort KM table.")
+  km <- figure_read_parquet(km_path)
   landmark <- config$forest_landmark
   plots <- list(event_incidence = plot_cohort_event_overview(incidence, config$forest_cohorts, landmark),
-                metastatic_label_overlap = plot_stage1_label_overview(overlap))
+                metastatic_label_overlap = plot_stage1_label_overview(overlap),
+                cohort_km_cascade = plot_cohort_km_cascade(km, config$forest_cohorts, landmark))
+  tables <- list(event_incidence = incidence, metastatic_label_overlap = overlap,
+                 cohort_km_cascade = cohort_km_counts(km))
   base <- file.path(config$fig_root, "ADT", "by_figure", "cohort_comparison")
   for (name in names(plots)) {
     if (is.null(plots[[name]])) { message("Cohort overview skipped: ", name, " (no available inputs)"); next }
-    leaf <- if (name == "event_incidence") paste0(name, "_landmark", landmark) else name
+    leaf <- if (name == "metastatic_label_overlap") name else paste0(name, "_landmark", landmark)
     destination <- file.path(base, leaf, "platinum__all__incl")
     getOption("compass.figure_capture")(plots[[name]], destination, 16, 7.5, leaf)
     if(exists("figure_public_path",mode="function")) destination <- figure_public_path(destination)
     table <- paste0(destination, ".csv")
     if (exists("figure_sidecar_path", mode = "function")) table <- figure_sidecar_path(table)
     dir.create(dirname(table), recursive = TRUE, showWarnings = FALSE)
-    readr::write_csv(if (name == "event_incidence") incidence else overlap, table)
+    readr::write_csv(tables[[name]], table)
     getOption("compass.figure_table_capture")(table)
   }
   # Figure 6 combines this job's incidence table with the cohort forest. The
@@ -611,43 +651,4 @@ render_metastatic_supplements <- function(config, patient_df, labs, save_panel,
     }
   }
   invisible(labels)
-}
-
-# ============================================================================
-# ---- notebook 05 forest CLI ------------------------------------------------
-# ============================================================================
-# Notebook adapter: Rscript figure_supplements.R input.csv output_root landmark dpi overwrite
-# The notebook and 07_figures.R deliberately share the same renderer and destinations.
-if (sys.nframe() == 0L) {
-  suppressPackageStartupMessages({library(ggplot2); library(dplyr); library(tidyr)})
-  args <- commandArgs(trailingOnly = TRUE)
-  if (length(args) != 5L) stop("Expected input.csv output_root landmark dpi overwrite")
-  frame <- readr::read_csv(args[1], show_col_types = FALSE)
-  landmark <- as.integer(args[3]); dpi <- as.numeric(args[4]); overwrite <- tolower(args[5]) == "true"
-  for (endpoint in c("platinum", "nepc")) {
-    d <- prepare_cohort_forest(frame, endpoint, landmark)
-    p <- plot_cohort_forest(d, endpoint, landmark)
-    if (is.null(p)) next
-    directory <- file.path(args[2], "ADT", "06_cohort_sensitivity")
-    dir.create(directory, recursive = TRUE, showWarnings = FALSE)
-    destination <- file.path(directory, sprintf("cohort_forest_lm%d__%s__all__incl.png", landmark, endpoint))
-    # PIL-style header and end marker check without loading a graphics device.
-    complete <- function(path) {
-      if (!file.exists(path) || file.size(path) < 20) return(FALSE)
-      con <- file(path, "rb"); on.exit(close(con))
-      head <- readBin(con, "raw", 8); seek(con, -12, "end")
-      tail <- readBin(con, "raw", 12)
-      identical(head, as.raw(c(137, 80, 78, 71, 13, 10, 26, 10))) &&
-        identical(tail[5:8], charToRaw("IEND"))
-    }
-    if (!overwrite && complete(destination)) { message("Skipped ", destination); next }
-    temporary <- tempfile(tmpdir = directory, fileext = ".png")
-    tryCatch({
-      ggsave(temporary, p, width = COHORT_FOREST_SLIDE_SIZE[["width"]],
-             height = COHORT_FOREST_SLIDE_SIZE[["height"]],
-             dpi = dpi, bg = "white", device = if (requireNamespace("ragg", quietly = TRUE)) ragg::agg_png else "png")
-      if (!complete(temporary) || !file.rename(temporary, destination)) stop("Could not publish ", destination)
-    }, finally = unlink(temporary))
-    message("Wrote ", destination)
-  }
 }

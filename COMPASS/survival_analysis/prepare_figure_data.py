@@ -363,7 +363,11 @@ def prepare_metastatic(config: dict, patients: pl.DataFrame) -> pl.DataFrame:
 
 
 def prepare_cohort_overview(config: dict) -> dict:
-    """Small Stage-3 incidence and Stage-1 label summaries from notebook 07."""
+    """Stage-3 incidence and KM inputs plus Stage-1 label summaries for 07.
+
+    ``cohort_km`` is patient-level (cohort, endpoint, time, event), so it stays in
+    the data cache; 07 publishes only its per-cohort counts.
+    """
     root, cache = Path(config["data_root"]), Path(config["cache_root"])
     cohorts = as_list(config.get("forest_cohorts", ["adt", "adt_noprecastrate",
         "adt_metastatic_adt", "adt_metastatic_adt_noprecastrate",
@@ -378,15 +382,16 @@ def prepare_cohort_overview(config: dict) -> dict:
     key = digest([sources, cohorts, landmark, pl.__version__,
                   hashlib.sha256(Path(__file__).read_bytes()).hexdigest()])
     directory = cache / "cohort_overview" / key
-    names = ["incidence", "label_overlap"]
+    names = ["incidence", "label_overlap", "cohort_km"]
     if config.get("force") or not valid_bundle(directory, key, names):
-        rows = []
+        rows, km = [], []
         for (cohort, ep), path in paths.items():
             row = dict(cohort=cohort, endpoint=ep, landmark_days=landmark,
                        n_patients=None, n_events=None, status="missing")
             if path.exists():
                 scan = pl.scan_csv(path, infer_schema_length=0, null_values=["", "NA", "NaN"])
-                if not {ID, ep.upper()} <= set(scan.collect_schema().names()):
+                columns = set(scan.collect_schema().names())
+                if not {ID, ep.upper()} <= columns:
                     row["status"] = f"missing {ID} or {ep.upper()} column"
                 else:
                     counts = scan.select(pl.len().alias("n"), pl.col(ID).n_unique().alias("ids"),
@@ -395,8 +400,18 @@ def prepare_cohort_overview(config: dict) -> dict:
                     if counts["n"] != counts["ids"] or counts["missing_ids"]:
                         raise ValueError(f"Non-unique/missing patient IDs in {path}")
                     row.update(n_patients=counts["n"], n_events=counts["events"], status="ok")
+                    # KM down the cascade: durations from the ADT anchor, positive only.
+                    if f"t_{ep}" in columns:
+                        km.append(scan.select(
+                            pl.lit(cohort).alias("cohort"), pl.lit(ep).alias("endpoint"),
+                            pl.col(f"t_{ep}").cast(pl.Float64, strict=False).alias("time"),
+                            (pl.col(ep.upper()).cast(pl.Float64, strict=False) == 1)
+                            .fill_null(False).cast(pl.Int64).alias("event"),
+                        ).filter(pl.col("time") > 0).collect())
             rows.append(row)
         incidence = pl.DataFrame(rows, schema_overrides={"n_patients": pl.Int64, "n_events": pl.Int64})
+        cohort_km = pl.concat(km) if km else pl.DataFrame(schema={
+            "cohort": pl.String, "endpoint": pl.String, "time": pl.Float64, "event": pl.Int64})
         overlap = pl.DataFrame(schema={"adt_label": pl.String, "llm_label": pl.String, "n": pl.Int64})
         if intent.exists() and llm.exists():
             def labels(path, column):
@@ -414,7 +429,8 @@ def prepare_cohort_overview(config: dict) -> dict:
             overlap = a.join(b, on=ID, how="left").with_columns(pl.col("llm_label").fill_null("Unlabelled")) \
                 .group_by("adt_label", "llm_label").len(name="n").with_columns(pl.col("n").cast(pl.Int64))
         directory.mkdir(parents=True, exist_ok=True)
-        for name, table in [("incidence", incidence), ("label_overlap", overlap)]:
+        for name, table in [("incidence", incidence), ("label_overlap", overlap),
+                            ("cohort_km", cohort_km)]:
             with tempfile.NamedTemporaryFile(dir=directory, suffix=".parquet", delete=False) as stream:
                 temporary = Path(stream.name)
             table.write_parquet(temporary)
