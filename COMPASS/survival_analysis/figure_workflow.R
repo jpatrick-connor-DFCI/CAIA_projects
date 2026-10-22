@@ -68,7 +68,7 @@ figure_overview_km_landmark <- function() {
 figure_dfci_overview_spec <- function(landmark=figure_overview_km_landmark()) {
   stopifnot(landmark %in% c(0,90,180))
   list(key=paste0("dfci_labs_overview_km_lm",landmark),
-    title=paste0("DFCI lab associations, trajectories and extreme-quintile survival (KM day ",landmark,")"),
+    title=paste0("DFCI lab associations, trajectories and extreme-decile survival (KM day ",landmark,")"),
     width=24, height=22, cols=6, row_heights=c(8,7,7),
     layout_matrix=rbind(c(1,1,2,2,3,3),c(4,4,4,5,5,5),c(6,6,6,7,7,7)),
     members=c(paste0("figure3_univariate_platinum_landmark",c(0,90,180)),
@@ -99,7 +99,7 @@ figure_compilation_spec <- function(stem) {
       width=24, height=9, cols=3, keep_individuals=TRUE,
       shared_caption=FALSE, shared_legend=TRUE))
   if (stem %in% c("figure2v3_confusion_matrix", "figure2v3_metric_bar"))
-    return(list(key="classifier_validation", title="NEPC classifier validation", width=12, height=6, cols=2,
+    return(list(key="classifier_validation", title="Subtype classifier validation", width=12, height=6, cols=2,
       keep_individuals=TRUE, shared_caption=TRUE, shared_legend=FALSE))
   if (stem %in% c("figure2v3_subtype_landscape", "figure2v3_enrichment"))
     return(list(key="subtype_platinum", title="Subtype landscape and platinum enrichment", width=15, height=7, cols=2,
@@ -212,7 +212,7 @@ figure_combine <- function(items, spec, directory) {
           lab <- sub("^km_quintile_(.*)_landmark.*$", "\\1",stem)
           spec$title <- paste(if(lab=="psa") "PSA" else tools::toTitleCase(gsub("_"," ",lab)), "extremes: time to platinum")
           if(is_overview) title <- paste(if(lab=="psa") "PSA" else "Testosterone",
-            "bottom vs top 20%",paste0("(day ",sub("^.*landmark","",stem),")"))
+            sprintf("bottom vs top %d%%",round(100*LAB_EXTREME_FRACTION)),paste0("(day ",sub("^.*landmark","",stem),")"))
         }
       } else if (grepl("^figure4[fg]_",stem)) {
         # Compiled titles are dropped; the stratifier/level must stay on the panel.
@@ -1399,7 +1399,7 @@ plot_federated_lab_km <- function(fig, lab, landmark, site=NULL,
     summary$q20,summary$q80)
   plot_km_curves(select(curves,stratum,time,survival,lower,upper),counts,summary$logrank_p,
     paste(lab,"bottom vs top 20%: time to platinum"),sprintf("the +%d-day treatment landmark",landmark),
-    c("Bottom 20%","Top 20%"),note)
+    c("Bottom 20%","Top 20%"),note,zoom_y=TRUE)
 }
 
 plot_federated_cohort_km <- function(fig, site=NULL) {
@@ -1561,11 +1561,11 @@ manuscript_specs <- function() {
       c("Cohort selection","Platinum-free survival","Lab record span","Diagnosis to ADT","ADT to platinum")),
     spec("02_llm_nepc_avpc", c("figure2v3_confusion_matrix","figure2v3_metric_bar",
       "figure2v3_subtype_landscape","figure2v3_enrichment"), 6.2, rbind(1:2,3:4),
-      c("NEPC: chart-review agreement","NEPC classification metrics","NEPC/AVPC proxy subtypes","Platinum enrichment")),
+      c("Subtype: chart-review agreement","Subtype classification metrics","NEPC/AVPC proxy subtypes","Platinum enrichment")),
     spec("03_dfci_univariable", figure_dfci_overview_spec(manuscript_dfci_km_landmark)$members, 8.6,
       rbind(c(1,1,2,2,3,3),rep(8,6),c(4,4,4,5,5,5),c(6,6,6,7,7,7)),
-      c("Day 0","Day 90","Day 180","PSA trajectory","PSA: extreme quintiles",
-        "Testosterone trajectory","Testosterone: extreme quintiles"),
+      c("Day 0","Day 90","Day 180","PSA trajectory","PSA: extreme deciles",
+        "Testosterone trajectory","Testosterone: extreme deciles"),
       row_heights=c(1.5,.18,1,1), shared_legend_panels=1:3),
     spec("04_multivariable_labs", c(
       "figure4a_discrimination_auc_platinum",
@@ -1597,11 +1597,11 @@ manuscript_captions <- function() {
       "Panels b and c include 2,239 patients. Panel d displays 2,216 of 2,239 patients, and panel e displays 162 of 198 platinum-treated patients. ADT, androgen-deprivation therapy; PARPi, poly(ADP-ribose) polymerase inhibitor; PSA, prostate-specific antigen."),
     `02_llm_nepc_avpc`=caption(
       "Figure 2. Large language model classification of neuroendocrine and aggressive-variant prostate cancer proxies.",
-      "(a) Confusion matrix comparing large language model (LLM) neuroendocrine prostate cancer (NEPC) labels with manual chart-review annotations. (b) Accuracy, precision, recall, and specificity in the chart-reviewed set. (c) Distribution of conventional, aggressive-variant prostate cancer (AVPC), and NEPC subtypes within platinum-positive and platinum-negative groups. (d) Observed platinum-positive fraction for aggressive subtypes, defined as AVPC or NEPC, versus conventional prostate cancer; error bars denote 95% Wilson confidence intervals. The displayed odds ratio and one-sided Fisher exact-test P value compare the aggressive and conventional groups.",
+      "(a) Confusion matrix comparing large language model (LLM) subtype labels (conventional, aggressive-variant prostate cancer [AVPC], and neuroendocrine prostate cancer [NEPC]) on the x axis with manual chart-review annotations on the y axis. (b) One-vs-rest accuracy, precision, recall, and specificity for each subtype in the chart-reviewed set. (c) Distribution of conventional, AVPC, and NEPC subtypes within platinum-positive and platinum-negative groups. (d) Observed platinum-positive fraction for aggressive subtypes, defined as AVPC or NEPC, versus conventional prostate cancer; error bars denote 95% Wilson confidence intervals. The displayed odds ratio and one-sided Fisher exact-test P value compare the aggressive and conventional groups.",
       "Panels a and b include 41 chart-reviewed patients, of whom 12 were manually annotated as NEPC. Panel c includes 3,754 classified patients (213 platinum positive and 3,541 platinum negative) from 3,869 ADT-exposed patients; patients without a resolved subtype label were excluded from panels c and d. OR, odds ratio."),
     `03_dfci_univariable`=caption(
       "Figure 3. Univariable laboratory associations with platinum treatment and longitudinal PSA and testosterone patterns.",
-      "(a-c) Univariable Cox associations at ADT initiation (a), 90 days (b), and 180 days (c). The horizontal axis gives the log hazard ratio per standard-deviation increase and the vertical axis gives -log10(P), displayed through 20. The solid vertical line denotes no association, dashed vertical lines mark log hazard ratios of -0.5 and 0.5, and the dotted horizontal line is the landmark-specific threshold corresponding to a Benjamini-Hochberg false-discovery rate below 0.05. Colors identify laboratory categories. At the three landmarks, 31 of 235, 72 of 244, and 76 of 245 tested features, respectively, had q < 0.05. (d,f) Mean log1p-transformed PSA (d) and testosterone (f) trajectories by subsequent platinum status; points and shading denote the mean and 95% confidence interval, and only bins containing at least 10 patients per stratum are shown. The dotted vertical line denotes ADT initiation. (e,g) Kaplan-Meier platinum-free survival from the 180-day landmark comparing the bottom and top 20% of the pre-landmark mean PSA (e) or testosterone (g) distribution. Middle quintiles are omitted, equal values remain together, shading denotes pointwise 95% confidence intervals, and P values are from log-rank tests.",
+      "(a-c) Univariable Cox associations at ADT initiation (a), 90 days (b), and 180 days (c). The horizontal axis gives the log hazard ratio per standard-deviation increase and the vertical axis gives -log10(P), displayed through 20. The solid vertical line denotes no association, dashed vertical lines mark log hazard ratios of -0.5 and 0.5, and the dotted horizontal line is the landmark-specific threshold corresponding to a Benjamini-Hochberg false-discovery rate below 0.05. Colors identify laboratory categories. At the three landmarks, 31 of 235, 72 of 244, and 76 of 245 tested features, respectively, had q < 0.05. (d,f) Mean log1p-transformed PSA (d) and testosterone (f) trajectories by subsequent platinum status; points and shading denote the mean and 95% confidence interval, and only bins containing at least 10 patients per stratum are shown. The dotted vertical line denotes ADT initiation. (e,g) Kaplan-Meier platinum-free survival from the 180-day landmark comparing the bottom and top 10% of the pre-landmark mean PSA (e) or testosterone (g) distribution. The middle 80% is omitted, equal values remain together, shading denotes pointwise 95% confidence intervals, and P values are from log-rank tests. Because platinum treatment is rare, the vertical axis is truncated below 1 to show separation between curves.",
       "The trajectory analyses include 2,217 patients for PSA and 2,059 for testosterone. For PSA, the bottom group was ≤0.2453 (n=403; 11 events) and the top group was >9.626 (n=403; 58 events); log-rank P=2.75 × 10^-13. For testosterone, the bottom group was ≤10 (n=317; 41 events) and the top group was >294.3 (n=313; 19 events); log-rank P=6.92 × 10^-6. ADT, androgen-deprivation therapy; CBC, complete blood count; CMP, comprehensive metabolic panel; HR, hazard ratio; LFT, liver-function test; PSA, prostate-specific antigen; SD, standard deviation."),
     `04_multivariable_labs`=caption(
       "Figure 4. Multivariable laboratory models for prediction of platinum treatment.",
@@ -1626,7 +1626,7 @@ manuscript_captions <- function() {
     # The federated manuscript set is numbered separately (federated_figure<N>).
     federated_03_univariable=caption(
       "Federated Figure 3. Pooled univariable laboratory associations with platinum treatment and longitudinal PSA and testosterone patterns across four sites.",
-      "Results pool the Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering (MSK) ADT cohorts. (a-c) Federated univariable Cox associations at ADT initiation (a), 90 days (b), and 180 days (c). The horizontal axis gives the log hazard ratio per standard-deviation increase and the vertical axis gives -log10(P); values above 30 are drawn at 30 as triangles. The solid vertical line denotes no association, dashed vertical lines mark log hazard ratios of -0.5 and 0.5, and the dotted horizontal line is the landmark-specific threshold corresponding to a Benjamini-Hochberg false-discovery rate below 0.05. Colors identify laboratory categories. At the three landmarks, 93 of 261, 121 of 258, and 126 of 260 displayed features, respectively, had q < 0.05. (d,f) Pooled mean log1p-transformed PSA (d) and testosterone (f) trajectories by subsequent platinum status; points and shading denote the mean and 95% confidence interval, and only bins containing at least 10 patients per stratum are shown. The dotted vertical line denotes ADT initiation. (e,g) Pooled Kaplan-Meier platinum-free survival from the 180-day landmark comparing the bottom and top 20% of the pre-landmark mean PSA (e) or testosterone (g) distribution, with quintile cutoffs computed across all four sites. Middle quintiles are omitted, shading denotes pointwise 95% confidence intervals, and P values are from log-rank tests.",
+      "Results pool the Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering (MSK) ADT cohorts. (a-c) Federated univariable Cox associations at ADT initiation (a), 90 days (b), and 180 days (c). The horizontal axis gives the log hazard ratio per standard-deviation increase and the vertical axis gives -log10(P); values above 30 are drawn at 30 as triangles. The solid vertical line denotes no association, dashed vertical lines mark log hazard ratios of -0.5 and 0.5, and the dotted horizontal line is the landmark-specific threshold corresponding to a Benjamini-Hochberg false-discovery rate below 0.05. Colors identify laboratory categories. At the three landmarks, 93 of 261, 121 of 258, and 126 of 260 displayed features, respectively, had q < 0.05. (d,f) Pooled mean log1p-transformed PSA (d) and testosterone (f) trajectories by subsequent platinum status; points and shading denote the mean and 95% confidence interval, and only bins containing at least 10 patients per stratum are shown. The dotted vertical line denotes ADT initiation. (e,g) Pooled Kaplan-Meier platinum-free survival from the 180-day landmark comparing the bottom and top 20% of the pre-landmark mean PSA (e) or testosterone (g) distribution, with quintile cutoffs computed across all four sites. Middle quintiles are omitted, shading denotes pointwise 95% confidence intervals, and P values are from log-rank tests. Because platinum treatment is rare, the vertical axis is truncated below 1 to show separation between curves.",
       "Panels a-c display features with finite estimates, absolute log hazard ratios of at most 4, and confidence-interval upper-to-lower ratios below 100; supplied q values were not recalculated. Panels d-g were drawn from aggregate site exports (binned means and Kaplan-Meier curves) without patient-level data. Cohorts included 22,138 patients (664 platinum events) at day 0, 21,791 (608) at day 90, and 21,216 (564) at day 180; by site at day 0, Dana-Farber contributed 5,853 (231 events), Fred Hutch 3,277 (90), Johns Hopkins 3,069 (35), and MSK 9,939 (308). The trajectory analyses include 22,035 patients for PSA and 17,937 for testosterone. For PSA, the bottom group was ≤0.4184 (n=4,129; 68 events) and the top group was >11.31 (n=4,129; 209 events); log-rank P=2.61 × 10^-30. For testosterone, the bottom group was ≤23.0 (n=2,875; 146 events) and the top group was >348.6 (n=2,872; 41 events); log-rank P=1.34 × 10^-16. Within-site versions are provided as supplementary figures. ADT, androgen-deprivation therapy; CBC, complete blood count; CMP, comprehensive metabolic panel; LFT, liver-function test; PSA, prostate-specific antigen; SD, standard deviation."),
     federated_04_multivariable=caption(
       "Federated Figure 4. Federated multivariable laboratory models for prediction of platinum treatment, with and without Dana-Farber training data.",
@@ -2132,8 +2132,8 @@ manuscript_univariable_restyle <- function(plots, federated=FALSE) {
     plots[[i]] <- plots[[i]] + ggplot2::labs(subtitle=NULL,
       x=paste0("Days from day-",manuscript_dfci_km_landmark," landmark"),y=manuscript_km_y_label)
     if(is.character(logrank) && length(logrank)==1 && nzchar(logrank))
-      plots[[i]] <- plots[[i]] + ggplot2::annotate("text",x=Inf,y=.05,label=logrank,
-        hjust=1.08,vjust=0,size=2.3,color="#52514e")
+      plots[[i]] <- plots[[i]] + ggplot2::annotate("text",x=Inf,y=-Inf,label=logrank,
+        hjust=1.08,vjust=-.6,size=2.3,color="#52514e")
   }
   list(plots=plots,legend=if(federated)
     "Panels a-c share one -log10(p) display range (values above 30 drawn as triangles at 30) and centered landmark headers." else
@@ -2929,8 +2929,9 @@ reformat_downloaded_figures <- function(input, output, landmark=0L) {
       gp=grid::gpar(fontsize=17,fontface="bold"))
     download_draw_panel(volcano,.5,1-(.4+7.6/2)/height,1,7.6/height,
       canvas_width=width,canvas_height=height)
-    headings <- c("d   PSA trajectory (log1p)",paste0("e   PSA bottom vs top 20% — day ",landmark),
-      "f   Testosterone trajectory (log1p)",paste0("g   Testosterone bottom vs top 20% — day ",landmark))
+    extremes <- sprintf("bottom vs top %d%%",round(100*LAB_EXTREME_FRACTION))
+    headings <- c("d   PSA trajectory (log1p)",paste0("e   PSA ",extremes," — day ",landmark),
+      "f   Testosterone trajectory (log1p)",paste0("g   Testosterone ",extremes," — day ",landmark))
     for(i in 1:4) {
       row <- ceiling(i/2); col <- (i-1) %% 2
       download_draw_panel(panels[[i]],.25+.5*col,1-(8+(row-.5)*7)/height,.5,7/height,
@@ -2954,7 +2955,7 @@ reformat_downloaded_figures <- function(input, output, landmark=0L) {
     row$path <- paste0("compiled/associations/",stem,".",format)
     row$topic <- "compiled"; row$figure_id <- sub("__.*$","",stem)
     row$endpoint <- "platinum"; row$cohort <- "all__incl"; row$landmark <- "0,90,180"
-    row$title <- paste0("DFCI lab associations, trajectories and extreme-quintile survival (KM day ",landmark,")")
+    row$title <- paste0("DFCI lab associations, trajectories and extreme-decile survival (KM day ",landmark,")")
     row$format <- format
     metadata <- rbind(metadata,row)
   }

@@ -9,6 +9,7 @@ pipeline <- new.env(parent = globalenv())
 needed <- c("COLOR_PLATINUM_POS", "COLOR_PLATINUM_NEG", "COLOR_NEUTRAL_INK",
             "theme_fig", "prepare_figure_text", "wilson_ci", "CLASS_ORDER", "CLASS_LABELS", "count_labels",
             "compute_enrichment", "render_landscape_panel", "render_enrichment_panel", "render_confusion_panel",
+            "render_metric_bar_panel", "binary_metrics", "multiclass_metrics",
             ".read_cache", "cached_read_csv", "MANUAL_LABEL_COL", "MANUAL_LABEL_LEVELS", "load_manual_annotations")
 collect <- function(expr) {
   if (missing(expr) || !is.call(expr)) return(invisible(NULL))
@@ -22,12 +23,35 @@ collect <- function(expr) {
 for (expr in parse("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R"))
   collect(expr)
 
-# Columns are manual truth, rows are LLM predictions. Unequal FP/FN expose
-# the transpose that previously contradicted the reported precision/recall.
-cm <- pipeline$render_confusion_panel(list(TN=28,FP=1,FN=2,TP=10))$data
-stopifnot(cm$n[cm$truth=="NEPC" & cm$pred=="Non-NEPC"]==2,
-          cm$n[cm$truth=="Non-NEPC" & cm$pred=="NEPC"]==1,
-          sum(cm$n[cm$truth=="NEPC"])==12)
+# 3-class validation: y axis is manual truth, x axis is LLM prediction.
+# Asymmetric off-diagonal cells expose a transpose.
+truth <- c(rep("conventional", 10), rep("avpc", 5), rep("nepc", 4), NA)
+pred  <- c(rep("conventional", 8), "avpc", "nepc",
+           rep("avpc", 3), rep("conventional", 2),
+           rep("nepc", 3), "avpc", "nepc")
+mm <- suppressWarnings(pipeline$multiclass_metrics(truth, pred, pipeline$CLASS_ORDER))
+stopifnot(mm$N == 19L, mm$Excluded == 1L, isTRUE(all.equal(mm$Accuracy, 14 / 19)),
+          mm$cm$n[mm$cm$truth == "avpc" & mm$cm$pred == "conventional"] == 2L,
+          mm$cm$n[mm$cm$truth == "conventional" & mm$cm$pred == "avpc"] == 1L)
+pc <- mm$per_class
+stopifnot(identical(as.character(pc$class), pipeline$CLASS_ORDER),
+          isTRUE(all.equal(pc$Precision[pc$class == "avpc"], 3 / 5)),
+          isTRUE(all.equal(pc$Recall[pc$class == "avpc"], 3 / 5)),
+          isTRUE(all.equal(pc$Precision[pc$class == "nepc"], 3 / 4)),
+          isTRUE(all.equal(pc$Recall[pc$class == "nepc"], 3 / 4)),
+          isTRUE(all.equal(pc$Specificity[pc$class == "conventional"], 7 / 9)))
+cm_plot <- pipeline$render_confusion_panel(mm)
+cm <- cm_plot$data
+stopifnot(nrow(cm) == 9L, rlang::as_label(cm_plot$mapping$x) == "pred",
+          rlang::as_label(cm_plot$mapping$y) == "truth",
+          cm$n[cm$truth == "AVPC" & cm$pred == "Conventional"] == 2L,
+          sum(cm$n[cm$truth == "NEPC"]) == 4L,
+          identical(levels(cm$pred), c("Conventional", "AVPC", "NEPC")),
+          identical(levels(cm$truth), c("NEPC", "AVPC", "Conventional")))
+bars <- pipeline$render_metric_bar_panel(mm)
+invisible(ggplot_build(bars))
+stopifnot(nrow(bars$data) == 12L,
+          identical(levels(bars$data$class), c("Conventional", "AVPC", "NEPC")))
 
 labels <- tibble(
   primary_label = factor(c(rep("avpc", 4), rep("nepc", 2),

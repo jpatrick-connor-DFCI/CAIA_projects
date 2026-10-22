@@ -60,27 +60,38 @@ figure_tertiles <- function(values) {
   result
 }
 
-# Bottom 20% vs top 20%; the middle 60% is dropped rather than plotted. Same
-# tie contract as figure_tertiles: equal measurements never land in opposite
-# arms. This matters most for post-ADT PSA, where a pile of tied values sits at
-# the assay floor and can straddle the 20th-percentile cut -- splitting those by
-# row order would manufacture separation between clinically identical patients.
-figure_extreme_quintiles <- function(values) {
+# Bottom vs top `fraction` (default 20%); the middle is dropped rather than
+# plotted. Same tie contract as figure_tertiles: equal measurements never land
+# in opposite arms. This matters most for post-ADT PSA, where a pile of tied
+# values sits at the assay floor and can straddle the bottom cut -- splitting
+# those by row order would manufacture separation between clinically identical
+# patients.
+figure_extreme_quintiles <- function(values, fraction = 0.2) {
+  stopifnot(fraction > 0, fraction < 0.5)
   values <- suppressWarnings(as.numeric(values))
   valid <- is.finite(values)
   result <- rep(NA_character_, length(values))
   if (sum(valid) < 2L) return(result)
-  cuts <- as.numeric(quantile(values[valid], c(0.2, 0.8), names = FALSE))
+  cuts <- as.numeric(quantile(values[valid], c(fraction, 1 - fraction), names = FALSE))
   if (cuts[1] >= cuts[2]) return(result)
   # Closed at the bottom cut, open at the top: ties at either edge stay whole.
   low <- valid & values <= cuts[1]
   high <- valid & values > cuts[2]
-  result[low] <- "Bottom 20%"
-  result[high] <- "Top 20%"
+  labels <- figure_extreme_labels(fraction)
+  result[low] <- labels[1]
+  result[high] <- labels[2]
   if (!any(low) || !any(high)) return(rep(NA_character_, length(values)))
   attr(result, "cutpoints") <- cuts
   result
 }
+
+figure_extreme_labels <- function(fraction) {
+  pct <- round(100 * fraction)
+  c(sprintf("Bottom %d%%", pct), sprintf("Top %d%%", pct))
+}
+
+# PSA/testosterone extreme-group KM panels compare the bottom vs top 10%.
+LAB_EXTREME_FRACTION <- 0.1
 
 figure_gleason_groups <- function(values) {
   x <- suppressWarnings(as.numeric(values))
@@ -111,7 +122,8 @@ figure_platinum_strata <- function(frame, groups) {
 
 plot_stratified_platinum <- function(d, title, origin, group_order = unique(d$stratum),
                                      note = NULL, colors = NULL, ci = TRUE,
-                                     ylab = "Platinum-free probability", legend_ncol = 1) {
+                                     ylab = "Platinum-free probability", legend_ncol = 1,
+                                     zoom_y = FALSE) {
   if (!nrow(d) || length(unique(d$stratum)) < 2L) return(NULL)
   group_order <- group_order[group_order %in% d$stratum]
   d$stratum <- factor(d$stratum, levels = group_order)
@@ -127,14 +139,25 @@ plot_stratified_platinum <- function(d, title, origin, group_order = unique(d$st
     test <- survival::survdiff(survival::Surv(time, event) ~ stratum, data = d)
     pchisq(test$chisq, length(test$n) - 1, lower.tail = FALSE)
   }, error = function(e) NA_real_)
-  plot_km_curves(curves, counts, logrank, title, origin, group_order, note, colors, ci, ylab, legend_ncol)
+  plot_km_curves(curves, counts, logrank, title, origin, group_order, note, colors, ci, ylab,
+                 legend_ncol, zoom_y)
+}
+
+# Platinum is rare, so a 0-1 axis flattens every curve against the top. Zoomed
+# panels start just below the lowest plotted KM estimate (in 0.05 steps); CI
+# ribbons below that are clipped, not dropped.
+km_zoom_ylim <- function(survival, pad = 0.02, step = 0.05) {
+  lo <- suppressWarnings(min(survival, na.rm = TRUE))
+  if (!is.finite(lo)) return(c(0, 1.02))
+  c(max(0, floor((lo - pad) / step) * step), 1.005)
 }
 
 # Draws already-estimated KM curves (stratum, time, survival, lower, upper), e.g.
 # the federated aggregate export, in the same style as locally fitted ones.
 plot_km_curves <- function(curves, counts, logrank, title, origin, group_order = unique(curves$stratum),
                            note = NULL, colors = NULL, ci = TRUE,
-                           ylab = "Platinum-free probability", legend_ncol = 1) {
+                           ylab = "Platinum-free probability", legend_ncol = 1,
+                           zoom_y = FALSE) {
   group_order <- group_order[group_order %in% curves$stratum]
   curves$stratum <- factor(curves$stratum, levels = group_order)
   legend_labels <- setNames(sprintf("%s (n=%s; events=%s)", counts$stratum,
@@ -153,7 +176,7 @@ plot_km_curves <- function(curves, counts, logrank, title, origin, group_order =
     geom_step(linewidth = .85) +
     scale_color_manual(values = colors, breaks = group_order, labels = legend_labels, name = NULL) +
     scale_fill_manual(values = colors, guide = "none") +
-    coord_cartesian(ylim = c(0, 1.02)) +
+    coord_cartesian(ylim = if (zoom_y) km_zoom_ylim(curves$survival) else c(0, 1.02)) +
     labs(x = paste("Days from", origin), y = ylab, title = title,
          subtitle = if (is.finite(logrank)) sprintf("Log-rank p = %.3g", logrank) else "Log-rank p unavailable",
          caption = note) + theme_fig() +
@@ -496,8 +519,8 @@ cached_profile_patient_and_labs <- function(path, id_col = "DFCI_MRN") {
 }
 
 # load_manual_annotations: one row per chart-reviewed patient with
-# manual_label in MANUAL_LABEL_LEVELS. Blank labels become NA so binary_metrics
-# excludes them instead of scoring them as non-NEPC.
+# manual_label in MANUAL_LABEL_LEVELS. Blank labels become NA so multiclass_metrics
+# excludes them instead of scoring them as conventional.
 load_manual_annotations <- function(path) {
   manual <- cached_read_csv(path, show_col_types = FALSE)
   missing <- setdiff(c("DFCI_MRN", MANUAL_LABEL_COL), names(manual))
@@ -643,6 +666,41 @@ binary_metrics <- function(y_true, y_pred) {
     TP = tp, FP = fp, TN = tn, FN = fn,
     N = length(y_true), Excluded = excluded
   )
+}
+
+# multiclass_metrics: full confusion matrix plus one-vs-rest binary_metrics per
+# class for a categorical truth/pred pair. Rows with missing or out-of-level
+# labels are excluded (and counted) rather than scored as any class.
+multiclass_metrics <- function(y_true, y_pred, levels) {
+  if (length(y_true) != length(y_pred)) {
+    stop("multiclass_metrics: y_true and y_pred must have the same length")
+  }
+  y_true <- as.character(y_true)
+  y_pred <- as.character(y_pred)
+  valid <- !is.na(y_true) & !is.na(y_pred) & y_true %in% levels & y_pred %in% levels
+  excluded <- sum(!valid)
+  if (excluded > 0) {
+    warning(sprintf(
+      "multiclass_metrics: excluded %s row(s) with missing or unrecognized truth/prediction",
+      format(excluded, big.mark = ",")
+    ))
+  }
+  y_true <- factor(y_true[valid], levels = levels)
+  y_pred <- factor(y_pred[valid], levels = levels)
+  cm <- as.data.frame(table(truth = y_true, pred = y_pred), responseName = "n",
+                      stringsAsFactors = FALSE) %>%
+    as_tibble() %>%
+    mutate(truth = factor(truth, levels = levels), pred = factor(pred, levels = levels),
+           n = as.integer(n))
+  per_class <- bind_rows(lapply(levels, function(cls) {
+    m <- binary_metrics(y_true == cls, y_pred == cls)
+    tibble(class = cls, Accuracy = m$Accuracy, Precision = m$Precision,
+           Recall = m$Recall, Specificity = m$TNR,
+           TP = m$TP, FP = m$FP, TN = m$TN, FN = m$FN)
+  })) %>% mutate(class = factor(class, levels = levels))
+  list(cm = cm, per_class = per_class,
+       Accuracy = if (length(y_true) > 0) mean(y_true == y_pred) else 0,
+       N = length(y_true), Excluded = excluded)
 }
 
 # wilson_ci: Wilson score interval for a binomial proportion. Returns c(phat, lo, hi).
@@ -2139,47 +2197,44 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         mutate(frac = count / sum(count))
     }
 
-    # Annotated 2x2 confusion matrix, LLM (rows) vs manual truth (cols).
+    # Annotated 3x3 confusion matrix from multiclass_metrics: manual truth on the
+    # y axis (Conventional at top), LLM prediction on the x axis.
     render_confusion_panel <- function(metrics,
-                                       truth_label = "NEPC",
-                                       pred_label = "NEPC",
                                        title = "Panel A1 — confusion matrix") {
-      cm <- tibble(
-        truth = factor(c(paste0("Non-", truth_label), truth_label,
-                         paste0("Non-", truth_label), truth_label),
-                       levels = c(paste0("Non-", truth_label), truth_label)),
-        pred  = factor(c(paste0("Non-", pred_label), paste0("Non-", pred_label),
-                         pred_label, pred_label),
-                       levels = c(pred_label, paste0("Non-", pred_label))),
-        n     = c(metrics$TN, metrics$FN, metrics$FP, metrics$TP)
-      )
+      cm <- metrics$cm %>%
+        mutate(truth = factor(CLASS_LABELS[as.character(truth)], levels = rev(CLASS_LABELS[CLASS_ORDER])),
+               pred  = factor(CLASS_LABELS[as.character(pred)],  levels = CLASS_LABELS[CLASS_ORDER]))
       thresh <- max(cm$n) / 2
-      ggplot(cm, aes(truth, pred, fill = n)) +
+      ggplot(cm, aes(pred, truth, fill = n)) +
         geom_tile(color = "white", linewidth = 1) +
         geom_text(aes(label = format(n, big.mark = ","),
                       color = n > thresh), size = 5, fontface = "bold") +
         scale_fill_gradient(low = "#eaf1fb", high = COLOR_PLATINUM_POS, guide = "none") +
         scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "#0b0b0b"), guide = "none") +
-        labs(x = "Manual annotation (truth)", y = "LLM label (prediction)", title = title) +
+        labs(x = "LLM label (prediction)", y = "Manual annotation (truth)", title = title) +
         theme_fig() +
         theme(panel.grid = element_blank(),
               plot.title = element_text(face = "bold", size = 11))
     }
 
-    # Compact metric bar: Accuracy, Precision, Recall, Specificity (Specificity == TNR).
+    # One-vs-rest Accuracy, Precision, Recall, Specificity, faceted by class.
     render_metric_bar_panel <- function(metrics) {
-      d <- tibble(
-        metric = factor(c("Accuracy","Precision","Recall","Specificity"),
-                        levels = c("Accuracy","Precision","Recall","Specificity")),
-        value  = c(metrics$Accuracy, metrics$Precision, metrics$Recall, metrics$TNR)
-      )
+      metric_levels <- c("Accuracy","Precision","Recall","Specificity")
+      d <- metrics$per_class %>%
+        select(class, all_of(metric_levels)) %>%
+        tidyr::pivot_longer(-class, names_to = "metric", values_to = "value") %>%
+        mutate(metric = factor(metric, levels = metric_levels),
+               class  = factor(CLASS_LABELS[as.character(class)], levels = CLASS_LABELS[CLASS_ORDER]))
       ggplot(d, aes(metric, value)) +
         geom_col(fill = COLOR_PLATINUM_POS, width = 0.6) +
-        geom_text(aes(label = sprintf("%.2f", value)), vjust = -0.4, size = 3.6, color = "#0b0b0b") +
-        coord_cartesian(ylim = c(0, 1.0)) +
-        labs(x = NULL, y = "Metric value", title = "Panel A2 — classifier metrics") +
+        geom_text(aes(label = sprintf("%.2f", value)), vjust = -0.4, size = 3.2, color = "#0b0b0b") +
+        facet_wrap(~ class, nrow = 1) +
+        coord_cartesian(ylim = c(0, 1.05)) +
+        labs(x = NULL, y = "Metric value (one-vs-rest)", title = "Panel A2 — classifier metrics") +
         theme_fig() +
-        theme(plot.title = element_text(face = "bold", size = 11))
+        theme(plot.title = element_text(face = "bold", size = 11),
+              axis.text.x = element_text(angle = 45, hjust = 1),
+              strip.text = element_text(face = "bold"))
     }
 
     render_landscape_panel <- function(label_distributions, n_pos, n_neg,
@@ -2305,29 +2360,33 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       format(nrow(llm_classifier_labels), big.mark = ",")
     ))
 
-    ## Panel A: binary NEPC validation uses has_nepc directly. Panels B/C below
-    ## use primary_label for the subtype landscape and aggressive-variant group.
+    ## Panel A: 3-class validation of primary_label against manual chart review.
+    ## Panels B/C below use the same primary_label for the subtype landscape and
+    ## aggressive-variant group.
     merged_v3 <- manual_annotations %>%
-      inner_join(v3_labels_all, by = "DFCI_MRN") %>%
-      mutate(manual_NEPC = as.numeric(manual_label == "nepc"))
-    cat(sprintf("figure2v3 merged_results: %s rows, %s manual-NEPC positive\n",
+      inner_join(v3_labels_all, by = "DFCI_MRN")
+    cat(sprintf("figure2v3 merged_results: %s rows; manual conventional/AVPC/NEPC = %s\n",
                 format(nrow(merged_v3), big.mark = ","),
-                format(sum(merged_v3$manual_NEPC, na.rm = TRUE), big.mark = ",")))
-    metrics_v3 <- binary_metrics(merged_v3$manual_NEPC, merged_v3$has_nepc)
-    n_total_v3 <- metrics_v3$N
-    n_nepc_manual_v3 <- metrics_v3$TP + metrics_v3$FN
-    caption_a_v3 <- sprintf("All ADT-exposed patients (N=%s total, no prediction-cohort restriction); %s chart-reviewed/labeled patients; %s manual-NEPC positive (primary_subtype_labels.parquet).",
-                            format(length(adt_exposed_mrns_v3), big.mark = ","),
-                            format(n_total_v3, big.mark = ","), format(n_nepc_manual_v3, big.mark = ","))
-    pA1_v3 <- render_confusion_panel(
-      metrics_v3, "NEPC", "NEPC", "NEPC classifier agreement"
-    ) + labs(caption = caption_a_v3) +
+                paste(sapply(CLASS_ORDER, function(cls)
+                  format(sum(merged_v3$manual_label == cls, na.rm = TRUE), big.mark = ",")),
+                  collapse = "/")))
+    metrics_v3 <- multiclass_metrics(merged_v3$manual_label, merged_v3$primary_label, CLASS_ORDER)
+    n_manual_v3 <- metrics_v3$cm %>% group_by(truth) %>% summarise(n = sum(n), .groups = "drop")
+    caption_a_v3 <- str_wrap(sprintf(
+      "All ADT-exposed patients (N=%s total, no prediction-cohort restriction); %s chart-reviewed/labeled patients (manual %s); overall 3-class accuracy %.2f (primary_subtype_labels.parquet).",
+      format(length(adt_exposed_mrns_v3), big.mark = ","),
+      format(metrics_v3$N, big.mark = ","),
+      paste(sprintf("%s=%s", CLASS_LABELS[as.character(n_manual_v3$truth)],
+                    format(n_manual_v3$n, big.mark = ",")), collapse = ", "),
+      metrics_v3$Accuracy), 95)
+    pA1_v3 <- render_confusion_panel(metrics_v3, "Subtype classifier agreement") +
+      labs(caption = caption_a_v3) +
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
     pA2_v3 <- render_metric_bar_panel(metrics_v3) +
-      labs(title = "NEPC classifier metrics", caption = caption_a_v3) +
+      labs(title = "Subtype classifier metrics", caption = caption_a_v3) +
       theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
-    save_fig(pA1_v3, OUT_DIR_V3, "figure2v3_confusion_matrix", 5.8, 5.4)
-    save_fig(pA2_v3, OUT_DIR_V3, "figure2v3_metric_bar", 6.2, 5.0)
+    save_fig(pA1_v3, OUT_DIR_V3, "figure2v3_confusion_matrix", 6.2, 5.8)
+    save_fig(pA2_v3, OUT_DIR_V3, "figure2v3_metric_bar", 9.0, 5.0)
     if (show) print(pA1_v3)
     if (show) print(pA2_v3)
 
@@ -3438,7 +3497,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
   # Extreme-quintile contrast, using the same incident risk set and pre-landmark
   # mean features as the fitted models. Only PSA/testosterone are requested.
-  notify_progress("stage", "Time to platinum: PSA/testosterone bottom vs top 20%")
+  extreme_labels <- figure_extreme_labels(LAB_EXTREME_FRACTION)
+  extreme_pct <- round(100 * LAB_EXTREME_FRACTION)
+  notify_progress("stage", sprintf("Time to platinum: PSA/testosterone bottom vs top %d%%", extreme_pct))
   for (landmark in LANDMARKS) {
     agg <- load_aggregated_landmark(landmark)
     if (is.null(agg)) next
@@ -3451,19 +3512,20 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     for (lab in ANDROGEN) {
       column <- resolve_mean_col(names(agg), lab)
       if (is.na(column)) { message("Tertile KM: missing ", lab, " mean at landmark ", landmark); next }
-      groups <- figure_extreme_quintiles(agg[[column]])
+      groups <- figure_extreme_quintiles(agg[[column]], LAB_EXTREME_FRACTION)
       if (all(is.na(groups))) {
-        message("Quintile KM: ", lab, " at landmark ", landmark,
-                " cannot form distinct bottom/top 20% groups without splitting tied values; skipped")
+        message("Extreme-group KM: ", lab, " at landmark ", landmark,
+                sprintf(" cannot form distinct bottom/top %d%% groups without splitting tied values; skipped",
+                        extreme_pct))
         next
       }
       d <- figure_platinum_strata(agg, groups)
       cuts <- attr(groups, "cutpoints")
-      note <- sprintf("%s. Pre-landmark mean; bottom 20%% <= %.4g, top 20%% > %.4g (middle 60%% not shown). Equal values stay together. Shading: 95%% CI.",
-                      COHORT_DISPLAY, cuts[1], cuts[2])
-      p <- plot_stratified_platinum(d, paste(lab, "bottom vs top 20%: time to platinum"),
+      note <- sprintf("%s. Pre-landmark mean; bottom %d%% <= %.4g, top %d%% > %.4g (middle %d%% not shown). Equal values stay together. Shading: 95%% CI; y axis zoomed.",
+                      COHORT_DISPLAY, extreme_pct, cuts[1], extreme_pct, cuts[2], 100 - 2 * extreme_pct)
+      p <- plot_stratified_platinum(d, sprintf("%s bottom vs top %d%%: time to platinum", lab, extreme_pct),
         sprintf("the +%d-day treatment landmark", landmark),
-        c("Bottom 20%", "Top 20%"), note)
+        extreme_labels, note, zoom_y = TRUE)
       if (is.null(p)) next
       save_fig(p, OUT_DIR, sprintf("km_quintile_%s_landmark%d", lab_stem_slug(lab), landmark), 8, 6.5)
       if (show) print(p)

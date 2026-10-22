@@ -187,7 +187,7 @@
 # labels only the outer log-hazard-ratio ticks because its four facets repeat the
 # same scale, plus 0 at the dashed null line; elastic-net and XGBoost
 # retain the local blue/gold model/baseline bars and lab-category colors. Incomplete source groups are not assembled. The DFCI
-# overview uses the same configurable extreme-quintile KM landmark as its larger
+# overview uses the same configurable extreme-decile KM landmark as its larger
 # compiled counterpart. Figure titles remain in filenames/legends, not supertitles.
 # The cohort overview uses a 7.2 × 7.2-inch canvas; panels b–e omit their
 # patient-count subtitles because those counts are retained in the external legend.
@@ -249,7 +249,8 @@
 # platinum cohort, for PSA/testosterone by default. Trajectories retain day-zero
 # boundaries, 180-day bins, and log transformation before averaging. Pre-ADT
 # coverage uses five years and full-stratum denominators. Lab KM curves compare
-# bottom versus top 20% without splitting ties. Somatic and Gleason curves retain
+# bottom versus top 10% without splitting ties (federated aggregate KM keeps the
+# site-exported 20% cutoffs); both zoom the y axis because platinum is rare. Somatic and Gleason curves retain
 # their specimen/score date origins. GAMs, non-androgen lab panels and the older
 # ADT-intent comparison are disabled by default.
 #

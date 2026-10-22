@@ -10,7 +10,8 @@ find_assignment <- function(expr, name) {
   }
   NULL
 }
-for (name in c("theme_fig", "figure_tertiles", "figure_extreme_quintiles",
+for (name in c("theme_fig", "figure_tertiles", "figure_extreme_quintiles", "figure_extreme_labels",
+               "LAB_EXTREME_FRACTION", "km_zoom_ylim", "plot_km_curves",
                "figure_gleason_groups", "figure_platinum_strata",
                "significant_mutation_features", "plot_stratified_platinum", "prepare_figure_text",
                "plot_model_discrimination", "render_discrimination_panel", "render_available_case_sensitivity",
@@ -35,6 +36,19 @@ stopifnot(identical(sort(unique(na.omit(q))), c("Bottom 20%", "Top 20%")),
           sum(is.na(q)) == 60)
 stopifnot(all(is.na(figure_extreme_quintiles(rep(0, 20)))),
           all(is.na(figure_extreme_quintiles(c(1, NA, Inf)))))
+# The PSA/testosterone panels use bottom/top 10%; the middle 80% is dropped.
+stopifnot(LAB_EXTREME_FRACTION == 0.1)
+q10 <- figure_extreme_quintiles(1:100, LAB_EXTREME_FRACTION)
+stopifnot(identical(sort(unique(na.omit(q10))), c("Bottom 10%", "Top 10%")),
+          sum(q10 == "Bottom 10%", na.rm = TRUE) == 10,
+          sum(q10 == "Top 10%", na.rm = TRUE) == 10,
+          sum(is.na(q10)) == 80,
+          identical(attr(q10, "cutpoints"), as.numeric(quantile(1:100, c(.1, .9)))))
+# Zoomed KM axes start just below the lowest estimate, in 0.05 steps.
+stopifnot(isTRUE(all.equal(km_zoom_ylim(c(1, .97, .912)), c(.85, 1.005))),
+          isTRUE(all.equal(km_zoom_ylim(c(1, .99)), c(.95, 1.005))),
+          identical(km_zoom_ylim(c(1, .01)), c(0, 1.005)),
+          identical(km_zoom_ylim(numeric()), c(0, 1.02)))
 # A pile of tied values straddling the bottom cut is never split across arms.
 tied <- figure_extreme_quintiles(c(rep(2, 40), 3:62))
 stopifnot(length(unique(tied[1:40])) == 1L)
@@ -69,7 +83,18 @@ plots$quintiles <- plot_stratified_platinum(figure_platinum_strata(f,qg),
   c("Bottom 20%","Top 20%"),
   "Synthetic data. Equal values stay together. Shading: 95% CI.")
 stopifnot(!is.null(plots$quintiles),
-          nrow(figure_platinum_strata(f,qg)) == sum(!is.na(qg)))
+          nrow(figure_platinum_strata(f,qg)) == sum(!is.na(qg)),
+          identical(plots$quintiles$coordinates$limits$y, c(0, 1.02)))
+rare <- tibble(DFCI_MRN = 1:200, t_platinum = seq(10, 2000, length.out = 200),
+               PLATINUM = rep(c(1, rep(0, 9)), 20))
+rg <- figure_extreme_quintiles(1:200, LAB_EXTREME_FRACTION)
+rd <- figure_platinum_strata(rare, rg)
+plots$deciles <- plot_stratified_platinum(rd, "PSA bottom vs top 10%: time to platinum",
+  "the +180-day treatment landmark", figure_extreme_labels(LAB_EXTREME_FRACTION),
+  "Synthetic data. Shading: 95% CI; y axis zoomed.", zoom_y = TRUE)
+zoom <- plots$deciles$coordinates$limits$y
+stopifnot(nrow(rd) == 40L, zoom[1] > 0, zoom[1] <= min(plots$deciles$data$survival),
+          zoom[2] == 1.005)
 plots$carriers <- plot_stratified_platinum(figure_platinum_strata(f,rep(c("Carrier","Non-carrier"),45)),
   "TP53 SNV carrier status: time to platinum", "sequencing specimen collection date")
 gleason_data <- figure_platinum_strata(f, figure_gleason_groups(rep(6:10,18)))
