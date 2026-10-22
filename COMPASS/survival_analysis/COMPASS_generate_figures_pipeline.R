@@ -2575,7 +2575,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # Separate plots from the lab volcanoes above: these come from
   # build_somatic_gleason_inputs.py / run_somatic_gleason_univariate(), which
   # build two DIFFERENT cohorts with different index dates (sequencing =
-  # specimen collection, gleason = the Gleason score date nearest ADT start).
+  # the sequencing report date nearest ADT start, gleason = the Gleason
+  # score date nearest ADT start).
   # Pooling them into one panel would mix index dates and patient sets, so each
   # index analysis gets its own figure. The sequencing cohort is screened twice:
   # sequencing_snv (SNV-only calls, unadjusted) and sequencing_any (any
@@ -2595,8 +2596,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   )
   # Each analysis' prediction time origin, from build_somatic_gleason_inputs.py.
   SG_ORIGINS <- c(
-    sequencing_snv = "sequencing specimen collection date",
-    sequencing_any = "sequencing specimen collection date",
+    sequencing_snv = "sequencing report date",
+    sequencing_any = "sequencing report date",
     gleason = "Gleason score date nearest ADT initiation"
   )
   SG_TOP_N <- 25   # forest plots show at most this many features, ranked by p

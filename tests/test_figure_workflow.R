@@ -92,9 +92,9 @@ local({
     horizon_days=c(365,730)) %>% mutate(auc=.7,n_cases=4),file.path(no_dfci_dir,"transfer_auc_t.csv"))
   no_dfci_clinical_path <- file.path(no_dfci_dir,"transfer_clinical_comparison.csv")
   write_csv(expand_grid(endpoint=c("avpc","nepc","platinum"),landmark_days=c(0,90,180),
-      subpopulation=c("gleason","trio"),
+      subpopulation=c("gleason","trio","trio_gleason"),
       bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),
-      model=c("transferred_labs","transferred_age","clinical_cox")) %>%
+      model=c("transferred_labs","transferred_age","clinical_cox","combined_cox")) %>%
     mutate(model_family=if_else(startsWith(bundle,"xgboost"),"xgboost_cox","elastic_net_cox"),
       n_patients=20,n_events=6,n_scored=20,n_scored_events=6,c_index=.64,c_index_lo=.58,c_index_hi=.7,
       delta_c_vs_transferred=if_else(model=="transferred_labs",NA_real_,.02),

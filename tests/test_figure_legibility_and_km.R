@@ -96,7 +96,7 @@ zoom <- plots$deciles$coordinates$limits$y
 stopifnot(nrow(rd) == 40L, zoom[1] > 0, zoom[1] <= min(plots$deciles$data$survival),
           zoom[2] == 1.005)
 plots$carriers <- plot_stratified_platinum(figure_platinum_strata(f,rep(c("Carrier","Non-carrier"),45)),
-  "TP53 SNV carrier status: time to platinum", "sequencing specimen collection date")
+  "TP53 SNV carrier status: time to platinum", "sequencing report date")
 gleason_data <- figure_platinum_strata(f, figure_gleason_groups(rep(6:10,18)))
 plots$gleason <- plot_stratified_platinum(gleason_data,
   "Gleason score: time to platinum", "Gleason score date nearest ADT initiation",

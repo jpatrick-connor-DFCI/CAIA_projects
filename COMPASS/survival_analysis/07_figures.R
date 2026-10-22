@@ -330,8 +330,8 @@
 # paired gain over the age-only model by landmark, faceted by endpoint. CSV sidecars keep
 # all metrics (`transfer_discrimination_no_dfci__platinum.csv`) and per-horizon AUC(t)
 # (`transfer_auc_t_no_dfci__platinum.csv`). `transfer_clinical_comparison.csv`
-# (04's Gleason / TP53-RB1-PTEN section) renders
-# `federated/transfer_clinical_comparison_no_dfci__platinum` and feeds Federated Figure 5 b-c;
+# (04's Gleason / TP53-RB1-PTEN / Gleason + TP53-RB1-PTEN section) renders
+# `federated/transfer_clinical_comparison_no_dfci__platinum` and feeds Federated Figure 5 b-d;
 # without it, Figure 5 is drawn with panel a only. Missing transfer outputs are reported and skipped.
 # Missing optional XGBoost files are reported and skipped independently. Run `06`
 # again after this update to register both files (including absent paths), then

@@ -1,4 +1,4 @@
-"""Transferred federated score vs local Gleason / TP53-RB1-PTEN Cox (Figure 5 b-c)."""
+"""Transferred federated score vs local Gleason / TP53-RB1-PTEN Cox (Figure 5 b-d)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -40,34 +40,31 @@ def test_clinical_data_must_be_available_before_the_landmark():
         (2, _day(-400), _day(90), 9),     # available on the landmark: excluded
         (3, _day(-400), _day(-300), 6),   # old score, available early: kept
     ])
-    somatic = _somatic([
-        (1, _day(80), _day(89), 1, 0, np.nan, 1),
-        (2, _day(80), _day(90), 1, 1, 1, 1),
-    ])
-    out = fcc.build_clinical_features(_local([1, 2, 3]), [90], gleason=gleason,
-                                      somatic=somatic, somatic_features=FEATURES)
+    out = fcc.build_clinical_features(_local([1, 2, 3]), [90], gleason=gleason)
     out = out.set_index("person_id")
     assert out.loc[1, "GLEASON_SCORE"] == 9
     assert np.isnan(out.loc[2, "GLEASON_SCORE"])
     assert out.loc[3, "GLEASON_SCORE"] == 6
-    assert out.loc[1, "HAS_SEQUENCING"] is True
-    assert out.loc[[2, 3], "HAS_SEQUENCING"].isna().all()
-    assert out.loc[[2, 3], ["TP53_ANY", "SOMATIC_N_GENES_ALTERED"]].isna().all().all()
+    # No somatic data on the ADT clock: it comes only from the anchoring specimen.
+    assert out[["HAS_SEQUENCING", "TP53_ANY", "SOMATIC_N_GENES_ALTERED"]].isna().all().all()
     assert (out["landmark_days"] == 90).all() and (out["AGE"] == 70.0).all()
 
 
 def test_burden_counts_every_altered_panel_gene_and_uncalled_is_wild_type():
     somatic = _somatic([
-        (1, _day(-50), _day(-40), 1, 0, np.nan, 1),
+        (1, _day(-50), _day(-50), 1, 0, np.nan, 1),
         # two same-day specimens are unioned
-        (2, _day(-50), _day(-40), 0, 1, 0, 0),
-        (2, _day(-50), _day(-40), 0, 0, 1, 0),
-        # an older specimen is superseded by the latest one
-        (3, _day(-900), _day(-890), 1, 1, 1, 1),
-        (3, _day(-50), _day(-40), 0, 0, 0, 0),
+        (2, _day(-50), _day(-50), 0, 1, 0, 0),
+        (2, _day(-50), _day(-50), 0, 0, 1, 0),
+        # a specimen reported farther from ADT is not selected
+        (3, _day(-900), _day(-900), 1, 1, 1, 1),
+        (3, _day(-50), _day(-50), 0, 0, 0, 0),
     ])
-    out = fcc.build_clinical_features(_local([1, 2, 3]), [0], gleason=_gleason([]),
-                                      somatic=somatic, somatic_features=FEATURES)
+    local = _local([1, 2, 3])
+    specimen = fcc.select_specimen(local, somatic, FEATURES)
+    out = fcc.build_clinical_features(fcc.sequencing_anchored_local(local, specimen), [0],
+                                      gleason=_gleason([]), specimen=specimen,
+                                      somatic_features=FEATURES)
     out = out.set_index("person_id")
     assert out.loc[1, "PTEN_ANY"] == 0
     assert out["SOMATIC_N_GENES_ALTERED"].to_dict() == {1: 2, 2: 2, 3: 0}
@@ -132,34 +129,59 @@ def _scores_and_clinical(n=150, n_events=None, seed=1):
 def test_comparison_is_paired_on_the_same_patients():
     scores, clinical = _scores_and_clinical()
     comp, coefs = fcc.compare_clinical_models(scores, clinical, n_bootstrap=60, seed=0)
-    assert set(comp["subpopulation"]) == {"gleason", "trio"}
-    assert len(comp) == 2 * 2 * 3  # subpopulation x bundle x model
+    assert set(comp["subpopulation"]) == {"gleason", "trio", "trio_gleason"}
+    assert len(comp) == 3 * 2 * 4  # subpopulation x bundle x model
     g = comp[comp["subpopulation"] == "gleason"]
     assert (g["n_patients"] == clinical["GLEASON_SCORE"].notna().sum()).all()
     t = comp[comp["subpopulation"] == "trio"]
     assert (t["n_patients"] == clinical["HAS_SEQUENCING"].notna().sum()).all()
+    tg = comp[comp["subpopulation"] == "trio_gleason"]
+    both = clinical["HAS_SEQUENCING"].notna() & clinical["GLEASON_SCORE"].notna()
+    assert (tg["n_patients"] == both.sum()).all()
     for (_, bundle), d in comp.groupby(["subpopulation", "bundle"]):
         d = d.set_index("model")
         assert d["n_scored"].nunique() == 1
         assert np.isnan(d.loc["transferred_labs", "delta_c_vs_transferred"])
-        delta = d.loc["clinical_cox", "c_index"] - d.loc["transferred_labs", "c_index"]
-        assert np.isclose(d.loc["clinical_cox", "delta_c_vs_transferred"], delta)
-        assert d.loc["clinical_cox", "delta_lo"] <= delta <= d.loc["clinical_cox", "delta_hi"]
-        assert np.isfinite(d.loc["clinical_cox", "c_index_apparent"])
+        for m in ("clinical_cox", "combined_cox"):
+            delta = d.loc[m, "c_index"] - d.loc["transferred_labs", "c_index"]
+            assert np.isclose(d.loc[m, "delta_c_vs_transferred"], delta)
+            assert d.loc[m, "delta_lo"] <= delta <= d.loc[m, "delta_hi"]
+            assert np.isfinite(d.loc[m, "c_index_apparent"])
+            d_auc = d.loc[m, "mean_auc"] - d.loc["transferred_labs", "mean_auc"]
+            assert np.isclose(d.loc[m, "delta_auc_vs_transferred"], d_auc)
+            assert d.loc[m, "delta_auc_lo"] <= d_auc <= d.loc[m, "delta_auc_hi"]
+            assert np.isfinite(d.loc[m, "mean_auc_apparent"])
         assert np.isnan(d.loc["transferred_labs", "delta_auc_vs_transferred"])
-        d_auc = d.loc["clinical_cox", "mean_auc"] - d.loc["transferred_labs", "mean_auc"]
-        assert np.isclose(d.loc["clinical_cox", "delta_auc_vs_transferred"], d_auc)
-        assert d.loc["clinical_cox", "delta_auc_lo"] <= d_auc <= d.loc["clinical_cox", "delta_auc_hi"]
-        for m in ("transferred_labs", "clinical_cox"):
+        for m in ("transferred_labs", "clinical_cox", "combined_cox"):
             assert d.loc[m, "mean_auc_lo"] <= d.loc[m, "mean_auc"] <= d.loc[m, "mean_auc_hi"]
-        assert np.isfinite(d.loc["clinical_cox", "mean_auc_apparent"])
-    # The clinical Cox does not depend on the bundle.
+        # Only the combined Cox carries the paired difference from the clinical Cox.
+        assert d.drop(index="combined_cox")[["delta_c_vs_clinical", "delta_auc_vs_clinical"]].isna().all().all()
+        comb = d.loc["combined_cox"]
+        dc = comb["c_index"] - d.loc["clinical_cox", "c_index"]
+        da = comb["mean_auc"] - d.loc["clinical_cox", "mean_auc"]
+        assert np.isclose(comb["delta_c_vs_clinical"], dc)
+        assert comb["delta_c_vs_clinical_lo"] <= dc <= comb["delta_c_vs_clinical_hi"]
+        assert np.isclose(comb["delta_auc_vs_clinical"], da)
+        assert comb["delta_auc_vs_clinical_lo"] <= da <= comb["delta_auc_vs_clinical_hi"]
+    # The clinical Cox does not depend on the bundle; the combined Cox does.
     cox = comp[comp["model"] == "clinical_cox"]
     assert cox.groupby("subpopulation")["c_index"].nunique().eq(1).all()
-    # Gleason drives the simulated hazard.
-    hr = coefs.set_index(["subpopulation", "covariate"])["hr"]
+    combined = comp[comp["model"] == "combined_cox"]
+    assert combined.groupby("subpopulation")["c_index"].nunique().eq(2).all()
+    # Gleason drives the simulated hazard; the burden is no longer a covariate.
+    clin_coefs = coefs[coefs["model"] == "clinical_cox"]
+    hr = clin_coefs.set_index(["subpopulation", "covariate"])["hr"]
     assert hr[("gleason", "GLEASON_SCORE")] > 1
-    assert set(coefs["subpopulation"]) == {"gleason", "trio"}
+    assert set(coefs["subpopulation"]) == {"gleason", "trio", "trio_gleason"}
+    assert set(clin_coefs.loc[clin_coefs["subpopulation"] == "trio_gleason", "covariate"]) == {
+        "GLEASON_SCORE", "TP53_ANY", "RB1_ANY", "PTEN_ANY", "AGE"}
+    assert "SOMATIC_N_GENES_ALTERED" not in set(coefs["covariate"])
+    # One combined fit per subpopulation x bundle, each with the transferred score.
+    comb_coefs = coefs[coefs["model"] == "combined_cox"]
+    score_rows = comb_coefs[comb_coefs["covariate"] == fcc.SCORE_COVARIATE]
+    assert len(score_rows) == 3 * 2
+    assert set(score_rows["bundle"]) == {"fed_en", "fed_xgb"}
+    assert clin_coefs["bundle"].isna().all()
 
 
 def test_too_few_events_gives_a_count_only_row():
@@ -185,7 +207,7 @@ def test_subpopulation_summary_sections_select_strata():
     scores, clinical = _scores_and_clinical()
     seq_only = fcc.subpopulation_score_summary(scores, clinical, sections=("sequencing",))
     strata = set(seq_only["stratum"])
-    assert {"Sequenced", "Any trio altered", "TP53 altered"} <= strata
+    assert {"Sequenced", "Sequenced, Gleason available", "Any trio altered", "TP53 altered"} <= strata
     assert not strata & {"Full cohort", "Gleason available", "Gleason missing"}
 
 
@@ -226,15 +248,15 @@ def test_sequencing_anchored_local_moves_anchor_and_age():
 def test_trio_comes_from_the_anchoring_specimen_at_every_landmark():
     somatic = _somatic([
         (1, _day(-10), _day(-10), 1, 0, 0, 0),
-        # collected after sequencing but before sequencing + 90: never used
+        # reported after sequencing but before sequencing + 90: never used
         (1, _day(40), _day(40), 0, 1, 1, 1),
     ])
     local = _local([1, 2])
     specimen = fcc.select_specimen(local, somatic, FEATURES)
     seq_local = fcc.sequencing_anchored_local(local, specimen)
     gleason = _gleason([(1, _day(-200), _day(-200), 7)])
-    out = fcc.build_clinical_features(seq_local, [0, 90], gleason=gleason, somatic=somatic,
-                                      somatic_features=FEATURES, specimen=specimen)
+    out = fcc.build_clinical_features(seq_local, [0, 90], gleason=gleason, specimen=specimen,
+                                      somatic_features=FEATURES)
     assert set(out["person_id"]) == {1}
     out = out.set_index("landmark_days")
     for lm in (0, 90):
@@ -243,24 +265,47 @@ def test_trio_comes_from_the_anchoring_specimen_at_every_landmark():
         assert out.loc[lm, "SOMATIC_N_GENES_ALTERED"] == 1
         assert bool(out.loc[lm, "HAS_SEQUENCING"])
     assert np.isclose(out.loc[0, "AGE"], 70.0 - 10 / fcc.fs.DAYS_PER_YEAR)
-    # Without the specimen, the later specimen would have replaced it by +90.
-    latest = fcc.build_clinical_features(seq_local, [90], gleason=gleason, somatic=somatic,
-                                         somatic_features=FEATURES)
-    assert latest.set_index("person_id").loc[1, "RB1_ANY"] == 1
+    # Without the specimen there is no trio at all, never a later specimen.
+    adt = fcc.build_clinical_features(local, [90], gleason=gleason)
+    assert adt[["TP53_ANY", "RB1_ANY", "HAS_SEQUENCING"]].isna().all().all()
 
 
 def test_compare_by_subpopulation_scores_each_arm_on_its_own_inputs():
     scores, clinical = _scores_and_clinical(seed=1)
     seq_scores, seq_clinical = _scores_and_clinical(seed=2)
     kwargs = dict(n_bootstrap=20, seed=0)
-    comp, coefs = fcc.compare_by_subpopulation(
-        {"gleason": (scores, clinical), "trio": (seq_scores, seq_clinical)}, **kwargs
-    )
-    assert set(comp["subpopulation"]) == {"gleason", "trio"}
-    assert set(coefs["subpopulation"]) == {"gleason", "trio"}
-    for sub, (s, c) in (("gleason", (scores, clinical)), ("trio", (seq_scores, seq_clinical))):
+    arms = {"gleason": (scores, clinical), "trio": (seq_scores, seq_clinical),
+            "trio_gleason": (seq_scores, seq_clinical)}
+    comp, coefs = fcc.compare_by_subpopulation(arms, **kwargs)
+    assert set(comp["subpopulation"]) == set(arms)
+    assert set(coefs["subpopulation"]) == set(arms)
+    for sub, (s, c) in arms.items():
         expected, _ = fcc.compare_clinical_models(
             s, c, subpopulations={sub: fcc.SUBPOPULATIONS[sub]}, **kwargs
         )
         got = comp[comp["subpopulation"] == sub].reset_index(drop=True)
         pd.testing.assert_frame_equal(got, expected.reset_index(drop=True))
+
+
+def test_subpopulations_are_the_same_patients_at_every_landmark():
+    scores, clinical = _scores_and_clinical()
+    ids = sorted(scores["person_id"].unique())
+    # Landmark 90: one patient no longer at risk, and every Gleason score now available.
+    later = scores[scores["person_id"] != ids[1]].assign(landmark_days=90)
+    clinical_90 = clinical.assign(landmark_days=90)
+    clinical_90["GLEASON_SCORE"] = clinical_90["GLEASON_SCORE"].fillna(7.0)
+    comp, _ = fcc.compare_clinical_models(pd.concat([scores, later]), pd.concat([clinical, clinical_90]),
+                                          n_bootstrap=0)
+    n = comp.groupby(["subpopulation", "landmark_days"])["n_patients"].first().unstack()
+    assert (n[0] == n[90]).all()
+    g = comp[comp["subpopulation"] == "gleason"].groupby("landmark_days").first()
+    # Gleason at day 0 among patients scored at both landmarks (ids[0] has none at day 0).
+    expected = clinical.loc[clinical["person_id"] != ids[1], "GLEASON_SCORE"].notna().sum()
+    assert g.loc[0, "n_patients"] == g.loc[90, "n_patients"] == expected
+    assert g.loc[0, "n_dropped_not_every_landmark"] == 1
+    assert g.loc[90, "n_dropped_not_every_landmark"] == 30
+
+    per_lm, _ = fcc.compare_clinical_models(pd.concat([scores, later]), pd.concat([clinical, clinical_90]),
+                                            n_bootstrap=0, common_cohort=False)
+    g = per_lm[per_lm["subpopulation"] == "gleason"].groupby("landmark_days")["n_patients"].first()
+    assert g[0] == clinical["GLEASON_SCORE"].notna().sum() and g[90] == len(ids) - 1

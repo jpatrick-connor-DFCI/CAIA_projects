@@ -438,10 +438,13 @@ notebook. All operate on the merged `profile_data` run:
     `summarize_clinical_combinations` adds a paired bootstrap `delta_c_index` against each
     cohort's `labs` arm on the shared test-block patients.
   - **Risk-score stratification** (`03`, `run_risk_stratification`) — stratifies the full-cohort
-    labs risk score by Gleason/stage/TP53-PTEN-RB1 (from `build_somatic_gleason_inputs.py`'s
+    labs risk score by Gleason/stage on the ADT clock (from `build_somatic_gleason_inputs.py`'s
     `somatic_gleason/clinical_stratifiers/clinical_stratifiers_landmark{D}.csv`), and separately
     compares the labs arm against every other matched arm within the
-    `gleason_somatic_available_case` cohort via `risk_score_stratified_figures.py --comparison-risks`.
+    `gleason_somatic_available_case` cohort via `risk_score_stratified_figures.py --comparison-risks`,
+    stratified by Gleason/stage/TP53-PTEN-RB1 on the sequencing clock. Every somatic cohort is
+    anchored on the sequencing report date (`REPORT_DT`) reported closest to ADT start; no somatic
+    data is used on the ADT clock.
     Runs once per scoring scheme, written to `<output_dir>/risk_stratification/<test|cv_oof>/full_cohort/landmark_<D>/`
     and `<output_dir>/risk_stratification/<test|cv_oof>/matched/<cohort>/<cox|xgboost>/landmark_<D>/`
     — **the two schemes are never pooled into the same directory or KM panel.**
@@ -1188,6 +1191,10 @@ It maps local `LAB_NAME` to the OMOP names via `OMOP_to_DFCI_lab_ids.csv`, puts
 each endpoint's date in the federated chain's event slot, and reuses
 `federated_scoring.build_landmark_frame` unchanged, so events at/before the
 landmark are dropped (incident risk set) and follow-up is censored at 3650 days.
+Every landmark of an endpoint is evaluated on the same patients: those at risk at
+all landmarks (the 180-day risk set), so performance changes across landmarks are
+not changes in the test cohort (`--per-landmark-cohort` turns this off). The
+Gleason/trio subpopulations in Figure 5 b-d are fixed across landmarks the same way.
 NEPC/AVPC are censored at last contact (death is not a competing event).
 Outputs: `transfer_metrics.csv` (mean AUC(t) + bootstrap CI and paired ΔAUC(t) vs the
 age-only baseline, which the figures plot; Harrell C + CI, paired ΔC, Uno's C, HR per SD

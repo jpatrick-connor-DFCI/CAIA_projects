@@ -3,8 +3,8 @@
 The baseline ADT cohort and train/valid/test assignments are inherited from
 the standard COMPASS landmark-0 inputs. Three distinct analyses are built:
 
-* ``sequencing_snv`` selects the sample-collection date closest to ADT start
-  and predicts from that collection date to platinum (or last contact). Every
+* ``sequencing_snv`` selects the sequencing report date (REPORT_DT) closest to
+  ADT start and predicts from that report date to platinum (or last contact). Every
   gene is tested as its SNV indicator only, with no burden adjustment.
 * ``sequencing_any`` uses the same index date and cohort but tests every gene
   as one any-alteration indicator (SNV, DEL, AMP, or SV), and carries the
@@ -20,10 +20,11 @@ the builder never substitutes a different observation based on the outcome.
 
 Additionally, ``gleason_available_case`` preserves the ADT time origin and
 original split while retaining the patients with Gleason data; it supports the
-matched multivariable Gleason-versus-labs sensitivity.
+matched multivariable Gleason-versus-labs sensitivity. It is the only
+ADT-clock cohort; no somatic data is ever used on the ADT clock.
 
 ``gleason_somatic_available_case`` (the Gleason/somatic/labs clinical
-combinations) is anchored on the sequencing date instead: the specimen closest
+combinations) is anchored on the sequencing date instead: the report closest
 to ADT start defines time 0 for every patient, landmarks are sequencing + D,
 lab summaries use only labs drawn before sequencing + D, and outcomes are
 measured from sequencing + D. The original split is inherited. Its clinical
@@ -88,6 +89,9 @@ SOMATIC_AVAILABLE_DATE = "_somatic_available_date"
 GLEASON_AVAILABLE_DATE = "_gleason_available_date"
 SOMATIC_TESTED_FEATURE = "HAS_SOMATIC_TEST"  # legacy compatibility constant
 SEQUENCING_DATE = "SEQUENCING_DATE"
+# Raw somatic column that defines SEQUENCING_DATE: the sequencing report date,
+# when the result was known, rather than the specimen collection date.
+SEQUENCING_DATE_SOURCE = "REPORT_DT"
 INDEX_DATE = "INDEX_DATE"
 INDEX_TO_ADT_DAYS = "INDEX_TO_ADT_DAYS"
 INDEX_ANALYSES = ("gleason", "sequencing_snv", "sequencing_any")
@@ -281,17 +285,16 @@ def load_somatic_features(
             f"Somatic matrix is missing {len(missing)} manifest features; "
             f"first values: {missing[:10]}"
         )
-    if "SAMPLE_COLLECTION_DT" not in somatic.columns:
+    if SEQUENCING_DATE_SOURCE not in somatic.columns:
         raise ValueError(
-            f"Somatic matrix {somatic_path} is missing 'SAMPLE_COLLECTION_DT', "
+            f"Somatic matrix {somatic_path} is missing '{SEQUENCING_DATE_SOURCE}', "
             "which is required as the sequencing prediction index date."
         )
     somatic[SEQUENCING_DATE] = pd.to_datetime(
-        somatic["SAMPLE_COLLECTION_DT"], errors="coerce"
+        somatic[SEQUENCING_DATE_SOURCE], errors="coerce"
     )
-    # Retain the old internal alias for callers that import it, but its meaning
-    # is now explicitly the specimen collection/index date rather than report
-    # availability.
+    # Retain the old internal alias for callers that import it; a result is
+    # available on its report date, which is also the index date.
     somatic[SOMATIC_AVAILABLE_DATE] = somatic[SEQUENCING_DATE]
     for column in source_columns:
         somatic[column] = pd.to_numeric(somatic[column], errors="coerce")
@@ -658,16 +661,18 @@ def build_available_case_sensitivity(
     landmark_day: int = 0,
     analysis: str = "gleason",
 ) -> pd.DataFrame:
-    """Return one source-specific, ADT-landmarked sensitivity cohort.
+    """Return the Gleason available-case, ADT-landmarked sensitivity cohort.
 
-    Each source-specific cohort has its own matched labs comparator. A datum
-    must be available by the requested ADT-relative landmark. Gleason selects
-    the score date closest to that landmark (among available values); somatic
-    selects the latest available specimen. Outcome, split assignment, and lab
-    summaries remain exactly those from the standard input at that landmark.
+    The cohort has its own matched labs comparator. The Gleason score must be
+    available by the requested ADT-relative landmark, and the score date
+    closest to that landmark (among available values) is selected. Outcome,
+    split assignment, and lab summaries remain exactly those from the standard
+    input at that landmark.
 
-    The Gleason ∩ somatic cohort is not built here: anything using somatic
-    data is anchored on the sequencing date (build_sequencing_anchored_case).
+    ``analysis`` must be "gleason"; ``somatic`` and ``somatic_features`` are
+    accepted for call compatibility but unused. No somatic cohort is built on
+    the ADT clock: anything using somatic data is anchored on the sequencing
+    report date (build_sequencing_anchored_case).
     """
     base = _normalize_mrn(base, source="landmark +0 base inputs")
     cutoff_dates = treatment_anchors + pd.to_timedelta(int(landmark_day), unit="D")
@@ -682,19 +687,10 @@ def build_available_case_sensitivity(
             available_date_col=GLEASON_AVAILABLE_DATE,
             value_cols=[GLEASON_FEATURE],
         ).dropna(subset=[GLEASON_FEATURE])
-    elif analysis == "somatic":
-        features = latest_available_by_landmark(
-            somatic,
-            cutoffs,
-            date_col=SOMATIC_AVAILABLE_DATE,
-            order_col=SEQUENCING_DATE,
-            value_cols=somatic_features,
-            combine_latest_ties_with_max=True,
-        )
     else:
         raise ValueError(
-            "analysis must be 'gleason' or 'somatic'; the Gleason + somatic cohort "
-            "is sequencing-anchored (build_sequencing_anchored_case)."
+            "analysis must be 'gleason'; every somatic cohort is "
+            "sequencing-anchored (build_sequencing_anchored_case)."
         )
     out = base.set_index(ca.ID_COL).join(features, how="inner")
     if out.empty:
@@ -718,9 +714,10 @@ def select_sequencing_specimen(
     somatic_features: list[str],
     treatment_anchors: pd.Series,
 ) -> pd.DataFrame:
-    """Pick each patient's sequencing specimen: the one closest to ADT start.
+    """Pick each patient's sequencing specimen: the report closest to ADT start.
 
-    This is the same specimen the sequencing-indexed screens use (earlier date
+    SEQUENCING_DATE is the report date (SEQUENCING_DATE_SOURCE). This is the
+    same specimen the sequencing-indexed screens use (earlier date
     wins an exact-distance tie; same-date testing groups are unioned with a
     maximum). Returns one row per MRN with SEQUENCING_DATE,
     SEQUENCING_TO_ADT_DAYS and the somatic features.
@@ -1010,7 +1007,7 @@ def build_sequencing_clinical_stratifiers(
 
     The trio comes from the same specimen the cohort is anchored on (rows of
     the unfiltered matrix on that patient's selected SEQUENCING_DATE), so a
-    later specimen collected before sequencing + D can never replace it.
+    later specimen reported before sequencing + D can never replace it.
     Gleason and stage are those available by sequencing + D.
     """
     selected_dates = specimen[[SEQUENCING_DATE]].rename_axis(ca.ID_COL).reset_index()
@@ -1134,7 +1131,9 @@ def main(args: argparse.Namespace) -> None:
             analysis_dir / pre_treatment_lab_filename(0), index=False
         )
 
-        index_source = "sequencing" if analysis in SEQUENCING_ANALYSIS_VARIANT_MODES else analysis
+        index_source = (
+            "sequencing report" if analysis in SEQUENCING_ANALYSIS_VARIANT_MODES else analysis
+        )
         variant_mode = SEQUENCING_ANALYSIS_VARIANT_MODES.get(analysis)
         manifest = dict(base_manifest)
         manifest.update(
@@ -1302,8 +1301,8 @@ def main(args: argparse.Namespace) -> None:
             "sensitivity_analysis": "gleason_somatic",
             "time_origin_column": SEQUENCING_DATE,
             "specimen_selection": (
-                "sample collection date closest to ADT start; earlier date wins an "
-                "exact tie; same-date testing groups unioned with max"
+                "sequencing report date (REPORT_DT) closest to ADT start; earlier "
+                "date wins an exact tie; same-date testing groups unioned with max"
             ),
             "landmark_definition": "sequencing date + landmark days",
             "lab_window": "labs drawn before sequencing date + landmark days",
@@ -1329,7 +1328,7 @@ def main(args: argparse.Namespace) -> None:
         _read_table(Path(args.somatic_path)), source=str(args.somatic_path)
     )
     raw_somatic[SEQUENCING_DATE] = pd.to_datetime(
-        raw_somatic["SAMPLE_COLLECTION_DT"], errors="coerce"
+        raw_somatic[SEQUENCING_DATE_SOURCE], errors="coerce"
     )
     raw_somatic[SOMATIC_AVAILABLE_DATE] = raw_somatic[SEQUENCING_DATE]
     trio_columns = [

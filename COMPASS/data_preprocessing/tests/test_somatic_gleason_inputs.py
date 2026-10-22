@@ -130,8 +130,9 @@ def test_available_case_sensitivity_is_adt_anchored_and_excludes_future_data():
         base, somatic, ["TP53_SNV"], gleason, treatment_anchors=anchors
     )
 
-    # MRN 2's score is documented after ADT; MRN 3's specimen is after ADT.
-    assert result["DFCI_MRN"].tolist() == [1]
+    # Gleason only: MRN 2's score is documented after ADT; MRN 3's specimen
+    # after ADT is irrelevant because no somatic data is used on this clock.
+    assert result["DFCI_MRN"].tolist() == [1, 3]
     assert result.loc[0, "split"] == "train"
     assert result.loc[0, "PSA__mean"] == 4.0
     # The Jan 9 score, not Jan 2, is closest to the Jan 10 landmark.
@@ -144,13 +145,12 @@ def test_available_case_sensitivity_is_adt_anchored_and_excludes_future_data():
     )
     assert later["DFCI_MRN"].tolist() == [1, 2, 3]
 
-    somatic_only = build_available_case_sensitivity(
-        base, somatic, ["TP53_SNV"], gleason,
-        treatment_anchors=anchors, analysis="somatic",
-    )
-    assert somatic_only["DFCI_MRN"].tolist() == [1, 2]
-    assert GLEASON_FEATURE not in somatic_only
-    assert somatic_only.loc[0, "TP53_SNV"] == 1
+    # No somatic cohort on the ADT clock: somatic data is sequencing-anchored.
+    with pytest.raises(ValueError, match="sequencing-anchored"):
+        build_available_case_sensitivity(
+            base, somatic, ["TP53_SNV"], gleason,
+            treatment_anchors=anchors, analysis="somatic",
+        )
 
 
 def test_indexed_feature_sets_use_distinct_dates_and_followup_clocks():
@@ -382,7 +382,8 @@ def _write_somatic_fixture(tmp_path):
     pd.DataFrame(
         {
             "DFCI_MRN": [1, 2, 3, 4],
-            "SAMPLE_COLLECTION_DT": ["2020-01-01", "2020-02-01", "2020-03-01", "2020-04-01"],
+            "SAMPLE_COLLECTION_DT": ["2019-11-01", "2019-12-01", "2020-01-01", "2020-02-01"],
+            "REPORT_DT": ["2020-01-01", "2020-02-01", "2020-03-01", "2020-04-01"],
             "TP53_SNV": [1, 0, 0, np.nan],
             "AR_SNV": [1, 0, 0, 0],
             "RB1_SNV": [0, 0, 0, np.nan],
@@ -416,6 +417,23 @@ def test_load_somatic_features_trio_is_any_alteration_others_snv_only(tmp_path):
     assert frame.loc[4, ["TP53_ANY", "RB1_ANY", "PTEN_ANY"]].isna().all()
 
 
+def test_load_somatic_features_indexes_on_the_report_date(tmp_path):
+    somatic_path, manifest_path = _write_somatic_fixture(tmp_path)
+
+    frame, _ = load_somatic_features(somatic_path, manifest_path)
+
+    # The sequencing date is when the result was reported, not when the
+    # specimen was collected.
+    expected = pd.to_datetime(["2020-01-01", "2020-02-01", "2020-03-01", "2020-04-01"])
+    assert frame[SEQUENCING_DATE].tolist() == expected.tolist()
+    assert frame[SOMATIC_AVAILABLE_DATE].tolist() == expected.tolist()
+
+    no_report = pd.read_csv(somatic_path).drop(columns="REPORT_DT")
+    no_report.to_csv(somatic_path, index=False)
+    with pytest.raises(ValueError, match="REPORT_DT"):
+        load_somatic_features(somatic_path, manifest_path)
+
+
 def test_load_somatic_features_errors_when_manifest_has_nothing_testable(tmp_path):
     manifest_path = tmp_path / "manifest.csv"
     somatic_path = tmp_path / "somatic.csv"
@@ -423,7 +441,7 @@ def test_load_somatic_features_errors_when_manifest_has_nothing_testable(tmp_pat
     pd.DataFrame(
         {
             "DFCI_MRN": [1],
-            "SAMPLE_COLLECTION_DT": ["2020-01-01"],
+            "REPORT_DT": ["2020-01-01"],
             "TMPRSS2_SV": [1],
             "AR_AMP": [0],
         }

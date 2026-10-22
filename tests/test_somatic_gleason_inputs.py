@@ -2,9 +2,10 @@
 
 Exercises COMPASS.data_preprocessing.build_somatic_gleason_inputs directly.
 The Gleason-only cohort stays on the ADT clock; the Gleason ∩ somatic cohort
-and the trio stratifiers are anchored on the sequencing date of the specimen
-closest to ADT start (select_sequencing_specimen -> reclock_to_sequencing ->
-build_sequencing_anchored_case).
+and the trio stratifiers are anchored on the sequencing report date of the
+specimen reported closest to ADT start (select_sequencing_specimen ->
+reclock_to_sequencing -> build_sequencing_anchored_case). No somatic cohort is
+built on the ADT clock.
 """
 
 from __future__ import annotations
@@ -92,6 +93,20 @@ class TestGleasonSomaticAvailableCase:
         )
         assert set(out[ID_COL]) == {1, 2}
 
+    def test_somatic_is_not_built_on_the_adt_clock(self):
+        mrns = [1]
+        somatic, somatic_features = _somatic([(1, "2019-07-01", 1.0)])
+        with pytest.raises(ValueError, match="sequencing-anchored"):
+            bsg.build_available_case_sensitivity(
+                _base(mrns),
+                somatic,
+                somatic_features,
+                _gleason([(1, "2019-06-01", 7.0)]),
+                treatment_anchors=_treatment_anchors(mrns),
+                landmark_day=0,
+                analysis="somatic",
+            )
+
     def test_unsupported_analysis_raises(self):
         mrns = [1]
         base = _base(mrns)
@@ -142,8 +157,8 @@ def _longitudinal(rows: list[tuple]) -> pd.DataFrame:
 
 class TestSequencingAnchoredCase:
     """select_sequencing_specimen -> reclock_to_sequencing ->
-    build_sequencing_anchored_case: time 0 is the sequencing date of the
-    specimen closest to ADT start, so landmarks are sequencing + D."""
+    build_sequencing_anchored_case: time 0 is the sequencing report date of
+    the specimen reported closest to ADT start, so landmarks are sequencing + D."""
 
     # ADT starts 2020-01-01 for everyone.
     # MRN 1: sequenced 2019-11-02 (60 d before ADT); a later 2021 specimen is

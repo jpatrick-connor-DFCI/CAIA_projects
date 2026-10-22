@@ -960,16 +960,27 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
 # endpoints by 04_federated_transfer.ipynb (`federated_transfer_adt_no_DFCI/`).
 # No Dana-Farber patient was in training, so this is an external validation.
 FEDERATED_TRANSFER_FILES <- c("transfer_metrics.csv","transfer_auc_t.csv")
-# 04 in the patients with a Gleason score (ADT clock) / sequenced patients
-# (sequencing-date clock): the transferred labs score vs a local out-of-fold Cox
-# (federated_clinical_comparison.py).
+# 04 in the patients with a Gleason score (ADT clock) / sequenced patients /
+# sequenced patients with a Gleason score (sequencing-date clock): the
+# transferred labs score vs a local out-of-fold clinical Cox and a combined Cox
+# of the transferred score + the clinical covariates (federated_clinical_comparison.py).
 FEDERATED_TRANSFER_CLINICAL_FILE <- "transfer_clinical_comparison.csv"
 FEDERATED_TRANSFER_NO_DFCI_FILES <- c(FEDERATED_TRANSFER_FILES,FEDERATED_TRANSFER_CLINICAL_FILE)
-FEDERATED_TRANSFER_CLINICAL <- c(gleason="Gleason + age",trio="TP53/RB1/PTEN + age")
-FEDERATED_TRANSFER_CLINICAL_COLORS <- c(`Gleason + age`="#1baf7a",`TP53/RB1/PTEN + age`="#8e44ad")
+FEDERATED_TRANSFER_CLINICAL <- c(gleason="Gleason + age",trio="TP53/RB1/PTEN + age",
+  trio_gleason="Gleason + TP53/RB1/PTEN + age")
+FEDERATED_TRANSFER_CLINICAL_COLORS <- c(`Gleason + age`="#1baf7a",`TP53/RB1/PTEN + age`="#8e44ad",
+  `Gleason + TP53/RB1/PTEN + age`="#d6336c")
 # Somatic subpopulations run on a sequencing-date clock; the rest on ADT initiation.
-FEDERATED_TRANSFER_CLINICAL_ORIGIN <- c(gleason="ADT initiation",trio="sequencing date")
-FEDERATED_TRANSFER_CLINICAL_SCORES <- c("transferred_labs","transferred_age","clinical_cox")
+FEDERATED_TRANSFER_CLINICAL_ORIGIN <- c(gleason="ADT initiation",trio="sequencing date",
+  trio_gleason="sequencing date")
+FEDERATED_TRANSFER_CLINICAL_SCORES <- c("transferred_labs","transferred_age","clinical_cox","combined_cox")
+# Plotted scores (shape); color is the bundle, or the clinical model for the local Cox.
+FEDERATED_TRANSFER_CLINICAL_TYPES <- c(transferred_labs="Federated score",clinical_cox="Local clinical Cox",
+  combined_cox="Federated score + local clinical Cox")
+FEDERATED_TRANSFER_CLINICAL_SHAPES <- c(`Federated score`=16,`Local clinical Cox`=18,
+  `Federated score + local clinical Cox`=17)
+# combined_cox - clinical_cox, absent from CSVs written before 04 fitted the combined Cox.
+FEDERATED_TRANSFER_CLINICAL_OPTIONAL <- c("delta_auc_vs_clinical","delta_auc_vs_clinical_lo","delta_auc_vs_clinical_hi")
 FEDERATED_TRANSFER_ENDPOINTS <- c(platinum="Platinum (training endpoint)",nepc="NEPC",avpc="AVPC")
 FEDERATED_TRANSFER_MODELS <- c(xgboost_cox="XGBoost",elastic_net_cox="Elastic-net Cox")
 FEDERATED_TRANSFER_SPEC <- list(stem="transfer_discrimination_no_dfci",auc_stem="transfer_auc_t_no_dfci",
@@ -1041,7 +1052,8 @@ federated_transfer_stale <- function(d, needed, path) {
 
 # 04's clinical comparison: one row per endpoint x landmark x subpopulation x
 # bundle x score. The local Cox rows repeat for each bundle so that each paired
-# ΔAUC(t) (local Cox - that bundle's transferred labs score) has its own row.
+# ΔAUC(t) (local Cox - that bundle's transferred labs score) has its own row;
+# the combined Cox (that bundle's score + the clinical covariates) is per bundle.
 load_federated_transfer_clinical <- function(directory) {
   path <- file.path(directory,FEDERATED_TRANSFER_CLINICAL_FILE)
   if(!file.exists(path)) {
@@ -1055,6 +1067,8 @@ load_federated_transfer_clinical <- function(directory) {
   if(length(missing)) stop("Federated transfer clinical input is missing: ",paste(missing,collapse=", "))
   metrics <- c("mean_auc","mean_auc_lo","mean_auc_hi","delta_auc_vs_transferred","delta_auc_lo","delta_auc_hi")
   if(federated_transfer_stale(d,metrics,path)) return(NULL)
+  for(column in setdiff(FEDERATED_TRANSFER_CLINICAL_OPTIONAL,names(d))) d[[column]] <- NA_real_
+  metrics <- c(metrics,FEDERATED_TRANSFER_CLINICAL_OPTIONAL)
   d <- mutate(d,endpoint=tolower(endpoint),subpopulation=as.character(subpopulation),model=as.character(model)) %>%
     filter(endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS),subpopulation %in% names(FEDERATED_TRANSFER_CLINICAL))
   unknown <- setdiff(unique(d$model),FEDERATED_TRANSFER_CLINICAL_SCORES)
@@ -1074,22 +1088,27 @@ load_federated_transfer_clinical <- function(directory) {
   d
 }
 
-# Mean AUC(t) of each transferred full model and the local Cox (one point; it does
-# not depend on the bundle), plus each bundle's paired ΔAUC(t), local Cox - transferred.
+# Mean AUC(t) of each transferred full model, the local Cox (one point; it does
+# not depend on the bundle) and each bundle's combined Cox (transferred score +
+# clinical covariates), plus each bundle's paired ΔAUC(t) of the local and
+# combined Cox vs that bundle's transferred score. series (color) is the bundle,
+# or the clinical model for the local Cox; score_type (shape) is the score.
 prepare_federated_transfer_clinical <- function(d, subpopulations=names(FEDERATED_TRANSFER_CLINICAL)) {
   d <- filter(rename(d,score=model),subpopulation %in% subpopulations)
   d <- label_federated_transfer(d,sort(unique(d$landmark_days)))
   clinical <- unname(FEDERATED_TRANSFER_CLINICAL[subpopulations])
-  metric_levels <- c("Mean AUC(t)","ΔAUC(t), local Cox − transferred")
+  types <- unname(FEDERATED_TRANSFER_CLINICAL_TYPES[intersect(names(FEDERATED_TRANSFER_CLINICAL_TYPES),d$score)])
+  metric_levels <- c("Mean AUC(t)","ΔAUC(t) vs. federated score")
   cox <- filter(d,score=="clinical_cox")
   bind_rows(
-    mutate(filter(d,score=="transferred_labs"),metric=metric_levels[1],series=as.character(model),
-      value=mean_auc,lo=mean_auc_lo,hi=mean_auc_hi),
+    mutate(filter(d,score %in% c("transferred_labs","combined_cox")),metric=metric_levels[1],
+      series=as.character(model),value=mean_auc,lo=mean_auc_lo,hi=mean_auc_hi),
     mutate(distinct(cox,endpoint,landmark_days,subpopulation,.keep_all=TRUE),metric=metric_levels[1],
       series=unname(FEDERATED_TRANSFER_CLINICAL[subpopulation]),value=mean_auc,lo=mean_auc_lo,hi=mean_auc_hi),
-    mutate(cox,metric=metric_levels[2],series=as.character(model),
+    mutate(filter(d,score %in% c("clinical_cox","combined_cox")),metric=metric_levels[2],series=as.character(model),
       value=delta_auc_vs_transferred,lo=delta_auc_lo,hi=delta_auc_hi)) %>%
     mutate(series=factor(series,levels=c(levels(d$model),clinical)),
+      score_type=factor(unname(FEDERATED_TRANSFER_CLINICAL_TYPES[score]),levels=types),
       metric=factor(metric,levels=metric_levels),
       subpopulation_label=factor(unname(FEDERATED_TRANSFER_CLINICAL[subpopulation]),levels=clinical))
 }
@@ -1161,14 +1180,14 @@ plot_federated_transfer_clinical <- function(d, caption, title=NULL, subtitle=NU
   series <- levels(d$series)
   colors <- c(federated_transfer_colors(setdiff(series,FEDERATED_TRANSFER_CLINICAL)),
     FEDERATED_TRANSFER_CLINICAL_COLORS)[series]
-  shapes <- setNames(if_else(series %in% FEDERATED_TRANSFER_CLINICAL,18,16),series)
+  shapes <- FEDERATED_TRANSFER_CLINICAL_SHAPES[levels(d$score_type)]
   rows <- if(length(unique(d$subpopulation_label))>1) vars(subpopulation_label,metric) else vars(metric)
-  dodge <- position_dodge(width=.7)
-  ggplot(d,aes(landmark,value,color=series,shape=series,group=series)) +
+  dodge <- position_dodge(width=.75)
+  ggplot(d,aes(landmark,value,color=series,shape=score_type,group=interaction(series,score_type))) +
     geom_hline(data=references,aes(yintercept=reference),inherit.aes=FALSE,color="grey55",linetype="dotted",linewidth=.8) +
     geom_linerange(aes(ymin=lo,ymax=hi),position=dodge,linewidth=.8,na.rm=TRUE) +
     geom_point(position=dodge,size=3,stroke=1.1,na.rm=TRUE) +
-    scale_color_manual(values=colors,name=NULL,drop=FALSE) +
+    scale_color_manual(values=colors,name=NULL,drop=FALSE,guide=guide_legend(override.aes=list(shape=15))) +
     scale_shape_manual(values=shapes,name=NULL,drop=FALSE) +
     facet_grid(rows=rows,cols=vars(endpoint_label),scales="free_y",switch="y") +
     labs(x="Landmark after ADT start",y=NULL,caption=caption,title=title,subtitle=subtitle) +
@@ -1209,15 +1228,17 @@ render_federated_transfer_clinical <- function(root, directory, dpi, overwrite) 
   clinical <- load_federated_transfer_clinical(directory)
   if(is.null(clinical) || !nrow(clinical)) return(invisible(NULL))
   caption <- paste(FEDERATED_TRANSFER_SPEC$source,
-    "Transferred full labs models scored unchanged. Local unpenalized Cox models (Gleason score + age; TP53, RB1, PTEN any-alteration indicators + number of altered panel genes + age) are scored out-of-fold (stratified K-fold) on the same patients.",
-    "Gleason: ADT-initiation clock. TP53/RB1/PTEN: sequencing-date clock (sequenced patients; transferred models rescored on labs before sequencing + landmark). Clinical data had to be available before the landmark. Mean AUC(t) over the horizons estimable in each subpopulation. Bars: 95% bootstrap CIs over patients; ΔAUC(t) is paired, both scores on the same resamples.",
+    "Transferred full labs models scored unchanged. Local unpenalized Cox models (Gleason score + age; TP53, RB1, PTEN any-alteration indicators + age; Gleason + TP53/RB1/PTEN + age) and combined Cox models (each transferred score, standardized, + the same clinical covariates) are scored out-of-fold (stratified K-fold) on the same patients.",
+    "Gleason: ADT-initiation clock. TP53/RB1/PTEN with or without Gleason: sequencing-date clock (sequenced patients; transferred models rescored on labs before sequencing + landmark). Clinical data had to be available before the landmark. Each subpopulation is the same patients at every landmark (at risk and with complete clinical data at all landmarks). Mean AUC(t) over the horizons estimable in each subpopulation. Bars: 95% bootstrap CIs over patients; ΔAUC(t) vs. the federated score is paired, all scores on the same resamples.",
     paste0("Gleason subpopulation patients/events — ",federated_transfer_clinical_count_note(clinical,"gleason"),"."),
-    paste0("Sequenced subpopulation patients/events — ",federated_transfer_clinical_count_note(clinical,"trio"),"."),sep="\n")
+    paste0("Sequenced subpopulation patients/events — ",federated_transfer_clinical_count_note(clinical,"trio"),"."),
+    paste0("Sequenced with Gleason subpopulation patients/events — ",
+      federated_transfer_clinical_count_note(clinical,"trio_gleason"),"."),sep="\n")
   write_federated_transfer_table(root,clinical,"transfer_clinical_comparison_no_dfci")
   save_federated_panel(plot_federated_transfer_clinical(prepare_federated_transfer_clinical(clinical),caption,
       "Transferred federated labs models vs. local Gleason and TP53/RB1/PTEN Cox models",
-      "Federated models trained without Dana-Farber; local Cox models fitted on Dana-Farber patients and scored out-of-fold"),
-    file.path(root,"transfer_clinical_comparison_no_dfci__platinum.png"),13,12,dpi,overwrite)
+      "Federated models trained without Dana-Farber; local and combined Cox models fitted on Dana-Farber patients and scored out-of-fold"),
+    file.path(root,"transfer_clinical_comparison_no_dfci__platinum.png"),13,16,dpi,overwrite)
   invisible(clinical)
 }
 
@@ -1541,9 +1562,9 @@ manuscript_captions <- function() {
       "(a) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), at 0, 90, and 180 days after ADT initiation for Elastic-Net Cox and XGBoost survival models trained on all four sites, the same full models refit without Dana-Farber (darker bars, \"no DFCI\"), and age-only baselines (hatched). The dotted horizontal line marks 0.5. (b) Nonzero Elastic-Net Cox coefficients of the four-site model at each landmark, with up to 15 coefficients of largest absolute value displayed. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (c) XGBoost split-gain feature importance of the four-site model at each landmark, with up to 15 positive-gain features displayed. Colors in b and c identify laboratory categories.",
       "Four-site models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering (MSK) data; test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180. Models without Dana-Farber were trained and tested on Fred Hutch, Johns Hopkins, and MSK data; test-set sample sizes/events were 3,258/87, 3,204/78, and 3,105/72. Because the test sets differ, the two model versions are not compared on the same patients here; Federated Figure 5 evaluates the models without Dana-Farber on Dana-Farber patients. Performance values are from held-out test sets rather than training or tuning cross-validation. Age and body height are not displayed. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and are not signed effects or SHAP values. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; DFCI, Dana-Farber Cancer Institute; SHAP, Shapley additive explanations."),
     federated_05_transfer_no_dfci=caption(
-      "Federated Figure 5. External validation at Dana-Farber of federated platinum models trained without Dana-Farber, and comparison with Gleason score and TP53/RB1/PTEN status.",
-      "Elastic-Net Cox and XGBoost survival models trained for platinum treatment on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data were applied unchanged to the Dana-Farber ADT cohort and evaluated against three local endpoints: platinum treatment (the training endpoint), neuroendocrine prostate cancer (NEPC), and aggressive-variant prostate cancer (AVPC). (a) Mean time-dependent area under the receiver-operating-characteristic curve, AUC(t) (top), and the paired difference in mean AUC(t) relative to the age-only model (bottom) at 0, 90, and 180 days after ADT initiation. Filled points denote full laboratory models and open points age-only models. (b,c) The same full laboratory models compared with unpenalized Cox models fitted locally at Dana-Farber, among patients with a Gleason score available before the landmark (b) or among patients with tumor sequencing, with landmarks measured from the sequencing date (c). The local models used Gleason score and age (b), or any alteration (mutation, deletion, amplification, or structural variant) in TP53, RB1, and PTEN plus the number of altered genes on the sequencing panel and age (c). Diamonds denote the local Cox model; the bottom rows give the paired difference in mean AUC(t), local Cox model minus transferred model. In all panels, bars denote 95% bootstrap confidence intervals over patients, with compared models scored on the same resamples, and dotted lines mark 0.5 (AUC(t)) and 0 (difference).",
-      "No Dana-Farber patient contributed to federated model training, so every endpoint, including platinum, is out of sample. Mean AUC(t) is the inverse-probability-of-censoring-weighted cumulative/dynamic AUC averaged over 1, 2, 3, and 5 years after the landmark, with censoring estimated in the evaluated Dana-Farber patients; horizons without an observed event or later follow-up were omitted. The local Cox models were fitted on the Dana-Farber patients they were evaluated on and were scored with stratified 5-fold cross-validated (out-of-fold) predictions. Gleason scores were used only if available before the landmark. For c, the transferred models were rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, the specimen collected closest to ADT initiation defined the sequencing date, and age was age at sequencing. Patients/events in panel a were 2,267/182 at day 0, 2,233/166 at day 90, and 2,197/158 at day 180 for platinum; 2,218/92, 2,200/87, and 2,164/85 for NEPC; and 1,968/463, 1,891/397, and 1,842/373 for AVPC. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve.")
+      "Federated Figure 5. External validation at Dana-Farber of federated platinum models trained without Dana-Farber, alone and combined with Gleason score and TP53/RB1/PTEN status.",
+      "Elastic-Net Cox and XGBoost survival models trained for platinum treatment on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data were applied unchanged to the Dana-Farber ADT cohort and evaluated against three local endpoints: platinum treatment (the training endpoint), neuroendocrine prostate cancer (NEPC), and aggressive-variant prostate cancer (AVPC). (a) Mean time-dependent area under the receiver-operating-characteristic curve, AUC(t) (top), and the paired difference in mean AUC(t) relative to the age-only model (bottom) at 0, 90, and 180 days after ADT initiation. Filled points denote full laboratory models and open points age-only models. (b-d) The same full laboratory models compared with unpenalized Cox models fitted locally at Dana-Farber on clinical covariates alone and on the transferred score plus those covariates (combined models), among patients with a Gleason score available before ADT initiation (b), patients with tumor sequencing, with landmarks measured from the sequencing date (c), and sequenced patients who also had a Gleason score available before the sequencing date (d). The clinical covariates were Gleason score and age (b), any alteration (mutation, deletion, amplification, or structural variant) in TP53, RB1, and PTEN and age (c), or all of these (d). Circles denote the transferred models, diamonds the local clinical Cox models, and triangles the combined models; the bottom rows give the paired difference in mean AUC(t), local clinical or combined model minus transferred model. In all panels, bars denote 95% bootstrap confidence intervals over patients, with compared models scored on the same resamples, and dotted lines mark 0.5 (AUC(t)) and 0 (difference).",
+      "No Dana-Farber patient contributed to federated model training, so every endpoint, including platinum, is out of sample. Mean AUC(t) is the inverse-probability-of-censoring-weighted cumulative/dynamic AUC averaged over 1, 2, 3, and 5 years after the landmark, with censoring estimated in the evaluated Dana-Farber patients; horizons without an observed event or later follow-up were omitted. The local and combined Cox models were fitted on the Dana-Farber patients they were evaluated on and were scored with stratified 5-fold cross-validated (out-of-fold) predictions; in the combined models, the transferred score was standardized within the evaluated patients. Gleason scores were used only if available before the landmark. To keep differences across landmarks from reflecting changes in the evaluated patients, every landmark in a panel was evaluated in the same patients: those event-free and in follow-up at day 180 and, in b-d, with the clinical covariates available at every landmark. For c and d, the transferred models were rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation, and age was age at sequencing. Panel a included 2,197 patients for platinum, 2,164 for NEPC, and 1,842 for AVPC at every landmark. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve.")
   )
 }
 
@@ -1967,10 +1988,12 @@ manuscript_federated_multivariable_no_dfci <- function(performance,no_dfci_perfo
 
 # Federated Figure 5: platinum models trained without Dana-Farber, scored on the
 # local Dana-Farber NEPC, AVPC and platinum endpoints (04). All endpoints
-# are out of sample. a: discrimination in the full cohort; b, c: the transferred
-# full models vs local Cox models in the patients with a Gleason score (b, ADT
-# clock) and sequenced patients (c, sequencing-date clock). Per-horizon AUC(t)
-# stays on the standalone transfer page.
+# are out of sample. a: discrimination in the full ADT cohort; b-d: the
+# transferred full models vs local clinical Cox models and combined (score +
+# clinical) Cox models in the patients with a Gleason score (b, ADT clock),
+# sequenced patients (c) and sequenced patients with a Gleason score (d; c and d
+# on the sequencing-date clock). Per-horizon AUC(t) stays on the standalone
+# transfer page.
 manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL) {
   d <- prepare_federated_transfer(metrics)
   discrimination <- plot_federated_transfer(d,NULL,NULL,NULL) + ggplot2::labs(x="Landmark after ADT initiation")
@@ -1978,10 +2001,11 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL) {
   legend <- c(
     "a: mean AUC(t) (top) and paired ΔAUC(t) versus the age-only model (bottom) by endpoint and landmark; bars are 95% bootstrap CIs over patients.",
     paste0("Patients/events by landmark — ",federated_transfer_count_note(metrics),"."))
-  panel_titles <- c(gleason="vs. Gleason score",trio="vs. TP53/RB1/PTEN")
+  panel_titles <- c(gleason="vs. Gleason score",trio="vs. TP53/RB1/PTEN",trio_gleason="vs. Gleason + TP53/RB1/PTEN")
   panel_text <- c(
-    gleason="patients with a Gleason score before the landmark. Transferred full models vs. an unpenalized local Cox of Gleason score + age",
-    trio="sequenced patients, landmarks measured from the sequencing date (labs before and outcomes after sequencing + landmark). Transferred full models vs. an unpenalized local Cox of TP53, RB1 and PTEN any-alteration indicators (anchoring specimen) + number of altered panel genes + age at sequencing")
+    gleason="patients with a Gleason score before ADT initiation (the same patients at every landmark). Transferred full models vs. an unpenalized local Cox of Gleason score + age, and a combined Cox of the transferred score + Gleason score + age",
+    trio="sequenced patients, the same patients at every landmark, with landmarks measured from the sequencing date (labs before and outcomes after sequencing + landmark). Transferred full models vs. an unpenalized local Cox of TP53, RB1 and PTEN any-alteration indicators (anchoring specimen) + age at sequencing, and a combined Cox of the transferred score + those covariates",
+    trio_gleason="sequenced patients with a Gleason score before sequencing (the same patients at every landmark), on the sequencing-date clock. Transferred full models vs. an unpenalized local Cox of Gleason score + TP53, RB1 and PTEN any-alteration indicators + age at sequencing, and a combined Cox of the transferred score + those covariates")
   available <- if(is.null(clinical)) character() else intersect(names(FEDERATED_TRANSFER_CLINICAL),unique(clinical$subpopulation))
   if(!length(available)) message("Federated Figure 5: clinical comparison unavailable; drawing panel a only")
   for(sub in available) {
@@ -1989,11 +2013,11 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL) {
       NULL) + ggplot2::labs(x=paste("Landmark after",FEDERATED_TRANSFER_CLINICAL_ORIGIN[[sub]]))
     titles <- c(titles,panel_titles[[sub]])
     legend <- c(legend,paste0(letters[length(plots)],": ",panel_text[[sub]],
-      "; mean AUC(t) (top) and paired ΔAUC(t), local Cox − transferred model (bottom). Local Cox scores are out-of-fold."),
+      "; mean AUC(t) (top) and paired ΔAUC(t) of the local and combined Cox vs. the transferred model (bottom). Local and combined Cox scores are out-of-fold."),
       paste0("Patients/events by landmark — ",federated_transfer_clinical_count_note(clinical,sub),"."))
   }
   n <- length(plots)
-  spec <- list(key="federated_05_transfer_no_dfci",width=7.2,height=c(4.8,8,10.5)[n],
+  spec <- list(key="federated_05_transfer_no_dfci",width=7.2,height=c(4.8,8,10.5,13)[n],
     layout=matrix(seq_len(n),n),titles=titles,row_heights=rep(1,n),shared_legend_panels=integer())
   list(plot=manuscript_combine(plots,spec),spec=spec,data=metrics,legend=paste(
     c(legend,FEDERATED_TRANSFER_SPEC$source),collapse="\n"))

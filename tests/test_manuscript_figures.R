@@ -160,21 +160,23 @@ original <- plot_federated_comparison(labs,"PSA","Test")
 stopifnot(identical(original$scales$get_scales("colour")$palette(2),
   c(`Dana-Farber`="#0072B2",`Federated*`="#222222")))
 clinical_fixture <- function() tidyr::expand_grid(endpoint=c("NEPC","avpc","platinum"),landmark_days=c(0,180),
-    subpopulation=c("gleason","trio","other"),
+    subpopulation=c("gleason","trio","trio_gleason","other"),
     bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),
-    model=c("transferred_labs","transferred_age","clinical_cox")) %>%
+    model=c("transferred_labs","transferred_age","clinical_cox","combined_cox")) %>%
   mutate(model_family=if_else(startsWith(bundle,"xgboost"),"xgboost_cox","elastic_net_cox"),
     n_patients=if_else(subpopulation=="gleason",400,150),n_events=20,n_scored=n_patients,n_scored_events=n_events,
-    c_index=case_when(model=="clinical_cox"~.7,model=="transferred_labs"~.62,TRUE~.55),
+    c_index=case_when(model=="combined_cox"~.74,model=="clinical_cox"~.7,model=="transferred_labs"~.62,TRUE~.55),
     c_index_lo=c_index-.05,c_index_hi=c_index+.05,
     delta_c_vs_transferred=if_else(model=="transferred_labs",NA_real_,c_index-.62),
     delta_lo=delta_c_vs_transferred-.04,delta_hi=delta_c_vs_transferred+.04,
     mean_auc=c_index+.02,mean_auc_lo=mean_auc-.05,mean_auc_hi=mean_auc+.05,
     delta_auc_vs_transferred=if_else(model=="transferred_labs",NA_real_,mean_auc-.64),
     delta_auc_lo=delta_auc_vs_transferred-.04,delta_auc_hi=delta_auc_vs_transferred+.04,
+    delta_auc_vs_clinical=if_else(model=="combined_cox",mean_auc-.72,NA_real_),
+    delta_auc_vs_clinical_lo=delta_auc_vs_clinical-.03,delta_auc_vs_clinical_hi=delta_auc_vs_clinical+.03,
     c_index_apparent=NA_real_,mean_auc_apparent=NA_real_,n_folds=5,n_failed_folds=0,n_convergence_warnings=0,
     note=NA_character_)
-# Federated Figure 5: a = full-cohort discrimination, b/c = vs Gleason and TP53/RB1/PTEN Cox.
+# Federated Figure 5: a = full-cohort discrimination, b/c/d = vs Gleason, TP53/RB1/PTEN and both.
 transfer_metrics <- tidyr::expand_grid(endpoint=c("nepc","avpc","platinum"),
     bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),
     landmark_days=c(0,180),config=c("both","baseline")) %>%
@@ -186,15 +188,17 @@ transfer_metrics <- tidyr::expand_grid(endpoint=c("nepc","avpc","platinum"),
 transfer_clinical <- mutate(filter(clinical_fixture(),subpopulation!="other"),endpoint=tolower(endpoint))
 fig5 <- manuscript_federated_transfer_no_dfci(transfer_metrics,transfer_clinical)
 stopifnot(fig5$spec$key=="federated_05_transfer_no_dfci",inherits(fig5$plot,"gtable"),
-  identical(fig5$spec$titles,c("Discrimination","vs. Gleason score","vs. TP53/RB1/PTEN")),
-  fig5$spec$height==10.5,nrow(fig5$spec$layout)==3,
+  identical(fig5$spec$titles,c("Discrimination","vs. Gleason score","vs. TP53/RB1/PTEN","vs. Gleason + TP53/RB1/PTEN")),
+  fig5$spec$height==13,nrow(fig5$spec$layout)==4,
   grepl("b: patients with a Gleason score",fig5$legend,fixed=TRUE),
-  grepl("c: patients with sequencing",fig5$legend,fixed=TRUE),
+  grepl("c: sequenced patients,",fig5$legend,fixed=TRUE),
+  grepl("d: sequenced patients with a Gleason score",fig5$legend,fixed=TRUE),
+  grepl("combined Cox",fig5$legend,fixed=TRUE),!grepl("burden",fig5$legend,fixed=TRUE),
   grepl("PLATINUM: 0d 400/20",fig5$legend,fixed=TRUE),grepl("paired ΔAUC(t)",fig5$legend,fixed=TRUE),
   !grepl("ΔC",fig5$legend,fixed=TRUE))
 fig5_trio <- manuscript_federated_transfer_no_dfci(transfer_metrics,filter(transfer_clinical,subpopulation=="trio"))
 stopifnot(identical(fig5_trio$spec$titles,c("Discrimination","vs. TP53/RB1/PTEN")),
-  grepl("b: patients with sequencing",fig5_trio$legend,fixed=TRUE))
+  grepl("b: sequenced patients,",fig5_trio$legend,fixed=TRUE))
 fallback_message <- NULL
 fig5_a <- withCallingHandlers(manuscript_federated_transfer_no_dfci(transfer_metrics,NULL),
   message=function(m) {fallback_message <<- c(fallback_message,conditionMessage(m)); invokeRestart("muffleMessage")})

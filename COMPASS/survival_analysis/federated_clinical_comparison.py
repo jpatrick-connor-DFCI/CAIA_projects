@@ -1,37 +1,52 @@
 """Transferred federated labs score vs local Gleason and TP53/RB1/PTEN Cox models.
 
-Federated Figure 5 b-c. 04_federated_transfer.ipynb scores the frozen federated
-platinum bundles on every local DFCI patient. This module restricts those
-scores to two clinical subpopulations at each landmark and asks whether the
-transferred multivariable labs model ranks patients better than a model built
-from what a clinician already has:
+Federated Figure 5 b-d. 04_federated_transfer.ipynb scores the frozen federated
+platinum bundles on every local DFCI patient (panel a, the full ADT cohort).
+This module restricts those scores to three clinical subpopulations at each
+landmark and asks whether the transferred multivariable labs model ranks
+patients better than a model built from what a clinician already has, and
+whether it adds to that model:
 
 * ``gleason`` -- patients with a Gleason score available before the landmark,
   compared with an unpenalized Cox of GLEASON_SCORE (continuous) + age.
 * ``trio`` -- sequenced patients, on a clock anchored on the sequencing date
   (sequencing_anchored_local), compared with an unpenalized Cox of TP53_ANY +
-  RB1_ANY + PTEN_ANY + SOMATIC_N_GENES_ALTERED + age at sequencing. Each
-  indicator is any alteration (SNV, DEL, AMP or SV) on the specimen closest to
-  ADT start (the one the ``sequencing_any`` screen uses); the burden term
-  counts every panel gene with an alteration, the trio included.
+  RB1_ANY + PTEN_ANY + age at sequencing. Each indicator is any alteration
+  (SNV, DEL, AMP or SV) on the specimen whose sequencing report date is
+  closest to ADT start (the one the ``sequencing_any`` screen uses).
+* ``trio_gleason`` -- sequenced patients who also have a Gleason score
+  available before sequencing + landmark (sequencing clock), compared with an
+  unpenalized Cox of GLEASON_SCORE + the trio + age at sequencing.
 
-The transferred score is never refit. The clinical Cox models are fit on the
-same DFCI patients they are scored on, so each patient's clinical score comes
-from a stratified K-fold model that excluded them (out-of-fold); the apparent
-in-sample C and mean AUC(t) are kept alongside for reference only. Both
-scores share the transfer frame's duration/event (landmark clock, 3650-day
-censoring). Mean AUC(t) is the IPCW cumulative/dynamic AUC averaged over the
-horizons estimable in the scored subpopulation (censoring estimated on it);
-the C-index and mean AUC(t) differences are bootstrapped over patients with
-the scores resampled jointly.
+In each subpopulation a third, combined Cox adds the bundle's transferred
+labs score (z-scored within the subpopulation) to the clinical covariates.
+
+Every landmark of an endpoint × subpopulation is evaluated on the same
+patients: those scored (fet.evaluate_transfer's common cohort, at risk at
+every landmark) and members with complete covariates at every landmark. Clinical
+data only accrue as the landmark moves later, so this is membership at the
+earliest landmark among the patients at risk at the latest; each patient's
+covariates (the Gleason score closest to the landmark) still come from their
+own landmark.
+
+The transferred score is never refit. The clinical and combined Cox models
+are fit on the same DFCI patients they are scored on, so each patient's score
+comes from a stratified K-fold model that excluded them (out-of-fold); the
+apparent in-sample C and mean AUC(t) are kept alongside for reference only.
+All scores share the transfer frame's duration/event (landmark clock,
+3650-day censoring). Mean AUC(t) is the IPCW cumulative/dynamic AUC averaged
+over the horizons estimable in the scored subpopulation (censoring estimated
+on it); the C-index and mean AUC(t) differences are bootstrapped over
+patients with the scores resampled jointly.
 
 Clinical data obey the transfer's strict pre-landmark rule
 (``federated_scoring.filter_pre_landmark`` keeps days < landmark): a Gleason
 score counts only if it was available before TREATMENT_ANCHOR_DATE + landmark.
-For the trio the anchor is the sequencing date, so the transferred labs score
-is recomputed from labs before sequencing + landmark, outcomes run from
-sequencing + landmark, and the anchoring specimen defines membership at every
-landmark.
+No somatic data is used on the ADT clock. For the somatic arms the anchor is
+the sequencing report date, so the transferred
+labs score is recomputed from labs before sequencing + landmark, outcomes run
+from sequencing + landmark, Gleason must be available before sequencing +
+landmark, and the anchoring specimen defines membership at every landmark.
 """
 
 from __future__ import annotations
@@ -66,32 +81,43 @@ HAS_SEQUENCING = "HAS_SEQUENCING"
 TRIO_GENES = sg.CLINICAL_STRATIFIERS_TRIO_GENES
 TRIO_FEATURES = tuple(f"{gene}_{sg.ANY_ALTERATION_SUFFIX}" for gene in TRIO_GENES)
 
-# Subpopulation -> (display label, membership column, Cox covariates).
+# Subpopulation -> (display label, membership columns (all non-missing), Cox covariates).
 SUBPOPULATIONS = {
     "gleason": {
         "label": "Gleason + age",
-        "member": GLEASON_FEATURE,
+        "member": (GLEASON_FEATURE,),
         "covariates": (GLEASON_FEATURE, AGE_COL),
     },
     "trio": {
         "label": "TP53/RB1/PTEN + age",
-        "member": HAS_SEQUENCING,
-        "covariates": (*TRIO_FEATURES, BURDEN_COL, AGE_COL),
+        "member": (HAS_SEQUENCING,),
+        "covariates": (*TRIO_FEATURES, AGE_COL),
+    },
+    "trio_gleason": {
+        "label": "Gleason + TP53/RB1/PTEN + age",
+        "member": (HAS_SEQUENCING, GLEASON_FEATURE),
+        "covariates": (GLEASON_FEATURE, *TRIO_FEATURES, AGE_COL),
     },
 }
 TRANSFERRED_LABS = "transferred_labs"
 TRANSFERRED_AGE = "transferred_age"
 CLINICAL_COX = "clinical_cox"
-MODELS = (TRANSFERRED_LABS, TRANSFERRED_AGE, CLINICAL_COX)
+COMBINED_COX = "combined_cox"
+MODELS = (TRANSFERRED_LABS, TRANSFERRED_AGE, CLINICAL_COX, COMBINED_COX)
 # Bundle config holding each transferred score.
 CONFIG_FOR_MODEL = {TRANSFERRED_LABS: "both", TRANSFERRED_AGE: "baseline"}
+# Combined Cox covariate: the bundle's transferred labs score, z-scored in the subpopulation.
+SCORE_COVARIATE = "TRANSFERRED_SCORE"
 
 COMPARISON_COLUMNS = [
     "endpoint", "landmark_days", "subpopulation", "subpopulation_label", "bundle",
-    "model_family", "model", "n_patients", "n_events", "n_scored", "n_scored_events",
+    "model_family", "model", "n_patients", "n_events", "n_dropped_not_every_landmark",
+    "n_scored", "n_scored_events",
     "c_index", "c_index_lo", "c_index_hi", "delta_c_vs_transferred", "delta_lo",
-    "delta_hi", "c_index_apparent", "mean_auc", "mean_auc_lo", "mean_auc_hi",
-    "delta_auc_vs_transferred", "delta_auc_lo", "delta_auc_hi", "mean_auc_apparent",
+    "delta_hi", "delta_c_vs_clinical", "delta_c_vs_clinical_lo", "delta_c_vs_clinical_hi",
+    "c_index_apparent", "mean_auc", "mean_auc_lo", "mean_auc_hi",
+    "delta_auc_vs_transferred", "delta_auc_lo", "delta_auc_hi", "delta_auc_vs_clinical",
+    "delta_auc_vs_clinical_lo", "delta_auc_vs_clinical_hi", "mean_auc_apparent",
     "auc_horizons_days", "n_folds", "n_failed_folds", "n_convergence_warnings", "note",
 ]
 
@@ -130,7 +156,7 @@ def _patient_anchors(local: pd.DataFrame) -> pd.DataFrame:
 def select_specimen(
     local: pd.DataFrame, somatic: pd.DataFrame, somatic_features: list[str]
 ) -> pd.DataFrame:
-    """Each local patient's specimen closest to ADT start (sg.select_sequencing_specimen)."""
+    """Each local patient's specimen reported closest to ADT start (sg.select_sequencing_specimen)."""
     anchors = _patient_anchors(local)["anchor"].rename_axis(sg.ca.ID_COL)
     return sg.select_sequencing_specimen(somatic, list(somatic_features), anchors)
 
@@ -167,25 +193,32 @@ def build_clinical_features(
     landmarks,
     *,
     gleason: pd.DataFrame,
-    somatic: pd.DataFrame,
-    somatic_features: list[str],
     specimen: pd.DataFrame | None = None,
+    somatic_features: list[str] = (),
 ) -> pd.DataFrame:
     """Per patient × landmark Gleason and trio features, available before the landmark.
 
     Gleason is the score closest to the landmark among those available by then
-    (sg.closest_available_by_landmark); somatic calls come from the latest
-    specimen collected by then, same-day specimens unioned
-    (sg.latest_available_by_landmark). A sequenced patient's uncalled genes are
-    wild-type (0), as in sg.build_indexed_feature_sets.
+    (sg.closest_available_by_landmark).
 
-    With ``specimen`` (select_specimen) and a sequencing-anchored ``local``
-    (sequencing_anchored_local), the trio comes from that specimen at every
-    landmark: it defines time 0, so it is available by construction.
+    Somatic calls come only from ``specimen`` (select_specimen), with a
+    sequencing-anchored ``local`` (sequencing_anchored_local): the specimen
+    defines time 0, so it is available by construction at every landmark. A
+    sequenced patient's uncalled genes are wild-type (0), as in
+    sg.build_indexed_feature_sets. Without ``specimen`` (the ADT clock) the
+    trio, burden and HAS_SEQUENCING columns are left missing: no somatic data
+    is used on the ADT clock.
     """
-    missing_trio = [f for f in TRIO_FEATURES if f not in somatic_features]
-    if missing_trio:
-        raise ValueError(f"Somatic matrix has no {missing_trio}; cannot build the trio model.")
+    if specimen is not None:
+        missing_trio = [f for f in TRIO_FEATURES if f not in somatic_features]
+        if missing_trio:
+            raise ValueError(f"Somatic matrix has no {missing_trio}; cannot build the trio model.")
+        s = specimen[list(somatic_features)].apply(pd.to_numeric, errors="coerce").fillna(0)
+        s[BURDEN_COL] = s.sum(axis=1).astype(int)
+        s[HAS_SEQUENCING] = True
+    else:
+        s = pd.DataFrame(index=pd.Index([], name=sg.ca.ID_COL),
+                         columns=[*TRIO_FEATURES, BURDEN_COL, HAS_SEQUENCING], dtype=float)
     pt = _patient_anchors(local)
     frames = []
     for lm in sorted({int(x) for x in landmarks}):
@@ -196,17 +229,6 @@ def build_clinical_features(
             gleason, cutoffs, date_col="gleason_date",
             available_date_col=sg.GLEASON_AVAILABLE_DATE, value_cols=[GLEASON_FEATURE],
         ).dropna(subset=[GLEASON_FEATURE])
-        if specimen is None:
-            s = sg.latest_available_by_landmark(
-                somatic, cutoffs, date_col=sg.SOMATIC_AVAILABLE_DATE,
-                order_col=sg.SEQUENCING_DATE, value_cols=list(somatic_features),
-                combine_latest_ties_with_max=True,
-            )
-        else:
-            s = specimen.loc[specimen.index.isin(pt.index), list(somatic_features)]
-        s = s.apply(pd.to_numeric, errors="coerce").fillna(0)
-        s[BURDEN_COL] = s[list(somatic_features)].sum(axis=1).astype(int)
-        s[HAS_SEQUENCING] = True
         out = pd.DataFrame({AGE_COL: pt["age"]}, index=pt.index.rename(sg.ca.ID_COL))
         out = out.join(g[[GLEASON_FEATURE]], how="left")
         # HAS_SEQUENCING stays True / NaN so membership is a notna() test like Gleason.
@@ -281,6 +303,49 @@ def _coef_rows(cph, base: dict) -> list[dict]:
              "p": float(s.loc[cov, "p"])} for cov in s.index]
 
 
+def fit_local_cox(frame: pd.DataFrame, covariates, *, n_folds: int, seed: int, horizons_days) -> dict:
+    """Out-of-fold Cox score plus the apparent (in-sample) fit, for reference only.
+
+    Returns {oof, apparent_c, apparent_auc, cph (None if the full fit failed),
+    fit_info, note}.
+    """
+    covariates = list(covariates)
+    oof, k, failed, n_warn = out_of_fold_cox(frame, covariates, n_folds=n_folds, seed=seed)
+    out = {"oof": oof, "apparent_c": np.nan, "apparent_auc": np.nan, "cph": None, "note": ""}
+    try:
+        cph, w = _fit_cox(frame, covariates)
+        n_warn += w
+        lp = _linear_predictor(cph, frame, covariates)
+        dur, ev = frame[DURATION_COL], frame[EVENT_COL]
+        out["apparent_c"] = fet.harrell_c(dur, ev, lp)
+        out["apparent_auc"] = fet.mean_auc(dur, ev, lp, fet.estimable_horizons(dur, ev, horizons_days))
+        out["cph"] = cph
+    except Exception as exc:
+        out["note"] = f"apparent fit failed: {exc}"
+    out["fit_info"] = {"n_folds": k, "n_failed_folds": failed, "n_convergence_warnings": n_warn}
+    return out
+
+
+def fit_combined_cox(sub_df: pd.DataFrame, labs: np.ndarray, covariates, **kwargs) -> dict:
+    """fit_local_cox on the transferred labs score (z-scored) + the clinical covariates.
+
+    Fit on the patients with a finite score; the others stay NaN. z-scoring
+    uses no outcome, so it leaks nothing into the out-of-fold score; the
+    score's HR reads per SD within the subpopulation.
+    """
+    has = np.isfinite(labs)
+    sd = labs[has].std() if has.any() else np.nan
+    if not sd > 0:
+        return {"oof": np.full(len(sub_df), np.nan), "apparent_c": np.nan, "apparent_auc": np.nan,
+                "cph": None, "note": "transferred score constant or missing: combined Cox not fitted",
+                "fit_info": {"n_folds": 0, "n_failed_folds": 0, "n_convergence_warnings": 0}}
+    frame = sub_df.loc[has].assign(**{SCORE_COVARIATE: (labs[has] - labs[has].mean()) / sd})
+    fit = fit_local_cox(frame.reset_index(drop=True), [SCORE_COVARIATE, *covariates], **kwargs)
+    oof = np.full(len(sub_df), np.nan)
+    oof[has] = fit["oof"]
+    return {**fit, "oof": oof}
+
+
 # --------------------------------------------------------------------------- #
 # Comparison
 # --------------------------------------------------------------------------- #
@@ -302,6 +367,12 @@ def _endpoint_landmark_frame(scores: pd.DataFrame) -> tuple[pd.DataFrame, list[t
     return outcome.set_index(ID_COL).join(risks).reset_index(), keys
 
 
+def _complete_members(frame: pd.DataFrame, spec: dict) -> pd.DataFrame:
+    """Subpopulation members (all membership columns present) with every Cox covariate."""
+    members = frame[frame[list(spec["member"])].notna().all(axis=1)]
+    return members.dropna(subset=list(spec["covariates"]))
+
+
 def compare_clinical_models(
     scores: pd.DataFrame,
     clinical: pd.DataFrame,
@@ -312,59 +383,80 @@ def compare_clinical_models(
     min_events: int = 10,
     horizons_days=fet.DEFAULT_HORIZONS_DAYS,
     subpopulations: dict = SUBPOPULATIONS,
+    common_cohort: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Transferred labs/age scores vs the out-of-fold clinical Cox, per subpopulation.
+    """Transferred labs/age scores vs the out-of-fold clinical and combined Cox, per subpopulation.
 
     Returns (comparison, coefficients). ``comparison`` has one row per
-    endpoint × landmark × subpopulation × bundle × model; the clinical Cox rows
-    repeat for each bundle so that each ΔC and ΔAUC(t) (model − transferred
-    labs, paired bootstrap over the same patients) sits on its own row.
+    endpoint × landmark × subpopulation × bundle × model. The clinical Cox
+    does not depend on the bundle; its rows repeat for each bundle so that
+    each ΔC and ΔAUC(t) (model − transferred labs, paired bootstrap over the
+    same patients) sits on its own row. The combined Cox (that bundle's
+    transferred labs score + the clinical covariates) also carries its paired
+    difference from the clinical Cox (``delta_*_vs_clinical``).
+
+    With ``common_cohort`` (the default) each endpoint × subpopulation keeps
+    only the patients scored and complete members at every landmark, so its
+    landmarks are compared on the same patients
+    (``n_dropped_not_every_landmark`` counts the rest).
     """
     scores = _normalize_ids(scores)
     clinical = _normalize_ids(clinical)
     families = scores.drop_duplicates("bundle").set_index("bundle")["model_family"].to_dict()
-    rows, coefs = [], []
+    frames = {}
     for (endpoint, lm), grp in scores.groupby(["endpoint", "landmark_days"], sort=True):
         frame, keys = _endpoint_landmark_frame(grp)
-        frame = frame.merge(clinical[clinical["landmark_days"] == lm].drop(columns="landmark_days"),
-                            on=ID_COL, how="left")
+        frames[(endpoint, lm)] = (frame.merge(
+            clinical[clinical["landmark_days"] == lm].drop(columns="landmark_days"),
+            on=ID_COL, how="left"), keys)
+    eligible: dict[tuple, set] = {}
+    for (endpoint, lm), (frame, _) in frames.items():
+        for sub, spec in subpopulations.items():
+            ids = set(_complete_members(frame, spec)[ID_COL])
+            eligible[(endpoint, sub)] = eligible.get((endpoint, sub), ids) & ids
+    rows, coefs = [], []
+    for (endpoint, lm), (frame, keys) in frames.items():
         bundles = sorted({b for b, _ in keys})
         for sub, spec in subpopulations.items():
             covariates = list(spec["covariates"])
-            members = frame[frame[spec["member"]].notna()]
-            sub_df = members.dropna(subset=covariates).reset_index(drop=True)
+            members = frame[frame[list(spec["member"])].notna().all(axis=1)]
+            sub_df = _complete_members(frame, spec)
+            n_complete = len(sub_df)
+            if common_cohort:
+                sub_df = sub_df[sub_df[ID_COL].isin(eligible[(endpoint, sub)])]
+            sub_df = sub_df.reset_index(drop=True)
             base = {"endpoint": endpoint, "landmark_days": int(lm), "subpopulation": sub,
                     "subpopulation_label": spec["label"], "n_patients": len(sub_df),
-                    "n_events": int(sub_df[EVENT_COL].sum())}
+                    "n_events": int(sub_df[EVENT_COL].sum()),
+                    "n_dropped_not_every_landmark": n_complete - len(sub_df)}
+            coef_base = {k_: base[k_] for k_ in
+                         ("endpoint", "landmark_days", "subpopulation", "n_patients", "n_events")}
             note = ""
-            if len(members) > len(sub_df):
-                note = f"{len(members) - len(sub_df)} member(s) missing a covariate dropped; "
-            oof = np.full(len(sub_df), np.nan)
-            apparent = apparent_auc = np.nan
-            k = failed = n_warn = 0
-            if base["n_events"] < min_events:
-                note += f"fewer than {min_events} events: not fitted"
+            if len(members) > n_complete:
+                note = f"{len(members) - n_complete} member(s) missing a covariate dropped; "
+            fit_kw = dict(n_folds=n_folds, seed=seed, horizons_days=horizons_days)
+            fitted = base["n_events"] >= min_events
+            unfitted = {"oof": np.full(len(sub_df), np.nan), "apparent_c": np.nan, "apparent_auc": np.nan,
+                        "cph": None, "note": "",
+                        "fit_info": {"n_folds": 0, "n_failed_folds": 0, "n_convergence_warnings": 0}}
+            if fitted:
+                clin = fit_local_cox(sub_df, covariates, **fit_kw)
+                note += clin["note"]
+                if clin["cph"] is not None:
+                    coefs += _coef_rows(clin["cph"], {**coef_base, "model": CLINICAL_COX, "bundle": None})
             else:
-                oof, k, failed, n_warn = out_of_fold_cox(sub_df, covariates, n_folds=n_folds, seed=seed)
-                try:
-                    cph, w = _fit_cox(sub_df, covariates)
-                    n_warn += w
-                    lp = _linear_predictor(cph, sub_df, covariates)
-                    apparent = fet.harrell_c(sub_df[DURATION_COL], sub_df[EVENT_COL], lp)
-                    apparent_auc = fet.mean_auc(
-                        sub_df[DURATION_COL], sub_df[EVENT_COL], lp,
-                        fet.estimable_horizons(sub_df[DURATION_COL], sub_df[EVENT_COL], horizons_days))
-                    coefs += _coef_rows(cph, {k_: base[k_] for k_ in
-                                              ("endpoint", "landmark_days", "subpopulation", "n_patients", "n_events")})
-                except Exception as exc:
-                    note += f"apparent fit failed: {exc}"
-            scored = np.isfinite(oof)
-            fit_info = {"n_folds": k, "n_failed_folds": failed, "n_convergence_warnings": n_warn}
+                note += f"fewer than {min_events} events: not fitted"
+                clin = unfitted
             for bundle in bundles:
                 risks = {m: sub_df.get(f"{bundle}|{CONFIG_FOR_MODEL[m]}", pd.Series(np.nan, index=sub_df.index))
                          .to_numpy(dtype=float) for m in CONFIG_FOR_MODEL}
-                risks[CLINICAL_COX] = oof
-                ok = scored & np.all([np.isfinite(r) for r in risks.values()], axis=0)
+                comb = fit_combined_cox(sub_df, risks[TRANSFERRED_LABS], covariates, **fit_kw) if fitted else unfitted
+                if comb["cph"] is not None:
+                    coefs += _coef_rows(comb["cph"], {**coef_base, "model": COMBINED_COX, "bundle": bundle})
+                risks[CLINICAL_COX] = clin["oof"]
+                risks[COMBINED_COX] = comb["oof"]
+                fits = {CLINICAL_COX: clin, COMBINED_COX: comb}
+                ok = np.all([np.isfinite(r) for r in risks.values()], axis=0)
                 dur = sub_df[DURATION_COL].to_numpy(dtype=float)[ok]
                 ev = sub_df[EVENT_COL].to_numpy(dtype=int)[ok]
                 risks_ok = {m: r[ok] for m, r in risks.items()}
@@ -376,18 +468,24 @@ def compare_clinical_models(
                 boot_auc = (fet.bootstrap_mean_auc(dur, ev, risks_ok, horizons, n_bootstrap, seed)
                             if n_bootstrap > 0 and horizons else {})
                 for model in MODELS:
+                    # The transferred scores report the clinical Cox fit, as the subpopulation's fit.
+                    fit = fits.get(model, clin)
                     row = {**base, "bundle": bundle, "model_family": families.get(bundle),
                            "model": model, "n_scored": int(ok.sum()),
                            "n_scored_events": int(ev.sum()), "c_index": c[model],
                            "c_index_lo": np.nan, "c_index_hi": np.nan,
                            "delta_c_vs_transferred": np.nan, "delta_lo": np.nan, "delta_hi": np.nan,
-                           "c_index_apparent": apparent if model == CLINICAL_COX else np.nan,
+                           "delta_c_vs_clinical": np.nan, "delta_c_vs_clinical_lo": np.nan,
+                           "delta_c_vs_clinical_hi": np.nan,
+                           "c_index_apparent": fits[model]["apparent_c"] if model in fits else np.nan,
                            "mean_auc": auc[model], "mean_auc_lo": np.nan, "mean_auc_hi": np.nan,
                            "delta_auc_vs_transferred": np.nan, "delta_auc_lo": np.nan,
-                           "delta_auc_hi": np.nan,
-                           "mean_auc_apparent": apparent_auc if model == CLINICAL_COX else np.nan,
+                           "delta_auc_hi": np.nan, "delta_auc_vs_clinical": np.nan,
+                           "delta_auc_vs_clinical_lo": np.nan, "delta_auc_vs_clinical_hi": np.nan,
+                           "mean_auc_apparent": fits[model]["apparent_auc"] if model in fits else np.nan,
                            "auc_horizons_days": ",".join(str(int(h)) for h in horizons),
-                           **fit_info, "note": note}
+                           **fit["fit_info"],
+                           "note": note + (comb["note"] if model == COMBINED_COX else "")}
                     if boot:
                         row["c_index_lo"], row["c_index_hi"] = fet._ci(boot[model])
                     if model != TRANSFERRED_LABS:
@@ -401,6 +499,15 @@ def compare_clinical_models(
                         if boot_auc:
                             row["delta_auc_lo"], row["delta_auc_hi"] = fet._ci(
                                 boot_auc[model] - boot_auc[TRANSFERRED_LABS])
+                    if model == COMBINED_COX:
+                        row["delta_c_vs_clinical"] = c[model] - c[CLINICAL_COX]
+                        row["delta_auc_vs_clinical"] = auc[model] - auc[CLINICAL_COX]
+                        if boot:
+                            row["delta_c_vs_clinical_lo"], row["delta_c_vs_clinical_hi"] = fet._ci(
+                                boot[model] - boot[CLINICAL_COX])
+                        if boot_auc:
+                            row["delta_auc_vs_clinical_lo"], row["delta_auc_vs_clinical_hi"] = fet._ci(
+                                boot_auc[model] - boot_auc[CLINICAL_COX])
                     rows.append(row)
     return (pd.DataFrame(rows, columns=COMPARISON_COLUMNS),
             pd.DataFrame(coefs))
@@ -411,9 +518,10 @@ def compare_by_subpopulation(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """compare_clinical_models per subpopulation on its own (scores, clinical).
 
-    The Gleason arm is scored on the ADT clock and the trio arm on the
-    sequencing clock, so each subpopulation brings its own transfer scores and
-    clinical features. Returns the concatenated (comparison, coefficients).
+    The Gleason arm is scored on the ADT clock and the trio and trio + Gleason
+    arms on the sequencing clock, so each subpopulation brings its own transfer
+    scores and clinical features. Returns the concatenated (comparison,
+    coefficients).
     """
     comparisons, coefs = [], []
     for sub, (scores, clinical) in inputs.items():
@@ -476,6 +584,7 @@ def subpopulation_score_summary(scores: pd.DataFrame, clinical: pd.DataFrame,
             strata += [(label, d["gleason_group"].eq(label), None) for _, _, label in GLEASON_BINS]
         if "sequencing" in sections:
             strata += [("Sequenced", s_ok, BURDEN_COL), ("Not sequenced", ~s_ok, None),
+                       ("Sequenced, Gleason available", s_ok & g_ok, GLEASON_FEATURE),
                        ("Any trio altered", s_ok & any_trio.loc[d.index], None),
                        ("No trio alteration", s_ok & ~any_trio.loc[d.index], None)]
             strata += [(f"{g} altered", s_ok & d[f].eq(1), None)
@@ -515,8 +624,10 @@ def plot_clinical_comparison(comparison: pd.DataFrame, path=None, endpoints=fet.
         print("no estimable clinical comparison rows")
         return
     lms = sorted(d["landmark_days"].unique())
-    series = [(b, TRANSFERRED_LABS) for b in sorted(d["bundle"].unique())] + [(None, CLINICAL_COX)]
-    colors = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
+    bundles = sorted(d["bundle"].unique())
+    series = ([(b, TRANSFERRED_LABS) for b in bundles] + [(None, CLINICAL_COX)]
+              + [(b, COMBINED_COX) for b in bundles])
+    colors = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#8e44ad"]
     width = 0.8 / len(series)
     fig, axes = plt.subplots(len(subs), len(eps), figsize=(4.2 * len(eps), 3.2 * len(subs)),
                              sharey=True, squeeze=False)
@@ -529,10 +640,12 @@ def plot_clinical_comparison(comparison: pd.DataFrame, path=None, endpoints=fet.
                 r = (r[r["bundle"] == bundle] if bundle else r.drop_duplicates("landmark_days"))
                 r = r.set_index("landmark_days").reindex(lms)
                 x = np.arange(len(lms)) + (k - (len(series) - 1) / 2) * width
+                label = (SUBPOPULATIONS[sub]["label"] if bundle is None
+                         else f"{bundle} + clinical" if model == COMBINED_COX else bundle)
                 ax.errorbar(x, r["mean_auc"], yerr=np.vstack([r["mean_auc"] - r["mean_auc_lo"],
                                                              r["mean_auc_hi"] - r["mean_auc"]]),
-                            fmt="o" if bundle else "D", ms=6, capsize=0, color=colors[k % len(colors)],
-                            label=bundle or SUBPOPULATIONS[sub]["label"])
+                            fmt={TRANSFERRED_LABS: "o", CLINICAL_COX: "D", COMBINED_COX: "^"}[model],
+                            ms=6, capsize=0, color=colors[k % len(colors)], label=label)
             ax.axhline(0.5, color="#8a8a86", lw=1, ls="--", zorder=0)
             ax.set_xticks(range(len(lms)), [f"{lm}d" for lm in lms])
             n = dd.groupby("landmark_days")[["n_patients", "n_events"]].first().reindex(lms)

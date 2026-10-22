@@ -17,6 +17,10 @@ Pipeline:
    Reusing that chain unchanged means the features, the strict pre-landmark
    filter, the incident gate (events at/before the landmark are dropped) and
    the 3650-day administrative censoring are identical across endpoints.
+   By default every landmark of an endpoint is evaluated on the same patients:
+   those at risk at all of them (the latest landmark's set, since the incident
+   gate only removes patients as the landmark moves later), so a change in
+   performance across landmarks is not a change in who is evaluated.
 3. Score every bundle model with the pooled preprocessing (never refit).
 4. Evaluate: Harrell's C and IPCW cumulative/dynamic mean AUC(t), each with a
    patient bootstrap CI and the paired gain of the full model over the
@@ -366,6 +370,26 @@ def ipcw_metrics(duration, event, risk, horizons_days) -> tuple[dict, pd.DataFra
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
+def at_risk_at_every_landmark(
+    long_df: pd.DataFrame,
+    landmarks,
+    *,
+    max_followup_days: int | None = fs.DEFAULT_MAX_FOLLOWUP_DAYS,
+) -> set:
+    """Patients the landmark frame keeps at every landmark.
+
+    fs.build_landmark_frame keeps exactly make_outcome's patients (the lab
+    features are joined onto them), so this applies the incident gate alone.
+    """
+    static = fs.extract_static_frame(long_df)
+    keep = None
+    for lm in landmarks:
+        outcome, _ = fs.make_outcome(static, lm, max_followup_days=max_followup_days)
+        ids = set(outcome[fs.ID_COL])
+        keep = ids if keep is None else keep & ids
+    return keep or set()
+
+
 def evaluate_transfer(
     local: pd.DataFrame,
     bundles: dict[str, dict],
@@ -378,6 +402,7 @@ def evaluate_transfer(
     n_bootstrap: int = 200,
     seed: int = 0,
     max_followup_days: int | None = fs.DEFAULT_MAX_FOLLOWUP_DAYS,
+    common_cohort: bool = True,
     verbose: bool = True,
 ) -> dict[str, pd.DataFrame | list]:
     """Score every bundle model on every endpoint and evaluate it.
@@ -387,6 +412,12 @@ def evaluate_transfer(
     patients and their bootstrap is paired. Harrell's C and mean AUC(t) share
     the same resamples; mean AUC(t) uses the horizons estimable on the full
     frame, and its baseline difference ``delta_auc_vs_baseline`` is paired.
+
+    With ``common_cohort`` (the default) each endpoint is restricted, before
+    any landmark frame is built, to the patients at risk at every evaluated
+    landmark (at_risk_at_every_landmark), so all landmarks of an endpoint score
+    the same patients. Each patient's features and outcome still come from
+    their own landmark (labs before it, follow-up after it).
     """
     all_landmarks = sorted({
         int(m["landmark_days"]) for b in bundles.values() for m in b["models"]
@@ -400,6 +431,17 @@ def evaluate_transfer(
         long_df, stats = to_federated_long(local, endpoint, lab_mapping)
         long_df, excl = fs.apply_exclusion(long_df, exclusion)
         stats["exclusion"] = excl
+        if common_cohort and all_landmarks:
+            keep = at_risk_at_every_landmark(
+                long_df, all_landmarks, max_followup_days=max_followup_days
+            )
+            n_before = int(long_df[fs.ID_COL].nunique())
+            long_df = long_df[long_df[fs.ID_COL].isin(keep)]
+            stats["common_cohort"] = {
+                "landmarks": list(all_landmarks),
+                "n_patients": len(keep),
+                "n_dropped_not_at_risk_every_landmark": n_before - len(keep),
+            }
         prep_stats.append(stats)
         if verbose:
             print(
@@ -408,6 +450,14 @@ def evaluate_transfer(
                 f"({stats['n_patients_event_undated']:,} undated -> censored); "
                 f"exclusion={exclusion} kept {excl['n_patients_after']:,}"
             )
+            if "common_cohort" in stats:
+                cc = stats["common_cohort"]
+                print(
+                    f"[transfer]   common cohort: {cc['n_patients']:,} at risk at every landmark "
+                    f"({', '.join(f'{lm}d' for lm in all_landmarks)}); dropped "
+                    f"{cc['n_dropped_not_at_risk_every_landmark']:,} with event/censoring at or "
+                    f"before the latest"
+                )
 
         for lm in all_landmarks:
             wide, lm_stats = fs.build_landmark_frame(
@@ -472,6 +522,7 @@ def evaluate_transfer(
                     "trained_endpoint": bundle.get("endpoint", "platinum"),
                     "landmark_days": lm, "config": config,
                     "n_patients": int(len(wide)), "n_events": int(event.sum()),
+                    "common_cohort": bool(common_cohort),
                     "n_admin_censored": int(lm_stats["n_admin_censored"]),
                     "median_followup_days": float(np.median(duration)),
                     "c_index": harrell_c(duration, event, risk),
@@ -571,6 +622,9 @@ def main(argv=None) -> int:
     ap.add_argument("--n-bootstrap", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-followup-days", type=int, default=fs.DEFAULT_MAX_FOLLOWUP_DAYS)
+    ap.add_argument("--per-landmark-cohort", action="store_true",
+                    help="evaluate each landmark on everyone at risk at it, instead of the "
+                         "patients at risk at every landmark")
     args = ap.parse_args(argv)
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -604,6 +658,7 @@ def main(argv=None) -> int:
         exclusion=args.exclusion, landmarks=landmarks, horizons_days=horizons,
         n_bootstrap=args.n_bootstrap, seed=args.seed,
         max_followup_days=args.max_followup_days,
+        common_cohort=not args.per_landmark_cohort,
     )
 
     for name in ("scores", "metrics", "auc_t", "coverage", "unit_check"):
@@ -636,6 +691,7 @@ def main(argv=None) -> int:
             "n_bootstrap": args.n_bootstrap,
             "seed": args.seed,
             "max_followup_days": args.max_followup_days,
+            "common_cohort": not args.per_landmark_cohort,
             "prep_stats": res["prep_stats"],
         }, fh, indent=2, default=str)
     return 0

@@ -173,22 +173,24 @@ local({
   }
 })
 clinical_fixture <- function() tidyr::expand_grid(endpoint=c("NEPC","avpc","platinum"),landmark_days=c(0,180),
-    subpopulation=c("gleason","trio","other"),
+    subpopulation=c("gleason","trio","trio_gleason","other"),
     bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),
-    model=c("transferred_labs","transferred_age","clinical_cox")) %>%
+    model=c("transferred_labs","transferred_age","clinical_cox","combined_cox")) %>%
   mutate(model_family=if_else(startsWith(bundle,"xgboost"),"xgboost_cox","elastic_net_cox"),
     n_patients=if_else(subpopulation=="gleason",400,150),n_events=20,n_scored=n_patients,n_scored_events=n_events,
-    c_index=case_when(model=="clinical_cox"~.7,model=="transferred_labs"~.62,TRUE~.55),
+    c_index=case_when(model=="combined_cox"~.74,model=="clinical_cox"~.7,model=="transferred_labs"~.62,TRUE~.55),
     c_index_lo=c_index-.05,c_index_hi=c_index+.05,
     delta_c_vs_transferred=if_else(model=="transferred_labs",NA_real_,c_index-.62),
     delta_lo=delta_c_vs_transferred-.04,delta_hi=delta_c_vs_transferred+.04,
     mean_auc=c_index+.02,mean_auc_lo=mean_auc-.05,mean_auc_hi=mean_auc+.05,
     delta_auc_vs_transferred=if_else(model=="transferred_labs",NA_real_,mean_auc-.64),
     delta_auc_lo=delta_auc_vs_transferred-.04,delta_auc_hi=delta_auc_vs_transferred+.04,
+    delta_auc_vs_clinical=if_else(model=="combined_cox",mean_auc-.72,NA_real_),
+    delta_auc_vs_clinical_lo=delta_auc_vs_clinical-.03,delta_auc_vs_clinical_hi=delta_auc_vs_clinical+.03,
     c_index_apparent=NA_real_,mean_auc_apparent=NA_real_,n_folds=5,n_failed_folds=0,n_convergence_warnings=0,
     note=NA_character_)
 local({
-  # 04 clinical comparison (Federated Figure 5 b-c): transferred labs vs local Cox.
+  # 04 clinical comparison (Federated Figure 5 b-d): transferred labs vs local and combined Cox.
   directory <- tempfile("transfer-clinical-"); dir.create(directory)
   on.exit(unlink(directory,recursive=TRUE))
   absent <- withCallingHandlers(load_federated_transfer_clinical(directory),warning=function(w) invokeRestart("muffleWarning"))
@@ -197,22 +199,32 @@ local({
   path <- file.path(directory,"transfer_clinical_comparison.csv")
   readr::write_csv(clinical,path)
   loaded <- load_federated_transfer_clinical(directory)
-  stopifnot(nrow(loaded)==72,!"other" %in% loaded$subpopulation,all(loaded$endpoint %in% c("nepc","avpc","platinum")))
+  stopifnot(nrow(loaded)==144,!"other" %in% loaded$subpopulation,all(loaded$endpoint %in% c("nepc","avpc","platinum")))
   d <- prepare_federated_transfer_clinical(loaded)
-  # 24 transferred-labs AUC(t) points, one local Cox AUC(t) per endpoint/landmark/subpopulation, 24 paired ΔAUC(t).
-  stopifnot(nrow(d)==24+12+24,
-    identical(levels(d$series),c("XGBoost","Elastic-net Cox","Gleason + age","TP53/RB1/PTEN + age")),
-    all(d$series[d$metric=="ΔAUC(t), local Cox − transferred"] %in% c("XGBoost","Elastic-net Cox")),
-    all(abs(d$value[d$metric=="ΔAUC(t), local Cox − transferred"]-.08)<1e-9),
+  # Per subpopulation: 12 transferred-labs and 12 combined AUC(t) points, one local Cox AUC(t) per
+  # endpoint/landmark, and 12 + 12 paired ΔAUC(t) (local Cox and combined vs each bundle's score).
+  delta <- d$metric=="ΔAUC(t) vs. federated score"
+  stopifnot(nrow(d)==3*(12+12+6+12+12),
+    identical(levels(d$series),c("XGBoost","Elastic-net Cox","Gleason + age","TP53/RB1/PTEN + age",
+      "Gleason + TP53/RB1/PTEN + age")),
+    identical(levels(d$score_type),c("Federated score","Local clinical Cox","Federated score + local clinical Cox")),
+    all(d$series[delta] %in% c("XGBoost","Elastic-net Cox")),
+    all(abs(d$value[delta & d$score_type=="Local clinical Cox"]-.08)<1e-9),
+    all(abs(d$value[delta & d$score_type=="Federated score + local clinical Cox"]-.12)<1e-9),
     !any(d$series=="Age only"))
   b <- ggplot_build(plot_federated_transfer_clinical(d,"note"))
-  stopifnot(length(b$layout$panel_params)==12)
-  one <- prepare_federated_transfer_clinical(loaded,"trio")
-  stopifnot(nrow(one)==30,length(ggplot_build(plot_federated_transfer_clinical(one,NULL))$layout$panel_params)==6)
+  stopifnot(length(b$layout$panel_params)==18)
+  one <- prepare_federated_transfer_clinical(loaded,"trio_gleason")
+  stopifnot(nrow(one)==54,length(ggplot_build(plot_federated_transfer_clinical(one,NULL))$layout$panel_params)==6)
+  # A CSV written before the combined Cox still loads and plots.
+  readr::write_csv(select(filter(clinical,model!="combined_cox"),-starts_with("delta_auc_vs_clinical")),path)
+  legacy <- prepare_federated_transfer_clinical(load_federated_transfer_clinical(directory),"trio")
+  stopifnot(nrow(legacy)==30,identical(levels(legacy$score_type),c("Federated score","Local clinical Cox")),
+    length(ggplot_build(plot_federated_transfer_clinical(legacy,NULL))$layout$panel_params)==6)
   stopifnot(grepl("^PLATINUM: 0d 400/20, 180d 400/20",federated_transfer_clinical_count_note(loaded,"gleason")),
     federated_transfer_clinical_count_note(loaded[0,],"trio")=="none")
   for(bad in list(mutate(clinical,mean_auc=1.2),mutate(clinical,delta_auc_vs_transferred=-1.5),
-                  mutate(clinical,n_scored=n_patients+1),mutate(clinical,model=if_else(row_number()==1,"other",model)),
+                  mutate(clinical,delta_auc_vs_clinical=1.5),mutate(clinical,n_scored=n_patients+1),mutate(clinical,model=if_else(row_number()==1,"other",model)),
                   bind_rows(clinical,clinical[1,]),select(clinical,-n_scored))) {
     readr::write_csv(bad,path)
     stopifnot(inherits(tryCatch(load_federated_transfer_clinical(directory),error=identity),"error"))
