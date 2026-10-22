@@ -416,9 +416,9 @@ notebook. All operate on the merged `profile_data` run:
   Stage 2 runs `longitudinal_data_processing.py` once per anchor
   (`--anchor-med-set {arpi,adt}`) via `cp.stage2_runs(RUNS)`. **Stage 1b** writes the
   medication-derived ADT-intent MRN lists and their preliminary endpoint counts; **Stage 2c**
-  (after Stage 2, whose ADT-arm longitudinal file its KMs read) reviews that label over every
-  ADT-exposed patient via `export_adt_intent_outputs.run()`, writing PNGs only to
-  `<COMPASS_FIG_ROOT>/ADT_METASTATIC_FILTERING/`. Stages 0-2 are
+  (after Stage 2, whose ADT-arm longitudinal file its event counts read) re-derives that label
+  over every ADT-exposed patient with `export_adt_intent_outputs.build_labels()` and prints
+  text-only checks on it; it draws no figures and writes nothing. Stages 0-2 are
   independent of both cohort and endpoint and only need running once; Stage 3 forks per
   (cohort, endpoint).
 - `02_univariate.ipynb` / `03_multivariate.ipynb` — read `01`'s prediction inputs and run
@@ -1157,9 +1157,9 @@ cox.params_                             # coefficients by covariate name
 
 The federated bundles are trained on time to platinum only (NEPC/AVPC are not
 annotated at the other sites). `survival_common/federated_endpoint_transfer.py`
-scores them on the full DFCI ADT cohort and evaluates the same risk score
-against the local LLM-derived NEPC and AVPC timelines, with platinum as the
-reference:
+scores the bundles refit without DFCI (`federated_*_no_DFCI/`) on the full DFCI
+ADT cohort and evaluates the same risk score against the local LLM-derived NEPC
+and AVPC timelines, with platinum as the reference:
 
 ```bash
 RHINO=/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/rhino_results
@@ -1175,20 +1175,14 @@ python -m survival_common.federated_endpoint_transfer \
 All federated inputs live in the `rhino_results/` delivery under the COMPASS
 data root (override with `COMPASS_RHINO_ROOT`): `federated_model_results/` (the
 pooled univariate Cox CSV, within-site Cox, and the bundles trained with and
-without DFCI), `federated_transfer_adt_no_DFCI/` (04's arm B output) and
+without DFCI), `federated_transfer_adt_no_DFCI/` (04's output) and
 `misc_figure_data/` (aggregate KM curves and trajectories; see below).
 
 `COMPASS/survival_analysis/04_federated_transfer.ipynb` wraps the same call and
-picks up the bundles from `rhino_results/federated_model_results/federated_*/`.
-By default it runs only arm B, the bundles refit without Dana-Farber
-(`RUN_WITH_DFCI = False`). Set `RUN_WITH_DFCI = True` to also run arm A, the
-bundles trained on Dana-Farber, Fred Hutch, Johns Hopkins and MSK. For arm A,
-**DFCI is one of the training sites**, so the platinum rows are partly in-sample, and NEPC/AVPC
-are scored on patients the model was fitted on. Treat arm A as a
-cross-endpoint check, not external validation. The notebook compares the local
-cohort with DFCI's row in
-`nvflare_within_site_univariate_cox/cox_within_site_all_sites_cohort.csv` and
-shows the federated held-out test C-index next to the local platinum C-index.
+picks up the bundles from `rhino_results/federated_model_results/federated_*_no_DFCI/`,
+trained on Fred Hutch, Johns Hopkins and MSK only. The bundles trained with DFCI
+are not scored (DFCI patients would be in-sample). The notebook shows the federated
+held-out test C-index next to the local platinum C-index.
 
 It maps local `LAB_NAME` to the OMOP names via `OMOP_to_DFCI_lab_ids.csv`, puts
 each endpoint's date in the federated chain's event slot, and reuses
@@ -1204,8 +1198,8 @@ bundle's pooled means; a flagged row (>3x off) almost always means a unit
 mismatch between the DFCI and OMOP lab pipelines. Resolve those before you read
 the discrimination metrics.
 
-Arm B (`federated_*_no_DFCI/`) never saw a DFCI patient, so it is an external
-validation on all three endpoints. It writes `transfer_metrics.csv` and
+The no-DFCI bundles never saw a DFCI patient, so this is an external
+validation on all three endpoints. 04 writes `transfer_metrics.csv` and
 `transfer_auc_t.csv` to `COMPASS_FEDERATED_TRANSFER_NO_DFCI` (default
 `$COMPASS_RHINO_ROOT/federated_transfer_adt_no_DFCI`). Rerun
 `06_prep_figure_data.ipynb` after 04, then
@@ -1213,14 +1207,6 @@ validation on all three endpoints. It writes `transfer_metrics.csv` and
 to render `figures/ADT/federated/transfer_discrimination_no_dfci__platinum.{png,csv}`
 (mean AUC(t) and paired ΔAUC(t) vs. age only, by endpoint) and federated manuscript
 Figure 5.
-
-With `RUN_WITH_DFCI = True`, arm A writes the same files to
-`COMPASS_FEDERATED_TRANSFER` (default `$COMPASS_RHINO_ROOT/federated_transfer_adt_w_MSK`),
-rendered as `transfer_discrimination__platinum`, and arm B also writes
-`transfer_with_vs_without_dfci.csv` (paired full-model ΔAUC(t) and ΔC, without − with
-Dana-Farber, on the same patients and bootstrap resamples), rendered as
-`transfer_dfci_ablation__platinum`. Arm A and the comparison are skipped
-when their files are missing.
 
 The same federated run also renders the pooled federated models themselves from
 `federated_cox_multivariate/` (elastic-net) and `federated_xgboost/`, next to

@@ -76,8 +76,9 @@ local({
       test_c_index=.68,test_mean_auc_t=.72,n_test=20,n_events_test=5),cox_metrics_path)
   write_csv(expand_grid(landmark_days=c(0,90,180),feature=c("PSA__mean","Testosterone__last__missing","age")) %>%
     mutate(analysis_label="adt",endpoint="platinum",coefficient=rep(c(.2,-.1,.3),3)),cox_coefficients_path)
-  transfer_dir <- file.path(root,"rhino_results","federated_transfer_adt_w_MSK"); dir.create(transfer_dir,recursive=TRUE)
-  transfer_metrics_path <- file.path(transfer_dir,"transfer_metrics.csv")
+  # 04: bundles refit without Dana-Farber, scored on local endpoints.
+  no_dfci_dir <- file.path(root,"rhino_results","federated_transfer_adt_no_DFCI"); dir.create(no_dfci_dir,recursive=TRUE)
+  transfer_metrics_path <- file.path(no_dfci_dir,"transfer_metrics.csv")
   write_csv(expand_grid(endpoint=c("nepc","avpc","platinum"),
       bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),
       landmark_days=c(0,90,180),config=c("both","baseline")) %>%
@@ -88,16 +89,7 @@ local({
       mean_auc_hi=mean_auc+.05,mean_auc_baseline=.56,delta_auc_vs_baseline=if_else(config=="both",.12,NA_real_),
       delta_auc_lo=delta_auc_vs_baseline-.04,delta_auc_hi=delta_auc_vs_baseline+.04),transfer_metrics_path)
   write_csv(expand_grid(endpoint="nepc",bundle="xgboost_federated_model_adt",landmark_days=0,config="both",
-    horizon_days=c(365,730)) %>% mutate(auc=.7,n_cases=4),file.path(transfer_dir,"transfer_auc_t.csv"))
-  # 04 arm B: same bundles refit without Dana-Farber, plus the paired with/without comparison.
-  no_dfci_dir <- file.path(root,"rhino_results","federated_transfer_adt_no_DFCI"); dir.create(no_dfci_dir)
-  file.copy(file.path(transfer_dir,c("transfer_metrics.csv","transfer_auc_t.csv")),no_dfci_dir)
-  no_dfci_pairs_path <- file.path(no_dfci_dir,"transfer_with_vs_without_dfci.csv")
-  write_csv(expand_grid(endpoint=c("avpc","nepc","platinum"),landmark_days=c(0,90,180),
-      bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),config="both") %>%
-    mutate(n_patients=40,n_events=8,C_with_dfci=.66,C_no_dfci=.62,score_spearman=.9,
-      delta_c=-.04,delta_c_lo=-.08,delta_c_hi=0,AUC_with_dfci=.68,AUC_no_dfci=.64,
-      delta_auc=-.04,delta_auc_lo=-.08,delta_auc_hi=0),no_dfci_pairs_path)
+    horizon_days=c(365,730)) %>% mutate(auc=.7,n_cases=4),file.path(no_dfci_dir,"transfer_auc_t.csv"))
   no_dfci_clinical_path <- file.path(no_dfci_dir,"transfer_clinical_comparison.csv")
   write_csv(expand_grid(endpoint=c("avpc","nepc","platinum"),landmark_days=c(0,90,180),
       subpopulation=c("gleason","trio"),
@@ -209,8 +201,7 @@ local({
                         "elasticnet_performance", "elasticnet_coefficients",
                         "xgboost_performance", "xgboost_importance",
                         paste0("federated_volcano_landmark", c(0, 90, 180)),
-                        "transfer_discrimination", "transfer_discrimination_no_dfci",
-                        "transfer_dfci_ablation", "transfer_clinical_comparison_no_dfci",
+                        "transfer_discrimination_no_dfci", "transfer_clinical_comparison_no_dfci",
                         "08_federated_multivariable",
                         "federated_05_transfer_no_dfci")))
   coefficient_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated", "data",
@@ -218,17 +209,12 @@ local({
   stopifnot(nrow(coefficient_export) == 9L, sum(coefficient_export$displayed) == 6L,
     "last missing" %in% coefficient_export$feature_stat)
   transfer_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated", "data",
-    "transfer_discrimination__platinum.csv"), show_col_types = FALSE)
-  stopifnot(nrow(transfer_export) == 36L, file.exists(file.path(cfg$fig_root, "ADT", "federated", "data",
-    "transfer_auc_t__platinum.csv")))
-  stopifnot(file.exists(file.path(cfg$fig_root, "ADT", "federated", "data", c(
-    "transfer_discrimination_no_dfci__platinum.csv", "transfer_auc_t_no_dfci__platinum.csv",
-    "transfer_clinical_comparison_no_dfci__platinum.csv"))))
-  ablation_export <- read_csv(file.path(cfg$fig_root, "ADT", "federated", "data",
-    "transfer_dfci_ablation__platinum.csv"), show_col_types = FALSE)
-  # 18 full-model mean AUC(t) points per arm plus 18 paired ΔAUC(t) points.
-  stopifnot(nrow(ablation_export) == 54L, sum(ablation_export$arm == "Paired difference") == 18L,
-    all(!is.na(ablation_export$model_family)))
+    "transfer_discrimination_no_dfci__platinum.csv"), show_col_types = FALSE)
+  stopifnot(nrow(transfer_export) == 36L, file.exists(file.path(cfg$fig_root, "ADT", "federated", "data", c(
+    "transfer_auc_t_no_dfci__platinum.csv", "transfer_clinical_comparison_no_dfci__platinum.csv"))))
+  # Nothing is rendered for the removed with-Dana-Farber arm.
+  stopifnot(!any(file.exists(file.path(cfg$fig_root, "ADT", "federated", "data", c(
+    "transfer_discrimination__platinum.csv", "transfer_dfci_ablation__platinum.csv")))))
   # Both forest scenes keep widescreen slide dimensions through 07's cache;
   # the day-zero incidence layout is unchanged.
   for(scene in env$figure_run$prepared$federated$scenes[1:2]) {
@@ -245,7 +231,7 @@ local({
   federated_cfg <- cfg; federated_cfg$scope <- "federated"
   # Elastic-net, XGBoost and 04 transfer files require a refreshed 06 manifest after source changes.
   for(path in c(xgb_metrics_path,xgb_importance_path,cox_metrics_path,cox_coefficients_path,
-                transfer_metrics_path,no_dfci_pairs_path,no_dfci_clinical_path)) {
+                transfer_metrics_path,no_dfci_clinical_path)) {
     original_time <- file.info(path)$mtime
     Sys.setFileTime(path,original_time+5)
     changed <- tryCatch(figure_notebook_manifest(federated_cfg),error=identity)

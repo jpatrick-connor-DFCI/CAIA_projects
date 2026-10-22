@@ -1,9 +1,9 @@
 """Build the ADT metastatic-filtering label and write its figures.
 
-This is the whole ADT-intent label review (Stage 2c of 01_preprocessing.ipynb)
-as one callable: classify, cross-check against stage / coded metastasis, render
-the figures. The notebook stage is a thin wrapper over `run()` so that the same outputs can be
-regenerated from the command line without opening Jupyter.
+`run()` is the ADT-intent label build plus its figures as one callable:
+classify, cross-check against stage / coded metastasis, render the figures, from
+Python or the command line. Stage 2c of 01_preprocessing.ipynb calls only
+`build_labels()` and draws no figures.
 
 Everything lands under a single directory, by default
 

@@ -40,11 +40,10 @@
 # (default `<COMPASS_DATA_ROOT>/rhino_results`):
 #   federated_model_results/          pooled univariate Cox CSV, within-site Cox, and the
 #                                     elastic-net/XGBoost bundles with and without DFCI
-#   federated_transfer_adt_no_DFCI/   04's arm B (bundles trained without DFCI on DFCI endpoints)
-#   federated_transfer_adt_w_MSK/     04's optional arm A (RUN_WITH_DFCI); skipped when absent
+#   federated_transfer_adt_no_DFCI/   04's output (bundles trained without DFCI on DFCI endpoints)
 #   misc_figure_data/                 aggregate KM curves and binned trajectories, pooled and within site
-# `COMPASS_FEDERATED_RESULTS`, `COMPASS_FEDERATED_TRANSFER`, `COMPASS_FEDERATED_TRANSFER_NO_DFCI`
-# and `COMPASS_FEDERATED_FIGURE_DATA` override the individual paths; set the same values for `06`.
+# `COMPASS_FEDERATED_RESULTS`, `COMPASS_FEDERATED_TRANSFER_NO_DFCI` and
+# `COMPASS_FEDERATED_FIGURE_DATA` override the individual paths; set the same values for `06`.
 #
 # The site report reads `nvflare_within_site_univariate_cox/cox_within_site_all_sites_cohort.csv`
 # (legacy name `nvflare_within_site_cox_univariate/` is still accepted)
@@ -322,27 +321,18 @@
 # with `federated_volcano_landmark<N>` from the pooled univariate CSV. The local
 # trajectory and KM plotters are reused; nothing is refitted. Missing files are reported and skipped.
 #
-# Federated transfer (`COMPASS_FEDERATED_TRANSFER`, default
-# `federated_transfer_adt_w_MSK/`, rendered only when present) reads `transfer_metrics.csv` and
-# `transfer_auc_t.csv` written by `04_federated_transfer.ipynb`: the
-# platinum-trained federated XGBoost and elastic-net bundles scored on the local
-# ADT cohort for platinum, NEPC, and AVPC. `federated/transfer_discrimination__platinum`
-# shows Harrell's C with 95% bootstrap CIs, the paired gain over the age-only
-# model, and IPCW mean AUC(t) by landmark, faceted by endpoint. Dana-Farber is a
-# federated training site, so this is a cross-endpoint check, not external
-# validation; platinum rows are partly in-sample. CSV sidecars keep all metrics
-# (`transfer_discrimination__platinum.csv`) and per-horizon AUC(t)
-# (`transfer_auc_t__platinum.csv`). Missing transfer outputs are reported and skipped.
-# The no-Dana-Farber arm (`COMPASS_FEDERATED_TRANSFER_NO_DFCI`, default
-# `federated_transfer_adt_no_DFCI/`, 04's `OUTPUT_DIR_NO_DFCI`) scores the same
-# bundles refit without Dana-Farber, an external validation. It renders
-# `federated/transfer_discrimination_no_dfci__platinum` in the same layout and
-# `federated/transfer_dfci_ablation__platinum`: full-model mean AUC(t) with vs. without
-# Dana-Farber in training, plus the paired ΔAUC(t) from `transfer_with_vs_without_dfci.csv`
-# (only when arm A was also run). Arm B's `transfer_clinical_comparison.csv`
+# Federated transfer (`COMPASS_FEDERATED_TRANSFER_NO_DFCI`, default
+# `federated_transfer_adt_no_DFCI/`, 04's `OUTPUT_DIR`) reads `transfer_metrics.csv` and
+# `transfer_auc_t.csv` written by `04_federated_transfer.ipynb`: the platinum-trained
+# federated XGBoost and elastic-net bundles refit without Dana-Farber and scored on the
+# local ADT cohort for platinum, NEPC, and AVPC, an external validation.
+# `federated/transfer_discrimination_no_dfci__platinum` shows IPCW mean AUC(t) and the
+# paired gain over the age-only model by landmark, faceted by endpoint. CSV sidecars keep
+# all metrics (`transfer_discrimination_no_dfci__platinum.csv`) and per-horizon AUC(t)
+# (`transfer_auc_t_no_dfci__platinum.csv`). `transfer_clinical_comparison.csv`
 # (04's Gleason / TP53-RB1-PTEN section) renders
 # `federated/transfer_clinical_comparison_no_dfci__platinum` and feeds Federated Figure 5 b-c;
-# without it, Figure 5 is drawn with panel a only. Either arm is skipped when its files are missing.
+# without it, Figure 5 is drawn with panel a only. Missing transfer outputs are reported and skipped.
 # Missing optional XGBoost files are reported and skipped independently. Run `06`
 # again after this update to register both files (including absent paths), then
 # run `07_figures.R` with stage `all`. All Python remains in `06`; graphics caches stay in data.
@@ -402,7 +392,6 @@ RHINO_ROOT <- Sys.getenv("COMPASS_RHINO_ROOT", file.path(NEPC_PROJ_PATH, "rhino_
 FEDERATED_SUPPLEMENT <- list(
   results = Sys.getenv("COMPASS_FEDERATED_RESULTS", file.path(
     RHINO_ROOT, "federated_model_results", "cox_federated_univariate_adt.csv")),
-  transfer = Sys.getenv("COMPASS_FEDERATED_TRANSFER", file.path(RHINO_ROOT, "federated_transfer_adt_w_MSK")),
   transfer_no_dfci = Sys.getenv("COMPASS_FEDERATED_TRANSFER_NO_DFCI",
     file.path(RHINO_ROOT, "federated_transfer_adt_no_DFCI")),
   figure_data = Sys.getenv("COMPASS_FEDERATED_FIGURE_DATA", file.path(RHINO_ROOT, "misc_figure_data")))
@@ -426,7 +415,6 @@ figure_config <- list(
   metastatic_sources = METASTATIC_SUPPLEMENT[c("intent", "stage", "llm", "icd")],
   federated = PLOT_FEDERATED_SUPPLEMENT,
   federated_path = FEDERATED_SUPPLEMENT$results,
-  federated_transfer_path = FEDERATED_SUPPLEMENT$transfer,
   federated_transfer_no_dfci_path = FEDERATED_SUPPLEMENT$transfer_no_dfci,
   federated_figure_data_path = FEDERATED_SUPPLEMENT$figure_data)
 

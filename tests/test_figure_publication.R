@@ -140,11 +140,11 @@ local({
   # 04 transfer outputs: optional CI/ΔAUC(t)/C columns become gaps, bad inputs fail loudly.
   directory <- tempfile("transfer-"); dir.create(directory)
   on.exit(unlink(directory,recursive=TRUE))
-  stopifnot(identical(federated_transfer_dir(list(data_root="/x")),file.path("/x","rhino_results","federated_transfer_adt_w_MSK")),
-    identical(federated_transfer_dir(list(data_root="/x",federated_rhino_root="/r")),file.path("/r","federated_transfer_adt_w_MSK")),
+  stopifnot(identical(federated_transfer_no_dfci_dir(list(data_root="/x")),file.path("/x","rhino_results","federated_transfer_adt_no_DFCI")),
+    identical(federated_transfer_no_dfci_dir(list(data_root="/x",federated_rhino_root="/r")),file.path("/r","federated_transfer_adt_no_DFCI")),
     identical(federated_figure_data_dir(list(data_root="/x")),file.path("/x","rhino_results","misc_figure_data")),
     identical(federated_figure_data_dir(list(data_root="/x",federated_figure_data_path="/m")),"/m"),
-    identical(federated_transfer_dir(list(data_root="/x",federated_transfer_path="/y")),"/y"))
+    identical(federated_transfer_no_dfci_dir(list(data_root="/x",federated_transfer_no_dfci_path="/z")),"/z"))
   absent <- withCallingHandlers(load_federated_transfer(directory),warning=function(w) invokeRestart("muffleWarning"))
   stopifnot(is.null(absent))
   metrics <- tidyr::expand_grid(endpoint=c("NEPC","avpc","platinum","other"),
@@ -163,55 +163,14 @@ local({
     nrow(d)==36+18,!any(d$metric=="ΔAUC(t) vs. age only" & d$features=="Age only"))
   note <- federated_transfer_count_note(loaded)
   stopifnot(grepl("^PLATINUM: 0d 1,000/30, 180d 1,000/30; NEPC:",note))
-  b <- ggplot_build(plot_federated_transfer(d,note))
-  stopifnot(length(b$layout$panel_params)==6)
+  p <- plot_federated_transfer(d,note)
+  title <- if("get_labs" %in% getNamespaceExports("ggplot2")) ggplot2::get_labs(p)$title else p$labels$title
+  stopifnot(grepl("without Dana-Farber",title,fixed=TRUE),length(ggplot_build(p)$layout$panel_params)==6)
   for(bad in list(mutate(metrics,mean_auc=1.2),mutate(metrics,c_index=1.2),mutate(metrics,n_events=2000),bind_rows(metrics,metrics[1,]),
                   select(metrics,-mean_auc))) {
     readr::write_csv(bad,path)
     stopifnot(inherits(tryCatch(load_federated_transfer(directory),error=identity),"error"))
   }
-})
-local({
-  # 04 arm B: no-Dana-Farber directory, paired ΔAUC(t) loader and the with/without ablation panel.
-  directory <- tempfile("transfer-no-dfci-"); dir.create(directory)
-  on.exit(unlink(directory,recursive=TRUE))
-  stopifnot(identical(federated_transfer_no_dfci_dir(list(data_root="/x")),file.path("/x","rhino_results","federated_transfer_adt_no_DFCI")),
-    identical(federated_transfer_no_dfci_dir(list(data_root="/x",federated_transfer_no_dfci_path="/z")),"/z"))
-  absent <- withCallingHandlers(load_federated_transfer_pairs(directory),warning=function(w) invokeRestart("muffleWarning"))
-  stopifnot(is.null(absent))
-  metrics <- tidyr::expand_grid(endpoint=c("nepc","avpc","platinum"),
-      bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),
-      landmark_days=c(0,180),config=c("both","baseline")) %>%
-    mutate(model_family=if_else(startsWith(bundle,"xgboost"),"xgboost_cox","elastic_net_cox"),
-      n_patients=1000,n_events=30,mean_auc=.6,mean_auc_lo=.55,mean_auc_hi=.65)
-  pairs <- tidyr::expand_grid(endpoint=c("NEPC","avpc","platinum","other"),landmark_days=c(0,180),
-      bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),config=c("both","baseline")) %>%
-    mutate(n_patients=1000,n_events=30,AUC_with_dfci=.6,AUC_no_dfci=.57,delta_auc=-.03,delta_auc_lo=-.06,delta_auc_hi=0)
-  path <- file.path(directory,"transfer_with_vs_without_dfci.csv")
-  readr::write_csv(pairs,path)
-  loaded <- load_federated_transfer_pairs(directory)
-  # "other" endpoints and baseline rows are dropped.
-  stopifnot(nrow(loaded)==12,all(loaded$config=="both"),!"other" %in% loaded$endpoint)
-  d <- prepare_federated_transfer_ablation(metrics,mutate(metrics,mean_auc=.57),loaded)
-  stopifnot(nrow(d)==12+12+12,identical(levels(d$model),c("XGBoost","Elastic-net Cox")),
-    identical(levels(d$arm),FEDERATED_TRANSFER_ARM_LABELS),
-    all(d$arm[d$metric=="ΔAUC(t), without − with Dana-Farber"]=="Paired difference"),
-    !any(is.na(d$model)))
-  b <- ggplot_build(plot_federated_transfer_ablation(d,federated_transfer_count_note(loaded)))
-  stopifnot(length(b$layout$panel_params)==6)
-  arm_b <- plot_federated_transfer(prepare_federated_transfer(metrics),"note",
-    FEDERATED_TRANSFER_ARMS$no_dfci$title,FEDERATED_TRANSFER_ARMS$no_dfci$subtitle)
-  title <- if("get_labs" %in% getNamespaceExports("ggplot2")) ggplot2::get_labs(arm_b)$title else arm_b$labels$title
-  stopifnot(grepl("without Dana-Farber",title,fixed=TRUE),length(ggplot_build(arm_b)$layout$panel_params)==6)
-  for(bad in list(mutate(pairs,delta_auc=-1.5),mutate(pairs,AUC_no_dfci=1.2),mutate(pairs,n_events=2000),
-                  bind_rows(pairs,pairs[1,]),select(pairs,-n_events))) {
-    readr::write_csv(bad,path)
-    stopifnot(inherits(tryCatch(load_federated_transfer_pairs(directory),error=identity),"error"))
-  }
-  # A C-only file from before the AUC(t) bootstrap warns and is skipped.
-  readr::write_csv(select(pairs,-starts_with("AUC_"),-starts_with("delta_auc")),path)
-  stale <- tryCatch(load_federated_transfer_pairs(directory),warning=identity)
-  stopifnot(inherits(stale,"warning"),grepl("rerun 04",conditionMessage(stale),fixed=TRUE))
 })
 clinical_fixture <- function() tidyr::expand_grid(endpoint=c("NEPC","avpc","platinum"),landmark_days=c(0,180),
     subpopulation=c("gleason","trio","other"),
@@ -229,7 +188,7 @@ clinical_fixture <- function() tidyr::expand_grid(endpoint=c("NEPC","avpc","plat
     c_index_apparent=NA_real_,mean_auc_apparent=NA_real_,n_folds=5,n_failed_folds=0,n_convergence_warnings=0,
     note=NA_character_)
 local({
-  # 04 arm B clinical comparison (Federated Figure 5 b-c): transferred labs vs local Cox.
+  # 04 clinical comparison (Federated Figure 5 b-c): transferred labs vs local Cox.
   directory <- tempfile("transfer-clinical-"); dir.create(directory)
   on.exit(unlink(directory,recursive=TRUE))
   absent <- withCallingHandlers(load_federated_transfer_clinical(directory),warning=function(w) invokeRestart("muffleWarning"))

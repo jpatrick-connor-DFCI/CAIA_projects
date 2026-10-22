@@ -171,12 +171,11 @@ def federated_within_site_file(federated_path: Path, filename: str) -> Path:
     return next((p for p in candidates if p.exists()), candidates[0])
 
 
-# 04_federated_transfer.ipynb outputs; mirrors federated_transfer_dir() in figure_workflow.R.
-FEDERATED_TRANSFER_FILES = ("transfer_metrics.csv", "transfer_auc_t.csv")
-# 04's arm B (bundles refit without Dana-Farber) adds the paired with/without comparison
-# and the Gleason / TP53-RB1-PTEN Cox comparison (federated Figure 5 b-c).
-FEDERATED_TRANSFER_NO_DFCI_FILES = FEDERATED_TRANSFER_FILES + (
-    "transfer_with_vs_without_dfci.csv", "transfer_clinical_comparison.csv")
+# 04_federated_transfer.ipynb outputs (bundles refit without Dana-Farber): discrimination and
+# the Gleason / TP53-RB1-PTEN Cox comparison (federated Figure 5 b-c); mirrors
+# federated_transfer_no_dfci_dir() in figure_workflow.R.
+FEDERATED_TRANSFER_NO_DFCI_FILES = (
+    "transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv")
 # Federated multivariable exports beside the across-site results CSV
 # (mirrors FEDERATED_MULTIVARIABLE in figure_workflow.R). Each bundle also has
 # a refit without Dana-Farber in "<directory>_no_DFCI".
@@ -200,12 +199,6 @@ FEDERATED_FIGURE_DATA_FILES = ("manifest.json", "cohort_km.csv") + tuple(
 def federated_rhino_root(config: dict) -> Path:
     """Root of the federated delivery (rhino_results) under the COMPASS data root."""
     return Path(config.get("federated_rhino_root") or Path(config["data_root"]) / "rhino_results")
-
-
-def federated_transfer_dir(config: dict) -> Path:
-    # Arm A (bundles trained with Dana-Farber) is optional; 04 skips it by default.
-    return Path(config.get("federated_transfer_path")
-                or federated_rhino_root(config) / "federated_transfer_adt_w_MSK")
 
 
 def federated_transfer_no_dfci_dir(config: dict) -> Path:
@@ -573,8 +566,6 @@ def prepare(config: dict) -> dict:
         # absent paths too so later XGBoost/elastic-net deliveries invalidate preparation.
         federated_sources += [fingerprint(federated_path.parent / directory / name)
             for directory, name in FEDERATED_MULTIVARIABLE_FILES]
-        federated_sources += [fingerprint(federated_transfer_dir(config) / name)
-            for name in FEDERATED_TRANSFER_FILES]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / name)
             for name in FEDERATED_TRANSFER_NO_DFCI_FILES]
         federated_sources += [fingerprint(federated_figure_data_dir(config) / name)
