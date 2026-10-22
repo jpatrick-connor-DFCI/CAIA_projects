@@ -67,6 +67,15 @@ STAGE_COLUMN = "DERIVED_STAGE_MERGED"
 # panels keep usable group sizes in an ADT-anchored cohort.
 GLEASON_BINS = ((0, 6, "Gleason <=6"), (7, 7, "Gleason 7"), (8, 10, "Gleason 8-10"))
 
+# --stratifiers groups -> the clinical stratifier keys each one enables. The
+# risk-score and --comparison-risks panels are always drawn.
+CLINICAL_STRATIFIER_GROUPS = {
+    "gleason": ("gleason",),
+    "stage": ("stage",),
+    "trio": ("tp53", "pten", "rb1", "trio_burden", "tp53_rb1", "trio_combinations"),
+}
+DEFAULT_TIME_ORIGIN_LABEL = "Days from treatment anchor"
+
 RISK_HIGH = "High risk (above median)"
 RISK_LOW = "Low risk (at or below median)"
 
@@ -954,12 +963,17 @@ def run(args: argparse.Namespace) -> None:
 
     extra_stratifiers = build_comparison_stratifiers(frame, comparison_names)
     stratifiers = build_stratifiers(frame, cutpoint=cutpoint, extra_stratifiers=extra_stratifiers)
-    available = {s.key for s in stratifiers}
-    skipped = [
-        k for k in ("gleason", "stage", "tp53", "pten", "rb1",
-                    "trio_burden", "tp53_rb1", "trio_combinations")
-        if k not in available
+    requested = [
+        key
+        for group in (getattr(args, "stratifiers", None) or CLINICAL_STRATIFIER_GROUPS)
+        for key in CLINICAL_STRATIFIER_GROUPS[group]
     ]
+    all_clinical = {key for keys in CLINICAL_STRATIFIER_GROUPS.values() for key in keys}
+    stratifiers = [
+        s for s in stratifiers if s.key not in all_clinical or s.key in requested
+    ]
+    available = {s.key for s in stratifiers}
+    skipped = [k for k in requested if k not in available]
     if skipped:
         print(
             "  [note] no usable data (absent, all-missing, or single-valued) for: "
@@ -1021,7 +1035,7 @@ def run(args: argparse.Namespace) -> None:
                 + (f", landmark +{args.landmark_days}d" if args.landmark_days is not None else "")
                 + f", held-out n={len(frame):,})"
             ),
-            xlabel="Days from treatment anchor",
+            xlabel=getattr(args, "time_origin_label", DEFAULT_TIME_ORIGIN_LABEL),
             max_days=args.max_days,
         )
         for ext in args.formats:
@@ -1037,7 +1051,7 @@ def run(args: argparse.Namespace) -> None:
             + (f", landmark +{args.landmark_days}d" if args.landmark_days is not None else "")
             + f", held-out n={len(frame):,})"
         ),
-        xlabel="Days from treatment anchor",
+        xlabel=getattr(args, "time_origin_label", DEFAULT_TIME_ORIGIN_LABEL),
         max_days=args.max_days,
     )
     for ext in args.formats:
@@ -1087,6 +1101,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-days", type=float, default=None,
         help="Truncate the KM x-axis, e.g. 1825 for five years.",
+    )
+    parser.add_argument(
+        "--stratifiers", nargs="+", choices=sorted(CLINICAL_STRATIFIER_GROUPS),
+        default=None,
+        help=(
+            "Clinical stratifier groups to draw (default: all). A group whose "
+            "columns are absent from --clinical-features is skipped."
+        ),
+    )
+    parser.add_argument(
+        "--time-origin-label", default=DEFAULT_TIME_ORIGIN_LABEL,
+        help="KM x-axis label, naming the clock the risk file's durations use.",
     )
     parser.add_argument("--formats", nargs="+", default=["png"])
     parser.add_argument("--no-plot", action="store_true")

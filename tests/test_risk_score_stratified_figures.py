@@ -404,3 +404,76 @@ class TestComparisonRisks:
                 "--dataset", "test",
                 "--no-plot",
             ])
+
+
+class TestStratifierSelectionAndTimeOrigin:
+    """--stratifiers / --time-origin-label: the full cohort runs Gleason and
+    stage only on the ADT clock, while the sequencing-anchored cohort labels
+    its KM axis from the sequencing date."""
+
+    def _inputs(self, tmp_path):
+        risks = _risks(12)
+        clinical = pd.DataFrame({
+            ID: [str(i) for i in range(12)],
+            rsf.GLEASON_FEATURE: [6, 7, 8, 9] * 3,
+            rsf.STAGE_COLUMN: ["I", "II", "III", "IV"] * 3,
+            "TP53_SNV": [0, 1] * 6,
+            "RB1_SNV": [0, 0, 1, 1] * 3,
+            "PTEN_DEL": [1, 0] * 6,
+        })
+        clin_path = tmp_path / "clinical.csv"
+        clinical.to_csv(clin_path, index=False)
+        return _write(tmp_path, risks), clin_path
+
+    def test_stratifiers_subset_drops_the_trio(self, tmp_path):
+        risk_path, clin_path = self._inputs(tmp_path)
+        out_dir = tmp_path / "out"
+        rsf.main([
+            "--patient-risks", str(risk_path),
+            "--clinical-features", str(clin_path),
+            "--output-dir", str(out_dir),
+            "--endpoint", "platinum",
+            "--landmark-days", "180",
+            "--id-col", ID,
+            "--stratifiers", "gleason", "stage",
+            "--no-plot",
+        ])
+        table = pd.read_csv(out_dir / "risk_stratified_discrimination_platinum_landmark180.csv")
+        assert {"gleason", "stage"} <= set(table["feature"])
+        assert not set(table["feature"]) & set(rsf.CLINICAL_STRATIFIER_GROUPS["trio"])
+        # The risk-score split itself is always kept.
+        patients = pd.read_csv(out_dir / "risk_stratified_patients_platinum_landmark180.csv")
+        assert "risk_score" in patients.columns
+        assert "tp53" not in patients.columns
+
+    def test_time_origin_label_reaches_both_km_axes(self, tmp_path, monkeypatch):
+        risk_path, clin_path = self._inputs(tmp_path)
+        xlabels = []
+
+        class _Fig:
+            def savefig(self, *_args, **_kwargs):
+                pass
+
+        def fake_plot(*_args, xlabel, **_kwargs):
+            xlabels.append(xlabel)
+            return _Fig()
+
+        monkeypatch.setattr(rsf, "plot_panels", fake_plot)
+        monkeypatch.setattr(rsf, "plot_within_stratum", fake_plot)
+        rsf.main([
+            "--patient-risks", str(risk_path),
+            "--clinical-features", str(clin_path),
+            "--output-dir", str(tmp_path / "out"),
+            "--endpoint", "platinum",
+            "--landmark-days", "180",
+            "--id-col", ID,
+            "--time-origin-label", "Days from sequencing date",
+        ])
+        assert xlabels == ["Days from sequencing date"] * 2
+
+    def test_time_origin_label_defaults_to_treatment_anchor(self):
+        args = rsf.build_parser().parse_args([
+            "--patient-risks", "x.csv", "--output-dir", "out",
+        ])
+        assert args.time_origin_label == "Days from treatment anchor"
+        assert args.stratifiers is None

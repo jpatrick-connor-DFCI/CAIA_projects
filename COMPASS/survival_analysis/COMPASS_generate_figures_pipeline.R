@@ -233,6 +233,10 @@ RISK_STRATUM_COLORS <- c(
 )
 RISK_STRATIFICATION_SCHEMES <- c(test = "held-out test block", cv_oof = "out-of-fold (nested CV), full cohort")
 RISK_STRATIFICATION_MATCHED <- c("gleason_somatic")
+# Matched cohorts that use somatic data run on a sequencing-date clock
+# (build_somatic_gleason_inputs.py), as do their TP53/PTEN/RB1 stratifiers.
+RISK_STRATIFICATION_SEQUENCING <- c("gleason_somatic")
+SEQUENCING_ANCHOR_LABEL <- "sequencing date"
 
 # NULL when the run predates the per-patient export or the stage was not run.
 read_risk_strata <- function(directory, endpoint, landmark) {
@@ -3008,9 +3012,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
   # Clinical combinations (compass_pipeline.run_multivariate_clinical_combinations):
   # raw held-out test mean AUC(t) for every arm. Only the Gleason + somatic
-  # available-case cohort is fit (all 7 combinations); it has one shared split,
-  # so arms within a panel are comparable; nothing here is paired or
-  # differenced against labs.
+  # cohort is fit (all 7 combinations); it is anchored on the sequencing date
+  # (landmarks = sequencing + days, labs and outcomes on that clock) and has
+  # one shared split, so arms within a panel are comparable; nothing here is
+  # paired or differenced against labs.
   COMBINATION_ARMS <- list(
     gleason_somatic = c("labs", "gleason", "somatic", "gleason-labs", "somatic-labs",
                         "gleason-somatic", "gleason-somatic-labs"))
@@ -3063,11 +3068,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       facet_wrap(~model, ncol = 1) +
       scale_fill_manual(values = COMBINATION_ARM_COLORS, name = NULL, drop = FALSE) +
       coord_cartesian(ylim = c(0, 1.04)) +
-      labs(x = NULL, y = "Held-out mean AUC(t)",
+      labs(x = sprintf("Landmark (days from %s)", SEQUENCING_ANCHOR_LABEL), y = "Held-out mean AUC(t)",
            title = sprintf("Clinical combinations (Gleason + somatic cohort) — %s", ENDPOINT),
            subtitle = paste(sprintf("%s%dd: n=%s (test n=%s)", ifelse(combo_n$landmark_days > 0, "+", ""),
                                     combo_n$landmark_days, combo_n$n, combo_n$n_test), collapse = "; "),
-           caption = paste(COHORT_DISPLAY, "Raw held-out test mean AUC(t) per arm; available-case cohort with source data by each landmark.")) +
+           caption = paste(COHORT_DISPLAY, "Raw held-out test mean AUC(t) per arm; sequenced patients with Gleason by each landmark, measured from the sequencing date (labs before the landmark, outcomes after it).")) +
       theme_fig() +
       guides(fill = guide_legend(nrow = 2, byrow = TRUE)) +
       theme(legend.position = "top", legend.text = element_text(size = 9),
@@ -3079,10 +3084,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
   # Risk-score stratification KMs (compass_pipeline.run_risk_stratification).
   # test and cv_oof are separate scoring schemes and are never pooled; each gets
-  # its own panels. Durations count from the landmark.
+  # its own panels. Durations count from the landmark; matched cohorts that use
+  # somatic data count from the sequencing-date landmark.
   RISK_KM_YLAB <- if (ENDPOINT == "platinum") "Platinum-free probability" else
     paste0("Event-free probability (", ENDPOINT_DISPLAY, ")")
-  risk_km_origin <- function(lm) if (lm > 0) sprintf("landmark (%s + %s days)", ANCHOR_LABEL, lm) else ANCHOR_LABEL
+  risk_km_origin <- function(lm, anchor = ANCHOR_LABEL) if (lm > 0) sprintf("landmark (%s + %s days)", anchor, lm) else anchor
   risk_km_title <- function(meta, key) {
     if (startsWith(key, "comparison__")) {
       arm <- sub("^comparison__", "", key)
@@ -3092,9 +3098,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     if (key == "risk_score") return("Labs risk score")
     meta$title[match(key, meta$stratifier)]
   }
-  risk_km_plot <- function(d, title, lm, group_order, note) {
+  risk_km_plot <- function(d, title, lm, group_order, note, anchor = ANCHOR_LABEL) {
     many <- length(intersect(group_order, d$stratum)) > 4L
-    plot_stratified_platinum(d, title, risk_km_origin(lm), group_order, note,
+    plot_stratified_platinum(d, title, risk_km_origin(lm, anchor), group_order, note,
                              colors = RISK_STRATUM_COLORS, ci = !many, ylab = RISK_KM_YLAB,
                              legend_ncol = if (many) 2 else 1)
   }
@@ -3107,14 +3113,18 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       strata <- read_risk_strata(file.path(BASE, "risk_stratification", scheme, risk_sources[[source]],
                                            sprintf("landmark_%s", lm)), ENDPOINT, lm)
       if (is.null(strata)) next
+      source_cohort <- sub("_(cox|xgboost)$", "", source)
+      source_anchor <- if (source_cohort %in% RISK_STRATIFICATION_SEQUENCING) SEQUENCING_ANCHOR_LABEL else ANCHOR_LABEL
       source_label <- if (source == "full") "full landmark cohort" else
-        paste("matched", sub("_(cox|xgboost)$", "", source), "cohort,",
+        paste("matched", source_cohort,
+              if (source_cohort %in% RISK_STRATIFICATION_SEQUENCING) "cohort (sequencing-anchored)," else "cohort,",
               if (endsWith(source, "_cox")) "Elastic-Net Cox" else "XGBoost")
       note <- sprintf("%s Labs risk from %s, %s. Risk groups split at that scheme's median.",
                       COHORT_DISPLAY, RISK_STRATIFICATION_SCHEMES[[scheme]], source_label)
       for (key in strata$meta$stratifier) {
         d <- risk_strata_frame(strata$patients, key)
-        p_km <- risk_km_plot(d, risk_km_title(strata$meta, key), lm, risk_stratum_order(strata$meta, key), note)
+        p_km <- risk_km_plot(d, risk_km_title(strata$meta, key), lm, risk_stratum_order(strata$meta, key), note,
+                             anchor = source_anchor)
         if (is.null(p_km)) next
         save_fig(p_km, OUT_DIR, sprintf("figure4f_riskstrat_%s_%s_%s_landmark%s", scheme, source,
                                         lab_stem_slug(key), lm), 8, 7)
@@ -3138,13 +3148,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     }
   }
 
-  # TP53/PTEN/RB1 co-mutation KMs on the full landmark cohort. Group labels do
-  # not depend on the risk score, so the out-of-fold file (every landmark
-  # patient) is preferred; the held-out test block is the fallback.
+  # TP53/PTEN/RB1 co-mutation KMs on the sequencing-anchored Gleason + somatic
+  # cohort (the trio is somatic, so it is stratified only on the sequencing
+  # clock). Group labels do not depend on the risk score, so the out-of-fold
+  # file (every cohort patient) is preferred; the held-out test block is the
+  # fallback.
   for (lm in LANDMARKS) {
     strata <- NULL; scheme_used <- NA_character_
     for (scheme in c("cv_oof", "test")) {
-      strata <- read_risk_strata(file.path(BASE, "risk_stratification", scheme, "full_cohort",
+      strata <- read_risk_strata(file.path(BASE, "risk_stratification", scheme, "matched",
+                                           RISK_STRATIFICATION_SEQUENCING[[1]], "cox",
                                            sprintf("landmark_%s", lm)), ENDPOINT, lm)
       if (!is.null(strata)) { scheme_used <- scheme; break }
     }
@@ -3152,14 +3165,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       message("Co-mutation KM skipped at landmark ", lm, ": no risk-stratification patient file")
       next
     }
-    population <- if (scheme_used == "cv_oof") "Full landmark cohort" else "Held-out test block only"
+    population <- if (scheme_used == "cv_oof") "Sequencing-anchored Gleason + somatic cohort" else
+      "Sequencing-anchored Gleason + somatic cohort, held-out test block only"
     for (key in intersect(c("trio_combinations", "tp53_rb1", "trio_burden"), strata$meta$stratifier)) {
       d <- risk_strata_frame(strata$patients, key)
       p_km <- risk_km_plot(d, sprintf("%s: time to %s", strata$meta$title[match(key, strata$meta$stratifier)],
                                       if (ENDPOINT == "platinum") "platinum" else ENDPOINT_DISPLAY),
                            lm, risk_stratum_order(strata$meta, key),
-                           sprintf("%s %s. Patients need all genes in the grouping observed by the landmark; untested genes are never assumed wild-type.",
-                                   COHORT_DISPLAY, population))
+                           sprintf("%s %s. Genes are from the specimen that anchors each patient's clock; patients need all genes in the grouping observed; untested genes are never assumed wild-type.",
+                                   COHORT_DISPLAY, population),
+                           anchor = SEQUENCING_ANCHOR_LABEL)
       if (is.null(p_km)) next
       save_fig(p_km, OUT_DIR, sprintf("figure4h_comutation_%s_landmark%s", key, lm), 9,
                if (key == "trio_combinations") 8 else 7)

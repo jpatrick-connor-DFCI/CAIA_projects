@@ -1,9 +1,10 @@
-"""build_available_case_sensitivity's Gleason ∩ somatic cohort (Plan §2b).
+"""Source-specific cohorts and stratifiers in build_somatic_gleason_inputs.
 
-Exercises COMPASS.data_preprocessing.build_somatic_gleason_inputs directly:
-the new analysis="gleason_somatic" inner-joins the Gleason value closest to
-the landmark with the latest somatic specimen available by the landmark, so
-only patients with both sources by that landmark are retained.
+Exercises COMPASS.data_preprocessing.build_somatic_gleason_inputs directly.
+The Gleason-only cohort stays on the ADT clock; the Gleason ∩ somatic cohort
+and the trio stratifiers are anchored on the sequencing date of the specimen
+closest to ADT start (select_sequencing_specimen -> reclock_to_sequencing ->
+build_sequencing_anchored_case).
 """
 
 from __future__ import annotations
@@ -54,42 +55,24 @@ def _somatic(rows: list[tuple], feature="TP53_SNV") -> tuple[pd.DataFrame, list[
 
 
 class TestGleasonSomaticAvailableCase:
-    def test_inner_joins_both_sources(self):
-        # MRN 1: has both gleason and somatic before the landmark.
-        # MRN 2: has only gleason.
-        # MRN 3: has only somatic.
-        # MRN 4: has both, but somatic is after the landmark (excluded).
-        mrns = [1, 2, 3, 4]
+    def test_gleason_somatic_is_not_built_on_the_adt_clock(self):
+        # Anything using somatic data is sequencing-anchored, so the ADT-clock
+        # builder refuses the combined cohort instead of silently building it.
+        mrns = [1]
         base = _base(mrns)
         anchors = _treatment_anchors(mrns)
-        gleason = _gleason(
-            [
-                (1, "2019-06-01", 7.0),
-                (2, "2019-06-01", 8.0),
-                (4, "2019-06-01", 9.0),
-            ]
-        )
-        somatic, somatic_features = _somatic(
-            [
-                (1, "2019-07-01", 1.0),
-                (3, "2019-07-01", 0.0),
-                (4, "2020-06-01", 1.0),  # after landmark +0d (2020-01-01)
-            ]
-        )
-
-        out = bsg.build_available_case_sensitivity(
-            base,
-            somatic,
-            somatic_features,
-            gleason,
-            treatment_anchors=anchors,
-            landmark_day=0,
-            analysis="gleason_somatic",
-        )
-
-        assert set(out[ID_COL]) == {1}
-        assert bsg.GLEASON_FEATURE in out.columns
-        assert somatic_features[0] in out.columns
+        gleason = _gleason([(1, "2019-06-01", 7.0)])
+        somatic, somatic_features = _somatic([(1, "2019-07-01", 1.0)])
+        with pytest.raises(ValueError, match="sequencing-anchored"):
+            bsg.build_available_case_sensitivity(
+                base,
+                somatic,
+                somatic_features,
+                gleason,
+                treatment_anchors=anchors,
+                landmark_day=0,
+                analysis="gleason_somatic",
+            )
 
     def test_gleason_only_analysis_unaffected(self):
         mrns = [1, 2]
@@ -128,6 +111,144 @@ class TestGleasonSomaticAvailableCase:
 
     def test_gleason_somatic_available_case_constant_registered(self):
         assert bsg.GLEASON_SOMATIC_AVAILABLE_CASE == "gleason_somatic_available_case"
+
+
+HORIZON = 3650.0
+
+
+def _longitudinal(rows: list[tuple]) -> pd.DataFrame:
+    # rows: (mrn, t_platinum, platinum, t_last_contact, [t_lab, ...]), all on
+    # the ADT clock like the COMPASS longitudinal CSV (one row per lab).
+    records = []
+    for mrn, t_platinum, platinum, t_last_contact, labs in rows:
+        for t_lab in labs:
+            records.append({
+                ID_COL: mrn,
+                "AGE_AT_TREATMENTSTART": 65.0,
+                "FIRST_RECORD_DATE": "2015-01-01",
+                "FIRST_TREATMENT": 1,
+                "t_first_treatment": 0.0,
+                "t_platinum": t_platinum,
+                "PLATINUM": platinum,
+                "t_death": t_last_contact,
+                "DEATH": 0,
+                "t_last_contact": t_last_contact,
+                "LAB_NAME": "PSA",
+                "LAB_VALUE": float(t_lab),
+                "t_lab": float(t_lab),
+            })
+    return pd.DataFrame(records)
+
+
+class TestSequencingAnchoredCase:
+    """select_sequencing_specimen -> reclock_to_sequencing ->
+    build_sequencing_anchored_case: time 0 is the sequencing date of the
+    specimen closest to ADT start, so landmarks are sequencing + D."""
+
+    # ADT starts 2020-01-01 for everyone.
+    # MRN 1: sequenced 2019-11-02 (60 d before ADT); a later 2021 specimen is
+    #        farther from ADT and must not be selected.
+    # MRN 2: sequenced 2020-07-19 (200 d after ADT, i.e. after ADT + 180).
+    # MRN 3: sequenced but no Gleason -> excluded.
+    # MRN 4: sequenced with Gleason but outside the base split -> excluded.
+    MRNS = [1, 2, 3, 4]
+
+    def _inputs(self):
+        anchors = _treatment_anchors(self.MRNS)
+        somatic, features = _somatic([
+            (1, "2019-11-02", 1.0),
+            (1, "2021-01-01", 0.0),
+            (2, "2020-07-19", 0.0),
+            (3, "2019-12-01", 1.0),
+            (4, "2019-12-01", 1.0),
+        ])
+        specimen = bsg.select_sequencing_specimen(somatic, features, anchors)
+        gleason = _gleason([
+            (1, "2019-06-01", 7.0),
+            (1, "2019-12-15", 9.0),  # after sequencing, before sequencing + 90
+            (2, "2020-03-01", 8.0),  # after ADT start, before sequencing
+            (4, "2019-06-01", 6.0),
+        ])
+        longitudinal = _longitudinal([
+            (1, 500.0, 1, 900.0, [-100.0, -30.0]),
+            (2, 1000.0, 0, 1000.0, [150.0, 300.0]),
+            (3, 400.0, 0, 400.0, [-10.0]),
+            (4, 400.0, 0, 400.0, [-10.0]),
+        ])
+        split = pd.Series(
+            {1: "train", 2: "test", 3: "train"}, name="split"
+        ).rename_axis(ID_COL)
+        return specimen, features, gleason, longitudinal, split
+
+    def _build(self, landmark_day: int):
+        specimen, features, gleason, longitudinal, split = self._inputs()
+        reclocked = bsg.reclock_to_sequencing(
+            longitudinal, specimen[bsg.SEQUENCING_TO_ADT_DAYS]
+        )
+        return bsg.build_sequencing_anchored_case(
+            reclocked,
+            specimen,
+            features,
+            gleason,
+            split=split,
+            landmark_day=landmark_day,
+            max_followup_days=HORIZON,
+        )
+
+    def test_specimen_is_the_one_closest_to_adt(self):
+        specimen, *_ = self._inputs()
+        assert specimen.loc[1, bsg.SEQUENCING_DATE] == pd.Timestamp("2019-11-02")
+        assert specimen.loc[1, bsg.SEQUENCING_TO_ADT_DAYS] == -60.0
+        assert specimen.loc[2, bsg.SEQUENCING_TO_ADT_DAYS] == 200.0
+        assert specimen.loc[1, "TP53_SNV"] == 1.0
+
+    def test_reclock_keeps_pre_adt_sequencing_and_shifts_every_clock(self):
+        specimen, _, _, longitudinal, _ = self._inputs()
+        offsets = specimen[bsg.SEQUENCING_TO_ADT_DAYS].drop(index=[3, 4])
+        out = bsg.reclock_to_sequencing(longitudinal, offsets)
+        assert set(out[ID_COL]) == {1, 2}
+        row1 = out.loc[out[ID_COL] == 1].iloc[0]
+        assert row1["t_platinum"] == 560.0
+        assert row1["t_last_contact"] == 960.0
+        assert sorted(out.loc[out[ID_COL] == 1, "t_lab"]) == [-40.0, 30.0]
+        assert row1["AGE_AT_TREATMENTSTART"] == pytest.approx(65.0 - 60 / 365.25)
+        row2 = out.loc[out[ID_COL] == 2].iloc[0]
+        assert row2["t_platinum"] == 800.0
+        assert row2["AGE_AT_TREATMENTSTART"] == pytest.approx(65.0 + 200 / 365.25)
+
+    def test_cohort_requires_gleason_and_base_split(self):
+        aggregated, _ = self._build(0)
+        assert set(aggregated[ID_COL]) == {1, 2}
+        # Split is inherited from the base run, not reassigned.
+        assert aggregated.set_index(ID_COL)["split"].to_dict() == {1: "train", 2: "test"}
+
+    def test_sequencing_after_adt_plus_180_is_kept_with_sequencing_clock_outcomes(self):
+        aggregated, _ = self._build(0)
+        row2 = aggregated.set_index(ID_COL).loc[2]
+        assert row2["t_platinum"] == 800.0
+        assert row2["TP53_SNV"] == 0.0
+        row1 = aggregated.set_index(ID_COL).loc[1]
+        assert row1["t_platinum"] == 560.0
+        assert row1["TP53_SNV"] == 1.0
+
+    def test_gleason_must_be_available_by_sequencing_plus_landmark(self):
+        at0 = self._build(0)[0].set_index(ID_COL)
+        at90 = self._build(90)[0].set_index(ID_COL)
+        # MRN 2's post-ADT Gleason predates its sequencing date, so it counts.
+        assert at0.loc[2, bsg.GLEASON_FEATURE] == 8.0
+        # MRN 1's 2019-12-15 score is only available from sequencing + 43 d.
+        assert at0.loc[1, bsg.GLEASON_FEATURE] == 7.0
+        assert at90.loc[1, bsg.GLEASON_FEATURE] == 9.0
+
+    def test_labs_are_restricted_to_before_sequencing_plus_landmark(self):
+        _, labs0 = self._build(0)
+        _, labs90 = self._build(90)
+        assert sorted(labs0.loc[labs0[ID_COL] == 1, "t_lab"]) == [-40.0]
+        assert sorted(labs90.loc[labs90[ID_COL] == 1, "t_lab"]) == [-40.0, 30.0]
+        # MRN 2's ADT-clock labs (150, 300) sit at -50 and +100 from sequencing.
+        assert sorted(labs0.loc[labs0[ID_COL] == 2, "t_lab"]) == [-50.0]
+        assert labs0["t_lab"].lt(0).all()
+        assert labs90["t_lab"].lt(90).all()
 
 
 def _somatic_unfiltered(rows: list[tuple], trio_columns: list[str]) -> pd.DataFrame:
@@ -219,6 +340,65 @@ class TestClinicalStratifiers:
         )
         assert out.loc[out[ID_COL] == 1, "TP53_SNV"].iloc[0] == 1.0
 
+    def test_adt_stratifiers_omit_the_trio_when_no_trio_columns(self):
+        # main() writes the ADT-anchored file with trio_columns=[]: the trio is
+        # only stratified on the sequencing clock.
+        mrns = [1]
+        base = _base(mrns)
+        anchors = _treatment_anchors(mrns)
+        gleason = _gleason([(1, "2019-06-01", 7.0)])
+        somatic_unfiltered = _somatic_unfiltered(
+            [(1, "2019-07-01", 1.0)], ["TP53_SNV"]
+        )
+        stage = _stage([(1, "2019-05-01", "M1")])
+
+        out = bsg.build_clinical_stratifiers(
+            base, somatic_unfiltered, [], gleason, stage,
+            treatment_anchors=anchors, landmark_day=0,
+        )
+        assert list(out.columns) == [ID_COL, bsg.GLEASON_FEATURE, bsg.STAGE_COLUMN]
+
+    def test_sequencing_stratifiers_use_the_anchoring_specimen(self):
+        # Specimen sequenced 2019-11-02; a second specimen on 2020-01-15 is
+        # available by sequencing + 90 d but must not replace it.
+        mrns = [1]
+        base = _base(mrns)
+        trio_columns = ["TP53_SNV", "RB1_DEL"]
+        somatic_unfiltered = _somatic_unfiltered(
+            [(1, "2019-11-02", 1.0, 0.0), (1, "2020-01-15", 0.0, 1.0)],
+            trio_columns,
+        )
+        specimen = pd.DataFrame(
+            {bsg.SEQUENCING_DATE: [pd.Timestamp("2019-11-02")]},
+            index=pd.Index(mrns, name=ID_COL),
+        )
+        gleason = _gleason([(1, "2019-06-01", 7.0), (1, "2020-01-20", 9.0)])
+        stage = _stage([(1, "2019-10-01", "M0"), (1, "2020-01-20", "M1")])
+
+        at0 = bsg.build_sequencing_clinical_stratifiers(
+            base, somatic_unfiltered, trio_columns, gleason, stage,
+            specimen=specimen, landmark_day=0,
+        ).set_index(ID_COL).loc[1]
+        at90 = bsg.build_sequencing_clinical_stratifiers(
+            base, somatic_unfiltered, trio_columns, gleason, stage,
+            specimen=specimen, landmark_day=90,
+        ).set_index(ID_COL).loc[1]
+
+        for row in (at0, at90):
+            assert row["TP53_SNV"] == 1.0
+            assert row["RB1_DEL"] == 0.0
+        # Gleason and stage are those available by sequencing + D.
+        assert at0[bsg.GLEASON_FEATURE] == 7.0
+        assert at0[bsg.STAGE_COLUMN] == "M0"
+        assert at90[bsg.GLEASON_FEATURE] == 9.0
+        assert at90[bsg.STAGE_COLUMN] == "M1"
+
+    def test_sequencing_stratifiers_filename(self):
+        assert (
+            bsg.sequencing_clinical_stratifiers_filename(90)
+            == "clinical_stratifiers_sequencing_landmark90.csv"
+        )
+
     def test_tz_aware_event_date_does_not_crash_the_stage_comparison(self):
         """On the cluster, TREATMENT_ANCHOR_DATE comes back UTC-aware while the
         regex stage parquet's EVENT_DATE is naive; pandas raises TypeError on a
@@ -296,6 +476,16 @@ class TestAvailableCaseManifest:
         horizons = manifest["auc_horizons_by_landmark"]["0"]
         assert "platinum" in horizons
         assert "nepc" not in horizons
+
+    def test_prediction_time_origin_defaults_to_adt_and_is_overridable(self):
+        available = self._available(n=6, event_col="PLATINUM", n_events=3)
+        adt = bsg._available_case_manifest(self._base_manifest(), {0: available})
+        seq = bsg._available_case_manifest(
+            self._base_manifest(), {0: available},
+            prediction_time_origin="sequencing date",
+        )
+        assert adt["prediction_time_origin"] == "ADT start"
+        assert seq["prediction_time_origin"] == "sequencing date"
 
     def test_endpoint_with_events_still_gets_a_horizon_grid(self):
         available = self._available(n=6, event_col="PLATINUM", n_events=3)

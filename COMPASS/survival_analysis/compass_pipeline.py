@@ -1886,6 +1886,13 @@ RISK_STRATIFICATION_MATCHED_COHORTS = {
     cohort: tuple(arm for arm in arms if arm != "labs")
     for cohort, arms in CLINICAL_COMBINATION_SPECS.items()
 }
+# Matched cohorts that use somatic data are anchored on the sequencing date, so
+# their stratifiers (Gleason, stage, TP53/PTEN/RB1 from the anchoring specimen)
+# and KM time axis are on that clock too.
+RISK_STRATIFICATION_SEQUENCING_COHORTS = ("gleason_somatic",)
+# The full ADT cohort is stratified by Gleason and stage only: the trio is
+# somatic, so it is stratified only within the sequencing-anchored cohort.
+RISK_STRATIFICATION_FULL_COHORT_STRATIFIERS = ("gleason", "stage")
 
 
 def run_risk_stratification(run: dict, dry_run: bool = False):
@@ -1896,8 +1903,8 @@ def run_risk_stratification(run: dict, dry_run: bool = False):
     scored by the outer fold that excluded them -- never pooled, hence the
     separate `risk_stratification/<scheme>/...` subdirectories):
 
-    1. Full-cohort labs model vs. its own clinical stratifiers (Gleason,
-       stage, TP53/PTEN/RB1 trio, from build_somatic_gleason_inputs.py's §4a
+    1. Full-cohort labs model vs. its own clinical stratifiers (Gleason and
+       stage at ADT + D, from build_somatic_gleason_inputs.py's §4a
        clinical_stratifiers_landmark{D}.csv, left-joined so a patient missing
        one stratifier still keeps the others and the risk-score panel).
     2. Within each available-case cohort that has a matched clinical/somatic
@@ -1906,6 +1913,10 @@ def run_risk_stratification(run: dict, dry_run: bool = False):
        cohort via --comparison-risks, so the within-stratum comparison is
        "how does the labs score split patients whose Gleason/somatic-informed
        score also splits them" rather than just labs vs. raw clinical values.
+       The sequencing-anchored cohort is additionally stratified by Gleason,
+       stage and the TP53/PTEN/RB1 trio at sequencing + D
+       (clinical_stratifiers_sequencing_landmark{D}.csv), on a KM axis in
+       days from the sequencing date.
 
     cv_oof requires the run to have been fit with OUT_OF_FOLD_RISKS=True;
     scheme iterations with nothing to read are skipped with a printed warning
@@ -1953,6 +1964,7 @@ def run_risk_stratification(run: dict, dry_run: bool = False):
                     "--landmark-days", str(landmark_day),
                     "--id-col", id_col,
                     "--dataset", scheme,
+                    "--stratifiers", *RISK_STRATIFICATION_FULL_COHORT_STRATIFIERS,
                 ]
                 print(f"[run ] {tag}")
                 t0 = time.time()
@@ -2011,6 +2023,20 @@ def run_risk_stratification(run: dict, dry_run: bool = False):
                             f"[warn] {matched_tag} -> missing comparison risks for arms "
                             f"{missing_arms}; continuing with the rest."
                         )
+                    clinical_args = []
+                    if cohort in RISK_STRATIFICATION_SEQUENCING_COHORTS:
+                        sequencing_clinical_path = (
+                            run["inputs_dir"] / "somatic_gleason" / "clinical_stratifiers"
+                            / f"clinical_stratifiers_sequencing_landmark{landmark_day}.csv"
+                        )
+                        if sequencing_clinical_path.exists():
+                            clinical_args = ["--clinical-features", sequencing_clinical_path]
+                        else:
+                            print(
+                                f"[warn] {matched_tag} -> missing {sequencing_clinical_path}; "
+                                "comparing risk scores without clinical stratifiers."
+                            )
+                        clinical_args += ["--time-origin-label", "Days from sequencing date"]
                     if not dry_run:
                         matched_output_dir.mkdir(parents=True, exist_ok=True)
                     cmd = [
@@ -2021,6 +2047,7 @@ def run_risk_stratification(run: dict, dry_run: bool = False):
                         "--landmark-days", str(landmark_day),
                         "--id-col", id_col,
                         "--dataset", scheme,
+                        *clinical_args,
                         *comparison_args,
                     ]
                     print(f"[run ] {matched_tag}")

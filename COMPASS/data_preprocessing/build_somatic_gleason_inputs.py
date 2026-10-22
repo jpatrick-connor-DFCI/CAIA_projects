@@ -18,11 +18,16 @@ before or after ADT. An exact-distance tie prefers the earlier date. Patients
 whose selected index date is on/after platinum or last contact are excluded;
 the builder never substitutes a different observation based on the outcome.
 
-Additionally, ``gleason_available_case`` and ``gleason_somatic_available_case``
-preserve the ADT time origin and original split while retaining the patients
-with Gleason (respectively Gleason and sequencing) data. They support the
-matched multivariable Gleason-versus-labs sensitivity and the Gleason/somatic/labs
-clinical combinations.
+Additionally, ``gleason_available_case`` preserves the ADT time origin and
+original split while retaining the patients with Gleason data; it supports the
+matched multivariable Gleason-versus-labs sensitivity.
+
+``gleason_somatic_available_case`` (the Gleason/somatic/labs clinical
+combinations) is anchored on the sequencing date instead: the specimen closest
+to ADT start defines time 0 for every patient, landmarks are sequencing + D,
+lab summaries use only labs drawn before sequencing + D, and outcomes are
+measured from sequencing + D. The original split is inherited. Its clinical
+stratifiers (Gleason, TP53/PTEN/RB1, stage) are written on the same clock.
 """
 
 from __future__ import annotations
@@ -47,9 +52,16 @@ import cox_aggregated as ca  # noqa: E402
 from build_genomic_inputs import GENE_VARIANT_RE  # noqa: E402
 from build_prediction_inputs import (  # noqa: E402
     BUILD_MANIFEST_FILENAME,
+    SPLIT_ASSIGNMENTS_FILENAME,
     aggregated_filename,
+    build_aggregated_table,
     compute_horizon_grid,
     pre_treatment_lab_filename,
+)
+import survival_common.cohort as survival_cohort  # noqa: E402
+from survival_common.cohort import (  # noqa: E402
+    build_landmark_merged,
+    build_pre_treatment_lab_long,
 )
 
 PROFILE_DATA_ROOT = Path(
@@ -91,11 +103,16 @@ SEQUENCING_ANALYSIS_VARIANT_MODES = {"sequencing_snv": "snv", "sequencing_any": 
 # so it is deliberately absent from the feature manifest.
 SOMATIC_BURDEN_COVARIATE = "SOMATIC_N_GENES_ALTERED"
 # Treatment-anchored, complete-availability cohort used to compare baseline
-# labs with baseline Gleason + somatic calls.  This is deliberately distinct
-# from INDEX_ANALYSES: those arms rebase follow-up to an observation date and
+# labs with baseline Gleason.  This is deliberately distinct from
+# INDEX_ANALYSES: those arms rebase follow-up to an observation date and
 # therefore are not directly comparable with the lab model.
 AVAILABLE_CASE_SENSITIVITIES = ("gleason_available_case",)
+# Sequencing-anchored Gleason + somatic + labs cohort: every arm (labs alone
+# included) is fit on the same patients, on a clock that starts at sequencing.
 GLEASON_SOMATIC_AVAILABLE_CASE = "gleason_somatic_available_case"
+# Days from ADT start to the selected sequencing date (negative = before ADT).
+# Every ADT-relative t_* duration is shifted by this to re-clock on sequencing.
+SEQUENCING_TO_ADT_DAYS = "SEQUENCING_TO_ADT_DAYS"
 # Plan §4a: clinical-stratifier inputs for risk_score_stratified_figures.py.
 # These are stratifiers only, never model features, so the trio columns are
 # read from the UNFILTERED somatic matrix (every alteration class, one column
@@ -641,16 +658,16 @@ def build_available_case_sensitivity(
     landmark_day: int = 0,
     analysis: str = "gleason",
 ) -> pd.DataFrame:
-    """Return one source-specific, landmarked sensitivity cohort.
+    """Return one source-specific, ADT-landmarked sensitivity cohort.
 
     Each source-specific cohort has its own matched labs comparator. A datum
     must be available by the requested ADT-relative landmark. Gleason selects
     the score date closest to that landmark (among available values); somatic
-    selects the latest available specimen. 'gleason_somatic' inner-joins both,
-    matching the Gleason ∩ somatic cohort (Plan §2b) used to compare labs
-    against the combined feature set on patients who have both sources.
-    Outcome, split assignment, and lab summaries remain exactly those from
-    the standard input at that landmark.
+    selects the latest available specimen. Outcome, split assignment, and lab
+    summaries remain exactly those from the standard input at that landmark.
+
+    The Gleason ∩ somatic cohort is not built here: anything using somatic
+    data is anchored on the sequencing date (build_sequencing_anchored_case).
     """
     base = _normalize_mrn(base, source="landmark +0 base inputs")
     cutoff_dates = treatment_anchors + pd.to_timedelta(int(landmark_day), unit="D")
@@ -674,25 +691,11 @@ def build_available_case_sensitivity(
             value_cols=somatic_features,
             combine_latest_ties_with_max=True,
         )
-    elif analysis == "gleason_somatic":
-        gleason_features = closest_available_by_landmark(
-            gleason,
-            cutoffs,
-            date_col="gleason_date",
-            available_date_col=GLEASON_AVAILABLE_DATE,
-            value_cols=[GLEASON_FEATURE],
-        ).dropna(subset=[GLEASON_FEATURE])
-        somatic_feature_frame = latest_available_by_landmark(
-            somatic,
-            cutoffs,
-            date_col=SOMATIC_AVAILABLE_DATE,
-            order_col=SEQUENCING_DATE,
-            value_cols=somatic_features,
-            combine_latest_ties_with_max=True,
-        )
-        features = gleason_features.join(somatic_feature_frame, how="inner")
     else:
-        raise ValueError("analysis must be 'gleason', 'somatic', or 'gleason_somatic'.")
+        raise ValueError(
+            "analysis must be 'gleason' or 'somatic'; the Gleason + somatic cohort "
+            "is sequencing-anchored (build_sequencing_anchored_case)."
+        )
     out = base.set_index(ca.ID_COL).join(features, how="inner")
     if out.empty:
         raise ValueError(
@@ -702,8 +705,128 @@ def build_available_case_sensitivity(
     return out.rename_axis(ca.ID_COL).reset_index()
 
 
+def _cutoff_frame(origin_dates: pd.Series, landmark_day: int) -> pd.DataFrame:
+    """MRN -> ``_landmark_date`` (origin + landmark days) for the selectors."""
+    cutoff_dates = origin_dates + pd.to_timedelta(int(landmark_day), unit="D")
+    return pd.DataFrame(
+        {ca.ID_COL: cutoff_dates.index, "_landmark_date": cutoff_dates.values}
+    )
+
+
+def select_sequencing_specimen(
+    somatic: pd.DataFrame,
+    somatic_features: list[str],
+    treatment_anchors: pd.Series,
+) -> pd.DataFrame:
+    """Pick each patient's sequencing specimen: the one closest to ADT start.
+
+    This is the same specimen the sequencing-indexed screens use (earlier date
+    wins an exact-distance tie; same-date testing groups are unioned with a
+    maximum). Returns one row per MRN with SEQUENCING_DATE,
+    SEQUENCING_TO_ADT_DAYS and the somatic features.
+    """
+    selected = closest_observation_to_adt(
+        somatic,
+        treatment_anchors,
+        date_col=SEQUENCING_DATE,
+        value_cols=somatic_features,
+        combine_date_ties_with_max=True,
+    )
+    selected = selected.rename(
+        columns={INDEX_DATE: SEQUENCING_DATE, INDEX_TO_ADT_DAYS: SEQUENCING_TO_ADT_DAYS}
+    )
+    selected[SEQUENCING_DATE] = pd.to_datetime(selected[SEQUENCING_DATE])
+    selected[SEQUENCING_TO_ADT_DAYS] = selected[SEQUENCING_TO_ADT_DAYS].astype(float)
+    return selected.rename_axis(ca.ID_COL)
+
+
+def reclock_to_sequencing(
+    longitudinal: pd.DataFrame, sequencing_to_adt_days: pd.Series
+) -> pd.DataFrame:
+    """Shift an ADT-anchored longitudinal frame onto a sequencing-date clock.
+
+    Every ``t_*`` column in the COMPASS longitudinal CSV (``t_lab`` and every
+    outcome duration) is days from TREATMENT_ANCHOR_DATE, so subtracting the
+    per-patient sequencing-minus-ADT offset makes time 0 the sequencing date.
+    Age moves to age at sequencing. Patients without a specimen are dropped.
+    Re-clocking (rather than passing a sequencing anchor column to
+    make_outcome_df) keeps patients sequenced before ADT, whose offset is
+    negative and would fail that function's ``anchor >= 0`` gate.
+    """
+    out = longitudinal.loc[
+        longitudinal[ca.ID_COL].isin(sequencing_to_adt_days.index)
+    ].copy()
+    shift = out[ca.ID_COL].map(sequencing_to_adt_days).astype(float)
+    for column in [col for col in out.columns if col.startswith("t_")]:
+        out[column] = pd.to_numeric(out[column], errors="coerce") - shift
+    age_col = survival_cohort.AGE_COL
+    if age_col in out.columns:
+        out[age_col] = pd.to_numeric(out[age_col], errors="coerce") + shift / 365.25
+    return out
+
+
+def build_sequencing_anchored_case(
+    reclocked: pd.DataFrame,
+    specimen: pd.DataFrame,
+    somatic_features: list[str],
+    gleason: pd.DataFrame,
+    *,
+    split: pd.Series,
+    landmark_day: int,
+    max_followup_days: float | None,
+    endpoint: str = "platinum",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build the Gleason + somatic + labs cohort at sequencing + ``landmark_day``.
+
+    ``reclocked`` is the longitudinal frame from reclock_to_sequencing, so the
+    standard COMPASS landmark builder (anchor_col=None) gives outcomes from
+    sequencing + D, lab summaries from labs before sequencing + D, and the
+    base run's administrative censoring. Somatic features are the selected
+    specimen's (available by construction, since it defines time 0); Gleason
+    is the score closest to sequencing + D among those documented by then.
+    Only MRNs in the base split are kept, so the base PSA/PARPi cohort filters
+    and the held-out test assignment both carry over.
+
+    Returns (aggregated table with DFCI_MRN as a column, pre-landmark lab long).
+    """
+    _, _, merged = build_landmark_merged(
+        reclocked,
+        landmark_offset_days=landmark_day,
+        anchor_col=None,
+        require_first_treatment=False,
+        max_followup_days=max_followup_days,
+        endpoint=endpoint,
+    )
+    merged = merged.loc[merged.index.isin(split.index)]
+    sequencing_dates = specimen[SEQUENCING_DATE]
+    gleason_values = closest_available_by_landmark(
+        gleason,
+        _cutoff_frame(sequencing_dates, landmark_day),
+        date_col="gleason_date",
+        available_date_col=GLEASON_AVAILABLE_DATE,
+        value_cols=[GLEASON_FEATURE],
+    ).dropna(subset=[GLEASON_FEATURE])
+    features = gleason_values.join(specimen[somatic_features], how="inner")
+    aggregated = build_aggregated_table(merged, split=split).join(features, how="inner")
+    if aggregated.empty:
+        raise ValueError(
+            f"No patients have Gleason and sequencing data at sequencing +{landmark_day}d; "
+            "cannot build the sequencing-anchored inputs."
+        )
+    labs = build_pre_treatment_lab_long(
+        reclocked,
+        cohort_index=aggregated.index,
+        landmark_offset_days=landmark_day,
+        anchor_col=None,
+    )
+    return aggregated.rename_axis(ca.ID_COL).reset_index(), labs
+
+
 def _available_case_manifest(
-    base_manifest: dict, available_by_landmark: dict[int, pd.DataFrame]
+    base_manifest: dict,
+    available_by_landmark: dict[int, pd.DataFrame],
+    *,
+    prediction_time_origin: str = "ADT start",
 ) -> dict:
     """Clone the base manifest with horizons estimable in the available cases."""
     manifest = dict(base_manifest)
@@ -757,7 +880,7 @@ def _available_case_manifest(
     manifest.update(
         {
             "feature_set": "source_specific_available_case_sensitivity",
-            "prediction_time_origin": "ADT start",
+            "prediction_time_origin": prediction_time_origin,
             "landmark_days": sorted(available_by_landmark),
             "n_patients": int(n_patients_by_landmark.get("0", 0)),
             "n_patients_by_landmark": n_patients_by_landmark,
@@ -804,15 +927,17 @@ def build_clinical_stratifiers(
     table (one column per alteration class), not the collapsed <GENE>_ANY
     model features.
 
+    ``treatment_anchors`` is the per-patient time origin the landmark is
+    measured from: ADT start for the full cohort, or the sequencing date for
+    the sequencing-anchored cohort (build_sequencing_clinical_stratifiers).
+    Pass no ``trio_columns`` to omit the trio.
+
     Every column is independently left-joined onto the full landmark cohort,
     so a patient missing one clinical stratifier still gets the others rather
     than being dropped entirely.
     """
     base = _normalize_mrn(base, source="landmark base inputs")
-    cutoff_dates = treatment_anchors + pd.to_timedelta(int(landmark_day), unit="D")
-    cutoffs = pd.DataFrame(
-        {ca.ID_COL: cutoff_dates.index, "_landmark_date": cutoff_dates.values}
-    )
+    cutoffs = _cutoff_frame(treatment_anchors, landmark_day)
 
     gleason_values = closest_available_by_landmark(
         gleason,
@@ -865,6 +990,42 @@ def build_clinical_stratifiers(
     out = out.join(trio_values, how="left")
     out = out.join(stage_values, how="left")
     return out.rename_axis(ca.ID_COL).reset_index()
+
+
+def sequencing_clinical_stratifiers_filename(landmark_day: int) -> str:
+    return f"clinical_stratifiers_sequencing_landmark{int(landmark_day)}.csv"
+
+
+def build_sequencing_clinical_stratifiers(
+    base: pd.DataFrame,
+    somatic_unfiltered: pd.DataFrame,
+    trio_columns: list[str],
+    gleason: pd.DataFrame,
+    stage: pd.DataFrame,
+    *,
+    specimen: pd.DataFrame,
+    landmark_day: int = 0,
+) -> pd.DataFrame:
+    """Clinical stratifiers for the sequencing-anchored cohort at sequencing + D.
+
+    The trio comes from the same specimen the cohort is anchored on (rows of
+    the unfiltered matrix on that patient's selected SEQUENCING_DATE), so a
+    later specimen collected before sequencing + D can never replace it.
+    Gleason and stage are those available by sequencing + D.
+    """
+    selected_dates = specimen[[SEQUENCING_DATE]].rename_axis(ca.ID_COL).reset_index()
+    specimen_rows = somatic_unfiltered.merge(
+        selected_dates, on=[ca.ID_COL, SEQUENCING_DATE], how="inner"
+    )
+    return build_clinical_stratifiers(
+        base,
+        specimen_rows,
+        trio_columns,
+        gleason,
+        stage,
+        treatment_anchors=specimen[SEQUENCING_DATE],
+        landmark_day=landmark_day,
+    )
 
 
 def main(args: argparse.Namespace) -> None:
@@ -1009,16 +1170,20 @@ def main(args: argparse.Namespace) -> None:
             f"{analysis}: {len(built):,} patients indexed from {INDEX_DATE} -> {output_path}"
         )
 
-    # Unlike the three observation-indexed univariate analyses above, these
-    # inputs preserve the standard outcome clock and split assignment. Each
-    # cohort carries its own labs comparator, so Gleason-vs-labs (and the
-    # Gleason/somatic combinations) never conflate a feature comparison with a
-    # cohort shift.
+    # Unlike the three observation-indexed univariate analyses above, the
+    # Gleason sensitivity preserves the standard ADT outcome clock and split
+    # assignment, with its own labs comparator, so Gleason-vs-labs never
+    # conflates a feature comparison with a cohort shift.
     sensitivity_landmarks = [int(value) for value in base_manifest["landmark_days"]]
     sensitivity_cases: dict[str, dict[int, pd.DataFrame]] = {}
-    all_analyses = ("gleason", "gleason_somatic")
-    all_sensitivity_names = AVAILABLE_CASE_SENSITIVITIES + (GLEASON_SOMATIC_AVAILABLE_CASE,)
-    for analysis, sensitivity_name in zip(all_analyses, all_sensitivity_names):
+    gleason_feature_rows = [
+        {"feature": GLEASON_FEATURE, "feature_kind": "gleason_continuous", "source": str(args.gleason_path)}
+    ]
+    somatic_feature_rows = [
+        {"feature": feature, "feature_kind": "somatic_binary", "source": str(args.somatic_path)}
+        for feature in somatic_features
+    ]
+    for analysis, sensitivity_name in zip(("gleason",), AVAILABLE_CASE_SENSITIVITIES):
         sensitivity_dir = output_dir / sensitivity_name
         sensitivity_dir.mkdir(parents=True, exist_ok=True)
         available_cases: dict[int, pd.DataFrame] = {}
@@ -1049,20 +1214,9 @@ def main(args: argparse.Namespace) -> None:
                 f"{sensitivity_name} +{landmark_day}d: {len(available):,} patients "
                 f"with {analysis} data available by the landmark"
             )
-        gleason_feature_rows = [
-            {"feature": GLEASON_FEATURE, "feature_kind": "gleason_continuous", "source": str(args.gleason_path)}
-        ]
-        somatic_feature_rows = [
-            {"feature": feature, "feature_kind": "somatic_binary", "source": str(args.somatic_path)}
-            for feature in somatic_features
-        ]
-        if analysis == "gleason":
-            feature_rows = gleason_feature_rows
-        elif analysis == "somatic":
-            feature_rows = somatic_feature_rows
-        else:
-            feature_rows = gleason_feature_rows + somatic_feature_rows
-        pd.DataFrame(feature_rows).to_csv(sensitivity_dir / FEATURE_MANIFEST_FILENAME, index=False)
+        pd.DataFrame(gleason_feature_rows).to_csv(
+            sensitivity_dir / FEATURE_MANIFEST_FILENAME, index=False
+        )
         sensitivity_manifest = _available_case_manifest(base_manifest, available_cases)
         sensitivity_manifest.update(
             {
@@ -1077,6 +1231,93 @@ def main(args: argparse.Namespace) -> None:
             json.dumps(sensitivity_manifest, indent=2)
         )
         sensitivity_cases[analysis] = available_cases
+
+    # Gleason + somatic + labs: anchored on the sequencing date. Every arm of
+    # the clinical combinations (labs alone included) shares this cohort, so
+    # the comparison is on one clock and one patient set.
+    split_path = base_inputs_dir / SPLIT_ASSIGNMENTS_FILENAME
+    if not split_path.exists():
+        raise FileNotFoundError(
+            f"Missing {split_path}; the sequencing-anchored cohort inherits the base split."
+        )
+    if str(base_manifest.get("split_mode", "shared")) != "shared":
+        raise ValueError(
+            "The sequencing-anchored cohort needs one split across landmarks; rebuild "
+            "the base inputs with --split-mode shared."
+        )
+    split = (
+        _normalize_mrn(pd.read_csv(split_path), source=str(split_path))
+        .set_index(ca.ID_COL)["split"]
+        .astype(str)
+    )
+    specimen = select_sequencing_specimen(somatic, somatic_features, treatment_anchors)
+    specimen = specimen.loc[specimen.index.isin(split.index)]
+    for feature in somatic_features:
+        specimen[feature] = pd.to_numeric(specimen[feature], errors="coerce")
+    offsets = specimen[SEQUENCING_TO_ADT_DAYS]
+    print(
+        f"Sequencing anchor: {len(specimen):,} base-cohort patients with a specimen; "
+        f"sequencing minus ADT start median {offsets.median():.0f}d "
+        f"(IQR {offsets.quantile(0.25):.0f} to {offsets.quantile(0.75):.0f}d), "
+        f"{int(offsets.lt(0).sum()):,} sequenced before ADT."
+    )
+    longitudinal = _normalize_mrn(
+        pd.read_csv(longitudinal_path, low_memory=False), source=str(longitudinal_path)
+    )
+    reclocked = reclock_to_sequencing(longitudinal, offsets)
+    del longitudinal
+    max_followup_days = base_manifest.get("max_followup_days")
+    sequencing_dir = output_dir / GLEASON_SOMATIC_AVAILABLE_CASE
+    sequencing_dir.mkdir(parents=True, exist_ok=True)
+    sequencing_cases: dict[int, pd.DataFrame] = {}
+    for landmark_day in sensitivity_landmarks:
+        print(f"\n##### SEQUENCING-ANCHORED COHORT: SEQUENCING +{landmark_day} DAYS #####")
+        aggregated, labs = build_sequencing_anchored_case(
+            reclocked,
+            specimen,
+            somatic_features,
+            gleason,
+            split=split,
+            landmark_day=landmark_day,
+            max_followup_days=max_followup_days,
+            endpoint=args.endpoint,
+        )
+        sequencing_cases[landmark_day] = aggregated
+        aggregated.to_csv(sequencing_dir / aggregated_filename(landmark_day), index=False)
+        labs.to_csv(sequencing_dir / pre_treatment_lab_filename(landmark_day), index=False)
+        print(
+            f"{GLEASON_SOMATIC_AVAILABLE_CASE} sequencing +{landmark_day}d: "
+            f"{len(aggregated):,} patients with Gleason and sequencing data"
+        )
+    pd.DataFrame(gleason_feature_rows + somatic_feature_rows).to_csv(
+        sequencing_dir / FEATURE_MANIFEST_FILENAME, index=False
+    )
+    sequencing_manifest = _available_case_manifest(
+        base_manifest, sequencing_cases, prediction_time_origin="sequencing date"
+    )
+    sequencing_manifest.update(
+        {
+            "feature_set": "sequencing_anchored_gleason_somatic",
+            "base_inputs_dir": str(base_inputs_dir),
+            "sensitivity_analysis": "gleason_somatic",
+            "time_origin_column": SEQUENCING_DATE,
+            "specimen_selection": (
+                "sample collection date closest to ADT start; earlier date wins an "
+                "exact tie; same-date testing groups unioned with max"
+            ),
+            "landmark_definition": "sequencing date + landmark days",
+            "lab_window": "labs drawn before sequencing date + landmark days",
+            "outcome": f"days from sequencing date + landmark to {args.endpoint} or last contact",
+            "endpoint": args.endpoint,
+            "n_sequenced_before_adt": int(offsets.lt(0).sum()),
+            "somatic_path": str(args.somatic_path),
+            "somatic_manifest_path": str(args.somatic_manifest_path),
+            "gleason_path": str(args.gleason_path),
+        }
+    )
+    (sequencing_dir / BUILD_MANIFEST_FILENAME).write_text(
+        json.dumps(sequencing_manifest, indent=2)
+    )
 
     # Plan §4a: clinical stratifier inputs for risk_score_stratified_figures.py.
     # Read the trio columns from the UNFILTERED somatic wide table (every
@@ -1119,12 +1360,14 @@ def main(args: argparse.Namespace) -> None:
         stage = pd.DataFrame(columns=[ca.ID_COL, "EVENT_DATE", STAGE_COLUMN])
 
     for landmark_day in sensitivity_landmarks:
+        # Full ADT cohort: Gleason and stage only. The trio is somatic, so it is
+        # stratified only on the sequencing-anchored cohort below.
         landmark_base_path = base_inputs_dir / aggregated_filename(landmark_day)
         landmark_base = pd.read_csv(landmark_base_path, low_memory=False)
         clinical = build_clinical_stratifiers(
             landmark_base,
             raw_somatic,
-            trio_columns,
+            [],
             gleason,
             stage,
             treatment_anchors=treatment_anchors,
@@ -1135,21 +1378,50 @@ def main(args: argparse.Namespace) -> None:
         print(
             f"clinical_stratifiers +{landmark_day}d: {len(clinical):,} patients -> {clinical_path}"
         )
+        sequencing_clinical = build_sequencing_clinical_stratifiers(
+            sequencing_cases[landmark_day],
+            raw_somatic,
+            trio_columns,
+            gleason,
+            stage,
+            specimen=specimen,
+            landmark_day=landmark_day,
+        )
+        sequencing_clinical_path = stratifiers_dir / sequencing_clinical_stratifiers_filename(
+            landmark_day
+        )
+        sequencing_clinical.to_csv(sequencing_clinical_path, index=False)
+        print(
+            f"clinical_stratifiers sequencing +{landmark_day}d: "
+            f"{len(sequencing_clinical):,} patients -> {sequencing_clinical_path}"
+        )
 
     root_manifest = {
         "feature_set": "somatic_gleason_indexed",
         "analyses": list(INDEX_ANALYSES),
         "cohort_sizes": cohort_sizes,
         "available_case_sensitivities": {
-            analysis: {
-                "path": sensitivity_name,
+            "gleason": {
+                "path": AVAILABLE_CASE_SENSITIVITIES[0],
+                "prediction_time_origin": "ADT start",
                 "n_patients_by_landmark": {
                     str(landmark_day): int(len(available))
-                    for landmark_day, available in sensitivity_cases[analysis].items()
+                    for landmark_day, available in sensitivity_cases["gleason"].items()
                 },
-                "comparison": f"labs versus {analysis}, same available cases at each landmark",
-            }
-            for analysis, sensitivity_name in zip(all_analyses, all_sensitivity_names)
+                "comparison": "labs versus gleason, same available cases at each landmark",
+            },
+            "gleason_somatic": {
+                "path": GLEASON_SOMATIC_AVAILABLE_CASE,
+                "prediction_time_origin": "sequencing date",
+                "n_patients_by_landmark": {
+                    str(landmark_day): int(len(available))
+                    for landmark_day, available in sequencing_cases.items()
+                },
+                "comparison": (
+                    "labs versus gleason/somatic combinations, same patients at each "
+                    "sequencing landmark"
+                ),
+            },
         },
     }
     (output_dir / BUILD_MANIFEST_FILENAME).write_text(

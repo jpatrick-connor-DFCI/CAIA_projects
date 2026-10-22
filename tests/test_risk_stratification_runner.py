@@ -165,3 +165,79 @@ class TestMatchedCohortStage:
         assert matched_gleason_cox
         captured = capsys.readouterr()
         assert "missing comparison risks" in captured.out
+
+
+def _capture_commands(monkeypatch) -> list[list]:
+    commands: list[list] = []
+
+    def fake_run(cmd, dry_run=False):
+        commands.append([str(part) for part in cmd])
+        return 0
+
+    monkeypatch.setattr(cp, "_run", fake_run)
+    return commands
+
+
+def _write_risks(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("DFCI_MRN,endpoint,dataset,duration_days,event,risk_score\n")
+
+
+def _stratifiers_dir(inputs_dir: Path) -> Path:
+    path = inputs_dir / "somatic_gleason" / "clinical_stratifiers"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+class TestAnchors:
+    """Full-cohort stratifiers stay on ADT (Gleason/stage only); the matched
+    gleason_somatic cohort is sequencing-anchored, so it gets the sequencing
+    stratifier file and a sequencing-date KM axis."""
+
+    def test_full_cohort_runs_only_gleason_and_stage(self, tmp_path, monkeypatch):
+        commands = _capture_commands(monkeypatch)
+        run = _run(tmp_path, tmp_path / "inputs")
+        _write_risks(cp.patient_risk_path(run, "elastic-net", 0, "both"))
+        (_stratifiers_dir(run["inputs_dir"]) / "clinical_stratifiers_landmark0.csv").write_text("x\n")
+
+        cp.run_risk_stratification(run, dry_run=True)
+        full = [cmd for cmd in commands if "full_cohort" in " ".join(cmd)]
+        assert len(full) == len(cp.RISK_STRATIFICATION_SCHEMES)
+        for cmd in full:
+            i = cmd.index("--stratifiers")
+            assert cmd[i + 1:i + 3] == ["gleason", "stage"]
+            assert "--time-origin-label" not in cmd
+
+    def test_matched_sequencing_cohort_gets_sequencing_stratifiers_and_axis(
+        self, tmp_path, monkeypatch
+    ):
+        commands = _capture_commands(monkeypatch)
+        run = _run(tmp_path, tmp_path / "inputs")
+        labs_dir = cp._clinical_combination_dir(run, "gleason_somatic", "labs", "cox", 0)
+        _write_risks(labs_dir / "cox_agg_multivariable_patient_risks.csv")
+        sequencing_path = (
+            _stratifiers_dir(run["inputs_dir"]) / "clinical_stratifiers_sequencing_landmark0.csv"
+        )
+        sequencing_path.write_text("x\n")
+
+        cp.run_risk_stratification(run, dry_run=True)
+        matched = [cmd for cmd in commands if "matched" in " ".join(cmd)]
+        assert matched
+        for cmd in matched:
+            assert cmd[cmd.index("--clinical-features") + 1] == str(sequencing_path)
+            assert cmd[cmd.index("--time-origin-label") + 1] == "Days from sequencing date"
+
+    def test_matched_cohort_without_stratifier_file_still_uses_sequencing_axis(
+        self, tmp_path, monkeypatch
+    ):
+        commands = _capture_commands(monkeypatch)
+        run = _run(tmp_path, tmp_path / "inputs")
+        labs_dir = cp._clinical_combination_dir(run, "gleason_somatic", "labs", "cox", 0)
+        _write_risks(labs_dir / "cox_agg_multivariable_patient_risks.csv")
+
+        cp.run_risk_stratification(run, dry_run=True)
+        matched = [cmd for cmd in commands if "matched" in " ".join(cmd)]
+        assert matched
+        for cmd in matched:
+            assert "--clinical-features" not in cmd
+            assert cmd[cmd.index("--time-origin-label") + 1] == "Days from sequencing date"

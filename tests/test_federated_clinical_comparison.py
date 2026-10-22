@@ -179,3 +179,88 @@ def test_subpopulation_summary_strata():
     assert s.loc["Gleason available", "n"] + s.loc["Gleason missing", "n"] == 150
     assert s.loc["Sequenced", "n"] + s.loc["Not sequenced", "n"] == 150
     assert s.loc["Gleason available", "spearman_rho"] > 0.5
+
+
+def test_subpopulation_summary_sections_select_strata():
+    scores, clinical = _scores_and_clinical()
+    seq_only = fcc.subpopulation_score_summary(scores, clinical, sections=("sequencing",))
+    strata = set(seq_only["stratum"])
+    assert {"Sequenced", "Any trio altered", "TP53 altered"} <= strata
+    assert not strata & {"Full cohort", "Gleason available", "Gleason missing"}
+
+
+# --------------------------------------------------------------------------- #
+# Sequencing-anchored trio arm
+# --------------------------------------------------------------------------- #
+def test_specimen_is_the_one_closest_to_adt():
+    somatic = _somatic([
+        (1, _day(-60), _day(-60), 1, 0, 0, 0),
+        (1, _day(400), _day(400), 0, 1, 0, 0),   # farther from ADT: not selected
+        (2, _day(200), _day(200), 0, 0, 1, 0),   # sequenced after ADT + 180
+    ])
+    specimen = fcc.select_specimen(_local([1, 2, 3]), somatic, FEATURES)
+    assert set(specimen.index) == {1, 2}
+    assert specimen.loc[1, "SEQUENCING_DATE"] == _day(-60)
+    assert specimen.loc[1, "TP53_ANY"] == 1
+    assert specimen.loc[2, "SEQUENCING_TO_ADT_DAYS"] == 200
+
+
+def test_sequencing_anchored_local_moves_anchor_and_age():
+    local = pd.concat([_local([1, 2, 3])] * 2, ignore_index=True)  # long frame
+    specimen = pd.DataFrame(
+        {"SEQUENCING_DATE": [_day(-365), _day(200)]},
+        index=pd.Index([1, 2], name="DFCI_MRN"),
+    )
+    out = fcc.sequencing_anchored_local(local, specimen)
+    assert sorted(out["DFCI_MRN"].unique()) == [1, 2]  # unsequenced dropped
+    assert len(out) == 4
+    by_id = out.groupby("DFCI_MRN").first()
+    assert by_id.loc[1, "TREATMENT_ANCHOR_DATE"] == _day(-365)
+    assert by_id.loc[2, "TREATMENT_ANCHOR_DATE"] == _day(200)
+    assert np.isclose(by_id.loc[1, "AGE_AT_TREATMENTSTART"], 70.0 - 365 / fcc.fs.DAYS_PER_YEAR)
+    assert np.isclose(by_id.loc[2, "AGE_AT_TREATMENTSTART"], 70.0 + 200 / fcc.fs.DAYS_PER_YEAR)
+    # The input frame is not modified.
+    assert (local["TREATMENT_ANCHOR_DATE"] == ANCHOR).all()
+
+
+def test_trio_comes_from_the_anchoring_specimen_at_every_landmark():
+    somatic = _somatic([
+        (1, _day(-10), _day(-10), 1, 0, 0, 0),
+        # collected after sequencing but before sequencing + 90: never used
+        (1, _day(40), _day(40), 0, 1, 1, 1),
+    ])
+    local = _local([1, 2])
+    specimen = fcc.select_specimen(local, somatic, FEATURES)
+    seq_local = fcc.sequencing_anchored_local(local, specimen)
+    gleason = _gleason([(1, _day(-200), _day(-200), 7)])
+    out = fcc.build_clinical_features(seq_local, [0, 90], gleason=gleason, somatic=somatic,
+                                      somatic_features=FEATURES, specimen=specimen)
+    assert set(out["person_id"]) == {1}
+    out = out.set_index("landmark_days")
+    for lm in (0, 90):
+        assert out.loc[lm, "TP53_ANY"] == 1
+        assert out.loc[lm, "RB1_ANY"] == 0
+        assert out.loc[lm, "SOMATIC_N_GENES_ALTERED"] == 1
+        assert bool(out.loc[lm, "HAS_SEQUENCING"])
+    assert np.isclose(out.loc[0, "AGE"], 70.0 - 10 / fcc.fs.DAYS_PER_YEAR)
+    # Without the specimen, the later specimen would have replaced it by +90.
+    latest = fcc.build_clinical_features(seq_local, [90], gleason=gleason, somatic=somatic,
+                                         somatic_features=FEATURES)
+    assert latest.set_index("person_id").loc[1, "RB1_ANY"] == 1
+
+
+def test_compare_by_subpopulation_scores_each_arm_on_its_own_inputs():
+    scores, clinical = _scores_and_clinical(seed=1)
+    seq_scores, seq_clinical = _scores_and_clinical(seed=2)
+    kwargs = dict(n_bootstrap=20, seed=0)
+    comp, coefs = fcc.compare_by_subpopulation(
+        {"gleason": (scores, clinical), "trio": (seq_scores, seq_clinical)}, **kwargs
+    )
+    assert set(comp["subpopulation"]) == {"gleason", "trio"}
+    assert set(coefs["subpopulation"]) == {"gleason", "trio"}
+    for sub, (s, c) in (("gleason", (scores, clinical)), ("trio", (seq_scores, seq_clinical))):
+        expected, _ = fcc.compare_clinical_models(
+            s, c, subpopulations={sub: fcc.SUBPOPULATIONS[sub]}, **kwargs
+        )
+        got = comp[comp["subpopulation"] == sub].reset_index(drop=True)
+        pd.testing.assert_frame_equal(got, expected.reset_index(drop=True))

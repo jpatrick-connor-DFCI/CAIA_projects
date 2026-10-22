@@ -128,14 +128,18 @@
 #
 # Clinical combinations and risk stratification (ADT runs, under `prediction/`):
 # `combinations_<gleason|gleason_somatic>_auc__...` shows the raw held-out test
-# mean AUC(t) of every combination arm by landmark and model (no paired deltas; CSV
+# mean AUC(t) of every combination arm by landmark and model; the gleason_somatic
+# cohort is anchored on the sequencing date (no paired deltas; CSV
 # in `prediction/data/`). `compiled/prediction/riskstrat_<test|cv_oof>_<source>_lm<N>__...`
 # pages the KM curves for the labs risk score and each clinical or comparison-arm
-# stratifier (source `full` or `<cohort>_<cox|xgboost>` matched cohorts);
+# stratifier (source `full`, Gleason and stage at ADT + landmark, or
+# `<cohort>_<cox|xgboost>` matched cohorts; gleason_somatic is on the
+# sequencing-date clock with TP53/PTEN/RB1 from its anchoring specimen);
 # `withinstrat_<scheme>_<stratifier>_lm<N>` shows labs high vs low inside each
 # clinical level. The test and cv_oof schemes are never pooled.
 # `comutation_<trio_combinations|tp53_rb1|trio_burden>_lm<N>` gives TP53/PTEN/RB1
-# co-mutation KMs on the full landmark cohort (cv_oof file, falling back to test).
+# co-mutation KMs on the sequencing-anchored gleason_somatic cohort (cv_oof file,
+# falling back to test).
 # All read `risk_stratified_patients_*.csv` from run_risk_stratification; rerun it
 # if those files are missing, since older runs did not write them.
 #
@@ -179,7 +183,8 @@
 # `federated_05_transfer_no_dfci` (the models trained without Dana-Farber scored on
 # Dana-Farber platinum/NEPC/AVPC: a, mean AUC(t) and paired ΔAUC(t) vs. age; b, c, the full models
 # vs. local out-of-fold Cox models of Gleason + age and of TP53/RB1/PTEN + altered-gene
-# count + age, in the patients with a Gleason score / with sequencing before the landmark).
+# count + age, in the patients with a Gleason score before the ADT landmark / in sequenced
+# patients on a sequencing-date clock).
 # The local Figure 3 stays on Dana-Farber patient-level data. The cohort
 # sensitivity components are assembled into one continuous multipanel figure for
 # each analysis setting. Federated manuscript plots reuse the original subplot

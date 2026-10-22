@@ -8,11 +8,12 @@ from what a clinician already has:
 
 * ``gleason`` -- patients with a Gleason score available before the landmark,
   compared with an unpenalized Cox of GLEASON_SCORE (continuous) + age.
-* ``trio`` -- patients with a sequencing specimen collected before the
-  landmark, compared with an unpenalized Cox of TP53_ANY + RB1_ANY + PTEN_ANY
-  + SOMATIC_N_GENES_ALTERED + age. Each indicator is any alteration (SNV, DEL,
-  AMP or SV); the burden term counts every panel gene with an alteration,
-  the trio included, exactly as in the ``sequencing_any`` screen.
+* ``trio`` -- sequenced patients, on a clock anchored on the sequencing date
+  (sequencing_anchored_local), compared with an unpenalized Cox of TP53_ANY +
+  RB1_ANY + PTEN_ANY + SOMATIC_N_GENES_ALTERED + age at sequencing. Each
+  indicator is any alteration (SNV, DEL, AMP or SV) on the specimen closest to
+  ADT start (the one the ``sequencing_any`` screen uses); the burden term
+  counts every panel gene with an alteration, the trio included.
 
 The transferred score is never refit. The clinical Cox models are fit on the
 same DFCI patients they are scored on, so each patient's clinical score comes
@@ -26,8 +27,11 @@ the scores resampled jointly.
 
 Clinical data obey the transfer's strict pre-landmark rule
 (``federated_scoring.filter_pre_landmark`` keeps days < landmark): a Gleason
-score or specimen counts only if it was available before
-TREATMENT_ANCHOR_DATE + landmark.
+score counts only if it was available before TREATMENT_ANCHOR_DATE + landmark.
+For the trio the anchor is the sequencing date, so the transferred labs score
+is recomputed from labs before sequencing + landmark, outcomes run from
+sequencing + landmark, and the anchoring specimen defines membership at every
+landmark.
 """
 
 from __future__ import annotations
@@ -123,6 +127,41 @@ def _patient_anchors(local: pd.DataFrame) -> pd.DataFrame:
     return pt
 
 
+def select_specimen(
+    local: pd.DataFrame, somatic: pd.DataFrame, somatic_features: list[str]
+) -> pd.DataFrame:
+    """Each local patient's specimen closest to ADT start (sg.select_sequencing_specimen)."""
+    anchors = _patient_anchors(local)["anchor"].rename_axis(sg.ca.ID_COL)
+    return sg.select_sequencing_specimen(somatic, list(somatic_features), anchors)
+
+
+def sequencing_anchored_local(local: pd.DataFrame, specimen: pd.DataFrame) -> pd.DataFrame:
+    """Re-anchor the local long frame on each sequenced patient's sequencing date.
+
+    Keeps patients with a specimen, sets TREATMENT_ANCHOR_DATE to SEQUENCING_DATE
+    and moves AGE_AT_TREATMENTSTART to age at sequencing. The transfer derives
+    every lab offset and outcome duration from the anchor date
+    (fs.derive_analysis_columns), so passing this to fet.evaluate_transfer
+    scores the frozen bundles on labs before sequencing + landmark with
+    outcomes from sequencing + landmark.
+
+    Score it with exclusion="none": a pre-anchor exclusion would now be judged
+    against the sequencing date. Apply any cohort exclusion to ``local`` first.
+    """
+    sequencing = specimen[sg.SEQUENCING_DATE]
+    ids = pd.to_numeric(local[LOCAL_ID_COL], errors="coerce")
+    keep = ids.isin(sequencing.index)
+    out = local.loc[keep].copy()
+    adt = sg._drop_tz(pd.to_datetime(out["TREATMENT_ANCHOR_DATE"], errors="coerce", format="mixed"))
+    new_anchor = pd.to_datetime(ids.loc[keep].map(sequencing))
+    out["TREATMENT_ANCHOR_DATE"] = new_anchor
+    out["AGE_AT_TREATMENTSTART"] = (
+        pd.to_numeric(out["AGE_AT_TREATMENTSTART"], errors="coerce")
+        + (new_anchor - adt).dt.days / fs.DAYS_PER_YEAR
+    )
+    return out
+
+
 def build_clinical_features(
     local: pd.DataFrame,
     landmarks,
@@ -130,6 +169,7 @@ def build_clinical_features(
     gleason: pd.DataFrame,
     somatic: pd.DataFrame,
     somatic_features: list[str],
+    specimen: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Per patient × landmark Gleason and trio features, available before the landmark.
 
@@ -138,6 +178,10 @@ def build_clinical_features(
     specimen collected by then, same-day specimens unioned
     (sg.latest_available_by_landmark). A sequenced patient's uncalled genes are
     wild-type (0), as in sg.build_indexed_feature_sets.
+
+    With ``specimen`` (select_specimen) and a sequencing-anchored ``local``
+    (sequencing_anchored_local), the trio comes from that specimen at every
+    landmark: it defines time 0, so it is available by construction.
     """
     missing_trio = [f for f in TRIO_FEATURES if f not in somatic_features]
     if missing_trio:
@@ -152,11 +196,14 @@ def build_clinical_features(
             gleason, cutoffs, date_col="gleason_date",
             available_date_col=sg.GLEASON_AVAILABLE_DATE, value_cols=[GLEASON_FEATURE],
         ).dropna(subset=[GLEASON_FEATURE])
-        s = sg.latest_available_by_landmark(
-            somatic, cutoffs, date_col=sg.SOMATIC_AVAILABLE_DATE,
-            order_col=sg.SEQUENCING_DATE, value_cols=list(somatic_features),
-            combine_latest_ties_with_max=True,
-        )
+        if specimen is None:
+            s = sg.latest_available_by_landmark(
+                somatic, cutoffs, date_col=sg.SOMATIC_AVAILABLE_DATE,
+                order_col=sg.SEQUENCING_DATE, value_cols=list(somatic_features),
+                combine_latest_ties_with_max=True,
+            )
+        else:
+            s = specimen.loc[specimen.index.isin(pt.index), list(somatic_features)]
         s = s.apply(pd.to_numeric, errors="coerce").fillna(0)
         s[BURDEN_COL] = s[list(somatic_features)].sum(axis=1).astype(int)
         s[HAS_SEQUENCING] = True
@@ -359,6 +406,26 @@ def compare_clinical_models(
             pd.DataFrame(coefs))
 
 
+def compare_by_subpopulation(
+    inputs: dict[str, tuple[pd.DataFrame, pd.DataFrame]], **kwargs
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """compare_clinical_models per subpopulation on its own (scores, clinical).
+
+    The Gleason arm is scored on the ADT clock and the trio arm on the
+    sequencing clock, so each subpopulation brings its own transfer scores and
+    clinical features. Returns the concatenated (comparison, coefficients).
+    """
+    comparisons, coefs = [], []
+    for sub, (scores, clinical) in inputs.items():
+        comp, coef = compare_clinical_models(
+            scores, clinical, subpopulations={sub: SUBPOPULATIONS[sub]}, **kwargs
+        )
+        comparisons.append(comp)
+        coefs.append(coef)
+    return (pd.concat(comparisons, ignore_index=True),
+            pd.concat(coefs, ignore_index=True))
+
+
 # --------------------------------------------------------------------------- #
 # Risk scores inside the subpopulations
 # --------------------------------------------------------------------------- #
@@ -371,13 +438,21 @@ def _describe(values: pd.Series) -> dict:
             "q25": float(q[.25]), "median": float(q[.5]), "q75": float(q[.75])}
 
 
+SUMMARY_SECTIONS = ("cohort", "gleason", "sequencing")
+
+
 def subpopulation_score_summary(scores: pd.DataFrame, clinical: pd.DataFrame,
-                                config: str = "both") -> pd.DataFrame:
+                                config: str = "both",
+                                sections=SUMMARY_SECTIONS) -> pd.DataFrame:
     """Transferred score distribution by clinical stratum, per bundle × landmark.
 
     A patient's score does not depend on the endpoint (one feature frame), so
     patients are pooled across endpoints. Spearman rho of the score with
     Gleason (on 'Gleason available') and with the burden (on 'Sequenced').
+    ``sections`` picks the strata: "cohort" (full cohort), "gleason" (Gleason
+    available/missing and groups) and "sequencing" (sequenced and trio
+    strata), so ADT- and sequencing-anchored scores can each be summarized on
+    their own strata.
     """
     scores = _normalize_ids(scores)
     clinical = _normalize_ids(clinical)
@@ -392,14 +467,19 @@ def subpopulation_score_summary(scores: pd.DataFrame, clinical: pd.DataFrame,
         r = d["risk_score"]
         g_ok = d[GLEASON_FEATURE].notna()
         s_ok = seq.loc[d.index]
-        strata = [("Full cohort", d.index == d.index, None),
-                  ("Gleason available", g_ok, GLEASON_FEATURE),
-                  ("Gleason missing", ~g_ok, None)]
-        strata += [(label, d["gleason_group"].eq(label), None) for _, _, label in GLEASON_BINS]
-        strata += [("Sequenced", s_ok, BURDEN_COL), ("Not sequenced", ~s_ok, None),
-                   ("Any trio altered", s_ok & any_trio.loc[d.index], None),
-                   ("No trio alteration", s_ok & ~any_trio.loc[d.index], None)]
-        strata += [(f"{g} altered", s_ok & d[f].eq(1), None) for g, f in zip(TRIO_GENES, TRIO_FEATURES)]
+        strata = []
+        if "cohort" in sections:
+            strata += [("Full cohort", d.index == d.index, None)]
+        if "gleason" in sections:
+            strata += [("Gleason available", g_ok, GLEASON_FEATURE),
+                       ("Gleason missing", ~g_ok, None)]
+            strata += [(label, d["gleason_group"].eq(label), None) for _, _, label in GLEASON_BINS]
+        if "sequencing" in sections:
+            strata += [("Sequenced", s_ok, BURDEN_COL), ("Not sequenced", ~s_ok, None),
+                       ("Any trio altered", s_ok & any_trio.loc[d.index], None),
+                       ("No trio alteration", s_ok & ~any_trio.loc[d.index], None)]
+            strata += [(f"{g} altered", s_ok & d[f].eq(1), None)
+                       for g, f in zip(TRIO_GENES, TRIO_FEATURES)]
         for label, mask, rho_with in strata:
             mask = np.asarray(mask, dtype=bool)
             row = {"bundle": bundle, "model_family": d["model_family"].iloc[0],
