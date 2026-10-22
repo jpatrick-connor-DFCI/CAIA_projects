@@ -21,13 +21,9 @@ whether it adds to that model:
 In each subpopulation a third, combined Cox adds the bundle's transferred
 labs score (z-scored within the subpopulation) to the clinical covariates.
 
-Every landmark of an endpoint × subpopulation is evaluated on the same
-patients: those scored (fet.evaluate_transfer's common cohort, at risk at
-every landmark) and members with complete covariates at every landmark. Clinical
-data only accrue as the landmark moves later, so this is membership at the
-earliest landmark among the patients at risk at the latest; each patient's
-covariates (the Gleason score closest to the landmark) still come from their
-own landmark.
+The scored patients are fet.evaluate_transfer's common cohort (at risk at
+every landmark); subpopulation membership is then taken at each landmark, so
+a patient whose Gleason score becomes available later joins at that landmark.
 
 The transferred score is never refit. The clinical and combined Cox models
 are fit on the same DFCI patients they are scored on, so each patient's score
@@ -111,8 +107,7 @@ SCORE_COVARIATE = "TRANSFERRED_SCORE"
 
 COMPARISON_COLUMNS = [
     "endpoint", "landmark_days", "subpopulation", "subpopulation_label", "bundle",
-    "model_family", "model", "n_patients", "n_events", "n_dropped_not_every_landmark",
-    "n_scored", "n_scored_events",
+    "model_family", "model", "n_patients", "n_events", "n_scored", "n_scored_events",
     "c_index", "c_index_lo", "c_index_hi", "delta_c_vs_transferred", "delta_lo",
     "delta_hi", "delta_c_vs_clinical", "delta_c_vs_clinical_lo", "delta_c_vs_clinical_hi",
     "c_index_apparent", "mean_auc", "mean_auc_lo", "mean_auc_hi",
@@ -367,12 +362,6 @@ def _endpoint_landmark_frame(scores: pd.DataFrame) -> tuple[pd.DataFrame, list[t
     return outcome.set_index(ID_COL).join(risks).reset_index(), keys
 
 
-def _complete_members(frame: pd.DataFrame, spec: dict) -> pd.DataFrame:
-    """Subpopulation members (all membership columns present) with every Cox covariate."""
-    members = frame[frame[list(spec["member"])].notna().all(axis=1)]
-    return members.dropna(subset=list(spec["covariates"]))
-
-
 def compare_clinical_models(
     scores: pd.DataFrame,
     clinical: pd.DataFrame,
@@ -383,7 +372,6 @@ def compare_clinical_models(
     min_events: int = 10,
     horizons_days=fet.DEFAULT_HORIZONS_DAYS,
     subpopulations: dict = SUBPOPULATIONS,
-    common_cohort: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Transferred labs/age scores vs the out-of-fold clinical and combined Cox, per subpopulation.
 
@@ -394,46 +382,28 @@ def compare_clinical_models(
     same patients) sits on its own row. The combined Cox (that bundle's
     transferred labs score + the clinical covariates) also carries its paired
     difference from the clinical Cox (``delta_*_vs_clinical``).
-
-    With ``common_cohort`` (the default) each endpoint × subpopulation keeps
-    only the patients scored and complete members at every landmark, so its
-    landmarks are compared on the same patients
-    (``n_dropped_not_every_landmark`` counts the rest).
     """
     scores = _normalize_ids(scores)
     clinical = _normalize_ids(clinical)
     families = scores.drop_duplicates("bundle").set_index("bundle")["model_family"].to_dict()
-    frames = {}
+    rows, coefs = [], []
     for (endpoint, lm), grp in scores.groupby(["endpoint", "landmark_days"], sort=True):
         frame, keys = _endpoint_landmark_frame(grp)
-        frames[(endpoint, lm)] = (frame.merge(
-            clinical[clinical["landmark_days"] == lm].drop(columns="landmark_days"),
-            on=ID_COL, how="left"), keys)
-    eligible: dict[tuple, set] = {}
-    for (endpoint, lm), (frame, _) in frames.items():
-        for sub, spec in subpopulations.items():
-            ids = set(_complete_members(frame, spec)[ID_COL])
-            eligible[(endpoint, sub)] = eligible.get((endpoint, sub), ids) & ids
-    rows, coefs = [], []
-    for (endpoint, lm), (frame, keys) in frames.items():
+        frame = frame.merge(clinical[clinical["landmark_days"] == lm].drop(columns="landmark_days"),
+                            on=ID_COL, how="left")
         bundles = sorted({b for b, _ in keys})
         for sub, spec in subpopulations.items():
             covariates = list(spec["covariates"])
             members = frame[frame[list(spec["member"])].notna().all(axis=1)]
-            sub_df = _complete_members(frame, spec)
-            n_complete = len(sub_df)
-            if common_cohort:
-                sub_df = sub_df[sub_df[ID_COL].isin(eligible[(endpoint, sub)])]
-            sub_df = sub_df.reset_index(drop=True)
+            sub_df = members.dropna(subset=covariates).reset_index(drop=True)
             base = {"endpoint": endpoint, "landmark_days": int(lm), "subpopulation": sub,
                     "subpopulation_label": spec["label"], "n_patients": len(sub_df),
-                    "n_events": int(sub_df[EVENT_COL].sum()),
-                    "n_dropped_not_every_landmark": n_complete - len(sub_df)}
+                    "n_events": int(sub_df[EVENT_COL].sum())}
             coef_base = {k_: base[k_] for k_ in
                          ("endpoint", "landmark_days", "subpopulation", "n_patients", "n_events")}
             note = ""
-            if len(members) > n_complete:
-                note = f"{len(members) - n_complete} member(s) missing a covariate dropped; "
+            if len(members) > len(sub_df):
+                note = f"{len(members) - len(sub_df)} member(s) missing a covariate dropped; "
             fit_kw = dict(n_folds=n_folds, seed=seed, horizons_days=horizons_days)
             fitted = base["n_events"] >= min_events
             unfitted = {"oof": np.full(len(sub_df), np.nan), "apparent_c": np.nan, "apparent_auc": np.nan,

@@ -286,26 +286,3 @@ def test_compare_by_subpopulation_scores_each_arm_on_its_own_inputs():
         got = comp[comp["subpopulation"] == sub].reset_index(drop=True)
         pd.testing.assert_frame_equal(got, expected.reset_index(drop=True))
 
-
-def test_subpopulations_are_the_same_patients_at_every_landmark():
-    scores, clinical = _scores_and_clinical()
-    ids = sorted(scores["person_id"].unique())
-    # Landmark 90: one patient no longer at risk, and every Gleason score now available.
-    later = scores[scores["person_id"] != ids[1]].assign(landmark_days=90)
-    clinical_90 = clinical.assign(landmark_days=90)
-    clinical_90["GLEASON_SCORE"] = clinical_90["GLEASON_SCORE"].fillna(7.0)
-    comp, _ = fcc.compare_clinical_models(pd.concat([scores, later]), pd.concat([clinical, clinical_90]),
-                                          n_bootstrap=0)
-    n = comp.groupby(["subpopulation", "landmark_days"])["n_patients"].first().unstack()
-    assert (n[0] == n[90]).all()
-    g = comp[comp["subpopulation"] == "gleason"].groupby("landmark_days").first()
-    # Gleason at day 0 among patients scored at both landmarks (ids[0] has none at day 0).
-    expected = clinical.loc[clinical["person_id"] != ids[1], "GLEASON_SCORE"].notna().sum()
-    assert g.loc[0, "n_patients"] == g.loc[90, "n_patients"] == expected
-    assert g.loc[0, "n_dropped_not_every_landmark"] == 1
-    assert g.loc[90, "n_dropped_not_every_landmark"] == 30
-
-    per_lm, _ = fcc.compare_clinical_models(pd.concat([scores, later]), pd.concat([clinical, clinical_90]),
-                                            n_bootstrap=0, common_cohort=False)
-    g = per_lm[per_lm["subpopulation"] == "gleason"].groupby("landmark_days")["n_patients"].first()
-    assert g[0] == clinical["GLEASON_SCORE"].notna().sum() and g[90] == len(ids) - 1

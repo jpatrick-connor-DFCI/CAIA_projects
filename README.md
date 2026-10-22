@@ -1194,7 +1194,8 @@ landmark are dropped (incident risk set) and follow-up is censored at 3650 days.
 Every landmark of an endpoint is evaluated on the same patients: those at risk at
 all landmarks (the 180-day risk set), so performance changes across landmarks are
 not changes in the test cohort (`--per-landmark-cohort` turns this off). The
-Gleason/trio subpopulations in Figure 5 b-d are fixed across landmarks the same way.
+Gleason/trio subpopulations in Figure 5 b-d are drawn from that cohort, with
+membership taken at each landmark.
 NEPC/AVPC are censored at last contact (death is not a competing event).
 Outputs: `transfer_metrics.csv` (mean AUC(t) + bootstrap CI and paired ΔAUC(t) vs the
 age-only baseline, which the figures plot; Harrell C + CI, paired ΔC, Uno's C, HR per SD
