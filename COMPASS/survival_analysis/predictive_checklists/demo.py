@@ -52,7 +52,7 @@ def build_demo_inputs(root, landmarks=(0,), seed=42, n=240):
             "anchor_col": "none", "endpoint": endpoint,
             "restrict_to_mrns": None, "exclude_mrns": None,
             "landmark_days": list(landmarks), "split_mode": "shared",
-            "auc_timeline_schema_version": 3, "auc_max_time_units": 260,
+            "auc_timeline_schema_version": 3, "auc_max_time_units": 522,
             "auc_time_unit_days": 7, "time_unit_days": 7,
             "auc_horizons_by_landmark": {str(x): {endpoint: [52, 104, 156]} for x in landmarks},
             "min_patient_coverage": .2,

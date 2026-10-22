@@ -117,9 +117,10 @@ def longitudinal_event_columns(frame) -> tuple[list[str], list[str]]:
     return event_cols, time_cols
 LONGITUDINAL_SCHEMA_VERSION = 1
 # ~10 years. Restores administrative censoring at the cohort level so it
-# matches the AUC(t)/Brier evaluation timeline, which is already capped at
-# DEFAULT_AUC_MAX_TIME_UNITS * DEFAULT_TIME_UNIT_DAYS = 260 * 7 = 1820 days by
-# default (see survival_common.helper); kept as an explicit, recorded flag
+# matches the AUC(t)/Brier evaluation timeline, whose grid stays strictly below
+# DEFAULT_AUC_MAX_TIME_UNITS = ceil(3650 / 7) = 522 weeks, i.e. at most
+# 521 * 7 = 3647 days, by default (see survival_common.helper); kept as an
+# explicit, recorded flag
 # rather than a silent default because it changes every existing
 # prediction-inputs result.
 DEFAULT_MAX_FOLLOWUP_DAYS = 3650.0
@@ -173,18 +174,21 @@ def validate_max_followup_days(
     """Raise if the administrative-censoring horizon is shorter than the
     AUC(t)/Brier evaluation timeline it must cover.
 
+    The horizon grid stays strictly below ``auc_max_time_units``, so the
+    latest horizon it can hold is ``(auc_max_time_units - 1) * time_unit_days``.
+
     A cohort censored shorter than the horizons it is scored at would
     silently blank the tail of every model's evaluation timeline rather than
     erroring, so this is a hard fail rather than a warning.
     """
     if max_followup_days is None:
         return
-    auc_horizon_days = auc_max_time_units * time_unit_days
+    auc_horizon_days = (auc_max_time_units - 1) * time_unit_days
     if max_followup_days < auc_horizon_days:
         raise ValueError(
             f"--max-followup-days {max_followup_days:g} is shorter than the "
-            f"AUC(t)/Brier evaluation horizon (--auc-max-time-units "
-            f"{auc_max_time_units} * --time-unit-days {time_unit_days} = "
+            f"latest AUC(t)/Brier evaluation horizon ((--auc-max-time-units "
+            f"{auc_max_time_units} - 1) * --time-unit-days {time_unit_days} = "
             f"{auc_horizon_days:g} days). A cohort censored shorter than the "
             "horizons it is scored at would silently blank the tail of every "
             "model's evaluation timeline. Raise --max-followup-days or lower "
@@ -1204,9 +1208,9 @@ if __name__ == "__main__":
             f"Administrative censoring horizon in days (default {DEFAULT_MAX_FOLLOWUP_DAYS:g}, "
             "~10 years). Events (PLATINUM/DEATH) occurring after this horizon are "
             "censored and durations clipped, for every downstream model that reads "
-            "this directory's cohort. Must be >= --auc-max-time-units * "
-            "--time-unit-days, since the AUC(t)/Brier timeline is already capped "
-            "there; use --no-max-followup-days to disable."
+            "this directory's cohort. Must be >= (--auc-max-time-units - 1) * "
+            "--time-unit-days, the latest horizon the AUC(t)/Brier timeline can "
+            "hold; use --no-max-followup-days to disable."
         ),
     )
     parser.add_argument(

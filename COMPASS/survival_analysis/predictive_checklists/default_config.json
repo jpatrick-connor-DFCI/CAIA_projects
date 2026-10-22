@@ -1,7 +1,7 @@
 {
   "endpoints": ["platinum", "nepc"],
   "landmarks": [0, 90, 180],
-  "horizons": [365, 730, 1095],
+  "horizons": [365, 730, 1095, 1460, 1825],
   "max_items": [3, 5, 8],
   "n_folds": 5,
   "seed": 42,

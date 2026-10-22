@@ -10,7 +10,7 @@ from pathlib import Path
 class RunConfig:
     endpoints: tuple = ("platinum", "nepc")
     landmarks: tuple = (0, 90, 180)
-    horizons: tuple = (365, 730, 1095)
+    horizons: tuple = (365, 730, 1095, 1460, 1825)
     max_items: tuple = (3, 5, 8)
     n_folds: int = 5
     seed: int = 42

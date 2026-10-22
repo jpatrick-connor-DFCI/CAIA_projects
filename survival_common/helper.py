@@ -39,10 +39,12 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local env
 DEFAULT_AUC_QUANTILES: tuple[float, ...] = (0.25, 0.375, 0.50, 0.625, 0.75)
 DEFAULT_AUC_TIME_UNIT_DAYS: int = 7
 DEFAULT_AUC_MAX_GRID_POINTS: int = 25
-# Administrative censoring horizon for IPCW metrics (~5 years in weeks). The
-# builders clamp the horizon grid to this so every requested horizon stays
-# inside the window the runners later evaluate over.
-DEFAULT_AUC_MAX_TIME_UNITS: int = 260
+# Administrative censoring horizon for IPCW metrics: ceil(3650 / 7) = 522
+# weeks, matching the cohort-level 10-year administrative censoring. The
+# builders clamp the horizon grid strictly below this so every requested
+# horizon stays inside the window the runners later evaluate over. In practice
+# the 75th percentile of train_val event times bounds the grid first.
+DEFAULT_AUC_MAX_TIME_UNITS: int = 522
 # v3 adds the required `auc_max_time_units` key and clamps the grid to it, so
 # v2 manifests (grid built without the cap) must be rebuilt, not reused.
 AUC_TIMELINE_SCHEMA_VERSION: int = 3

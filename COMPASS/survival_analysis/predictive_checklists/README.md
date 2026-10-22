@@ -15,7 +15,10 @@ cumulative incidence.
 ## Scope and inputs
 
 Defaults are `arm=adt`, `cohort=all`, `exclusion=none`, landmarks 0/90/180 days,
-and prediction horizons 365/730/1095 days **after each landmark**. Day 0 is the
+and prediction horizons 365/730/1095/1460/1825 days (1–5 years) **after each
+landmark**; horizons at/beyond the input manifest evaluation cap (522 weeks =
+3654 days by default, matching the 3650-day administrative censoring) are
+recorded as unsupported. Day 0 is the
 primary analysis. Later landmarks condition on remaining event-free and observed;
 they do not restrict day-0 membership. Existing Stage-1 eligibility rules remain.
 

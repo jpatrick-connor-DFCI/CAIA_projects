@@ -66,7 +66,7 @@ def test_training_rejects_test_rows_and_ignores_unrelated_columns(tmp_path):
 def test_preflight_and_unsupported_horizon_are_explicit(tmp_path):
     inputs = build_demo_inputs(tmp_path / "inputs", landmarks=(0,), n=100)
     dirs = {"platinum": inputs / "prediction_inputs_adt"}
-    config = small_config(endpoints=("platinum",), horizons=(2000,))
+    config = small_config(endpoints=("platinum",), horizons=(4000,))
     assert run(config, dirs, tmp_path / "audit", preflight_only=True) == 0
     assert not list((tmp_path / "audit").rglob("model.json"))
     assert run(config, dirs, tmp_path / "unsupported") == 2

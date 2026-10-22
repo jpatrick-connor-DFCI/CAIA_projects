@@ -1094,7 +1094,7 @@ surprised by them.
 
 ### Medium impact
 
-- **`auc_max_time_units = 260` is the default** (`DEFAULT_AUC_MAX_TIME_UNITS` in `survival_common/helper.py`)
+- **`auc_max_time_units = 522` is the default** (`DEFAULT_AUC_MAX_TIME_UNITS` in `survival_common/helper.py`; ceil(3650 / 7), matching the 10-year administrative censoring)
   and admin-censors AUC/Brier unless `--auc-max-time-units` is overridden. The builders clamp the horizon
   grid to it and runners read it back from the manifest; overriding it at run time only (not at build
   time) makes the two diverge, which the runner warns about.
