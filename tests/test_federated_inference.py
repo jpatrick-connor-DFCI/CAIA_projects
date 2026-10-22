@@ -18,10 +18,14 @@ from survival_common.federated_inference import (
     FederatedCoxModel,
     _check_xgboost_version,
     _model_base_score,
+    build_deephit_sequences,
     build_design_matrix,
+    deephit_cif,
     load_bundle,
     load_fitted_model,
     load_model,
+    main,
+    predict_cif,
     predict_risk,
     predict_survival,
     select_model,
@@ -492,3 +496,196 @@ def test_guard_ignores_a_default_base_score_and_an_unstamped_bundle():
     _check_xgboost_version({}, {"model_json": json.dumps(
         {"learner": {"learner_model_param": {"base_score": "[2.46E0]"}}}
     )})
+
+
+# ---------------------------------------------------------------------------
+# dynamic_deephit.
+#
+# The bundle carries a GRU's weights plus the pooled sequence preprocessing.
+# Scoring rebuilds each patient's lab history from a long frame and runs the
+# GRU in numpy, so these pin the sequence builder by hand, the numpy forward
+# against torch, and the survival horizon mapping.
+# ---------------------------------------------------------------------------
+DH_LABS = ["A", "B"]
+DH_WINDOW = 20
+
+
+def _deephit_bundle(hidden: int = 6, seed: int = 0) -> dict:
+    rng = np.random.default_rng(seed)
+    d = 2 * len(DH_LABS) + 1
+    shapes = {
+        "gru.weight_ih_l0": (3 * hidden, d),
+        "gru.weight_hh_l0": (3 * hidden, hidden),
+        "gru.bias_ih_l0": (3 * hidden,),
+        "gru.bias_hh_l0": (3 * hidden,),
+        "head.1.weight": (hidden, hidden),
+        "head.1.bias": (hidden,),
+        "head.4.weight": (DH_WINDOW + 1, hidden),
+        "head.4.bias": (DH_WINDOW + 1,),
+    }
+    state = {
+        name: {
+            "shape": list(shape),
+            "values": rng.normal(0.0, 0.5, shape).astype(np.float32).reshape(-1).tolist(),
+        }
+        for name, shape in shapes.items()
+    }
+    return {
+        "format": "caia-federated-model-bundle",
+        "format_version": 1,
+        "model_family": "dynamic_deephit",
+        "analysis_label": "adt",
+        "endpoint": "platinum",
+        "time_unit_days": 7.0,
+        "models": [{
+            "landmark_days": 0,
+            "config": "both",
+            "hyperparameters": {"hidden_dim": hidden, "dropout": 0.1, "lr": 1e-3},
+            "architecture": {"input_dim": d, "hidden_dim": hidden, "dropout": 0.1,
+                             "n_events": 1, "max_pred_window": DH_WINDOW},
+            "preprocessing": {
+                "lab_names": DH_LABS, "clip_lo": [11.0, None], "clip_hi": [25.0, None],
+                "mean": [12.0, 4.0], "std": [2.0, 0.5], "max_observed_time": 3,
+                "time_unit_days": 7,
+            },
+            "n_rounds": 5,
+            "state_dict": state,
+        }],
+    }
+
+
+def _deephit_labs() -> pd.DataFrame:
+    # p1: A at days -10 and -8 (one 7-day bin, averaged) and -3; B at -1; a
+    # post-landmark A that must be ignored and an unselected lab C.  p2: A at
+    # -15 only.  p3 appears only through a post-landmark lab.
+    return pd.DataFrame({
+        "person_id": ["p1", "p1", "p1", "p1", "p1", "p1", "p2", "p3"],
+        "lab_name": ["A", "A", " A ", "B", "A", "C", "A", "A"],
+        "lab_value": [10.0, 14.0, 20.0, 5.0, 99.0, 1.0, 30.0, 50.0],
+        "days_relative_to_anchor": [-10, -8, -3, -1, 4, -2, -15, 0],
+    })
+
+
+def test_deephit_sequences_match_a_hand_built_history():
+    model = _deephit_bundle()["models"][0]
+    ids, xs = build_deephit_sequences(_deephit_labs(), model, ids=["p1", "p2", "p3", "p4"])
+    assert ids == ["p1", "p2", "p3", "p4"]
+    # History depth 2, so TIME = bin + 2 and the anchor sits at TIME 2.  The
+    # first A bin averages 10 and 14 to 12, inside A's [11, 25] bounds; B has
+    # no bounds.  Columns: [A, B | mask A, mask B | TIME/3].
+    np.testing.assert_array_equal(xs[0], np.array([
+        [0.0, 0.0, 1, 0, 0 / 3],
+        [(20.0 - 12) / 2, (5.0 - 4) / 0.5, 1, 1, 1 / 3],
+        [0.0, 0.0, 0, 0, 2 / 3],
+    ], dtype=np.float32))
+    # p2's lone value 30 is clipped to 25 before standardizing.
+    np.testing.assert_array_equal(xs[1], np.array([
+        [(25.0 - 12) / 2, 0.0, 1, 0, 0.0],
+        [0.0, 0.0, 0, 0, 1.0],
+    ], dtype=np.float32))
+    # A patient with only post-landmark labs, or none, is the anchor alone.
+    anchor = np.zeros((1, 5), dtype=np.float32)
+    np.testing.assert_array_equal(xs[2], anchor)
+    np.testing.assert_array_equal(xs[3], anchor)
+
+
+def test_deephit_default_ids_are_the_patients_in_the_frame():
+    model = _deephit_bundle()["models"][0]
+    ids, _ = build_deephit_sequences(_deephit_labs(), model)
+    assert ids == ["p1", "p2", "p3"]
+
+
+def test_deephit_numpy_forward_matches_profile_torch_module():
+    torch = pytest.importorskip("torch")
+    from survival_common.deephit_engine import DynamicDeepHitGRU
+
+    bundle = _deephit_bundle(hidden=8, seed=3)
+    model = bundle["models"][0]
+    rng = np.random.default_rng(1)
+    n = 40
+    labs = pd.DataFrame({
+        "person_id": rng.integers(0, n, 400),
+        "lab_name": rng.choice(DH_LABS, 400),
+        "lab_value": rng.normal(12.0, 4.0, 400),
+        "days_relative_to_anchor": rng.integers(-60, 5, 400),
+    })
+    ids, xs = build_deephit_sequences(labs, model, ids=list(range(n)))
+    cif = deephit_cif(xs, model)
+
+    net = load_model(bundle, model)
+    assert isinstance(net, DynamicDeepHitGRU) and not net.training
+    lengths = torch.tensor([len(x) for x in xs])
+    padded = torch.zeros(n, int(lengths.max()), xs[0].shape[1])
+    for i, x in enumerate(xs):
+        padded[i, : len(x)] = torch.from_numpy(x)
+    with torch.no_grad():
+        event_probs, _ = net.probabilities(net(padded, lengths))
+    ref = np.cumsum(event_probs[:, 0, :].numpy().astype(float), axis=1)
+
+    assert cif.shape == (n, DH_WINDOW)
+    np.testing.assert_allclose(cif, ref, atol=1e-5)
+    np.testing.assert_allclose(predict_risk(labs, bundle, model, ids=list(range(n))), ref[:, -1],
+                               atol=1e-5)
+
+
+def test_deephit_weights_load_strictly_and_unchanged(tmp_path):
+    torch = pytest.importorskip("torch")
+    bundle = _deephit_bundle()
+    path = tmp_path / "deephit.json"
+    path.write_text(json.dumps(bundle))
+    net, _, model = load_fitted_model(path, 0)
+    for name, item in model["state_dict"].items():
+        np.testing.assert_array_equal(
+            net.state_dict()[name].numpy().reshape(-1),
+            np.asarray(item["values"], dtype=np.float32),
+        )
+
+
+def test_deephit_survival_is_one_minus_cif_on_whole_weeks():
+    bundle = _deephit_bundle()
+    model = bundle["models"][0]
+    ids, cif = predict_cif(_deephit_labs(), model)
+    assert np.all(np.diff(cif, axis=1) >= 0) and np.all(cif[:, -1] <= 1.0)
+
+    surv = predict_survival(cif, model, [6, 7, 20, 21, 7 * DH_WINDOW + 50])
+    # Day 6 holds no whole week: nothing can have happened yet.
+    np.testing.assert_array_equal(surv["survival_6d"], 1.0)
+    np.testing.assert_allclose(surv["survival_7d"], 1.0 - cif[:, 0])
+    np.testing.assert_allclose(surv["survival_20d"], 1.0 - cif[:, 1])
+    np.testing.assert_allclose(surv["survival_21d"], 1.0 - cif[:, 2])
+    # Past the window the CIF is flat at its total.
+    np.testing.assert_allclose(surv[f"survival_{7 * DH_WINDOW + 50}d"], 1.0 - cif[:, -1])
+
+    with pytest.raises(BundleError, match="CIF matrix"):
+        predict_survival(cif[:, -1], model, [365])
+
+
+def test_deephit_rejects_sequences_of_the_wrong_width():
+    model = _deephit_bundle()["models"][0]
+    with pytest.raises(BundleError, match="features per step"):
+        deephit_cif([np.zeros((2, 3), dtype=np.float32)], model)
+
+
+def test_deephit_cli_scores_the_whole_cohort(tmp_path):
+    bundle = _deephit_bundle()
+    (tmp_path / "b.json").write_text(json.dumps(bundle))
+    _deephit_labs().to_csv(tmp_path / "labs.csv", index=False)
+    pd.DataFrame({"person_id": ["p1", "p2", "p3", "p4"]}).to_csv(
+        tmp_path / "cohort.csv", index=False
+    )
+    rc = main([
+        "--bundle", str(tmp_path / "b.json"), "--data", str(tmp_path / "labs.csv"),
+        "--cohort", str(tmp_path / "cohort.csv"), "--landmark", "0",
+        "--horizons", "7,70", "--output", str(tmp_path / "out.csv"),
+    ])
+    assert rc == 0
+    out = pd.read_csv(tmp_path / "out.csv")
+    assert out["person_id"].tolist() == ["p1", "p2", "p3", "p4"]
+    assert list(out.columns) == [
+        "person_id", "risk_score", "landmark_days", "config", "model_family",
+        "survival_7d", "survival_70d",
+    ]
+    _, cif = predict_cif(_deephit_labs(), bundle["models"][0], ids=["p1", "p2", "p3", "p4"])
+    np.testing.assert_allclose(out["risk_score"], cif[:, -1])
+    # Patients without pre-landmark labs share the anchor-only prediction.
+    assert out["risk_score"].iloc[2] == out["risk_score"].iloc[3]

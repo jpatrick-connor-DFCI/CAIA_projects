@@ -155,7 +155,12 @@ leaf <- "platinum__all__incl"
 stopifnot(figure_public_path(file.path("/x/ADT/by_figure/figure4/e_combinations_gleason_auc_platinum", leaf)) ==
             file.path("/x/ADT/04_multivariate/internal", paste0("combinations_gleason_auc__", leaf)),
           figure_public_path(file.path("/x/ADT/by_figure/figure4/h_comutation_trio_combinations_landmark90", leaf)) ==
-            file.path("/x/ADT/03_univariate/internal", paste0("comutation_trio_combinations_lm90__", leaf)),
+            file.path("/x/ADT/03_univariate/internal/km", paste0("comutation_trio_combinations_lm90__", leaf)),
+          # Univariate KM curves and trajectories have their own folders, nested by lab.
+          figure_public_path(file.path("/x/ADT/by_figure/labs/Androgen axis/PSA/km_quintile/landmark0", leaf)) ==
+            file.path("/x/ADT/03_univariate/internal/km/psa", paste0("km_quintile_lm0__", leaf)),
+          figure_public_path(file.path("/x/ADT/by_figure/labs/Androgen axis/PSA/longitudinal/platinum_log", leaf)) ==
+            file.path("/x/ADT/03_univariate/internal/trajectories/psa", paste0("longitudinal_platinum_log__", leaf)),
           figure_public_path(file.path("/x/ADT/by_figure/figure4/a_discrimination_auc_platinum", leaf)) ==
             file.path("/x/ADT/04_multivariate/internal", paste0("discrimination_auc__", leaf)),
           # Non-canonical cohorts nest their usual section under cohort sensitivity.
@@ -163,14 +168,18 @@ stopifnot(figure_public_path(file.path("/x/ADT/by_figure/figure4/e_combinations_
             "/x/ADT/06_cohort_sensitivity/metastatic_llm__incl/04_multivariate/internal/discrimination_auc__platinum__metastatic_llm__incl",
           figure_public_path("/x/ADT/by_figure/cohort_comparison/lm180/nepc__all__incl") ==
             "/x/ADT/06_cohort_sensitivity/cohort_forest_lm180__nepc__all__incl",
-          figure_compiled_path("/x/ADT/03_univariate/internal/trajectories/psa/km__p", "/x/ADT") ==
-            "/x/ADT/03_univariate/internal/trajectories/psa/compiled/km__p",
           federated_output_path("/x/ADT", "xgboost_importance_no_dfci", ".png") ==
             "/x/ADT/04_multivariate/federated/xgboost_importance_no_dfci__platinum.png",
           federated_output_path("/x/ADT", "transfer_auc_t_no_dfci") == "/x/ADT/05_transfer/transfer_auc_t_no_dfci__platinum",
           federated_output_path("/x/ADT", "site_incidence_lm000") == "/x/ADT/01_cohort/site_incidence_lm000__platinum",
           federated_output_path("/x/ADT", "federated_km_quintile_psa_landmark0_by_site") ==
-            "/x/ADT/03_univariate/federated/federated_km_quintile_psa_landmark0_by_site__platinum")
+            "/x/ADT/03_univariate/federated/km/psa/federated_km_quintile_psa_landmark0_by_site__platinum",
+          federated_output_path("/x/ADT", "federated_trajectory_psa") ==
+            "/x/ADT/03_univariate/federated/trajectories/psa/federated_trajectory_psa__platinum",
+          federated_output_path("/x/ADT", "federated_km_quintile_summary") ==
+            "/x/ADT/03_univariate/federated/km/federated_km_quintile_summary__platinum",
+          federated_output_path("/x/ADT", "federated_volcano_landmark0") ==
+            "/x/ADT/03_univariate/federated/federated_volcano_landmark0__platinum")
 
 # Compiled pages keep the stratifier on each panel and size to the rows used.
 items <- lapply(c("risk_score", "tp53"), function(key) list(

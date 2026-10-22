@@ -1,8 +1,8 @@
 """Score a federated CAIA model bundle on local data.
 
-The federated runs (caia-project-compass/rhino_scripts) fit XGBoost and
-elastic-net Cox models across sites and export each fitted model as a
-``caia-federated-model-bundle`` JSON file.  This module loads such a bundle and
+The federated runs (caia-project-compass/rhino_scripts) fit XGBoost,
+elastic-net Cox and Dynamic-DeepHit models across sites and export each fitted
+model as a ``caia-federated-model-bundle`` JSON file.  This module loads such a bundle and
 applies it to a local cohort, so DFCI data can be scored on the cluster without
 NVFLARE and without any module from the federated repo.
 
@@ -22,6 +22,15 @@ wide frame (``<sanitized_lab_name>__<stat>``), plus the age column.  Anything th
 bundle does not ask for is ignored, and a covariate the frame lacks is treated
 as missing and imputed with the pooled train mean.
 
+``dynamic_deephit`` bundles read a *long* lab frame instead -- one row per lab
+measurement, with ``person_id``, ``lab_name``, ``lab_value`` and
+``days_relative_to_anchor`` -- because the model reads each patient's lab
+history as a sequence.  The bundle's pooled clip bounds, means and standard
+deviations are applied verbatim, the risk score is ``CIF_total`` (the
+probability of the event within the model's window), and survival at a horizon
+is ``1 - CIF(h)``.  Scoring runs the GRU in numpy, so torch is only needed to
+get the trained ``DynamicDeepHitGRU`` back as an object.
+
 Loading the trained object in Python::
 
     from survival_common.federated_inference import load_fitted_model
@@ -33,12 +42,24 @@ Loading the trained object in Python::
     cox.params_                           # coefficients by covariate name
     cox.predict(df, age_col="age_at_anchor")
 
+    gru, bundle, model = load_fitted_model("deephit_federated_model_adt.json", 90)
+    gru                                   # deephit_engine.DynamicDeepHitGRU (needs torch)
+    ids, cif = predict_cif(labs_long, model)   # numpy; cif[:, -1] is the risk
+
 CLI::
 
     python -m survival_common.federated_inference \\
         --bundle xgboost_federated_model_adt.json \\
         --data cohort_wide.parquet \\
         --landmark 90 \\
+        --output risk_scores.csv
+
+    # dynamic_deephit: --data is the long lab frame; --cohort lists every
+    # patient to score, so one with no pre-landmark labs is still scored.
+    python -m survival_common.federated_inference \\
+        --bundle deephit_federated_model_adt.json \\
+        --data labs_long.parquet --cohort cohort.parquet \\
+        --landmark 90 --horizons 365,730 \\
         --output risk_scores.csv
 """
 
@@ -60,6 +81,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
 
 
 BUNDLE_FORMAT = "caia-federated-model-bundle"
+DEEPHIT_FAMILY = "dynamic_deephit"
 SUPPORTED_FORMAT_VERSIONS = (1,)
 
 
@@ -103,7 +125,8 @@ def select_model(bundle: dict, landmark_days: int, config: str = "both") -> dict
     """Pick one fitted model out of a bundle.
 
     ``config`` is ``both`` for the full model or ``baseline`` for the age-only
-    comparator, matching the federated result tables.
+    comparator, matching the federated result tables.  (``dynamic_deephit``
+    bundles have no baseline.)
     """
     wanted = [
         m for m in bundle["models"]
@@ -301,6 +324,11 @@ def load_model(bundle: dict, model: dict):
     Booster method works on it: ``predict``, ``save_model``, ``trees_to_dataframe``,
     ``get_score``, SHAP via ``pred_contribs=True``, ``xgboost.plot_tree``.
 
+    For ``dynamic_deephit`` this is a :class:`deephit_engine.DynamicDeepHitGRU`
+    in eval mode with the federated weights loaded -- the federated app keeps
+    that class's module layout, so the state dict loads strictly.  This is the
+    only part of the family that needs torch.
+
     For ``elastic_net_cox`` there is no third-party estimator to rebuild -- the
     federated fit is this repo's own proximal-gradient Cox, not a lifelines or
     sksurv object -- so this returns a :class:`FederatedCoxModel`, a small
@@ -334,6 +362,9 @@ def load_model(bundle: dict, model: dict):
 
     if family == "elastic_net_cox":
         return FederatedCoxModel.from_bundle(bundle, model)
+
+    if family == DEEPHIT_FAMILY:
+        return _load_deephit_module(model)
 
     raise BundleError(f"unknown model_family {family!r}")
 
@@ -413,6 +444,215 @@ class FederatedCoxModel:
 
 
 # --------------------------------------------------------------------- #
+# Dynamic-DeepHit
+# --------------------------------------------------------------------- #
+def _deephit_state(model: dict) -> dict[str, np.ndarray]:
+    """The bundle's ``{name: {shape, values}}`` weights as float64 arrays."""
+    return {
+        name: np.asarray(item["values"], dtype=np.float64).reshape(item["shape"])
+        for name, item in model["state_dict"].items()
+    }
+
+
+def _load_deephit_module(model: dict):
+    try:
+        import torch
+
+        from .deephit_engine import DynamicDeepHitGRU
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "torch is required to load a dynamic_deephit model as a torch module; "
+            "predict_cif / predict_risk score it without torch."
+        ) from exc
+    arch = model["architecture"]
+    net = DynamicDeepHitGRU(
+        int(arch["input_dim"]), int(arch["hidden_dim"]), int(arch["n_events"]),
+        int(arch["max_pred_window"]), float(arch["dropout"]),
+    )
+    state = {
+        name: torch.from_numpy(
+            np.asarray(item["values"], dtype=np.float32).reshape(item["shape"])
+        )
+        for name, item in model["state_dict"].items()
+    }
+    net.load_state_dict(state, strict=True)
+    net.eval()
+    return net
+
+
+def build_deephit_sequences(
+    labs: pd.DataFrame,
+    model: dict,
+    *,
+    ids=None,
+    id_col: str = "person_id",
+    lab_col: str = "lab_name",
+    value_col: str = "lab_value",
+    days_col: str = "days_relative_to_anchor",
+) -> tuple[list, list[np.ndarray]]:
+    """Rebuild the GRU's input sequences from a long lab frame.
+
+    The federated app's ``build_sequences``, applied with the bundle's pooled
+    preprocessing (``cohort.build_person_period_wide`` followed by
+    ``deephit_engine.build_sequences``):
+
+    1. labs strictly before the landmark, binned to
+       ``REL_BIN = floor((day - landmark) / time_unit_days)`` and averaged per
+       (patient, bin, lab);
+    2. each patient's history depth ``-min(REL_BIN)``, and
+       ``TIME = REL_BIN + depth``, so the landmark sits at ``TIME = depth``;
+    3. bin means clipped to the pooled bounds, plus an all-missing anchor step
+       at the landmark;
+    4. per step ``[standardized values (missing -> 0) | observed mask |
+       TIME / max(max_observed_time, 1)]``.
+
+    ``ids`` defaults to every patient in ``labs`` in order of first
+    appearance.  Pass the full cohort to score patients with no labs: they
+    get the anchor step alone, as in training.
+    """
+    pre = model["preprocessing"]
+    lab_names = list(pre["lab_names"])
+    unit = float(pre.get("time_unit_days") or 7)
+    landmark = float(model["landmark_days"])
+    if ids is None:
+        ids = pd.unique(labs[id_col]).tolist()
+    ids = list(ids)
+
+    sub = labs[[id_col, lab_col, value_col, days_col]].copy()
+    sub[value_col] = pd.to_numeric(sub[value_col], errors="coerce")
+    sub[days_col] = pd.to_numeric(sub[days_col], errors="coerce")
+    # The sites strip lab names before matching them, so a stray space here
+    # must not drop a lab the model reads.
+    sub[lab_col] = sub[lab_col].astype(str).str.strip()
+    sub = sub.dropna(subset=[id_col, value_col, days_col])
+    sub = sub[(sub[days_col] < landmark) & sub[lab_col].isin(lab_names)
+              & sub[id_col].isin(ids)]
+    sub = sub.assign(
+        REL_BIN=np.floor((sub[days_col].to_numpy(dtype=float) - landmark) / unit).astype(int)
+    )
+    cells = sub.groupby([id_col, "REL_BIN", lab_col], sort=False)[value_col].mean().reset_index()
+
+    depth = (-cells.groupby(id_col)["REL_BIN"].min()).reindex(pd.Index(ids)).fillna(0).astype(int)
+
+    lo = {l: v for l, v in zip(lab_names, pre["clip_lo"]) if v is not None}
+    hi = {l: v for l, v in zip(lab_names, pre["clip_hi"]) if v is not None}
+    vals = cells[value_col].to_numpy(dtype=float)
+    lo_arr = cells[lab_col].map(lo).to_numpy(dtype=float)
+    hi_arr = cells[lab_col].map(hi).to_numpy(dtype=float)
+    has = np.isfinite(lo_arr) & np.isfinite(hi_arr)
+    vals[has] = np.clip(vals[has], lo_arr[has], hi_arr[has])
+    cells = cells.assign(**{value_col: vals})
+    cells["TIME"] = cells["REL_BIN"].to_numpy(dtype=int) + depth.reindex(cells[id_col]).to_numpy(dtype=int)
+
+    if cells.empty:
+        wide = pd.DataFrame(columns=[id_col, "TIME"] + lab_names)
+    else:
+        wide = cells.pivot_table(
+            index=[id_col, "TIME"], columns=lab_col, values=value_col, aggfunc="mean"
+        ).reset_index()
+        wide.columns.name = None
+    for lab in lab_names:
+        if lab not in wide.columns:
+            wide[lab] = np.nan
+    anchors = pd.DataFrame({id_col: ids, "TIME": depth.to_numpy(dtype=int)})
+    for lab in lab_names:
+        anchors[lab] = np.nan
+    wide = pd.concat([wide[[id_col, "TIME"] + lab_names], anchors], ignore_index=True)
+    wide = wide.sort_values([id_col, "TIME"], kind="mergesort")
+
+    raw = wide[lab_names].astype(float)
+    mean = pd.Series(pre["mean"], index=lab_names, dtype=float)
+    std = pd.Series(pre["std"], index=lab_names, dtype=float)
+    denom = max(float(pre["max_observed_time"]), 1.0)
+    x = np.hstack([
+        ((raw - mean) / std).fillna(0.0).to_numpy(dtype=np.float32),
+        raw.notna().to_numpy(dtype=np.float32),
+        (wide["TIME"].to_numpy(dtype=float) / denom).reshape(-1, 1).astype(np.float32),
+    ])
+
+    keys = wide[id_col].to_numpy()
+    starts = np.flatnonzero(np.r_[True, keys[1:] != keys[:-1]])
+    ends = np.r_[starts[1:], len(keys)]
+    by_id = {keys[s]: x[s:e] for s, e in zip(starts, ends)}
+    return ids, [by_id[i] for i in ids]
+
+
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    return 0.5 * (1.0 + np.tanh(0.5 * x))
+
+
+def deephit_cif(xs: list[np.ndarray], model: dict) -> np.ndarray:
+    """``[N, max_pred_window]`` cumulative incidence, by a numpy forward pass.
+
+    torch's single-layer GRU (gate order r, z, n) over each sequence's own
+    length, the final hidden state through the head with dropout off, a
+    softmax over ``max_pred_window + 1`` outputs, and the cumulative sum of
+    the event pmf.  Column ``h - 1`` is CIF at ``h`` time units; the last
+    column is ``CIF_total``.
+    """
+    arch = model["architecture"]
+    window = int(arch["max_pred_window"])
+    if int(arch.get("n_events", 1)) != 1:
+        raise BundleError("only single-event dynamic_deephit bundles are supported")
+    w = _deephit_state(model)
+    W_ih, W_hh = w["gru.weight_ih_l0"], w["gru.weight_hh_l0"]
+    b_ih, b_hh = w["gru.bias_ih_l0"], w["gru.bias_hh_l0"]
+    H = W_hh.shape[1]
+    n = len(xs)
+    if n == 0:
+        return np.zeros((0, window))
+    if xs[0].shape[1] != W_ih.shape[1]:
+        raise BundleError(
+            f"sequences have {xs[0].shape[1]} features per step, the model expects "
+            f"{W_ih.shape[1]}"
+        )
+
+    lengths = np.array([len(s) for s in xs])
+    padded = np.zeros((n, lengths.max(), W_ih.shape[1]))
+    for i, s in enumerate(xs):
+        padded[i, : len(s)] = s
+    h = np.zeros((n, H))
+    for t in range(lengths.max()):
+        gi = padded[:, t] @ W_ih.T + b_ih
+        gh = h @ W_hh.T + b_hh
+        r = _sigmoid(gi[:, :H] + gh[:, :H])
+        z = _sigmoid(gi[:, H:2 * H] + gh[:, H:2 * H])
+        cand = np.tanh(gi[:, 2 * H:] + r * gh[:, 2 * H:])
+        step = (1.0 - z) * cand + z * h
+        # A finished sequence keeps its last hidden state, as packing does.
+        h = np.where((t < lengths)[:, None], step, h)
+
+    hidden = np.maximum(h @ w["head.1.weight"].T + w["head.1.bias"], 0.0)
+    logits = hidden @ w["head.4.weight"].T + w["head.4.bias"]
+    logits -= logits.max(axis=1, keepdims=True)
+    probs = np.exp(logits)
+    probs /= probs.sum(axis=1, keepdims=True)
+    return np.cumsum(probs[:, :window], axis=1)
+
+
+def predict_cif(labs: pd.DataFrame, model: dict, *, ids=None, **cols) -> tuple[list, np.ndarray]:
+    """``(ids, CIF)`` for a long lab frame; see :func:`build_deephit_sequences`."""
+    ids, xs = build_deephit_sequences(labs, model, ids=ids, **cols)
+    return ids, deephit_cif(xs, model)
+
+
+def deephit_survival(cif: np.ndarray, model: dict, horizons_days) -> pd.DataFrame:
+    """``1 - CIF(h)`` at each horizon in days.
+
+    A day horizon covers the time units it fully contains: targets are
+    ``ceil(days / unit)``, so an event by day ``h`` is one in a bin up to
+    ``floor(h / unit)``.  Past the window the CIF is flat at its total.
+    """
+    cif = np.asarray(cif, dtype=float)
+    unit = float(model["preprocessing"].get("time_unit_days") or 7)
+    out = {}
+    for h in horizons_days:
+        k = min(int(np.floor(float(h) / unit)), cif.shape[1])
+        out[f"survival_{int(h)}d"] = 1.0 - cif[:, k - 1] if k >= 1 else np.ones(len(cif))
+    return pd.DataFrame(out)
+
+
+# --------------------------------------------------------------------- #
 # Scoring
 # --------------------------------------------------------------------- #
 def predict_risk(
@@ -421,15 +661,23 @@ def predict_risk(
     model: dict,
     *,
     age_col: str | None = None,
+    ids=None,
 ) -> np.ndarray:
     """Linear predictor / log-hazard-ratio for each row.
 
-    Higher is higher risk, for both families.  This is on the same scale the
+    Higher is higher risk, for every family.  This is on the same scale the
     federated run used to compute its C-index, so local and federated
     discrimination are directly comparable.
+
+    For ``dynamic_deephit`` ``df`` is the long lab frame and the score is
+    ``CIF_total``, one per patient in :func:`build_deephit_sequences`'s order
+    (pass ``ids`` to fix it).
     """
-    design = build_design_matrix(df, model, age_col=age_col)
     family = bundle.get("model_family")
+    if family == DEEPHIT_FAMILY:
+        return predict_cif(df, model, ids=ids)[1][:, -1]
+
+    design = build_design_matrix(df, model, age_col=age_col)
 
     if family == "elastic_net_cox":
         beta = np.asarray(model["coefficients"], dtype=float)
@@ -463,7 +711,18 @@ def predict_survival(
 
     Only the elastic-net export carries one; without it a model gives relative
     risk only, and absolute survival cannot be recovered from the scores alone.
+
+    A ``dynamic_deephit`` model predicts absolute risk itself: pass the CIF
+    matrix from :func:`predict_cif` as ``risk``.
     """
+    if "architecture" in model:
+        cif = np.asarray(risk, dtype=float)
+        if cif.ndim != 2:
+            raise BundleError(
+                "dynamic_deephit survival needs the CIF matrix from predict_cif, "
+                "not the scalar risk score"
+            )
+        return deephit_survival(cif, model, horizons_days)
     base = model.get("baseline_cumhaz")
     if not base:
         raise BundleError(
@@ -497,13 +756,22 @@ def _read_table(path: str) -> pd.DataFrame:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--bundle", required=True, help="model bundle JSON")
-    ap.add_argument("--data", required=True, help="wide frame (.csv or .parquet)")
+    ap.add_argument(
+        "--data", required=True,
+        help="wide frame (.csv or .parquet); for dynamic_deephit, the long lab frame",
+    )
+    ap.add_argument(
+        "--cohort", default="",
+        help="dynamic_deephit: table whose --id-col lists every patient to score "
+        "(default: the patients in --data)",
+    )
     ap.add_argument("--landmark", type=int, required=True)
     ap.add_argument("--config", default="both", choices=["both", "baseline"])
     ap.add_argument("--age-col", default="age_at_anchor")
     ap.add_argument("--id-col", default="person_id")
     ap.add_argument(
-        "--horizons", default="", help="comma-separated days, e.g. 365,730 (elastic-net)"
+        "--horizons", default="",
+        help="comma-separated days, e.g. 365,730 (elastic-net, dynamic_deephit)"
     )
     ap.add_argument("--output", required=True)
     args = ap.parse_args(argv)
@@ -511,6 +779,23 @@ def main(argv=None) -> int:
     bundle = load_bundle(args.bundle)
     model = select_model(bundle, args.landmark, args.config)
     df = _read_table(args.data)
+    horizons = [float(h) for h in args.horizons.split(",") if h.strip()]
+
+    if bundle.get("model_family") == DEEPHIT_FAMILY:
+        ids = (
+            pd.unique(_read_table(args.cohort)[args.id_col]).tolist()
+            if args.cohort else None
+        )
+        ids, cif = predict_cif(df, model, ids=ids, id_col=args.id_col)
+        out = pd.DataFrame({args.id_col: ids, "risk_score": cif[:, -1]})
+        out["landmark_days"] = args.landmark
+        out["config"] = args.config
+        out["model_family"] = DEEPHIT_FAMILY
+        if horizons:
+            out = pd.concat([out, deephit_survival(cif, model, horizons)], axis=1)
+        out.to_csv(args.output, index=False)
+        print(f"[federated_inference] wrote {len(out):,} rows -> {args.output}")
+        return 0
 
     risk = predict_risk(df, bundle, model, age_col=args.age_col)
     out = pd.DataFrame({"risk_score": risk}, index=df.index)
@@ -522,8 +807,7 @@ def main(argv=None) -> int:
     out["config"] = args.config
     out["model_family"] = bundle.get("model_family")
 
-    if args.horizons.strip():
-        horizons = [float(h) for h in args.horizons.split(",") if h.strip()]
+    if horizons:
         surv = predict_survival(risk, model, horizons)
         out = pd.concat([out, surv.set_index(out.index)], axis=1)
 

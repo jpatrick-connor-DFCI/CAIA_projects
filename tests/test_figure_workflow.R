@@ -147,16 +147,15 @@ local({
   stopifnot("06_dfci_cohort_sensitivity" %in% overview_stems)
   platinum_stems <- vapply(first$prepared$adt__platinum$scenes, `[[`, character(1), "stem")
   nepc_stems <- vapply(first$prepared$adt__nepc$scenes, `[[`, character(1), "stem")
-  stopifnot(all(c("figure1_cohort", "figure1a_consort", "figure1b_km", "figure1c_span",
-    "figure1c_dx_to_tx", "figure1c_time_to_platinum", "figure2v3_llm",
+  # Compiled pages whose panels all appear in a manuscript figure are dropped
+  # as duplicates; their individual panels are still exported.
+  stopifnot(all(c("figure1a_consort", "figure1b_km", "figure1c_span",
+    "figure1c_dx_to_tx", "figure1c_time_to_platinum",
     "figure2v3_confusion_matrix", "figure2v3_metric_bar", "figure2v3_subtype_landscape",
-    "figure2v3_enrichment", "classifier_validation", "subtype_platinum") %in% platinum_stems),
-    !any(startsWith(nepc_stems,"figure2v3")))
-  overview <- Filter(function(s) startsWith(s$stem,"dfci_labs_overview_"),first$prepared$adt__platinum$scenes)
-  stopifnot(length(overview)==1L,grepl("/03_univariate/internal/compiled/",overview[[1]]$destination),
-    !any(startsWith(nepc_stems,"dfci_labs_overview_")))
-  panels <- Filter(function(g) inherits(g,"gtable"),readRDS(overview[[1]]$path)$grobs)
-  stopifnot(length(panels)==7)
+    "figure2v3_enrichment") %in% platinum_stems),
+    !any(c("figure1_cohort", "figure2v3_llm", "classifier_validation", "subtype_platinum") %in% platinum_stems),
+    !any(startsWith(platinum_stems,"dfci_labs_overview_")),
+    !any(startsWith(nepc_stems,"figure2v3")), !any(startsWith(nepc_stems,"dfci_labs_overview_")))
   stopifnot(length(list.files(cfg$fig_root, pattern = "\\.rds$", recursive = TRUE)) == 0L,
             length(list.files(cfg$cache_root, pattern = "\\.receipt\\.rds$", recursive = TRUE)) > 20L)
   stopifnot(!any(basename(list.dirs(cfg$fig_root, recursive = TRUE)) %in% c("main", "supplements")))

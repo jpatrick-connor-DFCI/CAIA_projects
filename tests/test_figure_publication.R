@@ -49,7 +49,7 @@ local({
   for(key in c("figure1_cohort","figure2v3_llm","metastatic_label_agreement")) {
     scene <- Filter(function(s) s$stem==key,m$scenes)[[1]]
     grob <- readRDS(scene$path)
-    stopifnot(grepl("/compiled/",scene$destination,fixed=TRUE),
+    stopifnot(!grepl("/compiled/",scene$destination,fixed=TRUE),
       !any(vapply(grob$grobs,inherits,logical(1),"text")))
     panels <- Filter(function(g) inherits(g,"gtable"),grob$grobs)
     members <- if(key=="figure2v3_llm") stems[1:4] else
@@ -80,9 +80,9 @@ local({
   writeLines("old export",old_paths[1])
   unknown <- sub("platinum__","nepc__",old_paths[1]); writeLines("other cohort",unknown)
   compiled_scene <- Filter(function(s) s$stem=="figure1_cohort",m$scenes)[[1]]
-  retired <- paste0(compiled_scene$previous_destination,".png")
+  retired <- file.path(dirname(compiled_scene$destination),"compiled",paste0(basename(compiled_scene$destination),".png"))
   dir.create(dirname(retired),recursive=TRUE,showWarnings=FALSE)
-  writeLines("previous shallow compiled export",retired)
+  writeLines("previous compiled/ export",retired)
   figure_archive_old_exports(config,prepared)
   stopifnot(!file.exists(old_paths[1]),!file.exists(retired),file.exists(unknown),
     length(list.files(file.path(cache,"previous_exports"),recursive=TRUE,pattern="png$"))==2,
@@ -173,12 +173,12 @@ local({
   d <- prepare_federated_transfer(loaded)
   stopifnot(identical(levels(d$model),c("XGBoost","Elastic-net Cox","custom_bundle")),
     identical(levels(d$landmark),c("0 days","+180 days")),
-    nrow(d)==36+18,!any(d$metric=="ΔAUC(t) vs. age only" & d$features=="Age only"))
+    nrow(d)==36,identical(levels(d$metric),"Mean AUC(t)"))
   note <- federated_transfer_count_note(loaded)
   stopifnot(grepl("^PLATINUM: 0d 1,000/30, 180d 1,000/30; NEPC:",note))
   p <- plot_federated_transfer(d,note)
   title <- if("get_labs" %in% getNamespaceExports("ggplot2")) ggplot2::get_labs(p)$title else p$labels$title
-  stopifnot(grepl("without Dana-Farber",title,fixed=TRUE),length(ggplot_build(p)$layout$panel_params)==6)
+  stopifnot(grepl("without Dana-Farber",title,fixed=TRUE),length(ggplot_build(p)$layout$panel_params)==3)
   for(bad in list(mutate(metrics,mean_auc=1.2),mutate(metrics,c_index=1.2),mutate(metrics,n_events=2000),bind_rows(metrics,metrics[1,]),
                   select(metrics,-mean_auc))) {
     readr::write_csv(bad,path)
@@ -214,26 +214,24 @@ local({
   loaded <- load_federated_transfer_clinical(directory)
   stopifnot(nrow(loaded)==144,!"other" %in% loaded$subpopulation,all(loaded$endpoint %in% c("nepc","avpc","platinum")))
   d <- prepare_federated_transfer_clinical(loaded)
-  # Per subpopulation: 12 transferred-labs and 12 combined AUC(t) points, one local Cox AUC(t) per
-  # endpoint/landmark, and 12 + 12 paired ΔAUC(t) (local Cox and combined vs each bundle's score).
-  delta <- d$metric=="ΔAUC(t) vs. federated score"
-  stopifnot(nrow(d)==3*(12+12+6+12+12),
+  # Per subpopulation: 12 transferred-labs and 12 combined AUC(t) points and one local Cox AUC(t)
+  # per endpoint/landmark; the paired ΔAUC(t) stays in the table, not the figure.
+  stopifnot(nrow(d)==3*(12+12+6),identical(levels(d$metric),"Mean AUC(t)"),
     identical(levels(d$series),c("XGBoost","Elastic-net Cox","Gleason + age","TP53/RB1/PTEN + age",
       "Gleason + TP53/RB1/PTEN + age")),
     identical(levels(d$score_type),c("Federated score","Local clinical Cox","Federated score + local clinical Cox")),
-    all(d$series[delta] %in% c("XGBoost","Elastic-net Cox")),
-    all(abs(d$value[delta & d$score_type=="Local clinical Cox"]-.08)<1e-9),
-    all(abs(d$value[delta & d$score_type=="Federated score + local clinical Cox"]-.12)<1e-9),
+    all(abs(d$value[d$score_type=="Local clinical Cox"]-.72)<1e-9),
+    all(abs(d$value[d$score_type=="Federated score + local clinical Cox"]-.76)<1e-9),
     !any(d$series=="Age only"))
   b <- ggplot_build(plot_federated_transfer_clinical(d,"note"))
-  stopifnot(length(b$layout$panel_params)==18)
+  stopifnot(length(b$layout$panel_params)==9)
   one <- prepare_federated_transfer_clinical(loaded,"trio_gleason")
-  stopifnot(nrow(one)==54,length(ggplot_build(plot_federated_transfer_clinical(one,NULL))$layout$panel_params)==6)
+  stopifnot(nrow(one)==30,length(ggplot_build(plot_federated_transfer_clinical(one,NULL))$layout$panel_params)==3)
   # A CSV written before the combined Cox still loads and plots.
   readr::write_csv(select(filter(clinical,model!="combined_cox"),-starts_with("delta_auc_vs_clinical")),path)
   legacy <- prepare_federated_transfer_clinical(load_federated_transfer_clinical(directory),"trio")
-  stopifnot(nrow(legacy)==30,identical(levels(legacy$score_type),c("Federated score","Local clinical Cox")),
-    length(ggplot_build(plot_federated_transfer_clinical(legacy,NULL))$layout$panel_params)==6)
+  stopifnot(nrow(legacy)==18,identical(levels(legacy$score_type),c("Federated score","Local clinical Cox")),
+    length(ggplot_build(plot_federated_transfer_clinical(legacy,NULL))$layout$panel_params)==3)
   stopifnot(grepl("^PLATINUM: 0d 400/20, 180d 400/20",federated_transfer_clinical_count_note(loaded,"gleason")),
     federated_transfer_clinical_count_note(loaded[0,],"trio")=="none")
   for(bad in list(mutate(clinical,mean_auc=1.2),mutate(clinical,delta_auc_vs_transferred=-1.5),

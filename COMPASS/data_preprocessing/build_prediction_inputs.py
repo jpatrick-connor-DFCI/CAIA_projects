@@ -845,7 +845,7 @@ def main(args: argparse.Namespace) -> None:
         # manifest so mean AUC(t) is on the same horizon set.
         train_val_block = aggregated.loc[aggregated["split"].isin(["train", "valid"])]
         landmark_horizons: dict[str, list[int]] = {}
-        for endpoint, cfg in ENDPOINTS.items():
+        for horizon_endpoint, cfg in ENDPOINTS.items():
             # Endpoints whose outcome columns this build doesn't carry (nepc,
             # when the cohort was compiled without the LLM annotations) get no
             # horizon grid rather than a KeyError. A run that later asks for
@@ -857,7 +857,7 @@ def main(args: argparse.Namespace) -> None:
             ]
             if missing:
                 print(
-                    f"  AUC horizons ({endpoint}): skipped, cohort has no "
+                    f"  AUC horizons ({horizon_endpoint}): skipped, cohort has no "
                     f"{', '.join(missing)}"
                 )
                 continue
@@ -869,10 +869,10 @@ def main(args: argparse.Namespace) -> None:
                 time_unit_days=args.time_unit_days,
                 admin_censor_days=args.auc_max_time_units * args.time_unit_days,
             )
-            landmark_horizons[endpoint] = [int(h) for h in grid]
+            landmark_horizons[horizon_endpoint] = [int(h) for h in grid]
             print(
-                f"  AUC horizons ({endpoint}): "
-                + ", ".join(str(h) for h in landmark_horizons[endpoint])
+                f"  AUC horizons ({horizon_endpoint}): "
+                + ", ".join(str(h) for h in landmark_horizons[horizon_endpoint])
                 + f" {args.time_unit_days}-day units"
             )
         auc_horizons_by_landmark[str(int(landmark_day))] = landmark_horizons

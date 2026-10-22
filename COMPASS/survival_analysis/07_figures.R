@@ -101,18 +101,18 @@
 # The label figure uses `mrn_lists/adt_intent_labels_model_cohort.csv` and
 # `llm_met_labels_model_cohort.csv`, preserving missing labels explicitly.
 # Run notebook `06` once after this update to prepare these small summary tables.
-# Combined outputs are under `06_cohort_sensitivity/compiled/` (count tables in `06_cohort_sensitivity/data/`):
+# Combined outputs are under `06_cohort_sensitivity/` (count tables in `06_cohort_sensitivity/data/`):
 # `event_incidence_lm180__platinum__all__incl`, `metastatic_label_overlap__platinum__all__incl`
 # and `cohort_km_cascade_lm180__platinum__all__incl`.
 #
-# Figure 1 also exports `01_cohort/compiled/figure1_cohort__<endpoint>__<subset>__<exclusion>`:
+# Figure 1 also exports `01_cohort/figure1_cohort__<endpoint>__<subset>__<exclusion>`:
 # a five-panel figure with the cohort-selection flow spanning the left column,
 # and survival, record span, diagnosis-to-treatment timing, and time to platinum
-# on the right. Figure 2v3 exports `02_llm/compiled/figure2v3_llm__platinum__all__incl`,
+# on the right. Figure 2v3 exports `02_llm/figure2v3_llm__platinum__all__incl`,
 # with agreement, classification metrics, subtype composition, and platinum
 # enrichment in a 2-by-2 layout. The existing `classifier_validation` and
 # `subtype_platinum` paired exports remain available. The three metastatic-label
-# confusion matrices also form `06_cohort_sensitivity/compiled/metastatic_label_agreement__<endpoint>__<subset>__<exclusion>`.
+# confusion matrices also form `06_cohort_sensitivity/metastatic_label_agreement__<endpoint>__<subset>__<exclusion>`.
 # These combined figures have lettered panels and retain each panel's counts,
 # captions, and legends. All individual panels are exported alongside them.
 # Compilation stays within each arm/cohort/endpoint; Figure 2v3 remains exclusive
@@ -120,7 +120,7 @@
 # the graphics caches and export these additions; `render` requires a matching prepared snapshot.
 #
 # The seven-panel DFCI overview is
-# `03_univariate/internal/compiled/dfci_labs_overview_km_lm180__platinum__<subset>__<exclusion>`.
+# `03_univariate/internal/dfci_labs_overview_km_lm180__platinum__<subset>__<exclusion>`.
 # The top row contains day-0/90/180 within-DFCI univariate volcanoes with common axes;
 # the second row pairs the PSA log1p trajectory by platinum status with the PSA
 # bottom-versus-top-20% KM curve; the third row does the same for testosterone.
@@ -130,11 +130,11 @@
 # Individual KM panels and the three-landmark KM sheets are also retained.
 #
 # Clinical combinations and risk stratification (ADT runs, under `04_multivariate/internal/`;
-# co-mutation KM curves are univariate and go to `03_univariate/internal/`):
+# co-mutation KM curves are univariate and go to `03_univariate/internal/km/`):
 # `combinations_<gleason|gleason_somatic>_auc__...` shows the raw held-out test
 # mean AUC(t) of every combination arm by landmark and model; the gleason_somatic
 # cohort is anchored on the sequencing date (no paired deltas; CSV
-# in `04_multivariate/internal/data/`). `04_multivariate/internal/compiled/riskstrat_<test|cv_oof>_<source>_lm<N>__...`
+# in `04_multivariate/internal/data/`). `04_multivariate/internal/riskstrat_<test|cv_oof>_<source>_lm<N>__...`
 # pages the KM curves for the labs risk score and each clinical or comparison-arm
 # stratifier (source `full`, Gleason and stage at ADT + landmark, or
 # `<cohort>_<cox|xgboost>` matched cohorts; gleason_somatic is on the
@@ -151,13 +151,14 @@
 #   01_cohort/                 raw cohort numbers: Figure 1/Table 1, analysis sets,
 #                              pre-ADT coverage, federated site incidence and cohort KM
 #   02_llm/                    LLM NEPC/AVPC subtype labels and their KM curves
-#   03_univariate/internal/    DFCI univariable labs (volcanoes), somatic/Gleason/
-#                              co-mutation associations, KM curves, and
-#                              `trajectories/<lab>/` (trajectories and lab KM curves)
-#   03_univariate/federated/   pooled PSA/testosterone forests, volcanoes,
-#                              trajectories and KM curves (pooled and by site)
+#   03_univariate/internal/    DFCI univariable labs (volcanoes) and somatic/Gleason
+#                              associations; `km/` holds KM curves (co-mutation,
+#                              somatic, Gleason) with lab KM curves in `km/<lab>/`;
+#                              `trajectories/<lab>/` holds lab trajectories and distributions
+#   03_univariate/federated/   pooled PSA/testosterone forests and volcanoes, with
+#                              `km/<lab>/` and `trajectories/<lab>/` (pooled and by site)
 #   04_multivariate/internal/  DFCI Elastic-Net/XGBoost discrimination, importance,
-#                              Gleason/somatic sensitivity, combinations, risk strata
+#                              somatic sensitivity, combinations, risk strata
 #   04_multivariate/federated/ federated models, including the no-DFCI refits
 #   05_transfer/               no-DFCI federated models scored at Dana-Farber
 #   06_cohort_sensitivity/     cohort forests, endpoint incidence, metastatic-label
@@ -169,9 +170,11 @@
 # (e.g. `04_multivariate/internal/data/`), and older tables left beside figures are
 # moved there when the catalog is rewritten. `<arm>/data/` holds `index.html` and
 # `manifest.csv`.
-# Compiled figures go in a `compiled/` subfolder beside their panels (e.g.
-# `03_univariate/internal/compiled/`, `.../trajectories/psa/compiled/`).
-# They retain panel letters, with no descriptive panel titles or overall supertitle. Counts formerly in a
+# Compiled (multi-panel) figures sit beside their panels in the section folder; a
+# compiled figure whose panels all appear in a canonical ADT/platinum manuscript
+# figure is a duplicate and is not exported for that identity (the manuscript
+# version is). Older `compiled/` subfolders are archived on the next render.
+# Compiled figures retain panel letters, with no descriptive panel titles or overall supertitle. Counts formerly in a
 # supertitle remain in panel subtitles or footnotes. Standalone panels stay in the
 # section folder itself.
 #
@@ -183,11 +186,11 @@
 # `manuscript/data/`. `manuscript/captions/` contains manuscript-ready legends as matching
 # `figureN.md` and `figureN.txt` files (`federated_figureN.*` for the federated set). They always include a
 # 600-dpi (or higher requested DPI) PNG and a PDF, even when `COMPASS_RENDER_PDF`
-# is false. The existing individual and compiled exports are retained.
+# is false. Individual panels are always retained.
 #
 # The numbered manuscript set is: `01_cohort_overview`, `02_llm_nepc_avpc`,
 # `03_dfci_univariable`, `04_multivariable_labs` (held-out Elastic-Net/XGBoost
-# discrimination versus age baselines), `05_gleason_sensitivity`,
+# discrimination versus age baselines),
 # `06_dfci_cohort_sensitivity` (paired platinum/NEPC incidence and counts plus
 # day-180 PSA/testosterone associations),
 # `07_federated_incidence_associations` (landmark-0 site incidence and counts plus
@@ -201,7 +204,7 @@
 # `federated_04_multivariable` (the Figure 8 layout, with the full models refit without
 # Dana-Farber added as darker bars in the discrimination rows), and
 # `federated_05_transfer_no_dfci` (the models trained without Dana-Farber scored on
-# Dana-Farber platinum/NEPC/AVPC: a, mean AUC(t) and paired ΔAUC(t) vs. age; b, c, the full models
+# Dana-Farber platinum/NEPC/AVPC: a, mean AUC(t) of the full and age-only models; b, c, the full models
 # vs. local out-of-fold Cox models of Gleason + age and of TP53/RB1/PTEN + altered-gene
 # count + age, in the patients with a Gleason score before the ADT landmark / in sequenced
 # patients on a sequencing-date clock).
@@ -251,7 +254,7 @@
 # model; lab-extreme KM into one three-landmark sheet per lab; and mutation KM into
 # pages of at most four panels. Model fits, counts, time origins, and tests are unchanged.
 # Local univariate lab volcanoes retain individual day-0/90/180 plots and also
-# export `03_univariate/internal/compiled/labs_univariate_all_landmarks__<endpoint>__<subset>__<exclusion>`.
+# export `03_univariate/internal/labs_univariate_all_landmarks__<endpoint>__<subset>__<exclusion>`.
 # The combined figure uses three side-by-side panels on a 24 × 9-inch canvas,
 # common axes, a shared category legend, and separate per-landmark significance
 # counts. Larger feature labels (approximately 12 pt) and axis text are preserved
@@ -269,7 +272,10 @@
 # and their files in the retired pre-section layout (`cohort/`, `labels/`,
 # `associations/`, `prediction/`, `trajectories/`, `federated/`, top-level
 # `compiled/` and `manuscript figures/`), are copied, checksum-verified, and archived
-# in `COMPASS_FIGURE_DATA_ROOT/previous_exports/`; only then are those old copies
+# in `COMPASS_FIGURE_DATA_ROOT/previous_exports/`, as are section `compiled/` folders,
+# figures left in `03_univariate/` from before the `km/`/`trajectories/` split, and the
+# retired internal Gleason sensitivity (`sensitivity_gleason_auc__*`, manuscript Figure 5);
+# only then are those old copies
 # and emptied folders removed. Unselected cohorts remain
 # untouched. Failed renders do not trigger archival. Archives are recoverable in data.
 #
@@ -340,7 +346,7 @@
 # `misc_figure_data/`) need `manifest.json` (bin width, minimum bin size, sites and per-site
 # counts) plus `cohort_km.csv`, `lab_extreme_{km,summary}.csv` and
 # `lab_trajector{ies,y_cohort}.csv`, each with a `within_site_` twin. They render
-# `01_cohort/federated_cohort_km` and, in `03_univariate/federated/`, `federated_trajectory_<lab>`, `federated_km_quintile_<lab>_landmark<N>`
+# `01_cohort/federated_cohort_km` and, in `03_univariate/federated/`, `trajectories/<lab>/federated_trajectory_<lab>`, `km/<lab>/federated_km_quintile_<lab>_landmark<N>`
 # (pooled cutoffs) and `_by_site` pages (one panel per site, site-specific cutoffs),
 # with `federated_volcano_landmark<N>` from the pooled univariate CSV. The local
 # trajectory and KM plotters are reused; nothing is refitted. Missing files are reported and skipped.

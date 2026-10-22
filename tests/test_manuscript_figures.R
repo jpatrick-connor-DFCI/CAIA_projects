@@ -39,11 +39,12 @@ stopifnot(landmark_header$theme$plot.subtitle$face=="bold",
 # embedding project and retain figure-specific audit language.
 captions <- manuscript_captions()
 federated_keys <- c("federated_03_univariable","federated_04_multivariable","federated_05_transfer_no_dfci")
-stopifnot(length(captions)==11,identical(names(captions),c(sprintf("%02d_%s",1:8,c(
+# Figure 5 (internal Gleason sensitivity) was removed; Gleason is compared in transfer.
+stopifnot(length(captions)==10,identical(names(captions),c(sprintf("%02d_%s",c(1:4,6:8),c(
   "cohort_overview","llm_nepc_avpc","dfci_univariable","multivariable_labs",
-  "gleason_sensitivity","dfci_cohort_sensitivity","federated_incidence_associations",
+  "dfci_cohort_sensitivity","federated_incidence_associations",
   "federated_multivariable")),federated_keys)),
-  all(startsWith(unname(captions[1:8]),paste0("Figure ",1:8,". "))),
+  all(startsWith(unname(captions[1:7]),paste0("Figure ",c(1:4,6:8),". "))),
   all(startsWith(unname(captions[federated_keys]),paste0("Federated Figure ",3:5,". "))),
   grepl("22,138 patients (664 platinum events)",captions[["federated_03_univariable"]],fixed=TRUE),
   grepl("without Dana-Farber",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
@@ -59,18 +60,18 @@ stopifnot(length(captions)==11,identical(names(captions),c(sprintf("%02d_%s",1:8
   grepl("9,939/308",captions[["07_federated_incidence_associations"]],fixed=TRUE))
 caption_root <- tempfile("manuscript-caption-test-")
 caption_paths <- manuscript_write_captions(caption_root)
-stopifnot(length(caption_paths)==22,all(file.exists(caption_paths)))
+stopifnot(length(caption_paths)==20,all(file.exists(caption_paths)))
 # The federated set is numbered on its own and never overwrites local figure3-5;
 # each caption sits in the manuscript folder of its figure's section.
 caption_md <- caption_paths[endsWith(caption_paths,".md")]
-stopifnot(setequal(basename(caption_md),paste0(c(paste0("figure",1:8),paste0("federated_figure",3:5)),".md")))
+stopifnot(setequal(basename(caption_md),paste0(c(paste0("figure",c(1:4,6:8)),paste0("federated_figure",3:5)),".md")))
 for(path in caption_md) stopifnot(identical(readLines(path,warn=FALSE),
   readLines(sub("[.]md$",".txt",path),warn=FALSE)))
 caption_file <- function(section,name) file.path(caption_root,section,"manuscript","captions",paste0(name,".md"))
 stopifnot(startsWith(readLines(caption_file("03_univariate/internal","figure3"),n=1,warn=FALSE),"Figure 3. "),
   startsWith(readLines(caption_file("03_univariate/federated","federated_figure3"),n=1,warn=FALSE),"Federated Figure 3. "),
   file.exists(caption_file("01_cohort","figure1")),file.exists(caption_file("02_llm","figure2")),
-  file.exists(caption_file("04_multivariate/internal","figure5")),file.exists(caption_file("06_cohort_sensitivity","figure6")),
+  !file.exists(caption_file("04_multivariate/internal","figure5")),file.exists(caption_file("04_multivariate/internal","figure4")),file.exists(caption_file("06_cohort_sensitivity","figure6")),
   file.exists(caption_file("04_multivariate/federated","figure8")),file.exists(caption_file("05_transfer","federated_figure5")),
   setequal(names(MANUSCRIPT_SECTIONS),names(captions)))
 unlink(caption_root,recursive=TRUE)
@@ -196,12 +197,12 @@ transfer_clinical <- mutate(filter(clinical_fixture(),subpopulation!="other"),en
 fig5 <- manuscript_federated_transfer_no_dfci(transfer_metrics,transfer_clinical)
 stopifnot(fig5$spec$key=="federated_05_transfer_no_dfci",inherits(fig5$plot,"gtable"),
   identical(fig5$spec$titles,c("Discrimination","vs. Gleason score","vs. TP53/RB1/PTEN","vs. Gleason + TP53/RB1/PTEN")),
-  fig5$spec$height==13,nrow(fig5$spec$layout)==4,
+  fig5$spec$height==10.4,nrow(fig5$spec$layout)==4,
   grepl("b: patients with a Gleason score",fig5$legend,fixed=TRUE),
   grepl("c: sequenced patients,",fig5$legend,fixed=TRUE),
   grepl("d: sequenced patients with a Gleason score",fig5$legend,fixed=TRUE),
   grepl("combined Cox",fig5$legend,fixed=TRUE),!grepl("burden",fig5$legend,fixed=TRUE),
-  grepl("PLATINUM: 0d 400/20",fig5$legend,fixed=TRUE),grepl("paired ΔAUC(t)",fig5$legend,fixed=TRUE),
+  grepl("PLATINUM: 0d 400/20",fig5$legend,fixed=TRUE),!grepl("ΔAUC",fig5$legend,fixed=TRUE),
   !grepl("ΔC",fig5$legend,fixed=TRUE))
 fig5_trio <- manuscript_federated_transfer_no_dfci(transfer_metrics,filter(transfer_clinical,subpopulation=="trio"))
 stopifnot(identical(fig5_trio$spec$titles,c("Discrimination","vs. TP53/RB1/PTEN")),
@@ -209,6 +210,6 @@ stopifnot(identical(fig5_trio$spec$titles,c("Discrimination","vs. TP53/RB1/PTEN"
 fallback_message <- NULL
 fig5_a <- withCallingHandlers(manuscript_federated_transfer_no_dfci(transfer_metrics,NULL),
   message=function(m) {fallback_message <<- c(fallback_message,conditionMessage(m)); invokeRestart("muffleMessage")})
-stopifnot(length(fig5_a$spec$titles)==1,fig5_a$spec$height==4.8,
+stopifnot(length(fig5_a$spec$titles)==1,fig5_a$spec$height==3.2,
   any(grepl("clinical comparison unavailable",fallback_message,fixed=TRUE)))
 cat("Manuscript data fidelity, missing cells, audit notes and isolated styling passed.\n")

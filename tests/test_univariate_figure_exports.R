@@ -38,8 +38,7 @@ local({
     all(vapply(singles,function(s) s$width==9 && s$height==7,logical(1))),
     all(vapply(combined,function(s) s$width==24 && s$height==9 && s$landmark=="0,90,180",logical(1))),
     all(grepl("/ADT/03_univariate/internal/",vapply(m$scenes,`[[`,character(1),"destination"))),
-    all(grepl("/03_univariate/internal/compiled/",vapply(combined,`[[`,character(1),"destination"))),
-    !any(grepl("/compiled/",vapply(singles,`[[`,character(1),"destination"))))
+    !any(grepl("/compiled/",vapply(m$scenes,`[[`,character(1),"destination"))))
   compiled_panels <- Filter(function(p) !is.null(p$labels$title) &&
     startsWith(p$labels$title,"Landmark ") && length(p$coordinates$limits$x)==2,observed)
   stopifnot(length(compiled_panels)>=5)

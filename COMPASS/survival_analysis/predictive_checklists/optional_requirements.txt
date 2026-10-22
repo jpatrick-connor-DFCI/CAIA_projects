@@ -1,0 +1,13 @@
+# The production weighted optimizer needs numpy and scipy>=1.9 (milp/HiGHS),
+# already supplied by the parent environment. These are OPTIONAL alternatives;
+# uncomment only the backend needed in an isolated environment.
+# mip>=1.13,<3       # Local weighted CBC backend; platform CBC library required.
+# cplex>=20.1       # Local weighted CPLEX backend; usable solver license required.
+#
+# The actual pinned upstream reference also imports pandas, scikit-learn,
+# imbalanced-learn, optbinning, matplotlib, and cplex (even when using CBC).
+# Install its own setup.py requirements in the separate reference environment.
+# Run upstream parity in a fresh process; CBC and OR-Tools native libraries can
+# conflict if both packages are loaded in the same process on macOS.
+# Authors' source: https://github.com/MLforHealth/predictive_checklists
+# Commit: d205245b9f62dd2cfd977171f0e5073c13d6aebf

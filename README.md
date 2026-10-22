@@ -95,6 +95,9 @@ COMPASS/
     │   ├── dynamic_deephit.py            # ENTRY: thin CLI over survival_common/deephit_engine.py
     │   ├── survlatent_ode.py             # ENTRY: adapter around the bundled editable checkout
     │   └── README.md                     # bundled-checkout/conda-env prerequisites, chdir caveat
+    ├── predictive_checklists/            # full-ADT platinum/NEPC M-of-N horizon models with IPCW
+    │   ├── run_predictive_checklists.ipynb # preflight, optional training, held-out tables and R figures
+    │   └── README.md                     # censoring extension, solver setup, CLI and interpretation
     └── GAM/
         ├── gam_trajectory_features.R     # hierarchical longitudinal GAM features
         ├── gam_cox_nonlinearity.R        # smooth-vs-linear Cox GAM tests
@@ -404,6 +407,16 @@ feature-selection file older than its trajectory-feature file, preventing a stal
 from being tested accidentally. The R notebook uses the merged-profile root exclusively.
 
 ### 2.4 — Notebooks
+
+The optional [predictive checklist subproject](COMPASS/survival_analysis/predictive_checklists/README.md)
+fits the Zhang et al. M-of-N model with a local inverse-censoring-weight extension on the full ADT
+cohort. Its runner reads the separate platinum/NEPC prebuilt input trees and existing splits;
+day 0 is primary, with day 90/180 secondary, and default horizons are 1/2/3 years after each
+landmark. It exports calibrated horizon risks, matched age/Cox/XGBoost comparisons, solver
+diagnostics, and R figures. These are independent horizon classifiers, not continuous survival
+curves or competing-risk cumulative incidence. Its manifest checks require rebuilding inputs
+that carry the old endpoint-metadata shadowing bug. Solver dependencies remain isolated from
+the existing Cox/XGBoost and torch workflows.
 
 COMPASS PROFILE has four Python stage notebooks sharing `compass_pipeline.py` (three numbered plus
 `03b`), two read-only Python reporting notebooks (`05`, `08`), one R figure notebook, and one R GAM
