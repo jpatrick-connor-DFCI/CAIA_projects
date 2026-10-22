@@ -207,7 +207,7 @@ def _metrics(frame, endpoint, horizon, censoring, score, flag, probability, conf
                             seed=config.seed)
 
 
-def run_cell(data, endpoint, landmark, population, config, output_dir):
+def run_cell(data, endpoint, landmark, population, config, output_dir, *, resume=False):
     output_dir.mkdir(parents=True, exist_ok=True)
     frame = data.frame.copy()
     if population == "resolved_nepc":
@@ -233,26 +233,46 @@ def run_cell(data, endpoint, landmark, population, config, output_dir):
         write_json(output_dir / "metrics.json", results)
         return results
     td, te = _outcomes(train, endpoint)
+    # Each horizon writes its metrics.json last, so it marks a finished horizon.
+    done = {horizon for horizon in config.horizons
+            if resume and (output_dir / f"horizon_{horizon}" / "metrics.json").exists()}
     baseline_results = {}
-    if config.baselines:
+    if config.baselines and len(done) < len(config.horizons):
         columns = schema_feature_columns(train, age_col=config.age_col)
-        baseline_results = fit_baselines(train[columns], td, te,
-            age_column=config.age_col, horizons=config.horizons,
-            n_splits=config.n_folds, seed=config.seed, models=config.baselines,
-            min_patient_coverage=config.min_patient_coverage, min_g=config.min_g)
-        write_json(output_dir / "baselines.json", {name: dict(status=value.status,
-            reason=value.reason, metadata=value.metadata) for name, value in baseline_results.items()})
-        with (output_dir / "baselines.pkl").open("wb") as stream:
-            pickle.dump(baseline_results, stream)
+        stored = output_dir / "baselines.pkl"
+        if resume and stored.exists():
+            with stored.open("rb") as stream:
+                baseline_results = pickle.load(stream)
+        else:
+            baseline_results = fit_baselines(train[columns], td, te,
+                age_column=config.age_col, horizons=config.horizons,
+                n_splits=config.n_folds, seed=config.seed, models=config.baselines,
+                min_patient_coverage=config.min_patient_coverage, min_g=config.min_g)
+            write_json(output_dir / "baselines.json", {name: dict(status=value.status,
+                reason=value.reason, metadata=value.metadata) for name, value in baseline_results.items()})
+            # Renamed into place so an interrupted dump is never reused on resume.
+            partial = output_dir / "baselines.pkl.tmp"
+            with partial.open("wb") as stream:
+                pickle.dump(baseline_results, stream)
+            partial.replace(stored)
     for horizon in config.horizons:
         cell = {**identity, "horizon_days": horizon}
         folder = output_dir / f"horizon_{horizon}"
+        if horizon in done:
+            print(f"  {endpoint} landmark={landmark} population={population} horizon={horizon}d: "
+                  "reusing completed horizon", flush=True)
+            results.extend(json.loads((folder / "metrics.json").read_text()))
+            continue
+        if resume and folder.exists():
+            shutil.rmtree(folder)
         folder.mkdir(exist_ok=True)
         print(f"  {endpoint} landmark={landmark} population={population} horizon={horizon}d", flush=True)
+        start = len(results)
         cap = data.manifest["auc_max_time_units"] * data.manifest.get("auc_time_unit_days", data.manifest.get("time_unit_days", 7))
         if horizon >= cap:
             results.append({**cell, "model": "checklist", "status": "unsupported",
                             "reason": "Horizon is at/beyond the input manifest evaluation cap"})
+            write_json(folder / "metrics.json", results[start:])
             continue
         try:
             fitted = fit_horizon(train, endpoint, horizon, config)
@@ -317,12 +337,13 @@ def run_cell(data, endpoint, landmark, population, config, output_dir):
             write_json(folder / "failure.json", results[-1])
             if isinstance(exc, FitFailure):
                 write_json(folder / "cv_folds.json", exc.cv_rows)
+        write_json(folder / "metrics.json", results[start:])
     write_json(output_dir / "metrics.json", results)
     return results
 
 
 def _check_resumable(previous, manifest):
-    """Refuse to mix completed cells with fits from different settings or data."""
+    """Refuse to mix completed horizons with fits from different settings or data."""
     if previous.get("schema_version") != manifest["schema_version"]:
         raise ValueError("Cannot resume: run manifest schema version differs")
     if previous.get("config") != json.loads(json.dumps(_jsonable(manifest["config"]))):
@@ -420,16 +441,8 @@ def run(config, input_dirs, output_dir, *, preflight_only=False, overwrite=False
             if endpoint == "nepc" and config.resolved_nepc_sensitivity:
                 populations.append("resolved_nepc")
             for population in populations:
-                cell_dir = output_dir / endpoint / f"landmark_{landmark}" / population
-                # run_cell writes its metrics.json last, so it marks a finished cell.
-                if resume and (cell_dir / "metrics.json").exists():
-                    print(f"  {endpoint} landmark={landmark} population={population}: "
-                          "reusing completed cell", flush=True)
-                    metrics.extend(json.loads((cell_dir / "metrics.json").read_text()))
-                    continue
-                if resume and cell_dir.exists():
-                    shutil.rmtree(cell_dir)
-                metrics.extend(run_cell(data, endpoint, landmark, population, config, cell_dir))
+                metrics.extend(run_cell(data, endpoint, landmark, population, config,
+                    output_dir / endpoint / f"landmark_{landmark}" / population, resume=resume))
     write_json(output_dir / "metrics.json", metrics)
     if metrics:
         pd.json_normalize(_jsonable(metrics)).to_csv(output_dir / "metrics.csv", index=False)

@@ -28,7 +28,7 @@ def main(argv=None):
     existing = parser.add_mutually_exclusive_group()
     existing.add_argument("--overwrite", action="store_true")
     existing.add_argument("--resume", action="store_true",
-                          help="Reuse completed cells of an interrupted run with identical settings")
+                          help="Reuse completed horizons of an interrupted run with identical settings")
     parser.add_argument("--demo", action="store_true", help="Generate clearly labeled synthetic inputs")
     args = parser.parse_args(argv)
     config = RunConfig.load(args.config)
@@ -44,7 +44,7 @@ def main(argv=None):
     config.validate()
     if (args.output_dir / "run_manifest.json").exists() and not (args.overwrite or args.resume):
         parser.error("Output run exists; choose a new --output-dir, pass --overwrite (archives prior "
-                     "results) or --resume (reuses completed cells)")
+                     "results) or --resume (reuses completed horizons)")
     if args.demo:
         from .demo import build_demo_inputs
         args.inputs_root = args.output_dir / "synthetic_inputs"

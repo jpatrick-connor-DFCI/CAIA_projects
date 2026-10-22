@@ -123,28 +123,36 @@ def test_demo_refusal_does_not_modify_existing_inputs(tmp_path):
     assert not (out / "synthetic_inputs").exists()
 
 
-def test_resume_reuses_completed_cells_and_refits_partial_ones(tmp_path, monkeypatch):
+def test_resume_reuses_completed_horizons_and_refits_partial_ones(tmp_path, monkeypatch):
     import COMPASS.survival_analysis.predictive_checklists.runner as runner
 
     inputs = build_demo_inputs(tmp_path / "inputs", landmarks=(0, 90), n=160)
     dirs = {"platinum": inputs / "prediction_inputs_adt"}
     out = tmp_path / "results"
-    config = small_config(endpoints=("platinum",), landmarks=(0, 90))
+    config = small_config(endpoints=("platinum",), landmarks=(0, 90), horizons=(365, 730),
+                          baselines=("age_cox",))
     assert run(config, dirs, out) == 0
     first = json.loads((out / "metrics.json").read_text())
     created = json.loads((out / "run_manifest.json").read_text())["created_utc"]
-    # Simulate an interruption inside landmark 90: no cell metrics, stale files.
-    partial = out / "platinum/landmark_90/full"
-    (partial / "metrics.json").unlink()
-    (partial / "horizon_365" / "stale.json").write_text("{}")
+    # Simulate an interruption inside landmark 90's second horizon.
+    cell = out / "platinum/landmark_90/full"
+    (cell / "metrics.json").unlink()
+    (cell / "horizon_730" / "metrics.json").unlink()
+    (cell / "horizon_730" / "stale.json").write_text("{}")
     fitted = []
-    original = runner.run_cell
-    monkeypatch.setattr(runner, "run_cell", lambda data, endpoint, landmark, *rest:
-                        fitted.append(landmark) or original(data, endpoint, landmark, *rest))
+    original = runner.fit_horizon
+    monkeypatch.setattr(runner, "fit_horizon", lambda train, endpoint, horizon, config:
+                        fitted.append(horizon) or original(train, endpoint, horizon, config))
+
+    def refit_baselines(*args, **kwargs):
+        raise AssertionError("baselines must be reloaded from baselines.pkl")
+
+    monkeypatch.setattr(runner, "fit_baselines", refit_baselines)
     assert run(config, dirs, out, resume=True) == 0
-    assert fitted == [90]
-    assert not (partial / "horizon_365" / "stale.json").exists()
-    assert (partial / "horizon_365" / "model.json").exists()
+    assert fitted == [730]
+    assert not (cell / "horizon_730" / "stale.json").exists()
+    assert (cell / "horizon_730" / "model.json").exists()
+    assert (cell / "horizon_730" / "predictions_age_cox.csv").exists()
     assert json.loads((out / "metrics.json").read_text()) == first
     manifest = json.loads((out / "run_manifest.json").read_text())
     assert manifest["created_utc"] == created and len(manifest["resumed_utc"]) == 1

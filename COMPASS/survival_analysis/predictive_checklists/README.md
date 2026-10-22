@@ -128,9 +128,11 @@ event counts are assumed until preflight and a pilot have run on cluster data.
 An existing output run is refused by default. `--overwrite` archives its managed
 results under `previous_runs/` before writing a new run, preventing stale models
 from masquerading as new fits. `--resume` instead continues an interrupted run in
-place: each endpoint × landmark × population cell with a finished `metrics.json`
-is reused, partially written cells are cleared and refitted, and the run-level
-metrics are rebuilt from all cells. Resuming is refused unless the configuration,
+place: each endpoint × landmark × population × horizon with a finished
+`horizon_<days>/metrics.json` is reused (including recorded unsupported or failed
+fits), partially written horizons are cleared and refitted, a cell's baselines are
+reloaded from `baselines.pkl` rather than refitted, and the run-level metrics are
+rebuilt from all horizons. Resuming is refused unless the configuration,
 package source and input fingerprints match the existing `run_manifest.json`;
 without an existing run it starts fresh. Exit code 0 indicates supported evaluated models
 (or successful preflight), 1 invalid inputs, and 2 no supported evaluated models.
