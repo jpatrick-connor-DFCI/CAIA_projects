@@ -26,6 +26,14 @@ for _p in (str(PROJECT_ROOT),):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+# Must precede the first Polars import (oncdrs_sources below). Uncapped, Polars
+# sizes its thread pools to every core on the node rather than the SLURM
+# allocation, and the async executor behind lazy scan().collect() panics with
+# EAGAIN once the per-user thread limit is hit. Subprocesses inherit the cap.
+os.environ.setdefault(
+    "POLARS_MAX_THREADS", str(max(1, int(os.environ.get("SLURM_CPUS_PER_TASK", "4"))))
+)
+
 from data_preprocessing_common.oncdrs_sources import TABLE_FILES  # noqa: E402
 from data_preprocessing_common.oncdrs_sources import scan_source  # noqa: E402
 from COMPASS.survival_analysis import cox_aggregated as _ca  # noqa: E402
