@@ -364,7 +364,13 @@
 # (`transfer_auc_t_no_dfci__platinum.csv`). `transfer_clinical_comparison.csv`
 # (04's Gleason / TP53-RB1-PTEN / Gleason + TP53-RB1-PTEN section) renders
 # `05_transfer/transfer_clinical_comparison_no_dfci__platinum` and feeds Federated Figure 5 b-d;
-# without it, Figure 5 is drawn with panel a only. Missing transfer outputs are reported and skipped.
+# without it, Figure 5 is drawn with panel a only. `transfer_km_patients.csv` (04's patient-level
+# transferred labs scores with Gleason and TP53/RB1/PTEN status on the ADT and sequencing clocks)
+# renders `05_transfer/km/`: score × Gleason and score × TP53/RB1/PTEN KM curves per endpoint,
+# a head-to-head grid (score | Gleason | TP53/RB1/PTEN), the 3-year event-free gradient and a
+# hazard-ratio forest per bundle × landmark. Only aggregate tables are exported
+# (`transfer_km_{curves,summary,gradient,hr}_no_dfci`); they feed Federated Figure 5 e-h
+# (NEPC, elastic-net, 180 days). Missing transfer outputs are reported and skipped.
 # Missing optional XGBoost files are reported and skipped independently. Run `06`
 # again after this update to register both files (including absent paths), then
 # run `07_figures.R` with stage `all`. All Python remains in `06`; graphics caches stay in data.

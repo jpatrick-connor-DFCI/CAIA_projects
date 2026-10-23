@@ -580,11 +580,36 @@ def subpopulation_score_summary(scores: pd.DataFrame, clinical: pd.DataFrame,
 # --------------------------------------------------------------------------- #
 # Notebook helpers
 # --------------------------------------------------------------------------- #
-def write_outputs(comparison, coefs, summary, out_dir) -> None:
+KM_PATIENTS_FILE = "transfer_km_patients.csv"
+KM_PATIENT_COLUMNS = ["clock", "endpoint", "bundle", "model_family", "landmark_days", ID_COL,
+                      "risk_score", DURATION_COL, EVENT_COL, GLEASON_FEATURE, HAS_SEQUENCING,
+                      *TRIO_FEATURES, BURDEN_COL]
+
+
+def km_patients(clocks: dict, config: str = "both") -> pd.DataFrame:
+    """Patient-level scores joined to clinical strata, for the R KM figures.
+
+    ``clocks`` maps a clock name ("adt", "sequencing") to (scores, clinical)
+    on that clock. Only ``config`` scores (the labs score) are kept. The R
+    side assigns score groups, so cutpoints and figure styling stay in one
+    place. ADT-clock rows carry no somatic columns (build_clinical_features).
+    """
+    frames = []
+    for clock, (scores, clinical) in clocks.items():
+        sc = _normalize_ids(scores)
+        sc = sc[sc["config"] == config]
+        clin = _normalize_ids(clinical).drop(columns=AGE_COL)
+        frames.append(sc.merge(clin, on=[ID_COL, "landmark_days"], how="left").assign(clock=clock))
+    return pd.concat(frames, ignore_index=True)[KM_PATIENT_COLUMNS]
+
+
+def write_outputs(comparison, coefs, summary, out_dir, km=None) -> None:
     out_dir = Path(out_dir)
     comparison.to_csv(out_dir / "transfer_clinical_comparison.csv", index=False)
     coefs.to_csv(out_dir / "transfer_clinical_cox_coefs.csv", index=False)
     summary.to_csv(out_dir / "transfer_subpop_risk_summary.csv", index=False)
+    if km is not None:
+        km.to_csv(out_dir / KM_PATIENTS_FILE, index=False)
     print(f"wrote clinical comparison outputs -> {out_dir}")
 
 

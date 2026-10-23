@@ -175,7 +175,8 @@ def federated_within_site_file(federated_path: Path, filename: str) -> Path:
 # the Gleason / TP53-RB1-PTEN Cox comparison (federated Figure 5 b-c); mirrors
 # federated_transfer_no_dfci_dir() in figure_workflow.R.
 FEDERATED_TRANSFER_NO_DFCI_FILES = (
-    "transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv")
+    "transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv",
+    "transfer_km_patients.csv")
 # Federated multivariable exports beside the across-site results CSV
 # (mirrors FEDERATED_MULTIVARIABLE in figure_workflow.R). Each bundle also has
 # a refit without Dana-Farber in "<directory>_no_DFCI".

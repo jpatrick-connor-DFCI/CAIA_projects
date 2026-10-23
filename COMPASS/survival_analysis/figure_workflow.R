@@ -86,6 +86,7 @@ figure_federated_section <- function(stem) {
 }
 # Pooled KM curves and trajectories mirror the local km/<lab>/ and trajectories/<lab>/ folders.
 federated_univariate_folder <- function(stem) {
+  if (grepl("^transfer_km_", stem)) return("km")
   kind <- if (grepl("^federated_km_", stem)) "km" else if (grepl("^federated_trajectory_", stem)) "trajectories" else
     return(character())
   lab <- sub("^federated_(km_quintile|trajectory)_(.+?)(_landmark[0-9]+)?(_by_site)?$", "\\2", stem, perl = TRUE)
@@ -1073,7 +1074,11 @@ FEDERATED_TRANSFER_FILES <- c("transfer_metrics.csv","transfer_auc_t.csv")
 # of the transferred score + the clinical covariates without age (the transferred
 # full model already includes age; federated_clinical_comparison.py).
 FEDERATED_TRANSFER_CLINICAL_FILE <- "transfer_clinical_comparison.csv"
-FEDERATED_TRANSFER_NO_DFCI_FILES <- c(FEDERATED_TRANSFER_FILES,FEDERATED_TRANSFER_CLINICAL_FILE)
+# 04's patient-level transferred labs scores with Gleason and TP53/RB1/PTEN
+# status on each clock; only aggregate KM / event-free / HR tables leave R.
+FEDERATED_TRANSFER_KM_FILE <- "transfer_km_patients.csv"
+FEDERATED_TRANSFER_NO_DFCI_FILES <- c(FEDERATED_TRANSFER_FILES,FEDERATED_TRANSFER_CLINICAL_FILE,
+  FEDERATED_TRANSFER_KM_FILE)
 FEDERATED_TRANSFER_CLINICAL <- c(gleason="Gleason + age",trio="TP53/RB1/PTEN + age",
   trio_gleason="Gleason + TP53/RB1/PTEN + age")
 FEDERATED_TRANSFER_CLINICAL_COLORS <- c(`Gleason + age`="#1baf7a",`TP53/RB1/PTEN + age`="#8e44ad",
@@ -1347,6 +1352,312 @@ render_federated_transfer_clinical <- function(root, directory, dpi, overwrite) 
   invisible(clinical)
 }
 
+# Time-to-event views of the transferred labs score (Federated Figure 5 e-h and
+# 05_transfer/km/). Score groups use Dana-Farber cutpoints computed once per
+# clock x bundle x landmark over every scored patient, so a patient keeps their
+# group across endpoints. Gleason views run on the ADT clock and TP53/RB1/PTEN
+# views on the sequencing clock (no somatic data on the ADT clock).
+FEDERATED_TRANSFER_KM_CLOCKS <- c(adt="ADT",sequencing="sequencing")
+FEDERATED_TRANSFER_KM_YLAB <- c(platinum="Platinum-free probability",nepc="NEPC-free probability",
+  avpc="AVPC-free probability")
+FEDERATED_TRANSFER_ENDPOINT_COLORS <- c(`Platinum (training endpoint)`="#0072B2",NEPC="#D55E00",AVPC="#009E73")
+FEDERATED_TRANSFER_KM_HORIZON <- 1095
+# Panels with fewer events are not drawn; hazard ratios also need an event in each arm.
+FEDERATED_TRANSFER_KM_MIN_EVENTS <- 5
+# Manuscript panels e-h; other endpoints, landmarks and XGBoost are in 05_transfer/km/.
+FEDERATED_TRANSFER_KM_FIGURE <- list(endpoint="nepc",model_family="elastic_net_cox",landmark_days=180)
+FEDERATED_TRANSFER_GLEASON <- c("Gleason ≤7","Gleason ≥8")
+FEDERATED_TRANSFER_TRIO <- c("TP53/RB1/PTEN wild-type","TP53/RB1/PTEN altered")
+federated_transfer_cross <- function(groups)
+  paste(rep(groups,each=2),c("low score","high score"),sep=" · ")
+FEDERATED_TRANSFER_KM_VIEWS <- list(
+  score=list(clock="adt",column="score_extreme",levels=c("Bottom 20%","Top 20%"),label="Federated score"),
+  gleason=list(clock="adt",column="gleason_group",levels=FEDERATED_TRANSFER_GLEASON,label="Gleason"),
+  trio=list(clock="sequencing",column="trio_group",levels=FEDERATED_TRANSFER_TRIO,label="TP53/RB1/PTEN"),
+  score_gleason=list(clock="adt",column="score_gleason",levels=federated_transfer_cross(FEDERATED_TRANSFER_GLEASON),
+    label="Federated score × Gleason"),
+  score_trio=list(clock="sequencing",column="score_trio",levels=federated_transfer_cross(FEDERATED_TRANSFER_TRIO),
+    label="Federated score × TP53/RB1/PTEN"))
+# Hazard ratios compare the second level of each two-group view with the first.
+FEDERATED_TRANSFER_HR_LABELS <- c(score="Score: top vs bottom 20%",gleason="Gleason ≥8 vs ≤7",
+  trio="TP53/RB1/PTEN altered vs wild-type")
+FEDERATED_TRANSFER_GRADIENT <- list(
+  score_quintile=list(clock="adt",levels=paste0("Q",1:5),label="Federated score quintile"),
+  gleason_group=list(clock="adt",levels=FEDERATED_TRANSFER_GLEASON,label="Gleason"),
+  trio_burden=list(clock="sequencing",levels=c("0","1","≥2"),label="TP53/RB1/PTEN genes altered"))
+FEDERATED_TRANSFER_KM_TABLES <- c(curves="transfer_km_curves_no_dfci",summary="transfer_km_summary_no_dfci",
+  gradient="transfer_km_gradient_no_dfci",hr="transfer_km_hr_no_dfci")
+
+load_federated_transfer_km <- function(directory) {
+  path <- file.path(directory,FEDERATED_TRANSFER_KM_FILE)
+  if(!file.exists(path)) {
+    warning("Federated transfer KM patients unavailable; missing: ",path)
+    return(NULL)
+  }
+  d <- readr::read_csv(path,show_col_types=FALSE,
+    col_types=readr::cols(HAS_SEQUENCING=readr::col_character(),.default=readr::col_guess()))
+  needed <- c("clock","endpoint","bundle","model_family","landmark_days","person_id","risk_score",
+    "duration_days","event","GLEASON_SCORE","HAS_SEQUENCING","TP53_ANY","RB1_ANY","PTEN_ANY")
+  missing <- setdiff(needed,names(d))
+  if(length(missing)) stop("Federated transfer KM input is missing: ",paste(missing,collapse=", "))
+  d <- mutate(d,clock=as.character(clock),endpoint=tolower(endpoint),model_family=as.character(model_family),
+      sequenced=toupper(HAS_SEQUENCING) %in% c("TRUE","T","1")) %>%
+    filter(endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS),clock %in% names(FEDERATED_TRANSFER_KM_CLOCKS))
+  if(any(!d$event %in% c(0,1)) || any(!is.finite(d$duration_days) | d$duration_days<0))
+    stop("Invalid federated transfer KM outcomes")
+  keys <- c("clock","endpoint","bundle","landmark_days","person_id")
+  if(anyDuplicated(d[keys])) stop("Duplicate ",paste(keys,collapse="/")," rows in federated transfer KM input")
+  if(!nrow(d)) warning("No platinum/NEPC/AVPC rows in federated transfer KM input: ",path)
+  d
+}
+
+# Ties at the median go low, matching the closed-bottom figure_extreme_quintiles.
+federated_transfer_score_half <- function(x) {
+  out <- rep(NA_character_,length(x)); ok <- is.finite(x)
+  if(any(ok)) out[ok] <- ifelse(x[ok]>median(x[ok]),"high score","low score")
+  out
+}
+# Tied scores stay in one quintile; if ties collapse a quintile there is no gradient.
+federated_transfer_score_quintile <- function(x) {
+  out <- rep(NA_character_,length(x)); ok <- is.finite(x)
+  if(sum(ok)<5L) return(out)
+  breaks <- unique(quantile(x[ok],seq(0,1,.2),names=FALSE))
+  if(length(breaks)!=6L) return(out)
+  out[ok] <- paste0("Q",cut(x[ok],breaks,include.lowest=TRUE,labels=FALSE))
+  out
+}
+
+federated_transfer_km_groups <- function(d) {
+  patients <- distinct(d,clock,bundle,landmark_days,person_id,risk_score)
+  if(anyDuplicated(patients[c("clock","bundle","landmark_days","person_id")]))
+    stop("A federated transfer score differs across endpoints for the same patient")
+  patients <- patients %>% group_by(clock,bundle,landmark_days) %>%
+    mutate(score_extreme=as.vector(figure_extreme_quintiles(risk_score)),
+      score_half=federated_transfer_score_half(risk_score),
+      score_quintile=federated_transfer_score_quintile(risk_score)) %>% ungroup()
+  sequenced <- d$clock=="sequencing" & d$sequenced
+  trio_n <- d$TP53_ANY+d$RB1_ANY+d$PTEN_ANY
+  d %>% select(-risk_score) %>%
+    left_join(patients,by=c("clock","bundle","landmark_days","person_id")) %>%
+    mutate(gleason_group=if_else(clock=="adt",figure_gleason_groups(GLEASON_SCORE),NA_character_),
+      trio_group=if_else(sequenced,FEDERATED_TRANSFER_TRIO[1+(trio_n>0)],NA_character_),
+      trio_burden=if_else(sequenced,c("0","1","≥2")[pmin(trio_n,2)+1],NA_character_),
+      score_gleason=if_else(is.na(gleason_group)|is.na(score_half),NA_character_,
+        paste(gleason_group,score_half,sep=" · ")),
+      score_trio=if_else(is.na(trio_group)|is.na(score_half),NA_character_,
+        paste(trio_group,score_half,sep=" · ")))
+}
+
+federated_transfer_km_fit <- function(z, column, levels) {
+  z <- z[z[[column]] %in% levels,,drop=FALSE]
+  present <- levels[levels %in% z[[column]]]
+  if(length(present)<2L || sum(z$event)<FEDERATED_TRANSFER_KM_MIN_EVENTS) return(NULL)
+  curves <- bind_rows(lapply(present,function(group) {
+    fit <- survival::survfit(survival::Surv(duration_days,event)~1,data=z[z[[column]]==group,])
+    tibble(stratum=group,time=c(0,fit$time),survival=c(1,fit$surv),lower=c(1,fit$lower),upper=c(1,fit$upper))
+  }))
+  z$stratum <- z[[column]]
+  logrank <- tryCatch({
+    test <- survival::survdiff(survival::Surv(duration_days,event)~stratum,data=z)
+    pchisq(test$chisq,length(test$n)-1,lower.tail=FALSE)
+  },error=function(e) NA_real_)
+  counts <- z %>% group_by(stratum) %>% summarise(n=n(),events=sum(event),.groups="drop") %>%
+    arrange(match(stratum,levels)) %>% mutate(logrank_p=logrank)
+  list(curves=curves,counts=counts)
+}
+
+federated_transfer_event_free <- function(z, horizon=FEDERATED_TRANSFER_KM_HORIZON) {
+  none <- c(event_free=NA_real_,lo=NA_real_,hi=NA_real_)
+  if(!nrow(z) || max(z$duration_days)<horizon) return(none)
+  fit <- survival::survfit(survival::Surv(duration_days,event)~1,data=z)
+  s <- summary(fit,times=horizon,extend=TRUE)
+  if(length(s$surv)!=1L) return(none)
+  c(event_free=s$surv,lo=s$lower,hi=s$upper)
+}
+
+federated_transfer_hr <- function(z, column, levels) {
+  z <- z[z[[column]] %in% levels,,drop=FALSE]
+  n <- vapply(levels,function(l) sum(z[[column]]==l),numeric(1))
+  events <- vapply(levels,function(l) sum(z$event[z[[column]]==l]),numeric(1))
+  out <- tibble(n_reference=n[[1]],events_reference=events[[1]],n_compared=n[[2]],events_compared=events[[2]],
+    hr=NA_real_,lo=NA_real_,hi=NA_real_,p=NA_real_)
+  if(any(events==0) || sum(events)<FEDERATED_TRANSFER_KM_MIN_EVENTS) return(out)
+  x <- as.integer(z[[column]]==levels[[2]])
+  fit <- tryCatch(survival::coxph(survival::Surv(z$duration_days,z$event)~x),error=function(e) NULL)
+  if(is.null(fit)) return(out)
+  s <- summary(fit)
+  mutate(out,hr=s$conf.int[1,1],lo=s$conf.int[1,3],hi=s$conf.int[1,4],p=s$coefficients[1,5])
+}
+
+# Aggregate tables for every endpoint x bundle x landmark: KM curves and
+# per-stratum counts with the log-rank p, 3-year event-free probabilities, and
+# univariable Cox hazard ratios.
+federated_transfer_km_tables <- function(km) {
+  d <- federated_transfer_km_groups(km)
+  keys <- distinct(d,endpoint,bundle,model_family,landmark_days) %>%
+    arrange(match(endpoint,names(FEDERATED_TRANSFER_ENDPOINTS)),model_family,landmark_days)
+  out <- list(curves=list(),summary=list(),gradient=list(),hr=list())
+  for(i in seq_len(nrow(keys))) {
+    key <- keys[i,]
+    cell <- semi_join(d,key,by=names(key))
+    tag <- function(x,...) bind_cols(key[rep(1L,nrow(x)),],tibble(...,.rows=nrow(x)),x)
+    for(view in names(FEDERATED_TRANSFER_KM_VIEWS)) {
+      v <- FEDERATED_TRANSFER_KM_VIEWS[[view]]
+      z <- cell[cell$clock==v$clock,,drop=FALSE]
+      fit <- federated_transfer_km_fit(z,v$column,v$levels)
+      if(!is.null(fit)) {
+        out$curves[[length(out$curves)+1]] <- tag(fit$curves,view=view,clock=v$clock)
+        out$summary[[length(out$summary)+1]] <- tag(fit$counts,view=view,clock=v$clock)
+      }
+      if(view %in% names(FEDERATED_TRANSFER_HR_LABELS))
+        out$hr[[length(out$hr)+1]] <- tag(federated_transfer_hr(z,v$column,v$levels),view=view,clock=v$clock,
+          comparison=FEDERATED_TRANSFER_HR_LABELS[[view]])
+    }
+    for(stratifier in names(FEDERATED_TRANSFER_GRADIENT)) {
+      g <- FEDERATED_TRANSFER_GRADIENT[[stratifier]]
+      z <- cell[cell$clock==g$clock,,drop=FALSE]
+      rows <- bind_rows(lapply(g$levels,function(group) {
+        zz <- z[z[[stratifier]] %in% group,,drop=FALSE]
+        if(!nrow(zz)) return(NULL)
+        tibble(group=group,n=nrow(zz),events=sum(zz$event),!!!as.list(federated_transfer_event_free(zz)))
+      }))
+      if(nrow(rows)) out$gradient[[length(out$gradient)+1]] <- tag(rows,stratifier=stratifier,
+        stratifier_label=g$label,clock=g$clock,horizon_days=FEDERATED_TRANSFER_KM_HORIZON)
+    }
+  }
+  lapply(out,bind_rows)
+}
+
+federated_transfer_km_pick <- function(d, endpoint=NULL, model_family, landmark_days, view=NULL) {
+  keep <- d$model_family==model_family & d$landmark_days==landmark_days
+  if(!is.null(endpoint)) keep <- keep & d$endpoint==endpoint
+  if(!is.null(view)) keep <- keep & d$view==view
+  d[keep,,drop=FALSE]
+}
+
+federated_transfer_km_colors <- function(levels)
+  setNames(if(length(levels)==4L) c("#92c5de","#2166ac","#f4a582","#b2182b") else c("#2166ac","#b2182b"),levels)
+
+federated_transfer_model_label <- function(model_family)
+  coalesce(unname(FEDERATED_TRANSFER_MODELS[model_family]),model_family)
+
+plot_federated_transfer_km <- function(tables, view, endpoint, model_family, landmark, title=NULL, note=NULL) {
+  v <- FEDERATED_TRANSFER_KM_VIEWS[[view]]
+  curves <- federated_transfer_km_pick(tables$curves,endpoint,model_family,landmark,view)
+  counts <- federated_transfer_km_pick(tables$summary,endpoint,model_family,landmark,view)
+  if(!nrow(curves) || !nrow(counts)) return(NULL)
+  if(is.null(title)) title <- paste0(FEDERATED_TRANSFER_ENDPOINTS[[endpoint]],": ",v$label)
+  plot_km_curves(select(curves,stratum,time,survival,lower,upper),select(counts,stratum,n,events),
+    counts$logrank_p[[1]],title,sprintf("the +%d-day %s landmark",as.integer(landmark),
+      FEDERATED_TRANSFER_KM_CLOCKS[[v$clock]]),v$levels,note,federated_transfer_km_colors(v$levels),
+    ci=length(v$levels)==2L,ylab=FEDERATED_TRANSFER_KM_YLAB[[endpoint]],
+    legend_ncol=if(length(v$levels)==4L) 2 else 1,zoom_y=TRUE)
+}
+
+# Head-to-head: rows are endpoints; columns the score (ADT clock, all scored
+# patients), Gleason (ADT clock, patients with Gleason) and TP53/RB1/PTEN
+# (sequencing clock, sequenced patients). Each column is its own cohort.
+plot_federated_transfer_km_grid <- function(tables, model_family, landmark) {
+  cells <- list()
+  for(endpoint in names(FEDERATED_TRANSFER_ENDPOINTS)) for(view in c("score","gleason","trio")) {
+    p <- plot_federated_transfer_km(tables,view,endpoint,model_family,landmark,
+      title=paste0(FEDERATED_TRANSFER_ENDPOINTS[[endpoint]],": ",FEDERATED_TRANSFER_KM_VIEWS[[view]]$label))
+    cells[[length(cells)+1]] <- if(is.null(p)) grid::nullGrob() else p
+  }
+  if(!any(vapply(cells,inherits,logical(1),"ggplot"))) return(NULL)
+  gridExtra::arrangeGrob(grobs=cells,ncol=3,top=grid::textGrob(sprintf(
+    "%s trained without Dana-Farber: Dana-Farber event-free survival from the +%d-day landmark",
+    federated_transfer_model_label(model_family),as.integer(landmark)),gp=grid::gpar(fontsize=15,fontface="bold")),
+    bottom=grid::textGrob(paste(
+      "Score: top vs bottom 20% of the transferred labs score (Dana-Farber cutpoints shared across endpoints), ADT clock.",
+      "Gleason ≤7 vs ≥8 (available before the landmark), ADT clock. TP53/RB1/PTEN: any alteration vs none, sequenced patients, sequencing clock.",
+      sep="\n"),gp=grid::gpar(fontsize=10)),padding=grid::unit(1,"lines"))
+}
+
+plot_federated_transfer_gradient <- function(tables, model_family, landmark, title=NULL, caption=NULL) {
+  d <- federated_transfer_km_pick(tables$gradient,NULL,model_family,landmark)
+  d <- d[is.finite(d$event_free),,drop=FALSE]
+  if(!nrow(d)) return(NULL)
+  groups <- unlist(lapply(FEDERATED_TRANSFER_GRADIENT,`[[`,"levels"),use.names=FALSE)
+  labels <- vapply(FEDERATED_TRANSFER_GRADIENT,`[[`,character(1),"label")
+  d <- mutate(d,group=factor(group,levels=unique(groups)),
+    stratifier_label=factor(stratifier_label,levels=labels),
+    endpoint_label=factor(FEDERATED_TRANSFER_ENDPOINTS[endpoint],levels=FEDERATED_TRANSFER_ENDPOINTS))
+  dodge <- position_dodge(width=.5)
+  ggplot(d,aes(group,event_free,color=endpoint_label,group=endpoint_label)) +
+    geom_line(position=dodge,linewidth=.6,alpha=.6) +
+    geom_linerange(aes(ymin=lo,ymax=hi),position=dodge,linewidth=.7,na.rm=TRUE) +
+    geom_point(position=dodge,size=2.4) +
+    scale_color_manual(values=FEDERATED_TRANSFER_ENDPOINT_COLORS,name=NULL,drop=TRUE) +
+    facet_grid(.~stratifier_label,scales="free_x",space="free_x") +
+    labs(x=NULL,y=sprintf("%d-year event-free probability",FEDERATED_TRANSFER_KM_HORIZON%/%365),
+      title=title,caption=caption) +
+    federated_transfer_theme()
+}
+
+plot_federated_transfer_hr <- function(tables, model_family, landmark, title=NULL, caption=NULL) {
+  d <- federated_transfer_km_pick(tables$hr,NULL,model_family,landmark)
+  d <- d[is.finite(d$hr),,drop=FALSE]
+  if(!nrow(d)) return(NULL)
+  comparisons <- unname(FEDERATED_TRANSFER_HR_LABELS)
+  endpoints <- match(d$endpoint,names(FEDERATED_TRANSFER_ENDPOINTS))
+  # Rows top to bottom in FEDERATED_TRANSFER_HR_LABELS order; endpoints offset within a row.
+  d <- mutate(d,y=length(comparisons)+1-match(comparison,comparisons)+(2-endpoints)*.22,
+    endpoint_label=factor(FEDERATED_TRANSFER_ENDPOINTS[endpoint],levels=FEDERATED_TRANSFER_ENDPOINTS))
+  ggplot(d,aes(hr,y,color=endpoint_label)) +
+    geom_vline(xintercept=1,color="grey55",linetype="dotted",linewidth=.8) +
+    geom_linerange(aes(xmin=lo,xmax=hi),linewidth=.8) +
+    geom_point(size=2.4) +
+    scale_x_log10() +
+    scale_y_continuous(breaks=rev(seq_along(comparisons)),labels=comparisons,
+      limits=c(.5,length(comparisons)+.5)) +
+    scale_color_manual(values=FEDERATED_TRANSFER_ENDPOINT_COLORS,name=NULL,drop=TRUE) +
+    labs(x="Hazard ratio (95% CI, log scale)",y=NULL,title=title,caption=caption) +
+    federated_transfer_theme() + theme(panel.grid.major.y=element_blank())
+}
+
+FEDERATED_FAMILY_SLUGS <- c(elastic_net_cox="elasticnet",xgboost_cox="xgboost")
+federated_transfer_family_slug <- function(model_family)
+  if(model_family %in% names(FEDERATED_FAMILY_SLUGS)) FEDERATED_FAMILY_SLUGS[[model_family]] else
+    gsub("[^a-z0-9]+","",tolower(model_family))
+
+render_federated_transfer_km <- function(root, directory, dpi, overwrite) {
+  km <- load_federated_transfer_km(directory)
+  if(is.null(km) || !nrow(km)) return(invisible(NULL))
+  tables <- federated_transfer_km_tables(km)
+  for(name in names(FEDERATED_TRANSFER_KM_TABLES))
+    write_federated_transfer_table(root,tables[[name]],FEDERATED_TRANSFER_KM_TABLES[[name]])
+  save <- function(p, stem, width, height)
+    if(!is.null(p)) save_federated_panel(p,federated_output_path(root,stem,".png"),width,height,dpi,overwrite)
+  cutoffs <- "Score cutpoints: Dana-Farber patients scored at this landmark, shared across endpoints (not federated training cutoffs)."
+  cells <- distinct(bind_rows(tables$summary,tables$gradient),model_family,landmark_days)
+  for(i in seq_len(nrow(cells))) {
+    family <- cells$model_family[[i]]; landmark <- cells$landmark_days[[i]]
+    model <- federated_transfer_model_label(family)
+    suffix <- sprintf("%s_landmark%d",federated_transfer_family_slug(family),as.integer(landmark))
+    for(endpoint in names(FEDERATED_TRANSFER_ENDPOINTS)) for(view in c("score_gleason","score_trio"))
+      save(plot_federated_transfer_km(tables,view,endpoint,family,landmark,
+          title=paste0(FEDERATED_TRANSFER_ENDPOINTS[[endpoint]],": ",model," score × ",
+            if(view=="score_gleason") "Gleason" else "TP53/RB1/PTEN"),
+          note=paste(cutoffs,"Low/high score: at or below / above the median.",
+            if(view=="score_gleason") "Gleason available before the landmark; ADT clock." else
+              "Sequenced patients; landmark from the sequencing date.")),
+        sprintf("transfer_km_%s_%s_%s",view,endpoint,suffix),9,7)
+    save(plot_federated_transfer_km_grid(tables,family,landmark),sprintf("transfer_km_grid_%s",suffix),16,15)
+    save(plot_federated_transfer_gradient(tables,family,landmark,
+        title=sprintf("%s: observed 3-year event-free probability from the +%d-day landmark",model,as.integer(landmark)),
+        caption=paste(cutoffs,"Kaplan-Meier estimates with 95% CIs; score quintiles and Gleason on the ADT clock,",
+          "TP53/RB1/PTEN on the sequencing clock (sequenced patients). Missing points: no follow-up to 3 years.")),
+      sprintf("transfer_km_gradient_%s",suffix),12,5.5)
+    save(plot_federated_transfer_hr(tables,family,landmark,
+        title=sprintf("%s: hazard ratios from the +%d-day landmark",model,as.integer(landmark)),
+        caption=paste(cutoffs,"Univariable Cox. Score and Gleason on the ADT clock; TP53/RB1/PTEN on the sequencing clock.",
+          sprintf("Comparisons with no event in an arm or fewer than %d events are omitted.",FEDERATED_TRANSFER_KM_MIN_EVENTS))),
+      sprintf("transfer_km_hr_%s",suffix),9,4.8)
+  }
+  invisible(tables)
+}
+
 # Aggregate KM curves and binned trajectories exported by the federated run
 # (rhino_results/misc_figure_data): pooled across sites and within each site,
 # no patient-level rows. Drawn with the local plotters so the panels match.
@@ -1568,8 +1879,10 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
     render_federated_figure_data(root, federated_path, figure_data_dir, dpi, overwrite)
   if (!is.null(transfer_no_dfci_dir)) {
     no_dfci <- render_federated_transfer(root, transfer_no_dfci_dir, dpi, overwrite)
-    if (!is.null(no_dfci))
+    if (!is.null(no_dfci)) {
       render_federated_transfer_clinical(root, transfer_no_dfci_dir, dpi, overwrite)
+      render_federated_transfer_km(root, transfer_no_dfci_dir, dpi, overwrite)
+    }
   }
   invisible(d)
 }
@@ -1662,9 +1975,9 @@ manuscript_captions <- function() {
       "(a) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), at 0, 90, and 180 days after ADT initiation for Elastic-Net Cox and XGBoost survival models trained on all four sites, the same full models refit without Dana-Farber (darker bars, \"no DFCI\"), and age-only baselines (hatched). The dotted horizontal line marks 0.5. (b) Nonzero Elastic-Net Cox coefficients of the four-site model at each landmark, with up to 15 coefficients of largest absolute value displayed. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (c) XGBoost split-gain feature importance of the four-site model at each landmark, with up to 15 positive-gain features displayed. Colors in b and c identify laboratory categories.",
       "Four-site models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering (MSK) data; test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180. Models without Dana-Farber were trained and tested on Fred Hutch, Johns Hopkins, and MSK data; test-set sample sizes/events were 3,258/87, 3,204/78, and 3,105/72. Because the test sets differ, the two model versions are not compared on the same patients here; Federated Figure 5 evaluates the models without Dana-Farber on Dana-Farber patients. Performance values are from held-out test sets rather than training or tuning cross-validation. Age and body height are not displayed. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and are not signed effects or SHAP values. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; DFCI, Dana-Farber Cancer Institute; SHAP, Shapley additive explanations."),
     federated_05_transfer_no_dfci=caption(
-      "Federated Figure 5. External validation at Dana-Farber of federated platinum models trained without Dana-Farber, alone and combined with Gleason score and TP53/RB1/PTEN status.",
-      "Elastic-Net Cox and XGBoost survival models trained for platinum treatment on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data were applied unchanged to the Dana-Farber ADT cohort and evaluated against three local endpoints: platinum treatment (the training endpoint), neuroendocrine prostate cancer (NEPC), and aggressive-variant prostate cancer (AVPC). (a) Mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), at 0, 90, and 180 days after ADT initiation. Filled points denote full laboratory models and open points age-only models. (b-d) The same full laboratory models compared with unpenalized Cox models fitted locally at Dana-Farber on clinical covariates alone and on the transferred score plus the same covariates other than age (combined models), among patients with a Gleason score available before the landmark (b), patients with tumor sequencing, with landmarks measured from the sequencing date (c), and sequenced patients who also had a Gleason score (d). The clinical covariates were Gleason score and age (b), any alteration (mutation, deletion, amplification, or structural variant) in TP53, RB1, and PTEN and age (c), or all of these (d); because the transferred full models already include age, the combined models added only Gleason score (b), the TP53, RB1, and PTEN indicators (c), or both (d). Circles denote the transferred models, diamonds the local clinical Cox models, and triangles the combined models. In all panels, bars denote 95% bootstrap confidence intervals over patients and dotted lines mark 0.5.",
-      "No Dana-Farber patient contributed to federated model training, so every endpoint, including platinum, is out of sample. Mean AUC(t) is the inverse-probability-of-censoring-weighted cumulative/dynamic AUC averaged over 1, 2, 3, and 5 years after the landmark, with censoring estimated in the evaluated Dana-Farber patients; horizons without an observed event or later follow-up were omitted. The local and combined Cox models were fitted on the Dana-Farber patients they were evaluated on and were scored with stratified 5-fold cross-validated (out-of-fold) predictions; in the combined models, the transferred score was standardized within the evaluated patients. Gleason scores were used only if available before the landmark. For c and d, the transferred models were rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation, and age was age at sequencing. Patients/events in panel a were 2,267/182 at day 0, 2,233/166 at day 90, and 2,197/158 at day 180 for platinum; 2,218/92, 2,200/87, and 2,164/85 for NEPC; and 1,968/463, 1,891/397, and 1,842/373 for AVPC. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve.")
+      "Federated Figure 5. External validation at Dana-Farber of federated platinum models trained without Dana-Farber, alone and combined with Gleason score and TP53/RB1/PTEN status, and the time-to-event risk separation of the transferred score.",
+      "Elastic-Net Cox and XGBoost survival models trained for platinum treatment on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data were applied unchanged to the Dana-Farber ADT cohort and evaluated against three local endpoints: platinum treatment (the training endpoint), neuroendocrine prostate cancer (NEPC), and aggressive-variant prostate cancer (AVPC). (a) Mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), at 0, 90, and 180 days after ADT initiation. Filled points denote full laboratory models and open points age-only models. (b-d) The same full laboratory models compared with unpenalized Cox models fitted locally at Dana-Farber on clinical covariates alone and on the transferred score plus the same covariates other than age (combined models), among patients with a Gleason score available before the landmark (b), patients with tumor sequencing, with landmarks measured from the sequencing date (c), and sequenced patients who also had a Gleason score (d). The clinical covariates were Gleason score and age (b), any alteration (mutation, deletion, amplification, or structural variant) in TP53, RB1, and PTEN and age (c), or all of these (d); because the transferred full models already include age, the combined models added only Gleason score (b), the TP53, RB1, and PTEN indicators (c), or both (d). Circles denote the transferred models, diamonds the local clinical Cox models, and triangles the combined models. In a-d, bars denote 95% bootstrap confidence intervals over patients and dotted lines mark 0.5. (e,f) Kaplan-Meier NEPC-free survival from the 180-day landmark by the transferred Elastic-Net Cox score (above vs. at or below the Dana-Farber median) crossed with Gleason score (≤7 vs. ≥8; landmark after ADT initiation; e) or with any TP53, RB1, or PTEN alteration (sequenced patients, landmark after the sequencing date; f). P values are from log-rank tests across the four groups; shading is omitted and the vertical axes are truncated below 1 because NEPC is rare. (g) Kaplan-Meier 3-year event-free probability (95% confidence interval) from the 180-day landmark for platinum, NEPC, and AVPC by Elastic-Net score quintile, Gleason group, and number of TP53/RB1/PTEN genes altered. (h) Univariable Cox hazard ratios (95% confidence intervals) from the 180-day landmark comparing the top with the bottom 20% of the Elastic-Net score, Gleason ≥8 with ≤7, and any TP53/RB1/PTEN alteration with none.",
+      "No Dana-Farber patient contributed to federated model training, so every endpoint, including platinum, is out of sample. Mean AUC(t) is the inverse-probability-of-censoring-weighted cumulative/dynamic AUC averaged over 1, 2, 3, and 5 years after the landmark, with censoring estimated in the evaluated Dana-Farber patients; horizons without an observed event or later follow-up were omitted. Score groups in e-h use cutpoints computed among the Dana-Farber patients scored at each landmark, pooled over endpoints so that each patient is in the same group for every endpoint; they are not federated training cutoffs. Score and Gleason groups in e, g, and h use the ADT-initiation clock and TP53/RB1/PTEN groups the sequencing-date clock. XGBoost versions, the 0- and 90-day landmarks, and head-to-head Kaplan-Meier curves for all endpoints are provided as supplementary figures. The local and combined Cox models were fitted on the Dana-Farber patients they were evaluated on and were scored with stratified 5-fold cross-validated (out-of-fold) predictions; in the combined models, the transferred score was standardized within the evaluated patients. Gleason scores were used only if available before the landmark. For c and d, the transferred models were rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation, and age was age at sequencing. Patients/events in panel a were 2,267/182 at day 0, 2,233/166 at day 90, and 2,197/158 at day 180 for platinum; 2,218/92, 2,200/87, and 2,164/85 for NEPC; and 1,968/463, 1,891/397, and 1,842/373 for AVPC. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve.")
   )
 }
 
@@ -2093,8 +2406,9 @@ manuscript_federated_multivariable_no_dfci <- function(performance,no_dfci_perfo
 # clinical) Cox models in the patients with a Gleason score (b, ADT clock),
 # sequenced patients (c) and sequenced patients with a Gleason score (d; c and d
 # on the sequencing-date clock). Per-horizon AUC(t) stays on the standalone
-# transfer page.
-manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL) {
+# transfer page. With the KM tables (`km`), e-h add the time-to-event views
+# (manuscript_federated_transfer_km).
+manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL) {
   d <- prepare_federated_transfer(metrics)
   discrimination <- plot_federated_transfer(d,NULL,NULL,NULL) + ggplot2::labs(x="Landmark after ADT initiation")
   plots <- list(discrimination); titles <- "Discrimination"
@@ -2118,10 +2432,73 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL) {
       paste0("Patients/events by landmark — ",federated_transfer_clinical_count_note(clinical,sub),"."))
   }
   n <- length(plots)
-  spec <- list(key="federated_05_transfer_no_dfci",width=7.2,height=c(3.2,5.6,8,10.4)[n],
-    layout=matrix(seq_len(n),n),titles=titles,row_heights=rep(1,n),shared_legend_panels=integer())
+  height <- c(3.2,5.6,8,10.4)[n]
+  layout <- matrix(seq_len(n),n); row_heights <- rep(1,n)
+  extra <- if(is.null(km)) NULL else manuscript_federated_transfer_km(km,first=n+1L)
+  if(!is.null(km) && !length(extra$plots)) message("Federated Figure 5: no KM panels estimable; omitting them")
+  if(length(extra$plots)) {
+    # Time-to-event panels two per row under the full-width discrimination rows.
+    k <- length(extra$plots); km_rows <- ceiling(k/2)
+    layout <- rbind(cbind(seq_len(n),seq_len(n)),matrix(c(n+seq_len(k),rep(NA,k%%2)),ncol=2,byrow=TRUE))
+    row_heights <- c(rep(height/n,n),rep(MANUSCRIPT_TRANSFER_KM_ROW_HEIGHT,km_rows))
+    height <- sum(row_heights)
+    plots <- c(plots,extra$plots); titles <- c(titles,extra$titles); legend <- c(legend,extra$legend)
+  }
+  spec <- list(key="federated_05_transfer_no_dfci",width=7.2,height=height,
+    layout=layout,titles=titles,row_heights=row_heights,shared_legend_panels=integer())
   list(plot=manuscript_combine(plots,spec),spec=spec,data=metrics,legend=paste(
     c(legend,FEDERATED_TRANSFER_SPEC$source),collapse="\n"))
+}
+
+MANUSCRIPT_TRANSFER_KM_ROW_HEIGHT <- 3
+
+# Federated Figure 5 e-h from the captured KM tables (render_federated_transfer_km):
+# NEPC by score x Gleason (ADT clock) and score x TP53/RB1/PTEN (sequencing
+# clock), the 3-year event-free gradient and the hazard-ratio forest, for the
+# elastic-net bundle at the 180-day landmark. Panels that are not estimable are dropped.
+manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRANSFER_KM_FIGURE) {
+  endpoint <- figure$endpoint; family <- figure$model_family; landmark <- figure$landmark_days
+  name <- FEDERATED_TRANSFER_ENDPOINTS[[endpoint]]
+  model <- if(family=="elastic_net_cox") "elastic-net" else federated_transfer_model_label(family)
+  plots <- list(); titles <- character(); legend <- character()
+  add <- function(p, title, text) {
+    if(is.null(p)) return()
+    plots[[length(plots)+1]] <<- p; titles <<- c(titles,title)
+    legend <<- c(legend,paste0(letters[first+length(plots)-1L],": ",text))
+  }
+  counts <- function(view) {
+    d <- federated_transfer_km_pick(km$summary,endpoint,family,landmark,view)
+    paste0(paste(sprintf("%s %s/%s",d$stratum,scales::comma(d$n),scales::comma(d$events)),collapse="; "),
+      sprintf("; log-rank P = %.2g",d$logrank_p[[1]]))
+  }
+  for(view in c("score_gleason","score_trio")) {
+    p <- plot_federated_transfer_km(km,view,endpoint,family,landmark,title=NULL)
+    if(!is.null(p)) {
+      logrank <- p$labels$subtitle
+      p <- p + ggplot2::labs(subtitle=NULL,y=sub(" ","\n",FEDERATED_TRANSFER_KM_YLAB[[endpoint]]),
+          x=sprintf("Days from day-%d landmark",as.integer(landmark))) +
+        ggplot2::annotate("text",x=Inf,y=-Inf,label=logrank,hjust=1.08,vjust=-.6,size=2.3,color="#52514e")
+    }
+    trio <- view=="score_trio"
+    add(p,paste0(name,": score × ",if(trio) "TP53/RB1/PTEN" else "Gleason"),paste0(
+      sprintf("Kaplan-Meier %s-free survival from the %d-day landmark after ",name,as.integer(landmark)),
+      if(trio) "the sequencing date in sequenced patients, by any TP53/RB1/PTEN alteration" else
+        "ADT initiation in patients with a Gleason score, by Gleason ≤7 vs ≥8",
+      sprintf(" and the transferred %s score (above vs at or below the Dana-Farber median). Patients/events: ",model),
+      if(is.null(p)) "" else counts(view),"."))
+  }
+  gradient <- plot_federated_transfer_gradient(km,family,landmark)
+  if(!is.null(gradient)) gradient <- gradient + ggplot2::labs(y="3-year event-free\nprobability")
+  add(gradient,
+    "3-year event-free probability",paste0(
+      sprintf("Kaplan-Meier 3-year event-free probability (95%% CI) from the %d-day landmark for each endpoint, ",as.integer(landmark)),
+      sprintf("by transferred %s score quintile and Gleason group (ADT clock) and by the number of TP53/RB1/PTEN genes altered (sequencing clock).",model)))
+  add(plot_federated_transfer_hr(km,family,landmark),"Hazard ratios",paste0(
+    sprintf("Univariable Cox hazard ratios (95%% CI) from the %d-day landmark: top vs bottom 20%% of the transferred %s score and Gleason ≥8 vs ≤7 (ADT clock), ",as.integer(landmark),model),
+    "and any TP53/RB1/PTEN alteration vs none (sequencing clock)."))
+  if(length(plots)) legend <- c(legend,
+    "Score cutpoints were computed in the Dana-Farber patients scored at each landmark, shared across endpoints.")
+  list(plots=plots,titles=titles,legend=legend)
 }
 
 # Figure 3 manuscript styling, shared by the local (DFCI) and federated versions:
@@ -2266,9 +2643,12 @@ manuscript_build <- function(items,tables,root) {
       federated$coefficients,federated$importance)
   } else if(all(available)) message("Skipping federated manuscript Figure 4: missing no-DFCI performance tables")
   transfer <- read("^transfer_discrimination_no_dfci__platinum[.]csv$")
-  if(!is.null(transfer) && nrow(transfer))
+  if(!is.null(transfer) && nrow(transfer)) {
+    km <- lapply(FEDERATED_TRANSFER_KM_TABLES,function(stem) read(paste0("^",stem,"__platinum[.]csv$")))
+    km <- if(all(!vapply(km,is.null,logical(1)))) km else NULL
     result[["federated_05"]] <- manuscript_federated_transfer_no_dfci(transfer,
-      read("^transfer_clinical_comparison_no_dfci__platinum[.]csv$"))
+      read("^transfer_clinical_comparison_no_dfci__platinum[.]csv$"),km)
+  }
   result
 }
 

@@ -217,6 +217,25 @@ def test_subpopulation_summary_sections_select_strata():
     assert not strata & {"Full cohort", "Gleason available", "Gleason missing"}
 
 
+def test_km_patients_keeps_labs_scores_and_each_clock_own_strata(tmp_path):
+    scores, clinical = _scores_and_clinical()
+    adt_clinical = clinical.assign(**{c: np.nan for c in (
+        "HAS_SEQUENCING", "TP53_ANY", "RB1_ANY", "PTEN_ANY", "SOMATIC_N_GENES_ALTERED")})
+    km = fcc.km_patients({"adt": (scores, adt_clinical), "sequencing": (scores, clinical)})
+    assert list(km.columns) == fcc.KM_PATIENT_COLUMNS
+    # One row per clock × bundle × patient; the baseline (age) score is dropped.
+    assert len(km) == 2 * 2 * 150
+    assert set(km["clock"]) == {"adt", "sequencing"}
+    assert km.loc[km["clock"] == "adt", "TP53_ANY"].isna().all()
+    seq = km[km["clock"] == "sequencing"]
+    assert seq["HAS_SEQUENCING"].eq(True).sum() == 2 * 75
+    en = scores[(scores["bundle"] == "fed_en") & (scores["config"] == "both")]
+    assert np.allclose(km.loc[(km["clock"] == "adt") & (km["bundle"] == "fed_en"), "risk_score"],
+                       en["risk_score"])
+    fcc.write_outputs(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), tmp_path, km=km)
+    assert len(pd.read_csv(tmp_path / fcc.KM_PATIENTS_FILE)) == len(km)
+
+
 # --------------------------------------------------------------------------- #
 # Sequencing-anchored trio arm
 # --------------------------------------------------------------------------- #

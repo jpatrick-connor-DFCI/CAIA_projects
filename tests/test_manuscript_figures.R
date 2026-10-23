@@ -213,4 +213,88 @@ fig5_a <- withCallingHandlers(manuscript_federated_transfer_no_dfci(transfer_met
   message=function(m) {fallback_message <<- c(fallback_message,conditionMessage(m)); invokeRestart("muffleMessage")})
 stopifnot(length(fig5_a$spec$titles)==1,fig5_a$spec$height==3.2,
   any(grepl("clinical comparison unavailable",fallback_message,fixed=TRUE)))
+# Federated Figure 5 e-h: patient-level transfer scores -> aggregate KM tables.
+km_patients_fixture <- function(n=900) {
+  set.seed(11)
+  score <- rnorm(n); score[1:60] <- 0
+  gleason <- sample(c(6:10,NA),n,TRUE)
+  sequenced <- seq_len(n)%%2==0
+  trio <- matrix(rbinom(3*n,1,.3),n,dimnames=list(NULL,c("TP53_ANY","RB1_ANY","PTEN_ANY")))
+  bind_rows(lapply(c(adt="adt",sequencing="sequencing"),function(clock) {
+    rows <- if(clock=="adt") seq_len(n) else which(sequenced)
+    rates <- c(platinum=4e-4,nepc=2e-4,avpc=1e-3)
+    bind_rows(lapply(names(rates),function(endpoint) {
+      t <- rexp(n,rates[[endpoint]]*exp(score)*ifelse(!is.na(gleason)&gleason>=8,2,1)); censor <- runif(n,300,3000)
+      bind_rows(lapply(c(elastic_net_cox="cox_federated_elasticnet_model_adt",xgboost_cox="xgboost_federated_model_adt"),
+        function(bundle) tibble(clock=clock,endpoint=toupper(endpoint),bundle=bundle,
+          model_family=if(startsWith(bundle,"xgboost")) "xgboost_cox" else "elastic_net_cox",landmark_days=180,
+          person_id=seq_len(n),risk_score=if(startsWith(bundle,"xgboost")) round(score) else score,
+          duration_days=pmin(t,censor),event=as.integer(t<=censor),GLEASON_SCORE=gleason,
+          HAS_SEQUENCING=if(clock=="sequencing") "True" else NA_character_,
+          TP53_ANY=if(clock=="sequencing") trio[,1] else NA_real_,RB1_ANY=if(clock=="sequencing") trio[,2] else NA_real_,
+          PTEN_ANY=if(clock=="sequencing") trio[,3] else NA_real_,SOMATIC_N_GENES_ALTERED=NA_real_)[rows,]))
+    }))
+  }))
+}
+km_dir <- tempfile("transfer-km-"); dir.create(km_dir)
+readr::write_csv(km_patients_fixture(),file.path(km_dir,FEDERATED_TRANSFER_KM_FILE))
+km_input <- load_federated_transfer_km(km_dir)
+km_groups <- federated_transfer_km_groups(km_input)
+# One cutpoint per clock x bundle x landmark: a patient's score group never depends on the endpoint.
+shared <- km_groups %>% group_by(clock,bundle,person_id) %>%
+  summarise(n_extreme=n_distinct(score_extreme),n_half=n_distinct(score_half),
+    n_quintile=n_distinct(score_quintile),.groups="drop")
+tied <- filter(km_groups,clock=="adt",bundle=="cox_federated_elasticnet_model_adt",person_id<=60)
+stopifnot(all(shared$n_extreme==1),all(shared$n_half==1),all(shared$n_quintile==1),
+  n_distinct(tied$score_extreme)==1,n_distinct(tied$score_half)==1,n_distinct(tied$score_quintile)==1,
+  all(is.na(km_groups$trio_group[km_groups$clock=="adt"])),
+  all(is.na(km_groups$gleason_group[km_groups$clock=="sequencing"])),
+  all(!is.na(km_groups$trio_group[km_groups$clock=="sequencing"])),
+  setequal(na.omit(km_groups$score_gleason),federated_transfer_cross(FEDERATED_TRANSFER_GLEASON)))
+en <- filter(km_groups,clock=="adt",bundle=="cox_federated_elasticnet_model_adt",endpoint=="nepc")
+stopifnot(abs(mean(en$score_extreme %in% "Top 20%")-.2)<.02,
+  identical(sort(unique(na.omit(en$score_quintile))),paste0("Q",1:5)))
+km_tables <- federated_transfer_km_tables(km_input)
+stopifnot(identical(names(km_tables),names(FEDERATED_TRANSFER_KM_TABLES)),
+  setequal(unique(km_tables$summary$view),names(FEDERATED_TRANSFER_KM_VIEWS)),
+  all(km_tables$summary$clock[km_tables$summary$view %in% c("trio","score_trio")]=="sequencing"),
+  all(km_tables$hr$clock[km_tables$hr$view=="gleason"]=="adt"),
+  setequal(unique(km_tables$gradient$stratifier),names(FEDERATED_TRANSFER_GRADIENT)),
+  all(km_tables$gradient$event_free>=0 & km_tables$gradient$event_free<=1,na.rm=TRUE),
+  nrow(filter(km_tables$hr,is.finite(hr)))>0,
+  # Rounded XGBoost scores tie across quintile edges: no quintile gradient rather than mislabeled bins.
+  !any(km_tables$gradient$stratifier=="score_quintile" & km_tables$gradient$model_family=="xgboost_cox"))
+score_hr <- filter(km_tables$hr,view=="score",endpoint=="avpc",model_family=="elastic_net_cox")
+stopifnot(score_hr$hr>1,score_hr$n_reference+score_hr$n_compared<nrow(en))
+# Panels below the event floor are dropped, not drawn.
+stopifnot(is.null(federated_transfer_km_fit(mutate(en,event=0L),"score_extreme",c("Bottom 20%","Top 20%"))))
+p_km <- plot_federated_transfer_km(km_tables,"score_gleason","nepc","elastic_net_cox",180)
+stopifnot(inherits(p_km,"ggplot"),identical(p_km$labels$y,"NEPC-free probability"),
+  grepl("Log-rank",p_km$labels$subtitle,fixed=TRUE))
+fig5_km <- manuscript_federated_transfer_no_dfci(transfer_metrics,transfer_clinical,km_tables)
+stopifnot(inherits(fig5_km$plot,"gtable"),length(fig5_km$spec$titles)==8,
+  identical(fig5_km$spec$titles[1:4],fig5$spec$titles),
+  nrow(fig5_km$spec$layout)==6,ncol(fig5_km$spec$layout)==2,
+  all(fig5_km$spec$layout[1:4,1]==fig5_km$spec$layout[1:4,2]),
+  identical(as.vector(t(fig5_km$spec$layout[5:6,])),5:8),
+  abs(fig5_km$spec$height-(10.4+2*MANUSCRIPT_TRANSFER_KM_ROW_HEIGHT))<1e-9,
+  grepl("e: Kaplan-Meier NEPC-free survival",fig5_km$legend,fixed=TRUE),
+  grepl("f: Kaplan-Meier NEPC-free survival from the 180-day landmark after the sequencing date",fig5_km$legend,fixed=TRUE),
+  grepl("h: Univariable Cox hazard ratios",fig5_km$legend,fixed=TRUE))
+# Without the clinical comparison the KM panels follow panel a.
+fig5_km_a <- suppressMessages(manuscript_federated_transfer_no_dfci(transfer_metrics,NULL,km_tables))
+stopifnot(length(fig5_km_a$spec$titles)==5,grepl("b: Kaplan-Meier",fig5_km_a$legend,fixed=TRUE),
+  identical(fig5_km_a$spec$layout[4,],c(5L,NA)))
+# Standalone pages land in 05_transfer/km/ with aggregate (not patient-level) sidecars.
+km_root <- tempfile("transfer-km-out-")
+render_federated_transfer_km(km_root,km_dir,dpi=40,overwrite=TRUE)
+km_out <- file.path(km_root,FIGURE_SECTIONS[["transfer"]],"km")
+stopifnot(file.exists(file.path(km_out,c("transfer_km_score_gleason_nepc_elasticnet_landmark180__platinum.png",
+    "transfer_km_score_trio_avpc_xgboost_landmark180__platinum.png","transfer_km_grid_elasticnet_landmark180__platinum.png",
+    "transfer_km_gradient_elasticnet_landmark180__platinum.png","transfer_km_hr_xgboost_landmark180__platinum.png"))),
+  file.exists(file.path(km_out,"data",paste0(FEDERATED_TRANSFER_KM_TABLES,"__platinum.csv"))),
+  !any(grepl("person_id",unlist(lapply(file.path(km_out,"data",paste0(FEDERATED_TRANSFER_KM_TABLES,"__platinum.csv")),
+    readLines,n=1L)),fixed=TRUE)))
+missing_km <- tryCatch(load_federated_transfer_km(tempdir()),warning=identity)
+stopifnot(inherits(missing_km,"warning"))
 cat("Manuscript data fidelity, missing cells, audit notes and isolated styling passed.\n")
