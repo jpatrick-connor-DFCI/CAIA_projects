@@ -22,7 +22,7 @@ local({
   plot <- ggplot(tibble(x=c("A fairly long label","Another label"),y=c(.3,.8)),aes(x,y,fill=x))+
     geom_col()+theme_fig()+labs(title="Synthetic comparison",caption="Synthetic test data; no clinical interpretation.")
   plot <- plot + guides(fill=guide_legend(ncol=1))
-  stems <- c("figure2v3_confusion_matrix","figure2v3_metric_bar","figure2v3_subtype_landscape","figure2v3_enrichment",
+  stems <- c(figure2v3_stems("lm0"),
     "figure1a_consort","figure1b_km","figure1c_span","figure1c_dx_to_tx","figure1c_time_to_platinum",
     "adt_labels_llm_vs_regex_max_any","adt_labels_adt_vs_regex_max_any","adt_labels_adt_vs_llm",
     paste0(c("figure4a_discrimination","figure4c_sensitivity_gleason","figure4d_sensitivity_somatic"),"_auc_platinum"),
@@ -46,13 +46,13 @@ local({
     !anyDuplicated(vapply(m$scenes,`[[`,character(1),"destination")),
     !any(grepl("/by_figure/",vapply(m$scenes,`[[`,character(1),"destination"))))
   stopifnot(sum(grepl("somatic_snv_carrier_km_page",vapply(m$scenes,`[[`,character(1),"stem")))==2)
-  for(key in c("figure1_cohort","figure2v3_llm","metastatic_label_agreement")) {
+  for(key in c("figure1_cohort","figure2v3_llm_lm0","metastatic_label_agreement")) {
     scene <- Filter(function(s) s$stem==key,m$scenes)[[1]]
     grob <- readRDS(scene$path)
     stopifnot(!grepl("/compiled/",scene$destination,fixed=TRUE),
       !any(vapply(grob$grobs,inherits,logical(1),"text")))
     panels <- Filter(function(g) inherits(g,"gtable"),grob$grobs)
-    members <- if(key=="figure2v3_llm") stems[1:4] else
+    members <- if(key=="figure2v3_llm_lm0") stems[1:4] else
       figure_compilation_spec(if(key=="figure1_cohort") stems[5] else stems[10])$members
     stopifnot(length(panels)==length(members),
       all(members %in% vapply(m$scenes,`[[`,character(1),"stem")))
@@ -175,7 +175,7 @@ local({
     identical(levels(d$landmark),c("0 days","+180 days")),
     nrow(d)==36,identical(levels(d$metric),"Mean AUC(t)"))
   note <- federated_transfer_count_note(loaded)
-  stopifnot(grepl("^PLATINUM: 0d 1,000/30, 180d 1,000/30; NEPC:",note))
+  stopifnot(grepl("^PLATINUM: 0d 1,000/30, 180d 1,000/30; AVPC:",note))
   p <- plot_federated_transfer(d,note)
   title <- if("get_labs" %in% getNamespaceExports("ggplot2")) ggplot2::get_labs(p)$title else p$labels$title
   stopifnot(grepl("without Dana-Farber",title,fixed=TRUE),length(ggplot_build(p)$layout$panel_params)==3)

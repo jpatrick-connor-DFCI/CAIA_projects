@@ -509,8 +509,15 @@ notebook. All operate on the merged `profile_data` run:
   The cached `07_figures.R` workflow exports lettered multipanel figures alongside
   all individual Figure 1 and Figure 2v3 panels: `01_cohort/compiled/figure1_cohort__<identity>`
   combines cohort selection, survival, and three timing distributions, while
-  `02_llm/compiled/figure2v3_llm__platinum__all__incl` combines all four classifier/subtype
-  panels. Existing Figure 2v3 paired exports are retained. The three metastatic-label
+  `02_llm/compiled/figure2v3_llm_<cohort>__platinum__all__incl` combines all four classifier/subtype
+  panels for each Figure 2 cohort (`icd`, `adt`, `lm0`; see Figure 2 v3 below). Existing
+  Figure 2v3 paired exports are retained per cohort. Canonical ADT/platinum also draws
+  `figure1d_dfci_data` (DFCI patients with ICD-10 prostate cancer, ADT, a pre-ADT Gleason
+  score, tumor sequencing, and the day-0 prediction cohort; Gleason and sequencing are
+  counted within the day-0 cohort from `somatic_gleason/build_manifest.json`) and
+  `figure1e_site_counts` (day-0 platinum events/patients per federated site, from the
+  within-site cohort CSV; skipped when absent). Both join manuscript Figure 1 as panels f
+  and g. The three metastatic-label
   confusion matrices also receive a combined `06_cohort_sensitivity/compiled/metastatic_label_agreement__<identity>`
   export. Filenames use `<identity> = <endpoint>__<subset>__<exclusion>` under each arm;
   Figure 2v3 is emitted only for canonical ADT/platinum. Run the default figure stage
@@ -518,8 +525,13 @@ notebook. All operate on the merged `profile_data` run:
   Compiled exports sit in a `compiled/` subfolder of their section, without an overall supertitle.
   The new `03_univariate/internal/compiled/dfci_labs_overview_km_lm0__platinum__<subset>__<exclusion>`
   combines the three DFCI landmark volcanoes with PSA/testosterone log1p trajectories
-  by platinum status and bottom-versus-top-20% KM curves. KM defaults to day 0;
+  by platinum status and bottom-versus-top-10% KM curves. KM defaults to day 0;
   `COMPASS_COMBINED_KM_LANDMARK=90` or `180` selects another landmark.
+  `03_univariate/internal/dfci_supplement_labs_lm<N>__platinum__<subset>__<exclusion>` is the
+  matching supplement for LDH, hemoglobin, albumin and alkaline phosphatase: one row per lab,
+  trajectory (log1p for LDH and ALP) beside the bottom-versus-top-10% KM curve.
+  `COMPASS_SUPPLEMENT_LABS` (comma-separated canonical names, read by both notebook 06 and
+  `07_figures.R`) changes the lab set.
   Figure 4 additionally emits `figure4c_sensitivity_gleason_auc`, the held-out
   available-case comparison of labs against Gleason features at every landmark, alongside
   `figure4s_multivariate_all_models`, a supplemental held-out comparison
@@ -546,15 +558,15 @@ notebook. All operate on the merged `profile_data` run:
       labels are intersected with the complete ADT time-0 MRN set. Both Figure 2 and Figure 2v2 are
       ADT/day-0-only; the ARPI figure pass skips them, and captions report labeled/evaluable coverage
       against the total ADT day-0 cohort.
-    - **Figure 2 v3** (`ADT/figure2v3_llm/`) — the same label source and panel set as v2
-      (`figure2v3_confusion_matrix`, `figure2v3_metric_bar`, `figure2v3_confusion_has_nepc`,
-      `figure2v3_confusion_has_avpc`, `figure2v3_subtype_landscape`, `figure2v3_enrichment`,
-      `figure2v3_llm_subtype_platinum`) over a **wider patient universe**: every MRN with
-      `ADT_EXPOSED = 1` in `mrn_lists/icd_prostate_mrn_flags.csv` — ADT on/after diagnosis —
-      step of the Figure 1 CONSORT — rather than only the landmark-0 prediction cohort
-      (`eligible_landmark_0` in `landmark_mrn_availability.csv`) that v2 uses. So v3 includes
-      patients later dropped by the male-sex, post-ADT cancer, PARPi, pre-diagnosis-platinum,
-      and ≥5-PSA-test criteria.
+    - **Figure 2 v3** (`ADT/figure2v3_llm/`) — the same label source as v2, drawn on three
+      cohorts, each intersected with the LLM labels: `icd` (every MRN in
+      `mrn_lists/icd_prostate_mrn_flags.csv`), `adt` (`ADT_EXPOSED = 1`, the ADT step of the
+      Figure 1 CONSORT) and `lm0` (the ADT day-0 prediction cohort). Stems are
+      `figure2v3_<cohort>_{confusion_matrix,metric_bar,subtype_landscape,enrichment}`, and
+      manuscript keys `02_llm_nepc_avpc__<cohort>` (captions `figure2_<cohort>`) carry a cohort
+      header line. Platinum status here is any dated platinum ever, from
+      `mrn_lists/platinum_any_MRN_list.csv` (written by `compile_COMPASS_cohort_data.py`), so it
+      is defined outside the eligible cohort too.
       Like v2 it carries no `stopifnot` count assertions; it is emitted from the ADT pass only.
     - **All-lab longitudinal dynamics** — Figure 7's group-mean-CI trajectory machinery
       (`bin_group_ci()`/`plot_group_ci_panel()`) generalized from PSA/Testosterone-only to every
@@ -563,8 +575,8 @@ notebook. All operate on the merged `profile_data` run:
       `longitudinal_<stratum>_<lab>`.
     - **All-lab KM-by-quartile** — Figure 5's Q1-vs-Q4 platinum-free KM curves, generalized the same
       way via `resolve_mean_col()`. Stems: `km_quartile_<lab>_landmark<D>`.
-      The live PSA/testosterone KM contrast is the extreme-quintile split
-      (bottom 20% vs top 20%, middle 60% dropped), stem
+      The live PSA/testosterone KM contrast is the extreme-decile split
+      (bottom 10% vs top 10%, middle 80% dropped), stem
       `km_quintile_<lab>_landmark<D>`.
     - **All-lab distribution panels** — Figure 6's log/raw platinum-split distribution plots,
       generalized the same way. Stems: `dist_by_platinum_{log,raw}_<lab>_landmark<D>`.
@@ -1245,9 +1257,10 @@ subfolder of its section (`03_univariate/federated/`, `04_multivariate/federated
 
 | File | Content |
 |---|---|
-| `federated_03_univariable` | Figure 3 layout: pooled univariable Cox volcanoes at days 0/90/180, pooled PSA/testosterone trajectories and day-180 extreme-quintile KM curves |
+| `federated_03_univariable` | Figure 3 layout: pooled univariable Cox volcanoes at days 0/90/180 (with a log-HR direction arrow under the key), pooled PSA/testosterone trajectories and day-180 extreme-decile KM curves (site `extreme_fraction`, 10% by default) |
 | `federated_04_multivariable` | Figure 8 layout, with the full models refit without DFCI added to the AUC(t) row |
-| `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/NEPC/AVPC: (a) mean AUC(t) of the full and age-only models; (b–d) mean AUC(t) of the transferred full models, local out-of-fold Cox models of Gleason + age (b), TP53/RB1/PTEN + age (c) and Gleason + TP53/RB1/PTEN + age (d), and combined Cox models of each transferred score + those covariates without age, in patients with a Gleason score (b), sequenced patients (c) and sequenced patients with a Gleason score (d); c and d on the sequencing-date clock |
+| `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/AVPC/NEPC: (a) mean AUC(t) of the full and age-only models; (b–d) mean AUC(t) of the transferred full models, local out-of-fold Cox models of Gleason + age (b), TP53/RB1/PTEN + age (c) and Gleason + TP53/RB1/PTEN + age (d), and combined Cox models of each transferred score + those covariates without age, in patients with a Gleason score (b), sequenced patients (c) and sequenced patients with a Gleason score (d); c and d on the sequencing-date clock; strips give day-0 patients/events. (e–g) Platinum, AVPC and NEPC KM curves, top vs bottom 10% of the day-180 XGBoost score. (h) 5-year event-free probability by score quartile, Gleason score and TP53/PTEN/RB1 altered-gene count |
+| `federated_05_transfer_no_dfci__no_d` | The same without panel d (KM curves d–f, gradient g); caption `federated_figure5_no_d` |
 
 The local Figure 3 (`03_dfci_univariable`) still uses DFCI patient-level data.
 

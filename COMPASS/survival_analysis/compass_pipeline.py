@@ -1274,6 +1274,11 @@ SURVLATENT_OBSERVATION_CUT_DAYS = None
 # the number comparable to Cox/XGBoost.
 RUN_DYNAMIC = False
 
+# Fit each endpoint's competing-risk config (cause + death) alongside its
+# cause-only config. False keeps only the cause-only config -- the one
+# comparable to 03_multivariate.ipynb's Cox/XGBoost, which censor at death.
+LONGITUDINAL_INCLUDE_COMPETING = True
+
 
 def longitudinal_task_specs(
     endpoint: str = None,
@@ -1298,6 +1303,8 @@ def longitudinal_task_specs(
             f"Known: {valid}."
         )
     configs = _LONGITUDINAL_CONFIGS_BY_ENDPOINT[endpoint]
+    if not LONGITUDINAL_INCLUDE_COMPETING:
+        configs = configs[:1]
     specs = [
         ("dynamic-deephit", cfg, f"dynamic_deephit_metrics_{cfg}.csv") for cfg in configs
     ]

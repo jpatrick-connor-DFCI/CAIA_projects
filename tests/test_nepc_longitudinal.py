@@ -243,6 +243,17 @@ class TestTaskSpecWiring:
         assert platinum == ["platinum", "competing"]
         assert nepc == ["nepc", "nepc_competing"]
 
+    def test_competing_config_can_be_dropped(self, monkeypatch):
+        """LONGITUDINAL_INCLUDE_COMPETING=False keeps only the cause-only config."""
+        monkeypatch.setattr(cp, "LONGITUDINAL_INCLUDE_COMPETING", False)
+        for endpoint, cause_only in (("platinum", "platinum"), ("nepc", "nepc")):
+            configs = [
+                c for _, c, _ in cp.longitudinal_task_specs(
+                    endpoint, include_survlatent=True, include_dynamic=True
+                )
+            ]
+            assert set(configs) == {cause_only}
+
     def test_survlatent_off_by_default(self):
         """RUN_SURVLATENT gates it; 03b ships with it off."""
         assert cp.RUN_SURVLATENT is False

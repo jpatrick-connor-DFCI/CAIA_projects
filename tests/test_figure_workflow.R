@@ -26,6 +26,8 @@ local({
   for (col in c("DATED_PROSTATE_DIAGNOSIS", "MALE", "ARPI_DOCETAXEL_EXPOSED", "ADT_EXPOSED", "HAS_5_OR_MORE_PSA_TESTS", "ELIGIBLE")) flags[[col]] <- 1
   write_csv(flags, file.path(root, "mrn_lists", "icd_prostate_mrn_flags.csv"))
   write_csv(patient %>% filter(PLATINUM == 1) %>% select(DFCI_MRN), file.path(root, "mrn_lists", "platinum_MRN_list.csv"))
+  write_csv(patient %>% filter(PLATINUM == 1) %>% select(DFCI_MRN, PLATINUM_DATE),
+    file.path(root, "mrn_lists", "platinum_any_MRN_list.csv"))
   write_csv(tibble(DFCI_MRN = ids,
     updated_manual_low_confidence = if_else(patient$NEPC == 1, "nepc", "conventional"),
     updated_manual_high_confidence = updated_manual_low_confidence),
@@ -38,6 +40,10 @@ local({
     write_csv(tibble(DFCI_MRN = ids, eligible_landmark_0 = TRUE), file.path(inputs, "landmark_mrn_availability.csv"))
     jsonlite::write_json(list(eligible_by_landmark = list(`0` = 40L, `90` = 40L, `180` = 40L)),
       file.path(inputs, "landmark_attrition.json"), auto_unbox = TRUE)
+    dir.create(file.path(inputs, "somatic_gleason"))
+    jsonlite::write_json(list(cohort_sizes = list(gleason = 30L, sequencing_snv = 12L, sequencing_any = 15L),
+      available_case_sensitivities = list(gleason = list(n_patients_by_landmark = list(`0` = 30L, `90` = 31L)))),
+      file.path(inputs, "somatic_gleason", "build_manifest.json"), auto_unbox = TRUE)
     for (lm in c(0L, 90L, 180L)) {
       results <- file.path(root, "survival_analysis", paste0("local_runs_adt", suffix), "cox", paste0("landmark_", lm), "both")
       dir.create(results, recursive = TRUE)
@@ -151,9 +157,12 @@ local({
   # as duplicates; their individual panels are still exported.
   stopifnot(all(c("figure1a_consort", "figure1b_km", "figure1c_span",
     "figure1c_dx_to_tx", "figure1c_time_to_platinum",
-    "figure2v3_confusion_matrix", "figure2v3_metric_bar", "figure2v3_subtype_landscape",
-    "figure2v3_enrichment") %in% platinum_stems),
-    !any(c("figure1_cohort", "figure2v3_llm", "classifier_validation", "subtype_platinum") %in% platinum_stems),
+    "figure1d_dfci_data", "figure1e_site_counts",
+    unlist(lapply(names(FIGURE2_COHORTS), figure2v3_stems))) %in% platinum_stems),
+    !any(c("figure1_cohort", paste0(c("figure2v3_llm_", "classifier_validation_", "subtype_platinum_"),
+      rep(names(FIGURE2_COHORTS), each = 3))) %in% platinum_stems),
+    all(paste0("02_llm_nepc_avpc__", names(FIGURE2_COHORTS)) %in% platinum_stems),
+    "01_cohort_overview" %in% platinum_stems,
     !any(startsWith(platinum_stems,"dfci_labs_overview_")),
     !any(startsWith(nepc_stems,"figure2v3")), !any(startsWith(nepc_stems,"dfci_labs_overview_")))
   stopifnot(length(list.files(cfg$fig_root, pattern = "\\.rds$", recursive = TRUE)) == 0L,
@@ -203,7 +212,8 @@ local({
                         paste0("federated_volcano_landmark", c(0, 90, 180)),
                         "transfer_discrimination_no_dfci", "transfer_clinical_comparison_no_dfci",
                         "08_federated_multivariable",
-                        "federated_05_transfer_no_dfci")))
+                        "federated_05_transfer_no_dfci",
+                        "federated_05_transfer_no_dfci__no_d")))
   coefficient_export <- read_csv(file.path(cfg$fig_root, "ADT", "04_multivariate", "federated", "data",
     "elasticnet_coefficients__platinum.csv"), show_col_types = FALSE)
   stopifnot(nrow(coefficient_export) == 9L, sum(coefficient_export$displayed) == 6L,

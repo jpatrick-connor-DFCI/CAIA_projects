@@ -727,7 +727,9 @@ LFT <- c("ALT","AST","Alkaline phosphatase","Total bilirubin","Direct bilirubin"
 VITALS <- c("Body weight","Body temperature","Heart rate","Respiratory rate",
             "Systolic blood pressure","Diastolic blood pressure")
 ANDROGEN <- c("PSA","Testosterone")
-OTHER <- c("TSH")
+OTHER <- c("TSH","LDH")
+# Default extra DFCI per-lab trajectory/KM figures (COMPASS_SUPPLEMENT_LABS).
+DEFAULT_SUPPLEMENT_LABS <- c("LDH","Hemoglobin","Albumin","Alkaline phosphatase")
 DROP <- c("Body height")
 
 CATEGORY_MAP <- c(
@@ -1306,7 +1308,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                              cohorts = SUPPORTED_COHORTS, show = FALSE,
                              llm_annotations_path = DEFAULT_LLM_ANNOTATIONS_PATH,
                              plot_non_androgen_distributions = FALSE,
-                             plot_non_androgen_lab_figures = FALSE,
+                             lab_figure_labs = ANDROGEN,
                              plot_gam_trajectories = TRUE,
                              plot_adt_intent_supplement = TRUE,
                              save_dpi = SAVE_DPI,
@@ -1315,7 +1317,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                              progress = NULL,
                              overwrite = FALSE,
                              metastatic_supplement = NULL,
-                             cohort_forest_config = NULL) {
+                             cohort_forest_config = NULL,
+                             federated_path = NULL) {
   if (!is.null(progress) && !is.function(progress))
     stop("progress must be NULL or a function(event, detail)")
   notify_progress <- function(event, detail) {
@@ -1358,10 +1361,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       length(plot_non_androgen_distributions) != 1 ||
       is.na(plot_non_androgen_distributions))
     stop("plot_non_androgen_distributions must be one non-missing logical value")
-  if (!is.logical(plot_non_androgen_lab_figures) ||
-      length(plot_non_androgen_lab_figures) != 1 ||
-      is.na(plot_non_androgen_lab_figures))
-    stop("plot_non_androgen_lab_figures must be one non-missing logical value")
+  if (!is.character(lab_figure_labs) || !length(lab_figure_labs) || anyNA(lab_figure_labs) ||
+      !all(lab_figure_labs %in% names(CATEGORY_MAP)))
+    stop("lab_figure_labs must name canonical labs: ",
+         paste(setdiff(lab_figure_labs, names(CATEGORY_MAP)), collapse = ", "))
   if (!is.logical(plot_gam_trajectories) ||
       length(plot_gam_trajectories) != 1 ||
       is.na(plot_gam_trajectories))
@@ -1370,6 +1373,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       length(plot_adt_intent_supplement) != 1 ||
       is.na(plot_adt_intent_supplement))
     stop("plot_adt_intent_supplement must be one non-missing logical value")
+  if (!is.null(federated_path) &&
+      (!is.character(federated_path) || length(federated_path) != 1L || is.na(federated_path)))
+    stop("federated_path must be NULL or one non-missing path")
   COHORT_DISPLAY <- cohort_display(COHORT)
   ENDPOINT_DISPLAY <- toupper(ENDPOINT)
   message(sprintf("Generating figures for cohort: %s, endpoint: %s",
@@ -1749,6 +1755,50 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       theme_void() + theme(plot.title = element_text(face = "bold", size = 12.5, hjust = 0.5))
   }
 
+  # Patient counts for the DFCI data-availability panel. The Gleason and
+  # sequencing counts are the available-case subsets of the ADT day-0 cohort
+  # written by build_somatic_gleason_inputs.py.
+  dfci_data_availability <- function(mrn_flags, attrition, inputs_dir) {
+    manifest_path <- file.path(inputs_dir, "somatic_gleason", "build_manifest.json")
+    if (!file.exists(manifest_path)) {
+      message("Skipping figure1d_dfci_data: missing ", manifest_path)
+      return(NULL)
+    }
+    manifest <- fromJSON(manifest_path, simplifyVector = FALSE)
+    count <- function(x, what) {
+      x <- suppressWarnings(as.numeric(x))
+      if (length(x) != 1L || !is.finite(x) || x < 0)
+        stop("Data-availability count missing or invalid: ", what)
+      x
+    }
+    tibble(
+      label = c("ICD-10 prostate cancer", "ADT-exposed", "Gleason before ADT day 0",
+                "Tumor sequencing", "ADT day-0 prediction cohort"),
+      n = c(nrow(mrn_flags), sum(mrn_flags$ADT_EXPOSED == 1),
+            count(manifest$available_case_sensitivities$gleason$n_patients_by_landmark[["0"]],
+                  "Gleason day 0"),
+            count(manifest$cohort_sizes$sequencing_any, "sequencing_any"),
+            count(attrition[["eligible_by_landmark"]][["0"]], "eligible day 0")))
+  }
+
+  render_data_availability_panel <- function(counts) {
+    counts <- counts %>% mutate(y = rev(seq_len(n())))
+    ggplot(counts, aes(y = y)) +
+      geom_rect(aes(xmin = 0, xmax = n, ymin = y - 0.32, ymax = y + 0.32), fill = "#5d6d7e") +
+      geom_text(aes(x = n, label = format(n, big.mark = ",")),
+                hjust = -0.12, size = 3.1, color = "#3a3a38") +
+      scale_y_continuous(breaks = counts$y, labels = counts$label,
+                         limits = c(0.5, nrow(counts) + 0.5), expand = expansion(mult = 0)) +
+      scale_x_continuous(limits = c(0, max(counts$n) * 1.18), labels = scales::comma,
+                         expand = expansion(mult = c(0, 0.01))) +
+      labs(title = "DFCI data availability", x = "Patients", y = NULL,
+           subtitle = "Gleason and sequencing counts are within the ADT day-0 cohort") +
+      theme_classic(base_size = 11) +
+      theme(panel.grid.major.x = element_line(color = "grey92", linewidth = 0.3),
+            axis.ticks.y = element_blank(), axis.line.y = element_blank(),
+            plot.title = element_text(face = "bold", size = 12.5))
+  }
+
   platinum_km_inputs <- function(df) {
     t_platinum <- suppressWarnings(as.numeric(df$t_platinum))
     platinum <- coalesce(suppressWarnings(as.numeric(df$PLATINUM)), 0) == 1
@@ -1895,6 +1945,22 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   pB <- render_km_panel(patient_df)
   save_fig(pB, OUT_DIR, "figure1b_km", 6.5, 4.8)
   if (show) print(pB)
+  if (IS_CANONICAL_ADT && EMIT_ENDPOINT_INDEPENDENT) {
+    availability <- dfci_data_availability(icd_prostate_mrn_flags, attrition, INPUTS_DIR)
+    if (!is.null(availability)) {
+      pD <- render_data_availability_panel(availability)
+      save_fig(pD, OUT_DIR, "figure1d_dfci_data", 6.0, 3.4)
+      if (show) print(pD)
+    }
+    # Federated per-site counts come from the within-site export; the plot
+    # helpers live in figure_workflow.R, which 07_figures.R sources alongside.
+    sites <- if (is.null(federated_path)) NULL else load_federated_sites(federated_path)
+    if (!is.null(sites)) {
+      pE <- figure1_site_counts_plot(sites)
+      save_fig(pE, OUT_DIR, "figure1e_site_counts", 6.0, 3.0)
+      if (show) print(pE)
+    } else message("Skipping figure1e_site_counts: no federated within-site cohort counts")
+  }
 
   span_series <- patient_df$record_span_days
   km_inputs <- platinum_km_inputs(patient_df)
@@ -2178,14 +2244,13 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
   if (IS_CANONICAL_ADT && EMIT_ENDPOINT_INDEPENDENT) {
   notify_progress("stage", "Figure 2: validation, subtype landscape, and platinum enrichment")
-  ## ---- Figure 2 v3 -- classifier labels over every ADT-exposed patient ----
-  # The only Figure 2 variant retained. Earlier variants (v0: unrestricted
-  # LLM_v3_labels.tsv; v1: those labels narrowed to the ADT landmark-0
-  # prediction cohort; v2: the classifier labels on that same prediction
-  # cohort) have been removed. v3 uses primary_subtype_labels.parquet over
-  # every MRN with ADT_EXPOSED == 1 in the ICD prostate workflow flags -- the
-  # "ADT entry requirement" step of the Figure 1 CONSORT, before any
-  # downstream prediction-cohort filtering.
+  ## ---- Figure 2 v3 -- classifier labels on three cohorts ----
+  # Earlier variants (v0: unrestricted LLM_v3_labels.tsv; v1/v2: labels on the
+  # landmark-0 prediction cohort) have been removed. v3 uses
+  # primary_subtype_labels.parquet and is drawn three times (stems
+  # figure2v3_<icd|adt|lm0>_*): every ICD-10 C61 MRN, every MRN with
+  # ADT_EXPOSED == 1 (the CONSORT "ADT entry requirement" step), and the ADT
+  # day-0 prediction cohort.
   if (is.null(llm_classifier_labels)) {
     message("Figure 2 v3: llm_classifier_labels unavailable -- skipping.")
   } else {
@@ -2343,102 +2408,114 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
            p_conv = w_conv[1], lo_conv = w_conv[2], hi_conv = w_conv[3])
     }
 
-    adt_exposed_mrns_v3 <- unique(as.character(
-      icd_prostate_mrn_flags[[ID_COL]][icd_prostate_mrn_flags$ADT_EXPOSED == 1]))
-    v3_labels_all <- llm_classifier_labels %>%
-      filter(as.character(DFCI_MRN) %in% adt_exposed_mrns_v3)
-    # Not a stopifnot: a shortfall here means the prediction cohort and the ICD
-    # flag table disagree, which is worth surfacing but should not abort the pass.
+    # Figure 2 is drawn on three nested cohorts, each intersected with the
+    # classifier labels: every ICD-10 C61 patient, the ADT-exposed subset, and
+    # the ADT day-0 prediction cohort. Platinum status is any dated platinum
+    # ever (platinum_any_MRN_list.csv), so it is defined for all three.
+    platinum_any_path <- file.path(NEPC_PROJ_PATH, "mrn_lists", "platinum_any_MRN_list.csv")
+    if (!file.exists(platinum_any_path))
+      stop(platinum_any_path, " not found -- re-run compile_COMPASS_cohort_data.py")
+    platinum_any_set <- unique(as.character(
+      cached_read_csv(platinum_any_path, show_col_types = FALSE)[[ID_COL]]))
     cohort_mrns <- unique(as.character(patient_df[[ID_COL]]))
     stopifnot(base_landmark == 0L, length(cohort_mrns) == nrow(patient_df))
-    n_pred_outside_v3 <- sum(!cohort_mrns %in% adt_exposed_mrns_v3)
-    if (n_pred_outside_v3 > 0)
+    icd_mrns <- unique(as.character(icd_prostate_mrn_flags[[ID_COL]]))
+    adt_exposed_mrns <- unique(as.character(
+      icd_prostate_mrn_flags[[ID_COL]][icd_prostate_mrn_flags$ADT_EXPOSED == 1]))
+    n_pred_outside_adt <- sum(!cohort_mrns %in% adt_exposed_mrns)
+    if (n_pred_outside_adt > 0)
       message(sprintf(
         "Figure 2 v3: %s prediction-cohort MRN(s) are absent from ADT_EXPOSED == 1 in %s",
-        format(n_pred_outside_v3, big.mark = ","), ICD_PROSTATE_MRN_FLAGS_CSV))
-    message(sprintf(
-      "Figure 2 v3 ADT-exposed universe: %s total patients (%s in the landmark-0 prediction cohort); %s labeled/evaluable (%s source labels total)",
-      format(length(adt_exposed_mrns_v3), big.mark = ","),
-      format(length(cohort_mrns), big.mark = ","),
-      format(nrow(v3_labels_all), big.mark = ","),
-      format(nrow(llm_classifier_labels), big.mark = ",")
-    ))
+        format(n_pred_outside_adt, big.mark = ","), ICD_PROSTATE_MRN_FLAGS_CSV))
 
-    ## Panel A: 3-class validation of primary_label against manual chart review.
-    ## Panels B/C below use the same primary_label for the subtype landscape and
-    ## aggressive-variant group.
-    merged_v3 <- manual_annotations %>%
-      inner_join(v3_labels_all, by = "DFCI_MRN")
-    cat(sprintf("figure2v3 merged_results: %s rows; manual conventional/AVPC/NEPC = %s\n",
-                format(nrow(merged_v3), big.mark = ","),
-                paste(sapply(CLASS_ORDER, function(cls)
-                  format(sum(merged_v3$manual_label == cls, na.rm = TRUE), big.mark = ",")),
-                  collapse = "/")))
-    metrics_v3 <- multiclass_metrics(merged_v3$manual_label, merged_v3$primary_label, CLASS_ORDER)
-    n_manual_v3 <- metrics_v3$cm %>% group_by(truth) %>% summarise(n = sum(n), .groups = "drop")
-    caption_a_v3 <- str_wrap(sprintf(
-      "All ADT-exposed patients (N=%s total, no prediction-cohort restriction); %s chart-reviewed/labeled patients (manual %s); overall 3-class accuracy %.2f (primary_subtype_labels.parquet).",
-      format(length(adt_exposed_mrns_v3), big.mark = ","),
-      format(metrics_v3$N, big.mark = ","),
-      paste(sprintf("%s=%s", CLASS_LABELS[as.character(n_manual_v3$truth)],
-                    format(n_manual_v3$n, big.mark = ",")), collapse = ", "),
-      metrics_v3$Accuracy), 95)
-    pA1_v3 <- render_confusion_panel(metrics_v3, "Subtype classifier agreement") +
-      labs(caption = caption_a_v3) +
-      theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
-    pA2_v3 <- render_metric_bar_panel(metrics_v3) +
-      labs(title = "Subtype classifier metrics", caption = caption_a_v3) +
-      theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
-    save_fig(pA1_v3, OUT_DIR_V3, "figure2v3_confusion_matrix", 6.2, 5.8)
-    save_fig(pA2_v3, OUT_DIR_V3, "figure2v3_metric_bar", 9.0, 5.0)
-    if (show) print(pA1_v3)
-    if (show) print(pA2_v3)
-
-    ## Panel B -- subtype landscape by platinum status (3-class primary_label).
-    # load_llm_strata coerces primary_label values outside the three modeled
-    # classes to NA, and those rows would draw an "NA" bar.
-    v3_labels_classified <- v3_labels_all %>% filter(!is.na(primary_label))
-    n_unclassified_v3 <- nrow(v3_labels_all) - nrow(v3_labels_classified)
-    if (n_unclassified_v3 > 0) {
+    render_figure2v3 <- function(variant, mrns, cohort_label) {
+      stem <- function(panel) sprintf("figure2v3_%s_%s", variant, panel)
+      labels_all <- llm_classifier_labels %>%
+        filter(as.character(DFCI_MRN) %in% mrns) %>%
+        mutate(is_platinum = as.character(DFCI_MRN) %in% platinum_any_set)
       message(sprintf(
-        "figure2v3 Panel B: dropped %s row(s) without one of the three primary_label classes",
-        format(n_unclassified_v3, big.mark = ",")
-      ))
-    }
-    platinum_positive_v3 <- v3_labels_classified %>% filter(is_platinum) %>% count_labels() %>%
-      mutate(platinum_status = "positive")
-    platinum_negative_v3 <- v3_labels_classified %>% filter(!is_platinum) %>% count_labels() %>%
-      mutate(platinum_status = "negative")
-    label_distributions_v3 <- bind_rows(platinum_positive_v3, platinum_negative_v3)
-    n_pos <- sum(platinum_positive_v3$count)
-    n_neg <- sum(platinum_negative_v3$count)
-    caption_b_v3 <- sprintf("All ADT-exposed patients; %s classified of %s total patients%s; platinum+ n=%s, platinum- n=%s.",
-                            format(nrow(v3_labels_classified), big.mark = ","),
-                            format(length(adt_exposed_mrns_v3), big.mark = ","),
-                            if (n_unclassified_v3 > 0)
-                              sprintf(" (%s labeled row(s) outside the three classes excluded)",
-                                      format(n_unclassified_v3, big.mark = ","))
-                            else "",
-                            format(n_pos, big.mark = ","), format(n_neg, big.mark = ","))
-    pB_v3 <- render_landscape_panel(
-        label_distributions_v3, n_pos, n_neg,
-        "Subtype landscape by platinum status") +
-      labs(caption = str_wrap(caption_b_v3, 85)) +
-      theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-    save_fig(pB_v3, OUT_DIR_V3, "figure2v3_subtype_landscape", 9.5, 8)
+        "Figure 2 v3 [%s] %s: %s total patients; %s labeled/evaluable (%s source labels total)",
+        variant, cohort_label, format(length(mrns), big.mark = ","),
+        format(nrow(labels_all), big.mark = ","),
+        format(nrow(llm_classifier_labels), big.mark = ",")))
+      cohort_note <- sprintf("%s (N=%s; %s with an LLM label)", cohort_label,
+                             format(length(mrns), big.mark = ","),
+                             format(nrow(labels_all), big.mark = ","))
 
-    ## Panel C -- aggressive (avpc+nepc) vs conventional platinum enrichment.
-    enrichment_v3 <- compute_enrichment(v3_labels_all)
-    cat(sprintf("figure2v3 enrichment: OR = %.2f, Fisher p = %.3g\n",
-                enrichment_v3$OR, enrichment_v3$p_value))
-    caption_c_v3 <- sprintf("All ADT-exposed patients; excludes unclassified labels (%s rows). Error bars are 95%% Wilson intervals. OR=%.1f, one-sided Fisher p=%.1e.",
-                            format(enrichment_v3$n_excluded, big.mark = ","),
-                            enrichment_v3$OR, enrichment_v3$p_value)
-    pC_v3 <- render_enrichment_panel(enrichment_v3) + labs(caption = str_wrap(caption_c_v3, 58)) +
-      theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
-    save_fig(pC_v3, OUT_DIR_V3, "figure2v3_enrichment", 6.0, 5.8)
-    if (show) print(pB_v3)
-    if (show) print(pC_v3)
+      ## Panel A: 3-class validation of primary_label against manual chart review.
+      ## Panels B/C below use the same primary_label for the subtype landscape and
+      ## aggressive-variant group.
+      merged <- manual_annotations %>% inner_join(labels_all, by = "DFCI_MRN")
+      cat(sprintf("figure2v3 [%s] merged_results: %s rows; manual conventional/AVPC/NEPC = %s\n",
+                  variant, format(nrow(merged), big.mark = ","),
+                  paste(sapply(CLASS_ORDER, function(cls)
+                    format(sum(merged$manual_label == cls, na.rm = TRUE), big.mark = ",")),
+                    collapse = "/")))
+      metrics <- multiclass_metrics(merged$manual_label, merged$primary_label, CLASS_ORDER)
+      n_manual <- metrics$cm %>% group_by(truth) %>% summarise(n = sum(n), .groups = "drop")
+      caption_a <- str_wrap(sprintf(
+        "%s; %s chart-reviewed/labeled patients (manual %s); overall 3-class accuracy %.2f (primary_subtype_labels.parquet).",
+        cohort_note, format(metrics$N, big.mark = ","),
+        paste(sprintf("%s=%s", CLASS_LABELS[as.character(n_manual$truth)],
+                      format(n_manual$n, big.mark = ",")), collapse = ", "),
+        metrics$Accuracy), 95)
+      pA1 <- render_confusion_panel(metrics, "Subtype classifier agreement") +
+        labs(caption = caption_a) +
+        theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
+      pA2 <- render_metric_bar_panel(metrics) +
+        labs(title = "Subtype classifier metrics", caption = caption_a) +
+        theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK))
+      save_fig(pA1, OUT_DIR_V3, stem("confusion_matrix"), 6.2, 5.8)
+      save_fig(pA2, OUT_DIR_V3, stem("metric_bar"), 9.0, 5.0)
+      if (show) print(pA1)
+      if (show) print(pA2)
+
+      ## Panel B -- subtype landscape by platinum status (3-class primary_label).
+      # load_llm_strata coerces primary_label values outside the three modeled
+      # classes to NA, and those rows would draw an "NA" bar.
+      labels_classified <- labels_all %>% filter(!is.na(primary_label))
+      n_unclassified <- nrow(labels_all) - nrow(labels_classified)
+      if (n_unclassified > 0)
+        message(sprintf(
+          "figure2v3 [%s] Panel B: dropped %s row(s) without one of the three primary_label classes",
+          variant, format(n_unclassified, big.mark = ",")))
+      platinum_positive <- labels_classified %>% filter(is_platinum) %>% count_labels() %>%
+        mutate(platinum_status = "positive")
+      platinum_negative <- labels_classified %>% filter(!is_platinum) %>% count_labels() %>%
+        mutate(platinum_status = "negative")
+      n_pos <- sum(platinum_positive$count)
+      n_neg <- sum(platinum_negative$count)
+      caption_b <- sprintf("%s; %s classified%s; platinum+ n=%s, platinum- n=%s.",
+                           cohort_note, format(nrow(labels_classified), big.mark = ","),
+                           if (n_unclassified > 0)
+                             sprintf(" (%s labeled row(s) outside the three classes excluded)",
+                                     format(n_unclassified, big.mark = ","))
+                           else "",
+                           format(n_pos, big.mark = ","), format(n_neg, big.mark = ","))
+      pB <- render_landscape_panel(
+          bind_rows(platinum_positive, platinum_negative), n_pos, n_neg,
+          "Subtype landscape by platinum status") +
+        labs(caption = str_wrap(caption_b, 85)) +
+        theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
+      save_fig(pB, OUT_DIR_V3, stem("subtype_landscape"), 9.5, 8)
+
+      ## Panel C -- aggressive (avpc+nepc) vs conventional platinum enrichment.
+      enrichment <- compute_enrichment(labels_all)
+      cat(sprintf("figure2v3 [%s] enrichment: OR = %.2f, Fisher p = %.3g\n",
+                  variant, enrichment$OR, enrichment$p_value))
+      caption_c <- sprintf("%s; excludes unclassified labels (%s rows). Error bars are 95%% Wilson intervals. OR=%.1f, one-sided Fisher p=%.1e.",
+                           cohort_note, format(enrichment$n_excluded, big.mark = ","),
+                           enrichment$OR, enrichment$p_value)
+      pC <- render_enrichment_panel(enrichment) + labs(caption = str_wrap(caption_c, 58)) +
+        theme(plot.caption = element_text(size = 8, color = COLOR_NEUTRAL_INK, hjust = 0.5))
+      save_fig(pC, OUT_DIR_V3, stem("enrichment"), 6.0, 5.8)
+      if (show) print(pB)
+      if (show) print(pC)
+    }
+
+    render_figure2v3("icd", icd_mrns, "ICD-10 prostate cancer")
+    render_figure2v3("adt", adt_exposed_mrns, "ADT-exposed")
+    render_figure2v3("lm0", cohort_mrns, "ADT day-0 prediction cohort")
   }
   }
 
@@ -3307,20 +3384,17 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # All canonical labs in CATEGORY_MAP (CBC/CMP/LFT/Vitals/Androgen axis/Other),
   # generalizing what used to be the PSA/Testosterone-only ANDROGEN_LABS list.
   ALL_LABS <- names(CATEGORY_MAP)
-  LAB_FIGURE_LABS <- if (plot_non_androgen_lab_figures) {
-    ALL_LABS
-  } else {
-    intersect(ALL_LABS, ANDROGEN)
-  }
-  message(sprintf(
-    "Per-lab KM/longitudinal figures: %s (%s labs)",
-    if (plot_non_androgen_lab_figures) "all canonical labs" else "androgen axis only",
-    length(LAB_FIGURE_LABS)
-  ))
+  # PSA/testosterone always; COMPASS_SUPPLEMENT_LABS or COMPASS_NON_ANDROGEN_LABS add more.
+  LAB_FIGURE_LABS <- union(intersect(ALL_LABS, ANDROGEN), intersect(ALL_LABS, lab_figure_labs))
+  message(sprintf("Per-lab KM/longitudinal figures: %s (%s labs)",
+    paste(LAB_FIGURE_LABS, collapse = ", "), length(LAB_FIGURE_LABS)))
 
   # Case-insensitive match for a `<lab>__mean` column (mirrors find_col in the
-  # Python COMPASS diagnostics).
+  # Python COMPASS diagnostics). An exact `<lab>__mean` wins, so "Albumin" never
+  # resolves to "Albumin/globulin ratio__mean".
   find_mean_col <- function(columns, substr) {
+    exact <- columns[tolower(columns) == tolower(paste0(substr, "__mean"))]
+    if (length(exact)) return(exact[1])
     hit <- columns[grepl(tolower(substr), tolower(columns), fixed = TRUE) &
                    endsWith(columns, "__mean")]
     if (length(hit)) hit[1] else NA_character_
@@ -3372,6 +3446,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
 
   aggregated_landmark_cache <- new.env(parent = emptyenv())
+  aggregated_mean_pattern <- sprintf("^(%s).*__mean$", paste(
+    gsub("([][{}()+*^$|\\\\?.])", "\\\\\\1", c(LAB_FIGURE_LABS, "Prostate specific Ag")),
+    collapse = "|"))
   load_aggregated_landmark <- function(landmark) {
     key <- as.character(landmark)
     if (exists(key, envir = aggregated_landmark_cache, inherits = FALSE)) {
@@ -3387,7 +3464,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     }
     value <- read_csv(path, show_col_types = FALSE,
       col_select = c(any_of(c("DFCI_MRN", "t_platinum", "PLATINUM")),
-        matches("^(PSA|Testosterone|Prostate specific Ag).*__mean$", ignore.case = TRUE)),
+        matches(aggregated_mean_pattern, ignore.case = TRUE)),
       col_types = cols(.default = col_double(), DFCI_MRN = col_character()))
     aggregated_landmark_cache[[key]] <- value
     value
@@ -3427,11 +3504,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                  size = 2.6, color = "#5d6d7e", family = "sans")
   }
 
-  # Extreme-quintile contrast, using the same incident risk set and pre-landmark
-  # mean features as the fitted models. Only PSA/testosterone are requested.
+  # Extreme-group contrast, using the same incident risk set and pre-landmark
+  # mean features as the fitted models, for every requested figure lab.
   extreme_labels <- figure_extreme_labels(LAB_EXTREME_FRACTION)
   extreme_pct <- round(100 * LAB_EXTREME_FRACTION)
-  notify_progress("stage", sprintf("Time to platinum: PSA/testosterone bottom vs top %d%%", extreme_pct))
+  notify_progress("stage", sprintf("Time to platinum: per-lab bottom vs top %d%%", extreme_pct))
   for (landmark in LANDMARKS) {
     agg <- load_aggregated_landmark(landmark)
     if (is.null(agg)) next
@@ -3441,7 +3518,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     }
     eligible <- is.finite(agg$t_platinum) & agg$t_platinum > 0 & agg$PLATINUM %in% c(0, 1)
     agg <- agg[eligible, , drop = FALSE]
-    for (lab in ANDROGEN) {
+    for (lab in LAB_FIGURE_LABS) {
       column <- resolve_mean_col(names(agg), lab)
       if (is.na(column)) { message("Tertile KM: missing ", lab, " mean at landmark ", landmark); next }
       groups <- figure_extreme_quintiles(agg[[column]], LAB_EXTREME_FRACTION)

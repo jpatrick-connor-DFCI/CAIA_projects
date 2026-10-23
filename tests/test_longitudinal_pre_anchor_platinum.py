@@ -46,10 +46,12 @@ def test_lab_strata_remain_binary_nepc_with_figure2_subtypes_restored():
     assert "for (scheme_name in names(FIGURE_LLM_STRATA))" in source
     assert "for (scheme_name in names(LLM_STRATA))" not in source
     assert 'save_fig(p_has_avpc_v3' not in source
-    assert 'save_fig(pB_v3, OUT_DIR_V3, "figure2v3_subtype_landscape"' in source
-    assert 'save_fig(pC_v3, OUT_DIR_V3, "figure2v3_enrichment"' in source
-    assert '"figure2v3_confusion_matrix"' in source
-    assert '"figure2v3_metric_bar"' in source
+    # Figure 2 is drawn once per cohort; stems are figure2v3_<cohort>_<panel>.
+    assert 'stem <- function(panel) sprintf("figure2v3_%s_%s", variant, panel)' in source
+    for panel in ("confusion_matrix", "metric_bar", "subtype_landscape", "enrichment"):
+        assert f'stem("{panel}")' in source
+    for variant in ("icd", "adt", "lm0"):
+        assert f'render_figure2v3("{variant}"' in source
 
 
 def test_longitudinal_and_gam_titles_only_show_cohort_and_counts():

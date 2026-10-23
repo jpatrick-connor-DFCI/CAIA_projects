@@ -60,7 +60,9 @@ Outputs (in --out-dir, default NEPC_PROJ_PATH):
 Also writes matching bare DFCI_MRN-only CSVs to ``mrn_lists_dir``
 (default ``NEPC_PROJ_PATH/mrn_lists/``): ``arpi_mrns.csv``, ``adt_mrns.csv``,
 and ``platinum_MRN_list.csv``. The platinum list contains dated platinum
-recipients from the eligible ADT-entry cohort only.
+recipients from the eligible ADT-entry cohort only. ``platinum_any_MRN_list.csv``
+(DFCI_MRN, PLATINUM_DATE) holds the first dated platinum of every ICD-C61
+patient, with no eligibility restriction, for the Figure 2 cohort variants.
 
 Finally, writes ``icd_prostate_mrn_flags.csv`` to ``mrn_lists_dir``. This
 patient-level audit table includes every MRN with an ICD-10 C61 diagnosis and
@@ -1475,6 +1477,15 @@ def main():
         f"Saved ADT-cohort platinum MRN list "
         f"({len(eligible_platinum_df)} patients) to "
         f"{platinum_mrn_list_path}"
+    )
+
+    platinum_any_path = os.path.join(args.mrn_lists_dir, "platinum_any_MRN_list.csv")
+    platinum_df.select([ID_COL, "PLATINUM_DATE"]).sort(ID_COL).write_csv(
+        platinum_any_path
+    )
+    print(
+        f"Saved any-platinum MRN list ({len(platinum_df)} ICD-C61 patients) to "
+        f"{platinum_any_path}"
     )
 
     icd_prostate_flags = build_icd_prostate_mrn_flags(

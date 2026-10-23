@@ -108,10 +108,20 @@
 # Figure 1 also exports `01_cohort/figure1_cohort__<endpoint>__<subset>__<exclusion>`:
 # a five-panel figure with the cohort-selection flow spanning the left column,
 # and survival, record span, diagnosis-to-treatment timing, and time to platinum
-# on the right. Figure 2v3 exports `02_llm/figure2v3_llm__platinum__all__incl`,
-# with agreement, classification metrics, subtype composition, and platinum
-# enrichment in a 2-by-2 layout. The existing `classifier_validation` and
-# `subtype_platinum` paired exports remain available. The three metastatic-label
+# on the right. Canonical ADT/platinum adds `figure1d_dfci_data` (DFCI patients with
+# ICD-10 prostate cancer, ADT, a pre-ADT Gleason score, tumor sequencing, and the
+# day-0 prediction cohort; Gleason/sequencing counted within the day-0 cohort from
+# `prediction_inputs_adt/somatic_gleason/build_manifest.json`) and
+# `figure1e_site_counts` (day-0 platinum events/patients per federated site from the
+# within-site cohort export; skipped when absent), both in manuscript Figure 1.
+# Figure 2v3 is drawn on three cohorts, each restricted to patients with an LLM label:
+# `icd` (every ICD-10 C61 patient), `adt` (ADT_EXPOSED == 1) and `lm0` (the ADT day-0
+# prediction cohort). Platinum status is any dated platinum ever
+# (`mrn_lists/platinum_any_MRN_list.csv`, written by compile_COMPASS_cohort_data.py).
+# Each exports `02_llm/figure2v3_llm_<cohort>__platinum__all__incl`, with agreement,
+# classification metrics, subtype composition, and platinum enrichment in a 2-by-2
+# layout, plus `classifier_validation_<cohort>` and `subtype_platinum_<cohort>` paired
+# exports. The three metastatic-label
 # confusion matrices also form `06_cohort_sensitivity/metastatic_label_agreement__<endpoint>__<subset>__<exclusion>`.
 # These combined figures have lettered panels and retain each panel's counts,
 # captions, and legends. All individual panels are exported alongside them.
@@ -123,11 +133,17 @@
 # `03_univariate/internal/dfci_labs_overview_km_lm180__platinum__<subset>__<exclusion>`.
 # The top row contains day-0/90/180 within-DFCI univariate volcanoes with common axes;
 # the second row pairs the PSA log1p trajectory by platinum status with the PSA
-# bottom-versus-top-20% KM curve; the third row does the same for testosterone.
+# bottom-versus-top-10% KM curve; the third row does the same for testosterone.
 # KM panels default to day 180. Set `COMPASS_COMBINED_KM_LANDMARK=0` or `90` to
 # select another landmark; the filename and cached graphics record that choice.
 # The overview requires all seven source panels and is restricted to platinum.
 # Individual KM panels and the three-landmark KM sheets are also retained.
+# The DFCI supplement `03_univariate/internal/dfci_supplement_labs_lm180__platinum__<subset>__<exclusion>`
+# pairs each supplementary lab's trajectory (log1p for LDH and alkaline phosphatase,
+# raw for hemoglobin and albumin) with its bottom-versus-top-10% KM curve. Its labs
+# default to LDH, hemoglobin, albumin and alkaline phosphatase; set
+# `COMPASS_SUPPLEMENT_LABS` (comma-separated canonical names) to change them, here and
+# in notebook 06.
 #
 # Clinical combinations and risk stratification (ADT runs, under `04_multivariate/internal/`;
 # co-mutation KM curves are univariate and go to `03_univariate/internal/km/`):
@@ -188,7 +204,8 @@
 # 600-dpi (or higher requested DPI) PNG and a PDF, even when `COMPASS_RENDER_PDF`
 # is false. Individual panels are always retained.
 #
-# The numbered manuscript set is: `01_cohort_overview`, `02_llm_nepc_avpc`,
+# The numbered manuscript set is: `01_cohort_overview`, `02_llm_nepc_avpc__<icd|adt|lm0>`
+# (one per Figure 2 cohort, captions `figure2_<cohort>`, with a cohort header line),
 # `03_dfci_univariable`, `04_multivariable_labs` (held-out Elastic-Net/XGBoost
 # discrimination versus age baselines),
 # `06_dfci_cohort_sensitivity` (paired platinum/NEPC incidence and counts plus
@@ -200,16 +217,21 @@
 # A separate federated set, written by the federated job, is numbered on its own:
 # `federated_03_univariable` (the Figure 3 layout from the pooled four-site univariable Cox
 # results and the aggregate `misc_figure_data` PSA/testosterone trajectories and day-180
-# extreme-quintile KM curves; the volcano y-axis spans the data, capped at -log10(P)=30),
+# extreme-decile KM curves; the volcano y-axis spans the data, capped at -log10(P)=30;
+# an arrow under the color key marks positive log HR as higher risk/faster time to platinum),
 # `federated_04_multivariable` (the Figure 8 layout, with the full models refit without
 # Dana-Farber added as darker bars in the discrimination rows), and
 # `federated_05_transfer_no_dfci` (the models trained without Dana-Farber scored on
-# Dana-Farber platinum/NEPC/AVPC: a, mean AUC(t) of the full and age-only models; b-d, mean
+# Dana-Farber platinum/AVPC/NEPC, in that order: a, mean AUC(t) of the full and age-only models; b-d, mean
 # AUC(t) of the full models, local out-of-fold Cox models of Gleason + age (b),
 # TP53/RB1/PTEN + age (c) or Gleason + TP53/RB1/PTEN + age (d), and combined Cox models of
 # each transferred score + the same covariates without age (the full models include age),
 # in patients with a Gleason score before the ADT landmark (b), sequenced patients (c) and
-# sequenced patients with a Gleason score (d); c and d on a sequencing-date clock).
+# sequenced patients with a Gleason score (d); c and d on a sequencing-date clock; facet
+# strips give day-0 patients and events; e-g, platinum/AVPC/NEPC KM curves for the top vs
+# bottom 10% of the day-180 XGBoost score; h, 5-year event-free probability by score
+# quartile, Gleason score and TP53/PTEN/RB1 altered-gene count). `federated_05_transfer_no_dfci__no_d`
+# (caption `federated_figure5_no_d`) drops panel d, so its KM curves are d-f and the gradient g.
 # The local Figure 3 stays on Dana-Farber patient-level data. The cohort
 # sensitivity components are assembled into one continuous multipanel figure for
 # each analysis setting. Federated manuscript plots reuse the original subplot
@@ -219,8 +241,9 @@
 # retain the local blue/gold model/baseline bars and lab-category colors. Incomplete source groups are not assembled. The DFCI
 # overview uses the same configurable extreme-decile KM landmark as its larger
 # compiled counterpart. Figure titles remain in filenames/legends, not supertitles.
-# The cohort overview uses a 7.2 × 7.2-inch canvas; panels b–e omit their
-# patient-count subtitles because those counts are retained in the external legend.
+# The cohort overview uses a 7.2 × 9.4-inch canvas (panel g is omitted, and f spans the
+# row, without the federated within-site export); panels b–g omit their subtitles
+# because those counts and notes are retained in the external legend.
 # In the DFCI univariable manuscript figure, the three landmark volcanoes use an
 # expanded first row, compact horizontal spacing, a shared y-axis displayed
 # through -log10(P)=20, centered landmark headers, and one horizontal category legend.
@@ -281,12 +304,13 @@
 # and emptied folders removed. Unselected cohorts remain
 # untouched. Failed renders do not trigger archival. Archives are recoverable in data.
 #
-# Figure 2 runs once for canonical ADT/platinum. Lab figures run on each selected
-# platinum cohort, for PSA/testosterone by default. Trajectories retain day-zero
+# Figure 2 runs once for canonical ADT/platinum (three cohort variants). Lab figures run on
+# each selected platinum cohort, for PSA/testosterone and the supplementary labs by default. Trajectories retain day-zero
 # boundaries, 180-day bins, and log transformation before averaging. Pre-ADT
 # coverage uses five years and full-stratum denominators. Lab KM curves compare
-# bottom versus top 10% without splitting ties (federated aggregate KM keeps the
-# site-exported 20% cutoffs); both zoom the y axis because platinum is rare. Somatic and Gleason curves retain
+# bottom versus top 10% without splitting ties (federated aggregate KM uses the
+# site-exported `extreme_fraction`, 10% by default; older 20% `q20`/`q80` exports
+# are still read); both zoom the y axis because platinum is rare. Somatic and Gleason curves retain
 # their specimen/score date origins. GAMs, non-androgen lab panels and the older
 # ADT-intent comparison are disabled by default.
 #
@@ -366,11 +390,12 @@
 # `05_transfer/transfer_clinical_comparison_no_dfci__platinum` and feeds Federated Figure 5 b-d;
 # without it, Figure 5 is drawn with panel a only. `transfer_km_patients.csv` (04's patient-level
 # transferred labs scores with Gleason and TP53/RB1/PTEN status on the ADT and sequencing clocks)
-# renders `05_transfer/km/`: score × Gleason and score × TP53/RB1/PTEN KM curves per endpoint,
-# a head-to-head grid (score | Gleason | TP53/RB1/PTEN), the 3-year event-free gradient and a
-# hazard-ratio forest per bundle × landmark. Only aggregate tables are exported
-# (`transfer_km_{curves,summary,gradient,hr}_no_dfci`); they feed Federated Figure 5 e-h
-# (NEPC, elastic-net, 180 days). Missing transfer outputs are reported and skipped.
+# renders `05_transfer/km/`: score × TP53/RB1/PTEN and top-vs-bottom-10% score KM curves per
+# endpoint, a head-to-head grid (score | Gleason | TP53/RB1/PTEN) and the 5-year event-free
+# gradient (score quartile, Gleason, TP53/RB1/PTEN count) per bundle × landmark. Hazard-ratio
+# forests and score × Gleason curves are no longer drawn. Only aggregate tables are exported
+# (`transfer_km_{curves,summary,gradient}_no_dfci`); they feed Federated Figure 5 e-h
+# (XGBoost, 180 days). Missing transfer outputs are reported and skipped.
 # Missing optional XGBoost files are reported and skipped independently. Run `06`
 # again after this update to register both files (including absent paths), then
 # run `07_figures.R` with stage `all`. All Python remains in `06`; graphics caches stay in data.
@@ -413,6 +438,13 @@ stopifnot(length(COHORTS) > 0L, length(ENDPOINTS) > 0L,
 COHORT_FOREST_CONFIG <- list(script = file.path(dirname(pipeline_path), "figure_supplements.R"),
                              cohorts = ADT_COHORT_OPTIONS, landmark = 180L)
 PLOT_NON_ANDROGEN_LAB_FIGURES <- env_flag("COMPASS_NON_ANDROGEN_LABS")
+# Extra per-lab DFCI trajectory/KM figures beside PSA/testosterone (supplement);
+# set to "" for the androgen axis only. Must match the 06 notebook's LABS.
+SUPPLEMENT_LABS <- setdiff(env_values("COMPASS_SUPPLEMENT_LABS",
+  paste(DEFAULT_SUPPLEMENT_LABS, collapse = ",")), "")
+if (!all(SUPPLEMENT_LABS %in% names(CATEGORY_MAP)))
+  stop("COMPASS_SUPPLEMENT_LABS has unknown labs: ",
+       paste(setdiff(SUPPLEMENT_LABS, names(CATEGORY_MAP)), collapse = ", "))
 PLOT_GAM_TRAJECTORIES <- env_flag("COMPASS_GAM_TRAJECTORIES")
 PLOT_ADT_INTENT_SUPPLEMENT <- env_flag("COMPASS_ADT_INTENT_SUPPLEMENT")
 PLOT_METASTATIC_LABEL_SUPPLEMENT <- env_flag("COMPASS_METASTATIC_LABEL_SUPPLEMENT", TRUE)
@@ -445,7 +477,7 @@ source(file.path(dirname(pipeline_path), "figure_supplements.R"))
 figure_config <- list(
   data_root = NEPC_PROJ_PATH, cache_root = FIGURE_DATA_ROOT, fig_root = FIG_ROOT,
   cohorts = COHORTS, endpoints = ENDPOINTS, scope = FIGURE_SCOPE,
-  labs = if (PLOT_NON_ANDROGEN_LAB_FIGURES) names(CATEGORY_MAP) else ANDROGEN,
+  labs = if (PLOT_NON_ANDROGEN_LAB_FIGURES) names(CATEGORY_MAP) else c(ANDROGEN, SUPPLEMENT_LABS),
   classifier_path = DEFAULT_LLM_ANNOTATIONS_PATH,
   forest_cohorts = COHORT_FOREST_CONFIG$cohorts, forest_landmark = COHORT_FOREST_CONFIG$landmark,
   gam = PLOT_GAM_TRAJECTORIES, adt_intent = PLOT_ADT_INTENT_SUPPLEMENT,

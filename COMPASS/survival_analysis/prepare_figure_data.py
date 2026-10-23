@@ -140,14 +140,19 @@ def build_labels(intent: pl.DataFrame, notes: pl.DataFrame,
 
 def canonical_lab_names() -> list[str]:
     """Read the renderer's flat category declarations so the notebook cannot drift."""
+    return [name for group in ["CBC", "CMP", "LFT", "VITALS", "ANDROGEN", "OTHER"]
+            for name in _r_vector(group)]
+
+
+def _r_vector(name: str) -> list[str]:
     source = Path(__file__).with_name("COMPASS_generate_figures_pipeline.R").read_text()
-    names = []
-    for group in ["CBC", "CMP", "LFT", "VITALS", "ANDROGEN", "OTHER"]:
-        match = re.search(rf"^{group} <- c\((.*?)\)", source, re.M | re.S)
-        if match is None:
-            raise ValueError(f"Cannot read canonical lab group {group} from R renderer")
-        names.extend(re.findall(r'"([^"\n]+)"', match.group(1)))
-    return names
+    match = re.search(rf"^{name} <- c\((.*?)\)", source, re.M | re.S)
+    if match is None:
+        raise ValueError(f"Cannot read {name} from R renderer")
+    return re.findall(r'"([^"\n]+)"', match.group(1))
+
+
+DEFAULT_SUPPLEMENT_LABS = _r_vector("DEFAULT_SUPPLEMENT_LABS")
 
 
 def digest(value) -> str:
@@ -547,6 +552,7 @@ def prepare(config: dict) -> dict:
 
         shared_paths = [root / "LLM_NEPC_labels" / "full_manual_annotations.csv",
                         root / "mrn_lists" / "platinum_MRN_list.csv",
+                        root / "mrn_lists" / "platinum_any_MRN_list.csv",
                         root / "mrn_lists" / "icd_prostate_mrn_flags.csv",
                         Path(config["classifier_path"]) / "primary_subtype_labels.parquet"]
         shared = [fingerprint(p) for p in shared_paths]
@@ -562,6 +568,10 @@ def prepare(config: dict) -> dict:
                     manifest["errors"][cell] = manifest["errors"].get(arm, f"Missing prediction inputs: {inputs}")
                     continue
                 sources = source_files(inputs) + source_files(root / "survival_analysis" / f"local_runs_{cohort}{suffix}")
+                if cohort == "adt" and endpoint == "platinum":
+                    # Figure 1 per-site event/patient counts.
+                    sources.append(fingerprint(federated_within_site_file(
+                        Path(config["federated_path"]), "cox_within_site_all_sites_cohort.csv")))
                 if cohort == "adt":
                     for forest in as_list(config.get("forest_cohorts", cohorts)):
                         sources.append(fingerprint(root / "survival_analysis" / f"local_runs_{forest}{suffix}" / "cox" /
