@@ -228,7 +228,7 @@ km_patients_fixture <- function(n=900) {
       bind_rows(lapply(c(elastic_net_cox="cox_federated_elasticnet_model_adt",xgboost_cox="xgboost_federated_model_adt"),
         function(bundle) tibble(clock=clock,endpoint=toupper(endpoint),bundle=bundle,
           model_family=if(startsWith(bundle,"xgboost")) "xgboost_cox" else "elastic_net_cox",landmark_days=180,
-          person_id=seq_len(n),risk_score=if(startsWith(bundle,"xgboost")) round(score) else score,
+          person_id=seq_len(n),risk_score=if(startsWith(bundle,"xgboost")) round(score) else score*c(platinum=1,nepc=1+1e-9,avpc=1.5)[[endpoint]],
           duration_days=pmin(t,censor),event=as.integer(t<=censor),GLEASON_SCORE=gleason,
           HAS_SEQUENCING=if(clock=="sequencing") "True" else NA_character_,
           TP53_ANY=if(clock=="sequencing") trio[,1] else NA_real_,RB1_ANY=if(clock=="sequencing") trio[,2] else NA_real_,
@@ -240,12 +240,11 @@ km_dir <- tempfile("transfer-km-"); dir.create(km_dir)
 readr::write_csv(km_patients_fixture(),file.path(km_dir,FEDERATED_TRANSFER_KM_FILE))
 km_input <- load_federated_transfer_km(km_dir)
 km_groups <- federated_transfer_km_groups(km_input)
-# One cutpoint per clock x bundle x landmark: a patient's score group never depends on the endpoint.
-shared <- km_groups %>% group_by(clock,bundle,person_id) %>%
-  summarise(n_extreme=n_distinct(score_extreme),n_half=n_distinct(score_half),
-    n_quintile=n_distinct(score_quintile),.groups="drop")
+# Scores differ by endpoint (as transferred scores do); cutpoints are per clock x endpoint x bundle x landmark.
+top <- km_groups %>% filter(model_family=="elastic_net_cox") %>% group_by(clock,endpoint,bundle) %>%
+  summarise(top=mean(score_extreme %in% "Top 20%"),high=mean(score_half %in% "high score"),.groups="drop")
 tied <- filter(km_groups,clock=="adt",bundle=="cox_federated_elasticnet_model_adt",person_id<=60)
-stopifnot(all(shared$n_extreme==1),all(shared$n_half==1),all(shared$n_quintile==1),
+stopifnot(nrow(top)==6,all(abs(top$top-.2)<.02),all(abs(top$high-.5)<.02),
   n_distinct(tied$score_extreme)==1,n_distinct(tied$score_half)==1,n_distinct(tied$score_quintile)==1,
   all(is.na(km_groups$trio_group[km_groups$clock=="adt"])),
   all(is.na(km_groups$gleason_group[km_groups$clock=="sequencing"])),

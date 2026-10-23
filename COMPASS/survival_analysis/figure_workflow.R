@@ -1353,9 +1353,9 @@ render_federated_transfer_clinical <- function(root, directory, dpi, overwrite) 
 }
 
 # Time-to-event views of the transferred labs score (Federated Figure 5 e-h and
-# 05_transfer/km/). Score groups use Dana-Farber cutpoints computed once per
-# clock x bundle x landmark over every scored patient, so a patient keeps their
-# group across endpoints. Gleason views run on the ADT clock and TP53/RB1/PTEN
+# 05_transfer/km/). Score groups use Dana-Farber cutpoints computed within each
+# clock x endpoint x bundle x landmark cohort: each endpoint has its own at-risk
+# patients and scores. Gleason views run on the ADT clock and TP53/RB1/PTEN
 # views on the sequencing clock (no somatic data on the ADT clock).
 FEDERATED_TRANSFER_KM_CLOCKS <- c(adt="ADT",sequencing="sequencing")
 FEDERATED_TRANSFER_KM_YLAB <- c(platinum="Platinum-free probability",nepc="NEPC-free probability",
@@ -1428,17 +1428,12 @@ federated_transfer_score_quintile <- function(x) {
 }
 
 federated_transfer_km_groups <- function(d) {
-  patients <- distinct(d,clock,bundle,landmark_days,person_id,risk_score)
-  if(anyDuplicated(patients[c("clock","bundle","landmark_days","person_id")]))
-    stop("A federated transfer score differs across endpoints for the same patient")
-  patients <- patients %>% group_by(clock,bundle,landmark_days) %>%
-    mutate(score_extreme=as.vector(figure_extreme_quintiles(risk_score)),
-      score_half=federated_transfer_score_half(risk_score),
-      score_quintile=federated_transfer_score_quintile(risk_score)) %>% ungroup()
   sequenced <- d$clock=="sequencing" & d$sequenced
   trio_n <- d$TP53_ANY+d$RB1_ANY+d$PTEN_ANY
-  d %>% select(-risk_score) %>%
-    left_join(patients,by=c("clock","bundle","landmark_days","person_id")) %>%
+  d %>% group_by(clock,endpoint,bundle,landmark_days) %>%
+    mutate(score_extreme=as.vector(figure_extreme_quintiles(risk_score)),
+      score_half=federated_transfer_score_half(risk_score),
+      score_quintile=federated_transfer_score_quintile(risk_score)) %>% ungroup() %>%
     mutate(gleason_group=if_else(clock=="adt",figure_gleason_groups(GLEASON_SCORE),NA_character_),
       trio_group=if_else(sequenced,FEDERATED_TRANSFER_TRIO[1+(trio_n>0)],NA_character_),
       trio_burden=if_else(sequenced,c("0","1","≥2")[pmin(trio_n,2)+1],NA_character_),
@@ -1569,7 +1564,7 @@ plot_federated_transfer_km_grid <- function(tables, model_family, landmark) {
     "%s trained without Dana-Farber: Dana-Farber event-free survival from the +%d-day landmark",
     federated_transfer_model_label(model_family),as.integer(landmark)),gp=grid::gpar(fontsize=15,fontface="bold")),
     bottom=grid::textGrob(paste(
-      "Score: top vs bottom 20% of the transferred labs score (Dana-Farber cutpoints shared across endpoints), ADT clock.",
+      "Score: top vs bottom 20% of the transferred labs score (Dana-Farber cutpoints within each endpoint), ADT clock.",
       "Gleason ≤7 vs ≥8 (available before the landmark), ADT clock. TP53/RB1/PTEN: any alteration vs none, sequenced patients, sequencing clock.",
       sep="\n"),gp=grid::gpar(fontsize=10)),padding=grid::unit(1,"lines"))
 }
@@ -1629,7 +1624,7 @@ render_federated_transfer_km <- function(root, directory, dpi, overwrite) {
     write_federated_transfer_table(root,tables[[name]],FEDERATED_TRANSFER_KM_TABLES[[name]])
   save <- function(p, stem, width, height)
     if(!is.null(p)) save_federated_panel(p,federated_output_path(root,stem,".png"),width,height,dpi,overwrite)
-  cutoffs <- "Score cutpoints: Dana-Farber patients scored at this landmark, shared across endpoints (not federated training cutoffs)."
+  cutoffs <- "Score cutpoints: Dana-Farber patients at risk for this endpoint at this landmark (not federated training cutoffs)."
   cells <- distinct(bind_rows(tables$summary,tables$gradient),model_family,landmark_days)
   for(i in seq_len(nrow(cells))) {
     family <- cells$model_family[[i]]; landmark <- cells$landmark_days[[i]]
@@ -1977,7 +1972,7 @@ manuscript_captions <- function() {
     federated_05_transfer_no_dfci=caption(
       "Federated Figure 5. External validation at Dana-Farber of federated platinum models trained without Dana-Farber, alone and combined with Gleason score and TP53/RB1/PTEN status, and the time-to-event risk separation of the transferred score.",
       "Elastic-Net Cox and XGBoost survival models trained for platinum treatment on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data were applied unchanged to the Dana-Farber ADT cohort and evaluated against three local endpoints: platinum treatment (the training endpoint), neuroendocrine prostate cancer (NEPC), and aggressive-variant prostate cancer (AVPC). (a) Mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), at 0, 90, and 180 days after ADT initiation. Filled points denote full laboratory models and open points age-only models. (b-d) The same full laboratory models compared with unpenalized Cox models fitted locally at Dana-Farber on clinical covariates alone and on the transferred score plus the same covariates other than age (combined models), among patients with a Gleason score available before the landmark (b), patients with tumor sequencing, with landmarks measured from the sequencing date (c), and sequenced patients who also had a Gleason score (d). The clinical covariates were Gleason score and age (b), any alteration (mutation, deletion, amplification, or structural variant) in TP53, RB1, and PTEN and age (c), or all of these (d); because the transferred full models already include age, the combined models added only Gleason score (b), the TP53, RB1, and PTEN indicators (c), or both (d). Circles denote the transferred models, diamonds the local clinical Cox models, and triangles the combined models. In a-d, bars denote 95% bootstrap confidence intervals over patients and dotted lines mark 0.5. (e,f) Kaplan-Meier NEPC-free survival from the 180-day landmark by the transferred Elastic-Net Cox score (above vs. at or below the Dana-Farber median) crossed with Gleason score (≤7 vs. ≥8; landmark after ADT initiation; e) or with any TP53, RB1, or PTEN alteration (sequenced patients, landmark after the sequencing date; f). P values are from log-rank tests across the four groups; shading is omitted and the vertical axes are truncated below 1 because NEPC is rare. (g) Kaplan-Meier 3-year event-free probability (95% confidence interval) from the 180-day landmark for platinum, NEPC, and AVPC by Elastic-Net score quintile, Gleason group, and number of TP53/RB1/PTEN genes altered. (h) Univariable Cox hazard ratios (95% confidence intervals) from the 180-day landmark comparing the top with the bottom 20% of the Elastic-Net score, Gleason ≥8 with ≤7, and any TP53/RB1/PTEN alteration with none.",
-      "No Dana-Farber patient contributed to federated model training, so every endpoint, including platinum, is out of sample. Mean AUC(t) is the inverse-probability-of-censoring-weighted cumulative/dynamic AUC averaged over 1, 2, 3, and 5 years after the landmark, with censoring estimated in the evaluated Dana-Farber patients; horizons without an observed event or later follow-up were omitted. Score groups in e-h use cutpoints computed among the Dana-Farber patients scored at each landmark, pooled over endpoints so that each patient is in the same group for every endpoint; they are not federated training cutoffs. Score and Gleason groups in e, g, and h use the ADT-initiation clock and TP53/RB1/PTEN groups the sequencing-date clock. XGBoost versions, the 0- and 90-day landmarks, and head-to-head Kaplan-Meier curves for all endpoints are provided as supplementary figures. The local and combined Cox models were fitted on the Dana-Farber patients they were evaluated on and were scored with stratified 5-fold cross-validated (out-of-fold) predictions; in the combined models, the transferred score was standardized within the evaluated patients. Gleason scores were used only if available before the landmark. For c and d, the transferred models were rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation, and age was age at sequencing. Patients/events in panel a were 2,267/182 at day 0, 2,233/166 at day 90, and 2,197/158 at day 180 for platinum; 2,218/92, 2,200/87, and 2,164/85 for NEPC; and 1,968/463, 1,891/397, and 1,842/373 for AVPC. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve.")
+      "No Dana-Farber patient contributed to federated model training, so every endpoint, including platinum, is out of sample. Mean AUC(t) is the inverse-probability-of-censoring-weighted cumulative/dynamic AUC averaged over 1, 2, 3, and 5 years after the landmark, with censoring estimated in the evaluated Dana-Farber patients; horizons without an observed event or later follow-up were omitted. Score groups in e-h use cutpoints computed among the Dana-Farber patients at risk for each endpoint at each landmark; they are not federated training cutoffs. Score and Gleason groups in e, g, and h use the ADT-initiation clock and TP53/RB1/PTEN groups the sequencing-date clock. XGBoost versions, the 0- and 90-day landmarks, and head-to-head Kaplan-Meier curves for all endpoints are provided as supplementary figures. The local and combined Cox models were fitted on the Dana-Farber patients they were evaluated on and were scored with stratified 5-fold cross-validated (out-of-fold) predictions; in the combined models, the transferred score was standardized within the evaluated patients. Gleason scores were used only if available before the landmark. For c and d, the transferred models were rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation, and age was age at sequencing. Patients/events in panel a were 2,267/182 at day 0, 2,233/166 at day 90, and 2,197/158 at day 180 for platinum; 2,218/92, 2,200/87, and 2,164/85 for NEPC; and 1,968/463, 1,891/397, and 1,842/373 for AVPC. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve.")
   )
 }
 
@@ -2497,7 +2492,7 @@ manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRAN
     sprintf("Univariable Cox hazard ratios (95%% CI) from the %d-day landmark: top vs bottom 20%% of the transferred %s score and Gleason ≥8 vs ≤7 (ADT clock), ",as.integer(landmark),model),
     "and any TP53/RB1/PTEN alteration vs none (sequencing clock)."))
   if(length(plots)) legend <- c(legend,
-    "Score cutpoints were computed in the Dana-Farber patients scored at each landmark, shared across endpoints.")
+    "Score cutpoints were computed in the Dana-Farber patients at risk for each endpoint at each landmark.")
   list(plots=plots,titles=titles,legend=legend)
 }
 
