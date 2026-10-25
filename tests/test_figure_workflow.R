@@ -259,5 +259,98 @@ local({
   changed_sites <- tryCatch(figure_notebook_manifest(federated_cfg), error = identity)
   stopifnot(inherits(changed_sites, "error"),
             grepl("06_prep_figure_data.ipynb", conditionMessage(changed_sites), fixed = TRUE))
+  # Optional DeepHit and checklist exports render after a later delivery. The
+  # first workflow run above already exercised the missing-input fallback.
+  for(suffix in c("","_no_DFCI")) {
+    directory <- file.path(root,paste0("fast_federated_deephit",suffix))
+    dir.create(directory)
+    write_csv(expand_grid(landmark_days=c(0,90,180),training_arm=c("landmark","dynamic")) %>%
+      mutate(analysis_label="adt",endpoint="platinum",config="both",
+        test_mean_auc_t=if_else(training_arm=="dynamic",.74,.70),
+        test_c_index=.68,n_test=20,n_events_test=5),
+      file.path(directory,"deephit_federated_metrics_adt.csv"))
+  }
+  dh <- load_federated_dynamic_deephit(fed_path)
+  dh_no_dfci <- load_federated_dynamic_deephit(fed_path,"no_dfci")
+  stopifnot(nrow(dh)==3L,nrow(dh_no_dfci)==3L,
+    all(dh$name=="Dynamic DeepHit"),
+    all(dh_no_dfci$name=="Dynamic DeepHit, no DFCI"))
+  render_federated_deephit_performance(file.path(cfg$fig_root,"ADT"),fed_path,60,TRUE)
+  stopifnot(file.exists(federated_output_path(file.path(cfg$fig_root,"ADT"),
+    "deephit_performance",".png")))
+  perf <- bind_rows(
+    read_csv(file.path(cfg$fig_root,"ADT","04_multivariate","federated","data",
+      "elasticnet_performance__platinum.csv"),show_col_types=FALSE),
+    read_csv(file.path(cfg$fig_root,"ADT","04_multivariate","federated","data",
+      "xgboost_performance__platinum.csv"),show_col_types=FALSE),dh)
+  importance_export <- read_csv(file.path(cfg$fig_root,"ADT","04_multivariate","federated","data",
+    "xgboost_importance__platinum.csv"),show_col_types=FALSE)
+  main_with_dynamic <- manuscript_federated_multivariable(perf,coefficient_export,importance_export)
+  stopifnot("Dynamic DeepHit" %in% as.character(main_with_dynamic$data$name))
+  no_dfci_perf <- bind_rows(filter(perf,family!="dynamic_deephit"),dh_no_dfci)
+  main_no_dfci <- manuscript_federated_multivariable_no_dfci(perf,no_dfci_perf,
+    coefficient_export,importance_export)
+  stopifnot("Dynamic DeepHit, no DFCI" %in% as.character(main_no_dfci$data$name))
+  all_models_dir <- file.path(no_dfci_dir,"all_models"); dir.create(all_models_dir)
+  write_csv(expand_grid(endpoint=c("platinum","nepc"),landmark_days=c(0,90,180),
+      model_horizon_days=c(365,1825),config=c("both","baseline")) %>%
+    mutate(bundle="predictive_checklist_federated_model_adt",
+      model_family="predictive_checklist",evaluation_horizon_days=model_horizon_days,
+      mean_auc=if_else(config=="both",.72,.61),mean_auc_lo=mean_auc-.04,
+      mean_auc_hi=mean_auc+.04,brier=.13),
+    file.path(all_models_dir,"transfer_metrics.csv"))
+  all_model_metrics <- read_csv(file.path(all_models_dir,"transfer_metrics.csv"),show_col_types=FALSE)
+  write_csv(bind_rows(all_model_metrics,
+    tibble(bundle=c("cox_bundle","deephit_bundle"),
+      model_family=c("elastic_net_cox","dynamic_deephit"))),
+    file.path(all_models_dir,"transfer_metrics.csv"))
+  auc_grid <- expand_grid(endpoint=c("platinum","nepc"),landmark_days=c(0,90,180),
+      horizon_days=c(365,1825),
+      bundle=c("cox_bundle","deephit_bundle","predictive_checklist_federated_model_adt")) %>%
+    mutate(config="both",auc=.68,n_cases=5,
+      model_horizon_days=if_else(bundle=="predictive_checklist_federated_model_adt",horizon_days,NA_real_),
+      evaluation_horizon_days=if_else(bundle=="cox_bundle",NA_real_,horizon_days),
+      training_arm=if_else(bundle=="deephit_bundle","landmark",NA_character_))
+  write_csv(bind_rows(auc_grid,
+    filter(auc_grid,bundle=="deephit_bundle") %>% mutate(training_arm="dynamic",auc=.72)),
+    file.path(all_models_dir,"transfer_auc_t.csv"))
+  render_federated_checklist_supplement(file.path(cfg$fig_root,"ADT"),all_models_dir,60,TRUE)
+  stopifnot(file.exists(federated_output_path(file.path(cfg$fig_root,"ADT"),
+    "transfer_predictive_checklist_supplement",".png")))
+  all_model_plot <- render_federated_all_model_transfer_supplement(
+    file.path(cfg$fig_root,"ADT"),all_models_dir,60,TRUE)
+  stopifnot(all(c("DeepHit landmark","DeepHit dynamic","Predictive checklist") %in%
+    unique(all_model_plot$series)),
+    file.exists(federated_output_path(file.path(cfg$fig_root,"ADT"),
+      "transfer_all_models_supplement",".png")))
+  # Checklist supplement: cards for a fitted landmark and an unfit one, no workflow cache needed.
+  source("COMPASS/survival_analysis/checklist_supplement.R")
+  checklist_dir <- file.path(root,"checklist_tables"); dir.create(checklist_dir)
+  cells <- expand_grid(feature_set=c("labs","labs_gleason_somatic"),endpoint=c("platinum","nepc"),
+      landmark_days=c(0,90)) %>%
+    mutate(horizon_days=1825,population="full",n_test=100,n_events_total=30,
+      status=if_else(landmark_days==0,"ok","unsupported"),
+      reason=if_else(landmark_days==0,NA_character_,"Too few events"),
+      threshold=if_else(landmark_days==0,2,NA_real_),n_items=if_else(landmark_days==0,3L,NA_integer_))
+  write_csv(cells,file.path(checklist_dir,"checklist_cells.csv"))
+  write_csv(filter(cells,status=="ok") %>% select(feature_set,endpoint,landmark_days,horizon_days,population) %>%
+    slice(rep(row_number(),each=3)) %>% group_by(feature_set,endpoint,landmark_days) %>%
+    mutate(item_order=row_number(),name=paste("PSA >= ",item_order,"ng/mL, last value before the landmark"),
+      feature="PSA",op=">=",threshold=item_order,group="PSA") %>% ungroup(),
+    file.path(checklist_dir,"checklist_items_long.csv"))
+  write_csv(filter(cells,status=="ok") %>% select(feature_set,endpoint,landmark_days,horizon_days,population) %>%
+    slice(rep(row_number(),each=4)) %>% group_by(feature_set,endpoint,landmark_days) %>%
+    mutate(model=c("checklist","age_cox","elastic_net","xgboost"),dataset="test",status="ok",
+      auc=.7,auc_lower=.6,auc_upper=.8,brier=.12,sensitivity=.6,specificity=.7,ppv=.3,npv=.9) %>% ungroup(),
+    file.path(checklist_dir,"checklist_metrics.csv"))
+  captured <- character()
+  render_checklist_supplement(checklist_dir,file.path(root,"checklist_figs"),60,TRUE,
+    function(plot,path,width,height,dpi,overwrite) {
+      stopifnot(inherits(plot,"ggplot")); captured <<- c(captured,basename(path))
+    }, figure_sidecar_path)
+  stopifnot(setequal(captured,c("figure4s_checklist_labs__platinum.png","figure4s_checklist_labs__nepc.png",
+      "figure4s_checklist_labs_gleason_somatic__platinum.png","figure4s_checklist_labs_gleason_somatic__nepc.png")),
+    file.exists(file.path(root,"checklist_figs","data","figure4s_checklist_items_long.csv")))
+  stopifnot(is.null(suppressWarnings(render_checklist_supplement(file.path(root,"absent"),root,60,TRUE,NULL))))
   cat(sprintf("Synthetic workflow: first %.2fs; unchanged %.2fs; %d panels\n", t1, t2, length(first$rendered)))
 })

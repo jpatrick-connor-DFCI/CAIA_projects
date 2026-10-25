@@ -84,7 +84,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
 
 BUNDLE_FORMAT = "caia-federated-model-bundle"
 DEEPHIT_FAMILY = "dynamic_deephit"
-SUPPORTED_FORMAT_VERSIONS = (1,)
+SUPPORTED_FORMAT_VERSIONS = (1, 2, 3)
 
 
 class BundleError(ValueError):
@@ -120,10 +120,22 @@ def load_bundle(path) -> dict:
             f"{path}: contains no fitted models -- the run produced none, or it "
             "aborted before the final fit"
         )
+    family = bundle.get("model_family")
+    allowed = {"elastic_net_cox": {1}, "xgboost_cox": {1},
+               DEEPHIT_FAMILY: {1, 2, 3}, "predictive_checklist": {1}}
+    if family not in allowed or version not in allowed[family]:
+        raise BundleError(f"{path}: unsupported model_family/version {family!r}/{version}")
     return bundle
 
 
-def select_model(bundle: dict, landmark_days: int, config: str = "both") -> dict:
+def model_identity(bundle: dict, model: dict) -> tuple:
+    arm = (model.get("training_arm") or "landmark") if bundle.get("model_family") == DEEPHIT_FAMILY else None
+    return (int(model["landmark_days"]), str(model.get("config")), arm,
+            int(model["horizon_days"]) if model.get("horizon_days") is not None else None)
+
+
+def select_model(bundle: dict, landmark_days: int, config: str = "both", *,
+                 training_arm: str | None = None, horizon_days: int | None = None) -> dict:
     """Pick one fitted model out of a bundle.
 
     ``config`` is ``both`` for the full model or ``baseline`` for the age-only
@@ -133,6 +145,8 @@ def select_model(bundle: dict, landmark_days: int, config: str = "both") -> dict
         m for m in bundle["models"]
         if int(m["landmark_days"]) == int(landmark_days)
         and str(m.get("config")) == str(config)
+        and (training_arm is None or model_identity(bundle, m)[2] == training_arm)
+        and (horizon_days is None or model_identity(bundle, m)[3] == int(horizon_days))
     ]
     if not wanted:
         available = sorted(
@@ -142,6 +156,10 @@ def select_model(bundle: dict, landmark_days: int, config: str = "both") -> dict
             f"no model for landmark={landmark_days} config={config!r}; "
             f"bundle has {available}"
         )
+    if len(wanted) != 1:
+        raise BundleError(f"ambiguous model for landmark={landmark_days} config={config!r}; "
+                          f"specify training_arm and/or horizon_days: "
+                          f"{[model_identity(bundle, m) for m in wanted]}")
     return wanted[0]
 
 
@@ -301,7 +319,8 @@ def _check_xgboost_version(bundle: dict, model: dict) -> None:
     )
 
 
-def load_fitted_model(path, landmark_days: int, config: str = "both"):
+def load_fitted_model(path, landmark_days: int, config: str = "both", *,
+                      training_arm: str | None = None, horizon_days: int | None = None):
     """Open a bundle and hand back ``(estimator, bundle, model)`` in one call.
 
     The usual entry point when you want the trained object::
@@ -313,7 +332,8 @@ def load_fitted_model(path, landmark_days: int, config: str = "both"):
     score raw data -- the preprocessing lives in ``model``.
     """
     bundle = load_bundle(path)
-    model = select_model(bundle, landmark_days, config)
+    model = select_model(bundle, landmark_days, config, training_arm=training_arm,
+                         horizon_days=horizon_days)
     return load_model(bundle, model), bundle, model
 
 
@@ -366,6 +386,9 @@ def load_model(bundle: dict, model: dict):
 
     if family == DEEPHIT_FAMILY:
         return _load_deephit_module(model)
+
+    if family == "predictive_checklist":
+        return _checklist_components(model)
 
     raise BundleError(f"unknown model_family {family!r}")
 
@@ -455,6 +478,36 @@ def _deephit_state(model: dict) -> dict[str, np.ndarray]:
     }
 
 
+def _checklist_components(model: dict):
+    """Restore the frozen PROFILE binarizer, item weights and calibrator."""
+    from COMPASS.survival_analysis.predictive_checklists.evaluation import ProbabilityCalibrator
+    from COMPASS.survival_analysis.predictive_checklists.features import FeatureBinarizer
+    from COMPASS.survival_analysis.predictive_checklists.optimizer import ChecklistModel
+
+    payload = model.get("checklist") or {}
+    if payload.get("schema_version") != 1:
+        raise BundleError("unsupported predictive checklist payload schema")
+    return (FeatureBinarizer.from_dict(payload["binarizer"]),
+            ChecklistModel.from_dict(payload["model"]),
+            ProbabilityCalibrator.from_dict(payload["calibrator"]))
+
+
+def predict_checklist(frame: pd.DataFrame, model: dict) -> pd.DataFrame:
+    """Count selected items and apply the exported threshold and calibrator."""
+    binarizer, checklist, calibrator = _checklist_components(model)
+    selected = {binarizer.items[i]["feature"] for i in checklist.selected_indices}
+    absent = sorted(selected - set(frame.columns))
+    if absent:
+        raise BundleError(f"selected checklist feature(s) absent locally: {absent}")
+    matrix = binarizer.transform(frame)
+    score = checklist.predict_score(matrix)
+    return pd.DataFrame({
+        "score": score,
+        "flag": checklist.predict(matrix),
+        "probability": calibrator.predict(score / max(len(checklist.selected_indices), 1)),
+    }, index=frame.index)
+
+
 def _load_deephit_module(model: dict):
     try:
         import torch
@@ -523,6 +576,7 @@ def build_deephit_sequences(
     lab_col: str = "lab_name",
     value_col: str = "lab_value",
     days_col: str = "days_relative_to_anchor",
+    ages=None,
 ) -> tuple[list, list[np.ndarray]]:
     """Rebuild the GRU's input sequences from a long lab frame.
 
@@ -608,7 +662,20 @@ def build_deephit_sequences(
     starts = np.flatnonzero(np.r_[True, keys[1:] != keys[:-1]])
     ends = np.r_[starts[1:], len(keys)]
     by_id = {keys[s]: x[s:e] for s, e in zip(starts, ends)}
-    return ids, [by_id[i] for i in ids]
+    sequences = [by_id[i] for i in ids]
+    if pre.get("include_age"):
+        if ages is None:
+            raise BundleError("DeepHit bundle requires age_at_anchor for every scored patient")
+        age = np.asarray(ages, dtype=float)
+        if len(age) != len(ids) or not np.isfinite(age).all():
+            raise BundleError("DeepHit age values must align with the ordered patient IDs")
+        scale = float(pre["age_std"])
+        if scale <= 0:
+            raise BundleError("DeepHit age_std must be positive")
+        z = (age - float(pre["age_mean"])) / scale
+        sequences = [np.column_stack((seq, np.full(len(seq), z[i], dtype=np.float32)))
+                     for i, seq in enumerate(sequences)]
+    return ids, sequences
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -665,7 +732,8 @@ def deephit_cif(xs: list[np.ndarray], model: dict) -> np.ndarray:
 
 
 def predict_cif(
-    labs: pd.DataFrame, model: dict, *, ids=None, age_col: str | None = None, **cols
+    labs: pd.DataFrame, model: dict, *, ids=None, age_col: str | None = None,
+    cohort: pd.DataFrame | None = None, **cols
 ) -> tuple[list, np.ndarray]:
     """``(ids, CIF)`` for a long lab frame; see :func:`build_deephit_sequences`.
 
@@ -677,7 +745,17 @@ def predict_cif(
             labs, model, ids=ids, id_col=cols.get("id_col", "person_id"), age_col=age_col
         )
     else:
-        ids, xs = build_deephit_sequences(labs, model, ids=ids, **cols)
+        ages = None
+        if model["preprocessing"].get("include_age"):
+            if cohort is None:
+                raise BundleError("DeepHit bundle with include_age needs the cohort frame")
+            id_col = cols.get("id_col", "person_id")
+            source = age_col or model["preprocessing"].get("age_source_col", "age_at_anchor")
+            if source not in cohort or id_col not in cohort:
+                raise BundleError(f"DeepHit cohort needs {id_col!r} and {source!r}")
+            ordered = list(ids) if ids is not None else pd.unique(labs[id_col]).tolist()
+            ages = pd.to_numeric(cohort.set_index(id_col)[source], errors="coerce").reindex(ordered).to_numpy()
+        ids, xs = build_deephit_sequences(labs, model, ids=ids, ages=ages, **cols)
     return ids, deephit_cif(xs, model)
 
 
@@ -707,6 +785,7 @@ def predict_risk(
     *,
     age_col: str | None = None,
     ids=None,
+    cohort: pd.DataFrame | None = None,
 ) -> np.ndarray:
     """Linear predictor / log-hazard-ratio for each row.
 
@@ -721,7 +800,10 @@ def predict_risk(
     """
     family = bundle.get("model_family")
     if family == DEEPHIT_FAMILY:
-        return predict_cif(df, model, ids=ids, age_col=age_col)[1][:, -1]
+        return predict_cif(df, model, ids=ids, age_col=age_col, cohort=cohort)[1][:, -1]
+
+    if family == "predictive_checklist":
+        return predict_checklist(df, model)["score"].to_numpy(dtype=float)
 
     design = build_design_matrix(df, model, age_col=age_col)
 
@@ -814,6 +896,9 @@ def main(argv=None) -> int:
     )
     ap.add_argument("--landmark", type=int, required=True)
     ap.add_argument("--config", default="both", choices=["both", "baseline"])
+    ap.add_argument("--training-arm", choices=["landmark", "dynamic"])
+    ap.add_argument("--model-horizon", type=int,
+                    help="required to select a horizon-specific checklist model")
     ap.add_argument("--age-col", default="age_at_anchor")
     ap.add_argument("--id-col", default="person_id")
     ap.add_argument(
@@ -824,29 +909,38 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     bundle = load_bundle(args.bundle)
-    model = select_model(bundle, args.landmark, args.config)
+    model = select_model(bundle, args.landmark, args.config,
+                         training_arm=args.training_arm, horizon_days=args.model_horizon)
     df = _read_table(args.data)
     horizons = [float(h) for h in args.horizons.split(",") if h.strip()]
 
     if bundle.get("model_family") == DEEPHIT_FAMILY:
+        cohort = _read_table(args.cohort) if args.cohort else None
         ids = (
-            pd.unique(_read_table(args.cohort)[args.id_col]).tolist()
-            if args.cohort else None
+            pd.unique(cohort[args.id_col]).tolist() if cohort is not None else None
         )
         ids, cif = predict_cif(
-            df, model, ids=ids, id_col=args.id_col, age_col=args.age_col
+            df, model, ids=ids, id_col=args.id_col, age_col=args.age_col,
+            cohort=cohort,
         )
         out = pd.DataFrame({args.id_col: ids, "risk_score": cif[:, -1]})
         out["landmark_days"] = args.landmark
         out["config"] = args.config
         out["model_family"] = DEEPHIT_FAMILY
+        if "training_arm" in model:
+            out["training_arm"] = model_identity(bundle, model)[2]
         if horizons:
             out = pd.concat([out, deephit_survival(cif, model, horizons)], axis=1)
         out.to_csv(args.output, index=False)
         print(f"[federated_inference] wrote {len(out):,} rows -> {args.output}")
         return 0
 
-    risk = predict_risk(df, bundle, model, age_col=args.age_col)
+    if bundle.get("model_family") == "predictive_checklist":
+        pred = predict_checklist(df, model)
+        risk = pred["score"].to_numpy(dtype=float)
+    else:
+        pred = None
+        risk = predict_risk(df, bundle, model, age_col=args.age_col)
     out = pd.DataFrame({"risk_score": risk}, index=df.index)
     # The identifier is carried through for joining only; it is never a
     # predictor, and build_design_matrix ignores it.
@@ -855,8 +949,13 @@ def main(argv=None) -> int:
     out["landmark_days"] = args.landmark
     out["config"] = args.config
     out["model_family"] = bundle.get("model_family")
+    if model.get("horizon_days") is not None:
+        out["model_horizon_days"] = model_identity(bundle, model)[3]
+    if pred is not None:
+        out["probability"] = pred["probability"].to_numpy()
+        out["flag"] = pred["flag"].to_numpy()
 
-    if horizons:
+    if horizons and pred is None:
         surv = predict_survival(risk, model, horizons)
         out = pd.concat([out, surv.set_index(out.index)], axis=1)
 

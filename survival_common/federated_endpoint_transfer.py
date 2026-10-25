@@ -48,7 +48,10 @@ import numpy as np
 import pandas as pd
 
 from survival_common import federated_scoring as fs
-from survival_common.federated_inference import load_bundle, predict_risk
+from survival_common.federated_inference import (
+    BundleError, deephit_survival, load_bundle, model_identity, predict_checklist,
+    predict_cif, predict_risk,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_LAB_MAPPING = (
@@ -181,6 +184,9 @@ def unit_check(wide: pd.DataFrame, model: dict) -> pd.DataFrame:
     model and shifts every score.  A mean off by more than ~3x is flagged.
     """
     pre = model["preprocessing"]
+    if "covariate_cols" not in pre:
+        return pd.DataFrame(columns=["covariate", "local_mean", "pooled_mean",
+                                     "mean_ratio", "unit_flag"])
     impute = dict(pre.get("impute_means") or {})
     source = dict(pre.get("source_cols") or {})
     rows = []
@@ -363,6 +369,22 @@ def ipcw_metrics(duration, event, risk, horizons_days) -> tuple[dict, pd.DataFra
     return summary, auc_df
 
 
+def ipcw_brier(duration, event, probability, horizon_days) -> float:
+    """Brier score using the local cohort's censoring distribution."""
+    if horizon_days not in estimable_horizons(duration, event, [horizon_days]):
+        return float("nan")
+    try:
+        from sksurv.metrics import brier_score
+        from sksurv.util import Surv
+
+        y = Surv.from_arrays(event=np.asarray(event, dtype=bool),
+                             time=np.asarray(duration, dtype=float))
+        survival = 1.0 - np.asarray(probability, dtype=float)
+        return float(brier_score(y, y, survival, np.asarray([horizon_days], dtype=float))[1][0])
+    except Exception:
+        return float("nan")
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
@@ -425,77 +447,137 @@ def evaluate_transfer(
                     f"event/censoring at or before the landmark)"
                 )
 
-            risks: dict[tuple[str, str], np.ndarray] = {}
+            # The key includes the exported arm and model horizon. DeepHit's
+            # horizon-specific CIF also carries the evaluation horizon.
+            risks: dict[tuple, np.ndarray] = {}
+            details: dict[tuple, tuple[dict, dict, np.ndarray | None, np.ndarray | None]] = {}
+            ids = wide[fs.ID_COL].tolist()
             for stem, bundle in bundles.items():
                 for model in bundle["models"]:
                     if int(model["landmark_days"]) != lm:
                         continue
                     config = str(model.get("config"))
-                    risk = predict_risk(wide, bundle, model, age_col=fs.AGE_COL)
-                    risks[(stem, config)] = risk
+                    _, _, arm, model_horizon = model_identity(bundle, model)
+                    family = bundle.get("model_family")
+                    if model_horizon is not None and model_horizon not in horizons_days:
+                        continue
+                    predictions = []
+                    if family == "dynamic_deephit":
+                        if model["preprocessing"].get("input_kind") == "age":
+                            got, cif = predict_cif(wide, model, ids=ids, age_col=fs.AGE_COL)
+                        else:
+                            got, cif = predict_cif(long_df, model, ids=ids,
+                                                   cohort=wide, age_col=fs.AGE_COL)
+                        if got != ids:
+                            raise BundleError("DeepHit predictions are not aligned to landmark patients")
+                        for h in horizons_days:
+                            risk_h = 1.0 - deephit_survival(cif, model, [h]).iloc[:, 0].to_numpy()
+                            predictions.append((int(h), risk_h, risk_h, None))
+                    elif family == "predictive_checklist":
+                        pred = predict_checklist(wide, model)
+                        predictions.append((model_horizon,
+                                            pred["score"].to_numpy(dtype=float),
+                                            pred["probability"].to_numpy(dtype=float),
+                                            pred["flag"].to_numpy(dtype=int)))
+                    else:
+                        risk = predict_risk(wide, bundle, model, age_col=fs.AGE_COL)
+                        predictions.append((None, risk, None, None))
 
-                    scores.append(pd.DataFrame({
-                        "endpoint": endpoint, "bundle": stem,
-                        "model_family": bundle.get("model_family"),
-                        "landmark_days": lm, "config": config,
-                        fs.ID_COL: wide[fs.ID_COL].to_numpy(),
-                        "risk_score": risk,
-                        DURATION_COL: duration, EVENT_COL: event,
-                    }))
+                    for evaluation_horizon, risk, probability, flag in predictions:
+                        key = (stem, config, arm, model_horizon, evaluation_horizon)
+                        if key in risks:
+                            raise BundleError(f"duplicate transfer model identity: {key}")
+                        risks[key] = risk
+                        details[key] = (bundle, model, probability, flag)
+                        block = pd.DataFrame({
+                            "endpoint": endpoint, "bundle": stem,
+                            "model_family": family, "landmark_days": lm,
+                            "config": config, "training_arm": arm,
+                            "model_horizon_days": model_horizon,
+                            "evaluation_horizon_days": evaluation_horizon,
+                            fs.ID_COL: ids, "risk_score": risk,
+                            DURATION_COL: duration, EVENT_COL: event,
+                        })
+                        if probability is not None:
+                            block["probability"] = probability
+                        if flag is not None:
+                            block["flag"] = flag
+                        scores.append(block)
                     if endpoint == endpoints[0]:
                         cov = fs.covariate_coverage(wide, model)
                         cov.insert(0, "config", config)
+                        cov.insert(0, "training_arm", arm)
+                        cov.insert(0, "model_horizon_days", model_horizon)
                         cov.insert(0, "landmark_days", lm)
                         cov.insert(0, "bundle", stem)
                         coverage.append(cov)
                         uc = unit_check(wide, model)
                         uc.insert(0, "config", config)
+                        uc.insert(0, "training_arm", arm)
+                        uc.insert(0, "model_horizon_days", model_horizon)
                         uc.insert(0, "landmark_days", lm)
                         uc.insert(0, "bundle", stem)
                         units.append(uc)
 
-            keyed = {f"{s}|{c}": r for (s, c), r in risks.items()}
+            keyed = {str(k): r for k, r in risks.items()}
             boot = bootstrap_c(
                 duration, event, keyed, n_bootstrap, seed,
             ) if n_bootstrap > 0 else {}
             horizons = estimable_horizons(duration, event, horizons_days)
-            boot_auc = bootstrap_mean_auc(
-                duration, event, keyed, horizons, n_bootstrap, seed,
-            ) if n_bootstrap > 0 and horizons else {}
+            boot_auc = {}
+            if n_bootstrap > 0:
+                for key, risk in risks.items():
+                    hs = ([key[-1]] if key[-1] is not None else horizons)
+                    boot_auc[str(key)] = bootstrap_mean_auc(
+                        duration, event, {str(key): risk}, hs, n_bootstrap, seed,
+                    )[str(key)]
 
-            for (stem, config), risk in risks.items():
-                bundle = bundles[stem]
+            for identity, risk in risks.items():
+                stem, config, arm, model_horizon, evaluation_horizon = identity
+                bundle, model, probability, flag = details[identity]
+                metric_horizons = ([evaluation_horizon] if evaluation_horizon is not None
+                                   else horizons_days)
                 row = {
                     "endpoint": endpoint, "bundle": stem,
                     "model_family": bundle.get("model_family"),
                     "analysis_label": bundle.get("analysis_label"),
                     "trained_endpoint": bundle.get("endpoint", "platinum"),
                     "landmark_days": lm, "config": config,
+                    "training_arm": arm, "model_horizon_days": model_horizon,
+                    "evaluation_horizon_days": evaluation_horizon,
                     "n_patients": int(len(wide)), "n_events": int(event.sum()),
                     "n_admin_censored": int(lm_stats["n_admin_censored"]),
                     "median_followup_days": float(np.median(duration)),
                     "c_index": harrell_c(duration, event, risk),
                 }
-                key = f"{stem}|{config}"
+                key = str(identity)
                 if key in boot:
                     row["c_index_lo"], row["c_index_hi"] = _ci(boot[key])
-                base_key = f"{stem}|baseline"
-                if config != "baseline" and (stem, "baseline") in risks:
+                base_identity = (stem, "baseline", arm, model_horizon, evaluation_horizon)
+                if base_identity not in risks and arm == "dynamic":
+                    base_identity = (stem, "baseline", "landmark", model_horizon,
+                                     evaluation_horizon)
+                base_key = str(base_identity)
+                if config != "baseline" and base_identity in risks:
                     row["c_index_baseline"] = harrell_c(
-                        duration, event, risks[(stem, "baseline")]
+                        duration, event, risks[base_identity]
                     )
                     row["delta_c_vs_baseline"] = row["c_index"] - row["c_index_baseline"]
                     if key in boot and base_key in boot:
                         diff = boot[key] - boot[base_key]
                         row["delta_c_lo"], row["delta_c_hi"] = _ci(diff)
                 row.update(cox_slope(duration, event, risk))
-                ipcw, auc_df = ipcw_metrics(duration, event, risk, horizons_days)
+                ipcw, auc_df = ipcw_metrics(duration, event, risk, metric_horizons)
                 row.update(ipcw)
+                if probability is not None and evaluation_horizon is not None:
+                    row["brier"] = ipcw_brier(duration, event, probability,
+                                               evaluation_horizon)
                 if key in boot_auc:
                     row["mean_auc_lo"], row["mean_auc_hi"] = _ci(boot_auc[key])
-                if config != "baseline" and (stem, "baseline") in risks:
+                if config != "baseline" and base_identity in risks:
                     row["mean_auc_baseline"] = mean_auc(
-                        duration, event, risks[(stem, "baseline")], horizons
+                        duration, event, risks[base_identity],
+                        [evaluation_horizon] if evaluation_horizon is not None else horizons,
                     )
                     row["delta_auc_vs_baseline"] = row["mean_auc"] - row["mean_auc_baseline"]
                     if key in boot_auc and base_key in boot_auc:
@@ -503,6 +585,9 @@ def evaluate_transfer(
                         row["delta_auc_lo"], row["delta_auc_hi"] = _ci(diff)
                 metrics.append(row)
                 if not auc_df.empty:
+                    auc_df.insert(0, "training_arm", arm)
+                    auc_df.insert(0, "model_horizon_days", model_horizon)
+                    auc_df.insert(0, "evaluation_horizon_days", evaluation_horizon)
                     auc_df.insert(0, "config", config)
                     auc_df.insert(0, "landmark_days", lm)
                     auc_df.insert(0, "bundle", stem)
@@ -529,7 +614,7 @@ def evaluate_transfer(
                         and np.isfinite(d_auc) else ""
                     )
                     print(
-                        f"[transfer]     {stem} {config}: C={row['c_index']:.3f}{ci}"
+                        f"[transfer]     {stem} {config} {arm or ''} {evaluation_horizon or ''}: C={row['c_index']:.3f}{ci}"
                         f"{extra}; mean AUC(t)={row['mean_auc']:.3f}{auc_ci}{auc_extra}"
                         f", HR/SD={row['hr_per_sd']:.2f}"
                     )
@@ -579,6 +664,11 @@ def main(argv=None) -> int:
     for path in args.bundle:
         bundle = load_bundle(path)
         stem = os.path.splitext(os.path.basename(path))[0]
+        if stem in bundles:
+            raise BundleError(
+                f"duplicate bundle filename {stem!r}; give the files distinct names "
+                "before combining them in one transfer run"
+            )
         label = str(bundle.get("analysis_label") or "")
         if ("noprecastrate" in label) != (args.exclusion == "pre_anchor_castrate"):
             print(

@@ -55,6 +55,11 @@
 # not fixed-horizon cumulative incidence estimates. Missing site counts are reported
 # as unavailable; forest plots still render if the site file is absent.
 #
+# Checklist supplement (Figure 4S): `06` flattens the predictive-checklist runs at
+# `COMPASS_CHECKLIST_LABS_RUN` (labs only) and `COMPASS_CHECKLIST_TRIO_RUN` (labs + Gleason +
+# somatic), defaulting to `<COMPASS_DATA_ROOT>/survival_analysis/predictive_checklists/{full_adt,gleason_trio_labs}`
+# (fit with horizons=[1825]); 07 draws the 5-year platinum and NEPC checklists per landmark with
+# held-out metrics. Skipped when no run exists; `COMPASS_CHECKLIST_SUPPLEMENT=false` disables it.
 # Caches live under `COMPASS_FIGURE_DATA_ROOT` (default `COMPASS/figure_data`).
 # They include patient data and need the same access restrictions as the analysis
 # inputs. All RDS files, including per-image render receipts, live in that data
@@ -367,6 +372,9 @@
 # The same exports refit without Dana-Farber (`federated_cox_multivariate_no_DFCI/`,
 # `federated_xgboost_no_DFCI/`) render as `04_multivariate/federated/{elasticnet,xgboost}_*_no_dfci__platinum`
 # and feed federated manuscript Figure 4.
+# When a fast federated DeepHit metrics export is present, its dynamic arm
+# appears in the federated multivariate discrimination panel and Figure 4;
+# missing DeepHit results leave the Cox/XGBoost figure renderable.
 #
 # Aggregate KM curves and trajectories (`COMPASS_FEDERATED_FIGURE_DATA`, default
 # `misc_figure_data/`) need `manifest.json` (bin width, minimum bin size, sites and per-site
@@ -396,6 +404,10 @@
 # forests and score × Gleason curves are no longer drawn. Only aggregate tables are exported
 # (`transfer_km_{curves,summary,gradient}_no_dfci`); they feed Federated Figure 5 e-h
 # (XGBoost, 180 days). Missing transfer outputs are reported and skipped.
+# `all_models/transfer_metrics.csv`, when present, adds the horizon-specific
+# predictive checklist supplement at `05_transfer/transfer_predictive_checklist_supplement__platinum`.
+# With `all_models/transfer_auc_t.csv`, a second supplement compares the frozen
+# Cox, XGBoost, landmark/dynamic DeepHit and checklist AUC(t) on common DFCI horizons.
 # Missing optional XGBoost files are reported and skipped independently. Run `06`
 # again after this update to register both files (including absent paths), then
 # run `07_figures.R` with stage `all`. All Python remains in `06`; graphics caches stay in data.
@@ -449,6 +461,12 @@ PLOT_GAM_TRAJECTORIES <- env_flag("COMPASS_GAM_TRAJECTORIES")
 PLOT_ADT_INTENT_SUPPLEMENT <- env_flag("COMPASS_ADT_INTENT_SUPPLEMENT")
 PLOT_METASTATIC_LABEL_SUPPLEMENT <- env_flag("COMPASS_METASTATIC_LABEL_SUPPLEMENT", TRUE)
 PLOT_FEDERATED_SUPPLEMENT <- env_flag("COMPASS_FEDERATED_SUPPLEMENT", TRUE)
+PLOT_CHECKLIST_SUPPLEMENT <- env_flag("COMPASS_CHECKLIST_SUPPLEMENT", TRUE)
+CHECKLIST_RUNS <- list(
+  labs = Sys.getenv("COMPASS_CHECKLIST_LABS_RUN", file.path(
+    NEPC_PROJ_PATH, "survival_analysis", "predictive_checklists", "full_adt")),
+  trio = Sys.getenv("COMPASS_CHECKLIST_TRIO_RUN", file.path(
+    NEPC_PROJ_PATH, "survival_analysis", "predictive_checklists", "gleason_trio_labs")))
 METASTATIC_SUPPLEMENT <- list(
   prepare_script = file.path(dirname(pipeline_path), "figure_supplements.R"),
   r_script = file.path(dirname(pipeline_path), "figure_supplements.R"),
@@ -473,6 +491,7 @@ PREPARE_OVERWRITE <- env_flag("COMPASS_PREPARE_OVERWRITE")
 RENDER_WORKERS <- env_workers("COMPASS_RENDER_WORKERS", 2L)
 PREPARE_WORKERS <- env_workers("COMPASS_PREPARE_WORKERS", 1L)
 source(file.path(dirname(pipeline_path), "figure_supplements.R"))
+source(file.path(dirname(pipeline_path), "checklist_supplement.R"))
 
 figure_config <- list(
   data_root = NEPC_PROJ_PATH, cache_root = FIGURE_DATA_ROOT, fig_root = FIG_ROOT,
@@ -486,7 +505,10 @@ figure_config <- list(
   federated = PLOT_FEDERATED_SUPPLEMENT,
   federated_path = FEDERATED_SUPPLEMENT$results,
   federated_transfer_no_dfci_path = FEDERATED_SUPPLEMENT$transfer_no_dfci,
-  federated_figure_data_path = FEDERATED_SUPPLEMENT$figure_data)
+  federated_figure_data_path = FEDERATED_SUPPLEMENT$figure_data,
+  checklist_supplement = PLOT_CHECKLIST_SUPPLEMENT,
+  checklist_labs_run = CHECKLIST_RUNS$labs, checklist_trio_run = CHECKLIST_RUNS$trio,
+  checklist_horizon = 1825L)
 
 # ---- Prepare and render -----------------------------------------------------
 figure_run <- run_cached_figure_workflow(

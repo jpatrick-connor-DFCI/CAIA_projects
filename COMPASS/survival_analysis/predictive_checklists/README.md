@@ -204,6 +204,29 @@ python -m pytest -q tests/test_predictive_checklists_*.py
 Rscript COMPASS/survival_analysis/predictive_checklists/render_figures.R /tmp/checklists-demo
 ```
 
+### Checklist supplement
+
+For the manuscript supplement (platinum and NEPC, 5-year horizon, each landmark, labs only
+versus labs + Gleason + somatic), fit `default_config.json` and `gleason_trio_config.json` with
+`"horizons": [1825]`. The cached figure workflow picks the runs up on its own: notebook `06` flattens them
+(defaults `<data root>/survival_analysis/predictive_checklists/{full_adt,gleason_trio_labs}`, override with
+`COMPASS_CHECKLIST_LABS_RUN` / `COMPASS_CHECKLIST_TRIO_RUN`) and `07_figures.R` renders the figures into
+`04_multivariate/internal`. To preview two runs without the figure cache, flatten and draw them directly:
+
+```bash
+python -m COMPASS.survival_analysis.predictive_checklists.collect_supplement \
+    --labs-run <labs-run> --trio-run <gleason-trio-run> --output-dir <supp-dir>
+Rscript COMPASS/survival_analysis/predictive_checklists/render_supplement.R <supp-dir>
+```
+
+`collect_supplement.py` writes `checklist_cells.csv` (status, M-of-N threshold, test n),
+`checklist_items_long.csv` (every item) and `checklist_metrics.csv` (checklist and baseline
+held-out AUC/Brier with bootstrap intervals). The renderer writes one
+`figure4s_checklist_<endpoint>_<feature_set>` figure per endpoint and feature set with a card per
+landmark; cells that were not fit say why. The labs + Gleason + somatic run uses the
+sequencing-anchored available-case cohort, so its metrics are not directly comparable with the
+labs-only run.
+
 The R renderer exports AUC/Brier panels and calibration plots. Tests cover
 weighted exhaustive optima, duplication, time-limit status, upstream reference
 parity when installed, censoring/ties against scikit-survival, fold boundaries,

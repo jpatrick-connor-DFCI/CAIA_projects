@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import hashlib
+import importlib.util
 import inspect
 import json
 import math
@@ -182,6 +183,7 @@ def federated_within_site_file(federated_path: Path, filename: str) -> Path:
 FEDERATED_TRANSFER_NO_DFCI_FILES = (
     "transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv",
     "transfer_km_patients.csv")
+FEDERATED_TRANSFER_ALL_MODELS_FILES = ("transfer_metrics.csv", "transfer_auc_t.csv")
 # Federated multivariable exports beside the across-site results CSV
 # (mirrors FEDERATED_MULTIVARIABLE in figure_workflow.R). Each bundle also has
 # a refit without Dana-Farber in "<directory>_no_DFCI".
@@ -195,6 +197,13 @@ FEDERATED_MULTIVARIABLE_FILES = tuple(
         ("federated_cox_multivariate", "cox_federated_elasticnet_metrics_adt.csv"),
         ("federated_cox_multivariate", "cox_federated_elasticnet_coefficients_adt.csv"),
     )
+)
+FEDERATED_DEEPHIT_METRIC_FILES = tuple(
+    (directory + suffix, name)
+    for suffix in ("", FEDERATED_NO_DFCI_SUFFIX)
+    for directory in ("fast_federated_deephit", "federated_deephit")
+    for name in ("deephit_federated_metrics_adt.csv",
+                 "adt/deephit_federated_metrics_adt.csv")
 )
 # Aggregate KM/trajectory export (no patient rows); mirrors FEDERATED_FIGURE_DATA_FILES in figure_workflow.R.
 FEDERATED_FIGURE_DATA_FILES = ("manifest.json", "cohort_km.csv") + tuple(
@@ -318,11 +327,11 @@ def prepare_arm(source: Path, labs: list[str]) -> dict[str, pl.DataFrame]:
                 coverage_patient=coverage, coverage_bins=coverage_bins)
 
 
-def valid_bundle(directory: Path, key: str, tables=ARM_TABLES) -> bool:
+def valid_bundle(directory: Path, key: str, tables=ARM_TABLES, suffix: str = ".parquet") -> bool:
     try:
         manifest = json.loads((directory / "manifest.json").read_text())
         return manifest["key"] == key and all(
-            fingerprint(directory / f"{table}.parquet") == manifest["outputs"][table]
+            fingerprint(directory / f"{table}{suffix}") == manifest["outputs"][table]
             for table in tables)
     except (OSError, ValueError, KeyError):
         return False
@@ -450,6 +459,45 @@ def prepare_cohort_overview(config: dict) -> dict:
             "sources": sources, "outputs": outputs}
 
 
+CHECKLIST_TABLES = ["checklist_cells.csv", "checklist_items_long.csv", "checklist_metrics.csv"]
+CHECKLIST_RUN_FILES = {"checklist.json", "metrics.json", "cohort_audit.json", "failure.json"}
+
+
+def prepare_checklist_supplement(config: dict) -> dict | None:
+    """Flatten the two finished predictive-checklist runs into 07's supplement tables.
+
+    Returns None when neither run exists yet (the supplement is then skipped);
+    a run that is absent is recorded as missing so a later delivery invalidates
+    the key. Reuses collect_supplement.py, which only reads finished run files.
+    """
+    cache = Path(config["cache_root"])
+    runs = {"labs": Path(config["checklist_labs_run"]),
+            "labs_gleason_somatic": Path(config["checklist_trio_run"])}
+    horizon = int(config.get("checklist_horizon", 1825))
+    if not any(run.is_dir() for run in runs.values()):
+        return None
+    sources = []
+    for run in runs.values():
+        sources += [fingerprint(run)] if not run.is_dir() else [
+            fingerprint(p) for p in sorted(run.rglob("*.json")) if p.name in CHECKLIST_RUN_FILES]
+    module = Path(__file__).resolve().parent / "predictive_checklists" / "collect_supplement.py"
+    key = digest({"sources": sources, "horizon": horizon,
+                  "code": hashlib.sha256(module.read_bytes()).hexdigest()})
+    directory = cache / "checklist_supplement" / key
+    if not valid_bundle(directory, key, [t.removesuffix(".csv") for t in CHECKLIST_TABLES], suffix=".csv"):
+        spec = importlib.util.spec_from_file_location("compass_collect_supplement", module)
+        collector = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(collector)
+        collector.write({name: run for name, run in runs.items() if run.is_dir()}, directory, horizon)
+        atomic_json(directory / "manifest.json", {"key": key, "outputs": {
+            t.removesuffix(".csv"): fingerprint(directory / t) for t in CHECKLIST_TABLES}})
+        print(f"Prepared checklist supplement {key}", flush=True)
+    else:
+        print("Reused checklist supplement tables", flush=True)
+    return {"key": key, "directory": str(directory.resolve()), "horizon": horizon,
+            "sources": sources, "outputs": [fingerprint(directory / t) for t in CHECKLIST_TABLES]}
+
+
 def prepare(config: dict) -> dict:
     root = Path(config["data_root"])
     cache = Path(config["cache_root"])
@@ -550,6 +598,19 @@ def prepare(config: dict) -> dict:
             except Exception as exc:
                 manifest["errors"]["cohort_overview"] = str(exc)
 
+        if config.get("checklist_supplement", False) and config.get("scope") != "federated":
+            try:
+                checklist = prepare_checklist_supplement(config)
+            except Exception as exc:
+                manifest["errors"]["checklist_supplement"] = str(exc)
+            else:
+                if checklist is None:
+                    print("Checklist supplement skipped; no checklist runs found", flush=True)
+                else:
+                    manifest["checklist"] = checklist
+                    manifest["outputs"].extend(checklist["outputs"])
+                    manifest["source_fingerprints"].extend(checklist["sources"])
+
         shared_paths = [root / "LLM_NEPC_labels" / "full_manual_annotations.csv",
                         root / "mrn_lists" / "platinum_MRN_list.csv",
                         root / "mrn_lists" / "platinum_any_MRN_list.csv",
@@ -593,8 +654,12 @@ def prepare(config: dict) -> dict:
         # absent paths too so later XGBoost/elastic-net deliveries invalidate preparation.
         federated_sources += [fingerprint(federated_path.parent / directory / name)
             for directory, name in FEDERATED_MULTIVARIABLE_FILES]
+        federated_sources += [fingerprint(federated_path.parent / directory / name)
+            for directory, name in FEDERATED_DEEPHIT_METRIC_FILES]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / name)
             for name in FEDERATED_TRANSFER_NO_DFCI_FILES]
+        federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / "all_models" / name)
+            for name in FEDERATED_TRANSFER_ALL_MODELS_FILES]
         federated_sources += [fingerprint(federated_figure_data_dir(config) / name)
             for name in FEDERATED_FIGURE_DATA_FILES]
         manifest["federated"] = digest({"code": version, "force": manifest["force_version"],

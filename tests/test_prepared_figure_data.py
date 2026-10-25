@@ -111,11 +111,19 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     # The same exports refit without Dana-Farber sit in "<directory>_no_DFCI".
     no_dfci_model_paths = [path.parent.with_name(path.parent.name + "_no_DFCI") / path.name
                            for path in [*xgb_paths, *cox_paths]]
+    deephit_paths = [site_path.parent.parent / directory / "deephit_federated_metrics_adt.csv"
+                     for suffix in ("", "_no_DFCI")
+                     for directory in ("fast_federated_deephit" + suffix,
+                                       "federated_deephit" + suffix)]
+    deephit_paths = [candidate for path in deephit_paths
+                     for candidate in (path, path.parent / "adt" / path.name)]
     rhino = Path(config["data_root"]) / "rhino_results"
     no_dfci_dir = rhino / "federated_transfer_adt_no_DFCI"
     no_dfci_paths = [no_dfci_dir / name for name in
                      ("transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv",
                       "transfer_km_patients.csv")]
+    all_model_paths = [no_dfci_dir / "all_models" / name for name in
+                       ("transfer_metrics.csv", "transfer_auc_t.csv")]
     figure_data_dir = rhino / "misc_figure_data"
     figure_data_paths = [figure_data_dir / name for name in ("manifest.json", "cohort_km.csv")] + [
         figure_data_dir / (prefix + name) for prefix in ("", "within_site_") for name in (
@@ -123,7 +131,8 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     assert [item["path"] for item in result["federated_sources"]] == [
         config["federated_path"], str(site_path), str(within_path), *map(str, xgb_paths),
         *map(str, cox_paths), *map(str, no_dfci_model_paths),
-        *map(str, no_dfci_paths), *map(str, figure_data_paths)]
+        *map(str, deephit_paths), *map(str, no_dfci_paths),
+        *map(str, all_model_paths), *map(str, figure_data_paths)]
     assert result["federated_sources"][1]["missing"]
     site_path.parent.mkdir()
     pl.DataFrame({"site_name": ["site_a"], "n_patients": [10], "n_events": [2]}).write_csv(site_path)
@@ -137,7 +146,7 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     assert "missing" not in with_forests["federated_sources"][2]
     previous = with_forests
     for path in [*xgb_paths, *cox_paths, *no_dfci_model_paths]:
-        path.parent.mkdir(exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
     for index, path in enumerate([*xgb_paths, *cox_paths, *no_dfci_model_paths], start=3):
         assert previous["federated_sources"][index]["missing"]
         pl.DataFrame({"endpoint": ["platinum"]}).write_csv(path)
@@ -150,9 +159,11 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
         previous = updated_xgb
     # 04 transfer outputs and the aggregate figure data are optional; their delivery
     # or change reruns the federated job.
-    for directory in (no_dfci_dir, figure_data_dir):
+    for directory in (no_dfci_dir, no_dfci_dir / "all_models", figure_data_dir):
         directory.mkdir(parents=True)
-    for index, path in enumerate([*no_dfci_paths, *figure_data_paths], start=11):
+    for index, path in enumerate([*deephit_paths, *no_dfci_paths,
+                                  *all_model_paths, *figure_data_paths], start=11):
+        path.parent.mkdir(exist_ok=True)
         assert previous["federated_sources"][index]["missing"]
         pl.DataFrame({"endpoint": ["nepc"]}).write_csv(path)
         delivered = prep.prepare(config)
@@ -167,10 +178,11 @@ def test_federated_transfer_path_override(tmp_path):
     config["federated_transfer_no_dfci_path"] = str(tmp_path / "external")
     config["federated_figure_data_path"] = str(tmp_path / "aggregates")
     sources = prep.prepare(config)["federated_sources"]
-    assert [s["path"] for s in sources[-14:-10]] == [
+    assert [s["path"] for s in sources[-16:-12]] == [
         str(tmp_path / "external" / name) for name in
         ("transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv",
          "transfer_km_patients.csv")]
+    assert {Path(s["path"]).parent for s in sources[-12:-10]} == {tmp_path / "external" / "all_models"}
     assert {Path(s["path"]).parent for s in sources[-10:]} == {tmp_path / "aggregates"}
 
 
@@ -178,9 +190,10 @@ def test_federated_rhino_root_override(tmp_path):
     config = make_config(tmp_path, "federated")
     config["federated"] = True
     config["federated_rhino_root"] = str(tmp_path / "delivery")
-    paths = [Path(s["path"]) for s in prep.prepare(config)["federated_sources"][-14:]]
-    assert {path.parent.name for path in paths} == {"federated_transfer_adt_no_DFCI", "misc_figure_data"}
-    assert all(path.parent.parent == tmp_path / "delivery" for path in paths)
+    paths = [Path(s["path"]) for s in prep.prepare(config)["federated_sources"][-16:]]
+    assert {path.parent.name for path in paths} == {"federated_transfer_adt_no_DFCI", "all_models", "misc_figure_data"}
+    assert all((path.parent.parent if path.parent.name != "all_models" else path.parent.parent.parent)
+               == tmp_path / "delivery" for path in paths)
 
 
 def test_federated_within_site_accepts_legacy_folder(tmp_path):

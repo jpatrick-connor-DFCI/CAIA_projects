@@ -81,6 +81,7 @@ COMPASS/
     ├── COMPASS_generate_figures_pipeline.R # per-cohort figure-generation implementation
     ├── figure_workflow.R                 # 07 cached prepare/render, federated + manuscript figures, PNG reformat CLI
     ├── figure_supplements.R              # cohort forest (05 CLI), cohort overview, metastatic-label figures
+    ├── checklist_supplement.R            # predictive-checklist cards (Fig 4S), sourced by 07 and render_supplement.R
     ├── prepare_figure_data.py            # 06 Polars figure tables + metastatic labels
     ├── 01_preprocessing.ipynb            # cohort compile, ADT-intent strata + label review, preprocessing, diagnostics
     ├── 02_univariate.ipynb               # univariate arms + nominal-significance filter
@@ -97,6 +98,8 @@ COMPASS/
     │   └── README.md                     # bundled-checkout/conda-env prerequisites, chdir caveat
     ├── predictive_checklists/            # full-ADT platinum/NEPC M-of-N horizon models with IPCW
     │   ├── run_predictive_checklists.ipynb # preflight, optional training, held-out tables and R figures
+    │   ├── collect_supplement.py         # flattens finished runs into checklist cells/items/metrics CSVs
+    │   ├── render_supplement.R           # standalone preview CLI over checklist_supplement.R
     │   └── README.md                     # censoring extension, solver setup, CLI and interpretation
     └── GAM/
         ├── gam_trajectory_features.R     # hierarchical longitudinal GAM features
@@ -533,12 +536,15 @@ notebook. All operate on the merged `profile_data` run:
   `COMPASS_SUPPLEMENT_LABS` (comma-separated canonical names, read by both notebook 06 and
   `07_figures.R`) changes the lab set.
   Figure 4 additionally emits `figure4c_sensitivity_gleason_auc`, the held-out
-  available-case comparison of labs against Gleason features at every landmark, alongside
-  `figure4s_multivariate_all_models`, a supplemental held-out comparison
-  of elastic-net Cox, XGBoost, and death-censored Dynamic-DeepHit using mean AUC(t) and
-  integrated Brier score. All figures plot discrimination as mean AUC(t); C-index stays in
-  the CSVs. If optional `03b_multivariate_longitudinal.ipynb` results are absent, the
-  figure and data CSV mark Dynamic-DeepHit as missing instead of suppressing the supplement.
+  available-case comparison of labs against Gleason features at every landmark. Figure 4a
+  includes the death-censored dynamic-arm Dynamic-DeepHit (`dynamic_deephit_dynamic`, the
+  prediction-time == landmark row) as a series beside Elastic-Net Cox and XGBoost. All
+  figures plot discrimination as mean AUC(t); C-index stays in the CSVs. If optional
+  `03b_multivariate_longitudinal.ipynb` results are absent, the Dynamic-DeepHit series is
+  omitted with a message. The checklist supplement (`figure4s_checklist_*`) is part of the cached
+  07 workflow: `06` runs `predictive_checklists/collect_supplement.py` on the finished runs
+  (`COMPASS_CHECKLIST_LABS_RUN`, `COMPASS_CHECKLIST_TRIO_RUN`) and `07` draws it into
+  `04_multivariate/internal`. It is skipped when no run exists; `COMPASS_CHECKLIST_SUPPLEMENT=false` disables it.
   - **LLM label strata:** alongside the existing `LLM_v3_labels.tsv`-driven Figure 2, the pipeline
     loads `primary_subtype_labels.parquet` from
     `/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_primary_subtype/` (the same file Stage 1
@@ -1134,14 +1140,14 @@ surprised by them.
 
 ## Scoring federated models on local data
 
-The federated runs in `caia-project-compass/rhino_scripts` fit XGBoost and
-elastic-net Cox models across sites and export each fitted model as a
+The federated runs in `caia-project-compass/rhino_scripts` fit XGBoost,
+elastic-net Cox, DeepHit and predictive checklist models across sites and export each fitted model as a
 `caia-federated-model-bundle` JSON. Two modules here consume those bundles:
 
 | Module | Takes | Does |
 | --- | --- | --- |
-| `survival_common/federated_inference.py` | a frame that already has the model's covariates | loads the bundle, rebuilds the design matrix with the **pooled** transform, returns risk / survival; also hands back the trained `xgboost.Booster` or a `FederatedCoxModel` |
-| `survival_common/federated_scoring.py` | the **long-format** table a site actually holds | builds each landmark's wide frame by the federated rules, scores every model in a bundle, reports coverage and local C-index |
+| `survival_common/federated_inference.py` | a wide frame for Cox, XGBoost and checklists; ordered long histories and a cohort frame for DeepHit | applies frozen preprocessing and returns risk or survival; can also restore the trained estimator |
+| `survival_common/federated_scoring.py` | the **long-format** table a site actually holds | builds each landmark's cohort and wide frame by the federated rules, scores the selected models, reports coverage and local C-index |
 
 Use `federated_scoring` on the cluster; it is the one with a CLI over raw data:
 
@@ -1232,6 +1238,31 @@ validation on all three endpoints. 04 writes `transfer_metrics.csv` and
 to render `figures/ADT/05_transfer/transfer_discrimination_no_dfci__platinum.{png,csv}`
 (mean AUC(t) and paired ΔAUC(t) vs. age only, by endpoint) and federated manuscript
 Figure 5.
+
+The same notebook also discovers no-DFCI DeepHit and predictive checklist
+bundles placed under `federated_model_results/`, including the checklist's
+site-set subdirectory. It scores the landmark and dynamic DeepHit arms from
+strictly pre-landmark lab histories and the checklist at each model's exported
+horizon. These additional comparisons, including Cox and XGBoost on the same
+DFCI cohort, are written under `federated_transfer_adt_no_DFCI/all_models/`.
+The `training_arm`, `model_horizon_days`, and `evaluation_horizon_days` columns
+identify each prediction. Checklist `risk_score` is the raw item count;
+`probability` and `flag` are the frozen calibrator and decision output.
+DeepHit uses its frozen cumulative incidence at each evaluation horizon.
+The horizon-specific rows also report an IPCW Brier score for DeepHit and
+checklist probabilities, with censoring estimated on the DFCI cohort.
+For a CLI run, pass the additional JSON paths to the existing `--bundle` list.
+Only downloaded bundles from runs that excluded DFCI belong in this comparison.
+After rerunning `06_prep_figure_data.ipynb` and `07_figures.R`, the dynamic arm's
+held-out federated metrics appear in the multivariate main figures when the
+corresponding DeepHit metrics CSV is available. The figures still render with
+Cox and XGBoost alone when it is absent. Transferred predictive checklist
+results appear separately as
+`05_transfer/transfer_predictive_checklist_supplement__platinum` with a metrics
+CSV beside the plot; they are not added to the main figures. The companion
+`05_transfer/transfer_all_models_supplement__platinum` compares Cox, XGBoost,
+the landmark and dynamic DeepHit arms, and checklists on the same DFCI patients
+at the checklist horizons.
 
 The same federated run also renders the pooled federated models themselves from
 `federated_cox_multivariate/` (elastic-net) and `federated_xgboost/`, next to

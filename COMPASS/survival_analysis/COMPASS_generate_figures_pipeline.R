@@ -2909,6 +2909,15 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   xgb_baseline <- function(lm) read_endpoint_performance(
     file.path(BASE, "xgboost", sprintf("landmark_%s", lm), "baseline", "landmark_xgboost_baseline_metrics.csv"),
     ENDPOINT)
+  # Dynamic DeepHit (dynamic arm), cause-only config named for the endpoint.
+  # 03b is torch-gated and optional, so a missing file yields NA metrics and
+  # the series is dropped from Figure 4a rather than plotted empty. The file
+  # holds only the prediction_time == landmark_time row for the dynamic arm.
+  dynamic_deephit_dyn <- function(lm) read_endpoint_performance(
+    file.path(BASE, "multivariate_longitudinal", "dynamic_deephit_dynamic",
+              sprintf("landmark_%s", lm), ENDPOINT,
+              sprintf("dynamic_deephit_dyn_metrics_%s.csv", ENDPOINT)),
+    ENDPOINT)
   # Retained with the disabled all-model supplement below. Keep its recursive
   # input discovery unreachable too; otherwise every active figure cell scans
   # the Dynamic-DeepHit tree for a figure that is never emitted.
@@ -2971,8 +2980,15 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     "Elastic-Net Cox",        list(cox_labs),     "#4C72B0", FALSE,
     "Cox baseline (age)",     list(cox_baseline), "#9DB3D6", TRUE,
     "XGBoost Survival",       list(xgb_labs),     "#B58900", FALSE,
-    "XGBoost baseline (age)", list(xgb_baseline), "#E0CC8A", TRUE
+    "XGBoost baseline (age)", list(xgb_baseline), "#E0CC8A", TRUE,
+    "Dynamic DeepHit",        list(dynamic_deephit_dyn), "#2A9D8F", FALSE
   )
+  deephit_available <- any(map_lgl(LANDMARKS, function(lm)
+    is.finite(dynamic_deephit_dyn(lm)[["auc"]])))
+  if (!deephit_available) {
+    message("Figure 4a: no Dynamic DeepHit metrics for ", ENDPOINT, "; series omitted.")
+    DISCRIMINATION_SERIES <- DISCRIMINATION_SERIES %>% filter(name != "Dynamic DeepHit")
+  }
   SERIES_LEVELS <- DISCRIMINATION_SERIES$name
   SERIES_COLORS <- setNames(DISCRIMINATION_SERIES$color, SERIES_LEVELS)
 

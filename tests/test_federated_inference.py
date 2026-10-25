@@ -762,3 +762,38 @@ def test_deephit_cli_scores_the_age_baseline(tmp_path):
     assert (out["config"] == "baseline").all()
     _, cif = predict_cif(_deephit_cohort(), bundle["models"][1])
     np.testing.assert_allclose(out["risk_score"].iloc[:3], cif[:3, -1])
+
+
+def test_v3_deephit_arms_and_frozen_age_channel():
+    from survival_common.federated_inference import BundleError
+
+    bundle = _deephit_bundle()
+    bundle["format_version"] = 3
+    main = bundle["models"][0]
+    main["training_arm"] = "landmark"
+    main["architecture"]["input_dim"] += 1
+    main["state_dict"] = _deephit_state(main["architecture"]["input_dim"], 6, 33)
+    main["preprocessing"].update(include_age=True, age_mean=65.0, age_std=10.0,
+                                  age_source_col="age_at_anchor")
+    dynamic = json.loads(json.dumps(main))
+    dynamic["training_arm"] = "dynamic"
+    dynamic["state_dict"] = _deephit_state(main["architecture"]["input_dim"], 6, 34)
+    bundle["models"] = [main, dynamic, bundle["models"][1]]
+    bundle["models"][2]["training_arm"] = "landmark"
+
+    with pytest.raises(BundleError, match="ambiguous"):
+        select_model(bundle, 0, "both")
+    assert select_model(bundle, 0, "both", training_arm="dynamic") is dynamic
+    cohort = _deephit_cohort().iloc[:3].copy()
+    labs = _deephit_labs()
+    ids = cohort["person_id"].tolist()
+    got, cif = predict_cif(labs, main, ids=ids, cohort=cohort)
+    assert got == ids
+    assert cif.shape == (3, DH_WINDOW)
+    _, xs = build_deephit_sequences(labs, main, ids=ids,
+                                    ages=cohort["age_at_anchor"].to_numpy())
+    np.testing.assert_allclose(xs[0][:, -1], -1.0)
+    np.testing.assert_allclose(xs[2][:, -1], 1.5)
+    later = labs.copy()
+    later.loc[len(later)] = ["p1", DH_LABS[0], 99.0, 4.0]
+    np.testing.assert_allclose(predict_cif(later, main, ids=ids, cohort=cohort)[1], cif)

@@ -80,7 +80,7 @@ figure_public_path <- function(path) {
 # Federated outputs are written by stem rather than through by_figure.
 figure_federated_section <- function(stem) {
   section <- if (grepl("^transfer_", stem)) "transfer" else
-    if (grepl("^(elasticnet|xgboost)_", stem)) "multivariate_federated" else
+    if (grepl("^(elasticnet|xgboost|deephit)_", stem)) "multivariate_federated" else
     if (grepl("^(site_incidence|federated_cohort_km)", stem)) "cohort" else "univariate_federated"
   FIGURE_SECTIONS[[section]]
 }
@@ -933,7 +933,8 @@ FEDERATED_MULTIVARIABLE <- list(
     series=c(both="XGBoost Survival",baseline="XGBoost baseline (age)")))
 # Local Figure 4 series colors; age baselines are the lighter twins.
 FEDERATED_MODEL_COLORS <- c("Elastic-Net Cox"="#4C72B0","Cox baseline (age)"="#9DB3D6",
-  "XGBoost Survival"="#B58900","XGBoost baseline (age)"="#E0CC8A")
+  "XGBoost Survival"="#B58900","XGBoost baseline (age)"="#E0CC8A",
+  "Dynamic DeepHit"="#2A9D8F")
 FEDERATED_FEATURE_STATS <- c("mean","min","max","last","delta","n_observations")
 
 # The same bundles refit without Dana-Farber sit in "<directory>_no_DFCI".
@@ -944,7 +945,50 @@ FEDERATED_MULTIVARIABLE_VARIANTS <- list(
     note="Refit without Dana-Farber; trained and tested on Fred Hutch, Johns Hopkins and MSK data."))
 # Darker twins of the pooled full-model colors, used where both variants share a panel.
 FEDERATED_NO_DFCI_MODEL_COLORS <- c("Elastic-Net Cox, no DFCI"="#1F3D73",
-  "XGBoost Survival, no DFCI"="#6E5200")
+  "XGBoost Survival, no DFCI"="#6E5200",
+  "Dynamic DeepHit, no DFCI"="#17675D")
+
+FEDERATED_DEEPHIT_METRIC_DIRS <- c("fast_federated_deephit", "federated_deephit")
+FEDERATED_DEEPHIT_METRIC_FILE <- "deephit_federated_metrics_adt.csv"
+federated_deephit_metric_paths <- function(federated_path, suffix="")
+  unlist(lapply(paste0(FEDERATED_DEEPHIT_METRIC_DIRS,suffix),function(directory)
+    file.path(dirname(federated_path),directory,
+      c(FEDERATED_DEEPHIT_METRIC_FILE,
+        file.path("adt",FEDERATED_DEEPHIT_METRIC_FILE)))),use.names=FALSE)
+
+load_federated_dynamic_deephit <- function(federated_path,variant="pooled") {
+  suffix <- FEDERATED_MULTIVARIABLE_VARIANTS[[variant]]$suffix
+  paths <- federated_deephit_metric_paths(federated_path,suffix)
+  found <- FALSE
+  for(path in paths[file.exists(paths)]) {
+    d <- readr::read_csv(path,show_col_types=FALSE)
+    # The older DeepHit exporter contains only the landmark arm.
+    if(!"training_arm" %in% names(d)) next
+    needed <- c("analysis_label","endpoint","landmark_days","config","training_arm",
+      "test_mean_auc_t","n_test","n_events_test")
+    if(length(missing <- setdiff(needed,names(d))))
+      stop("Federated DeepHit metrics are missing: ",paste(missing,collapse=", ")," in ",path)
+    d <- dplyr::filter(d,tolower(analysis_label)=="adt",tolower(endpoint)=="platinum",
+      training_arm=="dynamic",config=="both",landmark_days %in% c(0,90,180))
+    if(nrow(d)) { found <- TRUE; break }
+  }
+  if(!found) return(NULL)
+  if(anyDuplicated(d$landmark_days)) stop("Duplicate dynamic DeepHit landmark rows in ",path)
+  if(!is.numeric(d$test_mean_auc_t) && !all(is.na(d$test_mean_auc_t)))
+    stop("Non-numeric dynamic DeepHit AUC in ",path)
+  if(any(!is.na(d$test_mean_auc_t) & (!is.finite(d$test_mean_auc_t) |
+      d$test_mean_auc_t<0 | d$test_mean_auc_t>1)) ||
+      any(!is.finite(d$n_test) | !is.finite(d$n_events_test) |
+        d$n_test<0 | d$n_events_test<0 | d$n_events_test>d$n_test))
+    stop("Invalid dynamic DeepHit held-out metrics in ",path)
+  if(!any(is.finite(d$test_mean_auc_t))) return(NULL)
+  if(!"test_c_index" %in% names(d)) d$test_c_index <- NA_real_
+  d <- d %>% tidyr::complete(landmark_days=c(0,90,180)) %>%
+    dplyr::mutate(name=if(variant=="pooled") "Dynamic DeepHit" else "Dynamic DeepHit, no DFCI",
+      landmark=landmark_days,auc=test_mean_auc_t,cindex=test_c_index,
+      family="dynamic_deephit",input_audit_note=NA_character_,source_path=path)
+  d
+}
 
 federated_multivariable_files <- function(federated_path, family, suffix="") {
   spec <- FEDERATED_MULTIVARIABLE[[family]]
@@ -1093,6 +1137,24 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
       figure$width,figure$height,dpi,overwrite)
   }
   invisible(NULL)
+}
+
+render_federated_deephit_performance <- function(root,federated_path,dpi,overwrite,variant="pooled") {
+  d <- load_federated_dynamic_deephit(federated_path,variant)
+  if(is.null(d)) return(invisible(NULL))
+  stem <- paste0("deephit_performance",FEDERATED_MULTIVARIABLE_VARIANTS[[variant]]$stem)
+  path <- figure_sidecar_path(federated_output_path(root,stem,".csv"))
+  dir.create(dirname(path),recursive=TRUE,showWarnings=FALSE)
+  readr::write_csv(d,path)
+  capture <- getOption("compass.figure_table_capture")
+  if(is.function(capture)) capture(path)
+  colors <- c(FEDERATED_MODEL_COLORS,FEDERATED_NO_DFCI_MODEL_COLORS)[unique(d$name)]
+  p <- plot_model_discrimination(d,"auc","Test Mean AUC(t)",colors,show_legend=TRUE) +
+    ggplot2::labs(title=paste0("Federated dynamic DeepHit",
+      FEDERATED_MULTIVARIABLE_VARIANTS[[variant]]$label),
+      caption="Held-out test metrics from the dynamic arm; missing landmarks are shown as gaps.")
+  save_federated_panel(p,federated_output_path(root,stem,".png"),7.5,5.5,dpi,overwrite)
+  invisible(d)
 }
 
 # Platinum-trained federated bundles refit without Dana-Farber, scored on local
@@ -1377,6 +1439,127 @@ render_federated_transfer <- function(root, directory, dpi, overwrite) {
   save_federated_panel(plot_federated_transfer(d,caption,spec$title,spec$subtitle),
     federated_output_path(root,spec$stem,".png"),13,6,dpi,overwrite)
   invisible(metrics)
+}
+
+# The all-model transfer table has one checklist model per training horizon.
+# Keep it in a separate supplement so the main transfer figure retains its
+# original multi-horizon Cox/XGBoost estimand and clinical comparison panels.
+render_federated_checklist_supplement <- function(root,directory,dpi,overwrite) {
+  path <- file.path(directory,"transfer_metrics.csv")
+  if(!file.exists(path)) return(invisible(NULL))
+  d <- readr::read_csv(path,show_col_types=FALSE)
+  needed <- c("endpoint","bundle","model_family","landmark_days","config",
+    "model_horizon_days","evaluation_horizon_days","mean_auc")
+  if(length(missing <- setdiff(needed,names(d))))
+    stop("All-model transfer metrics are missing: ",paste(missing,collapse=", ")," in ",path)
+  d <- dplyr::filter(d,model_family=="predictive_checklist",
+    endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS),
+    !is.na(model_horizon_days),model_horizon_days==evaluation_horizon_days,
+    config %in% c("both","baseline"))
+  if(!nrow(d)) return(invisible(NULL))
+  if(anyDuplicated(d[c("endpoint","bundle","landmark_days","config","model_horizon_days")]))
+    stop("Duplicate predictive checklist transfer rows in ",path)
+  if((!is.numeric(d$mean_auc) && !all(is.na(d$mean_auc))) || any(!is.na(d$mean_auc) &
+      (!is.finite(d$mean_auc) | d$mean_auc<0 | d$mean_auc>1)))
+    stop("Invalid predictive checklist AUC in ",path)
+  for(column in c("mean_auc_lo","mean_auc_hi","brier"))
+    if(!column %in% names(d)) d[[column]] <- NA_real_
+  stem <- "transfer_predictive_checklist_supplement"
+  write_federated_transfer_table(root,d,stem)
+  if(!any(is.finite(d$mean_auc))) return(invisible(d))
+  shown <- d %>% dplyr::mutate(
+    endpoint_label=factor(unname(FEDERATED_TRANSFER_ENDPOINTS[endpoint]),
+      levels=unname(FEDERATED_TRANSFER_ENDPOINTS)),
+    horizon_label=factor(paste0(as.integer(model_horizon_days/365),"-year checklist"),
+      levels=unique(paste0(as.integer(sort(unique(model_horizon_days))/365),"-year checklist"))),
+    landmark=factor(paste0("+",landmark_days," days"),
+      levels=paste0("+",sort(unique(landmark_days))," days")),
+    config_label=factor(if_else(config=="both","Checklist","Age-only checklist"),
+      levels=c("Checklist","Age-only checklist")))
+  palette <- setNames(rep_len(c("#6A3D9A","#A6761D","#1B9E77"),length(unique(d$bundle))),
+    unique(d$bundle))
+  p <- ggplot2::ggplot(shown,ggplot2::aes(landmark,mean_auc,color=bundle,shape=config_label,
+    group=interaction(bundle,config_label,model_horizon_days))) +
+    ggplot2::geom_hline(yintercept=.5,color="grey65",linetype="dotted") +
+    ggplot2::geom_line(linewidth=.75,na.rm=TRUE) +
+    ggplot2::geom_linerange(ggplot2::aes(ymin=mean_auc_lo,ymax=mean_auc_hi),
+      linewidth=.65,na.rm=TRUE) +
+    ggplot2::geom_point(size=2.5,na.rm=TRUE) +
+    ggplot2::facet_grid(endpoint_label~horizon_label) +
+    ggplot2::scale_color_manual(values=palette,name="Bundle") +
+    ggplot2::scale_shape_manual(values=c("Checklist"=16,"Age-only checklist"=1),name=NULL) +
+    ggplot2::coord_cartesian(ylim=c(0,1)) +
+    ggplot2::labs(title="Supplementary: predictive checklist transfer to Dana-Farber",
+      subtitle="Platinum-trained models without Dana-Farber; horizon-matched external validation",
+      x="Landmark after ADT start",y="Horizon-specific AUC(t)",
+      caption="Points are IPCW AUC(t); bars are patient-bootstrap 95% intervals when available. Frozen checklist Brier scores and counts are in the accompanying CSV.") +
+    federated_transfer_theme()
+  save_federated_panel(p,federated_output_path(root,stem,".png"),11,8,dpi,overwrite)
+  invisible(d)
+}
+
+# A shared DFCI cohort and horizon permits a direct external comparison of
+# Cox, XGBoost, both DeepHit arms and the horizon-specific checklist.
+render_federated_all_model_transfer_supplement <- function(root,directory,dpi,overwrite) {
+  metrics_path <- file.path(directory,"transfer_metrics.csv")
+  auc_path <- file.path(directory,"transfer_auc_t.csv")
+  if(!file.exists(metrics_path) || !file.exists(auc_path)) return(invisible(NULL))
+  metrics <- readr::read_csv(metrics_path,show_col_types=FALSE)
+  auc <- readr::read_csv(auc_path,show_col_types=FALSE)
+  if(length(missing <- setdiff(c("bundle","model_family"),names(metrics))))
+    stop("All-model metrics are missing: ",paste(missing,collapse=", "))
+  if(length(missing <- setdiff(c("endpoint","bundle","landmark_days","config",
+      "horizon_days","auc"),names(auc))))
+    stop("All-model AUC table is missing: ",paste(missing,collapse=", "))
+  for(column in c("training_arm","model_horizon_days","evaluation_horizon_days"))
+    if(!column %in% names(auc)) auc[[column]] <- NA
+  family <- dplyr::distinct(metrics,bundle,model_family)
+  if(anyDuplicated(family$bundle)) stop("Bundle has multiple model families in ",metrics_path)
+  d <- dplyr::left_join(auc,family,by="bundle") %>%
+    dplyr::filter(config=="both",endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS),
+      is.na(evaluation_horizon_days) | evaluation_horizon_days==horizon_days,
+      is.na(model_horizon_days) | model_horizon_days==horizon_days)
+  if(!nrow(d)) return(invisible(NULL))
+  checklist_horizons <- unique(d$horizon_days[d$model_family=="predictive_checklist"])
+  if(length(checklist_horizons))
+    d <- dplyr::filter(d,horizon_days %in% checklist_horizons)
+  if(!is.numeric(d$auc) || any(!is.na(d$auc) & (!is.finite(d$auc) | d$auc<0 | d$auc>1)))
+    stop("Invalid all-model transfer AUC in ",auc_path)
+  d <- d %>% dplyr::mutate(series=dplyr::case_when(
+    model_family=="elastic_net_cox" ~ "Elastic-Net Cox",
+    model_family=="xgboost_cox" ~ "XGBoost",
+    model_family=="dynamic_deephit" & training_arm=="dynamic" ~ "DeepHit dynamic",
+    model_family=="dynamic_deephit" ~ "DeepHit landmark",
+    model_family=="predictive_checklist" ~ "Predictive checklist",
+    TRUE ~ as.character(bundle)))
+  if(anyDuplicated(d[c("endpoint","landmark_days","horizon_days","series")]))
+    d$series <- paste(d$series,d$bundle,sep=" · ")
+  stem <- "transfer_all_models_supplement"
+  write_federated_transfer_table(root,d,stem)
+  if(!any(is.finite(d$auc))) return(invisible(d))
+  shown <- d %>% dplyr::mutate(
+    endpoint_label=factor(unname(FEDERATED_TRANSFER_ENDPOINTS[endpoint]),
+      levels=unname(FEDERATED_TRANSFER_ENDPOINTS)),
+    horizon_label=factor(paste0(as.integer(horizon_days)," days"),
+      levels=paste0(sort(unique(as.integer(horizon_days)))," days")),
+    landmark=factor(paste0("+",landmark_days," days"),
+      levels=paste0("+",sort(unique(landmark_days))," days")))
+  palette <- setNames(rep_len(c("#4C72B0","#B58900","#2A9D8F","#17675D","#6A3D9A"),
+    length(unique(shown$series))),unique(shown$series))
+  p <- ggplot2::ggplot(shown,ggplot2::aes(landmark,auc,color=series,group=series)) +
+    ggplot2::geom_hline(yintercept=.5,color="grey65",linetype="dotted") +
+    ggplot2::geom_line(linewidth=.75,na.rm=TRUE) +
+    ggplot2::geom_point(size=2.5,na.rm=TRUE) +
+    ggplot2::facet_grid(endpoint_label~horizon_label) +
+    ggplot2::scale_color_manual(values=palette,name=NULL) +
+    ggplot2::coord_cartesian(ylim=c(0,1)) +
+    ggplot2::labs(title="Supplementary: no-DFCI models transferred to Dana-Farber",
+      subtitle="Same endpoint-specific patients at each landmark and horizon; checklist is horizon-specific",
+      x="Landmark after ADT start",y="IPCW AUC(t)",
+      caption="Platinum-trained frozen models. The companion CSV records each model's arm, training horizon, case count and AUC(t).") +
+    federated_transfer_theme()
+  save_federated_panel(p,federated_output_path(root,stem,".png"),12,8,dpi,overwrite)
+  invisible(d)
 }
 
 render_federated_transfer_clinical <- function(root, directory, dpi, overwrite) {
@@ -1906,6 +2089,8 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
   }
   for(variant in names(FEDERATED_MULTIVARIABLE_VARIANTS)) for(family in names(FEDERATED_MULTIVARIABLE))
     render_federated_multivariable(root,federated_path,family,dpi,overwrite,variant)
+  for(variant in names(FEDERATED_MULTIVARIABLE_VARIANTS))
+    render_federated_deephit_performance(root,federated_path,dpi,overwrite,variant)
   if (!is.null(figure_data_dir))
     render_federated_figure_data(root, federated_path, figure_data_dir, dpi, overwrite)
   if (!is.null(transfer_no_dfci_dir)) {
@@ -1914,6 +2099,9 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
       render_federated_transfer_clinical(root, transfer_no_dfci_dir, dpi, overwrite)
       render_federated_transfer_km(root, transfer_no_dfci_dir, dpi, overwrite)
     }
+    render_federated_checklist_supplement(root, file.path(transfer_no_dfci_dir,"all_models"),dpi,overwrite)
+    render_federated_all_model_transfer_supplement(root,
+      file.path(transfer_no_dfci_dir,"all_models"),dpi,overwrite)
   }
   invisible(d)
 }
@@ -2051,8 +2239,8 @@ manuscript_captions <- function() {
       "The trajectory analyses include 2,217 patients for PSA and 2,059 for testosterone. For PSA, the bottom group was ≤0.2453 (n=403; 11 events) and the top group was >9.626 (n=403; 58 events); log-rank P=2.75 × 10^-13. For testosterone, the bottom group was ≤10 (n=317; 41 events) and the top group was >294.3 (n=313; 19 events); log-rank P=6.92 × 10^-6. ADT, androgen-deprivation therapy; CBC, complete blood count; CMP, comprehensive metabolic panel; HR, hazard ratio; LFT, liver-function test; PSA, prostate-specific antigen; SD, standard deviation."),
     `04_multivariable_labs`=caption(
       "Figure 4. Multivariable laboratory models for prediction of platinum treatment.",
-      "(a) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), for Elastic-Net Cox and XGBoost survival models at 0, 90, and 180 days after ADT initiation. Laboratory models are compared with age-only baselines; the dotted horizontal line marks 0.5. (b) Nonzero Elastic-Net Cox coefficients at each landmark. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (c) XGBoost split-gain feature importance at each landmark. Colors in b and c identify laboratory categories.",
-      "Performance values are from held-out test sets rather than training or tuning cross-validation. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and do not encode effect direction. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; PSA, prostate-specific antigen."),
+      "(a) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), for Elastic-Net Cox and XGBoost survival models and, when available, dynamic DeepHit at 0, 90, and 180 days after ADT initiation. Laboratory models are compared with age-only baselines; the dotted horizontal line marks 0.5. (b) Nonzero Elastic-Net Cox coefficients at each landmark. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (c) XGBoost split-gain feature importance at each landmark. Colors in b and c identify laboratory categories.",
+      "Performance values are from held-out test sets rather than training or tuning cross-validation. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and do not encode effect direction. When available, dynamic DeepHit is a neural cause-specific model with no feature-level coefficients, so it appears in a only; it has no age-only baseline and is scored with the same inverse-probability-of-censoring-weighted horizon grid. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; PSA, prostate-specific antigen."),
     `06_dfci_cohort_sensitivity`=caption(
       "Figure 6. Cohort-size, endpoint-incidence, and laboratory-association sensitivity analyses within Dana-Farber.",
       "Patients eligible at the 180-day androgen-deprivation therapy (ADT) landmark are shown across the full ADT cohort, cohorts excluding prior castration, metastatic cohorts defined from ADT treatment intent, and metastatic cohorts defined by the large language model (LLM). (a) Observed platinum and neuroendocrine prostate cancer (NEPC) event fractions during follow-up with 95% Wilson confidence intervals. (b) Pale bars show eligible patients and solid bars show observed events; labels give events/patients. Blue denotes platinum and orange denotes NEPC in a and b; an asterisk denotes fewer than 25 events. (c) Natural-log hazard ratios per standard-deviation increase and 95% confidence intervals for the mean, minimum, maximum, and last PSA or testosterone value through the landmark. The dashed line at 0 marks the null; filled points indicate Benjamini-Hochberg q < 0.05.",
@@ -2072,8 +2260,8 @@ manuscript_captions <- function() {
       "Panels a-c display features with finite estimates, absolute log hazard ratios of at most 4, and confidence-interval upper-to-lower ratios below 100; supplied q values were not recalculated. Panels d-g were drawn from aggregate site exports (binned means and Kaplan-Meier curves) without patient-level data. Cohorts included 22,138 patients (664 platinum events) at day 0, 21,791 (608) at day 90, and 21,216 (564) at day 180; by site at day 0, Dana-Farber contributed 5,853 (231 events), Fred Hutch 3,277 (90), Johns Hopkins 3,069 (35), and MSK 9,939 (308). The trajectory analyses include 22,035 patients for PSA and 17,937 for testosterone. Cutoffs, group sizes, events, and log-rank P values for e and g are reported in federated_km_quintile_summary.csv. Within-site versions are provided as supplementary figures. ADT, androgen-deprivation therapy; CBC, complete blood count; CMP, comprehensive metabolic panel; LFT, liver-function test; PSA, prostate-specific antigen; SD, standard deviation."),
     federated_04_multivariable=caption(
       "Federated Figure 4. Federated multivariable laboratory models for prediction of platinum treatment, with and without Dana-Farber training data.",
-      "(a) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), at 0, 90, and 180 days after ADT initiation for Elastic-Net Cox and XGBoost survival models trained on all four sites, the same full models refit without Dana-Farber (darker bars, \"no DFCI\"), and age-only baselines (hatched). The dotted horizontal line marks 0.5. (b) Nonzero Elastic-Net Cox coefficients of the four-site model at each landmark, with up to 15 coefficients of largest absolute value displayed. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (c) XGBoost split-gain feature importance of the four-site model at each landmark, with up to 15 positive-gain features displayed. Colors in b and c identify laboratory categories.",
-      "Four-site models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering (MSK) data; test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180. Models without Dana-Farber were trained and tested on Fred Hutch, Johns Hopkins, and MSK data; test-set sample sizes/events were 3,258/87, 3,204/78, and 3,105/72. Because the test sets differ, the two model versions are not compared on the same patients here; Federated Figure 5 evaluates the models without Dana-Farber on Dana-Farber patients. Performance values are from held-out test sets rather than training or tuning cross-validation. Age and body height are not displayed. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and are not signed effects or SHAP values. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; DFCI, Dana-Farber Cancer Institute; SHAP, Shapley additive explanations."),
+      "(a) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), at 0, 90, and 180 days after ADT initiation for Elastic-Net Cox and XGBoost survival models trained on all four sites, the same full models refit without Dana-Farber (darker bars, \"no DFCI\"), and age-only baselines (hatched). When available, the dynamic DeepHit arm from each training-site set is also shown in a. The dotted horizontal line marks 0.5. (b) Nonzero Elastic-Net Cox coefficients of the four-site model at each landmark, with up to 15 coefficients of largest absolute value displayed. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (c) XGBoost split-gain feature importance of the four-site model at each landmark, with up to 15 positive-gain features displayed. Colors in b and c identify laboratory categories.",
+      "Four-site models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering (MSK) data; test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180. Models without Dana-Farber were trained and tested on Fred Hutch, Johns Hopkins, and MSK data; test-set sample sizes/events were 3,258/87, 3,204/78, and 3,105/72. Because the test sets differ, the two model versions are not compared on the same patients here; Federated Figure 5 evaluates the models without Dana-Farber on Dana-Farber patients. Performance values are from held-out test sets rather than training or tuning cross-validation. Age and body height are not displayed. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and are not signed effects or SHAP values. When shown, dynamic DeepHit has no age-only baseline or feature-level coefficients; its held-out metrics use the same horizon grid. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; DFCI, Dana-Farber Cancer Institute; SHAP, Shapley additive explanations."),
     federated_05_transfer_no_dfci=manuscript_transfer_caption(no_d=FALSE),
     federated_05_transfer_no_dfci__no_d=manuscript_transfer_caption(no_d=TRUE)
   )
@@ -2483,6 +2671,7 @@ manuscript_federated_feature_label <- function(x) {
 manuscript_federated_multivariable <- function(performance,coefficients,importance,
                                                key="08_federated_multivariable",colors=FEDERATED_MODEL_COLORS,
                                                legend_nrow=1,note=NULL) {
+  colors <- colors[names(colors) %in% unique(as.character(performance$name))]
   d <- performance %>% mutate(name=factor(name,levels=names(colors)))
   stopifnot(!anyNA(d$name),!anyDuplicated(d[c("name","landmark")]))
   plots <- list(plot_model_discrimination(d,"auc","Test mean AUC(t)",colors,show_legend=TRUE))
@@ -2514,9 +2703,12 @@ manuscript_federated_multivariable <- function(performance,coefficients,importan
 # models refit without Dana-Farber added to the discrimination rows. Each
 # variant is scored on its own held-out test sites, so the sets differ.
 FEDERATED_FIG4_LEVELS <- c("Elastic-Net Cox","Elastic-Net Cox, no DFCI","Cox baseline (age)",
-  "XGBoost Survival","XGBoost Survival, no DFCI","XGBoost baseline (age)")
+  "XGBoost Survival","XGBoost Survival, no DFCI","XGBoost baseline (age)",
+  "Dynamic DeepHit","Dynamic DeepHit, no DFCI")
 manuscript_federated_multivariable_no_dfci <- function(performance,no_dfci_performance,coefficients,importance) {
-  renamed <- c(`Elastic-Net Cox`="Elastic-Net Cox, no DFCI",`XGBoost Survival`="XGBoost Survival, no DFCI")
+  renamed <- c(`Elastic-Net Cox`="Elastic-Net Cox, no DFCI",`XGBoost Survival`="XGBoost Survival, no DFCI",
+    `Dynamic DeepHit`="Dynamic DeepHit, no DFCI",
+    `Dynamic DeepHit, no DFCI`="Dynamic DeepHit, no DFCI")
   no_dfci <- no_dfci_performance %>% filter(config=="both",as.character(name) %in% names(renamed)) %>%
     mutate(name=unname(renamed[as.character(name)]))
   colors <- c(FEDERATED_MODEL_COLORS,FEDERATED_NO_DFCI_MODEL_COLORS)[FEDERATED_FIG4_LEVELS]
@@ -2779,6 +2971,9 @@ manuscript_build <- function(items,tables,root) {
     # An all-empty audit column reads back as logical; align before binding.
     performance <- dplyr::bind_rows(lapply(federated[1:2],function(d)
       mutate(d,input_audit_note=as.character(input_audit_note))))
+    deephit <- read("^deephit_performance__platinum[.]csv$")
+    if(!is.null(deephit) && nrow(deephit))
+      performance <- dplyr::bind_rows(performance,deephit)
     result[["08"]] <- manuscript_federated_multivariable(performance,federated$coefficients,federated$importance)
   } else if(any(available))
     message("Skipping manuscript Figure 8: missing captured federated ",
@@ -2788,6 +2983,9 @@ manuscript_build <- function(items,tables,root) {
   if(all(available) && all(!vapply(no_dfci,is.null,logical(1)))) {
     no_dfci_performance <- dplyr::bind_rows(lapply(no_dfci,function(d)
       mutate(d,input_audit_note=as.character(input_audit_note))))
+    deephit_no_dfci <- read("^deephit_performance_no_dfci__platinum[.]csv$")
+    if(!is.null(deephit_no_dfci) && nrow(deephit_no_dfci))
+      no_dfci_performance <- dplyr::bind_rows(no_dfci_performance,deephit_no_dfci)
     result[["federated_04"]] <- manuscript_federated_multivariable_no_dfci(performance,no_dfci_performance,
       federated$coefficients,federated$importance)
   } else if(all(available)) message("Skipping federated manuscript Figure 4: missing no-DFCI performance tables")
@@ -3211,6 +3409,14 @@ figure_notebook_manifest <- function(config, check_sources = TRUE) {
       if (!same_path(prepared$metastatic_sources[[key]], config$metastatic_sources[[key]]))
         fail(paste("Prepared metastatic source does not match:", key))
   }
+  if (isTRUE(config$checklist_supplement) && !federated_only) {
+    # Absent runs are a reported skip, but a stale preparation must not be read.
+    for (key in c("checklist_labs_run", "checklist_trio_run"))
+      if (!isTRUE(prepared$checklist_supplement) || !same_path(prepared[[key]], config[[key]]))
+        fail(paste("Prepared checklist supplement does not match:", key))
+    if (!same(prepared$checklist_horizon, config$checklist_horizon))
+      fail("Prepared checklist horizon does not match.")
+  }
   if (isTRUE(config$federated)) {
     if (!isTRUE(prepared$federated) || !same_path(prepared$federated_path, config$federated_path))
       fail("Requested federated results were not prepared.")
@@ -3220,7 +3426,11 @@ figure_notebook_manifest <- function(config, check_sources = TRUE) {
         lapply(names(FEDERATED_MULTIVARIABLE), function(family)
           federated_multivariable_files(config$federated_path, family, variant$suffix))), use.names = FALSE))
     registered_inputs <- c(registered_inputs,
+      unlist(lapply(FEDERATED_MULTIVARIABLE_VARIANTS,function(variant)
+        federated_deephit_metric_paths(config$federated_path,variant$suffix)),use.names=FALSE),
       file.path(federated_transfer_no_dfci_dir(config), FEDERATED_TRANSFER_NO_DFCI_FILES),
+      file.path(federated_transfer_no_dfci_dir(config),"all_models",
+        c("transfer_metrics.csv","transfer_auc_t.csv")),
       file.path(federated_figure_data_dir(config), FEDERATED_FIGURE_DATA_FILES))
     if (!same_path(federated_transfer_no_dfci_dir(prepared), federated_transfer_no_dfci_dir(config)))
       fail("Prepared no-Dana-Farber federated transfer path does not match.")
@@ -3300,6 +3510,17 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     jobs$cohort_overview <- list(name = "cohort_overview", signature = signature,
       directory = file.path(config$cache_root, "scenes", "cohort_overview", signature))
   }
+  checklist_enabled <- isTRUE(config$checklist_supplement) && !identical(config$scope, "federated") &&
+    "adt" %in% config$cohorts
+  if (checklist_enabled) {
+    if (is.null(manifest$checklist)) {
+      message("Checklist supplement skipped; no predictive-checklist runs were prepared by 06.")
+    } else {
+      signature <- figure_object_hash(list(manifest$checklist$key, runtime))
+      jobs$checklist_supplement <- list(name = "checklist_supplement", signature = signature,
+        directory = file.path(config$cache_root, "scenes", "checklist_supplement", signature))
+    }
+  }
   build_job <- function(job) {
     if (!is.null(manifest$errors[[job$name]])) stop(manifest$errors[[job$name]])
     # Optional missing federation inputs produce a reported skip, not an empty
@@ -3307,6 +3528,16 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     if (job$name == "cohort_overview") {
       source(file.path(dirname(pipeline_path), "figure_supplements.R"), local = TRUE)
       build <- function() render_cohort_overview(manifest, config, forest_config)
+    } else if (job$name == "checklist_supplement") {
+      data_dir <- manifest$checklist$directory
+      if (stage != "render" && !all(file.exists(file.path(data_dir, CHECKLIST_TABLES)))) {
+        warning("Checklist supplement skipped; missing prepared tables in ", data_dir)
+        return(list(skipped = TRUE))
+      }
+      build <- function() render_checklist_supplement(data_dir,
+        file.path(config$fig_root, "ADT", FIGURE_SECTIONS[["multivariate_internal"]]),
+        dpi, TRUE, save_federated_panel, figure_sidecar_path,
+        getOption("compass.figure_table_capture"))
     } else if (job$name == "federated") {
       inputs <- federated_config$results
       if (stage != "render" && any(!file.exists(inputs))) {
@@ -3345,7 +3576,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
   # Only pending jobs warm tables. A resumed all-mode run reads no patient
   # Parquet at all when every scene snapshot is current.
   if (stage != "render") {
-    pending <- Filter(function(job) !job$name %in% c("federated", "cohort_overview") &&
+    pending <- Filter(function(job) !job$name %in% c("federated", "cohort_overview", "checklist_supplement") &&
       is.null(manifest$errors[[job$name]]) &&
       (prepare_overwrite || is.null(figure_scene_manifest(job$directory, job$signature))), jobs)
     for (arm in unique(vapply(pending, function(job) cohort_arm(job$cohort), character(1)))) {

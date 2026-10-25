@@ -54,6 +54,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
 import numpy as np
@@ -61,7 +62,11 @@ import pandas as pd
 
 from survival_common.federated_inference import (
     BundleError,
+    deephit_survival,
     load_bundle,
+    model_identity,
+    predict_checklist,
+    predict_cif,
     predict_risk,
     predict_survival,
 )
@@ -410,7 +415,12 @@ def covariate_coverage(wide: pd.DataFrame, model: dict) -> pd.DataFrame:
     dictionary that does not match the training site's.
     """
     pre = model["preprocessing"]
-    cols = list(pre["covariate_cols"])
+    if "lab_names" in pre:
+        cols = list(pre["lab_names"])
+        if pre.get("include_age"):
+            cols.append("age")
+    else:
+        cols = list(pre["covariate_cols"])
     source = dict(pre.get("source_cols") or {})
     missing_cols = set(pre.get("missing_indicator_cols") or [])
 
@@ -418,6 +428,11 @@ def covariate_coverage(wide: pd.DataFrame, model: dict) -> pd.DataFrame:
     for col in cols:
         base = col[: -len("__missing")] if col in missing_cols else col
         src = source.get(base, base)
+        if base == "age" and pre.get("include_age"):
+            src = pre.get("age_source_col", AGE_COL)
+        if "lab_names" in pre and base != "age":
+            # Raw DeepHit labs are long; the wide summary is only a coverage proxy.
+            src = re.sub(r"[^\w]", "_", base) + "__n_observations"
         present = src in wide.columns
         n_obs = (
             int(pd.to_numeric(wide[src], errors="coerce").notna().sum())
@@ -482,6 +497,8 @@ def score_bundle(
     *,
     configs: tuple[str, ...] = ("both", "baseline"),
     landmarks: tuple[int, ...] | None = None,
+    training_arms: tuple[str, ...] | None = None,
+    model_horizons_days: tuple[int, ...] | None = None,
     horizons_days: tuple[float, ...] = (),
     evaluate: bool = False,
     max_followup_days: int | None = DEFAULT_MAX_FOLLOWUP_DAYS,
@@ -503,6 +520,8 @@ def score_bundle(
         m for m in bundle["models"]
         if str(m.get("config")) in configs
         and (landmarks is None or int(m["landmark_days"]) in landmarks)
+        and (training_arms is None or model_identity(bundle, m)[2] in training_arms)
+        and (model_horizons_days is None or model_identity(bundle, m)[3] in model_horizons_days)
     ]
     if not wanted:
         available = sorted(
@@ -534,11 +553,31 @@ def score_bundle(
 
         for model in [m for m in wanted if int(m["landmark_days"]) == lm]:
             config = str(model.get("config"))
-            risk = predict_risk(wide, bundle, model, age_col=AGE_COL)
+            _, _, arm, model_horizon = model_identity(bundle, model)
+            probability = flag = None
+            if family == "dynamic_deephit":
+                ids = wide[id_col].tolist()
+                if model["preprocessing"].get("input_kind") == "age":
+                    got, cif = predict_cif(wide, model, ids=ids, age_col=AGE_COL)
+                else:
+                    got, cif = predict_cif(long_df, model, ids=ids, cohort=wide,
+                                           age_col=AGE_COL)
+                if got != ids:
+                    raise BundleError("DeepHit predictions are not aligned to landmark patients")
+                risk = cif[:, -1]
+            elif family == "predictive_checklist":
+                prediction = predict_checklist(wide, model)
+                risk = prediction["score"].to_numpy(dtype=float)
+                probability = prediction["probability"].to_numpy(dtype=float)
+                flag = prediction["flag"].to_numpy(dtype=int)
+            else:
+                risk = predict_risk(wide, bundle, model, age_col=AGE_COL)
 
             block = pd.DataFrame({
                 "landmark_days": lm,
                 "config": config,
+                "training_arm": arm,
+                "model_horizon_days": model_horizon,
                 "model_family": family,
                 "analysis_label": label,
                 "risk_score": risk,
@@ -548,8 +587,14 @@ def score_bundle(
             if stats["has_outcome"]:
                 block[DURATION_COL] = wide[DURATION_COL].to_numpy()
                 block[EVENT_COL] = wide[EVENT_COL].to_numpy()
+            if probability is not None:
+                block["probability"] = probability
+                block["flag"] = flag
 
-            if horizons_days and model.get("baseline_cumhaz"):
+            if horizons_days and family == "dynamic_deephit":
+                surv = deephit_survival(cif, model, horizons_days)
+                block = pd.concat([block, surv.set_index(block.index)], axis=1)
+            elif horizons_days and model.get("baseline_cumhaz"):
                 surv = predict_survival(risk, model, horizons_days)
                 block = pd.concat([block, surv.set_index(block.index)], axis=1)
             elif horizons_days and verbose:
@@ -562,6 +607,8 @@ def score_bundle(
 
             cov = covariate_coverage(wide, model)
             cov.insert(0, "config", config)
+            cov.insert(0, "training_arm", arm)
+            cov.insert(0, "model_horizon_days", model_horizon)
             cov.insert(0, "landmark_days", lm)
             coverage_rows.append(cov)
 
@@ -572,7 +619,9 @@ def score_bundle(
                 "analysis_label": label,
                 "n_patients": stats["n_patients"],
                 "n_events": stats["n_events"],
-                "n_covariates": len(model["preprocessing"]["covariate_cols"]),
+                "training_arm": arm,
+                "model_horizon_days": model_horizon,
+                "n_covariates": len(cov),
                 "n_covariates_absent_locally": int((~cov["in_local_frame"]).sum()),
                 "risk_mean": float(np.nanmean(risk)) if len(risk) else float("nan"),
                 "risk_sd": float(np.nanstd(risk)) if len(risk) else float("nan"),

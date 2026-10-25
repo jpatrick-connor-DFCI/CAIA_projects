@@ -176,3 +176,112 @@ def test_missing_endpoint_columns_fail_loudly(tmp_path):
     with pytest.raises(ValueError, match="AVPC"):
         fet.read_local_frame(data, ["avpc"])
 
+
+def test_checklist_transfer_selects_frozen_model_at_each_horizon(tmp_path):
+    from COMPASS.survival_analysis.predictive_checklists.evaluation import ProbabilityCalibrator
+    from COMPASS.survival_analysis.predictive_checklists.features import FeatureBinarizer
+    from COMPASS.survival_analysis.predictive_checklists.optimizer import ChecklistModel
+    from COMPASS.survival_analysis.predictive_checklists.inference import predict_bundle
+    from survival_common.federated_inference import predict_checklist, select_model
+
+    local = _local(n=24)
+    long_df, _ = fet.to_federated_long(local, "nepc", MAPPING)
+    wide, _ = fs.build_landmark_frame(long_df, 0)
+    binarizer = FeatureBinarizer(age_col=fs.AGE_COL, id_col=fs.ID_COL).fit(wide)
+    candidates = [i for i, item in enumerate(binarizer.items)
+                  if item["feature"] == HGB_FEATURE]
+    assert len(candidates) >= 2
+    models = []
+    for horizon, index in zip((1000, 2000), candidates[:2]):
+        payload = {
+            "schema_version": 1, "config": {"id_col": fs.ID_COL},
+            "binarizer": binarizer.to_dict(),
+            "model": ChecklistModel([index], 1, len(binarizer.items), {}).to_dict(),
+            "calibrator": ProbabilityCalibrator(
+                "logistic", {"intercept": -2.0, "slope": 3.0}).to_dict(),
+        }
+        models.append({"landmark_days": 0, "horizon_days": horizon,
+                       "config": "both", "checklist": payload,
+                       "preprocessing": {"covariate_cols": binarizer.feature_columns}})
+        path = tmp_path / f"checklist_{horizon}.json"
+        path.write_text(json.dumps(payload))
+        ref = predict_bundle(path, wide)
+        pred = predict_checklist(wide, models[-1])
+        np.testing.assert_array_equal(pred["score"], ref["score"])
+        np.testing.assert_allclose(pred["probability"], ref["probability"])
+
+    bundle = {"format": "caia-federated-model-bundle", "format_version": 1,
+              "model_family": "predictive_checklist", "analysis_label": "adt",
+              "models": models}
+    with pytest.raises(ValueError, match="ambiguous"):
+        select_model(bundle, 0)
+    assert select_model(bundle, 0, horizon_days=2000) is models[1]
+    res = fet.evaluate_transfer(local, {"checklist": bundle}, endpoints=("nepc",),
+                                lab_mapping=MAPPING, horizons_days=(1000, 2000),
+                                n_bootstrap=0, verbose=False)
+    scores = res["scores"]
+    assert set(scores["model_horizon_days"]) == {1000, 2000}
+    assert set(scores["evaluation_horizon_days"]) == {1000, 2000}
+    assert "brier" in res["metrics"]
+    for horizon in (1000, 2000):
+        rows = scores[scores["model_horizon_days"] == horizon]
+        assert len(rows) == len(wide)
+        expected = predict_checklist(wide, select_model(bundle, 0, horizon_days=horizon))
+        np.testing.assert_array_equal(rows["risk_score"], expected["score"])
+        np.testing.assert_allclose(rows["probability"], expected["probability"])
+        np.testing.assert_array_equal(rows["flag"], expected["flag"])
+
+
+def test_v3_deephit_transfer_keeps_arms_and_pairs_landmark_age_baseline():
+    def weights(input_dim, bias):
+        hidden, window = 2, 300
+        shapes = {
+            "gru.weight_ih_l0": (6, input_dim), "gru.weight_hh_l0": (6, 2),
+            "gru.bias_ih_l0": (6,), "gru.bias_hh_l0": (6,),
+            "head.1.weight": (2, 2), "head.1.bias": (2,),
+            "head.4.weight": (window + 1, 2), "head.4.bias": (window + 1,),
+        }
+        state = {}
+        for name, shape in shapes.items():
+            arr = np.zeros(shape, dtype=np.float32)
+            if name == "head.4.bias":
+                arr[0] = bias
+            state[name] = {"shape": list(shape), "values": arr.ravel().tolist()}
+        return state
+
+    def entry(config, arm, bias):
+        is_age = config == "baseline"
+        return {"landmark_days": 0, "config": config, "training_arm": arm,
+                "architecture": {"input_dim": 1 if is_age else 4,
+                                 "hidden_dim": 2, "dropout": 0.0,
+                                 "n_events": 1, "max_pred_window": 300},
+                "preprocessing": ({"input_kind": "age", "covariate_cols": ["age"],
+                                   "centers": {"age": 65.0}, "scales": {"age": 10.0},
+                                   "source_cols": {"age": fs.AGE_COL}, "time_unit_days": 7}
+                                  if is_age else
+                                  {"input_kind": "labs", "lab_names": [HGB_OMOP],
+                                   "clip_lo": [None], "clip_hi": [None],
+                                   "mean": [12.0], "std": [2.0],
+                                   "max_observed_time": 8, "time_unit_days": 7,
+                                   "include_age": True, "age_mean": 65.0,
+                                   "age_std": 10.0, "age_source_col": fs.AGE_COL}),
+                "state_dict": weights(1 if is_age else 4, bias)}
+
+    bundle = {"format": "caia-federated-model-bundle", "format_version": 3,
+              "model_family": "dynamic_deephit", "analysis_label": "adt",
+              "models": [entry("both", "landmark", 0.5),
+                         entry("both", "dynamic", 1.0),
+                         entry("baseline", "landmark", 0.0)]}
+    res = fet.evaluate_transfer(_local(n=8), {"dh": bundle}, endpoints=("nepc",),
+                                lab_mapping=MAPPING, horizons_days=(1000,),
+                                n_bootstrap=0, verbose=False)
+    scores = res["scores"]
+    assert len(scores) == 3 * 8
+    assert set(scores["training_arm"]) == {"landmark", "dynamic"}
+    assert set(scores["evaluation_horizon_days"]) == {1000}
+    assert scores["risk_score"].notna().all()
+    m = res["metrics"]
+    assert len(m) == 3
+    assert "brier" in m
+    assert m[m["training_arm"] == "dynamic"]["c_index_baseline"].notna().all()
+
