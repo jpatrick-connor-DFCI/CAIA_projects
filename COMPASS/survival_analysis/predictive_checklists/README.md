@@ -149,6 +149,21 @@ python -m COMPASS.survival_analysis.predictive_checklists \
   --n-folds 2 --bootstrap-samples 20 --solver-time-limit 10
 ```
 
+## Gleason + TP53/RB1/PTEN subset
+
+`run_predictive_checklists_gleason_trio.ipynb` with `gleason_trio_config.json`
+fits 5-year platinum and NEPC checklists on each endpoint's
+`somatic_gleason/gleason_somatic_available_case/` inputs (passed via
+`--platinum-inputs` / `--nepc-inputs`). That subset is anchored on the
+sequencing report date, not ADT start: landmarks are sequencing + D, and
+age is age at sequencing. The config's `clinical_features` adds
+`GLEASON_SCORE` and `TP53_ANY`/`RB1_ANY`/`PTEN_ANY` to the lab and age
+candidates. Each is its own group and is exempt from the lab coverage rule.
+Low-cardinality columns are thresholded at every observed training value. The
+matched comparators receive the same columns. A configured column that is absent
+from an input is an error. `min_events` is 5 because NEPC events are sparse in
+this subset, and the resolved-label NEPC sensitivity is off.
+
 ## Solvers and upstream provenance
 
 The default HiGHS backend comes with SciPy's `milp`; CBC (`--solver cbc`) and

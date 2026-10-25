@@ -174,7 +174,8 @@ def load_landmark(
         "n_patients": len(frame), "n_events": int(events.sum()),
         "split_counts": {str(key): int(value) for key, value in counts.items()},
         "events_by_split": {str(key): int(value) for key, value in frame.groupby("split")[event_col].sum().items()},
-        "duration_units": "days_after_landmark", "auc_time_unit_days": float(manifest["auc_time_unit_days"]),
+        "duration_units": "days_after_landmark",
+        "prediction_time_origin": manifest.get("prediction_time_origin", "ADT start"), "auc_time_unit_days": float(manifest["auc_time_unit_days"]),
         "auc_horizons_days": [float(value) * float(manifest["auc_time_unit_days"])
                               for value in manifest["auc_horizons_by_landmark"][str(landmark)][endpoint]],
         "auc_max_days": float(manifest["auc_time_unit_days"]) * float(manifest["auc_max_time_units"]),

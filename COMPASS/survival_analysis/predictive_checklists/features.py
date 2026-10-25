@@ -1,10 +1,14 @@
 """Training-only, raw-unit binary candidates for interpretable checklists.
 
-Only age and the established pre-landmark lab summary schema are eligible.
+Only age, the established pre-landmark lab summary schema, and explicitly
+configured clinical columns (e.g. Gleason, TP53/RB1/PTEN) are eligible.
 Patients with missing labs remain in the matrix: numeric comparisons use fitted
 training medians, and missingness is an explicit candidate when it varies in
 training. All candidates from one lab share a group, so the optimizer can limit
 a checklist to one item per lab rather than repeating correlated summaries.
+Each clinical column is its own group; a low-cardinality one (binary
+alteration flags, Gleason) is thresholded at every observed training value,
+since quantiles of a rare 0/1 flag never reach 1.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import pandas as pd
 
 SUMMARY_STATS = frozenset({"mean", "min", "max", "last", "delta", "n_observations"})
 DEFAULT_QUANTILES = (0.1, 0.25, 0.5, 0.75, 0.9)
+MAX_DISCRETE_LEVELS = 10
 _NON_LAB_SOURCES = frozenset({
     "DFCI_MRN", "MRN", "ID", "SPLIT", "GENDER", "FIRST_TREATMENT",
     "FIRST_RECORD_DATE", "DIAGNOSIS_DATE", "TREATMENT_ANCHOR_DATE",
@@ -25,9 +30,9 @@ _NON_LAB_SOURCES = frozenset({
 })
 
 
-def _group(feature: str, age_col: str) -> str | None:
-    if feature == age_col:
-        return age_col
+def _group(feature: str, age_col: str, clinical_features: Iterable[str] = ()) -> str | None:
+    if feature == age_col or feature in clinical_features:
+        return feature
     source, separator, stat = feature.rpartition("__")
     if not separator or not source or stat not in SUMMARY_STATS:
         return None
@@ -49,13 +54,19 @@ def _numeric(frame: pd.DataFrame, feature: str) -> pd.Series:
 
 def schema_feature_columns(
     frame: pd.DataFrame, age_col: str = "AGE_AT_TREATMENTSTART",
+    clinical_features: Iterable[str] = (),
 ) -> list[str]:
     """Whitelist raw baseline inputs without learning anything from their values.
 
     Baseline runners can pass this schema-only list into inner CV, where
     coverage, missingness, and variability selection must be fitted anew.
     """
-    return sorted(str(column) for column in frame.columns if _group(str(column), age_col) is not None)
+    clinical_features = tuple(clinical_features)
+    missing = set(clinical_features) - set(map(str, frame.columns))
+    if missing:
+        raise ValueError(f"Configured clinical features are absent: {', '.join(sorted(missing))}.")
+    return sorted(str(column) for column in frame.columns
+                  if _group(str(column), age_col, clinical_features) is not None)
 
 
 class FeatureBinarizer:
@@ -75,6 +86,7 @@ class FeatureBinarizer:
         age_col: str = "AGE_AT_TREATMENTSTART",
         canonical_labs: Iterable[str] | None = None,
         id_col: str = "DFCI_MRN",
+        clinical_features: Iterable[str] = (),
     ) -> None:
         self.min_patient_coverage = float(min_patient_coverage)
         self.quantiles = tuple(sorted(set(float(q) for q in quantiles)))
@@ -84,6 +96,9 @@ class FeatureBinarizer:
             raise ValueError("quantiles must be finite values strictly between zero and one.")
         self.age_col = str(age_col)
         self.id_col = str(id_col)
+        self.clinical_features = tuple(map(str, clinical_features))
+        if self.age_col in self.clinical_features or len(set(self.clinical_features)) != len(self.clinical_features):
+            raise ValueError("clinical_features must be distinct and exclude the age column.")
         self.canonical_labs = (
             None if canonical_labs is None else sorted(set(map(str, canonical_labs)))
         )
@@ -99,6 +114,9 @@ class FeatureBinarizer:
             raise ValueError("Cannot fit checklist features on an empty training block.")
         if frame.columns.duplicated().any():
             raise ValueError("Training frame has duplicate feature columns.")
+        missing = set(self.clinical_features) - set(map(str, frame.columns))
+        if missing:
+            raise ValueError(f"Configured clinical features are absent: {', '.join(sorted(missing))}.")
         self.feature_columns, self.items, self.groups = [], [], []
         self.medians, self.coverage = {}, {}
         eligible_labs = None if self.canonical_labs is None else set(self.canonical_labs)
@@ -118,20 +136,25 @@ class FeatureBinarizer:
             eligible_labs = train_labs if eligible_labs is None else eligible_labs & train_labs
 
         for feature in sorted(str(c) for c in frame.columns):
-            group = _group(feature, self.age_col)
-            if group is None or (feature != self.age_col and eligible_labs is not None and group not in eligible_labs):
+            group = _group(feature, self.age_col, self.clinical_features)
+            is_lab = feature != self.age_col and feature not in self.clinical_features
+            if group is None or (is_lab and eligible_labs is not None and group not in eligible_labs):
                 continue
             values = _numeric(frame, feature)
             observed = values.dropna()
             coverage = float(values.notna().mean())
-            if observed.empty or (feature != self.age_col and coverage < self.min_patient_coverage):
+            if observed.empty or (is_lab and coverage < self.min_patient_coverage):
                 continue
             self.feature_columns.append(feature)
             self.medians[feature] = float(observed.median())
             self.coverage[feature] = coverage
             imputed = values.fillna(self.medians[feature]).to_numpy()
             if observed.nunique() >= 2:
-                for threshold in sorted(set(float(v) for v in observed.quantile(self.quantiles))):
+                if feature in self.clinical_features and observed.nunique() <= MAX_DISCRETE_LEVELS:
+                    thresholds = set(float(v) for v in observed.unique())
+                else:
+                    thresholds = set(float(v) for v in observed.quantile(self.quantiles))
+                for threshold in sorted(thresholds):
                     for op in ("<=", ">="):
                         binary = imputed <= threshold if op == "<=" else imputed >= threshold
                         if binary.all() or not binary.any():
@@ -170,7 +193,8 @@ class FeatureBinarizer:
         return {
             "schema_version": 1, "age_col": self.age_col, "id_col": self.id_col,
             "min_patient_coverage": self.min_patient_coverage, "quantiles": list(self.quantiles),
-            "canonical_labs": self.canonical_labs, "feature_columns": list(self.feature_columns),
+            "canonical_labs": self.canonical_labs, "clinical_features": list(self.clinical_features),
+            "feature_columns": list(self.feature_columns),
             "medians": dict(self.medians), "coverage": dict(self.coverage),
             "items": [dict(item) for item in self.items],
         }
@@ -181,16 +205,16 @@ class FeatureBinarizer:
             raise ValueError("Unsupported checklist feature schema_version.")
         result = cls(**{key: state[key] for key in (
             "age_col", "id_col", "min_patient_coverage", "quantiles", "canonical_labs"
-        )})
+        )}, clinical_features=state.get("clinical_features", ()))
         result.feature_columns = list(state["feature_columns"])
         result.medians = {key: float(value) for key, value in state["medians"].items()}
         result.coverage = {key: float(value) for key, value in state["coverage"].items()}
         result.items = [dict(item) for item in state["items"]]
         for feature in result.feature_columns:
-            if _group(feature, result.age_col) is None or not np.isfinite(result.medians[feature]):
+            if _group(feature, result.age_col, result.clinical_features) is None or not np.isfinite(result.medians[feature]):
                 raise ValueError("Invalid serialized checklist feature or imputation value.")
         for item in result.items:
-            if item["feature"] not in result.feature_columns or item["group"] != _group(item["feature"], result.age_col):
+            if item["feature"] not in result.feature_columns or item["group"] != _group(item["feature"], result.age_col, result.clinical_features):
                 raise ValueError("Invalid serialized checklist item feature/group.")
             if item["op"] not in {"<=", ">=", "is_missing"}:
                 raise ValueError("Invalid serialized checklist comparison.")

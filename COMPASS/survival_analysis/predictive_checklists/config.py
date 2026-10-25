@@ -24,6 +24,9 @@ class RunConfig:
     bootstrap_samples: int = 200
     baselines: tuple = ("age_cox", "elastic_net", "xgboost")
     resolved_nepc_sensitivity: bool = True
+    # Non-lab columns (e.g. GLEASON_SCORE, TP53_ANY) admitted as candidates and
+    # baseline predictors; each must exist in every input table.
+    clinical_features: tuple = ()
     id_col: str = "DFCI_MRN"
     age_col: str = "AGE_AT_TREATMENTSTART"
 
@@ -49,6 +52,10 @@ class RunConfig:
             raise ValueError("quantiles must be strictly between zero and one")
         if set(self.baselines) - {"age_cox", "elastic_net", "xgboost"}:
             raise ValueError("unknown baseline model")
+        if (len(set(self.clinical_features)) != len(self.clinical_features)
+                or self.age_col in self.clinical_features
+                or any(not isinstance(x, str) or not x for x in self.clinical_features)):
+            raise ValueError("clinical_features must be distinct non-age column names")
         return self
 
     def to_dict(self):

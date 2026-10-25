@@ -1,0 +1,19 @@
+{
+  "endpoints": ["platinum", "nepc"],
+  "landmarks": [0, 90, 180],
+  "horizons": [1825],
+  "max_items": [3, 5, 8],
+  "n_folds": 5,
+  "seed": 42,
+  "solver": "highs",
+  "solver_time_limit": 60,
+  "min_patient_coverage": 0.2,
+  "quantiles": [0.1, 0.25, 0.5, 0.75, 0.9],
+  "min_events": 5,
+  "min_controls": 10,
+  "min_g": 0.05,
+  "bootstrap_samples": 200,
+  "baselines": ["age_cox", "elastic_net", "xgboost"],
+  "resolved_nepc_sensitivity": false,
+  "clinical_features": ["GLEASON_SCORE", "TP53_ANY", "RB1_ANY", "PTEN_ANY"]
+}

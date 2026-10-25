@@ -101,7 +101,8 @@ def horizon_preflight(data, endpoint, config):
 
 def _binarizer(config):
     return FeatureBinarizer(min_patient_coverage=config.min_patient_coverage,
-                            quantiles=config.quantiles, age_col=config.age_col, id_col=config.id_col)
+                            quantiles=config.quantiles, age_col=config.age_col, id_col=config.id_col,
+                            clinical_features=config.clinical_features)
 
 
 def fit_horizon(train, endpoint, horizon, config):
@@ -238,7 +239,8 @@ def run_cell(data, endpoint, landmark, population, config, output_dir, *, resume
             if resume and (output_dir / f"horizon_{horizon}" / "metrics.json").exists()}
     baseline_results = {}
     if config.baselines and len(done) < len(config.horizons):
-        columns = schema_feature_columns(train, age_col=config.age_col)
+        columns = schema_feature_columns(train, age_col=config.age_col,
+                                         clinical_features=config.clinical_features)
         stored = output_dir / "baselines.pkl"
         if resume and stored.exists():
             with stored.open("rb") as stream:
@@ -289,7 +291,8 @@ def run_cell(data, endpoint, landmark, population, config, output_dir, *, resume
             write_json(folder / "horizon_audit.json", fitted["audit"])
             items = [fitted["binarizer"].items[j] for j in model.selected_indices]
             write_json(folder / "checklist.json", {"threshold": model.threshold, "items": items})
-            lines = [f"{endpoint.upper()}: event within {horizon} days after ADT +{landmark} days",
+            origin = data.manifest.get("prediction_time_origin", "ADT start")
+            lines = [f"{endpoint.upper()}: event within {horizon} days after {origin} +{landmark} days",
                      f"Flag when at least {model.threshold} of {len(items)} items are checked.", ""]
             lines.extend(f"[ ] {item['name']}" for item in items)
             lines += ["", "Use the exported preprocessing rules for missing measurements.",

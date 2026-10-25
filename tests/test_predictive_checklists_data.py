@@ -189,6 +189,26 @@ def test_binarizer_keeps_completely_missing_patient_and_evaluation_column():
     assert np.isfinite(binary).all()
 
 
+def test_clinical_features_are_own_groups_with_observed_value_thresholds():
+    frame = pd.concat([_training_features()] * 5, ignore_index=True)
+    # A rare flag: every default quantile is 0, so "altered" needs observed-value thresholds.
+    frame["RB1_ANY"] = [1] + [0] * (len(frame) - 1)
+    frame["GLEASON_SCORE"] = [6, 7, 8, 9] * 5
+    clinical = ("GLEASON_SCORE", "RB1_ANY")
+    fitted = FeatureBinarizer(clinical_features=clinical).fit(frame)
+    names = {item["name"] for item in fitted.items}
+    assert {"RB1_ANY >= 1", "RB1_ANY <= 0", "GLEASON_SCORE >= 8", "GLEASON_SCORE <= 7"} <= names
+    assert {item["group"] for item in fitted.items if item["feature"] in clinical} == set(clinical)
+    assert "TP53_SNV" not in fitted.feature_columns
+    restored = FeatureBinarizer.from_dict(json.loads(json.dumps(fitted.to_dict())))
+    np.testing.assert_array_equal(restored.transform(frame), fitted.transform(frame))
+    assert set(clinical) <= set(schema_feature_columns(frame, clinical_features=clinical))
+    with pytest.raises(ValueError, match="clinical features are absent"):
+        FeatureBinarizer(clinical_features=("PTEN_ANY",)).fit(frame)
+    with pytest.raises(ValueError, match="clinical features are absent"):
+        schema_feature_columns(frame, clinical_features=("PTEN_ANY",))
+
+
 @pytest.mark.parametrize("endpoint", ["platinum", "nepc"])
 def test_builder_manifest_preserves_selected_endpoint_after_horizon_loop(tmp_path, endpoint):
     """Real builder regression: iterating all endpoint horizons cannot rename the cohort."""
