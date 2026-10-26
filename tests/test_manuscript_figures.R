@@ -362,14 +362,14 @@ stopifnot(nrow(top)==6,all(abs(top$top-.2)<.02),all(abs(top$decile-.1)<.02),all(
   identical(seq_rows$gleason_group,figure_gleason_groups(seq_rows$GLEASON_SCORE)),
   all(!is.na(seq_rows$trio_group)),
   identical(unname(FEDERATED_TRANSFER_GRADIENT$trio_pattern$levels),
-    c("0 altered","TP53 altered","PTEN altered","RB1 altered","2 altered","3 altered")))
+    c("WT","TP53","PTEN","RB1","2 MT","3 MT")))
 trio_n <- seq_rows$TP53_ANY+seq_rows$RB1_ANY+seq_rows$PTEN_ANY
-stopifnot(all(seq_rows$trio_pattern[trio_n==0]=="0 altered"),
-  all(seq_rows$trio_pattern[trio_n==1 & seq_rows$TP53_ANY==1]=="TP53 altered"),
-  all(seq_rows$trio_pattern[trio_n==1 & seq_rows$PTEN_ANY==1]=="PTEN altered"),
-  all(seq_rows$trio_pattern[trio_n==1 & seq_rows$RB1_ANY==1]=="RB1 altered"),
-  all(seq_rows$trio_pattern[trio_n==2]=="2 altered"),
-  all(seq_rows$trio_pattern[trio_n==3]=="3 altered"),
+stopifnot(all(seq_rows$trio_pattern[trio_n==0]=="WT"),
+  all(seq_rows$trio_pattern[trio_n==1 & seq_rows$TP53_ANY==1]=="TP53"),
+  all(seq_rows$trio_pattern[trio_n==1 & seq_rows$PTEN_ANY==1]=="PTEN"),
+  all(seq_rows$trio_pattern[trio_n==1 & seq_rows$RB1_ANY==1]=="RB1"),
+  all(seq_rows$trio_pattern[trio_n==2]=="2 MT"),
+  all(seq_rows$trio_pattern[trio_n==3]=="3 MT"),
   setequal(unique(na.omit(seq_rows$trio_pattern)),FEDERATED_TRANSFER_GRADIENT$trio_pattern$levels),
   all(seq_rows$trio_group[trio_n==0]==FEDERATED_TRANSFER_TRIO[1]))
 en <- filter(km_groups,clock=="adt",bundle=="cox_federated_elasticnet_model_adt",endpoint=="nepc")

@@ -242,7 +242,7 @@ in patients with a Gleason score before the ADT landmark (b), sequenced patients
 sequenced patients with a Gleason score (d); c and d on a sequencing-date clock; facet
 strips give day-0 patients and events; e-g, platinum/AVPC/NEPC KM curves for the top vs
 bottom 10% of the day-180 XGBoost score; h, 5-year event-free probability from sequencing date +180 days (sequenced patients) by transferred federated XGBoost score
-quartile, Gleason score and six mutually exclusive mutation groups (0 altered, TP53 altered, PTEN altered, RB1 altered, 2 altered, 3 altered)). `federated_05_transfer_no_dfci__no_d`
+quartile, Gleason score and six mutually exclusive mutation groups (WT, TP53, PTEN, RB1, 2 MT, 3 MT)). `federated_05_transfer_no_dfci__no_d`
 (caption `federated_figure5_no_d`) drops panel d, so its KM curves are d-f and the gradient g.
 The local Figure 3 stays on Dana-Farber patient-level data. The cohort
 sensitivity components are assembled into one continuous multipanel figure for

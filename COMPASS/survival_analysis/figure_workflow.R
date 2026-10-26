@@ -1799,7 +1799,7 @@ FEDERATED_TRANSFER_GRADIENT <- list(
   score_quartile=list(clock="sequencing",levels=paste0("Q",1:4),label="Federated score quartile"),
   gleason_group=list(clock="sequencing",levels=FEDERATED_TRANSFER_GLEASON,label="Gleason"),
   trio_pattern=list(clock="sequencing",
-    levels=c("0 altered","TP53 altered","PTEN altered","RB1 altered","2 altered","3 altered"),
+    levels=c("WT","TP53","PTEN","RB1","2 MT","3 MT"),
     label="TP53/PTEN/RB1 alteration"))
 FEDERATED_TRANSFER_KM_TABLES <- c(curves="transfer_km_curves_no_dfci",summary="transfer_km_summary_no_dfci",
   gradient="transfer_km_gradient_no_dfci")
@@ -1857,12 +1857,12 @@ federated_transfer_km_groups <- function(d) {
     mutate(gleason_group=if_else(clock=="adt" | sequenced,figure_gleason_groups(GLEASON_SCORE),NA_character_),
       trio_group=if_else(sequenced,FEDERATED_TRANSFER_TRIO[1+(trio_n>0)],NA_character_),
       trio_pattern=case_when(
-        sequenced & trio_n==0 ~ "0 altered",
-        sequenced & trio_n==1 & TP53_ANY==1 ~ "TP53 altered",
-        sequenced & trio_n==1 & PTEN_ANY==1 ~ "PTEN altered",
-        sequenced & trio_n==1 & RB1_ANY==1 ~ "RB1 altered",
-        sequenced & trio_n==2 ~ "2 altered",
-        sequenced & trio_n==3 ~ "3 altered",
+        sequenced & trio_n==0 ~ "WT",
+        sequenced & trio_n==1 & TP53_ANY==1 ~ "TP53",
+        sequenced & trio_n==1 & PTEN_ANY==1 ~ "PTEN",
+        sequenced & trio_n==1 & RB1_ANY==1 ~ "RB1",
+        sequenced & trio_n==2 ~ "2 MT",
+        sequenced & trio_n==3 ~ "3 MT",
         TRUE ~ NA_character_),
       score_trio=if_else(is.na(trio_group)|is.na(score_half),NA_character_,
         paste(trio_group,score_half,sep=" · ")))
@@ -1997,7 +1997,6 @@ plot_federated_transfer_gradient <- function(tables, model_family, landmark, tit
     geom_linerange(aes(ymin=lo,ymax=hi),position=dodge,linewidth=.7,na.rm=TRUE) +
     geom_point(position=dodge,size=2.4) +
     scale_color_manual(values=FEDERATED_TRANSFER_ENDPOINT_COLORS,name=NULL,drop=TRUE) +
-    scale_x_discrete(labels=function(x) sub(" altered$","\\naltered",x)) +
     facet_grid(.~stratifier_label,scales="free_x",space="free_x") +
     labs(x=NULL,y=paste(federated_transfer_horizon_label(),"event-free probability"),
       title=title,caption=caption) +
@@ -2403,7 +2402,7 @@ manuscript_transfer_caption <- function(no_d=FALSE) {
       if(no_d) "a-c" else "a-d",", bars denote 95% bootstrap confidence intervals over patients, dotted lines mark 0.5, and column strips give the day-0 patients and events for each endpoint. ",
       sprintf("(%s-%s) Kaplan-Meier platinum-free (%s), AVPC-free (%s), and NEPC-free (%s) survival from the 180-day landmark after ADT initiation comparing the top and bottom 10%% of the transferred XGBoost score; the middle 80%% is omitted, shading denotes pointwise 95%% confidence intervals, P values are from log-rank tests, and the vertical axes are truncated below 1. ",
         km[1],km[3],km[1],km[2],km[3]),
-      sprintf("(%s) Kaplan-Meier 5-year event-free probability (95%% confidence interval) from 180 days after the sequencing date in sequenced patients for each endpoint by transferred XGBoost score quartile, Gleason group (≤7 vs. ≥8), and six mutually exclusive TP53, PTEN, and RB1 alteration groups: none, TP53 only, PTEN only, RB1 only, any two, or all three.",gradient)),
+      sprintf("(%s) Kaplan-Meier 5-year event-free probability (95%% confidence interval) from 180 days after the sequencing date in sequenced patients for each endpoint by transferred XGBoost score quartile, Gleason group (≤7 vs. ≥8), and six mutually exclusive TP53, PTEN, and RB1 alteration groups: none (WT), TP53 only (TP53), PTEN only (PTEN), RB1 only (RB1), any two (2 MT), or all three (3 MT).",gradient)),
     paste0("No Dana-Farber patient contributed to federated model training, so every endpoint, including platinum, is out of sample. Mean AUC(t) is the inverse-probability-of-censoring-weighted cumulative/dynamic AUC averaged over 1, 2, 3, and 5 years after the landmark, with censoring estimated in the evaluated Dana-Farber patients; horizons without an observed event or later follow-up were omitted. ",
       sprintf("Score groups in %s-%s use cutpoints computed among the Dana-Farber patients at risk for each endpoint at the landmark; they are not federated training cutoffs. Panels %s-%s use the ADT-initiation clock; all groups in %s use the sequencing-date clock from day 180 (sequenced patients). ",km[1],gradient,km[1],km[3],gradient),
       "Elastic-Net versions, the 0- and 90-day landmarks, score × TP53/RB1/PTEN Kaplan-Meier curves, and head-to-head Kaplan-Meier grids are provided as supplementary figures. The local and combined Cox models were fitted on the Dana-Farber patients they were evaluated on and were scored with stratified 5-fold cross-validated (out-of-fold) predictions; in the combined models, the transferred score was standardized within the evaluated patients. Gleason scores were used only if available before the landmark. ",
@@ -3032,7 +3031,7 @@ manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRAN
   if(!is.null(gradient)) gradient <- gradient + ggplot2::labs(y=paste(horizon,"event-free\nprobability"))
   has_gradient <- add(gradient,paste(horizon,"event-free probability"),paste0(
     sprintf("Kaplan-Meier %s event-free probability (95%% CI) from %d days after the sequencing date for each endpoint, ",horizon,as.integer(landmark)),
-    sprintf("by transferred %s score quartile and Gleason group, then 0 altered, TP53 only, PTEN only, RB1 only, any two, or all three altered. All use the sequencing clock (sequenced patients).",model)))
+    sprintf("by transferred %s score quartile and Gleason group, then WT (no alteration), TP53, PTEN, or RB1 only, 2 MT (any two), or 3 MT (all three). All use the sequencing clock (sequenced patients).",model)))
   if(length(plots)) legend <- c(legend,
     "Score cutpoints were computed in the Dana-Farber patients at risk for each endpoint at each landmark.")
   list(plots=plots,titles=titles,legend=legend,km=plots[seq_len(n_km)],
