@@ -1337,11 +1337,15 @@ over the four sites' test patients; the export has no per-site breakdown. The
 `_items` and `_metrics` CSV sidecars keep exact thresholds and every interval.
 The no-DFCI checklists are shown only in the transfer supplement.
 
-Two resolution rules apply:
+Three resolution rules apply:
 
 - An export in the earlier layout, with the file directly in
   `federated_cox_multivariate{,_no_DFCI}/`, `federated_xgboost{,_no_DFCI}/` or
   `{fast_,}federated_deephit{,_no_DFCI}/`, wins over the per-landmark files.
+- XGBoost metrics/importance missing from `rhino_data_v2` are read from the first
+  delivery, `rhino_results/federated_model_results/federated_xgboost{,_no_DFCI}/`
+  (`COMPASS_RHINO_V1_ROOT`), as 04a does for the transfer bundles. The panel captions
+  say so. Without XGBoost, the federated Figure 4 and Figure 8 are skipped.
 - A landmark found twice fails as a duplicate. 06 fingerprints every export it
   finds, so an export delivered after 06 last ran makes 07 stop and ask for a
   rerun of 06.
@@ -1363,7 +1367,7 @@ subfolder of its section (`03_univariate/federated/`, `04_multivariate/federated
 |---|---|
 | `federated_03_univariable` | Figure 3 layout: pooled univariable Cox volcanoes at days 0/90/180 (with a log-HR direction arrow under the key), pooled PSA/testosterone trajectories and day-180 extreme-decile KM curves (site `extreme_fraction`, 10% by default) |
 | `federated_04_multivariable` | Figure 8 layout, with the full models refit without DFCI added to the AUC(t) row |
-| `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/AVPC/NEPC: (a) mean AUC(t) of the full and age-only models; (b–d) mean AUC(t) of the transferred full models, local out-of-fold Cox models of Gleason + age (b), TP53/RB1/PTEN + age (c) and Gleason + TP53/RB1/PTEN + age (d), and combined Cox models of each transferred score + those covariates without age, in patients with a Gleason score (b), sequenced patients (c) and sequenced patients with a Gleason score (d); c and d on the sequencing-date clock; strips give day-0 patients/events. (e–g) Platinum, AVPC and NEPC KM curves, top vs bottom 10% of the day-180 XGBoost score. (h) 5-year event-free probability from the ADT +180-day landmark using the transferred federated XGBoost score, Gleason score and six mutually exclusive mutation groups (0 altered, TP53 altered, PTEN altered, RB1 altered, 2 altered, 3 altered); mutation results must be reported before the landmark |
+| `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/AVPC/NEPC: (a) mean AUC(t) of the full and age-only models; (b–d) mean AUC(t) of the transferred full models, local out-of-fold Cox models of Gleason + age (b), TP53/RB1/PTEN + age (c) and Gleason + TP53/RB1/PTEN + age (d), and combined Cox models of each transferred score + those covariates without age, in patients with a Gleason score (b), sequenced patients (c) and sequenced patients with a Gleason score (d); c and d on the sequencing-date clock; strips give day-0 patients/events. (e–g) Platinum, AVPC and NEPC KM curves, top vs bottom 10% of the day-180 XGBoost score. (h) 5-year event-free probability from sequencing date +180 days in sequenced patients using the transferred federated XGBoost score, Gleason score and six mutually exclusive mutation groups (0 altered, TP53 altered, PTEN altered, RB1 altered, 2 altered, 3 altered); every group on the sequencing clock |
 | `federated_05_transfer_no_dfci__no_d` | The same without panel d (KM curves d–f, gradient g); caption `federated_figure5_no_d` |
 
 The local Figure 3 (`03_dfci_univariable`) still uses DFCI patient-level data.

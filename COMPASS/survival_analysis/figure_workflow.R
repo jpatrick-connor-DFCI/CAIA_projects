@@ -935,7 +935,7 @@ FEDERATED_MULTIVARIABLE <- list(
       features="xgboost_federated_importance_adt.csv"),
     model="xgboost_cox",value="gain",kind="xgb",
     stems=c(metrics="xgboost_performance",features="xgboost_importance"),
-    series=c(both="XGBoost Survival",baseline="XGBoost baseline (age)")))
+    series=c(both="XGBoost Survival",baseline="XGBoost baseline (age)"),v1_fallback=TRUE))
 # Local Figure 4 series colors; age baselines are the lighter twins.
 FEDERATED_MODEL_COLORS <- c("Elastic-Net Cox"="#4C72B0","Cox baseline (age)"="#9DB3D6",
   "XGBoost Survival"="#B58900","XGBoost baseline (age)"="#E0CC8A",
@@ -1021,16 +1021,31 @@ load_federated_dynamic_deephit <- function(federated_path,variant="pooled") {
   d
 }
 
+# First delivery's multivariable exports, as in 04a (COMPASS_RHINO_V1_ROOT,
+# default rhino_results/ beside rhino_data_v2/). Mirrors
+# federated_v1_multivariable_dir() in prepare_figure_data.py.
+federated_v1_multivariable_dir <- function(federated_path)
+  file.path(Sys.getenv("COMPASS_RHINO_V1_ROOT",
+    file.path(dirname(dirname(federated_path)),"rhino_results")),"federated_model_results")
+
 # The legacy "<directory><suffix>/<file>" when present, else the rhino_data_v2
-# files (federated_v2_export_files), else the legacy path, reported as missing.
+# files (federated_v2_export_files), else, for a v1_fallback family (XGBoost),
+# the first delivery's copy, else the legacy path, reported as missing.
 federated_multivariable_files <- function(federated_path, family, variant="pooled") {
   spec <- FEDERATED_MULTIVARIABLE[[family]]
-  legacy <- file.path(dirname(federated_path),
-    paste0(spec$directory,FEDERATED_MULTIVARIABLE_VARIANTS[[variant]]$suffix),spec$files)
+  directory <- paste0(spec$directory,FEDERATED_MULTIVARIABLE_VARIANTS[[variant]]$suffix)
+  legacy <- file.path(dirname(federated_path),directory,spec$files)
+  v1 <- file.path(federated_v1_multivariable_dir(federated_path),directory,spec$files)
   setNames(lapply(seq_along(legacy),function(i) {
     v2 <- federated_v2_export_files(federated_path,spec$files[[i]],variant)
-    if(file.exists(legacy[[i]]) || !length(v2)) legacy[[i]] else v2
+    if(file.exists(legacy[[i]])) legacy[[i]] else if(length(v2)) v2 else
+      if(isTRUE(spec$v1_fallback) && file.exists(v1[[i]])) v1[[i]] else legacy[[i]]
   }),names(spec$files))
+}
+federated_multivariable_v1_note <- function(federated_path, paths) {
+  v1 <- unlist(paths,use.names=FALSE)
+  v1 <- startsWith(v1,paste0(federated_v1_multivariable_dir(federated_path),"/"))
+  if(any(v1)) "Not in rhino_data_v2; read from the first federated delivery (rhino_results)." else ""
 }
 
 # OMOP names contain internal double underscores, and missingness indicators
@@ -1117,6 +1132,10 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
   features <- load_federated_multivariable(paths[["features"]],family,"features")
   audit <- federated_input_audit_note(features,family)
   if(startsWith(audit,"CAUTION")) warning(audit)
+  if(nzchar(delivery <- federated_multivariable_v1_note(federated_path,paths))) {
+    message("Federated ",spec$label,version$label,": ",delivery)
+    version$note <- paste(version$note,delivery)
+  }
   capture <- getOption("compass.figure_table_capture")
   write_table <- function(data,stem) {
     path <- figure_sidecar_path(federated_output_path(root,stem,".csv"))
@@ -1751,8 +1770,9 @@ render_federated_transfer_clinical <- function(root, directory, dpi, overwrite) 
 # Time-to-event views of the transferred labs score (Federated Figure 5 e-h and
 # 05_transfer/km/). Score groups use Dana-Farber cutpoints computed within each
 # clock x endpoint x bundle x landmark cohort: each endpoint has its own at-risk
-# patients and scores. Standalone TP53/RB1/PTEN KM views use the sequencing
-# clock; the panel-h gradient uses ADT-clock calls available before its landmark.
+# patients and scores. Gleason views run on the ADT clock and TP53/RB1/PTEN
+# views on the sequencing clock (no somatic data on the ADT clock). The panel-h
+# gradient puts every group on the sequencing clock (sequenced patients).
 FEDERATED_TRANSFER_KM_CLOCKS <- c(adt="ADT",sequencing="sequencing")
 FEDERATED_TRANSFER_KM_YLAB <- c(platinum="Platinum-free probability",nepc="NEPC-free probability",
   avpc="AVPC-free probability")
@@ -1776,9 +1796,9 @@ FEDERATED_TRANSFER_KM_VIEWS <- list(
   score_trio=list(clock="sequencing",column="score_trio",levels=federated_transfer_cross(FEDERATED_TRANSFER_TRIO),
     label="Federated score × TP53/RB1/PTEN"))
 FEDERATED_TRANSFER_GRADIENT <- list(
-  score_quartile=list(clock="adt",levels=paste0("Q",1:4),label="Federated score quartile"),
-  gleason_group=list(clock="adt",levels=FEDERATED_TRANSFER_GLEASON,label="Gleason"),
-  trio_pattern=list(clock="adt",
+  score_quartile=list(clock="sequencing",levels=paste0("Q",1:4),label="Federated score quartile"),
+  gleason_group=list(clock="sequencing",levels=FEDERATED_TRANSFER_GLEASON,label="Gleason"),
+  trio_pattern=list(clock="sequencing",
     levels=c("0 altered","TP53 altered","PTEN altered","RB1 altered","2 altered","3 altered"),
     label="TP53/PTEN/RB1 alteration"))
 FEDERATED_TRANSFER_KM_TABLES <- c(curves="transfer_km_curves_no_dfci",summary="transfer_km_summary_no_dfci",
@@ -1827,24 +1847,22 @@ federated_transfer_score_quantile <- function(x, k=4L) {
 }
 
 federated_transfer_km_groups <- function(d) {
-  sequenced <- d$sequenced
-  seq_clock <- d$clock=="sequencing" & sequenced
-  adt_clock <- d$clock=="adt" & sequenced
+  sequenced <- d$clock=="sequencing" & d$sequenced
   trio_n <- d$TP53_ANY+d$RB1_ANY+d$PTEN_ANY
   d %>% group_by(clock,endpoint,bundle,landmark_days) %>%
     mutate(score_extreme=as.vector(figure_extreme_quintiles(risk_score)),
       score_decile=as.vector(figure_extreme_quintiles(risk_score,.1)),
       score_half=federated_transfer_score_half(risk_score),
       score_quartile=federated_transfer_score_quantile(risk_score,4L)) %>% ungroup() %>%
-    mutate(gleason_group=if_else(clock=="adt",figure_gleason_groups(GLEASON_SCORE),NA_character_),
-      trio_group=if_else(seq_clock,FEDERATED_TRANSFER_TRIO[1+(trio_n>0)],NA_character_),
+    mutate(gleason_group=if_else(clock=="adt" | sequenced,figure_gleason_groups(GLEASON_SCORE),NA_character_),
+      trio_group=if_else(sequenced,FEDERATED_TRANSFER_TRIO[1+(trio_n>0)],NA_character_),
       trio_pattern=case_when(
-        adt_clock & trio_n==0 ~ "0 altered",
-        adt_clock & trio_n==1 & TP53_ANY==1 ~ "TP53 altered",
-        adt_clock & trio_n==1 & PTEN_ANY==1 ~ "PTEN altered",
-        adt_clock & trio_n==1 & RB1_ANY==1 ~ "RB1 altered",
-        adt_clock & trio_n==2 ~ "2 altered",
-        adt_clock & trio_n==3 ~ "3 altered",
+        sequenced & trio_n==0 ~ "0 altered",
+        sequenced & trio_n==1 & TP53_ANY==1 ~ "TP53 altered",
+        sequenced & trio_n==1 & PTEN_ANY==1 ~ "PTEN altered",
+        sequenced & trio_n==1 & RB1_ANY==1 ~ "RB1 altered",
+        sequenced & trio_n==2 ~ "2 altered",
+        sequenced & trio_n==3 ~ "3 altered",
         TRUE ~ NA_character_),
       score_trio=if_else(is.na(trio_group)|is.na(score_half),NA_character_,
         paste(trio_group,score_half,sep=" · ")))
@@ -1963,8 +1981,8 @@ plot_federated_transfer_km_grid <- function(tables, model_family, landmark) {
 
 plot_federated_transfer_gradient <- function(tables, model_family, landmark, title=NULL, caption=NULL) {
   d <- federated_transfer_km_pick(tables$gradient,NULL,model_family,landmark)
-  if(any(d$clock!="adt"))
-    stop("Transfer event-free gradient must use ADT-landmark outcomes for every group.")
+  if(any(d$clock!="sequencing"))
+    stop("Transfer event-free gradient must use sequencing-landmark outcomes for every group.")
   d <- d[is.finite(d$event_free),,drop=FALSE]
   if(!nrow(d)) return(NULL)
   groups <- unlist(lapply(FEDERATED_TRANSFER_GRADIENT,`[[`,"levels"),use.names=FALSE)
@@ -2020,8 +2038,8 @@ render_federated_transfer_km <- function(root, directory, dpi, overwrite) {
     save(plot_federated_transfer_km_grid(tables,family,landmark),sprintf("transfer_km_grid_%s",suffix),16,15)
     save(plot_federated_transfer_gradient(tables,family,landmark,
         title=sprintf("%s: observed %s event-free probability from the +%d-day landmark",model,horizon,as.integer(landmark)),
-        caption=paste(cutoffs,"Kaplan-Meier estimates with 95% CIs; score quartiles and Gleason on the ADT clock,",
-          sprintf("Six exclusive TP53/PTEN/RB1 alteration groups reported before the ADT landmark. All groups use the ADT clock. Missing points: no follow-up to %s.",
+        caption=paste(cutoffs,"Kaplan-Meier estimates with 95% CIs; score quartiles, Gleason and six exclusive TP53/PTEN/RB1 alteration groups,",
+          sprintf("all on the sequencing clock (sequenced patients). Missing points: no follow-up to %s.",
             sub("-year"," years",horizon)))),
       sprintf("transfer_km_gradient_%s",suffix),12,5.5)
   }
@@ -2370,7 +2388,7 @@ manuscript_transfer_caption <- function(no_d=FALSE) {
   clinical <- if(no_d) "(b,c)" else "(b-d)"
   km <- if(no_d) c("d","e","f") else c("e","f","g")
   gradient <- if(no_d) "g" else "h"
-  seq_panels <- if(no_d) "c" else "c and d"
+  seq_panels <- if(no_d) paste0("c and ",gradient) else paste0("c, d, and ",gradient)
   caption(
     paste0(if(no_d) "Federated Figure 5 (without the sequenced-with-Gleason panel). " else "Federated Figure 5. ",
       "External validation at Dana-Farber of federated platinum models trained without Dana-Farber, alone and combined with Gleason score and TP53/RB1/PTEN status, and time-to-event risk separation by the transferred score."),
@@ -2385,9 +2403,9 @@ manuscript_transfer_caption <- function(no_d=FALSE) {
       if(no_d) "a-c" else "a-d",", bars denote 95% bootstrap confidence intervals over patients, dotted lines mark 0.5, and column strips give the day-0 patients and events for each endpoint. ",
       sprintf("(%s-%s) Kaplan-Meier platinum-free (%s), AVPC-free (%s), and NEPC-free (%s) survival from the 180-day landmark after ADT initiation comparing the top and bottom 10%% of the transferred XGBoost score; the middle 80%% is omitted, shading denotes pointwise 95%% confidence intervals, P values are from log-rank tests, and the vertical axes are truncated below 1. ",
         km[1],km[3],km[1],km[2],km[3]),
-      sprintf("(%s) Kaplan-Meier 5-year event-free probability (95%% confidence interval) from the 180-day landmark for each endpoint by transferred XGBoost score quartile, Gleason group (≤7 vs. ≥8), and six mutually exclusive TP53, PTEN, and RB1 alteration groups: none, TP53 only, PTEN only, RB1 only, any two, or all three.",gradient)),
+      sprintf("(%s) Kaplan-Meier 5-year event-free probability (95%% confidence interval) from 180 days after the sequencing date in sequenced patients for each endpoint by transferred XGBoost score quartile, Gleason group (≤7 vs. ≥8), and six mutually exclusive TP53, PTEN, and RB1 alteration groups: none, TP53 only, PTEN only, RB1 only, any two, or all three.",gradient)),
     paste0("No Dana-Farber patient contributed to federated model training, so every endpoint, including platinum, is out of sample. Mean AUC(t) is the inverse-probability-of-censoring-weighted cumulative/dynamic AUC averaged over 1, 2, 3, and 5 years after the landmark, with censoring estimated in the evaluated Dana-Farber patients; horizons without an observed event or later follow-up were omitted. ",
-      sprintf("Score groups in %s-%s use cutpoints computed among the Dana-Farber patients at risk for each endpoint at the landmark; they are not federated training cutoffs. All groups in %s use the ADT-initiation clock from day 180; TP53/PTEN/RB1 status is restricted to sequencing reports available before that landmark. ",km[1],gradient,gradient),
+      sprintf("Score groups in %s-%s use cutpoints computed among the Dana-Farber patients at risk for each endpoint at the landmark; they are not federated training cutoffs. Panels %s-%s use the ADT-initiation clock; all groups in %s use the sequencing-date clock from day 180 (sequenced patients). ",km[1],gradient,km[1],km[3],gradient),
       "Elastic-Net versions, the 0- and 90-day landmarks, score × TP53/RB1/PTEN Kaplan-Meier curves, and head-to-head Kaplan-Meier grids are provided as supplementary figures. The local and combined Cox models were fitted on the Dana-Farber patients they were evaluated on and were scored with stratified 5-fold cross-validated (out-of-fold) predictions; in the combined models, the transferred score was standardized within the evaluated patients. Gleason scores were used only if available before the landmark. ",
       sprintf("For %s, the transferred models were rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation, and age was age at sequencing. ",seq_panels),
       "Patients/events in panel a were 2,267/182 at day 0, 2,233/166 at day 90, and 2,197/158 at day 180 for platinum; 2,237/197, 2,208/181, and 2,165/171 for AVPC; and 2,231/50, 2,212/46, and 2,172/41 for NEPC. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve."))
@@ -2975,13 +2993,10 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
 # survival by the top vs bottom 10% of the transferred score for platinum, AVPC
 # and NEPC (ADT clock; `km`), then the event-free probability at
 # FEDERATED_TRANSFER_KM_HORIZON by score quartile, Gleason group and mutually
-# exclusive TP53/PTEN/RB1 alteration groups (all on the ADT clock;
-# `gradient`). Panels that are not estimable are dropped.
+# exclusive TP53/PTEN/RB1 alteration groups (all on the sequencing clock,
+# sequenced patients; `gradient`). Panels that are not estimable are dropped.
 manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRANSFER_KM_FIGURE) {
   family <- figure$model_family; landmark <- figure$landmark_days
-  panel_h_rows <- federated_transfer_km_pick(km$gradient,NULL,family,landmark)
-  if(!any(panel_h_rows$stratifier=="trio_pattern"))
-    stop("Panel h lacks mutation groups on the ADT clock; rerun 04a_transfer_updated.ipynb, then 06_prep_figure_data.ipynb.")
   model <- c(elastic_net_cox="Elastic-Net",xgboost_cox="XGBoost")[family]
   if(is.na(model)) model <- federated_transfer_model_label(family)
   horizon <- federated_transfer_horizon_label()
@@ -3016,8 +3031,8 @@ manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRAN
   gradient <- plot_federated_transfer_gradient(km,family,landmark)
   if(!is.null(gradient)) gradient <- gradient + ggplot2::labs(y=paste(horizon,"event-free\nprobability"))
   has_gradient <- add(gradient,paste(horizon,"event-free probability"),paste0(
-    sprintf("Kaplan-Meier %s event-free probability (95%% CI) from the %d-day landmark for each endpoint, ",horizon,as.integer(landmark)),
-    sprintf("by transferred %s score quartile and Gleason group, then 0 altered, TP53 only, PTEN only, RB1 only, any two, or all three altered. All use the ADT clock from the %d-day landmark; sequencing reports must predate that landmark.",model,as.integer(landmark))))
+    sprintf("Kaplan-Meier %s event-free probability (95%% CI) from %d days after the sequencing date for each endpoint, ",horizon,as.integer(landmark)),
+    sprintf("by transferred %s score quartile and Gleason group, then 0 altered, TP53 only, PTEN only, RB1 only, any two, or all three altered. All use the sequencing clock (sequenced patients).",model)))
   if(length(plots)) legend <- c(legend,
     "Score cutpoints were computed in the Dana-Farber patients at risk for each endpoint at each landmark.")
   list(plots=plots,titles=titles,legend=legend,km=plots[seq_len(n_km)],

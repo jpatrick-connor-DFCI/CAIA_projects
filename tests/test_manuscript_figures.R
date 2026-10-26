@@ -334,14 +334,13 @@ km_patients_fixture <- function(n=900) {
       bind_rows(lapply(c(elastic_net_cox="cox_federated_elasticnet_model_adt",xgboost_cox="xgboost_federated_model_adt"),
         function(bundle) { xgb <- startsWith(bundle,"xgboost"); seq_clock <- clock=="sequencing"
           scale <- c(platinum=1,nepc=1+1e-9,avpc=1.5)[[endpoint]]
-          eligible <- if(seq_clock) rep(TRUE,n) else sequenced
           tibble(clock=clock,endpoint=toupper(endpoint),bundle=bundle,
           model_family=if(xgb) "xgboost_cox" else "elastic_net_cox",landmark_days=180,
           person_id=seq_len(n),risk_score=if(xgb) round(score) else score*scale,
           duration_days=pmin(t,censor),event=as.integer(t<=censor),GLEASON_SCORE=gleason,
-          HAS_SEQUENCING=ifelse(eligible,"True",NA_character_),
-          TP53_ANY=ifelse(eligible,trio[,1],NA_real_),RB1_ANY=ifelse(eligible,trio[,2],NA_real_),
-          PTEN_ANY=ifelse(eligible,trio[,3],NA_real_),SOMATIC_N_GENES_ALTERED=NA_real_)[rows,]}))
+          HAS_SEQUENCING=if(seq_clock) "True" else NA_character_,
+          TP53_ANY=if(seq_clock) trio[,1] else NA_real_,RB1_ANY=if(seq_clock) trio[,2] else NA_real_,
+          PTEN_ANY=if(seq_clock) trio[,3] else NA_real_,SOMATIC_N_GENES_ALTERED=NA_real_)[rows,]}))
     }))
   }))
 }
@@ -355,24 +354,24 @@ top <- km_groups %>% filter(model_family=="elastic_net_cox") %>% group_by(clock,
     high=mean(score_half %in% "high score"),.groups="drop")
 tied <- filter(km_groups,clock=="adt",bundle=="cox_federated_elasticnet_model_adt",person_id<=60)
 seq_rows <- filter(km_groups,clock=="sequencing")
-adt_sequenced <- filter(km_groups,clock=="adt",sequenced)
 # The 60 tied zero scores sit at the median and go low, so the half split is ~47% high.
 stopifnot(nrow(top)==6,all(abs(top$top-.2)<.02),all(abs(top$decile-.1)<.02),all(abs(top$high-.5)<.04),
   n_distinct(tied$score_extreme)==1,n_distinct(tied$score_half)==1,n_distinct(tied$score_quartile)==1,
   all(is.na(km_groups$trio_group[km_groups$clock=="adt"])),
-  all(is.na(km_groups$trio_pattern[km_groups$clock=="sequencing"])),
-  all(is.na(km_groups$gleason_group[km_groups$clock=="sequencing"])),
+  all(is.na(km_groups$trio_pattern[km_groups$clock=="adt"])),
+  identical(seq_rows$gleason_group,figure_gleason_groups(seq_rows$GLEASON_SCORE)),
   all(!is.na(seq_rows$trio_group)),
   identical(unname(FEDERATED_TRANSFER_GRADIENT$trio_pattern$levels),
     c("0 altered","TP53 altered","PTEN altered","RB1 altered","2 altered","3 altered")))
-trio_n <- adt_sequenced$TP53_ANY+adt_sequenced$RB1_ANY+adt_sequenced$PTEN_ANY
-stopifnot(all(adt_sequenced$trio_pattern[trio_n==0]=="0 altered"),
-  all(adt_sequenced$trio_pattern[trio_n==1 & adt_sequenced$TP53_ANY==1]=="TP53 altered"),
-  all(adt_sequenced$trio_pattern[trio_n==1 & adt_sequenced$PTEN_ANY==1]=="PTEN altered"),
-  all(adt_sequenced$trio_pattern[trio_n==1 & adt_sequenced$RB1_ANY==1]=="RB1 altered"),
-  all(adt_sequenced$trio_pattern[trio_n==2]=="2 altered"),
-  all(adt_sequenced$trio_pattern[trio_n==3]=="3 altered"),
-  setequal(unique(na.omit(adt_sequenced$trio_pattern)),FEDERATED_TRANSFER_GRADIENT$trio_pattern$levels))
+trio_n <- seq_rows$TP53_ANY+seq_rows$RB1_ANY+seq_rows$PTEN_ANY
+stopifnot(all(seq_rows$trio_pattern[trio_n==0]=="0 altered"),
+  all(seq_rows$trio_pattern[trio_n==1 & seq_rows$TP53_ANY==1]=="TP53 altered"),
+  all(seq_rows$trio_pattern[trio_n==1 & seq_rows$PTEN_ANY==1]=="PTEN altered"),
+  all(seq_rows$trio_pattern[trio_n==1 & seq_rows$RB1_ANY==1]=="RB1 altered"),
+  all(seq_rows$trio_pattern[trio_n==2]=="2 altered"),
+  all(seq_rows$trio_pattern[trio_n==3]=="3 altered"),
+  setequal(unique(na.omit(seq_rows$trio_pattern)),FEDERATED_TRANSFER_GRADIENT$trio_pattern$levels),
+  all(seq_rows$trio_group[trio_n==0]==FEDERATED_TRANSFER_TRIO[1]))
 en <- filter(km_groups,clock=="adt",bundle=="cox_federated_elasticnet_model_adt",endpoint=="nepc")
 stopifnot(abs(mean(en$score_extreme %in% "Top 20%")-.2)<.02,
   identical(sort(unique(na.omit(en$score_quartile))),paste0("Q",1:4)),
@@ -388,21 +387,16 @@ stopifnot(identical(names(km_tables),names(FEDERATED_TRANSFER_KM_TABLES)),
   !any(c("score_gleason","hr") %in% names(FEDERATED_TRANSFER_KM_VIEWS)),
   all(km_tables$summary$clock[km_tables$summary$view %in% c("trio","score_trio")]=="sequencing"),
   setequal(unique(km_tables$gradient$stratifier),names(FEDERATED_TRANSFER_GRADIENT)),
-  all(km_tables$gradient$clock=="adt"),
+  all(km_tables$gradient$clock=="sequencing"),
   setequal(unique(km_tables$gradient$group[km_tables$gradient$stratifier=="trio_pattern"]),
     FEDERATED_TRANSFER_GRADIENT$trio_pattern$levels),
   all(km_tables$gradient$horizon_days==1825),
   all(km_tables$gradient$event_free>=0 & km_tables$gradient$event_free<=1,na.rm=TRUE),
   identical(federated_transfer_horizon_label(),"5-year"))
-stale_km <- km_tables
-stale_km$gradient <- filter(stale_km$gradient,stratifier!="trio_pattern")
-stale_error <- tryCatch(manuscript_federated_transfer_km(stale_km),error=identity)
-stopifnot(inherits(stale_error,"error"),
-  grepl("rerun 04a_transfer_updated.ipynb",conditionMessage(stale_error),fixed=TRUE))
 mixed_km <- km_tables
 mixed_row <- which(mixed_km$gradient$model_family=="xgboost_cox" &
   mixed_km$gradient$landmark_days==180)[[1]]
-mixed_km$gradient$clock[[mixed_row]] <- "sequencing"
+mixed_km$gradient$clock[[mixed_row]] <- "adt"
 stopifnot(inherits(tryCatch(plot_federated_transfer_gradient(mixed_km,"xgboost_cox",180),
   error=identity),"error"))
 # A group whose every patient has the event before 5 years is 0, not missing;
@@ -424,7 +418,7 @@ stopifnot(FEDERATED_TRANSFER_KM_FIGURE$model_family=="xgboost_cox",
   all(panel_h$data$model_family=="xgboost_cox"),
   all(panel_h$data$landmark_days==180L),
   all(panel_h$data$horizon_days==1825),
-  all(panel_h$data$clock=="adt"))
+  all(panel_h$data$clock=="sequencing"))
 stopifnot(inherits(fig5_km$plot,"gtable"),length(fig5_km$spec$titles)==8,
   identical(fig5_km$spec$titles[1:4],fig5$spec$titles),
   identical(fig5_km$spec$titles[5:8],c("Platinum: score extremes","AVPC: score extremes","NEPC: score extremes",
@@ -436,7 +430,8 @@ stopifnot(inherits(fig5_km$plot,"gtable"),length(fig5_km$spec$titles)==8,
   grepl("f: Kaplan-Meier AVPC-free survival",fig5_km$legend,fixed=TRUE),
   grepl("g: Kaplan-Meier NEPC-free survival",fig5_km$legend,fixed=TRUE),
   grepl("top vs bottom 10% of the transferred XGBoost score",fig5_km$legend,fixed=TRUE),
-  grepl("h: Kaplan-Meier 5-year event-free probability",fig5_km$legend,fixed=TRUE),
+  grepl("h: Kaplan-Meier 5-year event-free probability (95% CI) from 180 days after the sequencing date",fig5_km$legend,fixed=TRUE),
+  grepl("All use the sequencing clock (sequenced patients).",fig5_km$legend,fixed=TRUE),
   !grepl("hazard ratio",fig5_km$legend,ignore.case=TRUE))
 fig5_km_no_d <- manuscript_federated_transfer_no_dfci(transfer_metrics,transfer_clinical,km_tables,
   include=c("gleason","trio"),key="federated_05_transfer_no_dfci__no_d")

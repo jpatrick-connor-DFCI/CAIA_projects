@@ -36,7 +36,7 @@ patients with the scores resampled jointly.
 Clinical data obey the transfer's strict pre-landmark rule
 (``federated_scoring.filter_pre_landmark`` keeps days < landmark): a Gleason
 score counts only if it was available before TREATMENT_ANCHOR_DATE + landmark.
-The clinical Cox somatic arms do not use somatic data on the ADT clock. For those arms the anchor is
+No somatic data is used on the ADT clock. For the somatic arms the anchor is
 the sequencing report date, so the transferred
 labs score is recomputed from labs before sequencing + landmark, outcomes run
 from sequencing + landmark, Gleason must be available before sequencing +
@@ -236,48 +236,6 @@ def build_clinical_features(
     cols = [ID_COL, "landmark_days", AGE_COL, GLEASON_FEATURE, HAS_SEQUENCING,
             *TRIO_FEATURES, BURDEN_COL]
     return pd.concat(frames, ignore_index=True)[cols]
-
-
-def attach_adt_landmark_somatic(
-    clinical: pd.DataFrame,
-    local: pd.DataFrame,
-    somatic: pd.DataFrame,
-    somatic_features: list[str],
-) -> pd.DataFrame:
-    """Attach only calls reported before each ADT landmark for the KM export.
-
-    This leaves the sequencing-anchored clinical comparisons untouched. The
-    selected report is the closest available to the ADT landmark, with same-day
-    tests unioned. Uncalled genes on an eligible report count as wild type.
-    """
-    missing_trio = [feature for feature in TRIO_FEATURES if feature not in somatic_features]
-    if missing_trio:
-        raise ValueError(f"Somatic matrix has no {missing_trio}; cannot build ADT KM groups.")
-    anchors = _patient_anchors(local)["anchor"]
-    rows = []
-    for lm in sorted(pd.to_numeric(clinical["landmark_days"], errors="raise").unique()):
-        cutoff = anchors + pd.to_timedelta(int(lm) - 1, unit="D")
-        cutoffs = pd.DataFrame({sg.ca.ID_COL: anchors.index, "_landmark_date": cutoff.values})
-        selected = sg.closest_available_by_landmark(
-            somatic, cutoffs, date_col=sg.SEQUENCING_DATE,
-            available_date_col=sg.SOMATIC_AVAILABLE_DATE,
-            value_cols=list(somatic_features), combine_date_ties_with_max=True,
-        )
-        if selected.empty:
-            continue
-        selected = selected.apply(pd.to_numeric, errors="coerce").fillna(0)
-        selected[BURDEN_COL] = selected[list(somatic_features)].sum(axis=1).astype(int)
-        selected[HAS_SEQUENCING] = True
-        rows.append(selected[[*TRIO_FEATURES, BURDEN_COL, HAS_SEQUENCING]]
-                    .reset_index().rename(columns={sg.ca.ID_COL: ID_COL})
-                    .assign(landmark_days=int(lm)))
-    if not rows:
-        return clinical.copy()
-    calls = pd.concat(rows, ignore_index=True)
-    keys = [ID_COL, "landmark_days"]
-    columns = [*TRIO_FEATURES, BURDEN_COL, HAS_SEQUENCING]
-    out = clinical.drop(columns=columns).merge(calls, on=keys, how="left", validate="one_to_one")
-    return out[clinical.columns]
 
 
 # --------------------------------------------------------------------------- #
@@ -641,8 +599,7 @@ def km_patients(clocks: dict, config: str = "both") -> pd.DataFrame:
     ``clocks`` maps a clock name ("adt", "sequencing") to (scores, clinical)
     on that clock. Only ``config`` scores (the labs score) are kept. The R
     side assigns score groups, so cutpoints and figure styling stay in one
-    place. ADT-clock somatic columns, when supplied, contain only reports
-    available before that ADT landmark (attach_adt_landmark_somatic).
+    place. ADT-clock rows carry no somatic columns (build_clinical_features).
     """
     frames = []
     for clock, (scores, clinical) in clocks.items():

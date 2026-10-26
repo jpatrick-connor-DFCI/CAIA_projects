@@ -199,6 +199,18 @@ FEDERATED_MULTIVARIABLE_FILES = tuple(
         ("federated_cox_multivariate", "cox_federated_elasticnet_coefficients_adt.csv"),
     )
 )
+# XGBoost exports absent from rhino_data_v2 fall back to the first delivery, as
+# in 04a; mirrors federated_v1_multivariable_dir() in figure_workflow.R.
+FEDERATED_V1_FALLBACK_FILES = tuple(
+    (directory, name) for directory, name in FEDERATED_MULTIVARIABLE_FILES
+    if directory.startswith("federated_xgboost"))
+
+
+def federated_v1_multivariable_dir(federated_path: Path) -> Path:
+    return Path(os.environ.get("COMPASS_RHINO_V1_ROOT",
+                               federated_path.parent.parent / "rhino_results")) / "federated_model_results"
+
+
 FEDERATED_DEEPHIT_METRIC_FILES = tuple(
     (directory + suffix, name)
     for suffix in ("", FEDERATED_NO_DFCI_SUFFIX)
@@ -678,6 +690,9 @@ def prepare(config: dict) -> dict:
                                        FEDERATED_MULTIVARIABLE_FILES + FEDERATED_DEEPHIT_METRIC_FILES]
                                       + list(FEDERATED_CHECKLIST_FILES))
             for path in federated_v2_export_files(federated_path, name) if path not in legacy]
+        # First-delivery XGBoost, read only when rhino_data_v2 has none (absent paths tracked too).
+        federated_sources += [fingerprint(federated_v1_multivariable_dir(federated_path) / directory / name)
+                              for directory, name in FEDERATED_V1_FALLBACK_FILES]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / name)
             for name in FEDERATED_TRANSFER_NO_DFCI_FILES]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / "all_models" / name)

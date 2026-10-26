@@ -241,7 +241,7 @@ each transferred score + the same covariates without age (the full models includ
 in patients with a Gleason score before the ADT landmark (b), sequenced patients (c) and
 sequenced patients with a Gleason score (d); c and d on a sequencing-date clock; facet
 strips give day-0 patients and events; e-g, platinum/AVPC/NEPC KM curves for the top vs
-bottom 10% of the day-180 XGBoost score; h, 5-year event-free probability from the ADT +180-day landmark by transferred federated XGBoost score
+bottom 10% of the day-180 XGBoost score; h, 5-year event-free probability from sequencing date +180 days (sequenced patients) by transferred federated XGBoost score
 quartile, Gleason score and six mutually exclusive mutation groups (0 altered, TP53 altered, PTEN altered, RB1 altered, 2 altered, 3 altered)). `federated_05_transfer_no_dfci__no_d`
 (caption `federated_figure5_no_d`) drops panel d, so its KM curves are d-f and the gradient g.
 The local Figure 3 stays on Dana-Farber patient-level data. The cohort
@@ -416,7 +416,7 @@ without it, Figure 5 is drawn with panel a only. `transfer_km_patients.csv` (04'
 transferred labs scores with Gleason and TP53/RB1/PTEN status on the ADT and sequencing clocks)
 renders `05_transfer/km/`: score × TP53/RB1/PTEN and top-vs-bottom-10% score KM curves per
 endpoint, a head-to-head grid (score | Gleason | TP53/RB1/PTEN) and the 5-year event-free
-gradient (score quartile, Gleason, six TP53/PTEN/RB1 alteration groups reported before the ADT landmark) per bundle × landmark, all using the ADT clock. Hazard-ratio
+gradient (score quartile, Gleason, six TP53/PTEN/RB1 alteration groups) per bundle × landmark, all on the sequencing clock (sequenced patients). Hazard-ratio
 forests and score × Gleason curves are no longer drawn. Only aggregate tables are exported
 (`transfer_km_{curves,summary,gradient}_no_dfci`); they feed Federated Figure 5 e-h
 (XGBoost, 180 days). Missing transfer outputs are reported and skipped.

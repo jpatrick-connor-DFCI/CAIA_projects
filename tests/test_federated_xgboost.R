@@ -196,6 +196,37 @@ local({
   stopifnot(identical(federated_multivariable_files(fed,"xgboost")$metrics,legacy))
 })
 local({
+  # XGBoost absent from rhino_data_v2 falls back to the first delivery (as in 04a);
+  # elastic-net does not.
+  root <- tempfile("federated-v1-",tmpdir="/private/tmp"); dir.create(root)
+  on.exit(unlink(root,recursive=TRUE))
+  old <- Sys.getenv("COMPASS_RHINO_V1_ROOT",NA); Sys.unsetenv("COMPASS_RHINO_V1_ROOT")
+  on.exit(if(!is.na(old)) Sys.setenv(COMPASS_RHINO_V1_ROOT=old),add=TRUE)
+  fed <- file.path(root,"rhino_data_v2","cox_federated_univariate_adt.csv")
+  v1 <- file.path(root,"rhino_results","federated_model_results")
+  put <- function(d,...) {
+    path <- file.path(v1,...); dir.create(dirname(path),recursive=TRUE,showWarnings=FALSE)
+    write_csv(d,path); path
+  }
+  metrics <- put(expand_grid(landmark_days=c(0,90,180),config=c("both","baseline")) %>%
+    mutate(analysis_label="adt",endpoint="platinum",model="xgboost_cox",cohort="all",
+      test_c_index=.7,test_mean_auc_t=.74,n_test=100,n_events_test=10),
+    "federated_xgboost_no_DFCI","xgboost_federated_metrics_adt.csv")
+  put(tibble(analysis_label="adt",endpoint="platinum",model="elastic_net_cox"),
+    "federated_cox_multivariate","cox_federated_elasticnet_metrics_adt.csv")
+  paths <- federated_multivariable_files(fed,"xgboost","no_dfci")
+  stopifnot(identical(paths$metrics,metrics),
+    identical(paths$features,file.path(dirname(fed),"federated_xgboost_no_DFCI","xgboost_federated_importance_adt.csv")),
+    identical(federated_multivariable_files(fed,"elastic_net")$metrics,
+      file.path(dirname(fed),"federated_cox_multivariate","cox_federated_elasticnet_metrics_adt.csv")),
+    nzchar(federated_multivariable_v1_note(fed,paths)),
+    !nzchar(federated_multivariable_v1_note(fed,federated_multivariable_files(fed,"xgboost"))))
+  # A rhino_data_v2 export still wins over the first delivery.
+  v2 <- file.path(dirname(fed),"federated_xgboost","lm_0","no_DFCI","xgboost_federated_metrics_adt.csv")
+  dir.create(dirname(v2),recursive=TRUE); file.copy(metrics,v2)
+  stopifnot(identical(federated_multivariable_files(fed,"xgboost","no_dfci")$metrics,v2))
+})
+local({
   # rhino_data_v2 predictive checklists: federated_predictive_checklists/lm_<days>/{w,no}_DFCI/.
   root <- tempfile("federated-checklist-",tmpdir="/private/tmp"); dir.create(root)
   on.exit(unlink(root,recursive=TRUE))

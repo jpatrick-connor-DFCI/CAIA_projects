@@ -118,6 +118,10 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     deephit_paths = [candidate for path in deephit_paths
                      for candidate in (path, path.parent / "adt" / path.name)]
     rhino = Path(config["data_root"]) / "rhino_data_v2"
+    # First-delivery XGBoost (rhino_results/), the fallback when rhino_data_v2 has none.
+    v1_dir = Path(config["federated_path"]).parent.parent / "rhino_results" / "federated_model_results"
+    v1_paths = [v1_dir / directory / path.name for directory in ("federated_xgboost", "federated_xgboost_no_DFCI")
+                for path in xgb_paths]
     no_dfci_dir = rhino / "federated_transfer_adt_no_DFCI"
     no_dfci_paths = [no_dfci_dir / name for name in
                      ("transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv",
@@ -131,7 +135,7 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     assert [item["path"] for item in result["federated_sources"]] == [
         config["federated_path"], str(site_path), str(within_path), *map(str, xgb_paths),
         *map(str, cox_paths), *map(str, no_dfci_model_paths),
-        *map(str, deephit_paths), *map(str, no_dfci_paths),
+        *map(str, deephit_paths), *map(str, v1_paths), *map(str, no_dfci_paths),
         *map(str, all_model_paths), *map(str, figure_data_paths)]
     assert result["federated_sources"][1]["missing"]
     site_path.parent.mkdir()
@@ -161,9 +165,9 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     # or change reruns the federated job.
     for directory in (no_dfci_dir, no_dfci_dir / "all_models", figure_data_dir):
         directory.mkdir(parents=True)
-    for index, path in enumerate([*deephit_paths, *no_dfci_paths,
+    for index, path in enumerate([*deephit_paths, *v1_paths, *no_dfci_paths,
                                   *all_model_paths, *figure_data_paths], start=11):
-        path.parent.mkdir(exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         assert previous["federated_sources"][index]["missing"]
         pl.DataFrame({"endpoint": ["nepc"]}).write_csv(path)
         delivered = prep.prepare(config)
@@ -264,6 +268,7 @@ def test_preparation_notebook_runs_all_python_cells(tmp_path, monkeypatch):
     monkeypatch.setenv("COMPASS_DATA_ROOT", config["data_root"])
     monkeypatch.setenv("COMPASS_FIGURE_DATA_ROOT", config["cache_root"])
     monkeypatch.setenv("COMPASS_METASTATIC_LABEL_SUPPLEMENT", "false")
+    monkeypatch.delenv("COMPASS_PREPARE_OVERWRITE", raising=False)
     root = Path(__file__).resolve().parents[1]
     monkeypatch.chdir(root)
     notebook = json.loads((root / "COMPASS/survival_analysis/06_prep_figure_data.ipynb").read_text())
@@ -271,6 +276,7 @@ def test_preparation_notebook_runs_all_python_cells(tmp_path, monkeypatch):
     for i, cell in enumerate(notebook["cells"]):
         if cell["cell_type"] == "code":
             exec(compile("".join(cell["source"]), f"notebook-cell-{i}", "exec"), state)
+    assert state["FORCE"] is True
     assert state["ENDPOINTS"] == ["platinum"]
     assert set(state["manifest"]["cells"]) == {"adt__platinum"}
     assert state["manifest"]["cohort_overview"]
