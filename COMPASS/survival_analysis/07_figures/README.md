@@ -433,4 +433,6 @@ run `07_figures/all.R` with stage `all`. All Python remains in `06`; graphics ca
 
 Run `Rscript COMPASS/survival_analysis/07_figures/all.R` for the complete workflow, or run a numbered script in this directory for one manuscript figure and its section supplements. Run notebook `06_prep_figure_data.ipynb` first. Set `CAIA_PROJECT_ROOT` when using a checkout outside the cluster default. Each script honors the same `COMPASS_*` settings and `COMPASS_FIGURE_STAGE` (`all`, `prepare`, or `render`). Figure data and legends remain alongside exported figures in their `data/` folders; patient and graphics caches remain under `COMPASS_FIGURE_DATA_ROOT`.
 
+The entry points also work with `source("/absolute/path/to/07_figures/<figure>.R")`; they infer the code root from the sourced file when `CAIA_PROJECT_ROOT` is unset.
+
 The numbered scripts share the same preparation functions. Preparing one figure may compute additional source panels needed by its manuscript layout; rendering is restricted to that figure family. Run `all.R` to render and reconcile the full catalog.
