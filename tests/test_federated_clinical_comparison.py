@@ -190,6 +190,22 @@ def test_comparison_is_paired_on_the_same_patients():
     assert clin_coefs["bundle"].isna().all()
 
 
+def test_a_bundle_without_an_age_model_keeps_its_other_comparisons():
+    """The landmark XGBoost packages export no age-only model; that must not empty the bundle's rows."""
+    scores, clinical = _scores_and_clinical()
+    full, _ = fcc.compare_clinical_models(scores, clinical, n_bootstrap=30, seed=0)
+    no_age = scores[~((scores["bundle"] == "fed_xgb") & (scores["config"] == "baseline"))]
+    comp, _ = fcc.compare_clinical_models(no_age, clinical, n_bootstrap=30, seed=0)
+    assert len(comp) == len(full)
+    keys = ["subpopulation", "bundle", "model"]
+    full, comp = full.set_index(keys).sort_index(), comp.set_index(keys).sort_index()
+    age = comp.xs(("fed_xgb", "transferred_age"), level=("bundle", "model"))
+    assert age[["c_index", "mean_auc", "delta_c_vs_transferred", "mean_auc_lo"]].isna().all().all()
+    kept = comp.index.get_level_values("model") != "transferred_age"
+    pd.testing.assert_frame_equal(comp[kept], full[kept])
+    assert comp.loc[kept, "n_scored"].gt(0).all()
+
+
 def test_too_few_events_gives_a_count_only_row():
     scores, clinical = _scores_and_clinical(n_events=6)
     comp, coefs = fcc.compare_clinical_models(scores, clinical, n_bootstrap=20, min_events=10)

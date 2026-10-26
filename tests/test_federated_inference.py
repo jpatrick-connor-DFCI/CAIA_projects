@@ -25,6 +25,7 @@ from survival_common.federated_inference import (
     load_fitted_model,
     load_model,
     main,
+    merge_bundles,
     predict_cif,
     predict_risk,
     predict_survival,
@@ -129,6 +130,49 @@ def test_select_model_reports_what_is_available(tmp_path):
     bundle = load_bundle(p)
     with pytest.raises(BundleError, match=r"\(90, 'both'\)"):
         select_model(bundle, 180, "both")
+
+
+def _landmark_bundle(df: pd.DataFrame, landmark: int, sites=("a",)) -> dict:
+    bundle = _enet_bundle(df)
+    bundle["models"][0]["landmark_days"] = landmark
+    bundle["training_sites"] = list(sites)
+    return bundle
+
+
+def test_merge_bundles_concatenates_per_landmark_exports(tmp_path):
+    """The landmark Rhino packages write one bundle per landmark; merged, they
+    score like the three-landmark export."""
+    df = _frame()
+    parts = [_landmark_bundle(df, lm, sites) for lm, sites in
+             ((0, ("a", "b")), (90, ("b",)), (180, ("c",)))]
+    merged = merge_bundles(parts, sources=["lm_0", "lm_90", "lm_180"])
+    assert [m["landmark_days"] for m in merged["models"]] == [0, 90, 180]
+    assert merged["training_sites"] == ["a", "b", "c"]
+    assert merged["source_paths"] == ["lm_0", "lm_90", "lm_180"]
+    assert parts[0]["models"] == [merged["models"][0]]
+    p = tmp_path / "merged.json"
+    p.write_text(json.dumps(merged))
+    bundle = load_bundle(p)
+    np.testing.assert_allclose(predict_risk(df, bundle, select_model(bundle, 180)),
+                               predict_risk(df, parts[2], parts[2]["models"][0]))
+
+
+@pytest.mark.parametrize("key, value", [
+    ("model_family", "xgboost_cox"), ("format_version", 2),
+    ("analysis_label", "psa"), ("time_unit_days", 7.0)])
+def test_merge_bundles_rejects_incompatible_exports(key, value):
+    df = _frame()
+    other = _landmark_bundle(df, 90)
+    other[key] = value
+    with pytest.raises(BundleError, match=key):
+        merge_bundles([_landmark_bundle(df, 0), other])
+
+
+def test_merge_bundles_rejects_a_model_exported_twice():
+    df = _frame()
+    with pytest.raises(BundleError, match="in both lm_90 and again"):
+        merge_bundles([_landmark_bundle(df, 90), _landmark_bundle(df, 90)],
+                      sources=["lm_90", "again"])
 
 
 # --------------------------------------------------------------------- #

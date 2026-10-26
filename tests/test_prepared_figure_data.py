@@ -102,7 +102,7 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     result = prep.prepare(config)
     assert result["arms"] == {} and result["cells"] == {}
     assert result["federated"]
-    site_path = Path(config["federated_path"]).parent / "nvflare_within_site_univariate_cox" / "cox_within_site_all_sites_cohort.csv"
+    site_path = Path(config["federated_path"]).parent / "within_site_cox_univariate" / "cox_within_site_all_sites_cohort.csv"
     within_path = site_path.with_name("cox_within_site_all_sites_results.csv")
     xgb_dir = site_path.parent.parent / "federated_xgboost"
     xgb_paths = [xgb_dir / f"xgboost_federated_{kind}_adt.csv" for kind in ("metrics", "importance")]
@@ -117,14 +117,14 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
                                        "federated_deephit" + suffix)]
     deephit_paths = [candidate for path in deephit_paths
                      for candidate in (path, path.parent / "adt" / path.name)]
-    rhino = Path(config["data_root"]) / "rhino_results"
+    rhino = Path(config["data_root"]) / "rhino_data_v2"
     no_dfci_dir = rhino / "federated_transfer_adt_no_DFCI"
     no_dfci_paths = [no_dfci_dir / name for name in
                      ("transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv",
                       "transfer_km_patients.csv")]
     all_model_paths = [no_dfci_dir / "all_models" / name for name in
                        ("transfer_metrics.csv", "transfer_auc_t.csv")]
-    figure_data_dir = rhino / "misc_figure_data"
+    figure_data_dir = rhino / "figure_data"
     figure_data_paths = [figure_data_dir / name for name in ("manifest.json", "cohort_km.csv")] + [
         figure_data_dir / (prefix + name) for prefix in ("", "within_site_") for name in (
             "lab_extreme_km.csv", "lab_extreme_summary.csv", "lab_trajectories.csv", "lab_trajectory_cohort.csv")]
@@ -191,7 +191,7 @@ def test_federated_rhino_root_override(tmp_path):
     config["federated"] = True
     config["federated_rhino_root"] = str(tmp_path / "delivery")
     paths = [Path(s["path"]) for s in prep.prepare(config)["federated_sources"][-16:]]
-    assert {path.parent.name for path in paths} == {"federated_transfer_adt_no_DFCI", "all_models", "misc_figure_data"}
+    assert {path.parent.name for path in paths} == {"federated_transfer_adt_no_DFCI", "all_models", "figure_data"}
     assert all((path.parent.parent if path.parent.name != "all_models" else path.parent.parent.parent)
                == tmp_path / "delivery" for path in paths)
 
@@ -206,6 +206,32 @@ def test_federated_within_site_accepts_legacy_folder(tmp_path):
     sources = prep.prepare(config)["federated_sources"]
     assert [Path(s["path"]).parent.name for s in sources[1:3]] == [legacy.name] * 2
     assert not any(s.get("missing") for s in sources[1:3])
+
+
+def test_federated_v2_exports_are_fingerprinted_once(tmp_path):
+    # rhino_data_v2: elastic-net Cox per variant, XGBoost/DeepHit per landmark (optionally under adt/).
+    config = make_config(tmp_path, "federated")
+    config["federated"] = True
+    root = Path(config["federated_path"]).parent
+    v2 = [root / "federated_elastic_net_cox_w_DFCI" / "cox_federated_elasticnet_metrics_adt.csv",
+          root / "federated_elastic_net_cox_no_DFCI" / "cox_federated_elasticnet_coefficients_adt.csv",
+          root / "federated_xgboost" / "lm_0" / "no_DFCI" / "adt" / "xgboost_federated_metrics_adt.csv",
+          root / "federated_xgboost" / "lm_90" / "no_DFCI" / "xgboost_federated_metrics_adt.csv",
+          root / "federated_deephit" / "lm_180" / "w_DFCI" / "deephit_federated_metrics_adt.csv"]
+    # A legacy no-DFCI export also matches the v2 "*_no_DFCI" pattern; it stays in the legacy block.
+    legacy = root / "federated_xgboost_no_DFCI" / "xgboost_federated_importance_adt.csv"
+    stray = root / "federated_xgboost" / "lm_0" / "other" / "xgboost_federated_metrics_adt.csv"
+    for path in [*v2, legacy, stray]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("landmark_days\n0\n")
+    sources = prep.prepare(config)["federated_sources"]
+    paths = [s["path"] for s in sources]
+    assert len(paths) == len(set(paths))
+    start = paths.index(str(root / "federated_deephit_no_DFCI" / "adt" / "deephit_federated_metrics_adt.csv")) + 1
+    assert set(paths[start:start + len(v2)]) == {str(path) for path in v2}
+    assert not any(s.get("missing") for s in sources[start:start + len(v2)])
+    assert paths.count(str(legacy)) == 1 and paths.index(str(legacy)) < start
+    assert str(stray) not in paths
 
 
 def test_arpi_preparation_does_not_require_adt(tmp_path):

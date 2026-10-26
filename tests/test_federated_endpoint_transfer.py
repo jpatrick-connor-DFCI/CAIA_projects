@@ -137,6 +137,30 @@ def test_transported_score_is_concordant_and_beats_age_only():
     np.testing.assert_allclose(per_ep["nepc"], per_ep["avpc"])
 
 
+def test_baseline_fallback_pairs_a_bundle_without_an_age_model_to_a_donor():
+    nobase = _bundle()
+    nobase["models"] = [m for m in nobase["models"] if m["config"] == "both"]
+    kw = dict(endpoints=("nepc",), lab_mapping=MAPPING, n_bootstrap=30,
+              verbose=False, horizons_days=(1000, 2000))
+    bundles = {"enet": _bundle(), "nobase": nobase}
+
+    m = fet.evaluate_transfer(_local(), bundles, **kw)["metrics"].set_index(["bundle", "config"])
+    assert np.isnan(m.loc[("nobase", "both"), "delta_auc_vs_baseline"])
+
+    m = fet.evaluate_transfer(_local(), bundles, baseline_fallback={"nobase": "enet"},
+                              **kw)["metrics"].set_index(["bundle", "config"])
+    donor, borrowed = m.loc[("enet", "both")], m.loc[("nobase", "both")]
+    assert donor["baseline_bundle"] == "enet"
+    assert borrowed["baseline_bundle"] == "enet"
+    # same full model, same patients, same resamples -> identical paired deltas
+    for col in ("c_index_baseline", "delta_c_vs_baseline", "delta_c_lo",
+                "mean_auc_baseline", "delta_auc_vs_baseline", "delta_auc_hi"):
+        assert borrowed[col] == pytest.approx(donor[col])
+
+    with pytest.raises(ValueError, match="unknown bundles"):
+        fet.evaluate_transfer(_local(), bundles, baseline_fallback={"nobase": "xgb"}, **kw)
+
+
 def test_unit_check_flags_a_tenfold_mismatch():
     long_df, _ = fet.to_federated_long(_local(), "nepc", MAPPING)
     wide, _ = fs.build_landmark_frame(long_df, 0)

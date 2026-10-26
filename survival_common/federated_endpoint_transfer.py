@@ -400,6 +400,7 @@ def evaluate_transfer(
     n_bootstrap: int = 200,
     seed: int = 0,
     max_followup_days: int | None = fs.DEFAULT_MAX_FOLLOWUP_DAYS,
+    baseline_fallback: dict[str, str] | None = None,
     verbose: bool = True,
 ) -> dict[str, pd.DataFrame | list]:
     """Score every bundle model on every endpoint and evaluate it.
@@ -409,7 +410,16 @@ def evaluate_transfer(
     patients and their bootstrap is paired. Harrell's C and mean AUC(t) share
     the same resamples; mean AUC(t) uses the horizons estimable on the full
     frame, and its baseline difference ``delta_auc_vs_baseline`` is paired.
+
+    ``baseline_fallback`` maps a bundle stem that ships no age-only model to
+    a donor stem whose ``baseline`` it is compared against (``baseline_bundle``
+    names the one used). An age-only model's discrimination depends only on
+    how it ranks age, so the donor family's age model stands in for the
+    missing one.
     """
+    unknown = {s for pair in (baseline_fallback or {}).items() for s in pair} - set(bundles)
+    if unknown:
+        raise ValueError(f"baseline_fallback names unknown bundles: {sorted(unknown)}")
     all_landmarks = sorted({
         int(m["landmark_days"]) for b in bundles.values() for m in b["models"]
     })
@@ -557,8 +567,12 @@ def evaluate_transfer(
                 if base_identity not in risks and arm == "dynamic":
                     base_identity = (stem, "baseline", "landmark", model_horizon,
                                      evaluation_horizon)
+                donor = (baseline_fallback or {}).get(stem)
+                if base_identity not in risks and donor is not None:
+                    base_identity = (donor, "baseline", arm, model_horizon, evaluation_horizon)
                 base_key = str(base_identity)
                 if config != "baseline" and base_identity in risks:
+                    row["baseline_bundle"] = base_identity[0]
                     row["c_index_baseline"] = harrell_c(
                         duration, event, risks[base_identity]
                     )

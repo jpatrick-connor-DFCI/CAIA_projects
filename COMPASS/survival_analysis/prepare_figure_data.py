@@ -169,7 +169,8 @@ def fingerprint(path: Path) -> dict:
 
 
 # Newest export name first; mirrors federated_within_site_file() in figure_workflow.R.
-FEDERATED_WITHIN_SITE_DIRS = ("nvflare_within_site_univariate_cox", "nvflare_within_site_cox_univariate")
+FEDERATED_WITHIN_SITE_DIRS = ("within_site_cox_univariate", "nvflare_within_site_univariate_cox",
+                              "nvflare_within_site_cox_univariate")
 
 
 def federated_within_site_file(federated_path: Path, filename: str) -> Path:
@@ -177,7 +178,7 @@ def federated_within_site_file(federated_path: Path, filename: str) -> Path:
     return next((p for p in candidates if p.exists()), candidates[0])
 
 
-# 04_federated_transfer.ipynb outputs (bundles refit without Dana-Farber): discrimination and
+# 04a_transfer_updated.ipynb outputs (bundles refit without Dana-Farber): discrimination and
 # the Gleason / TP53-RB1-PTEN Cox comparison (federated Figure 5 b-c); mirrors
 # federated_transfer_no_dfci_dir() in figure_workflow.R.
 FEDERATED_TRANSFER_NO_DFCI_FILES = (
@@ -205,6 +206,19 @@ FEDERATED_DEEPHIT_METRIC_FILES = tuple(
     for name in ("deephit_federated_metrics_adt.csv",
                  "adt/deephit_federated_metrics_adt.csv")
 )
+# rhino_data_v2 exports for either variant: a directory per variant
+# (federated_elastic_net_cox_w_DFCI/) or a Rhino package per landmark
+# (<model>/lm_<days>/w_DFCI/), each optionally under adt/. Mirrors
+# federated_v2_export_files() in figure_workflow.R, which reads a family's
+# per-landmark files together when its legacy export is absent.
+FEDERATED_V2_VARIANT_MARKERS = ("w_DFCI", "no_DFCI")
+
+
+def federated_v2_export_files(federated_path: Path, filename: str) -> list[Path]:
+    return sorted({path for marker in FEDERATED_V2_VARIANT_MARKERS
+                   for pattern in (f"*_{marker}/{filename}", f"*_{marker}/adt/{filename}",
+                                   f"*/lm_*/{marker}/{filename}", f"*/lm_*/{marker}/adt/{filename}")
+                   for path in federated_path.parent.glob(pattern)})
 # Aggregate KM/trajectory export (no patient rows); mirrors FEDERATED_FIGURE_DATA_FILES in figure_workflow.R.
 FEDERATED_FIGURE_DATA_FILES = ("manifest.json", "cohort_km.csv") + tuple(
     prefix + name for prefix in ("", "within_site_") for name in (
@@ -212,8 +226,8 @@ FEDERATED_FIGURE_DATA_FILES = ("manifest.json", "cohort_km.csv") + tuple(
 
 
 def federated_rhino_root(config: dict) -> Path:
-    """Root of the federated delivery (rhino_results) under the COMPASS data root."""
-    return Path(config.get("federated_rhino_root") or Path(config["data_root"]) / "rhino_results")
+    """Root of the federated delivery (rhino_data_v2) under the COMPASS data root."""
+    return Path(config.get("federated_rhino_root") or Path(config["data_root"]) / "rhino_data_v2")
 
 
 def federated_transfer_no_dfci_dir(config: dict) -> Path:
@@ -223,7 +237,7 @@ def federated_transfer_no_dfci_dir(config: dict) -> Path:
 
 def federated_figure_data_dir(config: dict) -> Path:
     return Path(config.get("federated_figure_data_path")
-                or federated_rhino_root(config) / "misc_figure_data")
+                or federated_rhino_root(config) / "figure_data")
 
 
 def code_version() -> str:
@@ -652,10 +666,14 @@ def prepare(config: dict) -> dict:
             for name in ("cox_within_site_all_sites_cohort.csv", "cox_within_site_all_sites_results.csv")]
         # Small fitted-result tables are read by R, like the Cox exports. Track
         # absent paths too so later XGBoost/elastic-net deliveries invalidate preparation.
-        federated_sources += [fingerprint(federated_path.parent / directory / name)
-            for directory, name in FEDERATED_MULTIVARIABLE_FILES]
-        federated_sources += [fingerprint(federated_path.parent / directory / name)
-            for directory, name in FEDERATED_DEEPHIT_METRIC_FILES]
+        legacy = [federated_path.parent / directory / name
+                  for directory, name in FEDERATED_MULTIVARIABLE_FILES + FEDERATED_DEEPHIT_METRIC_FILES]
+        federated_sources += [fingerprint(path) for path in legacy]
+        # Present v2 copies; one delivered later is unregistered, so R asks for a rerun.
+        federated_sources += [fingerprint(path)
+            for name in dict.fromkeys(Path(name).name for _, name in
+                                      FEDERATED_MULTIVARIABLE_FILES + FEDERATED_DEEPHIT_METRIC_FILES)
+            for path in federated_v2_export_files(federated_path, name) if path not in legacy]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / name)
             for name in FEDERATED_TRANSFER_NO_DFCI_FILES]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / "all_models" / name)

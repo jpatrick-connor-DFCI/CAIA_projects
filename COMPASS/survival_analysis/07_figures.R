@@ -37,16 +37,21 @@
 # without requiring longitudinal data or running other figure families.
 #
 # Every federated input defaults to the delivery under `COMPASS_RHINO_ROOT`
-# (default `<COMPASS_DATA_ROOT>/rhino_results`):
-#   federated_model_results/          pooled univariate Cox CSV, within-site Cox, and the
-#                                     elastic-net/XGBoost bundles with and without DFCI
-#   federated_transfer_adt_no_DFCI/   04's output (bundles trained without DFCI on DFCI endpoints)
-#   misc_figure_data/                 aggregate KM curves and binned trajectories, pooled and within site
+# (default `<COMPASS_DATA_ROOT>/rhino_data_v2`):
+#   cox_federated_univariate_adt.csv  pooled univariate Cox results
+#   within_site_cox_univariate/       within-site Cox results and per-site cohort counts
+#   federated_elastic_net_cox_{w,no}_DFCI/
+#                                     elastic-net Cox exports with and without DFCI
+#   federated_*/lm_<days>/{w,no}_DFCI/ per-landmark XGBoost, DeepHit and checklist exports
+#   federated_transfer_adt_no_DFCI/   04a's output (bundles trained without DFCI on DFCI endpoints)
+#   figure_data/                      aggregate KM curves and binned trajectories, pooled and within site
+# The earlier rhino_results layout (federated_model_results/, misc_figure_data/) still
+# resolves when the paths below point at it.
 # `COMPASS_FEDERATED_RESULTS`, `COMPASS_FEDERATED_TRANSFER_NO_DFCI` and
 # `COMPASS_FEDERATED_FIGURE_DATA` override the individual paths; set the same values for `06`.
 #
-# The site report reads `nvflare_within_site_univariate_cox/cox_within_site_all_sites_cohort.csv`
-# (legacy name `nvflare_within_site_cox_univariate/` is still accepted)
+# The site report reads `within_site_cox_univariate/cox_within_site_all_sites_cohort.csv`
+# (legacy names `nvflare_within_site_{univariate_cox,cox_univariate}/` are still accepted)
 # beside the federated results CSV. It exports cohort sizes, event counts, and observed
 # event percentages at landmark 0 only in `01_cohort/site_incidence_lm000__platinum.{png,csv}`.
 # The figure matches the cohort-comparison layout: incidence with 95% Wilson CIs
@@ -221,13 +226,13 @@
 # elastic-net Cox and XGBoost models: test performance, coefficients, and gains).
 # A separate federated set, written by the federated job, is numbered on its own:
 # `federated_03_univariable` (the Figure 3 layout from the pooled four-site univariable Cox
-# results and the aggregate `misc_figure_data` PSA/testosterone trajectories and day-180
+# results and the aggregate `figure_data` PSA/testosterone trajectories and day-180
 # extreme-decile KM curves; the volcano y-axis spans the data, capped at -log10(P)=30;
 # an arrow under the color key marks positive log HR as higher risk/faster time to platinum),
 # `federated_04_multivariable` (the Figure 8 layout, with the full models refit without
 # Dana-Farber added as darker bars in the discrimination rows), and
 # `federated_05_transfer_no_dfci` (the models trained without Dana-Farber scored on
-# Dana-Farber platinum/AVPC/NEPC, in that order: a, mean AUC(t) of the full and age-only models; b-d, mean
+# Dana-Farber platinum/AVPC/NEPC, in that order: a, mean AUC(t) of the full models; b-d, mean
 # AUC(t) of the full models, local out-of-fold Cox models of Gleason + age (b),
 # TP53/RB1/PTEN + age (c) or Gleason + TP53/RB1/PTEN + age (d), and combined Cox models of
 # each transferred score + the same covariates without age (the full models include age),
@@ -337,7 +342,7 @@
 # explicitly marked instead of applying the former volcano magnitude filters.
 # Both across-site and individual within-site HRs are plotted, without re-pooling
 # site estimates. Within-site forests read
-# `nvflare_within_site_univariate_cox/cox_within_site_all_sites_results.csv` beside
+# `within_site_cox_univariate/cox_within_site_all_sites_results.csv` beside
 # the across-site results CSV. Each uses its own supplied p/q values.
 # No matching local results are required. Outputs are
 # `03_univariate/federated/{psa,testosterone}_forest__platinum.{png,csv}` plus the day-0
@@ -352,8 +357,11 @@
 # one figure set do not prevent preparation/rendering of other available sets.
 #
 # Federated multivariable models are read beside the Cox results: elastic-net Cox
-# from `federated_cox_multivariate/cox_federated_elasticnet_{metrics,coefficients}_adt.csv`
-# and XGBoost from `federated_xgboost/xgboost_federated_{metrics,importance}_adt.csv`.
+# from `cox_federated_elasticnet_{metrics,coefficients}_adt.csv` and XGBoost from
+# `xgboost_federated_{metrics,importance}_adt.csv`, either in a v2 variant directory
+# (`federated_elastic_net_cox_w_DFCI/`) or one per landmark (`<model>/lm_<days>/w_DFCI/`,
+# read together), each optionally under `adt/`. The legacy `federated_cox_multivariate/`
+# and `federated_xgboost/` directories take precedence when present.
 # Each model gets two compiled figures built with the local PROFILE Figure 4
 # plotting functions, in `04_multivariate/federated/`. `{elasticnet,xgboost}_performance__platinum` pairs
 # held-out test mean AUC(t) for labs versus the age baseline at days
@@ -369,15 +377,16 @@
 # Identifier features with nonzero gain or coefficients trigger a warning and a
 # figure caption; they are not silently removed or treated as validated predictors.
 # Manuscript Figure 8 requires all four captured CSVs.
-# The same exports refit without Dana-Farber (`federated_cox_multivariate_no_DFCI/`,
-# `federated_xgboost_no_DFCI/`) render as `04_multivariate/federated/{elasticnet,xgboost}_*_no_dfci__platinum`
+# The same exports refit without Dana-Farber (`no_DFCI` in place of `w_DFCI`; legacy
+# `<directory>_no_DFCI/`) render as `04_multivariate/federated/{elasticnet,xgboost}_*_no_dfci__platinum`
 # and feed federated manuscript Figure 4.
-# When a fast federated DeepHit metrics export is present, its dynamic arm
+# When a federated DeepHit metrics export is present (legacy `fast_federated_deephit/`
+# or the v2 per-landmark `deephit_federated_metrics_adt.csv` files), its dynamic arm
 # appears in the federated multivariate discrimination panel and Figure 4;
 # missing DeepHit results leave the Cox/XGBoost figure renderable.
 #
 # Aggregate KM curves and trajectories (`COMPASS_FEDERATED_FIGURE_DATA`, default
-# `misc_figure_data/`) need `manifest.json` (bin width, minimum bin size, sites and per-site
+# `figure_data/`) need `manifest.json` (bin width, minimum bin size, sites and per-site
 # counts) plus `cohort_km.csv`, `lab_extreme_{km,summary}.csv` and
 # `lab_trajector{ies,y_cohort}.csv`, each with a `within_site_` twin. They render
 # `01_cohort/federated_cohort_km` and, in `03_univariate/federated/`, `trajectories/<lab>/federated_trajectory_<lab>`, `km/<lab>/federated_km_quintile_<lab>_landmark<N>`
@@ -386,8 +395,8 @@
 # trajectory and KM plotters are reused; nothing is refitted. Missing files are reported and skipped.
 #
 # Federated transfer (`COMPASS_FEDERATED_TRANSFER_NO_DFCI`, default
-# `federated_transfer_adt_no_DFCI/`, 04's `OUTPUT_DIR`) reads `transfer_metrics.csv` and
-# `transfer_auc_t.csv` written by `04_federated_transfer.ipynb`: the platinum-trained
+# `federated_transfer_adt_no_DFCI/`, 04a's `OUTPUT_DIR`) reads `transfer_metrics.csv` and
+# `transfer_auc_t.csv` written by `04a_transfer_updated.ipynb`: the platinum-trained
 # federated XGBoost and elastic-net bundles refit without Dana-Farber and scored on the
 # local ADT cohort for platinum, NEPC, and AVPC, an external validation.
 # `05_transfer/transfer_discrimination_no_dfci__platinum` shows IPCW mean AUC(t) and the
@@ -476,13 +485,12 @@ METASTATIC_SUPPLEMENT <- list(
     "CANCER_ANNOTATIONS", "CANCER_STAGE_NOTE_LEVEL.parquet")),
   llm = Sys.getenv("LLM_MET_LABELS_PATH", "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_met_diagnosis/met_dx_labels.parquet"),
   icd = file.path(NEPC_PROJ_PATH, "prostate_icd_data.csv"))
-RHINO_ROOT <- Sys.getenv("COMPASS_RHINO_ROOT", file.path(NEPC_PROJ_PATH, "rhino_results"))
+RHINO_ROOT <- Sys.getenv("COMPASS_RHINO_ROOT", file.path(NEPC_PROJ_PATH, "rhino_data_v2"))
 FEDERATED_SUPPLEMENT <- list(
-  results = Sys.getenv("COMPASS_FEDERATED_RESULTS", file.path(
-    RHINO_ROOT, "federated_model_results", "cox_federated_univariate_adt.csv")),
+  results = Sys.getenv("COMPASS_FEDERATED_RESULTS", file.path(RHINO_ROOT, "cox_federated_univariate_adt.csv")),
   transfer_no_dfci = Sys.getenv("COMPASS_FEDERATED_TRANSFER_NO_DFCI",
     file.path(RHINO_ROOT, "federated_transfer_adt_no_DFCI")),
-  figure_data = Sys.getenv("COMPASS_FEDERATED_FIGURE_DATA", file.path(RHINO_ROOT, "misc_figure_data")))
+  figure_data = Sys.getenv("COMPASS_FEDERATED_FIGURE_DATA", file.path(RHINO_ROOT, "figure_data")))
 RENDER_PROFILE <- match.arg(tolower(Sys.getenv("COMPASS_RENDER_PROFILE", "fast")), c("fast", "publication"))
 RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 200
 RENDER_PDF <- env_flag("COMPASS_RENDER_PDF")

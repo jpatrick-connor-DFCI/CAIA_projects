@@ -88,6 +88,7 @@ COMPASS/
     ├── 03_multivariate.ipynb             # elastic-net + XGBoost + summary tables
     ├── 03b_multivariate_longitudinal.ipynb # Dynamic-DeepHit (torch, optional; SurvLatent ODE off by default)
     ├── 04_federated_transfer.ipynb       # frozen federated bundles scored on local DFCI endpoints
+    ├── 04a_transfer_updated.ipynb        # the same for rhino_data_v2: Cox, XGBoost, DeepHit, checklists
     ├── 05_cohort_comparison.ipynb        # read-only: 6 cohorts x 2 endpoints, landmark +180d
     ├── 06_prep_figure_data.ipynb         # Polars figure tables + cache manifest for 07
     ├── 07_figures.R                      # R figures from merged profile_data outputs (Rscript)
@@ -1033,8 +1034,9 @@ patient subsets with `COHORTS`, and the event(s) with `ENDPOINTS`
 4. `COMPASS/survival_analysis/03b_multivariate_longitudinal.ipynb` (optional — requires torch;
    see [Dependencies](#dependencies) and `multivariate_longitudinal/README.md`)
 5. `COMPASS/survival_analysis/GAM/04_gam.ipynb`
-6. `COMPASS/survival_analysis/04_federated_transfer.ipynb` (scores the frozen federated bundles
-   on the local endpoints; needs the `rhino_results/` delivery)
+6. `COMPASS/survival_analysis/04a_transfer_updated.ipynb` (scores the frozen federated bundles
+   on the local endpoints; needs the `rhino_data_v2/` delivery. `04_federated_transfer.ipynb`
+   is the same for the earlier `rhino_results/` delivery)
 7. `COMPASS/survival_analysis/05_cohort_comparison.ipynb` (read-only; only after steps 1-3 have
    been run for **all** cohorts and endpoints being compared)
 8. `python COMPASS/survival_analysis/adt_intent_comparison.py` (read-only; writes the
@@ -1193,29 +1195,64 @@ ADT cohort and evaluates the same risk score against the local LLM-derived NEPC
 and AVPC timelines, with platinum as the reference:
 
 ```bash
-RHINO=/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/rhino_results
-FED=$RHINO/federated_model_results
+RHINO=/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/rhino_data_v2
 python -m survival_common.federated_endpoint_transfer \
-    --bundle $FED/federated_xgboost_no_DFCI/xgboost_federated_model_adt.json \
-             $FED/federated_cox_multivariate_no_DFCI/cox_federated_elasticnet_model_adt.json \
+    --bundle $RHINO/federated_elastic_net_cox_no_DFCI/cox_federated_elasticnet_model_adt.json \
     --data /data/gusev/USERS/jpconnor/data/CAIA/COMPASS/longitudinal_prediction_data_adt.csv \
     --output-dir $RHINO/federated_transfer_adt_no_DFCI/ \
     --n-bootstrap 1000
 ```
 
-All federated inputs live in the `rhino_results/` delivery under the COMPASS
-data root (override with `COMPASS_RHINO_ROOT`): `federated_model_results/` (the
-pooled univariate Cox CSV, within-site Cox, and the bundles trained with and
-without DFCI), `federated_transfer_adt_no_DFCI/` (04's output) and
-`misc_figure_data/` (aggregate KM curves and trajectories; see below).
+The CLI keys bundles by file name and rejects duplicates. The per-landmark
+XGBoost, DeepHit and checklist deliveries all share one file name per family,
+so score those through 04a (below), which merges them first.
 
-`COMPASS/survival_analysis/04_federated_transfer.ipynb` wraps the same call and
-picks up the bundles from `rhino_results/federated_model_results/federated_*_no_DFCI/`,
-trained on Fred Hutch, Johns Hopkins and MSK only. The bundles trained with DFCI
-are not scored (DFCI patients would be in-sample). The notebook shows the federated
-held-out test C-index next to the local platinum C-index.
+All federated inputs live in the `rhino_data_v2/` delivery under the COMPASS
+data root (override with `COMPASS_RHINO_ROOT`):
 
-It maps local `LAB_NAME` to the OMOP names via `OMOP_to_DFCI_lab_ids.csv`, puts
+| Path | Content |
+| --- | --- |
+| `cox_federated_univariate_adt.csv` | pooled univariate Cox across the four sites |
+| `within_site_cox_univariate/` | the same fits within each site |
+| `federated_elastic_net_cox_{w,no}_DFCI/` | elastic-net Cox trained with and without DFCI; one bundle holds landmarks 0/90/180 × full/age-only |
+| `federated_predictive_checklists/lm_{0,90,180}/{w,no}_DFCI/` | one checklist bundle and its metrics per landmark |
+| `federated_xgboost*/lm_<days>/{w,no}_DFCI/`, `federated_*deephit*/lm_<days>/{w,no}_DFCI/` | landmark XGBoost and DeepHit, delivered like the checklists (optionally under `adt/`) |
+| `federated_transfer_adt_no_DFCI/` | 04a's output |
+| `figure_data/` | aggregate KM curves and trajectories; see below |
+
+To read the earlier `rhino_results/` delivery instead, set `COMPASS_RHINO_ROOT`
+to it, `COMPASS_FEDERATED_RESULTS` to its `federated_model_results/` CSV, and
+`COMPASS_FEDERATED_FIGURE_DATA` to its `misc_figure_data/`.
+
+`COMPASS/survival_analysis/04a_transfer_updated.ipynb` wraps the same call for
+`rhino_data_v2`. It scores elastic-net Cox, XGBoost, DeepHit and the predictive
+checklists from the bundles trained on Fred Hutch, Johns Hopkins and MSK only. The
+bundles trained with DFCI are not scored (DFCI patients would be in-sample).
+
+- **Discovery.** Bundles are found by file name anywhere under `RHINO_ROOT`, in a
+  `no_DFCI` or `*_no_DFCI` directory. The exact XGBoost and DeepHit folder names
+  therefore do not matter. A family that has not been delivered yet is skipped
+  with a warning.
+- **Merge.** `federated_inference.merge_bundles` combines each family's
+  per-landmark bundles into one. Format version, model family, analysis label,
+  endpoint, time unit and library version must agree, and a landmark exported
+  twice is an error.
+- **Age-only comparator for XGBoost.** The landmark XGBoost packages export no
+  age-only model, so XGBoost's paired Δ is taken against the elastic-net Cox
+  `baseline` (`baseline_fallback`; recorded in `baseline_bundle`). An age-only
+  model's C and AUC(t) depend only on how it ranks age, so the comparator is the
+  same.
+- **Comparison table.** The notebook shows each family's federated held-out test
+  metrics next to the local platinum ones. Those are read from the metrics CSV
+  beside each source bundle.
+
+`04_federated_transfer.ipynb` is the same analysis for the earlier
+`rhino_results/` delivery (Cox, XGBoost, DeepHit and checklist bundles under
+`federated_model_results/federated_*_no_DFCI/`). It writes to
+`rhino_results/federated_transfer_adt_no_DFCI/`, which the figures read only when
+`COMPASS_FEDERATED_TRANSFER_NO_DFCI` points there.
+
+The transfer module maps local `LAB_NAME` to the OMOP names via `OMOP_to_DFCI_lab_ids.csv`, puts
 each endpoint's date in the federated chain's event slot, and reuses
 `federated_scoring.build_landmark_frame` unchanged, so events at/before the
 landmark are dropped (incident risk set) and follow-up is censored at 3650 days.
@@ -1230,29 +1267,36 @@ mismatch between the DFCI and OMOP lab pipelines. Resolve those before you read
 the discrimination metrics.
 
 The no-DFCI bundles never saw a DFCI patient, so this is an external
-validation on all three endpoints. 04 writes `transfer_metrics.csv` and
+validation on all three endpoints. 04a writes `transfer_metrics.csv` and
 `transfer_auc_t.csv` to `COMPASS_FEDERATED_TRANSFER_NO_DFCI` (default
-`$COMPASS_RHINO_ROOT/federated_transfer_adt_no_DFCI`). Rerun
-`06_prep_figure_data.ipynb` after 04, then
+`$COMPASS_RHINO_ROOT/federated_transfer_adt_no_DFCI`). These primary tables hold
+elastic-net Cox and XGBoost only, one row per endpoint, bundle, landmark and
+config, as Figure 5 requires. The sequencing-clock run and the Gleason /
+TP53-RB1-PTEN clinical comparison (Figure 5 b–h) also use those two families. Without
+an age-only XGBoost model, XGBoost's `transferred_age` rows in the clinical
+comparison stay empty, and its other comparisons are unaffected. Rerun
+`06_prep_figure_data.ipynb` after 04a, then
 `COMPASS_FIGURE_SCOPE=federated Rscript COMPASS/survival_analysis/07_figures.R`
 to render `figures/ADT/05_transfer/transfer_discrimination_no_dfci__platinum.{png,csv}`
 (mean AUC(t) and paired ΔAUC(t) vs. age only, by endpoint) and federated manuscript
 Figure 5.
 
-The same notebook also discovers no-DFCI DeepHit and predictive checklist
-bundles placed under `federated_model_results/`, including the checklist's
-site-set subdirectory. It scores the landmark and dynamic DeepHit arms from
-strictly pre-landmark lab histories and the checklist at each model's exported
-horizon. These additional comparisons, including Cox and XGBoost on the same
-DFCI cohort, are written under `federated_transfer_adt_no_DFCI/all_models/`.
+DeepHit and the predictive checklists are scored in a second pass on the same
+frames and bootstrap resamples, so a failure in either cannot block the Figure 5
+outputs. The landmark and dynamic DeepHit arms are scored from strictly
+pre-landmark lab histories, and each checklist at its exported horizon. The
+dynamic arm is paired with the landmark arm's age-only model. All four families,
+the Cox and XGBoost rows included, are written to
+`federated_transfer_adt_no_DFCI/all_models/`.
 The `training_arm`, `model_horizon_days`, and `evaluation_horizon_days` columns
 identify each prediction. Checklist `risk_score` is the raw item count;
 `probability` and `flag` are the frozen calibrator and decision output.
 DeepHit uses its frozen cumulative incidence at each evaluation horizon.
 The horizon-specific rows also report an IPCW Brier score for DeepHit and
 checklist probabilities, with censoring estimated on the DFCI cohort.
-For a CLI run, pass the additional JSON paths to the existing `--bundle` list.
-Only downloaded bundles from runs that excluded DFCI belong in this comparison.
+For a CLI run, pass the additional JSON paths to the existing `--bundle` list,
+one bundle per file name. Only downloaded bundles from runs that excluded DFCI
+belong in this comparison.
 After rerunning `06_prep_figure_data.ipynb` and `07_figures.R`, the dynamic arm's
 held-out federated metrics appear in the multivariate main figures when the
 corresponding DeepHit metrics CSV is available. The figures still render with
@@ -1264,16 +1308,26 @@ CSV beside the plot; they are not added to the main figures. The companion
 the landmark and dynamic DeepHit arms, and checklists on the same DFCI patients
 at the checklist horizons.
 
-The same federated run also renders the pooled federated models themselves from
-`federated_cox_multivariate/` (elastic-net) and `federated_xgboost/`, next to
-the across-site results CSV. The outputs are
+The same federated run also renders the pooled federated models themselves,
+from the exports trained with DFCI next to the univariate CSV. Elastic-net Cox
+comes from `federated_elastic_net_cox_w_DFCI/`; XGBoost and DeepHit come from
+their `lm_<days>/w_DFCI/` files, which are stacked into one table. The outputs are
 `figures/ADT/04_multivariate/federated/{elasticnet,xgboost}_performance__platinum`,
 `elasticnet_coefficients__platinum`, and `xgboost_importance__platinum`.
 Manuscript Figure 8 (`08_federated_multivariable`) puts them in the local
-Figure 4 layout. The same exports refit without DFCI (`*_no_DFCI/`) render as
-`*_no_dfci__platinum`.
+Figure 4 layout. The `no_DFCI` exports render as `*_no_dfci__platinum`.
+XGBoost exports no age-only model, so its baseline series is left empty.
 
-`misc_figure_data/` holds aggregate KM curves (`cohort_km.csv`,
+Two resolution rules apply:
+
+- An export in the earlier layout, with the file directly in
+  `federated_cox_multivariate{,_no_DFCI}/`, `federated_xgboost{,_no_DFCI}/` or
+  `{fast_,}federated_deephit{,_no_DFCI}/`, wins over the per-landmark files.
+- A landmark found twice fails as a duplicate. 06 fingerprints every export it
+  finds, so an export delivered after 06 last ran makes 07 stop and ask for a
+  rerun of 06.
+
+`figure_data/` holds aggregate KM curves (`cohort_km.csv`,
 `lab_extreme_{km,summary}.csv`) and binned PSA/testosterone trajectories
 (`lab_trajector{ies,y_cohort}.csv`), each pooled across the four sites and, in
 the `within_site_*` twins, per site, plus a `manifest.json` with the binning

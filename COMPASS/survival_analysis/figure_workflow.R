@@ -698,9 +698,11 @@ plot_federated_forest <- function(d, landmark, site_name = NULL) {
 }
 
 # The within-site bundle directory was renamed between exports
-# (nvflare_within_site_cox_univariate -> nvflare_within_site_univariate_cox).
-# Accept either, preferring whichever actually exists.
-FEDERATED_WITHIN_SITE_DIRS <- c("nvflare_within_site_univariate_cox",
+# (nvflare_within_site_cox_univariate -> nvflare_within_site_univariate_cox ->
+# within_site_cox_univariate in rhino_data_v2). Accept any, preferring whichever
+# actually exists.
+FEDERATED_WITHIN_SITE_DIRS <- c("within_site_cox_univariate",
+                                "nvflare_within_site_univariate_cox",
                                 "nvflare_within_site_cox_univariate")
 
 federated_within_site_file <- function(federated_path, filename) {
@@ -937,31 +939,57 @@ FEDERATED_MODEL_COLORS <- c("Elastic-Net Cox"="#4C72B0","Cox baseline (age)"="#9
   "Dynamic DeepHit"="#2A9D8F")
 FEDERATED_FEATURE_STATS <- c("mean","min","max","last","delta","n_observations")
 
-# The same bundles refit without Dana-Farber sit in "<directory>_no_DFCI".
+# The same bundles refit without Dana-Farber sit in "<directory>_no_DFCI";
+# rhino_data_v2 marks both variants (marker: "w_DFCI" or "no_DFCI").
 FEDERATED_MULTIVARIABLE_VARIANTS <- list(
-  pooled=list(suffix="",stem="",label="",
+  pooled=list(suffix="",marker="w_DFCI",stem="",label="",
     note="Trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins and MSK data."),
-  no_dfci=list(suffix="_no_DFCI",stem="_no_dfci",label=" (trained without Dana-Farber)",
+  no_dfci=list(suffix="_no_DFCI",marker="no_DFCI",stem="_no_dfci",label=" (trained without Dana-Farber)",
     note="Refit without Dana-Farber; trained and tested on Fred Hutch, Johns Hopkins and MSK data."))
 # Darker twins of the pooled full-model colors, used where both variants share a panel.
 FEDERATED_NO_DFCI_MODEL_COLORS <- c("Elastic-Net Cox, no DFCI"="#1F3D73",
   "XGBoost Survival, no DFCI"="#6E5200",
   "Dynamic DeepHit, no DFCI"="#17675D")
 
+# rhino_data_v2 exports beside the univariate CSV, for one variant: a directory per
+# variant (federated_elastic_net_cox_w_DFCI/) or a Rhino package per landmark
+# (<model>/lm_<days>/w_DFCI/), either with an optional adt/ subfolder. A family's
+# per-landmark files load together; the duplicate-key checks catch overlaps.
+# Mirrors federated_v2_export_files() in prepare_figure_data.py.
+federated_v2_export_files <- function(federated_path, file, variant="pooled") {
+  marker <- FEDERATED_MULTIVARIABLE_VARIANTS[[variant]]$marker
+  root <- dirname(federated_path)
+  sort(unique(Sys.glob(c(file.path(root,paste0("*_",marker),c(file,file.path("adt",file))),
+    file.path(root,"*","lm_*",marker,c(file,file.path("adt",file)))))))
+}
+
+# Per-landmark files are read as text and typed together, so a column that is
+# empty in one landmark's file still binds with the others.
+read_federated_csvs <- function(paths) {
+  if(length(paths)==1L) return(readr::read_csv(paths,show_col_types=FALSE))
+  d <- dplyr::bind_rows(lapply(paths,readr::read_csv,col_types=readr::cols(.default="c")))
+  readr::type_convert(d,col_types=readr::cols())
+}
+
 FEDERATED_DEEPHIT_METRIC_DIRS <- c("fast_federated_deephit", "federated_deephit")
 FEDERATED_DEEPHIT_METRIC_FILE <- "deephit_federated_metrics_adt.csv"
-federated_deephit_metric_paths <- function(federated_path, suffix="")
-  unlist(lapply(paste0(FEDERATED_DEEPHIT_METRIC_DIRS,suffix),function(directory)
-    file.path(dirname(federated_path),directory,
-      c(FEDERATED_DEEPHIT_METRIC_FILE,
-        file.path("adt",FEDERATED_DEEPHIT_METRIC_FILE)))),use.names=FALSE)
+# Candidate exports in order: each legacy file alone, then the v2 files together.
+federated_deephit_metric_sources <- function(federated_path, variant="pooled") {
+  legacy <- unlist(lapply(paste0(FEDERATED_DEEPHIT_METRIC_DIRS,FEDERATED_MULTIVARIABLE_VARIANTS[[variant]]$suffix),
+    function(directory) file.path(dirname(federated_path),directory,
+      c(FEDERATED_DEEPHIT_METRIC_FILE,file.path("adt",FEDERATED_DEEPHIT_METRIC_FILE)))),use.names=FALSE)
+  v2 <- setdiff(federated_v2_export_files(federated_path,FEDERATED_DEEPHIT_METRIC_FILE,variant),legacy)
+  c(as.list(legacy),if(length(v2)) list(v2))
+}
+federated_deephit_metric_paths <- function(federated_path, variant="pooled")
+  unlist(federated_deephit_metric_sources(federated_path,variant),use.names=FALSE)
 
 load_federated_dynamic_deephit <- function(federated_path,variant="pooled") {
-  suffix <- FEDERATED_MULTIVARIABLE_VARIANTS[[variant]]$suffix
-  paths <- federated_deephit_metric_paths(federated_path,suffix)
   found <- FALSE
-  for(path in paths[file.exists(paths)]) {
-    d <- readr::read_csv(path,show_col_types=FALSE)
+  for(paths in federated_deephit_metric_sources(federated_path,variant)) {
+    if(!all(file.exists(paths))) next
+    d <- read_federated_csvs(paths)
+    path <- paste(paths,collapse="; ")
     # The older DeepHit exporter contains only the landmark arm.
     if(!"training_arm" %in% names(d)) next
     needed <- c("analysis_label","endpoint","landmark_days","config","training_arm",
@@ -990,9 +1018,16 @@ load_federated_dynamic_deephit <- function(federated_path,variant="pooled") {
   d
 }
 
-federated_multivariable_files <- function(federated_path, family, suffix="") {
+# The legacy "<directory><suffix>/<file>" when present, else the rhino_data_v2
+# files (federated_v2_export_files), else the legacy path, reported as missing.
+federated_multivariable_files <- function(federated_path, family, variant="pooled") {
   spec <- FEDERATED_MULTIVARIABLE[[family]]
-  setNames(file.path(dirname(federated_path),paste0(spec$directory,suffix),spec$files),names(spec$files))
+  legacy <- file.path(dirname(federated_path),
+    paste0(spec$directory,FEDERATED_MULTIVARIABLE_VARIANTS[[variant]]$suffix),spec$files)
+  setNames(lapply(seq_along(legacy),function(i) {
+    v2 <- federated_v2_export_files(federated_path,spec$files[[i]],variant)
+    if(file.exists(legacy[[i]]) || !length(v2)) legacy[[i]] else v2
+  }),names(spec$files))
 }
 
 # OMOP names contain internal double underscores, and missingness indicators
@@ -1011,11 +1046,11 @@ load_federated_multivariable <- function(path, family=names(FEDERATED_MULTIVARIA
   spec <- FEDERATED_MULTIVARIABLE[[family]]
   what <- paste("Federated",spec$label,if(kind=="metrics") "metrics" else
     if(spec$kind=="cox") "coefficients" else "importance")
-  if (!file.exists(path)) {
-    warning(what," unavailable; missing: ",path)
+  if (!all(file.exists(path))) {
+    warning(what," unavailable; missing: ",paste(path[!file.exists(path)],collapse=", "))
     return(NULL)
   }
-  d <- readr::read_csv(path,show_col_types=FALSE)
+  d <- read_federated_csvs(path)
   needed <- c("analysis_label","endpoint","landmark_days",if(kind=="metrics")
     c("model","cohort","config","test_mean_auc_t","n_test","n_events_test") else c("feature",spec$value))
   missing <- setdiff(needed,names(d))
@@ -1047,7 +1082,7 @@ load_federated_multivariable <- function(path, family=names(FEDERATED_MULTIVARIA
   }
   if(anyDuplicated(d[keys])) stop("Duplicate landmark/",if(kind=="metrics") "config" else "feature",
     " rows in ",what," input")
-  if(!nrow(d)) warning("No ADT/platinum rows in ",what," input: ",path)
+  if(!nrow(d)) warning("No ADT/platinum rows in ",what," input: ",paste(path,collapse=", "))
   d
 }
 
@@ -1074,7 +1109,7 @@ render_federated_multivariable <- function(root,federated_path,family,dpi,overwr
   spec <- FEDERATED_MULTIVARIABLE[[family]]
   version <- FEDERATED_MULTIVARIABLE_VARIANTS[[variant]]
   spec$stems <- setNames(paste0(spec$stems,version$stem),names(spec$stems))
-  paths <- federated_multivariable_files(federated_path,family,version$suffix)
+  paths <- federated_multivariable_files(federated_path,family,variant)
   metrics <- load_federated_multivariable(paths[["metrics"]],family,"metrics")
   features <- load_federated_multivariable(paths[["features"]],family,"features")
   audit <- federated_input_audit_note(features,family)
@@ -1158,7 +1193,7 @@ render_federated_deephit_performance <- function(root,federated_path,dpi,overwri
 }
 
 # Platinum-trained federated bundles refit without Dana-Farber, scored on local
-# endpoints by 04_federated_transfer.ipynb (`federated_transfer_adt_no_DFCI/`).
+# endpoints by 04a_transfer_updated.ipynb (`federated_transfer_adt_no_DFCI/`).
 # No Dana-Farber patient was in training, so this is an external validation.
 FEDERATED_TRANSFER_FILES <- c("transfer_metrics.csv","transfer_auc_t.csv")
 # 04 in the patients with a Gleason score (ADT clock) / sequenced patients /
@@ -1197,19 +1232,19 @@ FEDERATED_TRANSFER_SPEC <- list(stem="transfer_discrimination_no_dfci",auc_stem=
   source="Platinum-trained federated bundles refit without Dana-Farber and scored on the local ADT cohort; every endpoint, platinum included, is out of sample.")
 
 # Path helpers mirror their namesakes in prepare_figure_data.py. Every federated
-# input defaults to the rhino_results delivery under the COMPASS data root.
+# input defaults to the rhino_data_v2 delivery under the COMPASS data root.
 federated_config_path <- function(config, key, default) {
   path <- config[[key]]
   if(length(path)==1L && !is.na(path) && nzchar(path)) path else default
 }
 federated_rhino_root <- function(config)
-  federated_config_path(config,"federated_rhino_root",file.path(config$data_root,"rhino_results"))
+  federated_config_path(config,"federated_rhino_root",file.path(config$data_root,"rhino_data_v2"))
 federated_transfer_no_dfci_dir <- function(config)
   federated_config_path(config,"federated_transfer_no_dfci_path",
     file.path(federated_rhino_root(config),"federated_transfer_adt_no_DFCI"))
 federated_figure_data_dir <- function(config)
   federated_config_path(config,"federated_figure_data_path",
-    file.path(federated_rhino_root(config),"misc_figure_data"))
+    file.path(federated_rhino_root(config),"figure_data"))
 
 load_federated_transfer <- function(directory, kind=c("metrics","auc_t")) {
   kind <- match.arg(kind)
@@ -1253,7 +1288,7 @@ load_federated_transfer <- function(directory, kind=c("metrics","auc_t")) {
 federated_transfer_stale <- function(d, needed, path) {
   missing <- setdiff(needed,names(d))
   if(!length(missing)) return(FALSE)
-  warning("Federated transfer input predates the mean AUC(t) columns (rerun 04_federated_transfer.ipynb); missing ",
+  warning("Federated transfer input predates the mean AUC(t) columns (rerun 04a_transfer_updated.ipynb); missing ",
     paste(missing,collapse=", "),": ",path)
   TRUE
 }
@@ -1629,7 +1664,8 @@ load_federated_transfer_km <- function(directory) {
   missing <- setdiff(needed,names(d))
   if(length(missing)) stop("Federated transfer KM input is missing: ",paste(missing,collapse=", "))
   d <- mutate(d,clock=as.character(clock),endpoint=tolower(endpoint),model_family=as.character(model_family),
-      sequenced=toupper(HAS_SEQUENCING) %in% c("TRUE","T","1")) %>%
+      # pandas writes the True/NaN flag as "1.0" once it is concatenated with the all-NaN ADT-clock column.
+      sequenced=toupper(HAS_SEQUENCING) %in% c("TRUE","T") | suppressWarnings(as.numeric(HAS_SEQUENCING)) %in% 1) %>%
     filter(endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS),clock %in% names(FEDERATED_TRANSFER_KM_CLOCKS))
   if(any(!d$event %in% c(0,1)) || any(!is.finite(d$duration_days) | d$duration_days<0))
     stop("Invalid federated transfer KM outcomes")
@@ -1845,7 +1881,7 @@ render_federated_transfer_km <- function(root, directory, dpi, overwrite) {
 }
 
 # Aggregate KM curves and binned trajectories exported by the federated run
-# (rhino_results/misc_figure_data): pooled across sites and within each site,
+# (rhino_data_v2/figure_data): pooled across sites and within each site,
 # no patient-level rows. Drawn with the local plotters so the panels match.
 FEDERATED_FIGURE_DATA_FILES <- c(manifest="manifest.json",cohort_km="cohort_km.csv",
   km="lab_extreme_km.csv",km_summary="lab_extreme_summary.csv",
@@ -2188,7 +2224,7 @@ manuscript_transfer_caption <- function(no_d=FALSE) {
   caption(
     paste0(if(no_d) "Federated Figure 5 (without the sequenced-with-Gleason panel). " else "Federated Figure 5. ",
       "External validation at Dana-Farber of federated platinum models trained without Dana-Farber, alone and combined with Gleason score and TP53/RB1/PTEN status, and time-to-event risk separation by the transferred score."),
-    paste0("Elastic-Net Cox and XGBoost survival models trained for platinum treatment on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data were applied unchanged to the Dana-Farber ADT cohort and evaluated against three local endpoints: platinum treatment (the training endpoint), aggressive-variant prostate cancer (AVPC), and neuroendocrine prostate cancer (NEPC). (a) Mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), at 0, 90, and 180 days after ADT initiation. Filled points denote full laboratory models and open points age-only models. ",
+    paste0("Elastic-Net Cox and XGBoost survival models trained for platinum treatment on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data were applied unchanged to the Dana-Farber ADT cohort and evaluated against three local endpoints: platinum treatment (the training endpoint), aggressive-variant prostate cancer (AVPC), and neuroendocrine prostate cancer (NEPC). (a) Mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), of the full laboratory models at 0, 90, and 180 days after ADT initiation. ",
       clinical," The same full laboratory models compared with unpenalized Cox models fitted locally at Dana-Farber on clinical covariates alone and on the transferred score plus the same covariates other than age (combined models), among patients with a Gleason score available before the landmark (b) and patients with tumor sequencing, with landmarks measured from the sequencing date (c)",
       if(no_d) "" else ", and sequenced patients who also had a Gleason score (d)",
       ". The clinical covariates were Gleason score and age (b) or any alteration (mutation, deletion, amplification, or structural variant) in TP53, RB1, and PTEN and age (c)",
@@ -2728,14 +2764,17 @@ manuscript_federated_multivariable_no_dfci <- function(performance,no_dfci_perfo
 # Per-horizon AUC(t) stays on the standalone transfer page. With the KM tables
 # (`km`), a row of top- vs bottom-10% score KM panels (one per endpoint) and the
 # event-free gradient follow (manuscript_federated_transfer_km).
-MANUSCRIPT_TRANSFER_ROW_HEIGHTS <- c(first=3.4,clinical=2.6,km=2.7,gradient=2.6)
+MANUSCRIPT_TRANSFER_ROW_HEIGHTS <- c(first=2.6,clinical=2.6,km=2.7,gradient=2.6)
 manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
     include=names(FEDERATED_TRANSFER_CLINICAL),key="federated_05_transfer_no_dfci") {
+  # Panel a shows the full models only; the age-only rows stay on the standalone transfer page.
+  metrics <- metrics[metrics$config!="baseline",,drop=FALSE]
   d <- prepare_federated_transfer(metrics,federated_transfer_strip_counts(metrics))
-  discrimination <- plot_federated_transfer(d,NULL,NULL,NULL) + ggplot2::labs(x="Landmark after ADT initiation")
+  discrimination <- plot_federated_transfer(d,NULL,NULL,NULL) +
+    ggplot2::guides(shape="none") + ggplot2::labs(x="Landmark after ADT initiation")
   plots <- list(discrimination); titles <- "Discrimination"
   legend <- c(
-    "a: mean AUC(t) of the full and age-only models by endpoint and landmark; bars are 95% bootstrap CIs over patients. Strips give day-0 patients/events.",
+    "a: mean AUC(t) of the full models by endpoint and landmark; bars are 95% bootstrap CIs over patients. Strips give day-0 patients/events.",
     paste0("Patients/events by landmark — ",federated_transfer_count_note(metrics),"."))
   panel_titles <- c(gleason="Patients with Gleason score",trio="Sequenced patients",
     trio_gleason="Sequenced patients with Gleason score")
@@ -2774,7 +2813,8 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
   }
   plots <- c(plots,extra$plots); titles <- c(titles,extra$titles); legend <- c(legend,extra$legend)
   row_heights <- unname(row_heights)
-  spec <- list(key=key,width=7.2,height=sum(row_heights),layout=do.call(rbind,rows),titles=titles,
+  # 9 in (not the usual 7.2) keeps the one-row b-d legends unclipped; d's is ~8.5 in.
+  spec <- list(key=key,width=9,height=sum(row_heights),layout=do.call(rbind,rows),titles=titles,
     row_heights=row_heights,shared_legend_panels=integer())
   list(plot=manuscript_combine(plots,spec),spec=spec,data=metrics,legend=paste(
     c(legend,FEDERATED_TRANSFER_SPEC$source),collapse="\n"))
@@ -3422,12 +3462,12 @@ figure_notebook_manifest <- function(config, check_sources = TRUE) {
       fail("Requested federated results were not prepared.")
     registered_inputs <- c(vapply(c("cox_within_site_all_sites_cohort.csv", "cox_within_site_all_sites_results.csv"),
       function(filename) federated_within_site_file(config$federated_path, filename), character(1)),
-      unlist(lapply(FEDERATED_MULTIVARIABLE_VARIANTS, function(variant)
+      unlist(lapply(names(FEDERATED_MULTIVARIABLE_VARIANTS), function(variant)
         lapply(names(FEDERATED_MULTIVARIABLE), function(family)
-          federated_multivariable_files(config$federated_path, family, variant$suffix))), use.names = FALSE))
+          federated_multivariable_files(config$federated_path, family, variant))), use.names = FALSE))
     registered_inputs <- c(registered_inputs,
-      unlist(lapply(FEDERATED_MULTIVARIABLE_VARIANTS,function(variant)
-        federated_deephit_metric_paths(config$federated_path,variant$suffix)),use.names=FALSE),
+      unlist(lapply(names(FEDERATED_MULTIVARIABLE_VARIANTS),function(variant)
+        federated_deephit_metric_paths(config$federated_path,variant)),use.names=FALSE),
       file.path(federated_transfer_no_dfci_dir(config), FEDERATED_TRANSFER_NO_DFCI_FILES),
       file.path(federated_transfer_no_dfci_dir(config),"all_models",
         c("transfer_metrics.csv","transfer_auc_t.csv")),

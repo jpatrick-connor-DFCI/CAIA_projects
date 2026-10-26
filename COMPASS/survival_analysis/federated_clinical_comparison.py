@@ -422,8 +422,11 @@ def compare_clinical_models(
                 note += f"fewer than {min_events} events: not fitted"
                 clin = unfitted
             for bundle in bundles:
+                # A bundle exported without an age-only model (the landmark XGBoost packages) has no
+                # transferred age score: its row stays empty instead of emptying the paired patient set.
                 risks = {m: sub_df.get(f"{bundle}|{CONFIG_FOR_MODEL[m]}", pd.Series(np.nan, index=sub_df.index))
-                         .to_numpy(dtype=float) for m in CONFIG_FOR_MODEL}
+                         .to_numpy(dtype=float) for m in CONFIG_FOR_MODEL
+                         if m != TRANSFERRED_AGE or f"{bundle}|{CONFIG_FOR_MODEL[m]}" in sub_df}
                 comb = (fit_combined_cox(sub_df, risks[TRANSFERRED_LABS], spec["combined"], **fit_kw)
                         if fitted else unfitted)
                 if comb["cph"] is not None:
@@ -445,15 +448,16 @@ def compare_clinical_models(
                 for model in MODELS:
                     # The transferred scores report the clinical Cox fit, as the subpopulation's fit.
                     fit = fits.get(model, clin)
+                    scored = model in risks
                     row = {**base, "bundle": bundle, "model_family": families.get(bundle),
                            "model": model, "n_scored": int(ok.sum()),
-                           "n_scored_events": int(ev.sum()), "c_index": c[model],
+                           "n_scored_events": int(ev.sum()), "c_index": c.get(model, np.nan),
                            "c_index_lo": np.nan, "c_index_hi": np.nan,
                            "delta_c_vs_transferred": np.nan, "delta_lo": np.nan, "delta_hi": np.nan,
                            "delta_c_vs_clinical": np.nan, "delta_c_vs_clinical_lo": np.nan,
                            "delta_c_vs_clinical_hi": np.nan,
                            "c_index_apparent": fits[model]["apparent_c"] if model in fits else np.nan,
-                           "mean_auc": auc[model], "mean_auc_lo": np.nan, "mean_auc_hi": np.nan,
+                           "mean_auc": auc.get(model, np.nan), "mean_auc_lo": np.nan, "mean_auc_hi": np.nan,
                            "delta_auc_vs_transferred": np.nan, "delta_auc_lo": np.nan,
                            "delta_auc_hi": np.nan, "delta_auc_vs_clinical": np.nan,
                            "delta_auc_vs_clinical_lo": np.nan, "delta_auc_vs_clinical_hi": np.nan,
@@ -461,6 +465,9 @@ def compare_clinical_models(
                            "auc_horizons_days": ",".join(str(int(h)) for h in horizons),
                            **fit["fit_info"],
                            "note": note + (comb["note"] if model == COMBINED_COX else "")}
+                    if not scored:
+                        rows.append(row)
+                        continue
                     if boot:
                         row["c_index_lo"], row["c_index_hi"] = fet._ci(boot[model])
                     if model != TRANSFERRED_LABS:

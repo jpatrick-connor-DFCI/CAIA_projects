@@ -134,6 +134,52 @@ def model_identity(bundle: dict, model: dict) -> tuple:
             int(model["horizon_days"]) if model.get("horizon_days") is not None else None)
 
 
+# Top-level fields the per-landmark Rhino packages must agree on before their
+# bundles can be scored as one; a mismatch means the runs are not comparable.
+MERGE_MATCH_KEYS = ("format", "format_version", "model_family", "analysis_label",
+                    "endpoint", "time_unit_days", "xgboost_version", "torch_version")
+MERGE_UNION_KEYS = ("training_sites", "training_arms")
+
+
+def merge_bundles(bundles: list[dict], sources: list[str] | None = None) -> dict:
+    """Combine per-landmark bundles of one family into a single bundle.
+
+    The landmark Rhino packages export one bundle per landmark, all with the
+    same file name. Every model carries its own preprocessing, so the model
+    lists concatenate safely; the shared top-level fields must agree, and a
+    model identity may appear only once.
+    """
+    if not bundles:
+        raise BundleError("merge_bundles: no bundles to merge")
+    sources = [str(s) for s in sources] if sources is not None else [
+        f"bundle[{i}]" for i in range(len(bundles))]
+    if len(sources) != len(bundles):
+        raise BundleError("merge_bundles: sources must match bundles one to one")
+    first = bundles[0]
+    for key in MERGE_MATCH_KEYS:
+        values = {json.dumps(b.get(key)) for b in bundles}
+        if len(values) > 1:
+            found = {src: b.get(key) for src, b in zip(sources, bundles)}
+            raise BundleError(f"merge_bundles: bundles disagree on {key!r}: {found}")
+
+    merged = {k: v for k, v in first.items() if k not in ("models", *MERGE_UNION_KEYS)}
+    for key in MERGE_UNION_KEYS:
+        if any(key in b for b in bundles):
+            merged[key] = sorted({v for b in bundles for v in b.get(key) or []})
+    merged["models"] = []
+    seen: dict[tuple, str] = {}
+    for src, bundle in zip(sources, bundles):
+        for model in bundle["models"]:
+            identity = model_identity(bundle, model)
+            if identity in seen:
+                raise BundleError(f"merge_bundles: model {identity} is in both "
+                                  f"{seen[identity]} and {src}")
+            seen[identity] = src
+            merged["models"].append(model)
+    merged["source_paths"] = sources
+    return merged
+
+
 def select_model(bundle: dict, landmark_days: int, config: str = "both", *,
                  training_arm: str | None = None, horizon_days: int | None = None) -> dict:
     """Pick one fitted model out of a bundle.

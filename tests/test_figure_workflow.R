@@ -83,7 +83,7 @@ local({
   write_csv(expand_grid(landmark_days=c(0,90,180),feature=c("PSA__mean","Testosterone__last__missing","age")) %>%
     mutate(analysis_label="adt",endpoint="platinum",coefficient=rep(c(.2,-.1,.3),3)),cox_coefficients_path)
   # 04: bundles refit without Dana-Farber, scored on local endpoints.
-  no_dfci_dir <- file.path(root,"rhino_results","federated_transfer_adt_no_DFCI"); dir.create(no_dfci_dir,recursive=TRUE)
+  no_dfci_dir <- file.path(root,"rhino_data_v2","federated_transfer_adt_no_DFCI"); dir.create(no_dfci_dir,recursive=TRUE)
   transfer_metrics_path <- file.path(no_dfci_dir,"transfer_metrics.csv")
   write_csv(expand_grid(endpoint=c("nepc","avpc","platinum"),
       bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),
