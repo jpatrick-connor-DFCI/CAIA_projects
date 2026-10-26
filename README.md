@@ -1242,6 +1242,12 @@ bundles trained with DFCI are not scored (DFCI patients would be in-sample).
   `baseline` (`baseline_fallback`; recorded in `baseline_bundle`). An age-only
   model's C and AUC(t) depend only on how it ranks age, so the comparator is the
   same.
+- **First-delivery fallback.** If `rhino_data_v2` has no no-DFCI XGBoost bundle,
+  04a scores `rhino_results/federated_model_results/federated_xgboost_no_DFCI/` instead.
+  `COMPASS_RHINO_V1_ROOT` sets the earlier delivery's root, and
+  `V1_FALLBACK_FAMILIES` sets which families may fall back; `()` turns this off.
+  That bundle keeps its own age-only model if it has one. The bundle summary and
+  `transfer_run.json` (`delivery`) record which delivery each family came from.
 - **Comparison table.** The notebook shows each family's federated held-out test
   metrics next to the local platinum ones. Those are read from the metrics CSV
   beside each source bundle.
