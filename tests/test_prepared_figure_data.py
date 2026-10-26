@@ -271,7 +271,11 @@ def test_preparation_notebook_runs_all_python_cells(tmp_path, monkeypatch):
     for i, cell in enumerate(notebook["cells"]):
         if cell["cell_type"] == "code":
             exec(compile("".join(cell["source"]), f"notebook-cell-{i}", "exec"), state)
-    assert set(state["manifest"]["cells"]) == {"adt__platinum", "adt__nepc"}
+    assert state["ENDPOINTS"] == ["platinum"]
+    assert set(state["manifest"]["cells"]) == {"adt__platinum"}
+    assert state["manifest"]["cohort_overview"]
+    assert {row["table"] for row in state["rows"] if row["arm"] == "Figure 3 cohort sensitivity"} == {
+        "incidence", "label_overlap", "cohort_km"}
     assert Path(config["cache_root"], "preparation_config.json").exists()
     assert "PSA" in state["figure_data"].canonical_lab_names()
     assert state["rows"] and all(row["rows"] >= 0 for row in state["rows"])

@@ -165,9 +165,9 @@ stopifnot(figure_public_path(file.path("/x/ADT/by_figure/figure4/e_combinations_
             file.path("/x/ADT/04_multivariate/internal", paste0("discrimination_auc__", leaf)),
           # Non-canonical cohorts nest their usual section under cohort sensitivity.
           figure_public_path("/x/ADT/by_figure/figure4/a_discrimination_auc_platinum/platinum__metastatic_llm__incl") ==
-            "/x/ADT/06_cohort_sensitivity/metastatic_llm__incl/04_multivariate/internal/discrimination_auc__platinum__metastatic_llm__incl",
+            "/x/ADT/03_univariate/cohort_sensitivity/metastatic_llm__incl/04_multivariate/internal/discrimination_auc__platinum__metastatic_llm__incl",
           figure_public_path("/x/ADT/by_figure/cohort_comparison/lm180/nepc__all__incl") ==
-            "/x/ADT/06_cohort_sensitivity/cohort_forest_lm180__nepc__all__incl",
+            "/x/ADT/03_univariate/cohort_sensitivity/cohort_forest_lm180__nepc__all__incl",
           federated_output_path("/x/ADT", "xgboost_importance_no_dfci", ".png") ==
             "/x/ADT/04_multivariate/federated/xgboost_importance_no_dfci__platinum.png",
           federated_output_path("/x/ADT", "transfer_auc_t_no_dfci") == "/x/ADT/05_transfer/transfer_auc_t_no_dfci__platinum",

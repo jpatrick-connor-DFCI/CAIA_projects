@@ -113,7 +113,7 @@ Cells with fewer than 25 events are hatched/marked; missing cells stay blank.
 The label figure uses `mrn_lists/adt_intent_labels_model_cohort.csv` and
 `llm_met_labels_model_cohort.csv`, preserving missing labels explicitly.
 Run notebook `06` once after this update to prepare these small summary tables.
-Combined outputs are under `06_cohort_sensitivity/` (count tables in `06_cohort_sensitivity/data/`):
+Combined outputs are under `03_univariate/cohort_sensitivity/` (count tables in `03_univariate/cohort_sensitivity/data/`):
 `event_incidence_lm180__platinum__all__incl`, `metastatic_label_overlap__platinum__all__incl`
 and `cohort_km_cascade_lm180__platinum__all__incl`.
 
@@ -134,7 +134,7 @@ Each exports `02_llm/figure2v3_llm_<cohort>__platinum__all__incl`, with agreemen
 classification metrics, subtype composition, and platinum enrichment in a 2-by-2
 layout, plus `classifier_validation_<cohort>` and `subtype_platinum_<cohort>` paired
 exports. The three metastatic-label
-confusion matrices also form `06_cohort_sensitivity/metastatic_label_agreement__<endpoint>__<subset>__<exclusion>`.
+confusion matrices also form `03_univariate/cohort_sensitivity/metastatic_label_agreement__<endpoint>__<subset>__<exclusion>`.
 These combined figures have lettered panels and retain each panel's counts,
 captions, and legends. All individual panels are exported alongside them.
 Compilation stays within each arm/cohort/endpoint; Figure 2v3 remains exclusive
@@ -175,7 +175,7 @@ falling back to test).
 All read `risk_stratified_patients_*.csv` from run_risk_stratification; rerun it
 if those files are missing, since older runs did not write them.
 
-Each arm root (`ADT/`, `ARPI/`) has six numbered section folders:
+Each arm root (`ADT/`, `ARPI/`) has five numbered section folders:
   01_cohort/                 raw cohort numbers: Figure 1/Table 1, analysis sets,
                              pre-ADT coverage, federated site incidence and cohort KM
   02_llm/                    LLM NEPC/AVPC subtype labels and their KM curves
@@ -185,13 +185,13 @@ Each arm root (`ADT/`, `ARPI/`) has six numbered section folders:
                              `trajectories/<lab>/` holds lab trajectories and distributions
   03_univariate/federated/   pooled PSA/testosterone forests and volcanoes, with
                              `km/<lab>/` and `trajectories/<lab>/` (pooled and by site)
+  03_univariate/cohort_sensitivity/  Figure 3 supplement: cohort forests,
+                             endpoint incidence, metastatic-label comparisons,
+                             and `<subset>__<exclusion>/<section>/` for other cohorts
   04_multivariate/internal/  DFCI Elastic-Net/XGBoost discrimination, importance,
                              somatic sensitivity, combinations, risk strata
   04_multivariate/federated/ federated models, including the no-DFCI refits
   05_transfer/               no-DFCI federated models scored at Dana-Farber
-  06_cohort_sensitivity/     cohort forests, endpoint incidence, metastatic-label
-                             comparisons, and `<subset>__<exclusion>/<section>/` for
-                             every run on a non-canonical cohort (anything but all__incl)
 Local filenames are `<figure>__<endpoint>__<subset>__<exclusion>.png`; federated
 ones are `<figure>__platinum.png`. Every export folder holds only PNG/PDF figures:
 CSV/Markdown tables and legends go in a `data/` subfolder of the same folder
@@ -218,10 +218,10 @@ is false. Individual panels are always retained.
 
 The numbered manuscript set is: `01_cohort_overview`, `02_llm_nepc_avpc__<icd|adt|lm0>`
 (one per Figure 2 cohort, captions `figure2_<cohort>`, with a cohort header line),
-`03_dfci_univariable`, `04_multivariable_labs` (held-out Elastic-Net/XGBoost
-discrimination versus age baselines),
-`06_dfci_cohort_sensitivity` (paired platinum/NEPC incidence and counts plus
-day-180 PSA/testosterone associations),
+`03_dfci_univariable`, `03_cohort_sensitivity_supplement` (paired platinum/NEPC
+incidence and counts plus day-180 PSA/testosterone associations),
+`04_multivariable_labs` (held-out Elastic-Net/XGBoost discrimination versus age
+baselines),
 `07_federated_incidence_associations` (landmark-0 site incidence and counts plus
 PSA/testosterone associations on natural-log hazard-ratio axes), and
 `08_federated_multivariable` (the local Figure 4 layout for the federated
@@ -241,7 +241,7 @@ each transferred score + the same covariates without age (the full models includ
 in patients with a Gleason score before the ADT landmark (b), sequenced patients (c) and
 sequenced patients with a Gleason score (d); c and d on a sequencing-date clock; facet
 strips give day-0 patients and events; e-g, platinum/AVPC/NEPC KM curves for the top vs
-bottom 10% of the day-180 XGBoost score; h, 5-year event-free probability by score
+bottom 10% of the day-180 XGBoost score; h, 5-year event-free probability from the ADT +180-day landmark by transferred federated XGBoost score
 quartile, Gleason score and six mutually exclusive mutation groups (0 altered, TP53 altered, PTEN altered, RB1 altered, 2 altered, 3 altered)). `federated_05_transfer_no_dfci__no_d`
 (caption `federated_figure5_no_d`) drops panel d, so its KM curves are d-f and the gradient g.
 The local Figure 3 stays on Dana-Farber patient-level data. The cohort
@@ -416,7 +416,7 @@ without it, Figure 5 is drawn with panel a only. `transfer_km_patients.csv` (04'
 transferred labs scores with Gleason and TP53/RB1/PTEN status on the ADT and sequencing clocks)
 renders `05_transfer/km/`: score × TP53/RB1/PTEN and top-vs-bottom-10% score KM curves per
 endpoint, a head-to-head grid (score | Gleason | TP53/RB1/PTEN) and the 5-year event-free
-gradient (score quartile, Gleason, six TP53/PTEN/RB1 alteration groups) per bundle × landmark. Hazard-ratio
+gradient (score quartile, Gleason, six TP53/PTEN/RB1 alteration groups reported before the ADT landmark) per bundle × landmark, all using the ADT clock. Hazard-ratio
 forests and score × Gleason curves are no longer drawn. Only aggregate tables are exported
 (`transfer_km_{curves,summary,gradient}_no_dfci`); they feed Federated Figure 5 e-h
 (XGBoost, 180 days). Missing transfer outputs are reported and skipped.
@@ -432,6 +432,8 @@ run `07_figures/all.R` with stage `all`. All Python remains in `06`; graphics ca
 ## Entry points
 
 Run `Rscript COMPASS/survival_analysis/07_figures/all.R` for the complete workflow, or run a numbered script in this directory for one manuscript figure and its section supplements. Run notebook `06_prep_figure_data.ipynb` first. Set `CAIA_PROJECT_ROOT` when using a checkout outside the cluster default. Each script honors the same `COMPASS_*` settings and `COMPASS_FIGURE_STAGE` (`all`, `prepare`, or `render`). Figure data and legends remain alongside exported figures in their `data/` folders; patient and graphics caches remain under `COMPASS_FIGURE_DATA_ROOT`.
+
+`retained_exports.txt` records the curated PNG/PDF output set based on `Desktop/ADT` on 2026-10-26, with cohort sensitivity relocated under Figure 3. Every figure entry point renders only paths in that list under `COMPASS_FIG_ROOT/ADT`; this includes `all.R` and runs with `COMPASS_RENDER_PDF=true`. Prepared graphics caches and data sidecars may still contain inputs for assembling the retained figures. To restore an intentionally deleted render, add its relative PNG path to the list (and its PDF path if it is a manuscript figure).
 
 The entry points also work with `source("/absolute/path/to/07_figures/<figure>.R")`; they infer the code root from the sourced file when `CAIA_PROJECT_ROOT` is unset.
 

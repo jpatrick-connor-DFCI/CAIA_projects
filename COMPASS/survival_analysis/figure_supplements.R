@@ -299,7 +299,7 @@ render_cohort_overview <- function(manifest, config, forest_config=NULL) {
     readr::write_csv(tables[[name]], table)
     getOption("compass.figure_table_capture")(table)
   }
-  # Figure 6 combines this job's incidence table with the cohort forest. The
+  # The Figure 3 cohort-sensitivity supplement combines this job's incidence table with the cohort forest. The
   # canonical ADT job also renders the standalone forest, but manuscript
   # assembly is job-local, so register the same source plot here without
   # publishing a duplicate standalone scene.
@@ -309,10 +309,10 @@ render_cohort_overview <- function(manifest, config, forest_config=NULL) {
     if(nrow(forest)) {
       forest_plot <- plot_cohort_forest(forest,"platinum",landmark)
       manuscript_capture <- getOption("compass.manuscript_capture")
-      if(!is.function(manuscript_capture)) stop("Manuscript capture is unavailable for cohort Figure 6")
+      if(!is.function(manuscript_capture)) stop("Manuscript capture is unavailable for the Figure 3 cohort-sensitivity supplement")
       manuscript_capture(forest_plot,
         sprintf("cohort_forest_platinum_landmark%d",landmark))
-    } else message("Cohort overview: no platinum forest available for manuscript Figure 6")
+    } else message("Cohort overview: no platinum forest available for the Figure 3 cohort-sensitivity supplement")
   }
 }
 

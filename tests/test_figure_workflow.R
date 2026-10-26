@@ -140,17 +140,18 @@ local({
   stopifnot(inherits(mismatch, "error"), grepl("06_prep_figure_data.ipynb", conditionMessage(mismatch), fixed = TRUE))
   t1 <- system.time(first <- run_cached_figure_workflow(cfg, pipeline_path, "all", dpi = 60,
     prepare_workers = 1L, render_workers = 2L, forest_config = forest, federated_config = fc))[["elapsed"]]
+  retained_exports <- figure_retained_exports(pipeline_path)
   stopifnot(length(first$prepared) == 4L, length(first$rendered) > 20L,
-            all(vapply(first$rendered, function(x) x$rendered ==
-              if(grepl("^0[1-9]_",x$stem)) 2L else 1L, logical(1))))
-  manuscript_scenes <- Filter(function(s) isTRUE(s$manuscript),
+            all(vapply(first$rendered, function(x) x$rendered %in% c(1L, 2L), logical(1))))
+  manuscript_scenes <- Filter(function(s) isTRUE(s$manuscript) &&
+      figure_retained_image(s$destination, cfg$fig_root, ".png", retained_exports),
     unlist(lapply(first$prepared,`[[`,"scenes"),recursive=FALSE))
   stopifnot(length(manuscript_scenes)>=7L,
-    all(vapply(manuscript_scenes,function(s) grepl("/ADT/0[1-6]_[a-z_]+(/internal|/federated)?/manuscript/",s$destination) &&
+    all(vapply(manuscript_scenes,function(s) grepl("/ADT/(0[1-5]_[a-z_]+(/internal|/federated|/cohort_sensitivity)?|0[78]_[a-z_]+)/manuscript/",s$destination) &&
       file.exists(paste0(s$destination,".pdf")) &&
       file.exists(figure_sidecar_path(paste0(s$destination,".md"))) && s$width==7.2,logical(1))))
   overview_stems <- vapply(first$prepared$cohort_overview$scenes,`[[`,character(1),"stem")
-  stopifnot("06_dfci_cohort_sensitivity" %in% overview_stems)
+  stopifnot("03_cohort_sensitivity_supplement" %in% overview_stems)
   platinum_stems <- vapply(first$prepared$adt__platinum$scenes, `[[`, character(1), "stem")
   nepc_stems <- vapply(first$prepared$adt__nepc$scenes, `[[`, character(1), "stem")
   # Compiled pages whose panels all appear in a manuscript figure are dropped

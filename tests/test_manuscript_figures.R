@@ -74,10 +74,10 @@ federated_keys <- c("federated_03_univariable","federated_04_multivariable","fed
   "federated_05_transfer_no_dfci__no_d")
 figure2_keys <- paste0("02_llm_nepc_avpc__",c("icd","adt","lm0"))
 local_keys <- c("01_cohort_overview",figure2_keys,"03_dfci_univariable","04_multivariable_labs",
-  "06_dfci_cohort_sensitivity","07_federated_incidence_associations","08_federated_multivariable")
+  "03_cohort_sensitivity_supplement","07_federated_incidence_associations","08_federated_multivariable")
 # Figure 5 (internal Gleason sensitivity) was removed; Gleason is compared in transfer.
 stopifnot(length(captions)==13,identical(names(captions),c(local_keys,federated_keys)),
-  all(startsWith(unname(captions[local_keys]),paste0("Figure ",c(1,2,2,2,3,4,6:8),". "))),
+  all(startsWith(unname(captions[local_keys]),paste0("Figure ",c(1,2,2,2,3,4,3,7,8),". "))),
   all(grepl("^Federated Figure [3-5][. ]",unname(captions[federated_keys]))),
   setequal(unique(manuscript_base_key(names(captions))),names(MANUSCRIPT_SECTIONS)),
   grepl("ICD-10 prostate cancer cohort",captions[["02_llm_nepc_avpc__icd"]],fixed=TRUE),
@@ -107,7 +107,7 @@ stopifnot(length(caption_paths)==26,all(file.exists(caption_paths)))
 # The federated set is numbered on its own and never overwrites local figure3-5;
 # each caption sits in the manuscript folder of its figure's section.
 caption_md <- caption_paths[endsWith(caption_paths,".md")]
-stopifnot(setequal(basename(caption_md),paste0(c(paste0("figure",c(1,3,4,6:8)),paste0("figure2_",c("icd","adt","lm0")),
+stopifnot(setequal(basename(caption_md),paste0(c(paste0("figure",c(1,3,4,7,8)),"figure3_supplement",paste0("figure2_",c("icd","adt","lm0")),
   paste0("federated_figure",3:5),"federated_figure5_no_d"),".md")))
 for(path in caption_md) stopifnot(identical(readLines(path,warn=FALSE),
   readLines(sub("[.]md$",".txt",path),warn=FALSE)))
@@ -117,7 +117,7 @@ stopifnot(startsWith(readLines(caption_file("03_univariate/internal","figure3"),
   file.exists(caption_file("01_cohort","figure1")),!file.exists(caption_file("02_llm","figure2")),
   all(file.exists(caption_file("02_llm",paste0("figure2_",c("icd","adt","lm0"))))),
   file.exists(caption_file("05_transfer","federated_figure5_no_d")),
-  !file.exists(caption_file("04_multivariate/internal","figure5")),file.exists(caption_file("04_multivariate/internal","figure4")),file.exists(caption_file("06_cohort_sensitivity","figure6")),
+  !file.exists(caption_file("04_multivariate/internal","figure5")),file.exists(caption_file("04_multivariate/internal","figure4")),file.exists(caption_file("03_univariate/cohort_sensitivity","figure3_supplement")),
   file.exists(caption_file("04_multivariate/federated","figure8")),file.exists(caption_file("05_transfer","federated_figure5")),
   setequal(names(MANUSCRIPT_SECTIONS),manuscript_base_key(names(captions))))
 unlink(caption_root,recursive=TRUE)
@@ -194,7 +194,7 @@ association_plot <- ggplot(tibble(hazard_ratio_per_sd=c(.8,1.2),ci_lower=c(.7,1)
   ci_upper=c(.9,1.4),cohort=c("adt","adt_noprecastrate")),
   aes(hazard_ratio_per_sd,cohort)) + geom_point()
 dfci_combined <- manuscript_dfci_cohort_sensitivity(result,association_plot)
-stopifnot(dfci_combined$spec$key=="06_dfci_cohort_sensitivity",
+stopifnot(dfci_combined$spec$key=="03_cohort_sensitivity_supplement",
   identical(dfci_combined$spec$layout,rbind(c(1,2),c(3,3))),
   setequal(unique(dfci_combined$data$figure_section),
     c("incidence_and_counts","laboratory_associations")))
@@ -334,13 +334,14 @@ km_patients_fixture <- function(n=900) {
       bind_rows(lapply(c(elastic_net_cox="cox_federated_elasticnet_model_adt",xgboost_cox="xgboost_federated_model_adt"),
         function(bundle) { xgb <- startsWith(bundle,"xgboost"); seq_clock <- clock=="sequencing"
           scale <- c(platinum=1,nepc=1+1e-9,avpc=1.5)[[endpoint]]
-        tibble(clock=clock,endpoint=toupper(endpoint),bundle=bundle,
+          eligible <- if(seq_clock) rep(TRUE,n) else sequenced
+          tibble(clock=clock,endpoint=toupper(endpoint),bundle=bundle,
           model_family=if(xgb) "xgboost_cox" else "elastic_net_cox",landmark_days=180,
           person_id=seq_len(n),risk_score=if(xgb) round(score) else score*scale,
           duration_days=pmin(t,censor),event=as.integer(t<=censor),GLEASON_SCORE=gleason,
-          HAS_SEQUENCING=if(seq_clock) "True" else NA_character_,
-          TP53_ANY=if(seq_clock) trio[,1] else NA_real_,RB1_ANY=if(seq_clock) trio[,2] else NA_real_,
-          PTEN_ANY=if(seq_clock) trio[,3] else NA_real_,SOMATIC_N_GENES_ALTERED=NA_real_)[rows,]}))
+          HAS_SEQUENCING=ifelse(eligible,"True",NA_character_),
+          TP53_ANY=ifelse(eligible,trio[,1],NA_real_),RB1_ANY=ifelse(eligible,trio[,2],NA_real_),
+          PTEN_ANY=ifelse(eligible,trio[,3],NA_real_),SOMATIC_N_GENES_ALTERED=NA_real_)[rows,]}))
     }))
   }))
 }
@@ -354,24 +355,24 @@ top <- km_groups %>% filter(model_family=="elastic_net_cox") %>% group_by(clock,
     high=mean(score_half %in% "high score"),.groups="drop")
 tied <- filter(km_groups,clock=="adt",bundle=="cox_federated_elasticnet_model_adt",person_id<=60)
 seq_rows <- filter(km_groups,clock=="sequencing")
+adt_sequenced <- filter(km_groups,clock=="adt",sequenced)
 # The 60 tied zero scores sit at the median and go low, so the half split is ~47% high.
 stopifnot(nrow(top)==6,all(abs(top$top-.2)<.02),all(abs(top$decile-.1)<.02),all(abs(top$high-.5)<.04),
   n_distinct(tied$score_extreme)==1,n_distinct(tied$score_half)==1,n_distinct(tied$score_quartile)==1,
   all(is.na(km_groups$trio_group[km_groups$clock=="adt"])),
-  all(is.na(km_groups$trio_pattern[km_groups$clock=="adt"])),
+  all(is.na(km_groups$trio_pattern[km_groups$clock=="sequencing"])),
   all(is.na(km_groups$gleason_group[km_groups$clock=="sequencing"])),
   all(!is.na(seq_rows$trio_group)),
   identical(unname(FEDERATED_TRANSFER_GRADIENT$trio_pattern$levels),
     c("0 altered","TP53 altered","PTEN altered","RB1 altered","2 altered","3 altered")))
-trio_n <- seq_rows$TP53_ANY+seq_rows$RB1_ANY+seq_rows$PTEN_ANY
-stopifnot(all(seq_rows$trio_pattern[trio_n==0]=="0 altered"),
-  all(seq_rows$trio_pattern[trio_n==1 & seq_rows$TP53_ANY==1]=="TP53 altered"),
-  all(seq_rows$trio_pattern[trio_n==1 & seq_rows$PTEN_ANY==1]=="PTEN altered"),
-  all(seq_rows$trio_pattern[trio_n==1 & seq_rows$RB1_ANY==1]=="RB1 altered"),
-  all(seq_rows$trio_pattern[trio_n==2]=="2 altered"),
-  all(seq_rows$trio_pattern[trio_n==3]=="3 altered"),
-  setequal(unique(na.omit(seq_rows$trio_pattern)),FEDERATED_TRANSFER_GRADIENT$trio_pattern$levels),
-  all(seq_rows$trio_group[trio_n==0]==FEDERATED_TRANSFER_TRIO[1]))
+trio_n <- adt_sequenced$TP53_ANY+adt_sequenced$RB1_ANY+adt_sequenced$PTEN_ANY
+stopifnot(all(adt_sequenced$trio_pattern[trio_n==0]=="0 altered"),
+  all(adt_sequenced$trio_pattern[trio_n==1 & adt_sequenced$TP53_ANY==1]=="TP53 altered"),
+  all(adt_sequenced$trio_pattern[trio_n==1 & adt_sequenced$PTEN_ANY==1]=="PTEN altered"),
+  all(adt_sequenced$trio_pattern[trio_n==1 & adt_sequenced$RB1_ANY==1]=="RB1 altered"),
+  all(adt_sequenced$trio_pattern[trio_n==2]=="2 altered"),
+  all(adt_sequenced$trio_pattern[trio_n==3]=="3 altered"),
+  setequal(unique(na.omit(adt_sequenced$trio_pattern)),FEDERATED_TRANSFER_GRADIENT$trio_pattern$levels))
 en <- filter(km_groups,clock=="adt",bundle=="cox_federated_elasticnet_model_adt",endpoint=="nepc")
 stopifnot(abs(mean(en$score_extreme %in% "Top 20%")-.2)<.02,
   identical(sort(unique(na.omit(en$score_quartile))),paste0("Q",1:4)),
@@ -387,12 +388,23 @@ stopifnot(identical(names(km_tables),names(FEDERATED_TRANSFER_KM_TABLES)),
   !any(c("score_gleason","hr") %in% names(FEDERATED_TRANSFER_KM_VIEWS)),
   all(km_tables$summary$clock[km_tables$summary$view %in% c("trio","score_trio")]=="sequencing"),
   setequal(unique(km_tables$gradient$stratifier),names(FEDERATED_TRANSFER_GRADIENT)),
-  all(km_tables$gradient$clock[km_tables$gradient$stratifier=="trio_pattern"]=="sequencing"),
+  all(km_tables$gradient$clock=="adt"),
   setequal(unique(km_tables$gradient$group[km_tables$gradient$stratifier=="trio_pattern"]),
     FEDERATED_TRANSFER_GRADIENT$trio_pattern$levels),
   all(km_tables$gradient$horizon_days==1825),
   all(km_tables$gradient$event_free>=0 & km_tables$gradient$event_free<=1,na.rm=TRUE),
   identical(federated_transfer_horizon_label(),"5-year"))
+stale_km <- km_tables
+stale_km$gradient <- filter(stale_km$gradient,stratifier!="trio_pattern")
+stale_error <- tryCatch(manuscript_federated_transfer_km(stale_km),error=identity)
+stopifnot(inherits(stale_error,"error"),
+  grepl("rerun 04a_transfer_updated.ipynb",conditionMessage(stale_error),fixed=TRUE))
+mixed_km <- km_tables
+mixed_row <- which(mixed_km$gradient$model_family=="xgboost_cox" &
+  mixed_km$gradient$landmark_days==180)[[1]]
+mixed_km$gradient$clock[[mixed_row]] <- "sequencing"
+stopifnot(inherits(tryCatch(plot_federated_transfer_gradient(mixed_km,"xgboost_cox",180),
+  error=identity),"error"))
 # A group whose every patient has the event before 5 years is 0, not missing;
 # follow-up censored before 5 years is not estimable.
 stopifnot(federated_transfer_event_free(tibble(duration_days=c(100,400,900),event=1L))[["event_free"]]==0,
@@ -404,6 +416,15 @@ stopifnot(inherits(p_km,"ggplot"),identical(p_km$labels$y,"NEPC-free probability
   grepl("Log-rank",p_km$labels$subtitle,fixed=TRUE))
 # a-d, then one row of platinum/AVPC/NEPC KM panels (XGBoost, day 180), then the gradient.
 fig5_km <- manuscript_federated_transfer_no_dfci(transfer_metrics,transfer_clinical,km_tables)
+panel_h <- manuscript_federated_transfer_km(km_tables)$gradient
+stopifnot(FEDERATED_TRANSFER_KM_FIGURE$model_family=="xgboost_cox",
+  FEDERATED_TRANSFER_KM_FIGURE$landmark_days==180L,
+  FEDERATED_TRANSFER_KM_HORIZON==1825,
+  inherits(panel_h,"ggplot"),
+  all(panel_h$data$model_family=="xgboost_cox"),
+  all(panel_h$data$landmark_days==180L),
+  all(panel_h$data$horizon_days==1825),
+  all(panel_h$data$clock=="adt"))
 stopifnot(inherits(fig5_km$plot,"gtable"),length(fig5_km$spec$titles)==8,
   identical(fig5_km$spec$titles[1:4],fig5$spec$titles),
   identical(fig5_km$spec$titles[5:8],c("Platinum: score extremes","AVPC: score extremes","NEPC: score extremes",

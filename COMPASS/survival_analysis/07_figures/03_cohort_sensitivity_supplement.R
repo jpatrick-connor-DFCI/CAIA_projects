@@ -1,5 +1,5 @@
 #!/usr/bin/env Rscript
-# Figure 6: cohort sensitivity panels and data.
+# Figure 3 supplement: cohort sensitivity panels and data.
 project_root <- Sys.getenv("CAIA_PROJECT_ROOT")
 if (!nzchar(project_root)) {
   source_files <- lapply(sys.frames(), function(frame) frame$ofile)
@@ -15,4 +15,4 @@ if (!nzchar(project_root)) {
   Sys.setenv(CAIA_PROJECT_ROOT = project_root)
 }
 source(file.path(project_root, "COMPASS", "survival_analysis", "07_figures", "_common.R"))
-figure_run <- run_figure("06_dfci_cohort_sensitivity")
+figure_run <- run_figure("03_cohort_sensitivity_supplement")

@@ -499,14 +499,10 @@ notebook. All operate on the merged `profile_data` run:
   collected and reported rather than raising. Its header restates the two caveats that govern
   reading it — the cohorts are not the same patients, and the strict NEPC label is narrower than
   the Figure 2 classifier definition.
-- `07_figures/` — manuscript figure scripts (`Rscript COMPASS/survival_analysis/07_figures/all.R`
-  for the complete set, or a numbered `.R` file for one figure and its supplements;
-  see `07_figures/README.md`),
-  configured by `COMPASS_*` environment variables), using
-  `COMPASS_generate_figures_pipeline.R`. Its sibling scripts are loaded from the absolute code root
-  `/data/gusev/USERS/jpconnor/code/CAIA` (override with `CAIA_PROJECT_ROOT`), so it runs from any
-  working directory. It renders both arms' overview, LLM-label, univariate,
-  multivariate, KM, and per-lab distribution/trajectory figures at landmarks 0 and 90. Figure 1A reads
+- `07_figures/` — manuscript figure scripts: run `all.R` for the retained set or a numbered
+  script for one figure family. `retained_exports.txt` limits PNG/PDF output to the curated
+  `Desktop/ADT` figures. The scripts use `COMPASS_*` environment variables and
+  `COMPASS_generate_figures_pipeline.R`; see `07_figures/README.md`. Figure 1A reads
   `mrn_lists/icd_prostate_mrn_flags.csv` and displays cumulative ICD-C61 cohort selection through
   dated diagnosis, male sex, ≥5 PSA tests, post-diagnosis ADT, PARPi exclusion, pre-diagnosis
   platinum exclusion, and the requested post-ADT cancer exclusion; the ARPI arm additionally
@@ -524,7 +520,7 @@ notebook. All operate on the merged `profile_data` run:
   `figure1e_site_counts` (day-0 platinum events/patients per federated site, from the
   within-site cohort CSV; skipped when absent). Both join manuscript Figure 1 as panels f
   and g. The three metastatic-label
-  confusion matrices also receive a combined `06_cohort_sensitivity/compiled/metastatic_label_agreement__<identity>`
+  confusion matrices also receive a combined `03_univariate/cohort_sensitivity/metastatic_label_agreement__<identity>`
   export. Filenames use `<identity> = <endpoint>__<subset>__<exclusion>` under each arm;
   Figure 2v3 is emitted only for canonical ADT/platinum. Run the default figure stage
   (`all`) to prepare and render these additions, including PDFs when enabled.
@@ -616,13 +612,13 @@ notebook. All operate on the merged `profile_data` run:
       03_univariate/internal/     DFCI lab volcanoes, somatic/Gleason/co-mutation associations,
                                   KM curves, trajectories/<lab>/ (trajectories + lab KM curves)
       03_univariate/federated/    pooled PSA/testosterone forests, volcanoes, trajectories, KM
+      03_univariate/cohort_sensitivity/  Figure 3 supplement: cohort forests,
+                                  endpoint incidence, metastatic-label comparisons,
+                                  and <subset>__<exclusion>/<section>/ for other cohorts
       04_multivariate/internal/   DFCI Elastic-Net/XGBoost discrimination, importance,
                                   Gleason/somatic sensitivity, combinations, risk strata
       04_multivariate/federated/  federated models, including the no-DFCI refits
       05_transfer/                no-DFCI federated models scored at Dana-Farber
-      06_cohort_sensitivity/      cohort forests, endpoint incidence, metastatic-label
-                                  comparisons, and <subset>__<exclusion>/<section>/ for every
-                                  run on a cohort other than all__incl
       data/                       index.html and manifest.csv
     ```
 
@@ -1367,7 +1363,7 @@ subfolder of its section (`03_univariate/federated/`, `04_multivariate/federated
 |---|---|
 | `federated_03_univariable` | Figure 3 layout: pooled univariable Cox volcanoes at days 0/90/180 (with a log-HR direction arrow under the key), pooled PSA/testosterone trajectories and day-180 extreme-decile KM curves (site `extreme_fraction`, 10% by default) |
 | `federated_04_multivariable` | Figure 8 layout, with the full models refit without DFCI added to the AUC(t) row |
-| `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/AVPC/NEPC: (a) mean AUC(t) of the full and age-only models; (b–d) mean AUC(t) of the transferred full models, local out-of-fold Cox models of Gleason + age (b), TP53/RB1/PTEN + age (c) and Gleason + TP53/RB1/PTEN + age (d), and combined Cox models of each transferred score + those covariates without age, in patients with a Gleason score (b), sequenced patients (c) and sequenced patients with a Gleason score (d); c and d on the sequencing-date clock; strips give day-0 patients/events. (e–g) Platinum, AVPC and NEPC KM curves, top vs bottom 10% of the day-180 XGBoost score. (h) 5-year event-free probability by score quartile, Gleason score and six mutually exclusive mutation groups (0 altered, TP53 altered, PTEN altered, RB1 altered, 2 altered, 3 altered) |
+| `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/AVPC/NEPC: (a) mean AUC(t) of the full and age-only models; (b–d) mean AUC(t) of the transferred full models, local out-of-fold Cox models of Gleason + age (b), TP53/RB1/PTEN + age (c) and Gleason + TP53/RB1/PTEN + age (d), and combined Cox models of each transferred score + those covariates without age, in patients with a Gleason score (b), sequenced patients (c) and sequenced patients with a Gleason score (d); c and d on the sequencing-date clock; strips give day-0 patients/events. (e–g) Platinum, AVPC and NEPC KM curves, top vs bottom 10% of the day-180 XGBoost score. (h) 5-year event-free probability from the ADT +180-day landmark using the transferred federated XGBoost score, Gleason score and six mutually exclusive mutation groups (0 altered, TP53 altered, PTEN altered, RB1 altered, 2 altered, 3 altered); mutation results must be reported before the landmark |
 | `federated_05_transfer_no_dfci__no_d` | The same without panel d (KM curves d–f, gradient g); caption `federated_figure5_no_d` |
 
 The local Figure 3 (`03_dfci_univariable`) still uses DFCI patient-level data.

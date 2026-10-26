@@ -71,6 +71,26 @@ def test_burden_counts_every_altered_panel_gene_and_uncalled_is_wild_type():
     assert (out.loc[2, ["RB1_ANY", "PTEN_ANY"]] == 1).all()
 
 
+def test_adt_km_mutations_are_reported_before_the_landmark():
+    local = _local([1, 2, 3, 4])
+    somatic = _somatic([
+        (1, _day(-1), _day(-1), 1, 0, 0, 0),
+        (2, _day(180), _day(180), 0, 0, 1, 0),
+        (3, _day(-10), _day(-10), 0, 1, 0, 0),
+        (3, _day(179), _day(179), 0, 0, 1, 0),
+    ])
+    clinical = fcc.build_clinical_features(local, [0, 180], gleason=_gleason([]))
+    out = fcc.attach_adt_landmark_somatic(clinical, local, somatic, FEATURES)
+    got = out.set_index(["person_id", "landmark_days"])
+    assert got.loc[(1, 180), "TP53_ANY"] == 1
+    assert got.loc[(3, 0), "RB1_ANY"] == 1
+    assert got.loc[(3, 180), "PTEN_ANY"] == 1
+    assert got.loc[(3, 180), "RB1_ANY"] == 0
+    assert pd.isna(got.loc[(2, 180), "HAS_SEQUENCING"])
+    assert pd.isna(got.loc[(4, 180), "HAS_SEQUENCING"])
+    assert clinical["HAS_SEQUENCING"].isna().all()
+
+
 def _survival(n=120, seed=0):
     rng = np.random.default_rng(seed)
     x = rng.normal(size=n)

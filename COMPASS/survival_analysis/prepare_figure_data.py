@@ -1,4 +1,4 @@
-"""Prepare immutable Polars figure tables and source fingerprints for 05_figures.
+"""Prepare immutable Polars figure tables and source fingerprints for 07_figures.
 
 Imported by 06_prep_figure_data.ipynb. Patient
 tables stay under the data root, never under the public figure output tree.
@@ -395,7 +395,7 @@ def prepare_metastatic(config: dict, patients: pl.DataFrame) -> pl.DataFrame:
 
 
 def prepare_cohort_overview(config: dict) -> dict:
-    """Stage-3 incidence and KM inputs plus Stage-1 label summaries for 07.
+    """Figure 3 cohort-sensitivity incidence, KM, and label-summary inputs.
 
     ``cohort_km`` is patient-level (cohort, endpoint, time, event), so it stays in
     the data cache; 07 publishes only its per-cohort counts.

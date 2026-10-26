@@ -25,11 +25,11 @@ figure_sidecar_path <- function(path) {
 FIGURE_SECTIONS <- c(cohort = "01_cohort", llm = "02_llm",
   univariate_internal = "03_univariate/internal", univariate_federated = "03_univariate/federated",
   multivariate_internal = "04_multivariate/internal", multivariate_federated = "04_multivariate/federated",
-  transfer = "05_transfer", cohort_sensitivity = "06_cohort_sensitivity")
+  transfer = "05_transfer", cohort_sensitivity = "03_univariate/cohort_sensitivity")
 FIGURE_CANONICAL_COHORT <- "all__incl"
 # Pre-restructure top-level folders, archived once their job re-renders.
 FIGURE_RETIRED_FOLDERS <- c("cohort", "labels", "associations", "prediction",
-  "trajectories", "federated", "compiled", "manuscript figures")
+  "trajectories", "federated", "compiled", "manuscript figures", "06_cohort_sensitivity")
 
 figure_public_path <- function(path) {
   if (!grepl("/by_figure/", path, fixed = TRUE)) return(path)
@@ -102,7 +102,7 @@ federated_output_path <- function(arm_root, stem, extension = "") {
 # variants share their base key's section.
 MANUSCRIPT_SECTIONS <- c(`01_cohort_overview` = "cohort", `02_llm_nepc_avpc` = "llm",
   `03_dfci_univariable` = "univariate_internal", `04_multivariable_labs` = "multivariate_internal",
-  `06_dfci_cohort_sensitivity` = "cohort_sensitivity",
+  `03_cohort_sensitivity_supplement` = "cohort_sensitivity",
   `07_federated_incidence_associations` = "univariate_federated",
   `08_federated_multivariable` = "multivariate_federated",
   federated_03_univariable = "univariate_federated", federated_04_multivariable = "multivariate_federated",
@@ -535,7 +535,10 @@ figure_archive_old_exports <- function(config, prepared) {
         segments <- strsplit(substring(path,nchar(file.path(config$fig_root,arm))+2),"/",fixed=TRUE)[[1]]
         if(segments[1]=="compiled") segments <- segments[-1]
         name <- tools::file_path_sans_ext(basename(path))
-        job <- if(folder=="manuscript figures") {
+        job <- if(folder=="06_cohort_sensitivity" &&
+            grepl("^(06_dfci_cohort_sensitivity|figure6$|cohort_forest_|event_incidence_|cohort_km_cascade|metastatic_label_overlap)",name)) {
+          "cohort_overview"
+        } else if(folder=="manuscript figures") {
           if(grepl("^(federated|0[78]_|figure[78]$)",name)) "federated" else
             if(grepl("^(06_|figure6$)",name)) "cohort_overview" else "adt__platinum"
         } else if(segments[1]=="federated") "federated" else
@@ -1748,8 +1751,8 @@ render_federated_transfer_clinical <- function(root, directory, dpi, overwrite) 
 # Time-to-event views of the transferred labs score (Federated Figure 5 e-h and
 # 05_transfer/km/). Score groups use Dana-Farber cutpoints computed within each
 # clock x endpoint x bundle x landmark cohort: each endpoint has its own at-risk
-# patients and scores. Gleason views run on the ADT clock and TP53/RB1/PTEN
-# views on the sequencing clock (no somatic data on the ADT clock).
+# patients and scores. Standalone TP53/RB1/PTEN KM views use the sequencing
+# clock; the panel-h gradient uses ADT-clock calls available before its landmark.
 FEDERATED_TRANSFER_KM_CLOCKS <- c(adt="ADT",sequencing="sequencing")
 FEDERATED_TRANSFER_KM_YLAB <- c(platinum="Platinum-free probability",nepc="NEPC-free probability",
   avpc="AVPC-free probability")
@@ -1775,7 +1778,7 @@ FEDERATED_TRANSFER_KM_VIEWS <- list(
 FEDERATED_TRANSFER_GRADIENT <- list(
   score_quartile=list(clock="adt",levels=paste0("Q",1:4),label="Federated score quartile"),
   gleason_group=list(clock="adt",levels=FEDERATED_TRANSFER_GLEASON,label="Gleason"),
-  trio_pattern=list(clock="sequencing",
+  trio_pattern=list(clock="adt",
     levels=c("0 altered","TP53 altered","PTEN altered","RB1 altered","2 altered","3 altered"),
     label="TP53/PTEN/RB1 alteration"))
 FEDERATED_TRANSFER_KM_TABLES <- c(curves="transfer_km_curves_no_dfci",summary="transfer_km_summary_no_dfci",
@@ -1824,7 +1827,9 @@ federated_transfer_score_quantile <- function(x, k=4L) {
 }
 
 federated_transfer_km_groups <- function(d) {
-  sequenced <- d$clock=="sequencing" & d$sequenced
+  sequenced <- d$sequenced
+  seq_clock <- d$clock=="sequencing" & sequenced
+  adt_clock <- d$clock=="adt" & sequenced
   trio_n <- d$TP53_ANY+d$RB1_ANY+d$PTEN_ANY
   d %>% group_by(clock,endpoint,bundle,landmark_days) %>%
     mutate(score_extreme=as.vector(figure_extreme_quintiles(risk_score)),
@@ -1832,14 +1837,14 @@ federated_transfer_km_groups <- function(d) {
       score_half=federated_transfer_score_half(risk_score),
       score_quartile=federated_transfer_score_quantile(risk_score,4L)) %>% ungroup() %>%
     mutate(gleason_group=if_else(clock=="adt",figure_gleason_groups(GLEASON_SCORE),NA_character_),
-      trio_group=if_else(sequenced,FEDERATED_TRANSFER_TRIO[1+(trio_n>0)],NA_character_),
+      trio_group=if_else(seq_clock,FEDERATED_TRANSFER_TRIO[1+(trio_n>0)],NA_character_),
       trio_pattern=case_when(
-        sequenced & trio_n==0 ~ "0 altered",
-        sequenced & trio_n==1 & TP53_ANY==1 ~ "TP53 altered",
-        sequenced & trio_n==1 & PTEN_ANY==1 ~ "PTEN altered",
-        sequenced & trio_n==1 & RB1_ANY==1 ~ "RB1 altered",
-        sequenced & trio_n==2 ~ "2 altered",
-        sequenced & trio_n==3 ~ "3 altered",
+        adt_clock & trio_n==0 ~ "0 altered",
+        adt_clock & trio_n==1 & TP53_ANY==1 ~ "TP53 altered",
+        adt_clock & trio_n==1 & PTEN_ANY==1 ~ "PTEN altered",
+        adt_clock & trio_n==1 & RB1_ANY==1 ~ "RB1 altered",
+        adt_clock & trio_n==2 ~ "2 altered",
+        adt_clock & trio_n==3 ~ "3 altered",
         TRUE ~ NA_character_),
       score_trio=if_else(is.na(trio_group)|is.na(score_half),NA_character_,
         paste(trio_group,score_half,sep=" · ")))
@@ -1958,6 +1963,8 @@ plot_federated_transfer_km_grid <- function(tables, model_family, landmark) {
 
 plot_federated_transfer_gradient <- function(tables, model_family, landmark, title=NULL, caption=NULL) {
   d <- federated_transfer_km_pick(tables$gradient,NULL,model_family,landmark)
+  if(any(d$clock!="adt"))
+    stop("Transfer event-free gradient must use ADT-landmark outcomes for every group.")
   d <- d[is.finite(d$event_free),,drop=FALSE]
   if(!nrow(d)) return(NULL)
   groups <- unlist(lapply(FEDERATED_TRANSFER_GRADIENT,`[[`,"levels"),use.names=FALSE)
@@ -2014,7 +2021,7 @@ render_federated_transfer_km <- function(root, directory, dpi, overwrite) {
     save(plot_federated_transfer_gradient(tables,family,landmark,
         title=sprintf("%s: observed %s event-free probability from the +%d-day landmark",model,horizon,as.integer(landmark)),
         caption=paste(cutoffs,"Kaplan-Meier estimates with 95% CIs; score quartiles and Gleason on the ADT clock,",
-          sprintf("Six exclusive TP53/PTEN/RB1 alteration groups on the sequencing clock (sequenced patients). Missing points: no follow-up to %s.",
+          sprintf("Six exclusive TP53/PTEN/RB1 alteration groups reported before the ADT landmark. All groups use the ADT clock. Missing points: no follow-up to %s.",
             sub("-year"," years",horizon)))),
       sprintf("transfer_km_gradient_%s",suffix),12,5.5)
   }
@@ -2380,7 +2387,7 @@ manuscript_transfer_caption <- function(no_d=FALSE) {
         km[1],km[3],km[1],km[2],km[3]),
       sprintf("(%s) Kaplan-Meier 5-year event-free probability (95%% confidence interval) from the 180-day landmark for each endpoint by transferred XGBoost score quartile, Gleason group (≤7 vs. ≥8), and six mutually exclusive TP53, PTEN, and RB1 alteration groups: none, TP53 only, PTEN only, RB1 only, any two, or all three.",gradient)),
     paste0("No Dana-Farber patient contributed to federated model training, so every endpoint, including platinum, is out of sample. Mean AUC(t) is the inverse-probability-of-censoring-weighted cumulative/dynamic AUC averaged over 1, 2, 3, and 5 years after the landmark, with censoring estimated in the evaluated Dana-Farber patients; horizons without an observed event or later follow-up were omitted. ",
-      sprintf("Score groups in %s-%s use cutpoints computed among the Dana-Farber patients at risk for each endpoint at the landmark; they are not federated training cutoffs. Score and Gleason groups use the ADT-initiation clock and TP53/RB1/PTEN groups the sequencing-date clock (sequenced patients). ",km[1],gradient),
+      sprintf("Score groups in %s-%s use cutpoints computed among the Dana-Farber patients at risk for each endpoint at the landmark; they are not federated training cutoffs. All groups in %s use the ADT-initiation clock from day 180; TP53/PTEN/RB1 status is restricted to sequencing reports available before that landmark. ",km[1],gradient,gradient),
       "Elastic-Net versions, the 0- and 90-day landmarks, score × TP53/RB1/PTEN Kaplan-Meier curves, and head-to-head Kaplan-Meier grids are provided as supplementary figures. The local and combined Cox models were fitted on the Dana-Farber patients they were evaluated on and were scored with stratified 5-fold cross-validated (out-of-fold) predictions; in the combined models, the transferred score was standardized within the evaluated patients. Gleason scores were used only if available before the landmark. ",
       sprintf("For %s, the transferred models were rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation, and age was age at sequencing. ",seq_panels),
       "Patients/events in panel a were 2,267/182 at day 0, 2,233/166 at day 90, and 2,197/158 at day 180 for platinum; 2,237/197, 2,208/181, and 2,165/171 for AVPC; and 2,231/50, 2,212/46, and 2,172/41 for NEPC. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve."))
@@ -2420,8 +2427,8 @@ manuscript_captions <- function() {
       "Figure 4. Multivariable laboratory models for prediction of platinum treatment.",
       "(a) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), for Elastic-Net Cox and XGBoost survival models and, when available, dynamic DeepHit at 0, 90, and 180 days after ADT initiation. Laboratory models are compared with age-only baselines; the dotted horizontal line marks 0.5. (b) Nonzero Elastic-Net Cox coefficients at each landmark. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (c) XGBoost split-gain feature importance at each landmark. Colors in b and c identify laboratory categories.",
       "Performance values are from held-out test sets rather than training or tuning cross-validation. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and do not encode effect direction. When available, dynamic DeepHit is a neural cause-specific model with no feature-level coefficients, so it appears in a only; it has no age-only baseline and is scored with the same inverse-probability-of-censoring-weighted horizon grid. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; PSA, prostate-specific antigen."),
-    `06_dfci_cohort_sensitivity`=caption(
-      "Figure 6. Cohort-size, endpoint-incidence, and laboratory-association sensitivity analyses within Dana-Farber.",
+    `03_cohort_sensitivity_supplement`=caption(
+      "Figure 3. Supplementary cohort-size, endpoint-incidence, and laboratory-association sensitivity analyses within Dana-Farber.",
       "Patients eligible at the 180-day androgen-deprivation therapy (ADT) landmark are shown across the full ADT cohort, cohorts excluding prior castration, metastatic cohorts defined from ADT treatment intent, and metastatic cohorts defined by the large language model (LLM). (a) Observed platinum and neuroendocrine prostate cancer (NEPC) event fractions during follow-up with 95% Wilson confidence intervals. (b) Pale bars show eligible patients and solid bars show observed events; labels give events/patients. Blue denotes platinum and orange denotes NEPC in a and b; an asterisk denotes fewer than 25 events. (c) Natural-log hazard ratios per standard-deviation increase and 95% confidence intervals for the mean, minimum, maximum, and last PSA or testosterone value through the landmark. The dashed line at 0 marks the null; filled points indicate Benjamini-Hochberg q < 0.05.",
       "Cohort definitions overlap. Event fractions are observed proportions rather than censoring-adjusted cumulative incidence estimates. Change-from-baseline and observation-count features are excluded from c. 'No prior castrate' denotes the source no-previous-castration restriction. CI, confidence interval; PSA, prostate-specific antigen; SD, standard deviation."),
     `07_federated_incidence_associations`=caption(
@@ -2455,12 +2462,12 @@ manuscript_write_captions <- function(root,keys=names(manuscript_captions()),cap
   for(key in keys) {
     caption_root <- file.path(manuscript_folder(root,key),"captions")
     dir.create(caption_root,recursive=TRUE,showWarnings=FALSE)
-    # Keys carry their figure number ("06_..." -> figure6, "federated_03_..." ->
-    # federated_figure3), so retired figures leave a gap rather than renumbering;
-    # a "__<variant>" suffix is appended ("..._no_dfci__no_d" -> federated_figure5_no_d).
-    name <- paste0(if(startsWith(key,"federated_")) "federated_figure" else "figure",
-      as.integer(sub("^(federated_)?0*([0-9]+)_.*$","\\2",key)),
-      if(grepl("__",key,fixed=TRUE)) paste0("_",sub("^.*?__","",key,perl=TRUE)))
+    # The cohort sensitivity supplement shares Figure 3's number in its own folder.
+    # Other variants keep their existing numbered captions.
+    name <- if(key=="03_cohort_sensitivity_supplement") "figure3_supplement" else
+      paste0(if(startsWith(key,"federated_")) "federated_figure" else "figure",
+        as.integer(sub("^(federated_)?0*([0-9]+)_.*$","\\2",key)),
+        if(grepl("__",key,fixed=TRUE)) paste0("_",sub("^.*?__","",key,perl=TRUE)))
     for(extension in c("md","txt")) {
       path <- file.path(caption_root,paste0(name,".",extension))
       writeLines(captions[[key]],path,useBytes=TRUE)
@@ -2682,7 +2689,7 @@ manuscript_incidence <- function(d) {
       inherit.aes=FALSE,hjust=0,size=2.5)
     assign(which,p)
   }
-  spec <- list(key="06_dfci_cohort_sensitivity",width=7.2,height=3.6,
+  spec <- list(key="03_cohort_sensitivity_supplement",width=7.2,height=3.6,
     layout=matrix(1:2,1),titles=c("Endpoint incidence","Cohort size and event count"))
   list(plot=manuscript_combine(list(a,b),spec,shared_legend=TRUE),panels=list(a,b),spec=spec,data=d,
     legend=paste("Landmark day",paste(unique(d$landmark_days),collapse=", "),
@@ -2714,7 +2721,7 @@ manuscript_dfci_cohort_sensitivity <- function(incidence,association) {
   association <- manuscript_log_hazard_axis(association) +
     ggplot2::scale_y_discrete(labels=function(x) unname(manuscript_cohort_labels[x]))
   association_grob <- manuscript_grob(manuscript_style(association,NULL,"c"),7.2,5)
-  spec <- list(key="06_dfci_cohort_sensitivity",width=7.2,height=8.7,
+  spec <- list(key="03_cohort_sensitivity_supplement",width=7.2,height=8.7,
     layout=rbind(c(1,2),c(3,3)),titles=c("Endpoint incidence","Cohort size and event count",
       "PSA and testosterone associations"),row_heights=c(3.6,5.1))
   combined <- gridExtra::arrangeGrob(grobs=list(incidence$plot,association_grob),ncol=1,
@@ -2967,11 +2974,14 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
 # (render_federated_transfer_km), for one bundle and landmark: event-free
 # survival by the top vs bottom 10% of the transferred score for platinum, AVPC
 # and NEPC (ADT clock; `km`), then the event-free probability at
-# FEDERATED_TRANSFER_KM_HORIZON by score quartile and Gleason group (ADT clock)
-# and by mutually exclusive TP53/PTEN/RB1 alteration groups (sequencing clock;
+# FEDERATED_TRANSFER_KM_HORIZON by score quartile, Gleason group and mutually
+# exclusive TP53/PTEN/RB1 alteration groups (all on the ADT clock;
 # `gradient`). Panels that are not estimable are dropped.
 manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRANSFER_KM_FIGURE) {
   family <- figure$model_family; landmark <- figure$landmark_days
+  panel_h_rows <- federated_transfer_km_pick(km$gradient,NULL,family,landmark)
+  if(!any(panel_h_rows$stratifier=="trio_pattern"))
+    stop("Panel h lacks mutation groups on the ADT clock; rerun 04a_transfer_updated.ipynb, then 06_prep_figure_data.ipynb.")
   model <- c(elastic_net_cox="Elastic-Net",xgboost_cox="XGBoost")[family]
   if(is.na(model)) model <- federated_transfer_model_label(family)
   horizon <- federated_transfer_horizon_label()
@@ -3007,7 +3017,7 @@ manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRAN
   if(!is.null(gradient)) gradient <- gradient + ggplot2::labs(y=paste(horizon,"event-free\nprobability"))
   has_gradient <- add(gradient,paste(horizon,"event-free probability"),paste0(
     sprintf("Kaplan-Meier %s event-free probability (95%% CI) from the %d-day landmark for each endpoint, ",horizon,as.integer(landmark)),
-    sprintf("by transferred %s score quartile and Gleason group (ADT clock), then 0 altered, TP53 only, PTEN only, RB1 only, any two, or all three altered (sequencing clock).",model)))
+    sprintf("by transferred %s score quartile and Gleason group, then 0 altered, TP53 only, PTEN only, RB1 only, any two, or all three altered. All use the ADT clock from the %d-day landmark; sequencing reports must predate that landmark.",model,as.integer(landmark))))
   if(length(plots)) legend <- c(legend,
     "Score cutpoints were computed in the Dana-Farber patients at risk for each endpoint at each landmark.")
   list(plots=plots,titles=titles,legend=legend,km=plots[seq_len(n_km)],
@@ -3134,9 +3144,9 @@ manuscript_build <- function(items,tables,root) {
   incidence <- read("^event_incidence_lm180__platinum__all__incl[.]csv$")
   association_key <- "cohort_forest_platinum_landmark180"
   if(!is.null(incidence)) {
-    if(association_key %in% names(items)) result[["06"]] <- manuscript_dfci_cohort_sensitivity(
+    if(association_key %in% names(items)) result[["03_supplement"]] <- manuscript_dfci_cohort_sensitivity(
       manuscript_incidence(incidence),items[[association_key]]$plot)
-    else message("Skipping manuscript Figure 6: missing captured ",association_key)
+    else message("Skipping Figure 3 cohort-sensitivity supplement: missing captured ",association_key)
   }
   psa <- read("^psa_forest__platinum[.]csv$"); testosterone <- read("^testosterone_forest__platinum[.]csv$")
   site_incidence <- read("^site_incidence_lm000__platinum[.]csv$")
@@ -3550,6 +3560,25 @@ figure_absolute_path <- function(path) {
   file.path(figure_absolute_path(dirname(path)), basename(path))
 }
 
+figure_retained_exports <- function(pipeline_path) {
+  path <- file.path(dirname(pipeline_path), "07_figures", "retained_exports.txt")
+  if (!file.exists(path)) stop("Missing curated figure export list: ", path)
+  exports <- trimws(readLines(path, warn = FALSE))
+  exports <- exports[nzchar(exports) & !startsWith(exports, "#")]
+  if (!length(exports) || anyDuplicated(exports) ||
+      any(startsWith(exports, "/") | grepl("(^|/)\\.\\.(/|$)", exports)) ||
+      any(!grepl("\\.(png|pdf)$", exports)))
+    stop("Invalid curated figure export list: ", path)
+  exports
+}
+
+figure_retained_image <- function(destination, fig_root, extension, exports) {
+  adt_root <- paste0(file.path(fig_root, "ADT"), "/")
+  if (!startsWith(destination, adt_root)) return(FALSE)
+  relative <- substring(destination, nchar(adt_root) + 1L)
+  paste0(relative, extension) %in% exports
+}
+
 figure_parallel <- function(items, fun, workers) {
   if (!length(items)) return(list())
   safe <- function(item) tryCatch(fun(item), error = function(e) list(error = conditionMessage(e)))
@@ -3655,6 +3684,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
   started <- proc.time()[["elapsed"]]
   for (name in c("data_root", "cache_root", "fig_root"))
     config[[name]] <- figure_absolute_path(config[[name]])
+  retained_exports <- figure_retained_exports(pipeline_path)
   if (identical(config$cache_root, config$fig_root) ||
       startsWith(config$cache_root, paste0(config$fig_root, "/")) ||
       startsWith(config$fig_root, paste0(config$cache_root, "/")))
@@ -3689,7 +3719,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
       directory = file.path(config$cache_root, "scenes", "federated", signature))
   }
   if (!identical(config$scope, "federated") && "adt" %in% config$cohorts && "platinum" %in% config$endpoints) {
-    # Figure 6 also consumes the canonical ADT/platinum cohort-forest inputs,
+    # Figure 3 cohort sensitivity also consumes the canonical ADT/platinum cohort-forest inputs,
     # so changes to either the overview tables or those model results must
     # invalidate this job's prepared manuscript scene.
     signature <- figure_object_hash(list(manifest$cohort_overview$key,
@@ -3714,7 +3744,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
       `02_llm_nepc_avpc` = "adt__platinum",
       `03_dfci_univariable` = "adt__platinum",
       `04_multivariable_labs` = c("adt__platinum", "checklist_supplement"),
-      `06_dfci_cohort_sensitivity` = "cohort_overview",
+      `03_cohort_sensitivity_supplement` = "cohort_overview",
       `07_federated_incidence_associations` = "federated",
       `08_federated_multivariable` = "federated",
       federated_03_univariable = "federated",
@@ -3825,13 +3855,22 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
         TRUE
       }, tasks)
     }
+    tasks <- Filter(function(task) figure_retained_image(
+      task$scene$destination, config$fig_root, ".png", retained_exports), tasks)
+    tasks <- lapply(tasks, function(task) {
+      has_pdf <- figure_retained_image(task$scene$destination, config$fig_root, ".pdf", retained_exports)
+      if (isTRUE(task$scene$manuscript) && !has_pdf)
+        stop("Curated manuscript figure is missing its PDF entry: ", task$scene$destination)
+      task$pdf <- isTRUE(task$scene$manuscript) || (pdf && has_pdf)
+      task
+    })
     message("Rendering/checking ", length(tasks), " panels with ", render_workers, " workers ...")
     completed <- if (render_overwrite) rep(FALSE, length(tasks)) else
-      vapply(tasks, function(task) figure_scene_complete(task$scene, task$signature, dpi, pdf), logical(1))
+      vapply(tasks, function(task) figure_scene_complete(task$scene, task$signature, dpi, task$pdf), logical(1))
     render_results <- lapply(tasks, function(task) list(stem = task$scene$stem, rendered = 0L))
     message(sum(completed), " panels already current; ", sum(!completed), " need rendering.")
     render_results[!completed] <- figure_parallel(tasks[!completed], function(task) {
-      result <- render_figure_scene(task$scene, task$signature, dpi, pdf, render_overwrite)
+      result <- render_figure_scene(task$scene, task$signature, dpi, task$pdf, render_overwrite)
       message(if (result$rendered) "Saved " else "Reused ", result$stem)
       result
     }, render_workers)
