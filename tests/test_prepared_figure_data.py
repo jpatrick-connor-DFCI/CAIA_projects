@@ -209,7 +209,8 @@ def test_federated_within_site_accepts_legacy_folder(tmp_path):
 
 
 def test_federated_v2_exports_are_fingerprinted_once(tmp_path):
-    # rhino_data_v2: elastic-net Cox per variant, XGBoost/DeepHit per landmark (optionally under adt/).
+    # rhino_data_v2: elastic-net Cox per variant, XGBoost/DeepHit/checklists per landmark
+    # (optionally under adt/).
     config = make_config(tmp_path, "federated")
     config["federated"] = True
     root = Path(config["federated_path"]).parent
@@ -217,7 +218,9 @@ def test_federated_v2_exports_are_fingerprinted_once(tmp_path):
           root / "federated_elastic_net_cox_no_DFCI" / "cox_federated_elasticnet_coefficients_adt.csv",
           root / "federated_xgboost" / "lm_0" / "no_DFCI" / "adt" / "xgboost_federated_metrics_adt.csv",
           root / "federated_xgboost" / "lm_90" / "no_DFCI" / "xgboost_federated_metrics_adt.csv",
-          root / "federated_deephit" / "lm_180" / "w_DFCI" / "deephit_federated_metrics_adt.csv"]
+          root / "federated_deephit" / "lm_180" / "w_DFCI" / "deephit_federated_metrics_adt.csv",
+          root / "federated_predictive_checklists" / "lm_0" / "w_DFCI" / "predictive_checklist_checklists_adt.csv",
+          root / "federated_predictive_checklists" / "lm_90" / "w_DFCI" / "predictive_checklist_metrics_adt.csv"]
     # A legacy no-DFCI export also matches the v2 "*_no_DFCI" pattern; it stays in the legacy block.
     legacy = root / "federated_xgboost_no_DFCI" / "xgboost_federated_importance_adt.csv"
     stray = root / "federated_xgboost" / "lm_0" / "other" / "xgboost_federated_metrics_adt.csv"

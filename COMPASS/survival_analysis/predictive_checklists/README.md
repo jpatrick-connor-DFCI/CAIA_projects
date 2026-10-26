@@ -210,7 +210,7 @@ For the manuscript supplement (platinum and NEPC, 5-year horizon, each landmark,
 versus labs + Gleason + somatic), fit `default_config.json` and `gleason_trio_config.json` with
 `"horizons": [1825]`. The cached figure workflow picks the runs up on its own: notebook `06` flattens them
 (defaults `<data root>/survival_analysis/predictive_checklists/{full_adt,gleason_trio_labs}`, override with
-`COMPASS_CHECKLIST_LABS_RUN` / `COMPASS_CHECKLIST_TRIO_RUN`) and `07_figures.R` renders the figures into
+`COMPASS_CHECKLIST_LABS_RUN` / `COMPASS_CHECKLIST_TRIO_RUN`) and `07_figures/all.R` renders the figures into
 `04_multivariate/internal`. To preview two runs without the figure cache, flatten and draw them directly:
 
 ```bash

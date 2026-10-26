@@ -11,7 +11,7 @@ ICD-C61 cohort: `arpi` (anchored at first ARPI/chemo exposure) and `adt` (anchor
 exposure, years earlier in the treatment sequence). Entry requires a dated prostate diagnosis, male
 sex, at least five PSA measurements, and ADT on/after diagnosis; PARPi exposure, platinum before
 diagnosis, and bladder (C67), lung (C34), head-and-neck (C00-C14/C30-C32), or testicular (C62)
-cancer diagnosed strictly after first ADT are excluded. The paired, R-only `07_figures.R` script emits
+cancer diagnosed strictly after first ADT are excluded. The paired, R-only `07_figures/all.R` script emits
 manuscript figures for both.
 
 **Arm, cohort, and endpoint are three orthogonal axes.** The *arm* sets time 0 (the index-date
@@ -91,7 +91,7 @@ COMPASS/
     ├── 04a_transfer_updated.ipynb        # the same for rhino_data_v2: Cox, XGBoost, DeepHit, checklists
     ├── 05_cohort_comparison.ipynb        # read-only: 6 cohorts x 2 endpoints, landmark +180d
     ├── 06_prep_figure_data.ipynb         # Polars figure tables + cache manifest for 07
-    ├── 07_figures.R                      # R figures from merged profile_data outputs (Rscript)
+    ├── 07_figures/                    # one R entry point per manuscript figure; all.R runs all
     ├── 08_abstract_numbers.ipynb         # read-only: abstract/manuscript counts from built artifacts
     ├── multivariate_longitudinal/
     │   ├── dynamic_deephit.py            # ENTRY: thin CLI over survival_common/deephit_engine.py
@@ -141,7 +141,7 @@ reporting notebooks: they read already-generated artifacts and refit nothing.
            survival_analysis/multivariate_analysis.py
  local_runs_<arm>/ , local_runs_<arm>_nepc/
         │
-        ├──► 07_figures.R (R; 2 cohort arms: arpi, adt)
+        ├──► 07_figures/all.R (R; 2 cohort arms: arpi, adt)
         │    figures/
         │
         ▼  05_cohort_comparison.ipynb (read-only; 6 cohorts x 2 endpoints)
@@ -499,7 +499,9 @@ notebook. All operate on the merged `profile_data` run:
   collected and reported rather than raising. Its header restates the two caveats that govern
   reading it — the cohorts are not the same patients, and the strict NEPC label is narrower than
   the Figure 2 classifier definition.
-- `07_figures.R` — the sole COMPASS figure script (`Rscript COMPASS/survival_analysis/07_figures.R`,
+- `07_figures/` — manuscript figure scripts (`Rscript COMPASS/survival_analysis/07_figures/all.R`
+  for the complete set, or a numbered `.R` file for one figure and its supplements;
+  see `07_figures/README.md`),
   configured by `COMPASS_*` environment variables), using
   `COMPASS_generate_figures_pipeline.R`. Its sibling scripts are loaded from the absolute code root
   `/data/gusev/USERS/jpconnor/code/CAIA` (override with `CAIA_PROJECT_ROOT`), so it runs from any
@@ -510,7 +512,7 @@ notebook. All operate on the merged `profile_data` run:
   platinum exclusion, and the requested post-ADT cancer exclusion; the ARPI arm additionally
   displays its post-diagnosis ARPI/docetaxel exposure criterion. Axis and table labels throughout
   name the arm's anchor ("ARPI/chemo initiation" vs. "ADT initiation") via `ANCHOR_LABEL`.
-  The cached `07_figures.R` workflow exports lettered multipanel figures alongside
+  The cached `07_figures/all.R` workflow exports lettered multipanel figures alongside
   all individual Figure 1 and Figure 2v3 panels: `01_cohort/compiled/figure1_cohort__<identity>`
   combines cohort selection, survival, and three timing distributions, while
   `02_llm/compiled/figure2v3_llm_<cohort>__platinum__all__incl` combines all four classifier/subtype
@@ -535,7 +537,7 @@ notebook. All operate on the merged `profile_data` run:
   matching supplement for LDH, hemoglobin, albumin and alkaline phosphatase: one row per lab,
   trajectory (log1p for LDH and ALP) beside the bottom-versus-top-10% KM curve.
   `COMPASS_SUPPLEMENT_LABS` (comma-separated canonical names, read by both notebook 06 and
-  `07_figures.R`) changes the lab set.
+  `07_figures/all.R`) changes the lab set.
   Figure 4 additionally emits `figure4c_sensitivity_gleason_auc`, the held-out
   available-case comparison of labs against Gleason features at every landmark. Figure 4a
   includes the death-censored dynamic-arm Dynamic-DeepHit (`dynamic_deephit_dynamic`, the
@@ -634,7 +636,7 @@ notebook. All operate on the merged `profile_data` run:
     Internally the pipeline still addresses each plot as
     `<arm>/by_figure/<group>/<plot-stem>/<endpoint>__<subset>__<exclusion>`, and
     `figure_public_path()` maps that address to the section folder; `by_figure/` is never left
-    on disk by `07_figures.R`. Per-lab panels use
+    on disk by `07_figures/all.R`. Per-lab panels use
     `by_figure/labs/<lab_category>/<lab_name>/<panel_type>/...`; a lab-aware branch in
     `figure_group()` uses `assign_category()` for CBC/CMP/LFT/Vitals/Androgen axis/Other. Any
     plot stem `figure_group()` can't route still raises `stop("Unmapped figure output stem")`.
@@ -1044,7 +1046,7 @@ patient subsets with `COHORTS`, and the event(s) with `ENDPOINTS`
    after steps 2-3 have been run for both stratified cohorts)
 9. `COMPASS/survival_analysis/06_prep_figure_data.ipynb` (Polars figure tables; reads step 6's
    transfer outputs)
-10. `Rscript COMPASS/survival_analysis/07_figures.R`
+10. `Rscript COMPASS/survival_analysis/07_figures/all.R`
 11. `COMPASS/survival_analysis/08_abstract_numbers.ipynb` (read-only; abstract/manuscript counts)
 
 The notebooks pass `PROFILE_DATA/*.parquet` paths explicitly to the lower-level scripts. Existing
@@ -1282,7 +1284,7 @@ TP53-RB1-PTEN clinical comparison (Figure 5 b–h) also use those two families. 
 an age-only XGBoost model, XGBoost's `transferred_age` rows in the clinical
 comparison stay empty, and its other comparisons are unaffected. Rerun
 `06_prep_figure_data.ipynb` after 04a, then
-`COMPASS_FIGURE_SCOPE=federated Rscript COMPASS/survival_analysis/07_figures.R`
+`COMPASS_FIGURE_SCOPE=federated Rscript COMPASS/survival_analysis/07_figures/all.R`
 to render `figures/ADT/05_transfer/transfer_discrimination_no_dfci__platinum.{png,csv}`
 (mean AUC(t) and paired ΔAUC(t) vs. age only, by endpoint) and federated manuscript
 Figure 5.
@@ -1303,7 +1305,7 @@ checklist probabilities, with censoring estimated on the DFCI cohort.
 For a CLI run, pass the additional JSON paths to the existing `--bundle` list,
 one bundle per file name. Only downloaded bundles from runs that excluded DFCI
 belong in this comparison.
-After rerunning `06_prep_figure_data.ipynb` and `07_figures.R`, the dynamic arm's
+After rerunning `06_prep_figure_data.ipynb` and `07_figures/all.R`, the dynamic arm's
 held-out federated metrics appear in the multivariate main figures when the
 corresponding DeepHit metrics CSV is available. The figures still render with
 Cox and XGBoost alone when it is absent. Transferred predictive checklist
@@ -1323,6 +1325,21 @@ their `lm_<days>/w_DFCI/` files, which are stacked into one table. The outputs a
 Manuscript Figure 8 (`08_federated_multivariable`) puts them in the local
 Figure 4 layout. The `no_DFCI` exports render as `*_no_dfci__platinum`.
 XGBoost exports no age-only model, so its baseline series is left empty.
+
+The predictive checklists trained with DFCI
+(`federated_predictive_checklists/lm_<days>/w_DFCI/`) render as
+`figures/ADT/04_multivariate/federated/checklist_supplement__platinum`. It has
+one column per landmark (0/90/180 days) and three rows:
+
+- a: held-out test AUC(t) at 1 and 5 years, with 95% intervals, for the checklist and the age-only checklist;
+- b: the 1-year checklist cards;
+- c: the 5-year checklist cards.
+
+Each card gives the M-of-N rule, its items, the held-out n and events, AUC and
+Brier for both models, and the flag operating point. Held-out metrics are pooled
+over the four sites' test patients; the export has no per-site breakdown. The
+`_items` and `_metrics` CSV sidecars keep exact thresholds and every interval.
+The no-DFCI checklists are shown only in the transfer supplement.
 
 Two resolution rules apply:
 
@@ -1350,7 +1367,7 @@ subfolder of its section (`03_univariate/federated/`, `04_multivariate/federated
 |---|---|
 | `federated_03_univariable` | Figure 3 layout: pooled univariable Cox volcanoes at days 0/90/180 (with a log-HR direction arrow under the key), pooled PSA/testosterone trajectories and day-180 extreme-decile KM curves (site `extreme_fraction`, 10% by default) |
 | `federated_04_multivariable` | Figure 8 layout, with the full models refit without DFCI added to the AUC(t) row |
-| `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/AVPC/NEPC: (a) mean AUC(t) of the full and age-only models; (b–d) mean AUC(t) of the transferred full models, local out-of-fold Cox models of Gleason + age (b), TP53/RB1/PTEN + age (c) and Gleason + TP53/RB1/PTEN + age (d), and combined Cox models of each transferred score + those covariates without age, in patients with a Gleason score (b), sequenced patients (c) and sequenced patients with a Gleason score (d); c and d on the sequencing-date clock; strips give day-0 patients/events. (e–g) Platinum, AVPC and NEPC KM curves, top vs bottom 10% of the day-180 XGBoost score. (h) 5-year event-free probability by score quartile, Gleason score and TP53/PTEN/RB1 altered-gene count |
+| `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/AVPC/NEPC: (a) mean AUC(t) of the full and age-only models; (b–d) mean AUC(t) of the transferred full models, local out-of-fold Cox models of Gleason + age (b), TP53/RB1/PTEN + age (c) and Gleason + TP53/RB1/PTEN + age (d), and combined Cox models of each transferred score + those covariates without age, in patients with a Gleason score (b), sequenced patients (c) and sequenced patients with a Gleason score (d); c and d on the sequencing-date clock; strips give day-0 patients/events. (e–g) Platinum, AVPC and NEPC KM curves, top vs bottom 10% of the day-180 XGBoost score. (h) 5-year event-free probability by score quartile, Gleason score and six mutually exclusive mutation groups (0 altered, TP53 altered, PTEN altered, RB1 altered, 2 altered, 3 altered) |
 | `federated_05_transfer_no_dfci__no_d` | The same without panel d (KM curves d–f, gradient g); caption `federated_figure5_no_d` |
 
 The local Figure 3 (`03_dfci_univariable`) still uses DFCI patient-level data.

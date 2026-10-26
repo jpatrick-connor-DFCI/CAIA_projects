@@ -187,7 +187,7 @@ local({
   stopifnot(all(vapply(third$rendered, function(x) x$rendered == 0L, logical(1))))
   stale <- tryCatch(figure_notebook_manifest(cfg), error = identity)
   stopifnot(inherits(stale, "error"), grepl("06_prep_figure_data.ipynb", conditionMessage(stale), fixed = TRUE))
-  # Run the actual 07_figures.R with a federation-only scope and raw patient
+  # Run the actual 07_figures/all.R with a federation-only scope and raw patient
   # input hidden. This verifies configuration wiring as well as the helper API.
   variables <- c(CAIA_PROJECT_ROOT = normalizePath("."),
     COMPASS_DATA_ROOT = root, COMPASS_FIG_ROOT = cfg$fig_root,
@@ -203,7 +203,7 @@ local({
   stopifnot(file.rename(file.path(root, "survival_analysis", "local_runs_adt"),
                         file.path(root, "local_runs_hidden")))
   env <- new.env(parent = globalenv())
-  source(file.path(dirname(pipeline_path), "07_figures.R"), local = env)
+  source(file.path(dirname(pipeline_path), "07_figures/all.R"), local = env)
   stopifnot(identical(names(env$figure_run$prepared), "federated"))
   stopifnot(identical(vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem"),
                       c("psa_forest", "testosterone_forest", "site_incidence_lm000",

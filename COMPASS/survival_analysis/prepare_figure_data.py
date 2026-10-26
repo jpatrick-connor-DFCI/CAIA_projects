@@ -206,6 +206,9 @@ FEDERATED_DEEPHIT_METRIC_FILES = tuple(
     for name in ("deephit_federated_metrics_adt.csv",
                  "adt/deephit_federated_metrics_adt.csv")
 )
+# rhino_data_v2 per-landmark predictive checklists (no legacy location); mirrors
+# FEDERATED_CHECKLIST_FILES in figure_workflow.R.
+FEDERATED_CHECKLIST_FILES = ("predictive_checklist_checklists_adt.csv", "predictive_checklist_metrics_adt.csv")
 # rhino_data_v2 exports for either variant: a directory per variant
 # (federated_elastic_net_cox_w_DFCI/) or a Rhino package per landmark
 # (<model>/lm_<days>/w_DFCI/), each optionally under adt/. Mirrors
@@ -256,7 +259,7 @@ def atomic_json(path: Path, value) -> None:
 
 @contextmanager
 def preparation_lock(root: Path):
-    # Cluster workers and simultaneous 07_figures.R runs must not publish partial caches.
+    # Cluster workers and simultaneous 07_figures/all.R runs must not publish partial caches.
     import fcntl
     root.mkdir(parents=True, exist_ok=True)
     with (root / ".prepare.lock").open("a") as stream:
@@ -671,8 +674,9 @@ def prepare(config: dict) -> dict:
         federated_sources += [fingerprint(path) for path in legacy]
         # Present v2 copies; one delivered later is unregistered, so R asks for a rerun.
         federated_sources += [fingerprint(path)
-            for name in dict.fromkeys(Path(name).name for _, name in
-                                      FEDERATED_MULTIVARIABLE_FILES + FEDERATED_DEEPHIT_METRIC_FILES)
+            for name in dict.fromkeys([Path(name).name for _, name in
+                                       FEDERATED_MULTIVARIABLE_FILES + FEDERATED_DEEPHIT_METRIC_FILES]
+                                      + list(FEDERATED_CHECKLIST_FILES))
             for path in federated_v2_export_files(federated_path, name) if path not in legacy]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / name)
             for name in FEDERATED_TRANSFER_NO_DFCI_FILES]

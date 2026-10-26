@@ -9,7 +9,7 @@ Everything lands under a single directory, by default
 
     <FIG_ROOT>/ADT_METASTATIC_FILTERING/
 
-with FIG_ROOT matching 07_figures.R's
+with FIG_ROOT matching 07_figures/all.R's
 `/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS`, overridable via the
 COMPASS_FIG_ROOT environment variable or --fig-root.
 
@@ -84,7 +84,7 @@ from COMPASS.data_preprocessing.validate_adt_intent import (  # noqa: E402
     load_stage_nearest_adt,
 )
 
-# Matches FIG_ROOT in COMPASS/survival_analysis/07_figures.R.
+# Matches FIG_ROOT in COMPASS/survival_analysis/07_figures/all.R.
 DEFAULT_FIG_ROOT = os.environ.get(
     "COMPASS_FIG_ROOT", "/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS"
 )

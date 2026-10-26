@@ -1,4 +1,4 @@
-# Per-cohort figure-generation pipeline called from 07_figures.R once per
+# Per-cohort figure-generation pipeline called from 07_figures/all.R once per
 # cohort in the same R session.
 #
 # Required packages (install once on the cluster):
@@ -335,7 +335,7 @@ FIGURE_LLM_STRATA <- LLM_STRATA["has_nepc"]
 # ---------------------------------------------------------------------------
 # Loop-invariant read cache.
 #
-# 07_figures.R calls generate_figures() once per cohort x endpoint -- 6 x 2 =
+# 07_figures/all.R calls generate_figures() once per cohort x endpoint -- 6 x 2 =
 # 12 passes. Several inputs do not vary across that loop at all (the LLM label
 # set, the platinum MRN list, the ICD flag table) and one varies only with the
 # treatment arm (the longitudinal labs CSV, by far the largest file the
@@ -351,7 +351,7 @@ FIGURE_LLM_STRATA <- LLM_STRATA["has_nepc"]
 #
 # Correctness note: the cache lives for the R session, so a run that
 # regenerates an input mid-run would serve a stale frame. That does not happen
-# here -- 01/02/03 finish before 07_figures.R runs -- but clear_read_cache()
+# here -- 01/02/03 finish before 07_figures/all.R runs -- but clear_read_cache()
 # exists for interactive use after rebuilding inputs.
 .read_cache <- new.env(parent = emptyenv())
 
@@ -1953,7 +1953,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       if (show) print(pD)
     }
     # Federated per-site counts come from the within-site export; the plot
-    # helpers live in figure_workflow.R, which 07_figures.R sources alongside.
+    # helpers live in figure_workflow.R, which 07_figures/all.R sources alongside.
     sites <- if (is.null(federated_path)) NULL else load_federated_sites(federated_path)
     if (!is.null(sites)) {
       pE <- figure1_site_counts_plot(sites)

@@ -1,5 +1,6 @@
 source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
 source("COMPASS/survival_analysis/figure_workflow.R")
+source("COMPASS/survival_analysis/checklist_supplement.R")
 fails <- function(expr,pattern) {
   e <- tryCatch(force(expr),error=identity)
   stopifnot(inherits(e,"error"),grepl(pattern,conditionMessage(e)))
@@ -194,4 +195,62 @@ local({
   legacy <- put(xgb(0,"w_DFCI"),"federated_xgboost","xgboost_federated_metrics_adt.csv")
   stopifnot(identical(federated_multivariable_files(fed,"xgboost")$metrics,legacy))
 })
-cat("Federated elastic-net/XGBoost: test-only metrics, isolation, feature parsing, shared styling, audit, missing inputs, rhino_data_v2 layout and validation passed.\n")
+local({
+  # rhino_data_v2 predictive checklists: federated_predictive_checklists/lm_<days>/{w,no}_DFCI/.
+  root <- tempfile("federated-checklist-",tmpdir="/private/tmp"); dir.create(root)
+  on.exit(unlink(root,recursive=TRUE))
+  fed <- file.path(root,"cox_federated_univariate_adt.csv")
+  put <- function(d,...) {
+    path <- file.path(root,"federated_predictive_checklists",...)
+    dir.create(dirname(path),recursive=TRUE,showWarnings=FALSE)
+    write_csv(d,path,na=""); path
+  }
+  # A 2-year horizon is exported but not shown; the age checklist is one item.
+  items <- function(lm) bind_rows(
+    expand_grid(landmark_days=lm,horizon_days=c(365,730,1825),config="both",position=1:2) %>%
+      mutate(feature=c("Prostate_specific_Ag__Mass_volume__in_Serum_or_Plasma__max","Respiratory_rate__last")[position],
+        op=c(">=","is_missing")[position],threshold_value=c(72.1234,NA)[position],M=1,N=2),
+    expand_grid(landmark_days=lm,horizon_days=c(365,730,1825),config="baseline",position=1) %>%
+      mutate(feature="age_at_anchor",op="<=",threshold_value=58.06,M=1,N=1))
+  metrics <- function(lm,auc) expand_grid(landmark_days=lm,horizon_days=c(365,730,1825),
+    config=c("both","baseline"),dataset=c("train_val","test")) %>%
+    mutate(status="ok",n=1000,n_cases=20,auc=if_else(config=="both",auc,.5),auc_lower=auc-.1,
+      auc_upper=auc+.1,brier=.01,sensitivity=.6,specificity=.8,ppv=.05,npv=.99,
+      across(c(n,n_cases),~if_else(dataset=="test",.x/4,.x)))
+  for(lm in c(0,90,180)) for(variant in c("w_DFCI","no_DFCI")) {
+    sub <- if(lm==0) "adt" else character()
+    do.call(put,c(list(items(lm)),paste0("lm_",lm),variant,as.list(sub),"predictive_checklist_checklists_adt.csv"))
+    do.call(put,c(list(metrics(lm,if(variant=="w_DFCI") .7 else .6)),paste0("lm_",lm),variant,as.list(sub),
+      "predictive_checklist_metrics_adt.csv"))
+  }
+  stopifnot(all(lengths(federated_checklist_files(fed))==3L),all(lengths(federated_checklist_files(fed,"no_dfci"))==3L))
+  loaded <- load_federated_checklists(fed)
+  stopifnot(nrow(loaded$metrics)==12L,all(loaded$metrics$dataset=="test"),all(loaded$metrics$n==250),
+    all(loaded$metrics$auc[loaded$metrics$config=="both"]==.7),
+    identical(sort(unique(loaded$metrics$model)),c("age_checklist","checklist")),
+    nrow(loaded$items)==18L,!any(loaded$items$horizon_days==730))
+  stopifnot(identical(sort(unique(loaded$items$display_item)),
+    c("Age <= 58.1","PSA (max) >= 72.1","Respiratory rate (last) is missing")))
+  no_dfci <- load_federated_checklists(fed,"no_dfci")$metrics
+  stopifnot(nrow(no_dfci)==12L,all(no_dfci$auc[no_dfci$config=="both"]==.6))
+  output <- file.path(root,"figures"); dir.create(output)
+  render_federated_checklist_cards(output,fed,60,TRUE)
+  out <- file.path(output,"04_multivariate","federated")
+  stopifnot(file.exists(file.path(out,"checklist_supplement__platinum.png")))
+  sidecar <- read_csv(file.path(out,"data","checklist_supplement_metrics__platinum.csv"),show_col_types=FALSE)
+  stopifnot(nrow(sidecar)==12L,nrow(read_csv(file.path(out,"data","checklist_supplement_items__platinum.csv"),
+    show_col_types=FALSE))==18L)
+  # Fewer items than N, a duplicated landmark, out-of-range AUC and a missing export.
+  put(filter(items(90),!(horizon_days==365 & config=="both" & position==2)),
+    "lm_90","w_DFCI","predictive_checklist_checklists_adt.csv")
+  fails(render_federated_checklist_cards(output,fed,60,TRUE),"landmark 90, 1-year lists 1 items but N = 2")
+  put(items(90),"lm_90","w_DFCI","predictive_checklist_checklists_adt.csv")
+  put(metrics(0,.7),"lm_0","w_DFCI","predictive_checklist_metrics_adt.csv")
+  fails(load_federated_checklists(fed),"Duplicate federated checklist")
+  put(metrics(0,1.2),"lm_0","w_DFCI","predictive_checklist_metrics_adt.csv")
+  unlink(file.path(root,"federated_predictive_checklists","lm_0","w_DFCI","adt"),recursive=TRUE)
+  fails(load_federated_checklists(fed),"Invalid federated checklist auc")
+  unlink(Sys.glob(file.path(root,"federated_predictive_checklists","lm_*","w_DFCI","predictive_checklist_metrics_adt.csv")))
+  stopifnot(is.null(suppressWarnings(load_federated_checklists(fed))))
+})
+cat("Federated elastic-net/XGBoost: test-only metrics, isolation, feature parsing, shared styling, audit, missing inputs, rhino_data_v2 layout, predictive checklists and validation passed.\n")

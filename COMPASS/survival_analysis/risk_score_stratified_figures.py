@@ -428,7 +428,7 @@ def stratified_patients_table(
 
     The first frame has one row per scored patient (id, duration_days, event,
     risk_score) and one label column per stratifier key, so downstream KM
-    figures (07_figures.R) draw exactly the groups this script analysed. The
+    figures (07_figures/all.R) draw exactly the groups this script analysed. The
     second records each stratifier's title, display order ("|"-joined), and
     whether that order is ordinal. Unordered stratifiers (trio combinations)
     get a deterministic display order but stay flagged ordinal=False.

@@ -316,23 +316,23 @@ def test_supplement_never_refits_anything():
         )
 
 
-# ---- 07_figures.R render cross -----------------------------------------
+# ---- 07_figures/all.R render cross -----------------------------------------
 #
-# 07_figures.R names its COHORTS and ENDPOINTS as literal vectors, so it is the one
+# 07_figures/all.R names its COHORTS and ENDPOINTS as literal vectors, so it is the one
 # place that can drift out of the Python run cross without any import failing:
 # a retired endpoint left here dies in the ENDPOINT_SUFFIXES lookup, and a
 # missing cohort silently renders fewer figure sets than there are runs.
 
-FIGURES_SCRIPT = REPO_ROOT / "COMPASS" / "survival_analysis" / "07_figures.R"
+FIGURES_SCRIPT = REPO_ROOT / "COMPASS" / "survival_analysis" / "07_figures" / "_common.R"
 
 
 def _figures_vector(name: str) -> list[str]:
     body = re.search(rf"^{name} <- c\((.*?)\)", FIGURES_SCRIPT.read_text(), re.S | re.M)
     if body is None:
         default = re.search(rf'^{name} <- env_values\("[^"]+", "([^"]+)"\)', FIGURES_SCRIPT.read_text(), re.M)
-        assert default, f"{name} not found in 07_figures.R"
+        assert default, f"{name} not found in 07_figures/all.R"
         return default.group(1).split(",")
-    assert body, f"{name} not found in 07_figures.R"
+    assert body, f"{name} not found in 07_figures/all.R"
     return re.findall(r'"([^"]*)"', body.group(1))
 
 
@@ -373,7 +373,7 @@ def test_the_figures_script_names_no_retired_endpoint():
 
     endpoints = _figures_vector("ENDPOINTS")
     assert set(endpoints) <= supported, (
-        f"07_figures.R requests endpoints the pipeline does not support: "
+        f"07_figures/all.R requests endpoints the pipeline does not support: "
         f"{sorted(set(endpoints) - supported)}"
     )
 
@@ -388,7 +388,7 @@ def test_a_failed_cohort_does_not_abandon_the_rest():
 
 def test_r_figure_workflow_never_launches_python():
     """Python belongs exclusively to 06, including all/prepare stages in 05."""
-    paths = sorted(PIPELINE_R.parent.glob("*.R"))  # includes 07_figures.R
+    paths = sorted(PIPELINE_R.parent.glob("*.R"))  # includes 07_figures/all.R
     for path in paths:
         code = path.read_text()
         assert not re.search(r"\b(?:system2?|py_run_file|py_run_string|source_python)\s*\(", code), path

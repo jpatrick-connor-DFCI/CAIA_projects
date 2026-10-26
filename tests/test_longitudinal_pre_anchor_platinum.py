@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_R = (
     REPO_ROOT / "COMPASS" / "survival_analysis" / "COMPASS_generate_figures_pipeline.R"
 )
-FIGURES_SCRIPT = REPO_ROOT / "COMPASS" / "survival_analysis" / "07_figures.R"
+FIGURES_SCRIPT = REPO_ROOT / "COMPASS" / "survival_analysis" / "07_figures" / "_common.R"
 
 
 def test_descriptive_longitudinal_uses_exact_base_cohort():

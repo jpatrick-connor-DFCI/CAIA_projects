@@ -1,5 +1,5 @@
 # COMPASS figure workflow: presentation helpers, federated and manuscript
-# figures, the cached prepare/render bridge used by 07_figures.R, and the
+# figures, the cached prepare/render bridge used by 07_figures/all.R, and the
 # downloaded-PNG reformatter. Source after COMPASS_generate_figures_pipeline.R.
 # Standalone CLI: Rscript figure_workflow.R <downloaded-ADT-dir> <new-parent>/ADT [0|90|180]
 
@@ -80,7 +80,7 @@ figure_public_path <- function(path) {
 # Federated outputs are written by stem rather than through by_figure.
 figure_federated_section <- function(stem) {
   section <- if (grepl("^transfer_", stem)) "transfer" else
-    if (grepl("^(elasticnet|xgboost|deephit)_", stem)) "multivariate_federated" else
+    if (grepl("^(elasticnet|xgboost|deephit|checklist)_", stem)) "multivariate_federated" else
     if (grepl("^(site_incidence|federated_cohort_km)", stem)) "cohort" else "univariate_federated"
   FIGURE_SECTIONS[[section]]
 }
@@ -1192,6 +1192,136 @@ render_federated_deephit_performance <- function(root,federated_path,dpi,overwri
   invisible(d)
 }
 
+# rhino_data_v2 predictive checklists (federated_predictive_checklists/lm_<days>/<variant>/):
+# a unit-weight M-of-N checklist per landmark x horizon ("both") and a one-item
+# age checklist ("baseline"), with metrics on the sites' pooled held-out test patients.
+FEDERATED_CHECKLIST_FILES <- c(items="predictive_checklist_checklists_adt.csv",
+  metrics="predictive_checklist_metrics_adt.csv")
+FEDERATED_CHECKLIST_HORIZONS <- c(`1-year`=365,`5-year`=1825)
+FEDERATED_CHECKLIST_MODELS <- c(checklist="Checklist",age_checklist="Age-only checklist")
+FEDERATED_CHECKLIST_COLORS <- c(Checklist="#6A3D9A",`Age-only checklist`="#9F86C0")
+
+federated_checklist_files <- function(federated_path,variant="pooled")
+  lapply(FEDERATED_CHECKLIST_FILES,function(file) federated_v2_export_files(federated_path,file,variant))
+
+# "RDW (mean) >= 13.2"; thresholds shown to 3 significant digits (exact in the CSV).
+federated_checklist_item_label <- function(feature,op,threshold) {
+  name <- manuscript_federated_feature_label(if_else(feature=="age_at_anchor","Age",
+    format_label(federated_lab_label(feature),federated_feature_stat(feature))))
+  if_else(op=="is_missing",paste(name,"is missing"),
+    paste(name,op,trimws(formatC(signif(threshold,3),format="fg",digits=3))))
+}
+
+load_federated_checklists <- function(federated_path,variant="pooled") {
+  paths <- federated_checklist_files(federated_path,variant)
+  if(!all(lengths(paths))) {
+    warning("Federated predictive checklists unavailable; no ",
+      paste(FEDERATED_CHECKLIST_FILES[!lengths(paths)],collapse=", ")," under ",dirname(federated_path))
+    return(NULL)
+  }
+  items <- read_federated_csvs(paths$items)
+  metrics <- read_federated_csvs(paths$metrics)
+  needed <- list(items=c("landmark_days","horizon_days","config","position","feature","op",
+    "threshold_value","M","N"),metrics=c("landmark_days","horizon_days","config","dataset","status",
+    "n","n_cases","auc","auc_lower","auc_upper","brier","sensitivity","specificity","ppv","npv"))
+  for(part in names(needed)) if(length(missing <- setdiff(needed[[part]],names(list(items=items,metrics=metrics)[[part]]))))
+    stop("Federated checklist ",part," are missing: ",paste(missing,collapse=", "))
+  keep <- function(d) dplyr::filter(d,landmark_days %in% c(0,90,180),
+    horizon_days %in% FEDERATED_CHECKLIST_HORIZONS,config %in% c("both","baseline"))
+  items <- keep(items)
+  metrics <- dplyr::filter(keep(metrics),dataset=="test")
+  if(anyDuplicated(items[c("landmark_days","horizon_days","config","position")]) ||
+     anyDuplicated(metrics[c("landmark_days","horizon_days","config")]))
+    stop("Duplicate federated checklist rows in ",paste(unlist(paths),collapse="; "))
+  for(column in c("auc","auc_lower","auc_upper"))
+    if((!is.numeric(metrics[[column]]) && !all(is.na(metrics[[column]]))) ||
+       any(!is.na(metrics[[column]]) & (metrics[[column]]<0 | metrics[[column]]>1)))
+      stop("Invalid federated checklist ",column)
+  list(items=dplyr::mutate(items,display_item=federated_checklist_item_label(feature,op,threshold_value)),
+    metrics=dplyr::mutate(metrics,model=if_else(config=="both","checklist","age_checklist")))
+}
+
+# Held-out AUC(t) per landmark (a) above the 1-year (b) and 5-year (c) checklists,
+# one column per landmark. Cards come from checklist_supplement.R (sourced by 07).
+render_federated_checklist_cards <- function(root,federated_path,dpi,overwrite,variant="pooled") {
+  loaded <- load_federated_checklists(federated_path,variant)
+  if(is.null(loaded) || !nrow(loaded$metrics)) return(invisible(NULL))
+  version <- FEDERATED_MULTIVARIABLE_VARIANTS[[variant]]
+  stem <- paste0("checklist_supplement",version$stem)
+  landmark_levels <- sprintf("Landmark ADT +%d days",c(0,90,180))
+  metrics <- loaded$metrics %>% mutate(
+    series=factor(unname(FEDERATED_CHECKLIST_MODELS[model]),levels=unname(FEDERATED_CHECKLIST_MODELS)),
+    horizon=factor(names(FEDERATED_CHECKLIST_HORIZONS)[match(horizon_days,FEDERATED_CHECKLIST_HORIZONS)],
+      levels=names(FEDERATED_CHECKLIST_HORIZONS)),
+    landmark_label=factor(sprintf("Landmark ADT +%d days",landmark_days),levels=landmark_levels))
+  capture <- getOption("compass.figure_table_capture")
+  for(part in c("items","metrics")) {
+    path <- figure_sidecar_path(federated_output_path(root,paste0(stem,"_",part),".csv"))
+    dir.create(dirname(path),recursive=TRUE,showWarnings=FALSE)
+    readr::write_csv(loaded[[part]],path)
+    if(is.function(capture)) capture(path)
+  }
+  dodge <- ggplot2::position_dodge(width=.45)
+  auc <- ggplot2::ggplot(metrics,ggplot2::aes(horizon,auc,color=series,shape=series)) +
+    ggplot2::geom_hline(yintercept=.5,color="grey65",linetype="dotted") +
+    ggplot2::geom_linerange(ggplot2::aes(ymin=auc_lower,ymax=auc_upper),position=dodge,
+      linewidth=.65,na.rm=TRUE) +
+    ggplot2::geom_point(position=dodge,size=2.6,na.rm=TRUE) +
+    ggplot2::facet_wrap(~landmark_label,nrow=1,drop=FALSE) +
+    ggplot2::scale_x_discrete(drop=FALSE) +
+    ggplot2::scale_color_manual(values=FEDERATED_CHECKLIST_COLORS,name=NULL,drop=FALSE) +
+    ggplot2::scale_shape_manual(values=c(Checklist=16,`Age-only checklist`=1),name=NULL,drop=FALSE) +
+    ggplot2::coord_cartesian(ylim=c(0,1)) +
+    ggplot2::labs(title="a  Held-out test AUC(t)",x="Checklist horizon",y="AUC(t)") +
+    federated_transfer_theme()
+  cards <- list()
+  for(h in names(FEDERATED_CHECKLIST_HORIZONS)) for(lm in c(0,90,180)) {
+    days <- FEDERATED_CHECKLIST_HORIZONS[[h]]
+    m <- dplyr::filter(metrics,landmark_days==lm,horizon_days==days)
+    full <- dplyr::filter(m,config=="both")
+    items <- loaded$items %>% dplyr::filter(landmark_days==lm,horizon_days==days,config=="both") %>%
+      dplyr::arrange(position)
+    if(nrow(items) && nrow(items)!=items$N[1L])
+      stop("Federated checklist at landmark ",lm,", ",h," lists ",nrow(items)," items but N = ",items$N[1L])
+    fitted <- nrow(items)>0L && nrow(full)>0L && identical(full$status,"ok")
+    cell <- data.frame(landmark_days=lm,status=if(fitted) "ok" else "missing",
+      reason=if(nrow(full)) paste("export status", full$status) else "No checklist exported",
+      threshold=if(nrow(items)) items$M[1L] else NA,n_items=nrow(items),
+      n_test=if(nrow(m)) m$n[1L] else NA,n_events_test=if(nrow(m)) m$n_cases[1L] else NA)
+    lines <- checklist_card_lines(cell,dplyr::transmute(items,item_order=position,name=display_item),
+      m,round(days/365),FEDERATED_CHECKLIST_MODELS)
+    lines$landmark_label <- factor(sprintf("Landmark ADT +%d days",lm),levels=landmark_levels)
+    cards[[h]][[length(cards[[h]])+1L]] <- lines
+  }
+  # Every card row gets the same height, spaced for the longest card.
+  line_in <- .17
+  panel_in <- line_in*(max(vapply(unlist(cards,recursive=FALSE),nrow,integer(1)))+1.5)
+  rows <- lapply(seq_along(cards),function(i) {
+    d <- dplyr::bind_rows(lapply(cards[[i]],function(l) {
+      l$y <- 1-.02-(seq_len(nrow(l))-1L)*line_in/panel_in
+      l
+    }))
+    plot_checklist_cards(d,sprintf("%s  %s checklists",letters[i+1L],names(cards)[i]),caption=NULL)
+  })
+  # Matching gtable widths line the AUC facets up with the card columns.
+  grobs <- lapply(c(list(auc),rows),ggplot2::ggplotGrob)
+  if(length(unique(vapply(grobs,function(g) length(g$widths),integer(1))))==1L) {
+    widths <- do.call(grid::unit.pmax,lapply(grobs,function(g) g$widths))
+    for(i in seq_along(grobs)) grobs[[i]]$widths <- widths
+  }
+  heights <- c(3.2,rep(panel_in+.6,length(rows)))
+  caption <- paste(version$note,
+    "Unit-weight M-of-N checklists; the age-only checklist is a single age item fit on the same development patients.",
+    "IPCW-weighted AUC(t), Brier and flag operating points on held-out test patients at each horizon; bars and parentheses are 95% intervals.",
+    sep="\n")
+  p <- gridExtra::arrangeGrob(grobs=grobs,ncol=1,heights=grid::unit(heights,"in"),
+    top=grid::textGrob(paste0("Federated predictive checklists",version$label,": ADT, platinum endpoint"),
+      x=grid::unit(10,"pt"),hjust=0,gp=grid::gpar(fontsize=14,fontface="bold")),
+    bottom=grid::textGrob(caption,x=grid::unit(10,"pt"),hjust=0,gp=grid::gpar(fontsize=10,col="grey30")))
+  save_federated_panel(p,federated_output_path(root,stem,".png"),15.6,sum(heights)+1.2,dpi,overwrite)
+  invisible(loaded)
+}
+
 # Platinum-trained federated bundles refit without Dana-Farber, scored on local
 # endpoints by 04a_transfer_updated.ipynb (`federated_transfer_adt_no_DFCI/`).
 # No Dana-Farber patient was in training, so this is an external validation.
@@ -1645,7 +1775,9 @@ FEDERATED_TRANSFER_KM_VIEWS <- list(
 FEDERATED_TRANSFER_GRADIENT <- list(
   score_quartile=list(clock="adt",levels=paste0("Q",1:4),label="Federated score quartile"),
   gleason_group=list(clock="adt",levels=FEDERATED_TRANSFER_GLEASON,label="Gleason"),
-  trio_count=list(clock="sequencing",levels=as.character(0:3),label="TP53/RB1/PTEN genes altered"))
+  trio_pattern=list(clock="sequencing",
+    levels=c("0 altered","TP53 altered","PTEN altered","RB1 altered","2 altered","3 altered"),
+    label="TP53/PTEN/RB1 alteration"))
 FEDERATED_TRANSFER_KM_TABLES <- c(curves="transfer_km_curves_no_dfci",summary="transfer_km_summary_no_dfci",
   gradient="transfer_km_gradient_no_dfci")
 federated_transfer_horizon_label <- function(horizon=FEDERATED_TRANSFER_KM_HORIZON)
@@ -1701,7 +1833,14 @@ federated_transfer_km_groups <- function(d) {
       score_quartile=federated_transfer_score_quantile(risk_score,4L)) %>% ungroup() %>%
     mutate(gleason_group=if_else(clock=="adt",figure_gleason_groups(GLEASON_SCORE),NA_character_),
       trio_group=if_else(sequenced,FEDERATED_TRANSFER_TRIO[1+(trio_n>0)],NA_character_),
-      trio_count=if_else(sequenced,as.character(trio_n),NA_character_),
+      trio_pattern=case_when(
+        sequenced & trio_n==0 ~ "0 altered",
+        sequenced & trio_n==1 & TP53_ANY==1 ~ "TP53 altered",
+        sequenced & trio_n==1 & PTEN_ANY==1 ~ "PTEN altered",
+        sequenced & trio_n==1 & RB1_ANY==1 ~ "RB1 altered",
+        sequenced & trio_n==2 ~ "2 altered",
+        sequenced & trio_n==3 ~ "3 altered",
+        TRUE ~ NA_character_),
       score_trio=if_else(is.na(trio_group)|is.na(score_half),NA_character_,
         paste(trio_group,score_half,sep=" · ")))
 }
@@ -1828,10 +1967,12 @@ plot_federated_transfer_gradient <- function(tables, model_family, landmark, tit
     endpoint_label=factor(FEDERATED_TRANSFER_ENDPOINTS[endpoint],levels=FEDERATED_TRANSFER_ENDPOINTS))
   dodge <- position_dodge(width=.5)
   ggplot(d,aes(group,event_free,color=endpoint_label,group=endpoint_label)) +
-    geom_line(position=dodge,linewidth=.6,alpha=.6) +
+    geom_line(data=function(x) x[x$stratifier!="trio_pattern",,drop=FALSE],
+      position=dodge,linewidth=.6,alpha=.6) +
     geom_linerange(aes(ymin=lo,ymax=hi),position=dodge,linewidth=.7,na.rm=TRUE) +
     geom_point(position=dodge,size=2.4) +
     scale_color_manual(values=FEDERATED_TRANSFER_ENDPOINT_COLORS,name=NULL,drop=TRUE) +
+    scale_x_discrete(labels=function(x) sub(" altered$","\\naltered",x)) +
     facet_grid(.~stratifier_label,scales="free_x",space="free_x") +
     labs(x=NULL,y=paste(federated_transfer_horizon_label(),"event-free probability"),
       title=title,caption=caption) +
@@ -1873,7 +2014,7 @@ render_federated_transfer_km <- function(root, directory, dpi, overwrite) {
     save(plot_federated_transfer_gradient(tables,family,landmark,
         title=sprintf("%s: observed %s event-free probability from the +%d-day landmark",model,horizon,as.integer(landmark)),
         caption=paste(cutoffs,"Kaplan-Meier estimates with 95% CIs; score quartiles and Gleason on the ADT clock,",
-          sprintf("TP53/RB1/PTEN on the sequencing clock (sequenced patients). Missing points: no follow-up to %s.",
+          sprintf("Six exclusive TP53/PTEN/RB1 alteration groups on the sequencing clock (sequenced patients). Missing points: no follow-up to %s.",
             sub("-year"," years",horizon)))),
       sprintf("transfer_km_gradient_%s",suffix),12,5.5)
   }
@@ -2127,6 +2268,8 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
     render_federated_multivariable(root,federated_path,family,dpi,overwrite,variant)
   for(variant in names(FEDERATED_MULTIVARIABLE_VARIANTS))
     render_federated_deephit_performance(root,federated_path,dpi,overwrite,variant)
+  # The four-site checklists; the no-DFCI refits appear in the transfer supplement.
+  render_federated_checklist_cards(root,federated_path,dpi,overwrite)
   if (!is.null(figure_data_dir))
     render_federated_figure_data(root, federated_path, figure_data_dir, dpi, overwrite)
   if (!is.null(transfer_no_dfci_dir)) {
@@ -2235,7 +2378,7 @@ manuscript_transfer_caption <- function(no_d=FALSE) {
       if(no_d) "a-c" else "a-d",", bars denote 95% bootstrap confidence intervals over patients, dotted lines mark 0.5, and column strips give the day-0 patients and events for each endpoint. ",
       sprintf("(%s-%s) Kaplan-Meier platinum-free (%s), AVPC-free (%s), and NEPC-free (%s) survival from the 180-day landmark after ADT initiation comparing the top and bottom 10%% of the transferred XGBoost score; the middle 80%% is omitted, shading denotes pointwise 95%% confidence intervals, P values are from log-rank tests, and the vertical axes are truncated below 1. ",
         km[1],km[3],km[1],km[2],km[3]),
-      sprintf("(%s) Kaplan-Meier 5-year event-free probability (95%% confidence interval) from the 180-day landmark for each endpoint by transferred XGBoost score quartile, Gleason group (≤7 vs. ≥8), and number of TP53, RB1, and PTEN genes altered (0 to 3).",gradient)),
+      sprintf("(%s) Kaplan-Meier 5-year event-free probability (95%% confidence interval) from the 180-day landmark for each endpoint by transferred XGBoost score quartile, Gleason group (≤7 vs. ≥8), and six mutually exclusive TP53, PTEN, and RB1 alteration groups: none, TP53 only, PTEN only, RB1 only, any two, or all three.",gradient)),
     paste0("No Dana-Farber patient contributed to federated model training, so every endpoint, including platinum, is out of sample. Mean AUC(t) is the inverse-probability-of-censoring-weighted cumulative/dynamic AUC averaged over 1, 2, 3, and 5 years after the landmark, with censoring estimated in the evaluated Dana-Farber patients; horizons without an observed event or later follow-up were omitted. ",
       sprintf("Score groups in %s-%s use cutpoints computed among the Dana-Farber patients at risk for each endpoint at the landmark; they are not federated training cutoffs. Score and Gleason groups use the ADT-initiation clock and TP53/RB1/PTEN groups the sequencing-date clock (sequenced patients). ",km[1],gradient),
       "Elastic-Net versions, the 0- and 90-day landmarks, score × TP53/RB1/PTEN Kaplan-Meier curves, and head-to-head Kaplan-Meier grids are provided as supplementary figures. The local and combined Cox models were fitted on the Dana-Farber patients they were evaluated on and were scored with stratified 5-fold cross-validated (out-of-fold) predictions; in the combined models, the transferred score was standardized within the evaluated patients. Gleason scores were used only if available before the landmark. ",
@@ -2813,8 +2956,8 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
   }
   plots <- c(plots,extra$plots); titles <- c(titles,extra$titles); legend <- c(legend,extra$legend)
   row_heights <- unname(row_heights)
-  # 9 in (not the usual 7.2) keeps the one-row b-d legends unclipped; d's is ~8.5 in.
-  spec <- list(key=key,width=9,height=sum(row_heights),layout=do.call(rbind,rows),titles=titles,
+  # 10 in (not the usual 7.2) keeps the one-row b-d legends unclipped; d's is ~8.5 in.
+  spec <- list(key=key,width=10,height=sum(row_heights),layout=do.call(rbind,rows),titles=titles,
     row_heights=row_heights,shared_legend_panels=integer())
   list(plot=manuscript_combine(plots,spec),spec=spec,data=metrics,legend=paste(
     c(legend,FEDERATED_TRANSFER_SPEC$source),collapse="\n"))
@@ -2825,7 +2968,7 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
 # survival by the top vs bottom 10% of the transferred score for platinum, AVPC
 # and NEPC (ADT clock; `km`), then the event-free probability at
 # FEDERATED_TRANSFER_KM_HORIZON by score quartile and Gleason group (ADT clock)
-# and by the number of TP53/RB1/PTEN genes altered (sequencing clock;
+# and by mutually exclusive TP53/PTEN/RB1 alteration groups (sequencing clock;
 # `gradient`). Panels that are not estimable are dropped.
 manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRANSFER_KM_FIGURE) {
   family <- figure$model_family; landmark <- figure$landmark_days
@@ -2864,7 +3007,7 @@ manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRAN
   if(!is.null(gradient)) gradient <- gradient + ggplot2::labs(y=paste(horizon,"event-free\nprobability"))
   has_gradient <- add(gradient,paste(horizon,"event-free probability"),paste0(
     sprintf("Kaplan-Meier %s event-free probability (95%% CI) from the %d-day landmark for each endpoint, ",horizon,as.integer(landmark)),
-    sprintf("by transferred %s score quartile and Gleason group (ADT clock) and by the number of TP53/RB1/PTEN genes altered (0-3; sequencing clock).",model)))
+    sprintf("by transferred %s score quartile and Gleason group (ADT clock), then 0 altered, TP53 only, PTEN only, RB1 only, any two, or all three altered (sequencing clock).",model)))
   if(length(plots)) legend <- c(legend,
     "Score cutpoints were computed in the Dana-Farber patients at risk for each endpoint at each landmark.")
   list(plots=plots,titles=titles,legend=legend,km=plots[seq_len(n_km)],
@@ -3420,7 +3563,7 @@ figure_parallel <- function(items, fun, workers) {
 }
 
 figure_notebook_manifest <- function(config, check_sources = TRUE) {
-  guidance <- "Run 06_prep_figure_data.ipynb with the requested settings, then rerun 07_figures.R."
+  guidance <- "Run 06_prep_figure_data.ipynb with the requested settings, then rerun 07_figures/all.R."
   fail <- function(detail) stop(detail, "\n", guidance, call. = FALSE)
   path <- file.path(config$cache_root, "manifest.json")
   if (!file.exists(path)) fail(paste("Missing notebook-prepared manifest:", path))
@@ -3468,6 +3611,7 @@ figure_notebook_manifest <- function(config, check_sources = TRUE) {
     registered_inputs <- c(registered_inputs,
       unlist(lapply(names(FEDERATED_MULTIVARIABLE_VARIANTS),function(variant)
         federated_deephit_metric_paths(config$federated_path,variant)),use.names=FALSE),
+      unlist(federated_checklist_files(config$federated_path),use.names=FALSE),
       file.path(federated_transfer_no_dfci_dir(config), FEDERATED_TRANSFER_NO_DFCI_FILES),
       file.path(federated_transfer_no_dfci_dir(config),"all_models",
         c("transfer_metrics.csv","transfer_auc_t.csv")),
@@ -3505,7 +3649,8 @@ figure_notebook_manifest <- function(config, check_sources = TRUE) {
 run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     prepare_workers = 1L, render_workers = 2L, dpi = 200, pdf = FALSE,
     prepare_overwrite = FALSE, render_overwrite = FALSE,
-    metastatic_config = NULL, forest_config = NULL, federated_config = NULL) {
+    metastatic_config = NULL, forest_config = NULL, federated_config = NULL,
+    figure_key = NULL) {
   stage <- match.arg(stage, c("all", "prepare", "render"))
   started <- proc.time()[["elapsed"]]
   for (name in c("data_root", "cache_root", "fig_root"))
@@ -3516,8 +3661,10 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     stop("COMPASS_FIGURE_DATA_ROOT and COMPASS_FIG_ROOT must be separate, non-nested directories; keep caches in data.")
   dir.create(config$cache_root, recursive = TRUE, showWarnings = FALSE)
   manifest <- figure_notebook_manifest(config, check_sources = stage != "render")
-  figure_archive_legacy_receipts(config$fig_root, config$cache_root)
-  figure_flatten_export_layout(config$fig_root)
+  if (is.null(figure_key)) {
+    figure_archive_legacy_receipts(config$fig_root, config$cache_root)
+    figure_flatten_export_layout(config$fig_root)
+  }
   old <- options(compass.figure_data_manifest = manifest)
   on.exit(options(old), add = TRUE)
   runtime <- list(R = as.character(getRversion()), packages = vapply(
@@ -3560,6 +3707,23 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
       jobs$checklist_supplement <- list(name = "checklist_supplement", signature = signature,
         directory = file.path(config$cache_root, "scenes", "checklist_supplement", signature))
     }
+  }
+  if (!is.null(figure_key)) {
+    figure_jobs <- list(
+      `01_cohort_overview` = c("adt__platinum", "cohort_overview", "federated"),
+      `02_llm_nepc_avpc` = "adt__platinum",
+      `03_dfci_univariable` = "adt__platinum",
+      `04_multivariable_labs` = c("adt__platinum", "checklist_supplement"),
+      `06_dfci_cohort_sensitivity` = "cohort_overview",
+      `07_federated_incidence_associations` = "federated",
+      `08_federated_multivariable` = "federated",
+      federated_03_univariable = "federated",
+      federated_04_multivariable = "federated",
+      federated_05_transfer_no_dfci = "federated")
+    if (!figure_key %in% names(figure_jobs))
+      stop("Unknown manuscript figure: ", figure_key)
+    jobs <- jobs[intersect(names(jobs), figure_jobs[[figure_key]])]
+    if (!length(jobs)) stop("No prepared figure jobs are enabled for ", figure_key)
   }
   build_job <- function(job) {
     if (!is.null(manifest$errors[[job$name]])) stop(manifest$errors[[job$name]])
@@ -3641,6 +3805,26 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
       if (is.null(m$scenes)) return(list())
       lapply(m$scenes, function(scene) list(scene = scene, signature = m$signature))
     }), recursive = FALSE)
+    if (!is.null(figure_key)) {
+      figure_section <- MANUSCRIPT_SECTIONS[[figure_key]]
+      section_path <- paste0("/", FIGURE_SECTIONS[[figure_section]], "/")
+      tasks <- Filter(function(task) {
+        destination <- task$scene$destination
+        stem <- task$scene$stem
+        # Each script includes panels and supplements in its output section,
+        # while manuscript variants sharing a section remain independently selectable.
+        if (figure_key == "07_federated_incidence_associations" &&
+            stem == "site_incidence_lm000") return(TRUE)
+        if (!grepl(section_path, destination, fixed = TRUE)) return(FALSE)
+        if (grepl("/manuscript/", destination, fixed = TRUE))
+          return(startsWith(stem, figure_key))
+        if (figure_key == "07_federated_incidence_associations")
+          return(grepl("^(psa_forest|testosterone_forest|federated_|site_incidence)", stem))
+        if (figure_key == "federated_03_univariable")
+          return(grepl("^(federated_|fed3_)", stem))
+        TRUE
+      }, tasks)
+    }
     message("Rendering/checking ", length(tasks), " panels with ", render_workers, " workers ...")
     completed <- if (render_overwrite) rep(FALSE, length(tasks)) else
       vapply(tasks, function(task) figure_scene_complete(task$scene, task$signature, dpi, pdf), logical(1))
@@ -3656,7 +3840,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
   message(sprintf("Figure workflow finished in %.1fs (%s).", proc.time()[["elapsed"]] - started, stage))
   if (length(failures)) stop("Figure workflow failures:\n", paste(failures, collapse = "\n"))
   if(stage != "prepare") {
-    figure_archive_old_exports(config,prepared)
+    if (is.null(figure_key)) figure_archive_old_exports(config,prepared)
     figure_write_catalog(config,prepared)
   }
   invisible(list(prepared = prepared, rendered = render_results))

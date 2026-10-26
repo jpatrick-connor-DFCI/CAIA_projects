@@ -358,11 +358,20 @@ seq_rows <- filter(km_groups,clock=="sequencing")
 stopifnot(nrow(top)==6,all(abs(top$top-.2)<.02),all(abs(top$decile-.1)<.02),all(abs(top$high-.5)<.04),
   n_distinct(tied$score_extreme)==1,n_distinct(tied$score_half)==1,n_distinct(tied$score_quartile)==1,
   all(is.na(km_groups$trio_group[km_groups$clock=="adt"])),
-  all(is.na(km_groups$trio_count[km_groups$clock=="adt"])),
+  all(is.na(km_groups$trio_pattern[km_groups$clock=="adt"])),
   all(is.na(km_groups$gleason_group[km_groups$clock=="sequencing"])),
   all(!is.na(seq_rows$trio_group)),
-  identical(as.integer(seq_rows$trio_count),as.integer(seq_rows$TP53_ANY+seq_rows$RB1_ANY+seq_rows$PTEN_ANY)),
-  all(seq_rows$trio_group[seq_rows$trio_count=="0"]==FEDERATED_TRANSFER_TRIO[1]))
+  identical(unname(FEDERATED_TRANSFER_GRADIENT$trio_pattern$levels),
+    c("0 altered","TP53 altered","PTEN altered","RB1 altered","2 altered","3 altered")))
+trio_n <- seq_rows$TP53_ANY+seq_rows$RB1_ANY+seq_rows$PTEN_ANY
+stopifnot(all(seq_rows$trio_pattern[trio_n==0]=="0 altered"),
+  all(seq_rows$trio_pattern[trio_n==1 & seq_rows$TP53_ANY==1]=="TP53 altered"),
+  all(seq_rows$trio_pattern[trio_n==1 & seq_rows$PTEN_ANY==1]=="PTEN altered"),
+  all(seq_rows$trio_pattern[trio_n==1 & seq_rows$RB1_ANY==1]=="RB1 altered"),
+  all(seq_rows$trio_pattern[trio_n==2]=="2 altered"),
+  all(seq_rows$trio_pattern[trio_n==3]=="3 altered"),
+  setequal(unique(na.omit(seq_rows$trio_pattern)),FEDERATED_TRANSFER_GRADIENT$trio_pattern$levels),
+  all(seq_rows$trio_group[trio_n==0]==FEDERATED_TRANSFER_TRIO[1]))
 en <- filter(km_groups,clock=="adt",bundle=="cox_federated_elasticnet_model_adt",endpoint=="nepc")
 stopifnot(abs(mean(en$score_extreme %in% "Top 20%")-.2)<.02,
   identical(sort(unique(na.omit(en$score_quartile))),paste0("Q",1:4)),
@@ -378,7 +387,9 @@ stopifnot(identical(names(km_tables),names(FEDERATED_TRANSFER_KM_TABLES)),
   !any(c("score_gleason","hr") %in% names(FEDERATED_TRANSFER_KM_VIEWS)),
   all(km_tables$summary$clock[km_tables$summary$view %in% c("trio","score_trio")]=="sequencing"),
   setequal(unique(km_tables$gradient$stratifier),names(FEDERATED_TRANSFER_GRADIENT)),
-  all(km_tables$gradient$clock[km_tables$gradient$stratifier=="trio_count"]=="sequencing"),
+  all(km_tables$gradient$clock[km_tables$gradient$stratifier=="trio_pattern"]=="sequencing"),
+  setequal(unique(km_tables$gradient$group[km_tables$gradient$stratifier=="trio_pattern"]),
+    FEDERATED_TRANSFER_GRADIENT$trio_pattern$levels),
   all(km_tables$gradient$horizon_days==1825),
   all(km_tables$gradient$event_free>=0 & km_tables$gradient$event_free<=1,na.rm=TRUE),
   identical(federated_transfer_horizon_label(),"5-year"))

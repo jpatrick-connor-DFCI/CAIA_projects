@@ -2,7 +2,7 @@
 # card per landmark, each showing the fitted M-of-N checklist and its held-out
 # metrics. Pure consumer of the CSVs written by
 # predictive_checklists/collect_supplement.py (run by 06_prep_figure_data); it
-# never fits, reads patient data or calls Python. Sourced by 07_figures.R and
+# never fits, reads patient data or calls Python. Sourced by 07_figures/all.R and
 # by the standalone predictive_checklists/render_supplement.R.
 suppressPackageStartupMessages({library(dplyr); library(ggplot2)})
 
@@ -37,7 +37,8 @@ load_checklist_tables <- function(data_dir) {
 }
 
 # One card's text as a data frame of lines (text, fontface), top to bottom.
-checklist_card_lines <- function(cell, items, metrics, horizon_years) {
+# `cell$n_events_test`, when present, adds the held-out event count.
+checklist_card_lines <- function(cell, items, metrics, horizon_years, model_labels = CHECKLIST_MODEL_LABELS) {
   lines <- list()
   add <- function(text, face = "plain") for (piece in strsplit(text, "\n", fixed = TRUE)[[1L]])
     lines[[length(lines) + 1L]] <<- data.frame(text = piece, face = face, stringsAsFactors = FALSE)
@@ -55,13 +56,16 @@ checklist_card_lines <- function(cell, items, metrics, horizon_years) {
                 collapse = "\n"))
   }
   gap()
-  add(sprintf("Held-out test, n = %s; %d-year horizon",
-    if (is.finite(cell$n_test)) format(cell$n_test, big.mark = ",") else "NA", horizon_years), "bold")
-  add(sprintf("%-16s %-18s %s", "Model", "AUC (95% CI)", "Brier"), "bold")
-  for (model in names(CHECKLIST_MODEL_LABELS)) {
+  events <- if (is.null(cell$n_events_test) || !is.finite(cell$n_events_test)) "" else
+    sprintf(" (%s events)", format(cell$n_events_test, big.mark = ","))
+  add(sprintf("Held-out test, n = %s%s; %d-year horizon",
+    if (is.finite(cell$n_test)) format(cell$n_test, big.mark = ",") else "NA", events, horizon_years), "bold")
+  width <- max(16L, nchar(model_labels))
+  add(sprintf("%-*s %-18s %s", width, "Model", "AUC (95% CI)", "Brier"), "bold")
+  for (model in names(model_labels)) {
     row <- metrics[metrics$model == model, , drop = FALSE]
     if (nrow(row) == 0L) next
-    add(sprintf("%-16s %-18s %s", CHECKLIST_MODEL_LABELS[[model]], checklist_interval(row[1L, ], "auc"),
+    add(sprintf("%-*s %-18s %s", width, model_labels[[model]], checklist_interval(row[1L, ], "auc"),
                 checklist_number(row$brier[1L], 3)))
   }
   checklist <- metrics[metrics$model == "checklist", , drop = FALSE]
@@ -76,16 +80,16 @@ checklist_card_lines <- function(cell, items, metrics, horizon_years) {
   out
 }
 
-plot_checklist_cards <- function(cards, title) {
+plot_checklist_cards <- function(cards, title,
+    caption = "Unit-weight M-of-N checklists with IPCW-calibrated horizon risk; baselines are fit on the same development patients.") {
   ggplot(cards, aes(x = .03, y = y, label = text, fontface = face)) +
     geom_text(hjust = 0, vjust = 1, family = "mono", size = 3) +
     facet_wrap(~ landmark_label, nrow = 1) +
     scale_x_continuous(limits = c(0, 1), expand = c(0, 0)) +
     scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +
-    labs(title = title,
-         caption = "Unit-weight M-of-N checklists with IPCW-calibrated horizon risk; baselines are fit on the same development patients.") +
+    labs(title = title, caption = caption) +
     theme_void() +
-    theme(panel.border = element_rect(colour = "grey40", fill = NA),
+    theme(panel.border = element_rect(colour = "grey40", fill = NA, linewidth = .5),
           strip.text = element_blank(), panel.spacing = grid::unit(.8, "lines"),
           plot.title = element_text(face = "bold", size = 12, margin = margin(b = 6)),
           plot.caption = element_text(size = 8, colour = "grey30", hjust = 0, margin = margin(t = 6)),

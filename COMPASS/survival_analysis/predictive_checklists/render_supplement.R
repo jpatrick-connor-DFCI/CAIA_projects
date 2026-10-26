@@ -1,6 +1,6 @@
 #!/usr/bin/env Rscript
 # Standalone checklist-supplement figures from collect_supplement.py's CSVs.
-# The cached 07_figures.R workflow renders the same figures; use this to
+# The cached 07_figures/all.R workflow renders the same figures; use this to
 # preview a pair of runs without the figure cache.
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 1L) {

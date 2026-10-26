@@ -319,13 +319,13 @@ render_cohort_overview <- function(manifest, config, forest_config=NULL) {
 # ============================================================================
 # ---- metastatic-label preparation (R fallback for notebook 06's Polars prep) 
 # ============================================================================
-# R-only preparation for 07_figures.R. Uses the existing intent labels,
+# R-only preparation for 07_figures/all.R. Uses the existing intent labels,
 # metastatic-diagnosis LLM task and dated regex stages; no model refits.
 metastatic_parquet_backend <- function() {
   if (requireNamespace("arrow", quietly = TRUE)) return("arrow")
   if (requireNamespace("nanoparquet", quietly = TRUE)) return("nanoparquet")
   stop('Metastatic figures need an R Parquet reader. Run install.packages("nanoparquet") ',
-       'in this R environment, then rerun 07_figures.R. The R package arrow is also supported.', call. = FALSE)
+       'in this R environment, then rerun 07_figures/all.R. The R package arrow is also supported.', call. = FALSE)
 }
 
 read_metastatic_parquet <- function(path, columns) {
@@ -471,7 +471,7 @@ prepare_metastatic_figure_labels <- function(config, analysis_anchors = NULL) {
 # ============================================================================
 # ---- metastatic-label diagnostics ------------------------------------------
 # ============================================================================
-# Standalone ADT/LLM/regex diagnostics used by 07_figures.R. All writes use
+# Standalone ADT/LLM/regex diagnostics used by 07_figures/all.R. All writes use
 # the main pipeline's save_fig, so progress, atomic saves and overwrite apply.
 # The three requested confusion matrices: each of the LLM and ADT metastatic
 # labels against the regex maximum stage across the record, plus ADT vs LLM.
