@@ -21,7 +21,13 @@ Pipeline:
 4. Evaluate: Harrell's C and IPCW cumulative/dynamic mean AUC(t), each with a
    patient bootstrap CI and the paired gain of the full model over the
    age-only baseline; Uno's C, per-horizon AUC(t), and a Cox slope of the
-   endpoint on the standardized risk score.
+   endpoint on the standardized risk score.  AUC(t) is graded as in the
+   federated runs: a week grid rebuilt on each (endpoint, landmark) cohort
+   with the federated rule, the same support filter and coverage gates, and
+   DeepHit scored on CIF(h) per week with a Kaplan-Meier-weighted mean.
+   Censoring weights come from the local cohort (there is no training split).
+   Checklists keep their own fixed day horizon; the federated runs score no
+   checklist AUC(t).
 
 Death is not a competing event here: NEPC/AVPC follow-up ends at last contact,
 which is the death date for patients who died.  Platinum is scored alongside as
@@ -51,6 +57,10 @@ from survival_common import federated_scoring as fs
 from survival_common.federated_inference import (
     BundleError, deephit_survival, load_bundle, model_identity, predict_checklist,
     predict_cif, predict_risk,
+)
+from survival_common.helper import (
+    DEFAULT_AUC_TIME_UNIT_DAYS, MIN_IPCW_TIMELINE_COVERAGE, MIN_IPCW_VALID_HORIZONS,
+    compute_horizon_grid,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -83,6 +93,8 @@ ENDPOINT_SOURCES = {
     "avpc": ("AVPC", "AVPC_DATE"),
 }
 DEFAULT_ENDPOINTS = ("nepc", "avpc", "platinum")
+# Checklist model horizons to evaluate (days).  Every other family is graded on
+# the federated week grid instead (auc_horizon_grid).
 DEFAULT_HORIZONS_DAYS = (365, 730, 1095, 1825)
 
 EVENT_COL = "event"
@@ -223,8 +235,98 @@ def harrell_c(duration, event, risk) -> float:
     return float(concordance_index(duration, -np.asarray(risk), event_observed=event))
 
 
+def to_auc_units(duration) -> np.ndarray:
+    """Days -> whole AUC(t) time units, ``ceil(days / 7)`` as in rhino_scripts."""
+    return np.ceil(np.asarray(duration, dtype=float) / float(DEFAULT_AUC_TIME_UNIT_DAYS))
+
+
+def auc_horizon_grid(duration, event, *,
+                     max_followup_days=fs.DEFAULT_MAX_FOLLOWUP_DAYS) -> np.ndarray:
+    """The federated AUC(t) grid (weeks), rebuilt on this cohort's events.
+
+    Same rule as the federated apps: integer weeks between the 25th and 75th
+    percentile event week, thinned to 25 points and kept strictly inside the
+    administrative censoring cap. Empty when the cohort has no event.
+    """
+    frame = pd.DataFrame({"duration": duration, "event": event})
+    try:
+        return compute_horizon_grid(frame, duration_col="duration", event_col="event",
+                                    admin_censor_days=max_followup_days)
+    except ValueError:
+        return np.zeros(0)
+
+
+def valid_horizons(duration, grid) -> np.ndarray:
+    """Grid weeks the sample supports, behind the federated coverage gates.
+
+    A week must lie strictly between the shortest and longest follow-up
+    (in weeks), at least 2 must survive, and they must cover at least half
+    the grid; otherwise nothing is scored.  Depends on durations only, so
+    every score on one sample shares the same horizons.
+    """
+    units = to_auc_units(duration)
+    grid = np.asarray(grid, dtype=float)
+    if not units.size or not grid.size:
+        return np.zeros(0)
+    valid = grid[(grid > units.min()) & (grid < units.max())]
+    if len(valid) < MIN_IPCW_VALID_HORIZONS:
+        return np.zeros(0)
+    if len(valid) / len(grid) < MIN_IPCW_TIMELINE_COVERAGE:
+        return np.zeros(0)
+    return valid
+
+
+def _auc_t(units, event, score, grid, valid) -> tuple[np.ndarray, float]:
+    """Per-horizon AUC and their mean, scored the way the federated apps do.
+
+    A 1-D score (Cox, XGBoost) is one sksurv call whose mean is sksurv's.  A
+    2-D score (DeepHit CIF(h), one column per grid week) is one call per
+    horizon on that week's column, and the mean uses sksurv's Kaplan-Meier
+    weighting; it is NaN unless every horizon scored.
+    """
+    from sksurv.metrics import cumulative_dynamic_auc
+    from sksurv.nonparametric import SurvivalFunctionEstimator
+    from sksurv.util import Surv
+
+    y = Surv.from_arrays(event=event, time=units)
+    score = np.asarray(score, dtype=float)
+    auc_t = np.full(len(valid), np.nan)
+    if score.ndim == 1:
+        try:
+            auc, mean = cumulative_dynamic_auc(y, y, score, valid)
+            return np.asarray(auc, dtype=float), float(mean)
+        except (ValueError, ArithmeticError):
+            return auc_t, float("nan")
+    columns = np.searchsorted(np.asarray(grid, dtype=float), valid)
+    for i, (h, col) in enumerate(zip(valid, columns)):
+        try:
+            auc_t[i] = float(np.asarray(
+                cumulative_dynamic_auc(y, y, score[:, col], np.array([h]))[0]).reshape(-1)[0])
+        except (ValueError, ArithmeticError):
+            pass
+    if not np.isfinite(auc_t).all():
+        return auc_t, float("nan")
+    s = SurvivalFunctionEstimator().fit(y).predict_proba(valid)
+    d = -np.diff(np.r_[1.0, s])
+    return auc_t, float((auc_t * d).sum() / (1.0 - s[-1]))
+
+
+def mean_auc(duration, event, score, grid) -> float:
+    """IPCW cumulative/dynamic mean AUC(t) on the week ``grid``.
+
+    Censoring is estimated on this sample.  ``score`` is 1-D, or for DeepHit
+    a CIF(h) matrix with one column per grid week.  NaN when the sample fails
+    :func:`valid_horizons`' gates.
+    """
+    event = np.asarray(event).astype(bool)
+    valid = valid_horizons(duration, grid)
+    if not valid.size or not event.any():
+        return float("nan")
+    return _auc_t(to_auc_units(duration), event, score, grid, valid)[1]
+
+
 def estimable_horizons(duration, event, horizons_days) -> list:
-    """Horizons with an event at or before them and follow-up beyond them."""
+    """Day horizons with an event at or before them and follow-up beyond them."""
     duration = np.asarray(duration, dtype=float)
     event = np.asarray(event).astype(bool)
     if not len(duration):
@@ -233,11 +335,11 @@ def estimable_horizons(duration, event, horizons_days) -> list:
             if (event & (duration <= h)).any() and h < duration.max()]
 
 
-def mean_auc(duration, event, risk, horizons_days) -> float:
-    """IPCW cumulative/dynamic mean AUC(t) over ``horizons_days``.
+def fixed_horizon_mean_auc(duration, event, risk, horizons_days) -> float:
+    """Mean AUC(t) over fixed day horizons; the checklist path only.
 
-    Censoring is estimated on this sample. NaN when any horizon is
-    inestimable here, so every score in a sample shares the same horizons.
+    The federated runs score no checklist AUC(t), so checklists keep their
+    own model horizon.  NaN when any horizon is inestimable here.
     """
     from sksurv.metrics import cumulative_dynamic_auc
     from sksurv.util import Surv
@@ -279,18 +381,26 @@ def bootstrap_c(duration, event, risks: dict[str, np.ndarray], n_boot: int, seed
     return _bootstrap(duration, event, risks, n_boot, seed, harrell_c)
 
 
-def bootstrap_mean_auc(duration, event, risks: dict[str, np.ndarray], horizons_days,
+def bootstrap_mean_auc(duration, event, risks: dict[str, np.ndarray], grid,
                        n_boot: int, seed: int):
     """Patient-bootstrap mean AUC(t), resampling rows jointly as in bootstrap_c.
 
-    The horizons are fixed (those estimable on the full sample) and censoring
-    is re-estimated in each resample; a resample where a horizon is
-    inestimable is NaN for every score, so paired differences stay paired.
-    The same seed draws the same resamples as bootstrap_c.
+    The grid is fixed (built on the full sample); the support filter, the
+    coverage gates and censoring are reapplied in each resample.  The valid
+    horizons depend on durations only, so paired scores share them.  The
+    same seed draws the same resamples as bootstrap_c.
     """
+    grid = np.asarray(grid, dtype=float)
+    return _bootstrap(duration, event, risks, n_boot, seed,
+                      lambda d, e, r: mean_auc(d, e, r, grid))
+
+
+def bootstrap_fixed_horizon_mean_auc(duration, event, risks: dict[str, np.ndarray],
+                                     horizons_days, n_boot: int, seed: int):
+    """:func:`bootstrap_mean_auc` for the fixed day horizons of a checklist."""
     horizons = list(horizons_days)
     return _bootstrap(duration, event, risks, n_boot, seed,
-                      lambda d, e, r: mean_auc(d, e, r, horizons))
+                      lambda d, e, r: fixed_horizon_mean_auc(d, e, r, horizons))
 
 
 def _ci(values: np.ndarray) -> tuple[float, float]:
@@ -326,12 +436,79 @@ def cox_slope(duration, event, risk) -> dict:
     return out
 
 
-def ipcw_metrics(duration, event, risk, horizons_days) -> tuple[dict, pd.DataFrame]:
-    """Uno's C and cumulative/dynamic AUC(t), censoring estimated on this cohort.
+def ipcw_metrics(duration, event, risk, grid, *, auc_score=None) -> tuple[dict, pd.DataFrame]:
+    """Uno's C and AUC(t) on the federated week grid, censoring from this cohort.
 
     External validation has no training cohort to borrow a censoring
-    distribution from, so the local cohort supplies it.  Horizons with no event
-    before them, or at/after the last follow-up, are inestimable and skipped.
+    distribution from, so the local cohort supplies it.  ``risk`` (1-D) gives
+    Uno's C; ``auc_score`` (default ``risk``) gives AUC(t) and may be DeepHit's
+    CIF(h) matrix, which also yields Brier(t) on ``1 - CIF(h)`` and the
+    integrated Brier.  Rows are written only for horizons that pass
+    :func:`valid_horizons`; when the gates fail every metric is NaN.
+    """
+    columns = ["horizon_time_unit", "horizon_days", "auc", "n_cases"]
+    grid = np.asarray(grid, dtype=float)
+    summary = {"uno_c": np.nan, "mean_auc": np.nan,
+               "n_auc_horizons_requested": int(grid.size),
+               "n_auc_horizons_valid": 0, "note": ""}
+    try:
+        from sksurv.metrics import brier_score, concordance_index_ipcw
+        from sksurv.util import Surv
+    except ModuleNotFoundError:
+        summary["note"] = "sksurv not installed"
+        return summary, pd.DataFrame(columns=columns)
+
+    units = to_auc_units(duration)
+    event = np.asarray(event).astype(bool)
+    risk = np.asarray(risk, dtype=float)
+    score = risk if auc_score is None else np.asarray(auc_score, dtype=float)
+    deephit = score.ndim == 2
+    if deephit:
+        summary["ibs"] = np.nan
+        columns.append("brier")
+    valid = valid_horizons(duration, grid)
+    if not event.any():
+        summary["note"] = "no events"
+        return summary, pd.DataFrame(columns=columns)
+    if not valid.size:
+        summary["note"] = ("no horizon grid" if not grid.size
+                           else "AUC(t) coverage gates failed")
+        return summary, pd.DataFrame(columns=columns)
+    summary["n_auc_horizons_valid"] = int(valid.size)
+
+    y = Surv.from_arrays(event=event, time=units)
+    try:
+        summary["uno_c"] = float(concordance_index_ipcw(y, y, risk, tau=float(valid.max()))[0])
+    except Exception as exc:
+        summary["note"] += f"uno_c: {exc}; "
+    auc_t, summary["mean_auc"] = _auc_t(units, event, score, grid, valid)
+    auc_df = pd.DataFrame({
+        "horizon_time_unit": valid.astype(int),
+        "horizon_days": (valid * DEFAULT_AUC_TIME_UNIT_DAYS).astype(int),
+        "auc": auc_t,
+        "n_cases": [int((event & (units <= h)).sum()) for h in valid],
+    })
+    if deephit:
+        cols = np.searchsorted(grid, valid)
+        brier_t = np.full(len(valid), np.nan)
+        for i, (h, col) in enumerate(zip(valid, cols)):
+            try:
+                surv = (1.0 - np.clip(score[:, col], 0.0, 1.0)).reshape(-1, 1)
+                brier_t[i] = float(np.asarray(
+                    brier_score(y, y, surv, np.array([h]))[1]).reshape(-1)[0])
+            except (ValueError, ArithmeticError):
+                pass
+        auc_df["brier"] = brier_t
+        if np.isfinite(brier_t).all():
+            summary["ibs"] = float(np.trapezoid(brier_t, valid) / (valid[-1] - valid[0]))
+    return summary, auc_df
+
+
+def fixed_horizon_ipcw_metrics(duration, event, risk, horizons_days) -> tuple[dict, pd.DataFrame]:
+    """Uno's C and AUC(t) at fixed day horizons; the checklist path only.
+
+    Horizons with no event before them, or at/after the last follow-up, are
+    inestimable and skipped.
     """
     empty = pd.DataFrame(columns=["horizon_days", "auc", "n_cases"])
     try:
@@ -408,8 +585,15 @@ def evaluate_transfer(
     Each (endpoint, landmark) frame is built once and shared by every bundle
     and config, so the full and baseline models are compared on the same
     patients and their bootstrap is paired. Harrell's C and mean AUC(t) share
-    the same resamples; mean AUC(t) uses the horizons estimable on the full
-    frame, and its baseline difference ``delta_auc_vs_baseline`` is paired.
+    the same resamples, and the baseline difference ``delta_auc_vs_baseline``
+    is paired.
+
+    AUC(t) follows the federated runs: the week grid is rebuilt on each
+    (endpoint, landmark) frame (:func:`auc_horizon_grid`) and gated by
+    :func:`valid_horizons`.  DeepHit gets one row per model: ``risk_score``
+    and the C-index use CIF_total, as the federated C does, and AUC(t) scores
+    CIF(h) at each grid week.  ``horizons_days`` only selects the checklist
+    models to evaluate, each at its own model horizon.
 
     ``baseline_fallback`` maps a bundle stem that ships no age-only model to
     a donor stem whose ``baseline`` it is compared against (``baseline_bundle``
@@ -457,9 +641,12 @@ def evaluate_transfer(
                     f"event/censoring at or before the landmark)"
                 )
 
-            # The key includes the exported arm and model horizon. DeepHit's
-            # horizon-specific CIF also carries the evaluation horizon.
+            grid = auc_horizon_grid(duration, event, max_followup_days=max_followup_days)
+            # The key includes the exported arm and model horizon; a checklist
+            # also carries its evaluation horizon.  ``auc_scores`` holds what
+            # AUC(t) scores: the risk itself, or DeepHit's CIF(h) on the grid.
             risks: dict[tuple, np.ndarray] = {}
+            auc_scores: dict[tuple, np.ndarray] = {}
             details: dict[tuple, tuple[dict, dict, np.ndarray | None, np.ndarray | None]] = {}
             ids = wide[fs.ID_COL].tolist()
             for stem, bundle in bundles.items():
@@ -480,24 +667,26 @@ def evaluate_transfer(
                                                    cohort=wide, age_col=fs.AGE_COL)
                         if got != ids:
                             raise BundleError("DeepHit predictions are not aligned to landmark patients")
-                        for h in horizons_days:
-                            risk_h = 1.0 - deephit_survival(cif, model, [h]).iloc[:, 0].to_numpy()
-                            predictions.append((int(h), risk_h, risk_h, None))
+                        cif_h = (1.0 - deephit_survival(
+                            cif, model, grid * DEFAULT_AUC_TIME_UNIT_DAYS).to_numpy(dtype=float)
+                                 if grid.size else np.zeros((len(ids), 0)))
+                        predictions.append((None, np.asarray(cif)[:, -1], None, None, cif_h))
                     elif family == "predictive_checklist":
                         pred = predict_checklist(wide, model)
-                        predictions.append((model_horizon,
-                                            pred["score"].to_numpy(dtype=float),
+                        score = pred["score"].to_numpy(dtype=float)
+                        predictions.append((model_horizon, score,
                                             pred["probability"].to_numpy(dtype=float),
-                                            pred["flag"].to_numpy(dtype=int)))
+                                            pred["flag"].to_numpy(dtype=int), score))
                     else:
                         risk = predict_risk(wide, bundle, model, age_col=fs.AGE_COL)
-                        predictions.append((None, risk, None, None))
+                        predictions.append((None, risk, None, None, risk))
 
-                    for evaluation_horizon, risk, probability, flag in predictions:
+                    for evaluation_horizon, risk, probability, flag, auc_score in predictions:
                         key = (stem, config, arm, model_horizon, evaluation_horizon)
                         if key in risks:
                             raise BundleError(f"duplicate transfer model identity: {key}")
                         risks[key] = risk
+                        auc_scores[key] = auc_score
                         details[key] = (bundle, model, probability, flag)
                         block = pd.DataFrame({
                             "endpoint": endpoint, "bundle": stem,
@@ -533,20 +722,28 @@ def evaluate_transfer(
             boot = bootstrap_c(
                 duration, event, keyed, n_bootstrap, seed,
             ) if n_bootstrap > 0 else {}
-            horizons = estimable_horizons(duration, event, horizons_days)
             boot_auc = {}
             if n_bootstrap > 0:
-                for key, risk in risks.items():
-                    hs = ([key[-1]] if key[-1] is not None else horizons)
-                    boot_auc[str(key)] = bootstrap_mean_auc(
-                        duration, event, {str(key): risk}, hs, n_bootstrap, seed,
-                    )[str(key)]
+                for key, score in auc_scores.items():
+                    if key[-1] is not None:
+                        boot_auc[str(key)] = bootstrap_fixed_horizon_mean_auc(
+                            duration, event, {str(key): score}, [key[-1]],
+                            n_bootstrap, seed,
+                        )[str(key)]
+                    else:
+                        boot_auc[str(key)] = bootstrap_mean_auc(
+                            duration, event, {str(key): score}, grid, n_bootstrap, seed,
+                        )[str(key)]
+
+            def _mean_auc(identity):
+                if identity[-1] is not None:
+                    return fixed_horizon_mean_auc(duration, event, auc_scores[identity],
+                                                  [identity[-1]])
+                return mean_auc(duration, event, auc_scores[identity], grid)
 
             for identity, risk in risks.items():
                 stem, config, arm, model_horizon, evaluation_horizon = identity
                 bundle, model, probability, flag = details[identity]
-                metric_horizons = ([evaluation_horizon] if evaluation_horizon is not None
-                                   else horizons_days)
                 row = {
                     "endpoint": endpoint, "bundle": stem,
                     "model_family": bundle.get("model_family"),
@@ -581,7 +778,12 @@ def evaluate_transfer(
                         diff = boot[key] - boot[base_key]
                         row["delta_c_lo"], row["delta_c_hi"] = _ci(diff)
                 row.update(cox_slope(duration, event, risk))
-                ipcw, auc_df = ipcw_metrics(duration, event, risk, metric_horizons)
+                if evaluation_horizon is not None:
+                    ipcw, auc_df = fixed_horizon_ipcw_metrics(duration, event, risk,
+                                                              [evaluation_horizon])
+                else:
+                    ipcw, auc_df = ipcw_metrics(duration, event, risk, grid,
+                                                auc_score=auc_scores[identity])
                 row.update(ipcw)
                 if probability is not None and evaluation_horizon is not None:
                     row["brier"] = ipcw_brier(duration, event, probability,
@@ -589,10 +791,7 @@ def evaluate_transfer(
                 if key in boot_auc:
                     row["mean_auc_lo"], row["mean_auc_hi"] = _ci(boot_auc[key])
                 if config != "baseline" and base_identity in risks:
-                    row["mean_auc_baseline"] = mean_auc(
-                        duration, event, risks[base_identity],
-                        [evaluation_horizon] if evaluation_horizon is not None else horizons,
-                    )
+                    row["mean_auc_baseline"] = _mean_auc(base_identity)
                     row["delta_auc_vs_baseline"] = row["mean_auc"] - row["mean_auc_baseline"]
                     if key in boot_auc and base_key in boot_auc:
                         diff = boot_auc[key] - boot_auc[base_key]
@@ -666,7 +865,8 @@ def main(argv=None) -> int:
                     help="'none' is the full ADT cohort; match the bundle's analysis_label")
     ap.add_argument("--landmarks", default="", help="comma-separated; default all in bundles")
     ap.add_argument("--horizons", default=",".join(map(str, DEFAULT_HORIZONS_DAYS)),
-                    help="AUC(t) horizons, days after the landmark")
+                    help="checklist model horizons to evaluate, days after the landmark; "
+                         "other families use the federated week grid")
     ap.add_argument("--n-bootstrap", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-followup-days", type=int, default=fs.DEFAULT_MAX_FOLLOWUP_DAYS)
@@ -737,6 +937,7 @@ def main(argv=None) -> int:
             "exclusion": args.exclusion,
             "landmarks": list(landmarks) if landmarks else None,
             "horizons_days": list(horizons),
+            "auc_grid": "federated week grid rebuilt per endpoint and landmark",
             "n_bootstrap": args.n_bootstrap,
             "seed": args.seed,
             "max_followup_days": args.max_followup_days,

@@ -28,9 +28,12 @@ are fit on the same DFCI patients they are scored on, so each patient's score
 comes from a stratified K-fold model that excluded them (out-of-fold); the
 apparent in-sample C and mean AUC(t) are kept alongside for reference only.
 All scores share the transfer frame's duration/event (landmark clock,
-3650-day censoring). Mean AUC(t) is the IPCW cumulative/dynamic AUC averaged
-over the horizons estimable in the scored subpopulation (censoring estimated
-on it); the C-index and mean AUC(t) differences are bootstrapped over
+3650-day censoring). Mean AUC(t) is the IPCW cumulative/dynamic AUC graded as
+in the federated runs (fet.mean_auc): a week grid rebuilt on the scored
+subpopulation with the federated rule, behind the same support and coverage
+gates, censoring estimated on that subpopulation. A DeepHit bundle's
+transferred score is its CIF_total, a single score like the clinical Cox's;
+the C-index and mean AUC(t) differences are bootstrapped over
 patients with the scores resampled jointly.
 
 Clinical data obey the transfer's strict pre-landmark rule
@@ -301,7 +304,8 @@ def _coef_rows(cph, base: dict) -> list[dict]:
              "p": float(s.loc[cov, "p"])} for cov in s.index]
 
 
-def fit_local_cox(frame: pd.DataFrame, covariates, *, n_folds: int, seed: int, horizons_days) -> dict:
+def fit_local_cox(frame: pd.DataFrame, covariates, *, n_folds: int, seed: int,
+                  max_followup_days=fs.DEFAULT_MAX_FOLLOWUP_DAYS) -> dict:
     """Out-of-fold Cox score plus the apparent (in-sample) fit, for reference only.
 
     Returns {oof, apparent_c, apparent_auc, cph (None if the full fit failed),
@@ -316,7 +320,8 @@ def fit_local_cox(frame: pd.DataFrame, covariates, *, n_folds: int, seed: int, h
         lp = _linear_predictor(cph, frame, covariates)
         dur, ev = frame[DURATION_COL], frame[EVENT_COL]
         out["apparent_c"] = fet.harrell_c(dur, ev, lp)
-        out["apparent_auc"] = fet.mean_auc(dur, ev, lp, fet.estimable_horizons(dur, ev, horizons_days))
+        grid = fet.auc_horizon_grid(dur, ev, max_followup_days=max_followup_days)
+        out["apparent_auc"] = fet.mean_auc(dur, ev, lp, grid)
         out["cph"] = cph
     except Exception as exc:
         out["note"] = f"apparent fit failed: {exc}"
@@ -373,7 +378,7 @@ def compare_clinical_models(
     n_bootstrap: int = 200,
     seed: int = 0,
     min_events: int = 5,
-    horizons_days=fet.DEFAULT_HORIZONS_DAYS,
+    max_followup_days=fs.DEFAULT_MAX_FOLLOWUP_DAYS,
     subpopulations: dict = SUBPOPULATIONS,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Transferred labs/age scores vs the out-of-fold clinical and combined Cox, per subpopulation.
@@ -408,7 +413,7 @@ def compare_clinical_models(
             note = ""
             if len(members) > len(sub_df):
                 note = f"{len(members) - len(sub_df)} member(s) missing a covariate dropped; "
-            fit_kw = dict(n_folds=n_folds, seed=seed, horizons_days=horizons_days)
+            fit_kw = dict(n_folds=n_folds, seed=seed, max_followup_days=max_followup_days)
             fitted = base["n_events"] >= min_events
             unfitted = {"oof": np.full(len(sub_df), np.nan), "apparent_c": np.nan, "apparent_auc": np.nan,
                         "cph": None, "note": "",
@@ -441,10 +446,11 @@ def compare_clinical_models(
                 boot = (fet.bootstrap_c(dur, ev, risks_ok, n_bootstrap, seed)
                         if n_bootstrap > 0 and ok.any() else {})
                 c = {m: fet.harrell_c(dur, ev, r) if ok.any() else np.nan for m, r in risks_ok.items()}
-                horizons = fet.estimable_horizons(dur, ev, horizons_days)
-                auc = {m: fet.mean_auc(dur, ev, r, horizons) for m, r in risks_ok.items()}
-                boot_auc = (fet.bootstrap_mean_auc(dur, ev, risks_ok, horizons, n_bootstrap, seed)
-                            if n_bootstrap > 0 and horizons else {})
+                grid = fet.auc_horizon_grid(dur, ev, max_followup_days=max_followup_days)
+                horizons = fet.valid_horizons(dur, grid)
+                auc = {m: fet.mean_auc(dur, ev, r, grid) for m, r in risks_ok.items()}
+                boot_auc = (fet.bootstrap_mean_auc(dur, ev, risks_ok, grid, n_bootstrap, seed)
+                            if n_bootstrap > 0 and horizons.size else {})
                 for model in MODELS:
                     # The transferred scores report the clinical Cox fit, as the subpopulation's fit.
                     fit = fits.get(model, clin)
@@ -462,7 +468,8 @@ def compare_clinical_models(
                            "delta_auc_hi": np.nan, "delta_auc_vs_clinical": np.nan,
                            "delta_auc_vs_clinical_lo": np.nan, "delta_auc_vs_clinical_hi": np.nan,
                            "mean_auc_apparent": fits[model]["apparent_auc"] if model in fits else np.nan,
-                           "auc_horizons_days": ",".join(str(int(h)) for h in horizons),
+                           "auc_horizons_days": ",".join(
+                               str(int(h * fet.DEFAULT_AUC_TIME_UNIT_DAYS)) for h in horizons),
                            **fit["fit_info"],
                            "note": note + (comb["note"] if model == COMBINED_COX else "")}
                     if not scored:

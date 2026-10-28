@@ -300,12 +300,100 @@ def test_v3_deephit_transfer_keeps_arms_and_pairs_landmark_age_baseline():
                                 lab_mapping=MAPPING, horizons_days=(1000,),
                                 n_bootstrap=0, verbose=False)
     scores = res["scores"]
+    # one row per model, as in the federated runs: CIF_total, no evaluation horizon
     assert len(scores) == 3 * 8
     assert set(scores["training_arm"]) == {"landmark", "dynamic"}
-    assert set(scores["evaluation_horizon_days"]) == {1000}
+    assert scores["evaluation_horizon_days"].isna().all()
     assert scores["risk_score"].notna().all()
     m = res["metrics"]
     assert len(m) == 3
-    assert "brier" in m
+    assert {"ibs", "n_auc_horizons_requested", "n_auc_horizons_valid"} <= set(m)
     assert m[m["training_arm"] == "dynamic"]["c_index_baseline"].notna().all()
+
+
+def _survival(n=300, seed=1):
+    rng = np.random.default_rng(seed)
+    x = rng.normal(size=n)
+    t = rng.exponential(700 * np.exp(-0.7 * x))
+    c = rng.uniform(100, 3000, n)
+    return np.minimum(t, c).clip(1), (t <= c).astype(int), x
+
+
+def test_grid_is_the_federated_week_grid():
+    from survival_common.helper import compute_horizon_grid
+
+    duration, event, _ = _survival()
+    grid = fet.auc_horizon_grid(duration, event)
+    expected = compute_horizon_grid(
+        pd.DataFrame({"d": duration, "e": event}), duration_col="d", event_col="e",
+        admin_censor_days=fs.DEFAULT_MAX_FOLLOWUP_DAYS)
+    np.testing.assert_array_equal(grid, expected)
+    assert 2 <= len(grid) <= 25 and grid.max() < 522
+    weeks = np.ceil(duration[event == 1] / 7)
+    assert grid.min() >= np.floor(np.quantile(weeks, 0.25))
+    assert grid.max() <= np.ceil(np.quantile(weeks, 0.75))
+    assert fet.auc_horizon_grid(duration, np.zeros_like(event)).size == 0
+
+
+def test_valid_horizons_apply_the_support_filter_and_coverage_gates():
+    grid = np.arange(10, 20, dtype=float)
+    # weeks 1..15 of follow-up: 10..14 are strictly inside, 5/10 = coverage 0.5
+    np.testing.assert_array_equal(
+        fet.valid_horizons(np.arange(1, 16) * 7, grid), np.arange(10, 15))
+    # 4/10 < 0.5 -> nothing is scored
+    assert fet.valid_horizons(np.arange(1, 15) * 7, grid).size == 0
+    # one horizon < MIN_IPCW_VALID_HORIZONS
+    assert fet.valid_horizons(np.arange(1, 12) * 7, np.array([10.0])).size == 0
+
+    duration, event, x = _survival()
+    narrow = np.full(len(duration), 100.0)
+    assert np.isnan(fet.mean_auc(narrow, event, x, fet.auc_horizon_grid(duration, event)))
+    summary, auc_df = fet.ipcw_metrics(narrow, event, x, fet.auc_horizon_grid(duration, event))
+    assert np.isnan(summary["mean_auc"]) and auc_df.empty
+
+
+def test_auc_matches_sksurv_on_week_units():
+    from sksurv.metrics import cumulative_dynamic_auc
+    from sksurv.util import Surv
+
+    duration, event, x = _survival()
+    grid = fet.auc_horizon_grid(duration, event)
+    valid = fet.valid_horizons(duration, grid)
+    y = Surv.from_arrays(event=event.astype(bool), time=np.ceil(duration / 7))
+    auc, mean = cumulative_dynamic_auc(y, y, x, valid)
+    assert fet.mean_auc(duration, event, x, grid) == pytest.approx(mean)
+    summary, auc_df = fet.ipcw_metrics(duration, event, x, grid)
+    assert summary["mean_auc"] == pytest.approx(mean)
+    np.testing.assert_allclose(auc_df["auc"], auc)
+    np.testing.assert_array_equal(auc_df["horizon_days"], valid * 7)
+    assert summary["n_auc_horizons_valid"] == len(valid)
+
+
+def test_deephit_per_horizon_mean_reduces_to_sksurv_for_a_constant_score():
+    duration, event, x = _survival()
+    grid = fet.auc_horizon_grid(duration, event)
+    # the same score at every week: per-horizon calls + KM weighting == one call
+    cif_h = np.repeat(x[:, None], len(grid), axis=1)
+    assert fet.mean_auc(duration, event, cif_h, grid) == pytest.approx(
+        fet.mean_auc(duration, event, x, grid))
+    # a score that changes by week matches the rhino DeepHit controller's
+    # per-horizon calls and Kaplan-Meier-weighted mean
+    from sksurv.metrics import cumulative_dynamic_auc
+    from sksurv.nonparametric import SurvivalFunctionEstimator
+    from sksurv.util import Surv
+
+    rng = np.random.default_rng(3)
+    varying = cif_h + rng.normal(scale=0.5, size=cif_h.shape)
+    valid = fet.valid_horizons(duration, grid)
+    y = Surv.from_arrays(event=event.astype(bool), time=np.ceil(duration / 7))
+    auc_t = np.array([
+        cumulative_dynamic_auc(y, y, varying[:, list(grid).index(h)], np.array([h]))[0][0]
+        for h in valid])
+    s = SurvivalFunctionEstimator().fit(y).predict_proba(valid)
+    d = -np.diff(np.r_[1.0, s])
+    assert fet.mean_auc(duration, event, varying, grid) == pytest.approx(
+        (auc_t * d).sum() / (1 - s[-1]))
+    summary, auc_df = fet.ipcw_metrics(duration, event, x, grid,
+                                       auc_score=np.clip(1 / (1 + np.exp(-cif_h)), 0, 1))
+    assert np.isfinite(summary["ibs"]) and auc_df["brier"].notna().all()
 
