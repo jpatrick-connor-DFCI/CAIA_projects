@@ -3585,7 +3585,7 @@ figure_retained_exports <- function(pipeline_path) {
   exports <- exports[nzchar(exports) & !startsWith(exports, "#")]
   if (!length(exports) || anyDuplicated(exports) ||
       any(startsWith(exports, "/") | grepl("(^|/)\\.\\.(/|$)", exports)) ||
-      any(!grepl("\\.(png|pdf)$", exports)))
+      any(!grepl("\\.(png|svg)$", exports)))
     stop("Invalid curated figure export list: ", path)
   exports
 }

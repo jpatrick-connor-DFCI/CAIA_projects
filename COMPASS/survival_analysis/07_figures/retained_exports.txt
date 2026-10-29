@@ -8,7 +8,6 @@
 01_cohort/event_free_survival__platinum__all__incl.svg
 01_cohort/manuscript/01_cohort_overview.svg
 01_cohort/manuscript/01_cohort_overview.png
-01_cohort/manuscript/01_cohort_overview.svg
 01_cohort/site_counts__platinum__all__incl.png
 01_cohort/site_counts__platinum__all__incl.svg
 01_cohort/span__platinum__all__incl.png
@@ -25,7 +24,6 @@
 02_llm/lm0_subtype_landscape__platinum__all__incl.svg
 02_llm/manuscript/02_llm_nepc_avpc__lm0.svg
 02_llm/manuscript/02_llm_nepc_avpc__lm0.png
-02_llm/manuscript/02_llm_nepc_avpc__lm0.svg
 03_univariate/federated/federated_volcano_landmark0__platinum.png
 03_univariate/federated/federated_volcano_landmark0__platinum.svg
 03_univariate/federated/federated_volcano_landmark180__platinum.png
@@ -58,7 +56,6 @@
 03_univariate/federated/km/testosterone/federated_km_quintile_testosterone_landmark90_by_site__platinum.svg
 03_univariate/federated/manuscript/federated_03_univariable.svg
 03_univariate/federated/manuscript/federated_03_univariable.png
-03_univariate/federated/manuscript/federated_03_univariable.svg
 03_univariate/federated/trajectories/psa/federated_trajectory_psa__platinum.png
 03_univariate/federated/trajectories/psa/federated_trajectory_psa__platinum.svg
 03_univariate/federated/trajectories/psa/federated_trajectory_psa_by_site__platinum.png
@@ -153,7 +150,6 @@
 03_univariate/internal/labs_univariate_lm90__platinum__all__incl.svg
 03_univariate/internal/manuscript/03_dfci_univariable.svg
 03_univariate/internal/manuscript/03_dfci_univariable.png
-03_univariate/internal/manuscript/03_dfci_univariable.svg
 03_univariate/internal/somatic_any_forest_lm0__platinum__all__incl.png
 03_univariate/internal/somatic_any_forest_lm0__platinum__all__incl.svg
 03_univariate/internal/somatic_any_volcano_lm0__platinum__all__incl.png
@@ -218,7 +214,6 @@
 04_multivariate/federated/elasticnet_performance__platinum.svg
 04_multivariate/federated/manuscript/federated_04_multivariable.svg
 04_multivariate/federated/manuscript/federated_04_multivariable.png
-04_multivariate/federated/manuscript/federated_04_multivariable.svg
 04_multivariate/federated/xgboost_importance__platinum.png
 04_multivariate/federated/xgboost_importance__platinum.svg
 04_multivariate/federated/xgboost_performance__platinum.png
@@ -233,7 +228,6 @@
 04_multivariate/internal/figure4s_checklist_labs_gleason_somatic__platinum.svg
 04_multivariate/internal/manuscript/04_multivariable_labs.svg
 04_multivariate/internal/manuscript/04_multivariable_labs.png
-04_multivariate/internal/manuscript/04_multivariable_labs.svg
 05_transfer/km/transfer_km_gradient_elasticnet_landmark0__platinum.png
 05_transfer/km/transfer_km_gradient_elasticnet_landmark0__platinum.svg
 05_transfer/km/transfer_km_gradient_elasticnet_landmark180__platinum.png
@@ -260,10 +254,8 @@
 05_transfer/km/transfer_km_grid_xgboost_landmark90__platinum.svg
 05_transfer/manuscript/federated_05_transfer_no_dfci.svg
 05_transfer/manuscript/federated_05_transfer_no_dfci.png
-05_transfer/manuscript/federated_05_transfer_no_dfci.svg
 05_transfer/manuscript/federated_05_transfer_no_dfci__no_d.svg
 05_transfer/manuscript/federated_05_transfer_no_dfci__no_d.png
-05_transfer/manuscript/federated_05_transfer_no_dfci__no_d.svg
 05_transfer/transfer_all_models_supplement__platinum.png
 05_transfer/transfer_all_models_supplement__platinum.svg
 05_transfer/transfer_clinical_comparison_no_dfci__platinum.png
@@ -286,7 +278,6 @@
 03_univariate/cohort_sensitivity/llm_vs_regex_max_any__platinum__all__incl.svg
 03_univariate/cohort_sensitivity/manuscript/03_cohort_sensitivity_supplement.svg
 03_univariate/cohort_sensitivity/manuscript/03_cohort_sensitivity_supplement.png
-03_univariate/cohort_sensitivity/manuscript/03_cohort_sensitivity_supplement.svg
 03_univariate/cohort_sensitivity/metastatic_label_agreement__platinum__all__incl.png
 03_univariate/cohort_sensitivity/metastatic_label_agreement__platinum__all__incl.svg
 03_univariate/cohort_sensitivity/metastatic_label_overlap__platinum__all__incl.png
