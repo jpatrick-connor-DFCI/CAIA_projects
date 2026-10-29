@@ -22,10 +22,22 @@ def _static_covariates(ctx: Any, _args: argparse.Namespace, cox: Any) -> tuple[s
 
 
 def _prepare_context_kwargs(args: argparse.Namespace) -> dict:
-    return {"feature_set": args.feature_set}
+    return {
+        "feature_set": getattr(args, "feature_set", "labs"),
+        "exclude_vitals": getattr(args, "exclude_vitals", False),
+        "feature_stats": getattr(args, "feature_stats", "all"),
+    }
 
 
 def _add_cli_args(parser: argparse.ArgumentParser, _cox) -> None:
+    parser.add_argument(
+        "--exclude-vitals", action="store_true",
+        help="Exclude the seven canonical vital measurements from lab candidates (labs feature set only).",
+    )
+    parser.add_argument(
+        "--feature-stats", choices=["all", "mean-n-obs"], default="all",
+        help="Lab summary candidates: all statistics, or mean + n_observations; both retain train-derived missingness indicators.",
+    )
     parser.add_argument(
         "--feature-set",
         choices=[

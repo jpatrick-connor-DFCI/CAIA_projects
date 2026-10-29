@@ -587,6 +587,13 @@ def compute_shared_canonical_labs(
     return shared_sorted
 
 
+# Canonical vital names emitted by data_preprocessing_common/dfci_labs.py.
+VITAL_MEASUREMENTS = frozenset({
+    "Body height", "Body weight", "Body temperature", "Heart rate",
+    "Respiratory rate", "Systolic blood pressure", "Diastolic blood pressure",
+})
+
+
 def prepare_landmark_context(
     inputs_dir: Path,
     landmark_day: int,
@@ -594,6 +601,8 @@ def prepare_landmark_context(
     min_patient_coverage: float,
     canonical_labs_override: list[str] | None = None,
     feature_set: str = "labs",
+    exclude_vitals: bool = False,
+    feature_stats: str = "all",
 ) -> LandmarkContext:
     print(f"\n##### LANDMARK ANALYSES: +{landmark_day} DAYS #####")
     merged, train_val, test, pre_treatment_lab_df = _load_prebuilt_landmark(
@@ -738,6 +747,28 @@ def prepare_landmark_context(
         raw_feature_cols = [
             c for c in merged.columns if c not in non_feature_columns(merged)
         ]
+    if feature_stats not in {"all", "mean-n-obs"}:
+        raise ValueError(f"Unknown feature_stats: {feature_stats!r}")
+    if exclude_vitals or feature_stats != "all":
+        if feature_set != "labs":
+            raise ValueError("Vitals/statistic ablations require feature_set='labs'.")
+        # Filter candidates BEFORE fold-specific selection. Keeping the full
+        # patient frames preserves the risk set, outcomes, and prebuilt split.
+        # Both model preprocessors add train-derived missingness indicators.
+        raw_feature_cols = [
+            col for col in raw_feature_cols
+            if "__" in col
+            and (not exclude_vitals or col.rsplit("__", 1)[0] not in VITAL_MEASUREMENTS)
+            and (feature_stats == "all" or col.rsplit("__", 1)[1] in {"mean", "n_observations"})
+        ]
+        if exclude_vitals:
+            pre_treatment_lab_df = pre_treatment_lab_df.loc[
+                ~pre_treatment_lab_df["LAB_NAME"].isin(VITAL_MEASUREMENTS)
+            ].copy()
+            if canonical_labs_override is not None:
+                canonical_labs_override = [
+                    lab for lab in canonical_labs_override if lab not in VITAL_MEASUREMENTS
+                ]
     univariate_data = merged.copy()
     split_stratification = "prebuilt"
 

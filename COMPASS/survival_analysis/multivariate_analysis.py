@@ -936,7 +936,7 @@ def run_xgboost(args: argparse.Namespace) -> None:
             inputs_dir,
             landmark_day,
             min_patient_coverage=args.min_patient_coverage,
-            feature_set=getattr(args, "feature_set", "labs"),
+            **CONFIG.prepare_context_kwargs(args),
         )
         merged = ctx.merged
         train_val = ctx.train_val
