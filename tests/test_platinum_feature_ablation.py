@@ -100,6 +100,8 @@ def test_notebook_grid_and_summary(tmp_path, monkeypatch):
             inputs / f"aggregated_landmark{lm}.csv", index=False)
         (inputs / f"pre_treatment_lab_long_landmark{lm}.csv").touch()
     commands = []
+    clock = [0.0]
+    monkeypatch.setattr(scope["time"], "perf_counter", lambda: clock[0])
 
     def fake_fit(command, **kwargs):
         commands.append(command)
@@ -108,8 +110,10 @@ def test_notebook_grid_and_summary(tmp_path, monkeypatch):
         assert command[command.index("--feature-stats") + 1] == task["stats"]
         assert command[command.index("--endpoints") + 1] == "platinum"
         assert "--baseline" not in command
+        effect = 0.02 * (task["vitals"] == "with_vitals") + 0.01 * (task["stats"] == "all")
+        clock[0] += 120.0 + 1000 * effect
         pd.DataFrame([dict(endpoint="platinum", n_test=10, n_events_test=4,
-                           test_c_index=0.7, test_mean_auc_t=0.75,
+                           test_c_index=0.7, test_mean_auc_t=0.75 + effect,
                            test_integrated_brier=0.15)]).to_csv(task["metrics"], index=False)
 
     monkeypatch.setattr(subprocess, "run", fake_fit)
@@ -118,8 +122,47 @@ def test_notebook_grid_and_summary(tmp_path, monkeypatch):
             exec(compile("".join(cell["source"]), "notebook_cell", "exec"), scope)
     assert len(commands) == 24
     assert len(scope["summary"]) == 24
-    assert len(scope["contrast_df"]) == 24
+    assert len(scope["contrast_df"]) == 36  # six pairs per model/landmark
+    assert scope["contrast_df"].groupby(["model", "landmark"]).size().eq(6).all()
+    assert len(scope["cross_comparison"]) == 6
+    assert scope["cross_comparison"].shape[1] == 16  # four metrics x four combinations
+    diagonal = scope["contrast_df"].query(
+        "vitals_a == 'with_vitals' and stats_a == 'all' and "
+        "vitals_b == 'without_vitals' and stats_b == 'mean-n-obs'"
+    )
+    assert len(diagonal) == 6
+    assert np.allclose(diagonal["delta_test_mean_auc_t"], 0.03)
+    assert np.allclose(diagonal["delta_training_seconds"], 30.0)
     assert scope["summary"]["status"].eq("ok").all()
+    assert scope["summary"]["timing_status"].eq("completed").all()
+    assert scope["summary"]["training_seconds"].between(120, 150).all()
+    assert np.allclose(scope["summary"]["training_minutes"], scope["summary"]["training_seconds"] / 60)
+    timing_paths = [t["folder"] / "training_time.json" for t in tasks]
+    timings = [p.read_text() for p in timing_paths]
     # Resume does not rerun completed fits.
     exec(compile("".join(notebook["cells"][5]["source"]), "notebook_resume", "exec"), scope)
     assert len(commands) == 24
+    assert [p.read_text() for p in timing_paths] == timings
+    # Older fits have unknown time, never a fabricated zero or skip duration.
+    timing_paths[0].unlink()
+    exec(compile("".join(notebook["cells"][7]["source"]), "notebook_summary", "exec"), scope)
+    assert scope["summary"].iloc[0]["timing_status"] == "not_recorded"
+    assert np.isnan(scope["summary"].iloc[0]["training_seconds"])
+    # A failed overwrite must not report its elapsed time as successful training.
+    scope["TASKS"] = tasks[:1]
+    scope["OVERWRITE"] = True
+
+    def failed_fit(command, **kwargs):
+        clock[0] += 5.0
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(subprocess, "run", failed_fit)
+    with pytest.raises(subprocess.CalledProcessError):
+        exec(compile("".join(notebook["cells"][5]["source"]), "notebook_failure", "exec"), scope)
+    failure = json.loads(timing_paths[0].read_text())
+    assert failure["status"] == "failed"
+    assert failure["training_seconds"] == 5.0
+    assert failure["finished_at_utc"] is not None
+    exec(compile("".join(notebook["cells"][7]["source"]), "notebook_failed_summary", "exec"), scope)
+    assert scope["summary"].iloc[0]["status"] == "training_failed"
+    assert np.isnan(scope["summary"].iloc[0]["training_seconds"])
