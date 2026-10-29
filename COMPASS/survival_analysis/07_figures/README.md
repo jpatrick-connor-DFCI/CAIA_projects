@@ -5,7 +5,7 @@ COMPASS figures: cached preparation and rendering (stage 07, after notebook 06).
 Configured entirely through environment variables, e.g.
   Rscript COMPASS/survival_analysis/07_figures/all.R
   COMPASS_FIGURE_SCOPE=federated Rscript COMPASS/survival_analysis/07_figures/all.R
-  COMPASS_FIGURE_STAGE=render COMPASS_RENDER_PROFILE=publication COMPASS_RENDER_PDF=true Rscript ...
+  COMPASS_FIGURE_STAGE=render COMPASS_RENDER_PROFILE=publication SVG rendering Rscript ...
 Converted from 05_figures.Rmd; the former document text follows as comments.
 
 ---- Workflow --------------------------------------------------------------
@@ -24,14 +24,14 @@ Preparation and rendering are separate stages:
    optional GAMs, and caches finished graphics objects. CSV/Markdown figure
    tables are written during this stage; no images are generated.
 3. Rendering loads the graphics objects and writes individual and multipanel PNGs and optional
-   PDFs. It does not read patient inputs, fit curves, or repeat plot calculations.
+   SVGs. It does not read patient inputs, fit curves, or repeat plot calculations.
 
 `COMPASS_FIGURE_STAGE=all` (default) checks the notebook manifest and source
 metadata, prepares changed R figure sets, then renders missing or stale formats.
 `prepare` builds R graphics caches only; it does not prepare Python tables.
 `render` uses the last prepared snapshot without checking
 source data, and requires the same cohort/analysis settings. Use `all` for
-normal updates and `render` for DPI/PDF changes.
+normal updates and `render` for DPI changes.
 
 `COMPASS_FIGURE_SCOPE=federated` processes only the federated forests, site cohort report,
 elastic-net/XGBoost performance and importance, aggregate KM curves and PSA/testosterone
@@ -193,7 +193,7 @@ Each arm root (`ADT/`, `ARPI/`) has five numbered section folders:
   04_multivariate/federated/ federated models, including the no-DFCI refits
   05_transfer/               no-DFCI federated models scored at Dana-Farber
 Local filenames are `<figure>__<endpoint>__<subset>__<exclusion>.png`; federated
-ones are `<figure>__platinum.png`. Every export folder holds only PNG/PDF figures:
+ones are `<figure>__platinum.png`. Every export folder holds only PNG/SVG figures:
 CSV/Markdown tables and legends go in a `data/` subfolder of the same folder
 (e.g. `04_multivariate/internal/data/`), and older tables left beside figures are
 moved there when the catalog is rewritten. `<arm>/data/` holds `index.html` and
@@ -208,13 +208,12 @@ section folder itself.
 
 The canonical ADT/platinum, cohort-overview and federated runs also write
 manuscript figures to a `manuscript/` subfolder of the section each summarizes
-(e.g. `ADT/03_univariate/internal/manuscript/03_dfci_univariable.{png,pdf}`). These
+(e.g. `ADT/03_univariate/internal/manuscript/03_dfci_univariable.{png,svg}`). These
 additional exports generally use a 7.2-inch manuscript width, consistent 7–9 pt plot text,
 lettered panels without subplot titles, and separate `.md` figure legends in
 `manuscript/data/`. `manuscript/captions/` contains manuscript-ready legends as matching
 `figureN.md` and `figureN.txt` files (`federated_figureN.*` for the federated set). They always include a
-600-dpi (or higher requested DPI) PNG and a PDF, even when `COMPASS_RENDER_PDF`
-is false. Individual panels are always retained.
+600-dpi (or higher requested DPI) PNG and SVG on every render. Individual panels are always retained.
 
 The numbered manuscript set is: `01_cohort_overview`, `02_llm_nepc_avpc__<icd|adt|lm0>`
 (one per Figure 2 cohort, captions `figure2_<cohort>`, with a cohort header line),
@@ -302,7 +301,7 @@ For an existing canonical ADT/platinum PNG download without the graphics cache,
 `Rscript figure_workflow.R <input-ADT-dir> <new-parent>/ADT [0|90|180]` removes
 the compiled supertitles and assembles the new overview from the rendered panels.
 It preserves raster data/geometry, writes a separate tree and refreshed catalog,
-and exports the overview as PNG plus a PDF containing the existing raster panels.
+and exports the overview as PNG plus an SVG containing the existing raster panels.
 Normal pipeline runs rebuild figures from the underlying R plots instead.
 
 After a successful render, superseded `by_figure` exports for regenerated cohorts,
@@ -433,7 +432,7 @@ run `07_figures/all.R` with stage `all`. All Python remains in `06`; graphics ca
 
 Run `Rscript COMPASS/survival_analysis/07_figures/all.R` for the complete workflow, or run a numbered script in this directory for one manuscript figure and its section supplements. Run notebook `06_prep_figure_data.ipynb` first. Set `CAIA_PROJECT_ROOT` when using a checkout outside the cluster default. Each script honors the same `COMPASS_*` settings and `COMPASS_FIGURE_STAGE` (`all`, `prepare`, or `render`). Figure data and legends remain alongside exported figures in their `data/` folders; patient and graphics caches remain under `COMPASS_FIGURE_DATA_ROOT`.
 
-`retained_exports.txt` records the curated PNG/PDF output set based on `Desktop/ADT` on 2026-10-26, with cohort sensitivity relocated under Figure 3. Every figure entry point renders only paths in that list under `COMPASS_FIG_ROOT/ADT`; this includes `all.R` and runs with `COMPASS_RENDER_PDF=true`. Prepared graphics caches and data sidecars may still contain inputs for assembling the retained figures. To restore an intentionally deleted render, add its relative PNG path to the list (and its PDF path if it is a manuscript figure).
+`retained_exports.txt` records the curated PNG/SVG output set based on `Desktop/ADT` on 2026-10-26, with cohort sensitivity relocated under Figure 3. Every figure entry point renders only paths in that list under `COMPASS_FIG_ROOT/ADT`; this includes `all.R` and runs with `SVG rendering`. Prepared graphics caches and data sidecars may still contain inputs for assembling the retained figures. To restore an intentionally deleted render, add its relative PNG path to the list (and its SVG path if it is a manuscript figure).
 
 The entry points also work with `source("/absolute/path/to/07_figures/<figure>.R")`; they infer the code root from the sourced file when `CAIA_PROJECT_ROOT` is unset.
 

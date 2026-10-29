@@ -10,7 +10,7 @@
 figure_slug <- function(x) tolower(gsub("^_|_$", "", gsub("[^A-Za-z0-9]+", "_", x)))
 
 # Tables, legends, manifests and the HTML index sit in a "data" folder beside
-# the figures they describe, so each export folder lists only PNG/PDF figures.
+# the figures they describe, so each export folder lists only PNG/SVG figures.
 FIGURE_SIDECAR_DIR <- "data"
 figure_sidecar_path <- function(path) {
   if (basename(dirname(path)) == FIGURE_SIDECAR_DIR) return(path)
@@ -814,7 +814,8 @@ save_federated_panel <- function(plot, path, width, height, dpi, overwrite) {
     return(invisible(TRUE))
   }
   if (is.null(plot)) return(FALSE)
-  complete <- exists("figure_file_complete", mode = "function") && figure_file_complete(path)
+  complete <- exists("figure_file_complete", mode = "function") &&
+    figure_file_complete(path) && figure_file_complete(sub("\\.png$", ".svg", path))
   if (!overwrite && complete) { message("Skipped ", path); return(TRUE) }
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   temp <- tempfile(".federated-", tmpdir = dirname(path), fileext = ".png")
@@ -822,7 +823,12 @@ save_federated_panel <- function(plot, path, width, height, dpi, overwrite) {
   ggplot2::ggsave(temp, plot, width = width, height = height, dpi = dpi, bg = "white",
                   device = if (requireNamespace("ragg", quietly = TRUE)) ragg::agg_png else "png")
   if (!file.rename(temp, path)) stop("Could not publish federated supplement panel: ", path)
-  message("Wrote ", path)
+  svg_path <- sub("\\.png$", ".svg", path)
+  svg_temp <- tempfile(".federated-", tmpdir = dirname(path), fileext = ".svg")
+  on.exit(unlink(svg_temp), add = TRUE)
+  ggplot2::ggsave(svg_temp, plot, width = width, height = height, bg = "white", device = grDevices::svg)
+  if (!file.rename(svg_temp, svg_path)) stop("Could not publish federated supplement panel: ", svg_path)
+  message("Wrote ", path, " and ", svg_path)
   TRUE
 }
 
@@ -3516,11 +3522,10 @@ figure_archive_legacy_receipts <- function(fig_root, cache_root) {
   invisible(moved)
 }
 
-render_figure_scene <- function(scene, signature, dpi, pdf, overwrite = FALSE) {
-  if(isTRUE(scene$manuscript)) { dpi <- max(600,dpi); pdf <- TRUE }
+render_figure_scene <- function(scene, signature, dpi, pdf = FALSE, overwrite = FALSE) {
   grob <- NULL
   rendered <- 0L
-  for (format in c("png", if (pdf) "pdf")) {
+  for (format in c("png", "svg")) {
     path <- paste0(scene$destination, ".", format)
     receipt <- figure_receipt_path(scene, format)
     identity <- list(signature = signature, dpi = if (format == "png") dpi else NULL,
@@ -3534,7 +3539,7 @@ render_figure_scene <- function(scene, signature, dpi, pdf, overwrite = FALSE) {
     dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
     temporary <- tempfile(".figure-render-", tmpdir = dirname(path), fileext = paste0(".", format))
     tryCatch({
-      device <- if (format == "pdf") grDevices::cairo_pdf else if (HAS_RAGG) ragg::agg_png else "png"
+      device <- if (format == "svg") grDevices::svg else if (HAS_RAGG) ragg::agg_png else "png"
       ggplot2::ggsave(temporary, grob, width = scene$width, height = scene$height,
                      dpi = dpi, bg = "white", device = device)
       if (!figure_file_complete(temporary) || !file.rename(temporary, path)) stop("Cannot publish ", path)
@@ -3545,9 +3550,8 @@ render_figure_scene <- function(scene, signature, dpi, pdf, overwrite = FALSE) {
   list(stem = scene$stem, rendered = rendered)
 }
 
-figure_scene_complete <- function(scene, signature, dpi, pdf) {
-  if(isTRUE(scene$manuscript)) { dpi <- max(600,dpi); pdf <- TRUE }
-  all(vapply(c("png", if (pdf) "pdf"), function(format) {
+figure_scene_complete <- function(scene, signature, dpi, pdf = FALSE) {
+  all(vapply(c("png", "svg"), function(format) {
     path <- paste0(scene$destination, ".", format)
     receipt <- figure_receipt_path(scene, format)
     if (!file.exists(receipt) || !figure_file_complete(path)) return(FALSE)
@@ -3870,14 +3874,9 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
       }, tasks)
     }
     tasks <- Filter(function(task) figure_retained_image(
-      task$scene$destination, config$fig_root, ".png", retained_exports), tasks)
-    tasks <- lapply(tasks, function(task) {
-      has_pdf <- figure_retained_image(task$scene$destination, config$fig_root, ".pdf", retained_exports)
-      if (isTRUE(task$scene$manuscript) && !has_pdf)
-        stop("Curated manuscript figure is missing its PDF entry: ", task$scene$destination)
-      task$pdf <- isTRUE(task$scene$manuscript) || (pdf && has_pdf)
-      task
-    })
+      task$scene$destination, config$fig_root, ".png", retained_exports) &&
+      figure_retained_image(task$scene$destination, config$fig_root, ".svg", retained_exports), tasks)
+    tasks <- lapply(tasks, function(task) { task$pdf <- FALSE; task })
     message("Rendering/checking ", length(tasks), " panels with ", render_workers, " workers ...")
     completed <- if (render_overwrite) rep(FALSE, length(tasks)) else
       vapply(tasks, function(task) figure_scene_complete(task$scene, task$signature, dpi, task$pdf), logical(1))
@@ -4013,7 +4012,7 @@ reformat_downloaded_figures <- function(input, output, landmark=0L) {
   }
   ragg::agg_png(paste0(target,".png"),width=width,height=height,units="in",res=200,background="white")
   tryCatch(draw(),finally=grDevices::dev.off())
-  grDevices::cairo_pdf(paste0(target,".pdf"),width=width,height=height)
+  grDevices::svg(paste0(target,".svg"),width=width,height=height)
   tryCatch(draw(),finally=grDevices::dev.off())
   manifest <- file.path(output,FIGURE_SIDECAR_DIR,"manifest.csv")
   # Downloads made before tables moved into data/ keep the manifest at the root.
@@ -4023,7 +4022,7 @@ reformat_downloaded_figures <- function(input, output, landmark=0L) {
   moved <- metadata$path %in% selected
   metadata$path[moved] <- paste0("compiled/",metadata$path[moved])
   metadata$topic[moved] <- "compiled"
-  for(format in c("png","pdf")) {
+  for(format in c("png","svg")) {
     row <- metadata[1,,drop=FALSE]
     row$path <- paste0("compiled/associations/",stem,".",format)
     row$topic <- "compiled"; row$figure_id <- sub("__.*$","",stem)

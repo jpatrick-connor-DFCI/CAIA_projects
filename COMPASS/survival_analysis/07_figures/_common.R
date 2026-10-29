@@ -71,7 +71,6 @@ FEDERATED_SUPPLEMENT <- list(
   figure_data = Sys.getenv("COMPASS_FEDERATED_FIGURE_DATA", file.path(RHINO_ROOT, "figure_data")))
 RENDER_PROFILE <- match.arg(tolower(Sys.getenv("COMPASS_RENDER_PROFILE", "fast")), c("fast", "publication"))
 RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 200
-RENDER_PDF <- env_flag("COMPASS_RENDER_PDF")
 RENDER_OVERWRITE <- env_flag("COMPASS_RENDER_OVERWRITE")
 PREPARE_OVERWRITE <- env_flag("COMPASS_PREPARE_OVERWRITE")
 RENDER_WORKERS <- env_workers("COMPASS_RENDER_WORKERS", 2L)
@@ -114,7 +113,7 @@ run_figure <- function(figure_key = NULL) {
   figure_run <- run_cached_figure_workflow(
     config, pipeline_path, FIGURE_STAGE,
     prepare_workers = PREPARE_WORKERS, render_workers = RENDER_WORKERS,
-    dpi = RENDER_DPI, pdf = RENDER_PDF,
+    dpi = RENDER_DPI, pdf = FALSE,
     prepare_overwrite = PREPARE_OVERWRITE, render_overwrite = RENDER_OVERWRITE,
     metastatic_config = METASTATIC_SUPPLEMENT,
     forest_config = COHORT_FOREST_CONFIG,

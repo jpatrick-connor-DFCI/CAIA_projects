@@ -500,7 +500,7 @@ notebook. All operate on the merged `profile_data` run:
   reading it — the cohorts are not the same patients, and the strict NEPC label is narrower than
   the Figure 2 classifier definition.
 - `07_figures/` — manuscript figure scripts: run `all.R` for the retained set or a numbered
-  script for one figure family. `retained_exports.txt` limits PNG/PDF output to the curated
+  script for one figure family. `retained_exports.txt` limits PNG/SVG output to the curated
   `Desktop/ADT` figures. The scripts use `COMPASS_*` environment variables and
   `COMPASS_generate_figures_pipeline.R`; see `07_figures/README.md`. Figure 1A reads
   `mrn_lists/icd_prostate_mrn_flags.csv` and displays cumulative ICD-C61 cohort selection through
@@ -523,7 +523,7 @@ notebook. All operate on the merged `profile_data` run:
   confusion matrices also receive a combined `03_univariate/cohort_sensitivity/metastatic_label_agreement__<identity>`
   export. Filenames use `<identity> = <endpoint>__<subset>__<exclusion>` under each arm;
   Figure 2v3 is emitted only for canonical ADT/platinum. Run the default figure stage
-  (`all`) to prepare and render these additions, including PDFs when enabled.
+  (`all`) to prepare and render these additions, including SVGs.
   Compiled exports sit in a `compiled/` subfolder of their section, without an overall supertitle.
   The new `03_univariate/internal/compiled/dfci_labs_overview_km_lm0__platinum__<subset>__<exclusion>`
   combines the three DFCI landmark volcanoes with PSA/testosterone log1p trajectories
@@ -625,7 +625,7 @@ notebook. All operate on the merged `profile_data` run:
     Filenames are `<figure>__<endpoint>__<subset>__<exclusion>.png` (federated:
     `<figure>__platinum.png`); `__` separates axes, single underscores live inside a slug, and
     `incl` names the no-exclusion case so every filename has the same shape. Each folder holds
-    only PNG/PDF figures: tables and legends go in its `data/` subfolder, compiled multipanel
+    only PNG/SVG figures: tables and legends go in its `data/` subfolder, compiled multipanel
     figures in its `compiled/` subfolder, and manuscript figures in its `manuscript/` subfolder
     (legends in `manuscript/data/`, captions in `manuscript/captions/`).
 

@@ -13,6 +13,7 @@ out <- if (length(args) >= 2L) args[[2L]] else file.path(root, "figures")
 save_png <- function(plot, path, width, height, dpi, overwrite) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   ggplot2::ggsave(path, plot, width = width, height = height, dpi = dpi, bg = "white")
-  message("Wrote ", path)
+  ggplot2::ggsave(sub("\\.png$", ".svg", path), plot, width = width, height = height, bg = "white", device = grDevices::svg)
+  message("Wrote ", path, " and SVG")
 }
 render_checklist_supplement(root, out, 200, TRUE, save_png)

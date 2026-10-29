@@ -54,10 +54,10 @@ for (population in unique(metrics$population)) {
       }
     }
     stem <- file.path(out, paste(endpoint, population, "held_out", sep = "_"))
-    pdf(paste0(stem, ".pdf"), width = 11, height = 3.6 * length(landmarks))
-    draw(); dev.off()
     png(paste0(stem, ".png"), width = 2200, height = 720 * length(landmarks), res = 200,
         type = if (capabilities("cairo")) "cairo" else getOption("bitmapType"))
+    draw(); dev.off()
+    svg(paste0(stem, ".svg"), width = 11, height = 3.6 * length(landmarks))
     draw(); dev.off()
   }
 }
@@ -65,7 +65,7 @@ calibration_path <- file.path(root, "calibration.csv")
 if (file.exists(calibration_path)) {
   calibration <- read.csv(calibration_path, stringsAsFactors = FALSE)
   calibration <- calibration[calibration$model == "checklist", , drop = FALSE]
-  pdf(file.path(out, "checklist_calibration.pdf"), width = 6, height = 6)
+  draw_calibration <- function() {
   all_keys <- as.character(interaction(calibration$endpoint, calibration$landmark_days,
                                        calibration$population, calibration$horizon_days, drop = TRUE))
   for (key in unique(all_keys)) {
@@ -75,6 +75,11 @@ if (file.exists(calibration_path)) {
          main = as.character(key), pch = 16, col = "#0072B2", las = 1)
     abline(0, 1, lty = 2, col = "grey60")
   }
-  dev.off()
+  }
+  png(file.path(out, "checklist_calibration.png"), width = 1200, height = 1200, res = 200,
+      type = if (capabilities("cairo")) "cairo" else getOption("bitmapType"))
+  draw_calibration(); dev.off()
+  svg(file.path(out, "checklist_calibration.svg"), width = 6, height = 6)
+  draw_calibration(); dev.off()
 }
 message("Figures written to ", out)
