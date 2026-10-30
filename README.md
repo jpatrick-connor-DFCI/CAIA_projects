@@ -94,6 +94,7 @@ COMPASS/
     ├── 07_figures/                    # one R entry point per manuscript figure; all.R runs all
     ├── 08_abstract_numbers.ipynb         # read-only: abstract/manuscript counts from built artifacts
     ├── 10_platinum_feature_ablation.ipynb # Cox/XGBoost: vitals inclusion × summary-statistic sets, all landmarks
+    ├── 10c_platinum_adjust_only_vs_full.ipynb # Cox/XGBoost: no vitals, means only; adjust-only vs full with paired CIs
     ├── multivariate_longitudinal/
     │   ├── dynamic_deephit.py            # ENTRY: thin CLI over survival_common/deephit_engine.py
     │   ├── survlatent_ode.py             # ENTRY: adapter around the bundled editable checkout

@@ -449,6 +449,7 @@ def _run_multivariable_landmark(
             canonical_labs=ctx.canonical_labs,
             static_covariate_cols=static_covariate_cols,
             adjust_only_mode=adjust_only_mode,
+            save_test_survival=getattr(args, "save_test_survival", False),
         )
         _collect_multivariable_outputs(
             out, landmark_day, metrics_row, summary_df, predictions_df, test_auc_df, test_brier_df
@@ -529,6 +530,7 @@ def _run_baseline_landmark(
             canonical_labs=[],
             static_covariate_cols=static_covariate_cols,
             adjust_only_mode=adjust_only_mode,
+            save_test_survival=getattr(args, "save_test_survival", False),
         )
         if config.baseline_feature_count_column:
             metrics_row[config.baseline_feature_count_column] = len(feature_cols)

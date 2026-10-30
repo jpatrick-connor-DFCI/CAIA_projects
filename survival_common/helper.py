@@ -386,6 +386,20 @@ def breslow_survival_at_horizons(
     return out
 
 
+def survival_column(horizon: float) -> str:
+    """Patient-risk column holding S(t=horizon | x), with horizon in AUC time units."""
+    return f"surv_t{float(horizon):g}"
+
+
+def survival_columns(surv_at_horizons: np.ndarray, horizons: np.ndarray) -> dict[str, np.ndarray]:
+    """Map a (n_eval, n_horizons) survival matrix to patient-risk columns."""
+    horizons = np.asarray(horizons, dtype=float).reshape(-1)
+    return {
+        survival_column(horizon): surv_at_horizons[:, col]
+        for col, horizon in enumerate(horizons)
+    }
+
+
 # ---------------------------------------------------------------------------
 # IPCW Brier (per-horizon + integrated).
 # ---------------------------------------------------------------------------

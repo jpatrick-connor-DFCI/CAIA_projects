@@ -46,6 +46,7 @@ from survival_common.helper import (
     horizon_grid_frame,
     select_canonical_labs,
     summarize_brier_timeline,
+    survival_columns,
 )
 
 try:  # pragma: no cover - depends on local environment
@@ -1262,6 +1263,7 @@ def fit_final_multivariable_model(
     id_col: str = DEFAULT_ID_COL,
     age_col: str = DEFAULT_AGE_COL,
     adjust_only_mode: str = DEFAULT_ADJUST_ONLY_MODE,
+    save_test_survival: bool = False,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Refit on full train/validation data and evaluate on the held-out test set."""
     require_sksurv()
@@ -1467,6 +1469,8 @@ def fit_final_multivariable_model(
             "risk_score": np.asarray(test_pred).reshape(-1),
         }
     )
+    if save_test_survival:
+        predictions = predictions.assign(**survival_columns(test_surv, horizon_grid))
     test_auc_df = test_auc_df.copy()
     if not test_auc_df.empty:
         test_auc_df.insert(0, "endpoint", endpoint)

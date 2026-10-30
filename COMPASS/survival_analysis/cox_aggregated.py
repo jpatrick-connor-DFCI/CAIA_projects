@@ -481,6 +481,7 @@ def fit_final_multivariable_model(
     canonical_labs: list[str],
     static_covariate_cols: tuple[str, ...] = (),
     adjust_only_mode: str = DEFAULT_ADJUST_ONLY_MODE,
+    save_test_survival: bool = False,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     return _shared_fit_final_multivariable_model(
         train_val,
@@ -501,6 +502,7 @@ def fit_final_multivariable_model(
         id_col=ID_COL,
         age_col=AGE_COL,
         adjust_only_mode=adjust_only_mode,
+        save_test_survival=save_test_survival,
     )
 
 

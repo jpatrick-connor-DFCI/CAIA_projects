@@ -102,6 +102,7 @@ from survival_common.helper import (  # noqa: E402
     resolve_auc_max_time_units,
     select_canonical_labs,
     summarize_brier_timeline,
+    survival_columns,
 )
 from survival_common.xgboost_engine import (  # noqa: E402
     add_adjust_only_args,
@@ -736,6 +737,8 @@ def run_one_endpoint(
             "risk_score": risk,
         }
     )
+    if getattr(args, "save_test_survival", False):
+        risks = risks.assign(**survival_columns(test_surv, horizon_grid))
     feature_meta = feature_meta.copy()
     feature_meta.insert(0, "endpoint", endpoint)
     feature_meta.insert(0, "landmark_day", landmark_day)
@@ -1223,4 +1226,14 @@ if __name__ == "__main__":
     )
     add_out_of_fold_risk_args(parser)
     add_adjust_only_args(parser)
+    parser.add_argument(
+        "--save-test-survival",
+        action="store_true",
+        help=(
+            "Add each test patient's S(t|x) at every horizon to the patient-risk "
+            "file (surv_t<horizon> columns), so integrated Brier can be "
+            "recomputed from it, e.g. for a bootstrap. Works for both --model "
+            "families; the default output is unchanged."
+        ),
+    )
     main(parser.parse_args())
