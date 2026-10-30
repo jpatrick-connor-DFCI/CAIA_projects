@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from itertools import product
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +10,8 @@ import pandas as pd
 import pytest
 
 from COMPASS.survival_analysis import cox_aggregated as ca
+from COMPASS.survival_analysis.predictive_checklists.evaluation import evaluate_horizon
+from COMPASS.survival_analysis.predictive_checklists.survival import CensoringDistribution
 from survival_common.heldout_bootstrap import score_heldout
 from survival_common.helper import survival_columns
 
@@ -95,11 +98,73 @@ def _fake_fit(task, frame, *, leak=False):
             folder / f"landmark_xgboost_feature_importance_landmark{landmark}.csv", index=False)
 
 
+def _checklist_item(feature, op=">=", threshold=1.0):
+    return dict(name=f"{feature} {op} {threshold}", feature=feature, op=op, threshold=threshold, group="labs")
+
+
+def _fake_checklist(task, frame, *, extra_items=()):
+    """Write what a real run writes; late horizons fail, as they can in a small cohort."""
+    folder = task["folder"]
+    folder.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(1 + 100 * (task["arm"] == "full"))
+    train = frame.loc[frame["split"] == "train"]
+    test = frame.loc[frame["split"] == "test"]
+    duration = test["t_platinum"].to_numpy(dtype=float)
+    event = test["PLATINUM"].to_numpy(dtype=int)
+    censoring = CensoringDistribution.fit(train["t_platinum"].to_numpy(), train["PLATINUM"].to_numpy())
+    items = [_checklist_item("AGE_AT_TREATMENTSTART"), _checklist_item("PSA__mean"), *extra_items]
+    if task["arm"] == "full":
+        items += [_checklist_item("PSA__n_observations"), _checklist_item("PSA__mean", "is_missing", None)]
+    rows = []
+    for landmark, horizon in product(task["settings"]["landmarks"], task["settings"]["horizons"]):
+        cell = dict(endpoint="platinum", landmark_days=landmark, horizon_days=horizon, model="checklist")
+        if horizon > 730:
+            rows.append({**cell, "status": "unsupported", "reason": "Too few controls"})
+            continue
+        score = rng.integers(0, 4, len(test))
+        flag = score >= 2
+        probability = (score + 1) / 5
+        metrics = evaluate_horizon(duration, event, score, flag, probability, horizon, censoring)
+        rows.append({**cell, "status": "ok", "n": len(test), "auc": metrics["auc"], "brier": metrics["brier"],
+                     "n_items": len(items), "threshold": 2})
+        horizon_dir = folder / "platinum" / f"landmark_{landmark}" / "full" / f"horizon_{horizon}"
+        horizon_dir.mkdir(parents=True)
+        (horizon_dir / "checklist.json").write_text(json.dumps(dict(threshold=2, items=items)))
+        # Shuffled, with in-sample rows first: the notebook must align on patient and dataset.
+        tested = pd.DataFrame({ca.ID_COL: test[ca.ID_COL].to_numpy(), "split": "test", "dataset": "test",
+                               "score": score, "flag": flag, "probability": probability})
+        in_sample = pd.DataFrame({ca.ID_COL: train[ca.ID_COL].to_numpy(), "split": "train",
+                                  "dataset": "train_val_in_sample", "score": 0, "flag": False, "probability": 0.5})
+        pd.concat([in_sample, tested.sample(frac=1, random_state=0)]).to_csv(
+            horizon_dir / "predictions.csv", index=False)
+    pd.DataFrame(rows).to_csv(folder / "metrics.csv", index=False)
+    # A real manifest omits settings left at their defaults.
+    config = {key: value for key, value in task["settings"].items() if (key, value) != ("adjust_only_mode", "none")}
+    (folder / "run_manifest.json").write_text(json.dumps(dict(status="complete", config=config)))
+
+
+def _write_fits(scope, frame, *, checklist_arms=("full", "adjust_only"), extra_items=()):
+    for task in scope["TASKS"]:
+        task["folder"].mkdir(parents=True, exist_ok=True)
+        _fake_fit(task, frame)
+    for task in scope["CHECKLIST_TASKS"]:
+        if task["arm"] in checklist_arms:
+            _fake_checklist(task, frame, extra_items=extra_items if task["arm"] == "adjust_only" else ())
+
+
+def _is_checklist(command):
+    return "COMPASS.survival_analysis.predictive_checklists" in command
+
+
+def _horizon_dir(task, landmark, horizon):
+    return task["folder"] / "platinum" / f"landmark_{landmark}" / "full" / f"horizon_{horizon}"
+
+
 def _run_cells(cells, scope, *, skip_fit=False):
     for src, kind in cells:
         if kind != "code" or src.startswith("import json"):
             continue
-        if skip_fit and src.startswith("fit_counts"):
+        if skip_fit and src.startswith(("fit_counts", "checklist_counts")):
             continue
         exec(compile(src, "notebook_cell", "exec"), scope)
 
@@ -152,6 +217,8 @@ def test_reuses_notebook_10_fits_and_reports_paired_deltas(notebooks, monkeypatc
                 if task["command"] == command:
                     _fake_fit(task, frame)
                     return
+        task = next(t for t in scope_c["CHECKLIST_TASKS"] if t["command"] == command)
+        _fake_checklist(task, frame)
 
     monkeypatch.setattr(subprocess, "run", fit)
     exec(compile(_code(cells_10, "for task in TASKS"), "notebook_10_fit", "exec"), scope_10)
@@ -159,9 +226,11 @@ def test_reuses_notebook_10_fits_and_reports_paired_deltas(notebooks, monkeypatc
     commands.clear()
     _run_cells(cells_c, scope_c)
     # Every full fit resumes from notebook 10: its settings must compare equal.
-    assert len(commands) == 6
-    assert all("--adjust-only-mode" in command for command in commands)
+    survival = [command for command in commands if not _is_checklist(command)]
+    assert len(survival) == 6
+    assert all("--adjust-only-mode" in command for command in survival)
     assert scope_c["fit_counts"] == dict(completed=6, skipped=6)
+    assert scope_c["checklist_counts"] == dict(completed=2, skipped=0)
 
     comparison = scope_c["comparison"]
     assert len(comparison) == 6
@@ -213,3 +282,116 @@ def test_dry_run_writes_nothing(notebooks, monkeypatch):
     assert not scope_c["ADJUST_ONLY_ROOT"].exists()
     assert not scope_c["FULL_ROOT"].exists()
     assert scope_c["comparison"].empty
+    assert scope_c["checklist_comparison"].empty
+
+
+def test_checklist_arms_differ_only_in_mode_and_folder(notebooks):
+    *_, scope_c, _ = notebooks
+    full, adjust_only = scope_c["CHECKLIST_TASKS"]
+    assert (full["arm"], adjust_only["arm"]) == ("full", "adjust_only")
+    assert full["folder"] != adjust_only["folder"]
+    assert scope_c["CHECKLIST_HORIZONS"] == [365, 1825]
+    for task, mode in ((full, "none"), (adjust_only, "drop")):
+        command = task["command"]
+        assert _is_checklist(command)
+        assert command[command.index("--adjust-only-mode") + 1] == mode
+        assert command[command.index("--feature-stats") + 1] == "mean-n-obs"
+        assert command[command.index("--endpoints") + 1:command.index("--landmarks")] == ["platinum"]
+        assert "--exclude-vitals" in command and "--no-baselines" in command
+    different = [(a, b) for a, b in zip(full["command"], adjust_only["command"]) if a != b]
+    assert different == [(str(full["folder"].resolve()), str(adjust_only["folder"].resolve())), ("none", "drop")]
+
+
+def test_checklists_report_paired_deltas(notebooks, capsys):
+    _, _, cells_c, scope_c, frame = notebooks
+    _write_fits(scope_c, frame)
+    _run_cells(cells_c, scope_c, skip_fit=True)
+
+    assert "6 of 12 checklist cells are not comparable" in capsys.readouterr().out
+    comparison = scope_c["checklist_comparison"]
+    assert len(comparison) == 3  # three landmarks at the one supported horizon
+    assert np.allclose(comparison["delta_auc"], comparison["auc_adjust_only"] - comparison["auc_full"])
+    assert (comparison["delta_n_items"] == -2).all()
+    for metric in ("auc", "brier"):
+        assert comparison[f"delta_{metric}_ci_low"].notna().all()
+        assert (comparison[f"delta_{metric}_ci_low"] <= comparison[f"delta_{metric}_ci_high"]).all()
+    root = scope_c["ADJUST_ONLY_ROOT"]
+    for name in ("summary", "items", "comparison", "bootstrap_ci", "bootstrap_draws"):
+        assert (root / f"adjust_only_vs_full_checklist_{name}.csv").is_file()
+    assert (root / "adjust_only_vs_full_checklist_auc.png").is_file()
+    draws = pd.read_csv(root / "adjust_only_vs_full_checklist_bootstrap_draws.csv")
+    assert len(draws) == 3 * 2 * scope_c["N_BOOTSTRAP"]
+
+
+@pytest.mark.parametrize("item", [
+    _checklist_item("PSA__n_observations"),
+    _checklist_item("PSA__mean", "is_missing", None),
+    _checklist_item("Body weight__mean"),
+    _checklist_item("PSA__delta"),
+])
+def test_checklist_item_outside_its_pool_stops_the_comparison(notebooks, item):
+    _, _, cells_c, scope_c, frame = notebooks
+    _write_fits(scope_c, frame, extra_items=[item])
+    with pytest.raises(ValueError, match="outside the candidate pool"):
+        _run_cells(cells_c, scope_c, skip_fit=True)
+
+
+def test_one_finished_checklist_arm_shows_values_without_deltas(notebooks):
+    _, _, cells_c, scope_c, frame = notebooks
+    _write_fits(scope_c, frame, checklist_arms=("full",))
+    _run_cells(cells_c, scope_c, skip_fit=True)
+    comparison = scope_c["checklist_comparison"]
+    assert len(comparison) == 3
+    assert comparison["auc_full"].notna().all()
+    assert comparison["delta_auc"].isna().all()
+    assert comparison["delta_auc_ci_low"].isna().all()
+
+
+def test_finished_checklist_runs_are_skipped_unless_settings_changed(notebooks, monkeypatch):
+    _, _, cells_c, scope_c, frame = notebooks
+    _write_fits(scope_c, frame)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("finished run must not refit"))
+    fit_cell = compile(_code(cells_c, "checklist_counts"), "checklist_fit", "exec")
+    exec(fit_cell, scope_c)
+    assert scope_c["checklist_counts"] == dict(completed=0, skipped=2)
+
+    manifest_path = scope_c["CHECKLIST_TASKS"][1]["folder"] / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["config"]["adjust_only_mode"] = "none"
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="Settings changed"):
+        exec(fit_cell, scope_c)
+
+
+def test_interrupted_checklist_run_goes_back_to_the_cli(notebooks, monkeypatch):
+    _, _, cells_c, scope_c, frame = notebooks
+    _write_fits(scope_c, frame)
+    task = scope_c["CHECKLIST_TASKS"][0]
+    manifest_path = task["folder"] / "run_manifest.json"
+    manifest_path.write_text(json.dumps(dict(status="running", config=task["settings"])))
+    commands = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: commands.append(command))
+    exec(compile(_code(cells_c, "checklist_counts"), "checklist_fit", "exec"), scope_c)
+    assert commands == [task["command"]] and "--resume" in task["command"]
+    assert scope_c["checklist_counts"] == dict(completed=1, skipped=1)
+
+
+def test_checklist_metrics_must_reproduce_from_saved_predictions(notebooks):
+    _, _, cells_c, scope_c, frame = notebooks
+    _write_fits(scope_c, frame)
+    path = scope_c["CHECKLIST_TASKS"][0]["folder"] / "metrics.csv"
+    stored = pd.read_csv(path)
+    stored.loc[stored["status"] == "ok", "auc"] += 0.01
+    stored.to_csv(path, index=False)
+    with pytest.raises(ValueError, match="Recomputed metrics differ"):
+        _run_cells(cells_c, scope_c, skip_fit=True)
+
+
+def test_checklist_predictions_must_cover_the_test_set(notebooks):
+    _, _, cells_c, scope_c, frame = notebooks
+    _write_fits(scope_c, frame)
+    path = _horizon_dir(scope_c["CHECKLIST_TASKS"][0], 0, 365) / "predictions.csv"
+    saved = pd.read_csv(path)
+    saved.drop(saved.index[-1]).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="Test patients are missing"):
+        _run_cells(cells_c, scope_c, skip_fit=True)

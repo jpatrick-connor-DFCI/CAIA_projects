@@ -21,11 +21,18 @@ import pandas as pd
 
 
 SUMMARY_STATS = frozenset({"mean", "min", "max", "last", "delta", "n_observations"})
+# Lab summaries admitted by each --feature-stats choice (see cox_aggregated).
+FEATURE_STATS = {"all": SUMMARY_STATS, "mean-n-obs": frozenset({"mean", "n_observations"})}
 # Measurement-density summaries; adjust-only (never candidates) when excluded.
 ADJUSTER_STATS = frozenset({"n_observations"})
 # Static adjustment covariates carried by genomic inputs (see cox_aggregated).
 STATIC_ADJUSTER_PREFIXES = ("PANEL_VERSION_",)
 STATIC_ADJUSTER_COLUMNS = ("SOMATIC_N_GENES_ALTERED",)
+# Same names as cox_aggregated.VITAL_MEASUREMENTS, which needs the Cox stack.
+VITAL_MEASUREMENTS = frozenset({
+    "Body height", "Body weight", "Body temperature", "Heart rate",
+    "Respiratory rate", "Systolic blood pressure", "Diastolic blood pressure",
+})
 DEFAULT_QUANTILES = (0.1, 0.25, 0.5, 0.75, 0.9)
 MAX_DISCRETE_LEVELS = 10
 _NON_LAB_SOURCES = frozenset({
@@ -36,13 +43,16 @@ _NON_LAB_SOURCES = frozenset({
 
 
 def _group(feature: str, age_col: str, clinical_features: Iterable[str] = (),
-           exclude_adjusters: bool = False) -> str | None:
+           exclude_adjusters: bool = False, exclude_vitals: bool = False,
+           feature_stats: str = "all") -> str | None:
     if feature == age_col or feature in clinical_features:
         return feature
     source, separator, stat = feature.rpartition("__")
-    if not separator or not source or stat not in SUMMARY_STATS:
+    if not separator or not source or stat not in FEATURE_STATS[feature_stats]:
         return None
     if exclude_adjusters and stat in ADJUSTER_STATS:
+        return None
+    if exclude_vitals and source in VITAL_MEASUREMENTS:
         return None
     normalized = source.upper()
     if normalized in _NON_LAB_SOURCES or normalized.startswith(
@@ -63,6 +73,7 @@ def _numeric(frame: pd.DataFrame, feature: str) -> pd.Series:
 def schema_feature_columns(
     frame: pd.DataFrame, age_col: str = "AGE_AT_TREATMENTSTART",
     clinical_features: Iterable[str] = (), exclude_adjusters: bool = False,
+    exclude_vitals: bool = False, feature_stats: str = "all",
 ) -> list[str]:
     """Whitelist raw baseline inputs without learning anything from their values.
 
@@ -74,7 +85,8 @@ def schema_feature_columns(
     if missing:
         raise ValueError(f"Configured clinical features are absent: {', '.join(sorted(missing))}.")
     return sorted(str(column) for column in frame.columns
-                  if _group(str(column), age_col, clinical_features, exclude_adjusters) is not None)
+                  if _group(str(column), age_col, clinical_features, exclude_adjusters,
+                            exclude_vitals, feature_stats) is not None)
 
 
 class FeatureBinarizer:
@@ -86,7 +98,8 @@ class FeatureBinarizer:
     caller-supplied canonical list is only a restriction, never a substitute
     for this training coverage check. ``transform`` never changes candidates.
     With ``exclude_adjusters`` the lab counts and ``is missing`` items are not
-    candidates (see :class:`AdjusterDesign`).
+    candidates (see :class:`AdjusterDesign`). ``exclude_vitals`` and
+    ``feature_stats`` limit the pool as those survival-model options do.
     """
 
     def __init__(
@@ -98,8 +111,14 @@ class FeatureBinarizer:
         id_col: str = "DFCI_MRN",
         clinical_features: Iterable[str] = (),
         exclude_adjusters: bool = False,
+        exclude_vitals: bool = False,
+        feature_stats: str = "all",
     ) -> None:
         self.exclude_adjusters = bool(exclude_adjusters)
+        self.exclude_vitals = bool(exclude_vitals)
+        if feature_stats not in FEATURE_STATS:
+            raise ValueError(f"Unknown feature_stats: {feature_stats!r}")
+        self.feature_stats = str(feature_stats)
         self.min_patient_coverage = float(min_patient_coverage)
         self.quantiles = tuple(sorted(set(float(q) for q in quantiles)))
         if not 0 <= self.min_patient_coverage <= 1:
@@ -120,6 +139,10 @@ class FeatureBinarizer:
         self.medians: dict[str, float] = {}
         self.coverage: dict[str, float] = {}
         self._fitted = False
+
+    def _group_of(self, feature: str) -> str | None:
+        return _group(feature, self.age_col, self.clinical_features, self.exclude_adjusters,
+                      self.exclude_vitals, self.feature_stats)
 
     def fit(self, frame: pd.DataFrame, lab_long: pd.DataFrame | None = None) -> "FeatureBinarizer":
         if frame.empty:
@@ -148,7 +171,7 @@ class FeatureBinarizer:
             eligible_labs = train_labs if eligible_labs is None else eligible_labs & train_labs
 
         for feature in sorted(str(c) for c in frame.columns):
-            group = _group(feature, self.age_col, self.clinical_features, self.exclude_adjusters)
+            group = self._group_of(feature)
             is_lab = feature != self.age_col and feature not in self.clinical_features
             if group is None or (is_lab and eligible_labs is not None and group not in eligible_labs):
                 continue
@@ -211,6 +234,8 @@ class FeatureBinarizer:
             "items": [dict(item) for item in self.items],
             # Only written when set, so default-mode bundles are unchanged.
             **({"exclude_adjusters": True} if self.exclude_adjusters else {}),
+            **({"exclude_vitals": True} if self.exclude_vitals else {}),
+            **({"feature_stats": self.feature_stats} if self.feature_stats != "all" else {}),
         }
 
     @classmethod
@@ -220,16 +245,18 @@ class FeatureBinarizer:
         result = cls(**{key: state[key] for key in (
             "age_col", "id_col", "min_patient_coverage", "quantiles", "canonical_labs"
         )}, clinical_features=state.get("clinical_features", ()),
-            exclude_adjusters=state.get("exclude_adjusters", False))
+            exclude_adjusters=state.get("exclude_adjusters", False),
+            exclude_vitals=state.get("exclude_vitals", False),
+            feature_stats=state.get("feature_stats", "all"))
         result.feature_columns = list(state["feature_columns"])
         result.medians = {key: float(value) for key, value in state["medians"].items()}
         result.coverage = {key: float(value) for key, value in state["coverage"].items()}
         result.items = [dict(item) for item in state["items"]]
         for feature in result.feature_columns:
-            if _group(feature, result.age_col, result.clinical_features, result.exclude_adjusters) is None or not np.isfinite(result.medians[feature]):
+            if result._group_of(feature) is None or not np.isfinite(result.medians[feature]):
                 raise ValueError("Invalid serialized checklist feature or imputation value.")
         for item in result.items:
-            if item["feature"] not in result.feature_columns or item["group"] != _group(item["feature"], result.age_col, result.clinical_features, result.exclude_adjusters):
+            if item["feature"] not in result.feature_columns or item["group"] != result._group_of(item["feature"]):
                 raise ValueError("Invalid serialized checklist item feature/group.")
             if item["op"] not in {"<=", ">=", "is_missing"}:
                 raise ValueError("Invalid serialized checklist comparison.")

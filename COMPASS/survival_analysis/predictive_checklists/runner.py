@@ -107,7 +107,9 @@ def _binarizer(config):
     return FeatureBinarizer(min_patient_coverage=config.min_patient_coverage,
                             quantiles=config.quantiles, age_col=config.age_col, id_col=config.id_col,
                             clinical_features=config.clinical_features,
-                            exclude_adjusters=_adjust_only(config))
+                            exclude_adjusters=_adjust_only(config),
+                            exclude_vitals=config.exclude_vitals,
+                            feature_stats=config.feature_stats)
 
 
 def fit_horizon(train, endpoint, horizon, config):
@@ -255,7 +257,9 @@ def run_cell(data, endpoint, landmark, population, config, output_dir, *, resume
     if config.baselines and len(done) < len(config.horizons):
         columns = schema_feature_columns(train, age_col=config.age_col,
                                          clinical_features=config.clinical_features,
-                                         exclude_adjusters=_adjust_only(config))
+                                         exclude_adjusters=_adjust_only(config),
+                                         exclude_vitals=config.exclude_vitals,
+                                         feature_stats=config.feature_stats)
         stored = output_dir / "baselines.pkl"
         if resume and stored.exists():
             with stored.open("rb") as stream:

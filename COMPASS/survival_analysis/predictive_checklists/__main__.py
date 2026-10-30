@@ -27,6 +27,11 @@ def main(argv=None):
     parser.add_argument("--adjust-only-mode", choices=["none", "drop"],
                         help="drop: lab counts, missingness and panel covariates adjust "
                              "calibration only and are never checklist items")
+    parser.add_argument("--exclude-vitals", action="store_true", default=None,
+                        help="Remove vital signs from the checklist and baseline candidates")
+    parser.add_argument("--feature-stats", choices=["all", "mean-n-obs"],
+                        help="mean-n-obs: lab candidates are limited to __mean and "
+                             "__n_observations summaries and their missingness")
     parser.add_argument("--preflight-only", action="store_true")
     existing = parser.add_mutually_exclusive_group()
     existing.add_argument("--overwrite", action="store_true")
@@ -36,7 +41,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     config = RunConfig.load(args.config)
     for key in ("endpoints", "landmarks", "horizons", "solver", "solver_time_limit",
-                "n_folds", "bootstrap_samples", "adjust_only_mode"):
+                "n_folds", "bootstrap_samples", "adjust_only_mode", "exclude_vitals",
+                "feature_stats"):
         value = getattr(args, key)
         if value is not None:
             setattr(config, key, value)

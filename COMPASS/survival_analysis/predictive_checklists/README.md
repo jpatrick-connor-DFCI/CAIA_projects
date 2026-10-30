@@ -170,6 +170,19 @@ so the JSON configs are unchanged. `03c_multivariate_adjust_only.ipynb` runs
 both configs this way into `full_adt_adjust_only` and
 `gleason_trio_labs_adjust_only`.
 
+### Restricting the candidate pool (`--exclude-vitals`, `--feature-stats`)
+
+`--exclude-vitals` removes vital-sign measurements from the pool, and
+`--feature-stats mean-n-obs` keeps only `__mean` and `__n_observations` summaries.
+Both mean the same as in the survival models and apply equally to the
+comparators. They combine with `--adjust-only-mode drop`, which leaves age and
+lab means as the only candidates. Age is never removed. Like
+`--adjust-only-mode`, these are CLI overrides: the JSON configs are unchanged,
+and settings left at their defaults are omitted from manifests and `model.json`.
+
+`10c_platinum_adjust_only_vs_full.ipynb` uses them to compare adjust-only and
+full checklists without vitals and with means only.
+
 ## Gleason + TP53/RB1/PTEN subset
 
 `run_predictive_checklists_gleason_trio.ipynb` with `gleason_trio_config.json`

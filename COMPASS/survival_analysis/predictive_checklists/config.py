@@ -33,6 +33,10 @@ class RunConfig:
     # covariates are never checklist items; they adjust the probability
     # calibration only, evaluated at their training mean for every prediction.
     adjust_only_mode: str = "none"
+    # Candidate-pool restrictions, matching --exclude-vitals and --feature-stats
+    # of the survival models. Baselines are restricted to the same pool.
+    exclude_vitals: bool = False
+    feature_stats: str = "all"
 
     def validate(self):
         if not self.endpoints or set(self.endpoints) - {"platinum", "nepc"}:
@@ -62,14 +66,18 @@ class RunConfig:
             raise ValueError("clinical_features must be distinct non-age column names")
         if self.adjust_only_mode not in {"none", "drop"}:
             raise ValueError("adjust_only_mode must be none or drop")
+        if self.feature_stats not in {"all", "mean-n-obs"}:
+            raise ValueError("feature_stats must be all or mean-n-obs")
         return self
 
     def to_dict(self):
         values = asdict(self)
-        # Omitted at its default so existing manifests (and --resume of runs
-        # made before this setting existed) still compare equal.
-        if values["adjust_only_mode"] == "none":
-            del values["adjust_only_mode"]
+        # Omitted at their defaults so existing manifests (and --resume of runs
+        # made before these settings existed) still compare equal.
+        for key, default in (("adjust_only_mode", "none"), ("exclude_vitals", False),
+                             ("feature_stats", "all")):
+            if values[key] == default:
+                del values[key]
         return values
 
     @classmethod

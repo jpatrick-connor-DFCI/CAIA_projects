@@ -37,6 +37,14 @@ os.environ.setdefault(
 from data_preprocessing_common.oncdrs_sources import TABLE_FILES  # noqa: E402
 from data_preprocessing_common.oncdrs_sources import scan_source  # noqa: E402
 from COMPASS.survival_analysis import cox_aggregated as _ca  # noqa: E402
+from survival_common.heldout_bootstrap import (  # noqa: E402
+    DURATION_COL,
+    EVENT_COL,
+    assert_reproduces_stored,
+    bootstrap_heldout,
+    percentile_ci,
+)
+from survival_common.helper import resolve_auc_max_time_units  # noqa: E402
 from survival_common.metrics_schema import DEFAULT_COHORT  # noqa: E402
 from survival_common.cox_engine import (  # noqa: E402
     DEFAULT_ADJUST_ONLY_MODE,
@@ -81,6 +89,10 @@ REBUILD_PREDICTION_INPUTS = True
 # hyperparameters are re-tuned inside each outer fold. test and cv_oof scores
 # are never pooled -- see survival_common.cox_runners.add_out_of_fold_risk_args.
 OUT_OF_FOLD_RISKS = True
+# Store each test patient's S(t|x) in the elastic-net/XGBoost patient-risk files
+# (surv_t<h> columns). Off by default so default outputs stay unchanged; bootstrap
+# intervals on integrated Brier need it, while C-index and AUC(t) do not.
+SAVE_TEST_SURVIVAL = False
 # Which event is modeled. Must be a key of
 # COMPASS.survival_analysis.cox_aggregated.ENDPOINTS. "platinum" is the
 # original endpoint; "nepc" is time from the ADT anchor to the LLM-adjudicated
@@ -1437,6 +1449,8 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             cmd.append("--baseline")
         if OUT_OF_FOLD_RISKS:
             cmd.append("--out-of-fold-risks")
+        if SAVE_TEST_SURVIVAL:
+            cmd.append("--save-test-survival")
         cmd += _adjust_only_args(run)
         return cmd
     if model in ("dynamic-deephit", "dynamic-deephit-dyn"):
@@ -1513,6 +1527,8 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             cmd.append("--baseline")
         if OUT_OF_FOLD_RISKS:
             cmd.append("--out-of-fold-risks")
+        if SAVE_TEST_SURVIVAL:
+            cmd.append("--save-test-survival")
         cmd += _adjust_only_args(run)
         return cmd
     raise ValueError(f"Unknown model: {model}")
@@ -2323,6 +2339,127 @@ def summarize_patient_risks(run: dict) -> pd.DataFrame:
         .sort_values(["run", "landmark", "model", "config"])
         .reset_index(drop=True)
     )
+
+
+# Summary column -> metrics-file column, as mapped in _canonical_metric_fields.
+_HELDOUT_METRIC_COLUMNS = {
+    "c_index": "test_c_index",
+    "mean_auc_t": "test_mean_auc_t",
+    "integrated_brier": "test_integrated_brier",
+}
+
+
+def _heldout_reference(run: dict, landmark: int) -> pd.DataFrame:
+    """The train/valid durations and events behind a fit's IPCW weights."""
+    endpoint = _ca.ENDPOINTS[run.get("endpoint", ENDPOINT)]
+    columns = {endpoint["duration_col"]: DURATION_COL, endpoint["event_col"]: EVENT_COL}
+    inputs = pd.read_csv(
+        run["inputs_dir"] / f"aggregated_landmark{landmark}.csv", usecols=["split", *columns]
+    )
+    return inputs.loc[inputs["split"].isin(["train", "valid"])].rename(columns=columns)
+
+
+def _stored_heldout_metrics(run: dict) -> dict:
+    """Each completed task's reported test metrics, under their metrics-file names."""
+    summary = summarize_outputs(run)
+    return {
+        (row["model"], int(row["landmark"]), row["config"]): {
+            test_name: row[name] for name, test_name in _HELDOUT_METRIC_COLUMNS.items()
+        }
+        for _, row in summary.loc[summary["status"] == "ok"].iterrows()
+    }
+
+
+def bootstrap_adjust_only_comparison(
+    default_run: dict,
+    adjust_only_run: dict,
+    *,
+    n_boot: int = 1000,
+    seed: int = 42,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Paired patient-bootstrap intervals for one default vs adjust-only comparison.
+
+    Each (model, landmark, config) scores both modes on the same resampled test
+    patients, so a delta interval (adjust-only minus default) comes from the
+    per-draw difference. Tasks at one landmark share `seed + landmark`, as in
+    10_platinum_feature_ablation.ipynb.
+
+    Returns (intervals, draws). intervals has one row per task that has a risk
+    file in either mode, with <metric>_{default,adjust_only}_ci_* and
+    delta_<metric>_ci_* columns; a task with one mode gets that mode's intervals
+    and blank deltas. draws has one row per (task, mode, draw). Integrated Brier
+    intervals stay blank for fits without SAVE_TEST_SURVIVAL, and a delta needs
+    it in both modes. Stops if a recomputed metric differs from the stored one.
+    """
+    modes = {"default": default_run, "adjust_only": adjust_only_run}
+    endpoint = adjust_only_run.get("endpoint", ENDPOINT)
+    stored = {mode: _stored_heldout_metrics(run) for mode, run in modes.items()}
+    manifest = _ca._load_build_manifest(adjust_only_run["inputs_dir"])
+    score_settings = {
+        "time_unit_days": int(manifest["auc_time_unit_days"]),
+        "max_time_unit": resolve_auc_max_time_units(manifest, None),
+        "n_boot": n_boot,
+        "id_col": _ca.ID_COL,
+    }
+
+    metrics = list(_HELDOUT_METRIC_COLUMNS)
+    task_cols = ["model", "landmark", "config"]
+    references = {}
+    draw_frames = []
+    for model, landmark, config_dir, _ in tasks_for_run(adjust_only_run):
+        task = (model, landmark, config_dir)
+        paths = {mode: patient_risk_path(run, model, landmark, config_dir) for mode, run in modes.items()}
+        fits = {
+            mode: _load_test_block_risks(path, endpoint)
+            for mode, path in paths.items()
+            if task in stored[mode] and path.exists()
+        }
+        if not fits:
+            continue
+        if landmark not in references:
+            references[landmark] = _heldout_reference(adjust_only_run, landmark)
+        observed, task_draws = bootstrap_heldout(
+            fits,
+            reference=references[landmark],
+            horizons=np.asarray(manifest["auc_horizons_by_landmark"][str(landmark)][endpoint], dtype=float),
+            seed=seed + int(landmark),
+            **score_settings,
+        )
+        for _, row in observed.iterrows():
+            assert_reproduces_stored(
+                row, stored[row["fit"]][task],
+                context=f"{modes[row['fit']]['label']} {row['fit']} {model} +{landmark}d {config_dir}",
+            )
+        draw_frames.append(
+            task_draws.rename(columns={"fit": "mode", **{v: k for k, v in _HELDOUT_METRIC_COLUMNS.items()}})
+            .assign(model=model, landmark=landmark, config=config_dir, endpoint=endpoint)
+        )
+    draws = (
+        pd.concat(draw_frames, ignore_index=True)[[*task_cols, "endpoint", "mode", "draw", *metrics]]
+        if draw_frames
+        else pd.DataFrame(columns=[*task_cols, "endpoint", "mode", "draw", *metrics])
+    )
+
+    rows = []
+    for task, group in draws.groupby(task_cols, sort=False):
+        mode_draws = {mode: frame.set_index("draw") for mode, frame in group.groupby("mode")}
+        row = dict(zip(task_cols, task), endpoint=endpoint)
+        for metric in metrics:
+            for mode, frame in mode_draws.items():
+                row[f"{metric}_{mode}_ci_low"], row[f"{metric}_{mode}_ci_high"], \
+                    row[f"{metric}_{mode}_n_valid_draws"] = percentile_ci(frame[metric])
+            if len(mode_draws) == len(modes):
+                difference = mode_draws["adjust_only"][metric] - mode_draws["default"][metric]
+                row[f"delta_{metric}_ci_low"], row[f"delta_{metric}_ci_high"], \
+                    row[f"delta_{metric}_n_valid_draws"] = percentile_ci(difference)
+        rows.append(row)
+    interval_cols = [
+        f"{column}_{part}"
+        for metric in metrics
+        for column in (f"{metric}_default", f"{metric}_adjust_only", f"delta_{metric}")
+        for part in ("ci_low", "ci_high", "n_valid_draws")
+    ]
+    return pd.DataFrame(rows, columns=[*task_cols, "endpoint", *interval_cols]), draws
 
 
 def summarize_longitudinal_outputs(run: dict) -> pd.DataFrame:

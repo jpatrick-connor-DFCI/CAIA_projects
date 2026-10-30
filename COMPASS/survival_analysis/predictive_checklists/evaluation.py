@@ -160,6 +160,35 @@ def _metrics(labels: np.ndarray, weights: np.ndarray, score: np.ndarray,
             "weighted_observed_risk": _ratio(tp + fn, tp + fn + fp + tn)}
 
 
+def paired_bootstrap(duration: Any, event: Any, predictions: dict, horizon: float,
+                     censoring: CensoringDistribution, min_g: float = 0.05,
+                     bootstrap_samples: int = 1000, seed: int = 42) -> tuple[dict, list[dict]]:
+    """Score fixed predictions on shared patient resamples, for paired contrasts.
+
+    ``predictions`` maps a name to its (score, flag, probability) arrays, one
+    value per patient in ``duration`` order. Returns each name's observed
+    metrics and one AUC/Brier row per name and draw; the same draw index means
+    the same patients. Intervals condition on the fitted models and training
+    censoring distribution, as in :func:`evaluate_horizon`.
+    """
+    duration, event = validate_outcomes(duration, event)
+    labels, weights, _ = horizon_targets(duration, event, horizon, censoring, min_g)
+    arrays = {name: (np.asarray(score, dtype=float), np.asarray(flag).astype(bool),
+                     np.asarray(probability, dtype=float))
+              for name, (score, flag, probability) in predictions.items()}
+    observed = {name: _metrics(labels, weights, *values) for name, values in arrays.items()}
+    rng = np.random.default_rng(seed)
+    rows = []
+    for draw in range(bootstrap_samples):
+        sampled = rng.integers(0, len(duration), size=len(duration))
+        for name, (score, flag, probability) in arrays.items():
+            sample = _metrics(labels[sampled], weights[sampled], score[sampled], flag[sampled],
+                              probability[sampled])
+            rows.append({"fit": name, "draw": draw, "brier": sample["brier"],
+                         "auc": np.nan if sample["auc"] is None else sample["auc"]})
+    return observed, rows
+
+
 def evaluate_horizon(duration: Any, event: Any, score: Any, flag: Any,
                      probability: Any, horizon: float, censoring: CensoringDistribution,
                      min_g: float = 0.05, bootstrap_samples: int = 0, seed: int = 42,
