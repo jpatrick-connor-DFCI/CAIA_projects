@@ -10,6 +10,12 @@ from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
+from survival_common.cox_engine import (
+    ADJUST_ONLY_MODES,
+    DEFAULT_ADJUST_ONLY_MODE,
+    adjust_only_columns,
+    fit_coxnet_with_fallback,
+)
 from survival_common.helper import breslow_survival_at_horizons
 
 try:
@@ -19,6 +25,39 @@ try:
 except ModuleNotFoundError as exc:  # pragma: no cover - depends on local environment
     xgb = None
     XGBOOST_IMPORT_ERROR = exc
+
+
+# Adjuster-offset elastic net (adjust-only drop mode); see fit_adjuster_offset.
+DEFAULT_ADJUSTER_PENALIZER = 0.05
+DEFAULT_ADJUSTER_L1_RATIO = 0.5
+
+
+def add_adjust_only_args(parser: argparse.ArgumentParser) -> None:
+    """CLI flags for adjust-only covariates in the XGBoost arm."""
+    parser.add_argument(
+        "--adjust-only-mode",
+        choices=list(ADJUST_ONLY_MODES),
+        default=DEFAULT_ADJUST_ONLY_MODE,
+        help=(
+            "'none' (default): __n_observations, __missing and static covariates "
+            "are ordinary features. 'drop': they are fit in training only -- "
+            "jointly in the elastic-net Cox (then zeroed at scoring), or as a "
+            "linear offset for XGBoost -- so they never appear in coefficients, "
+            "trees, feature importances or risk scores."
+        ),
+    )
+    parser.add_argument(
+        "--adjuster-penalizer",
+        type=float,
+        default=DEFAULT_ADJUSTER_PENALIZER,
+        help="Elastic-net penalizer for the drop-mode adjuster offset (static covariates unpenalized).",
+    )
+    parser.add_argument(
+        "--adjuster-l1-ratio",
+        type=float,
+        default=DEFAULT_ADJUSTER_L1_RATIO,
+        help="Elastic-net L1 mixing for the drop-mode adjuster offset.",
+    )
 
 
 def require_xgboost() -> None:
@@ -59,7 +98,15 @@ def fit_preprocessor(
     feature_cols: list[str],
     age_col: str,
     static_cols: tuple[str, ...] = (),
+    adjust_only_mode: str = DEFAULT_ADJUST_ONLY_MODE,
 ) -> dict:
+    """Fit train-only imputers/scalers for the XGBoost design matrix.
+
+    In adjust-only ``drop`` mode the design is split in two: ``covariate_cols``
+    (what the trees see) holds the predictive columns only, and
+    ``adjust_only_cols`` (``__n_observations``, ``__missing``, static) feed the
+    linear offset from :func:`fit_adjuster_offset` instead.
+    """
     base_feature_cols = [
         col
         for col in feature_cols
@@ -71,7 +118,10 @@ def fit_preprocessor(
         if train_df[col].isna().nunique(dropna=False) > 1
     ]
     static_cols = tuple(static_cols)
-    covariate_cols = list(base_feature_cols) + missing_cols + ["age"] + list(static_cols)
+    design_cols = list(base_feature_cols) + missing_cols + ["age"] + list(static_cols)
+    adjust_cols = adjust_only_columns(design_cols, static_cols, adjust_only_mode)
+    adjust_set = set(adjust_cols)
+    covariate_cols = [col for col in design_cols if col not in adjust_set]
 
     imputer: SimpleImputer | None = None
     scaler: StandardScaler | None = None
@@ -108,7 +158,13 @@ def fit_preprocessor(
         "base_feature_cols": base_feature_cols,
         "missing_cols": missing_cols,
         "static_cols": list(static_cols),
+        "design_cols": design_cols,
         "covariate_cols": covariate_cols,
+        "adjust_only_mode": adjust_only_mode,
+        "adjust_only_cols": adjust_cols,
+        "adjuster_model": None,
+        "adjuster_coefs": {},
+        "adjuster_note": "",
         "xgb_feature_names": xgb_feature_names,
         "imputer": imputer,
         "scaler": scaler,
@@ -118,7 +174,8 @@ def fit_preprocessor(
     }
 
 
-def transform_xgb_matrix(df: pd.DataFrame, preprocessor: dict) -> np.ndarray:
+def _transform_design_matrix(df: pd.DataFrame, preprocessor: dict) -> np.ndarray:
+    """Full scaled design, columns in ``design_cols`` order."""
     base_feature_cols = preprocessor["base_feature_cols"]
     missing_cols = preprocessor["missing_cols"]
     static_cols = preprocessor.get("static_cols", [])
@@ -138,6 +195,93 @@ def transform_xgb_matrix(df: pd.DataFrame, preprocessor: dict) -> np.ndarray:
         static_vals = preprocessor["static_imputer"].transform(df[static_cols])
         blocks.append(preprocessor["static_scaler"].transform(static_vals))
     return np.hstack(blocks).astype(float)
+
+
+def _design_indices(preprocessor: dict, cols: list[str]) -> list[int]:
+    position = {col: i for i, col in enumerate(preprocessor.get("design_cols", preprocessor["covariate_cols"]))}
+    return [position[col] for col in cols]
+
+
+def transform_xgb_matrix(df: pd.DataFrame, preprocessor: dict) -> np.ndarray:
+    """Design matrix for the trees: predictive columns only in drop mode."""
+    x = _transform_design_matrix(df, preprocessor)
+    if not preprocessor.get("adjust_only_cols"):
+        return x
+    return x[:, _design_indices(preprocessor, preprocessor["covariate_cols"])]
+
+
+def transform_adjuster_matrix(df: pd.DataFrame, preprocessor: dict) -> np.ndarray:
+    """Scaled adjust-only columns (empty in ``none`` mode)."""
+    adjust_cols = preprocessor.get("adjust_only_cols") or []
+    if not adjust_cols:
+        return np.zeros((len(df), 0), dtype=float)
+    x = _transform_design_matrix(df, preprocessor)
+    return x[:, _design_indices(preprocessor, adjust_cols)]
+
+
+def fit_adjuster_offset(
+    train_df: pd.DataFrame,
+    preprocessor: dict,
+    *,
+    duration_col: str,
+    event_col: str,
+    penalizer: float,
+    l1_ratio: float,
+) -> None:
+    """Fit the adjuster-only elastic-net Cox whose LP is XGBoost's offset.
+
+    Static covariates stay unpenalized and the ``__n_observations`` /
+    ``__missing`` columns are penalized, as in the elastic-net Cox arm. Because
+    every adjuster is standardized on the training fold, the deployed score
+    (adjusters at their training mean) has offset 0. Stores the fitted model
+    on the preprocessor; a failed fit leaves it None (offset 0 everywhere).
+    """
+    adjust_cols = preprocessor.get("adjust_only_cols") or []
+    if not adjust_cols:
+        return
+    frame = pd.DataFrame(
+        transform_adjuster_matrix(train_df, preprocessor),
+        columns=adjust_cols,
+        index=train_df.index,
+    )
+    frame[duration_col] = train_df[duration_col].to_numpy()
+    frame[event_col] = train_df[event_col].to_numpy()
+    model, used_penalizer, note = fit_coxnet_with_fallback(
+        frame,
+        duration_col=duration_col,
+        event_col=event_col,
+        penalizers=[float(penalizer)],
+        l1_ratio=float(l1_ratio),
+        covariate_cols=adjust_cols,
+        unpenalized_cols=list(preprocessor.get("static_cols", [])),
+    )
+    preprocessor["adjuster_model"] = model
+    preprocessor["adjuster_note"] = note
+    if model is not None:
+        coefs = np.asarray(model.coef_, dtype=float)
+        if coefs.ndim == 2:
+            coefs = coefs[:, -1]
+        preprocessor["adjuster_coefs"] = dict(zip(adjust_cols, coefs.reshape(-1).tolist()))
+
+
+def adjuster_offset(df: pd.DataFrame, preprocessor: dict) -> np.ndarray | None:
+    """Training-time offset (adjuster LP), or None when there is no adjuster model."""
+    model = preprocessor.get("adjuster_model")
+    if model is None:
+        return None
+    return np.asarray(
+        model.predict(transform_adjuster_matrix(df, preprocessor)), dtype=float
+    ).reshape(-1)
+
+
+def _eval_dmatrix(x_eval: np.ndarray, preprocessor: dict):
+    dmatrix = xgb.DMatrix(x_eval, feature_names=preprocessor["xgb_feature_names"])
+    if preprocessor.get("adjust_only_cols"):
+        # Deployed score: adjusters at their training mean, i.e. offset 0. Set
+        # explicitly so base_score is handled the same way as in training,
+        # where a base_margin was supplied.
+        dmatrix.set_base_margin(np.zeros(x_eval.shape[0], dtype=float))
+    return dmatrix
 
 
 def signed_cox_label(duration: pd.Series, event: pd.Series) -> np.ndarray:
@@ -201,7 +345,17 @@ def fit_xgb_cox(
         feature_cols=feature_cols,
         age_col=age_col,
         static_cols=static_cols,
+        adjust_only_mode=getattr(args, "adjust_only_mode", DEFAULT_ADJUST_ONLY_MODE),
     )
+    if preprocessor["adjust_only_cols"]:
+        fit_adjuster_offset(
+            train_df,
+            preprocessor,
+            duration_col=duration_col,
+            event_col=event_col,
+            penalizer=float(getattr(args, "adjuster_penalizer", DEFAULT_ADJUSTER_PENALIZER)),
+            l1_ratio=float(getattr(args, "adjuster_l1_ratio", DEFAULT_ADJUSTER_L1_RATIO)),
+        )
     covariate_cols = preprocessor["covariate_cols"]
     xgb_names = preprocessor["xgb_feature_names"]
     x_train = transform_xgb_matrix(train_df, preprocessor)
@@ -210,6 +364,9 @@ def fit_xgb_cox(
         label=signed_cox_label(train_df[duration_col], train_df[event_col]),
         feature_names=xgb_names,
     )
+    train_offset = adjuster_offset(train_df, preprocessor)
+    if train_offset is not None:
+        dtrain.set_base_margin(train_offset)
     evals = [(dtrain, "train")]
     if len(valid_df):
         x_valid = transform_xgb_matrix(valid_df, preprocessor)
@@ -218,6 +375,9 @@ def fit_xgb_cox(
             label=signed_cox_label(valid_df[duration_col], valid_df[event_col]),
             feature_names=xgb_names,
         )
+        valid_offset = adjuster_offset(valid_df, preprocessor)
+        if valid_offset is not None:
+            dvalid.set_base_margin(valid_offset)
         evals.append((dvalid, "valid"))
 
     params = {
@@ -263,7 +423,7 @@ def predict_risk(
 ) -> tuple[np.ndarray, list[str]]:
     covariate_cols = preprocessor["covariate_cols"]
     x_eval = transform_xgb_matrix(eval_df, preprocessor)
-    dtest = xgb.DMatrix(x_eval, feature_names=preprocessor["xgb_feature_names"])
+    dtest = _eval_dmatrix(x_eval, preprocessor)
     best_iter = best_iteration(model)
     if best_iter is None:
         risk = model.predict(dtest)
@@ -280,7 +440,7 @@ def predict_xgb_margin(
 ) -> np.ndarray:
     """Raw margin (log relative hazard), used by Breslow survival curves."""
     x_eval = transform_xgb_matrix(eval_df, preprocessor)
-    dtest = xgb.DMatrix(x_eval, feature_names=preprocessor["xgb_feature_names"])
+    dtest = _eval_dmatrix(x_eval, preprocessor)
     best_iter = best_iteration(model)
     if best_iter is None:
         margin = model.predict(dtest, output_margin=True)

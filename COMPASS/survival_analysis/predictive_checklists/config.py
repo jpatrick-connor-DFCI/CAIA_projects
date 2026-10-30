@@ -29,6 +29,10 @@ class RunConfig:
     clinical_features: tuple = ()
     id_col: str = "DFCI_MRN"
     age_col: str = "AGE_AT_TREATMENTSTART"
+    # "drop": lab counts (__n_observations), missingness and panel/burden
+    # covariates are never checklist items; they adjust the probability
+    # calibration only, evaluated at their training mean for every prediction.
+    adjust_only_mode: str = "none"
 
     def validate(self):
         if not self.endpoints or set(self.endpoints) - {"platinum", "nepc"}:
@@ -56,10 +60,17 @@ class RunConfig:
                 or self.age_col in self.clinical_features
                 or any(not isinstance(x, str) or not x for x in self.clinical_features)):
             raise ValueError("clinical_features must be distinct non-age column names")
+        if self.adjust_only_mode not in {"none", "drop"}:
+            raise ValueError("adjust_only_mode must be none or drop")
         return self
 
     def to_dict(self):
-        return asdict(self)
+        values = asdict(self)
+        # Omitted at its default so existing manifests (and --resume of runs
+        # made before this setting existed) still compare equal.
+        if values["adjust_only_mode"] == "none":
+            del values["adjust_only_mode"]
+        return values
 
     @classmethod
     def load(cls, path=None):

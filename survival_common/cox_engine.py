@@ -78,6 +78,48 @@ def matching_n_obs_feature(feature_name: str) -> str:
     return f"{lab_name}__n_observations"
 
 
+# --adjust-only-mode values. "none" keeps every covariate predictive (the
+# historical behavior); "drop" fits the data-density/batch covariates below
+# jointly with the features, then drops their terms from every reported
+# coefficient and every risk score.
+ADJUST_ONLY_MODES = ("none", "drop")
+DEFAULT_ADJUST_ONLY_MODE = "none"
+ADJUST_ONLY_SUFFIXES = ("__missing", "__n_observations")
+
+
+def validate_adjust_only_mode(mode: str) -> str:
+    if mode not in ADJUST_ONLY_MODES:
+        raise ValueError(
+            f"adjust_only_mode must be one of {ADJUST_ONLY_MODES}, got {mode!r}."
+        )
+    return mode
+
+
+def adjust_only_columns(
+    covariate_cols: list[str],
+    static_cols: tuple[str, ...] | list[str] = (),
+    mode: str = DEFAULT_ADJUST_ONLY_MODE,
+) -> list[str]:
+    """Covariates fit in training but excluded from the deployed score.
+
+    In "drop" mode these are every per-lab n_observations count, every
+    missingness indicator, and the project's static covariates (panel version,
+    somatic burden, IPIO baseline). Age stays predictive.
+    """
+    if validate_adjust_only_mode(mode) == "none":
+        return []
+    static = set(static_cols)
+    return [
+        col for col in covariate_cols
+        if col in static or col.endswith(ADJUST_ONLY_SUFFIXES)
+    ]
+
+
+def predictive_columns(covariate_cols: list[str], adjust_only_cols: list[str]) -> list[str]:
+    adjust = set(adjust_only_cols)
+    return [col for col in covariate_cols if col not in adjust]
+
+
 def benjamini_hochberg(p_values: pd.Series) -> pd.Series:
     q_values = pd.Series(np.nan, index=p_values.index, dtype=float)
     valid = p_values.notna()
@@ -549,6 +591,26 @@ def fit_coxnet_with_fallback(
     return None, float("nan"), f"fit_failed: {last_error}"
 
 
+def coxnet_linear_predictor(
+    model,
+    model_df: pd.DataFrame,
+    *,
+    covariate_cols: list[str],
+    adjust_only_cols: list[str] | tuple[str, ...] = (),
+) -> np.ndarray:
+    """Coxnet log relative hazard, with adjust-only terms held at the train mean.
+
+    Model matrices are standardized on the training rows, so 0 is each
+    adjust-only column's training mean and zeroing it drops exactly that
+    column's term from the linear predictor.
+    """
+    X = model_df[covariate_cols].to_numpy(dtype=float, copy=True)
+    if adjust_only_cols:
+        adjust = set(adjust_only_cols)
+        X[:, [i for i, col in enumerate(covariate_cols) if col in adjust]] = 0.0
+    return np.asarray(model.predict(X)).reshape(-1)
+
+
 def score_coxnet_model(
     model,
     model_df: pd.DataFrame,
@@ -556,10 +618,12 @@ def score_coxnet_model(
     duration_col: str,
     event_col: str,
     covariate_cols: list[str],
+    adjust_only_cols: list[str] | tuple[str, ...] = (),
 ) -> tuple[float, np.ndarray]:
     require_lifelines()
-    X = model_df[covariate_cols].to_numpy(dtype=float)
-    log_pred = np.asarray(model.predict(X)).reshape(-1)
+    log_pred = coxnet_linear_predictor(
+        model, model_df, covariate_cols=covariate_cols, adjust_only_cols=adjust_only_cols
+    )
     c_index = float(concordance_index(model_df[duration_col], -log_pred, model_df[event_col]))
     return c_index, log_pred
 
@@ -574,12 +638,19 @@ def coxnet_survival_at_horizons(
     covariate_cols: list[str],
     horizons: np.ndarray,
     time_unit_days: int = DEFAULT_AUC_TIME_UNIT_DAYS,
+    adjust_only_cols: list[str] | tuple[str, ...] = (),
 ) -> np.ndarray:
-    """Survival probabilities for each eval row at each horizon."""
-    X_train = train_mdf[covariate_cols].to_numpy(dtype=float)
-    X_eval = eval_mdf[covariate_cols].to_numpy(dtype=float)
-    train_lp = np.asarray(model.predict(X_train)).reshape(-1)
-    eval_lp = np.asarray(model.predict(X_eval)).reshape(-1)
+    """Survival probabilities for each eval row at each horizon.
+
+    The Breslow baseline is estimated from the same (features-only, when
+    adjust_only_cols is given) linear predictor that scores the eval rows.
+    """
+    train_lp = coxnet_linear_predictor(
+        model, train_mdf, covariate_cols=covariate_cols, adjust_only_cols=adjust_only_cols
+    )
+    eval_lp = coxnet_linear_predictor(
+        model, eval_mdf, covariate_cols=covariate_cols, adjust_only_cols=adjust_only_cols
+    )
     train_event = train_mdf[event_col].astype(int).to_numpy()
     train_duration = pd.to_numeric(train_mdf[duration_col], errors="coerce").to_numpy(dtype=float)
     train_duration_units = np.ceil(train_duration / float(time_unit_days))

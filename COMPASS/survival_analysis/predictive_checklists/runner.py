@@ -17,7 +17,7 @@ from sklearn.model_selection import StratifiedKFold
 from .baselines import fit_baselines
 from .data import load_landmark, resolved_nepc_mask
 from .evaluation import evaluate_horizon, fit_calibrator
-from .features import FeatureBinarizer, schema_feature_columns
+from .features import AdjusterDesign, FeatureBinarizer, schema_feature_columns
 from .optimizer import fit_checklist
 from .survival import CensoringDistribution, horizon_targets
 
@@ -99,10 +99,15 @@ def horizon_preflight(data, endpoint, config):
     return records
 
 
+def _adjust_only(config):
+    return getattr(config, "adjust_only_mode", "none") == "drop"
+
+
 def _binarizer(config):
     return FeatureBinarizer(min_patient_coverage=config.min_patient_coverage,
                             quantiles=config.quantiles, age_col=config.age_col, id_col=config.id_col,
-                            clinical_features=config.clinical_features)
+                            clinical_features=config.clinical_features,
+                            exclude_adjusters=_adjust_only(config))
 
 
 def fit_horizon(train, endpoint, horizon, config):
@@ -181,15 +186,24 @@ def fit_horizon(train, endpoint, horizon, config):
         raise FitFailure("No checklist size completed every CV fold; inspect cv_folds.json", cv_rows)
     selected = min(candidates, key=lambda size: (candidates[size][0], size))
     loss, oof, calibration_weights = candidates[selected]
-    calibrator = fit_calibrator(oof, labels, calibration_weights)
     binarizer = _binarizer(config).fit(train)
+    adjusters = None
+    if _adjust_only(config):
+        # The adjusters carry no outcome information, so one development-block
+        # design serves the OOF calibration fit; predictions use Z = 0.
+        adjusters = AdjusterDesign().fit(train, binarizer)
+        calibrator = fit_calibrator(oof, labels, calibration_weights,
+                                    adjusters=adjusters.transform(train),
+                                    adjuster_names=adjusters.names)
+    else:
+        calibrator = fit_calibrator(oof, labels, calibration_weights)
     X = binarizer.transform(train)
     known = weights > 0
     model = fit_checklist(X[known], labels[known], _balanced_weights(labels, weights)[known],
                           binarizer.groups, max_items=selected,
                           time_limit=config.solver_time_limit, solver=config.solver, seed=config.seed)
     return dict(model=model, binarizer=binarizer, calibrator=calibrator, censoring=censoring,
-                selected_max_items=selected, cv_balanced_error=loss, cv_rows=cv_rows,
+                adjusters=adjusters, selected_max_items=selected, cv_balanced_error=loss, cv_rows=cv_rows,
                 audit=audit, oof=oof, oof_weights=calibration_weights, labels=labels)
 
 
@@ -240,7 +254,8 @@ def run_cell(data, endpoint, landmark, population, config, output_dir, *, resume
     baseline_results = {}
     if config.baselines and len(done) < len(config.horizons):
         columns = schema_feature_columns(train, age_col=config.age_col,
-                                         clinical_features=config.clinical_features)
+                                         clinical_features=config.clinical_features,
+                                         exclude_adjusters=_adjust_only(config))
         stored = output_dir / "baselines.pkl"
         if resume and stored.exists():
             with stored.open("rb") as stream:
@@ -286,6 +301,8 @@ def run_cell(data, endpoint, landmark, population, config, output_dir, *, resume
                 "selected_max_items": fitted["selected_max_items"],
                 "cv_balanced_error": fitted["cv_balanced_error"],
                 "prediction_type": "independent_horizon_risk_under_existing_endpoint_censoring"}
+            if fitted["adjusters"] is not None:
+                bundle["adjuster_design"] = fitted["adjusters"].to_dict()
             write_json(folder / "model.json", bundle)
             write_json(folder / "cv_folds.json", fitted["cv_rows"])
             write_json(folder / "horizon_audit.json", fitted["audit"])

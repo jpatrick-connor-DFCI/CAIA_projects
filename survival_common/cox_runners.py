@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 
 from survival_common.config import CoxProjectConfig
+from survival_common.cox_engine import ADJUST_ONLY_MODES, DEFAULT_ADJUST_ONLY_MODE
 from survival_common.helper import resolve_auc_max_time_units
 from survival_common.metrics_schema import (
     DEFAULT_COHORT,
@@ -149,6 +150,18 @@ def add_common_cox_args(parser: argparse.ArgumentParser, config: CoxProjectConfi
         dest="overwrite",
         action="store_false",
         help="Skip landmarks whose per-landmark output files already exist (the default).",
+    )
+    parser.add_argument(
+        "--adjust-only-mode",
+        choices=list(ADJUST_ONLY_MODES),
+        default=DEFAULT_ADJUST_ONLY_MODE,
+        help=(
+            "How the multivariable models treat the batch/density adjusters "
+            "(__n_observations, __missing and the project's static covariates). "
+            "'none' (default) keeps them as ordinary model terms. 'drop' fits "
+            "them jointly in training but removes them from reported "
+            "coefficients/importances and from every risk score."
+        ),
     )
 
 
@@ -376,9 +389,15 @@ def _run_multivariable_landmark(
     out: dict[str, list],
 ) -> None:
     static_covariate_cols = config.static_covariates(ctx, args, cox)
+    adjust_only_mode = getattr(args, "adjust_only_mode", DEFAULT_ADJUST_ONLY_MODE)
     print("\n##### ARM 2: MULTIVARIABLE ELASTIC-NET (all endpoints) #####")
     if static_covariate_cols:
         print(f"  always-included covariates: age + {', '.join(static_covariate_cols)} (unpenalized)")
+    if adjust_only_mode != "none":
+        print(
+            "  adjust-only mode: __n_observations, __missing and static covariates "
+            "are fit in training but dropped from coefficients and risk scores"
+        )
     for endpoint in endpoints:
         print(f"\n=== {endpoint.upper()} | LANDMARK +{landmark_day}D ===")
         print(cox.ENDPOINTS[endpoint]["description"])
@@ -409,6 +428,7 @@ def _run_multivariable_landmark(
             # feature sets (COMPASS: somatic_gleason, text). Lab-bearing arms are
             # unaffected: their canonical set is non-empty and the gate stays on.
             restrict_to_canonical_labs=bool(getattr(ctx, "canonical_labs", ())),
+            adjust_only_mode=adjust_only_mode,
         )
         if not fold_canonical_labs_df.empty:
             fold_canonical_labs_df.insert(0, "landmark_days", landmark_day)
@@ -428,6 +448,7 @@ def _run_multivariable_landmark(
             horizon_grid=horizon_grid,
             canonical_labs=ctx.canonical_labs,
             static_covariate_cols=static_covariate_cols,
+            adjust_only_mode=adjust_only_mode,
         )
         _collect_multivariable_outputs(
             out, landmark_day, metrics_row, summary_df, predictions_df, test_auc_df, test_brier_df
@@ -460,6 +481,7 @@ def _run_multivariable_landmark(
                 ),
                 genomic_feature_cols=tuple(getattr(ctx, "genomic_feature_cols", ())),
                 restrict_to_canonical_labs=bool(getattr(ctx, "canonical_labs", ())),
+                adjust_only_mode=adjust_only_mode,
             )
             if oof_df is not None and not oof_df.empty:
                 oof_df = oof_df.copy()
@@ -483,6 +505,7 @@ def _run_baseline_landmark(
 ) -> None:
     static_covariate_cols = config.static_covariates(ctx, args, cox)
     feature_cols = config.baseline_feature_cols(ctx, args, cox)
+    adjust_only_mode = getattr(args, "adjust_only_mode", DEFAULT_ADJUST_ONLY_MODE)
     baseline_penalizer = float(args.cv_penalizers[0])
     baseline_l1_ratio = float(args.cv_l1_ratios[0])
     extra = list(feature_cols) + list(static_covariate_cols)
@@ -505,6 +528,7 @@ def _run_baseline_landmark(
             horizon_grid=endpoint_horizon_grids[endpoint],
             canonical_labs=[],
             static_covariate_cols=static_covariate_cols,
+            adjust_only_mode=adjust_only_mode,
         )
         if config.baseline_feature_count_column:
             metrics_row[config.baseline_feature_count_column] = len(feature_cols)
@@ -533,6 +557,7 @@ def _run_baseline_landmark(
                 outer_folds=args.oof_outer_folds,
                 seed=args.seed,
                 static_covariate_cols=static_covariate_cols,
+                adjust_only_mode=adjust_only_mode,
             )
             if oof_df is not None and not oof_df.empty:
                 oof_df = oof_df.copy()
@@ -552,6 +577,14 @@ def _collect_multivariable_outputs(
     metrics_row["landmark_days"] = landmark_day
     summary_df.insert(0, "landmark_days", landmark_day)
     out["metric_rows"].append(metrics_row)
+    if "is_adjust_only" in summary_df.columns:
+        # Adjust-only mode: the adjusters were fit but are not part of the
+        # model's reported coefficients; keep them in a separate audit table.
+        adjust_mask = summary_df["is_adjust_only"].astype(bool)
+        out.setdefault("adjuster_frames", []).append(
+            summary_df.loc[adjust_mask].drop(columns="is_adjust_only")
+        )
+        summary_df = summary_df.loc[~adjust_mask].drop(columns="is_adjust_only")
     out["frames"].append(summary_df)
     if predictions_df is not None and not predictions_df.empty:
         predictions_df = predictions_df.copy()
@@ -569,7 +602,10 @@ def _collect_multivariable_outputs(
 
 def _print_multivariable_summary(best_row: dict, metrics_row: dict, summary_df: pd.DataFrame) -> None:
     top_cols = [c for c in ["feature", "coef", "exp(coef)"] if c in summary_df.columns]
-    top = summary_df.loc[~summary_df["is_age_covariate"], top_cols].head(10)
+    shown = ~summary_df["is_age_covariate"]
+    if "is_adjust_only" in summary_df.columns:
+        shown &= ~summary_df["is_adjust_only"].astype(bool)
+    top = summary_df.loc[shown, top_cols].head(10)
     print("\nChosen hyperparameters (elastic-net, age unpenalized):")
     print(
         f"  penalizer={best_row['penalizer']}  l1_ratio={best_row['l1_ratio']}  "
@@ -714,6 +750,10 @@ def _write_multivariable_landmark_outputs(
         pd.concat(out["frames"], ignore_index=True).to_csv(
             _per_landmark_path(output_dir, prefix, landmark_day), index=False
         )
+    if out.get("adjuster_frames"):
+        pd.concat(out["adjuster_frames"], ignore_index=True).to_csv(
+            _per_landmark_path(output_dir, f"{prefix}_adjusters", landmark_day), index=False
+        )
     if out["test_auc_frames"]:
         pd.concat(out["test_auc_frames"], ignore_index=True).to_csv(
             _per_landmark_path(output_dir, f"{prefix}_test_auc_t", landmark_day), index=False
@@ -772,6 +812,8 @@ def _combine_multivariable_outputs(
         print(f"  {cox.CANONICAL_LABS_FOLDS_FILENAME}")
     if _combine_per_landmark(output_dir, prefix, landmark_days, f"{prefix}.csv"):
         print(f"  {prefix}.csv")
+    if _combine_per_landmark(output_dir, f"{prefix}_adjusters", landmark_days, f"{prefix}_adjusters.csv"):
+        print(f"  {prefix}_adjusters.csv")
     if _combine_per_landmark(output_dir, f"{prefix}_test_auc_t", landmark_days, f"{prefix}_test_auc_t.csv"):
         print(f"  {prefix}_test_auc_t.csv")
     if _combine_per_landmark(output_dir, f"{prefix}_test_brier", landmark_days, f"{prefix}_test_brier.csv"):

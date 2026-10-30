@@ -125,6 +125,7 @@ from survival_common.helper import (  # noqa: E402
     summarize_brier_timeline,
 )
 from survival_common.xgboost_engine import (  # noqa: E402
+    add_adjust_only_args,
     best_iteration,
     chosen_from_best_row,
     feature_importance_frame,
@@ -1098,4 +1099,5 @@ if __name__ == "__main__":
         help="Skip 5-fold CV; fit a single model with the args.* hyperparameters.",
     )
     add_out_of_fold_risk_args(parser)
+    add_adjust_only_args(parser)
     main(parser.parse_args())

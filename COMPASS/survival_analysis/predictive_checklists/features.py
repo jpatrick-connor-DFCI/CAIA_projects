@@ -21,6 +21,11 @@ import pandas as pd
 
 
 SUMMARY_STATS = frozenset({"mean", "min", "max", "last", "delta", "n_observations"})
+# Measurement-density summaries; adjust-only (never candidates) when excluded.
+ADJUSTER_STATS = frozenset({"n_observations"})
+# Static adjustment covariates carried by genomic inputs (see cox_aggregated).
+STATIC_ADJUSTER_PREFIXES = ("PANEL_VERSION_",)
+STATIC_ADJUSTER_COLUMNS = ("SOMATIC_N_GENES_ALTERED",)
 DEFAULT_QUANTILES = (0.1, 0.25, 0.5, 0.75, 0.9)
 MAX_DISCRETE_LEVELS = 10
 _NON_LAB_SOURCES = frozenset({
@@ -30,11 +35,14 @@ _NON_LAB_SOURCES = frozenset({
 })
 
 
-def _group(feature: str, age_col: str, clinical_features: Iterable[str] = ()) -> str | None:
+def _group(feature: str, age_col: str, clinical_features: Iterable[str] = (),
+           exclude_adjusters: bool = False) -> str | None:
     if feature == age_col or feature in clinical_features:
         return feature
     source, separator, stat = feature.rpartition("__")
     if not separator or not source or stat not in SUMMARY_STATS:
+        return None
+    if exclude_adjusters and stat in ADJUSTER_STATS:
         return None
     normalized = source.upper()
     if normalized in _NON_LAB_SOURCES or normalized.startswith(
@@ -54,7 +62,7 @@ def _numeric(frame: pd.DataFrame, feature: str) -> pd.Series:
 
 def schema_feature_columns(
     frame: pd.DataFrame, age_col: str = "AGE_AT_TREATMENTSTART",
-    clinical_features: Iterable[str] = (),
+    clinical_features: Iterable[str] = (), exclude_adjusters: bool = False,
 ) -> list[str]:
     """Whitelist raw baseline inputs without learning anything from their values.
 
@@ -66,7 +74,7 @@ def schema_feature_columns(
     if missing:
         raise ValueError(f"Configured clinical features are absent: {', '.join(sorted(missing))}.")
     return sorted(str(column) for column in frame.columns
-                  if _group(str(column), age_col, clinical_features) is not None)
+                  if _group(str(column), age_col, clinical_features, exclude_adjusters) is not None)
 
 
 class FeatureBinarizer:
@@ -77,6 +85,8 @@ class FeatureBinarizer:
     that table, observed summary coverage is recomputed on ``frame``; a
     caller-supplied canonical list is only a restriction, never a substitute
     for this training coverage check. ``transform`` never changes candidates.
+    With ``exclude_adjusters`` the lab counts and ``is missing`` items are not
+    candidates (see :class:`AdjusterDesign`).
     """
 
     def __init__(
@@ -87,7 +97,9 @@ class FeatureBinarizer:
         canonical_labs: Iterable[str] | None = None,
         id_col: str = "DFCI_MRN",
         clinical_features: Iterable[str] = (),
+        exclude_adjusters: bool = False,
     ) -> None:
+        self.exclude_adjusters = bool(exclude_adjusters)
         self.min_patient_coverage = float(min_patient_coverage)
         self.quantiles = tuple(sorted(set(float(q) for q in quantiles)))
         if not 0 <= self.min_patient_coverage <= 1:
@@ -136,7 +148,7 @@ class FeatureBinarizer:
             eligible_labs = train_labs if eligible_labs is None else eligible_labs & train_labs
 
         for feature in sorted(str(c) for c in frame.columns):
-            group = _group(feature, self.age_col, self.clinical_features)
+            group = _group(feature, self.age_col, self.clinical_features, self.exclude_adjusters)
             is_lab = feature != self.age_col and feature not in self.clinical_features
             if group is None or (is_lab and eligible_labs is not None and group not in eligible_labs):
                 continue
@@ -163,7 +175,7 @@ class FeatureBinarizer:
                             "name": f"{feature} {op} {threshold:.12g}",
                             "feature": feature, "op": op, "threshold": threshold, "group": group,
                         })
-            if values.isna().any():
+            if values.isna().any() and not self.exclude_adjusters:
                 self.items.append({
                     "name": f"{feature} is missing", "feature": feature,
                     "op": "is_missing", "threshold": None, "group": group,
@@ -197,6 +209,8 @@ class FeatureBinarizer:
             "feature_columns": list(self.feature_columns),
             "medians": dict(self.medians), "coverage": dict(self.coverage),
             "items": [dict(item) for item in self.items],
+            # Only written when set, so default-mode bundles are unchanged.
+            **({"exclude_adjusters": True} if self.exclude_adjusters else {}),
         }
 
     @classmethod
@@ -205,21 +219,102 @@ class FeatureBinarizer:
             raise ValueError("Unsupported checklist feature schema_version.")
         result = cls(**{key: state[key] for key in (
             "age_col", "id_col", "min_patient_coverage", "quantiles", "canonical_labs"
-        )}, clinical_features=state.get("clinical_features", ()))
+        )}, clinical_features=state.get("clinical_features", ()),
+            exclude_adjusters=state.get("exclude_adjusters", False))
         result.feature_columns = list(state["feature_columns"])
         result.medians = {key: float(value) for key, value in state["medians"].items()}
         result.coverage = {key: float(value) for key, value in state["coverage"].items()}
         result.items = [dict(item) for item in state["items"]]
         for feature in result.feature_columns:
-            if _group(feature, result.age_col, result.clinical_features) is None or not np.isfinite(result.medians[feature]):
+            if _group(feature, result.age_col, result.clinical_features, result.exclude_adjusters) is None or not np.isfinite(result.medians[feature]):
                 raise ValueError("Invalid serialized checklist feature or imputation value.")
         for item in result.items:
-            if item["feature"] not in result.feature_columns or item["group"] != _group(item["feature"], result.age_col, result.clinical_features):
+            if item["feature"] not in result.feature_columns or item["group"] != _group(item["feature"], result.age_col, result.clinical_features, result.exclude_adjusters):
                 raise ValueError("Invalid serialized checklist item feature/group.")
             if item["op"] not in {"<=", ">=", "is_missing"}:
                 raise ValueError("Invalid serialized checklist comparison.")
+            if item["op"] == "is_missing" and result.exclude_adjusters:
+                raise ValueError("Missingness items are adjust-only in this bundle.")
             if item["op"] != "is_missing" and not np.isfinite(float(item["threshold"])):
                 raise ValueError("Invalid serialized checklist threshold.")
         result.groups = [item["group"] for item in result.items]
         result._fitted = True
+        return result
+
+
+class AdjusterDesign:
+    """Standardized adjust-only covariates for the probability calibrator.
+
+    Fitted on the development block alongside the final binarizer. Columns are
+    log1p lab counts for each lab the binarizer kept, missingness indicators
+    for its features (identical training patterns collapsed), and the static
+    panel-version/somatic-burden covariates when present. Every column is
+    centred on its training mean, so a zero row is the deployed reference.
+    """
+
+    def __init__(self) -> None:
+        self.columns: list[dict[str, Any]] = []
+        self.means: list[float] = []
+        self.scales: list[float] = []
+
+    def _raw(self, frame: pd.DataFrame, column: dict[str, Any]) -> np.ndarray:
+        values = _numeric(frame, column["source"])
+        if column["kind"] == "log1p_count":
+            return np.log1p(values.fillna(0.0).clip(lower=0.0)).to_numpy(dtype=float)
+        if column["kind"] == "missing":
+            return values.isna().to_numpy(dtype=float)
+        return values.fillna(column["fill"]).to_numpy(dtype=float)
+
+    def fit(self, frame: pd.DataFrame, binarizer: FeatureBinarizer) -> "AdjusterDesign":
+        candidates: list[dict[str, Any]] = []
+        lab_groups = sorted({_group(f, binarizer.age_col, binarizer.clinical_features)
+                             for f in binarizer.feature_columns
+                             if f != binarizer.age_col and f not in binarizer.clinical_features})
+        for group in lab_groups:
+            source = f"{group}__n_observations"
+            if source in frame:
+                candidates.append({"name": source, "source": source, "kind": "log1p_count"})
+        seen_patterns: set[bytes] = set()
+        for feature in binarizer.feature_columns:
+            pattern = _numeric(frame, feature).isna().to_numpy()
+            if pattern.any() and not pattern.all() and pattern.tobytes() not in seen_patterns:
+                seen_patterns.add(pattern.tobytes())
+                candidates.append({"name": f"{feature}__missing", "source": feature, "kind": "missing"})
+        static = [str(c) for c in frame.columns
+                  if str(c).startswith(STATIC_ADJUSTER_PREFIXES) or str(c) in STATIC_ADJUSTER_COLUMNS]
+        for source in sorted(static):
+            observed = _numeric(frame, source).dropna()
+            if not observed.empty:
+                candidates.append({"name": source, "source": source, "kind": "static",
+                                   "fill": float(observed.mean())})
+        self.columns, self.means, self.scales = [], [], []
+        for column in candidates:
+            raw = self._raw(frame, column)
+            scale = float(raw.std())
+            if scale > 1e-12:
+                self.columns.append(column)
+                self.means.append(float(raw.mean()))
+                self.scales.append(scale)
+        return self
+
+    @property
+    def names(self) -> list[str]:
+        return [column["name"] for column in self.columns]
+
+    def transform(self, frame: pd.DataFrame) -> np.ndarray:
+        if not self.columns:
+            return np.zeros((len(frame), 0), dtype=float)
+        raw = np.column_stack([self._raw(frame, column) for column in self.columns])
+        return (raw - np.asarray(self.means)) / np.asarray(self.scales)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"columns": [dict(c) for c in self.columns], "means": list(self.means),
+                "scales": list(self.scales)}
+
+    @classmethod
+    def from_dict(cls, state: dict[str, Any]) -> "AdjusterDesign":
+        result = cls()
+        result.columns = [dict(c) for c in state["columns"]]
+        result.means = [float(v) for v in state["means"]]
+        result.scales = [float(v) for v in state["scales"]]
         return result

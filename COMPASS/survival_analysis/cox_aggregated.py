@@ -35,6 +35,7 @@ from survival_common.cohort import (  # noqa: E402,F401
     normalize_landmark_days,
 )
 from survival_common.cox_engine import (  # noqa: E402,F401
+    DEFAULT_ADJUST_ONLY_MODE,
     _make_survival_array,
     apply_auc_admin_censoring as _apply_auc_admin_censoring,
     benjamini_hochberg,
@@ -361,6 +362,7 @@ def tune_multivariable_model(
     genomic_feature_cols: tuple[str, ...] = (),
     min_genomic_prevalence: float | None = DEFAULT_MIN_GENOMIC_PREVALENCE,
     restrict_to_canonical_labs: bool = True,
+    adjust_only_mode: str = DEFAULT_ADJUST_ONLY_MODE,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict, pd.DataFrame]:
     return _shared_tune_multivariable_model(
         train_val,
@@ -383,6 +385,7 @@ def tune_multivariable_model(
         endpoint_map=ENDPOINTS,
         id_col=ID_COL,
         age_col=AGE_COL,
+        adjust_only_mode=adjust_only_mode,
     )
 
 
@@ -406,6 +409,7 @@ def compute_out_of_fold_risk_scores(
     genomic_feature_cols: tuple[str, ...] = (),
     min_genomic_prevalence: float | None = DEFAULT_MIN_GENOMIC_PREVALENCE,
     restrict_to_canonical_labs: bool = True,
+    adjust_only_mode: str = DEFAULT_ADJUST_ONLY_MODE,
 ) -> pd.DataFrame:
     return _shared_compute_out_of_fold_risk_scores(
         cohort,
@@ -429,6 +433,7 @@ def compute_out_of_fold_risk_scores(
         endpoint_map=ENDPOINTS,
         id_col=ID_COL,
         age_col=AGE_COL,
+        adjust_only_mode=adjust_only_mode,
     )
 
 
@@ -442,6 +447,7 @@ def compute_fixed_feature_out_of_fold_risk_scores(
     outer_folds: int,
     seed: int,
     static_covariate_cols: tuple[str, ...] = (),
+    adjust_only_mode: str = DEFAULT_ADJUST_ONLY_MODE,
 ) -> pd.DataFrame:
     return _shared_compute_fixed_feature_out_of_fold_risk_scores(
         cohort,
@@ -455,6 +461,7 @@ def compute_fixed_feature_out_of_fold_risk_scores(
         endpoint_map=ENDPOINTS,
         id_col=ID_COL,
         age_col=AGE_COL,
+        adjust_only_mode=adjust_only_mode,
     )
 
 
@@ -473,6 +480,7 @@ def fit_final_multivariable_model(
     horizon_grid: np.ndarray,
     canonical_labs: list[str],
     static_covariate_cols: tuple[str, ...] = (),
+    adjust_only_mode: str = DEFAULT_ADJUST_ONLY_MODE,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     return _shared_fit_final_multivariable_model(
         train_val,
@@ -492,6 +500,7 @@ def fit_final_multivariable_model(
         auc_quantiles=DEFAULT_AUC_QUANTILES,
         id_col=ID_COL,
         age_col=AGE_COL,
+        adjust_only_mode=adjust_only_mode,
     )
 
 

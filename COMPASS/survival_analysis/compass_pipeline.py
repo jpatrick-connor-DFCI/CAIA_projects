@@ -38,6 +38,10 @@ from data_preprocessing_common.oncdrs_sources import TABLE_FILES  # noqa: E402
 from data_preprocessing_common.oncdrs_sources import scan_source  # noqa: E402
 from COMPASS.survival_analysis import cox_aggregated as _ca  # noqa: E402
 from survival_common.metrics_schema import DEFAULT_COHORT  # noqa: E402
+from survival_common.cox_engine import (  # noqa: E402
+    DEFAULT_ADJUST_ONLY_MODE,
+    validate_adjust_only_mode,
+)
 
 PYTHON = sys.executable
 
@@ -344,6 +348,7 @@ def make_runs(
     endpoint: str | None = None,
     cohort: str = "all",
     exclusion: str = "none",
+    adjust_only_mode: str = DEFAULT_ADJUST_ONLY_MODE,
 ) -> list[dict]:
     """Build the merged-profile RUNS list, restricted to ``arms``.
 
@@ -381,7 +386,15 @@ def make_runs(
     ``exclude_mrns`` (a path, or None) rather than folded into
     ``restrict_to_mrns``: the two lists are intersected at Stage 3, so a
     cohort's own MRN list stays a pure cohort definition.
+
+    ``adjust_only_mode="drop"`` makes every multivariable fit treat the
+    n_observations / missing indicators / static covariates as adjust-only
+    (fit in training, dropped from coefficients, importances, checklist items
+    and scores). Only ``output_dir`` gets an ``_adjust_only`` suffix: the
+    prediction inputs are identical, so they are shared with the default tree.
     """
+    adjust_only_mode = validate_adjust_only_mode(adjust_only_mode)
+    adjust_suffix = "" if adjust_only_mode == DEFAULT_ADJUST_ONLY_MODE else "_adjust_only"
     selected_endpoint = ENDPOINT if endpoint is None else str(endpoint).lower()
     selected_cohort = str(cohort).lower()
     if selected_cohort not in COHORT_SPECS:
@@ -457,7 +470,8 @@ def make_runs(
                     survival_output_root / f"prediction_inputs_{run_label}{output_suffix}",
                 )
             ).expanduser(),
-            "output_dir": survival_output_root / f"local_runs_{run_label}{output_suffix}",
+            "output_dir": survival_output_root / f"local_runs_{run_label}{output_suffix}{adjust_suffix}",
+            "adjust_only_mode": adjust_only_mode,
             "endpoint": selected_endpoint,
             "cohort": selected_cohort,
             "intent_stratum": (
@@ -499,6 +513,7 @@ def make_endpoint_runs(
     cohorts=DEFAULT_COHORTS,
     exclusions=DEFAULT_EXCLUSIONS,
     prediction_input_dirs_by_endpoint: dict[str, dict[str, str | Path]] | None = None,
+    adjust_only_mode: str = DEFAULT_ADJUST_ONLY_MODE,
 ) -> list[dict]:
     """Create independent trees across cohort x endpoint x exclusion x arm.
 
@@ -539,6 +554,7 @@ def make_endpoint_runs(
                         cohort=str(raw_cohort).lower(),
                         exclusion=str(raw_exclusion).lower(),
                         prediction_input_dirs=overrides.get(endpoint),
+                        adjust_only_mode=adjust_only_mode,
                     )
                 )
     return runs
@@ -1383,6 +1399,12 @@ def model_output_dir(model: str) -> str:
     return mapping[model]
 
 
+def _adjust_only_args(run: dict) -> list[str]:
+    """CLI flag for adjust-only runs; empty for default runs so their commands are unchanged."""
+    mode = run.get("adjust_only_mode", DEFAULT_ADJUST_ONLY_MODE)
+    return [] if mode == DEFAULT_ADJUST_ONLY_MODE else ["--adjust-only-mode", mode]
+
+
 def build_model_command(model, landmark, config_dir, row_output_dir, run):
     overwrite_flag = "--overwrite" if FORCE_RERUN else "--no-overwrite"
     # Stamped onto the canonical `cohort` metrics column so a metrics CSV names
@@ -1415,6 +1437,7 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             cmd.append("--baseline")
         if OUT_OF_FOLD_RISKS:
             cmd.append("--out-of-fold-risks")
+        cmd += _adjust_only_args(run)
         return cmd
     if model in ("dynamic-deephit", "dynamic-deephit-dyn"):
         cmd = [
@@ -1490,6 +1513,7 @@ def build_model_command(model, landmark, config_dir, row_output_dir, run):
             cmd.append("--baseline")
         if OUT_OF_FOLD_RISKS:
             cmd.append("--out-of-fold-risks")
+        cmd += _adjust_only_args(run)
         return cmd
     raise ValueError(f"Unknown model: {model}")
 
@@ -1628,6 +1652,7 @@ def run_multivariate_available_case_sensitivity(run: dict, dry_run: bool = False
                 "--feature-set", feature_set,
                 "--cohort", f"{run.get('cohort', DEFAULT_COHORT)}_available_case",
                 "--overwrite" if FORCE_RERUN else "--no-overwrite",
+                *_adjust_only_args(run),
             ]
             print(f"[run ] {tag}")
             t0 = time.time()
@@ -1717,6 +1742,7 @@ def run_multivariate_clinical_combinations(run: dict, dry_run: bool = False):
                     ]
                     if OUT_OF_FOLD_RISKS:
                         cmd.append("--out-of-fold-risks")
+                    cmd += _adjust_only_args(run)
                     print(f"[run ] {tag}")
                     t0 = time.time()
                     rc = _run(cmd, dry_run=dry_run)

@@ -104,6 +104,7 @@ from survival_common.helper import (  # noqa: E402
     summarize_brier_timeline,
 )
 from survival_common.xgboost_engine import (  # noqa: E402
+    add_adjust_only_args,
     best_iteration,
     chosen_from_best_row,
     feature_importance_frame,
@@ -275,6 +276,7 @@ def cv_one_endpoint(
                     event_col=event_col,
                     args=args,
                     age_col=AGE_COL,
+                    static_cols=getattr(args, "xgb_static_cols", ()),
                     eta=eta,
                     max_depth=max_depth,
                     min_child_weight=min_child_weight,
@@ -525,6 +527,7 @@ def _tune_fit_predict(
         event_col=event_col,
         args=args,
         age_col=AGE_COL,
+        static_cols=getattr(args, "xgb_static_cols", ()),
         eta=final_eta,
         max_depth=final_max_depth,
         min_child_weight=final_min_child_weight,
@@ -951,6 +954,14 @@ def run_xgboost(args: argparse.Namespace) -> None:
         )
 
         raw_feature_cols = ctx.raw_feature_cols
+        # Static covariates (panel version, somatic burden) enter the XGBoost
+        # arm only as adjust-only offset terms; the default mode leaves the
+        # design unchanged.
+        args.xgb_static_cols = (
+            tuple(CONFIG.static_covariates(ctx, args, _ca))
+            if getattr(args, "adjust_only_mode", "none") != "none"
+            else ()
+        )
         print(
             f"\nLandmark +{landmark_day}d: train_val={len(train_val)} test={len(test)} "
             f"raw_features={len(raw_feature_cols)}"
@@ -1211,4 +1222,5 @@ if __name__ == "__main__":
         help="Skip 5-fold CV; fit a single model with the args.* hyperparameters.",
     )
     add_out_of_fold_risk_args(parser)
+    add_adjust_only_args(parser)
     main(parser.parse_args())

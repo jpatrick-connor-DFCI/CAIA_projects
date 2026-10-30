@@ -24,6 +24,9 @@ def main(argv=None):
     parser.add_argument("--bootstrap-samples", type=int)
     parser.add_argument("--no-baselines", action="store_true")
     parser.add_argument("--no-nepc-sensitivity", action="store_true")
+    parser.add_argument("--adjust-only-mode", choices=["none", "drop"],
+                        help="drop: lab counts, missingness and panel covariates adjust "
+                             "calibration only and are never checklist items")
     parser.add_argument("--preflight-only", action="store_true")
     existing = parser.add_mutually_exclusive_group()
     existing.add_argument("--overwrite", action="store_true")
@@ -33,7 +36,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     config = RunConfig.load(args.config)
     for key in ("endpoints", "landmarks", "horizons", "solver", "solver_time_limit",
-                "n_folds", "bootstrap_samples"):
+                "n_folds", "bootstrap_samples", "adjust_only_mode"):
         value = getattr(args, key)
         if value is not None:
             setattr(config, key, value)

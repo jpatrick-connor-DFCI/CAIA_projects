@@ -149,6 +149,27 @@ python -m COMPASS.survival_analysis.predictive_checklists \
   --n-folds 2 --bootstrap-samples 20 --solver-time-limit 10
 ```
 
+### Adjust-only covariates (`--adjust-only-mode drop`)
+
+The default (`none`) is the method above. With `--adjust-only-mode drop`, lab
+`count` (n_observations) summaries and the `is missing` candidates are removed
+from the item pool, so no checklist can select them. Instead they enter only
+the probability calibration in step 5, as standardized adjusters Z: log1p lab
+counts, deduplicated missingness patterns of the candidate features, and the
+`PANEL_VERSION_*` / `SOMATIC_N_GENES_ALTERED` columns when present. The
+calibration fits `logit p = a + b·score + Z·γ` with a small ridge on γ, and
+predicts at Z = 0 (the development-block mean). Probabilities therefore depend
+on the checklist score alone. γ is recorded in `model.json` under
+`calibrator.metadata.adjust_only`, and the adjuster scaling is recorded under
+`adjuster_design`; both are for audit only. The Z design is fitted once on the
+development block, not per CV fold, because it uses no outcome information.
+
+The age-only, elastic-net and XGBoost comparators are only *restricted* to the
+same pool (no lab counts). They are not adjusted. The flag is a CLI override,
+so the JSON configs are unchanged. `03c_multivariate_adjust_only.ipynb` runs
+both configs this way into `full_adt_adjust_only` and
+`gleason_trio_labs_adjust_only`.
+
 ## Gleason + TP53/RB1/PTEN subset
 
 `run_predictive_checklists_gleason_trio.ipynb` with `gleason_trio_config.json`

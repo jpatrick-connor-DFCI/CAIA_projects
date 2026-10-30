@@ -22,6 +22,8 @@ from sklearn.preprocessing import StandardScaler
 from survival_common.cohort import AGE_COL as DEFAULT_AGE_COL
 from survival_common.cohort import ID_COL as DEFAULT_ID_COL
 from survival_common.cox_engine import (
+    DEFAULT_ADJUST_ONLY_MODE,
+    adjust_only_columns,
     benjamini_hochberg,
     compute_ipcw_auc_t,
     coxnet_coefficients,
@@ -608,6 +610,7 @@ def tune_multivariable_model(
     restrict_to_canonical_labs: bool = True,
     id_col: str = DEFAULT_ID_COL,
     age_col: str = DEFAULT_AGE_COL,
+    adjust_only_mode: str = DEFAULT_ADJUST_ONLY_MODE,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict, pd.DataFrame]:
     """Run per-fold canonical-lab selection and elastic-net Cox CV.
 
@@ -730,8 +733,11 @@ def tune_multivariable_model(
                     covariate_cols=covariate_cols,
                     unpenalized_cols=["age", *static_covariate_cols],
                 )
+                adjust_cols = adjust_only_columns(
+                    covariate_cols, static_covariate_cols, adjust_only_mode
+                )
                 row["note"] = note
-                row["n_covariates"] = len(covariate_cols)
+                row["n_covariates"] = len(covariate_cols) - len(adjust_cols)
                 if model is not None:
                     c_index, val_pred = score_coxnet_model(
                         model,
@@ -739,6 +745,7 @@ def tune_multivariable_model(
                         duration_col=duration_col,
                         event_col=event_col,
                         covariate_cols=covariate_cols,
+                        adjust_only_cols=adjust_cols,
                     )
                     row["c_index_val"] = c_index
                     mean_auc_val, auc_df_val = compute_ipcw_auc_t(
@@ -766,6 +773,7 @@ def tune_multivariable_model(
                         covariate_cols=covariate_cols,
                         horizons=horizon_grid,
                         time_unit_days=auc_time_unit_days,
+                        adjust_only_cols=adjust_cols,
                     )
                     train_dur_units = np.ceil(
                         pd.to_numeric(train_mdf[duration_col], errors="coerce").to_numpy(dtype=float)
@@ -866,6 +874,7 @@ def compute_out_of_fold_risk_scores(
     restrict_to_canonical_labs: bool = True,
     id_col: str = DEFAULT_ID_COL,
     age_col: str = DEFAULT_AGE_COL,
+    adjust_only_mode: str = DEFAULT_ADJUST_ONLY_MODE,
 ) -> pd.DataFrame:
     """Nested CV over the full cohort so every patient gets a held-out score.
 
@@ -956,6 +965,7 @@ def compute_out_of_fold_risk_scores(
                 restrict_to_canonical_labs=restrict_to_canonical_labs,
                 id_col=id_col,
                 age_col=age_col,
+                adjust_only_mode=adjust_only_mode,
             )
             canonical = select_canonical_labs(
                 pre_treatment_lab_df,
@@ -999,6 +1009,9 @@ def compute_out_of_fold_risk_scores(
                     duration_col=duration_col,
                     event_col=event_col,
                     covariate_cols=covariate_cols,
+                    adjust_only_cols=adjust_only_columns(
+                        covariate_cols, static_covariate_cols, adjust_only_mode
+                    ),
                 )
                 risk.loc[test_mdf.index] = np.asarray(fold_pred, dtype=float).reshape(-1)
                 notes[outer_fold] = note
@@ -1067,6 +1080,7 @@ def compute_fixed_feature_out_of_fold_risk_scores(
     static_covariate_cols: tuple[str, ...] = (),
     id_col: str = DEFAULT_ID_COL,
     age_col: str = DEFAULT_AGE_COL,
+    adjust_only_mode: str = DEFAULT_ADJUST_ONLY_MODE,
 ) -> pd.DataFrame:
     """Held-out risk for every patient from a FIXED feature set/hyperparameters.
 
@@ -1147,6 +1161,9 @@ def compute_fixed_feature_out_of_fold_risk_scores(
                     duration_col=duration_col,
                     event_col=event_col,
                     covariate_cols=covariate_cols,
+                    adjust_only_cols=adjust_only_columns(
+                        covariate_cols, static_covariate_cols, adjust_only_mode
+                    ),
                 )
                 risk.loc[test_mdf.index] = np.asarray(fold_pred, dtype=float).reshape(-1)
                 notes[outer_fold] = note
@@ -1244,6 +1261,7 @@ def fit_final_multivariable_model(
     auc_quantiles: tuple[float, ...] = (),
     id_col: str = DEFAULT_ID_COL,
     age_col: str = DEFAULT_AGE_COL,
+    adjust_only_mode: str = DEFAULT_ADJUST_ONLY_MODE,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Refit on full train/validation data and evaluate on the held-out test set."""
     require_sksurv()
@@ -1277,6 +1295,8 @@ def fit_final_multivariable_model(
             f"Final multivariable model failed for endpoint '{endpoint}' with the "
             f"CV-selected penalizer={penalizer:g}, l1_ratio={l1_ratio:g}: {note}"
         )
+    adjust_cols = adjust_only_columns(covariate_cols, static_covariate_cols, adjust_only_mode)
+    n_predictive = len(covariate_cols) - len(adjust_cols)
 
     train_c, train_pred = score_coxnet_model(
         model,
@@ -1284,6 +1304,7 @@ def fit_final_multivariable_model(
         duration_col=duration_col,
         event_col=event_col,
         covariate_cols=covariate_cols,
+        adjust_only_cols=adjust_cols,
     )
     test_c, test_pred = score_coxnet_model(
         model,
@@ -1291,6 +1312,7 @@ def fit_final_multivariable_model(
         duration_col=duration_col,
         event_col=event_col,
         covariate_cols=covariate_cols,
+        adjust_only_cols=adjust_cols,
     )
     train_mean_auc, train_auc_df = compute_ipcw_auc_t(
         train_mdf,
@@ -1324,6 +1346,7 @@ def fit_final_multivariable_model(
         covariate_cols=covariate_cols,
         horizons=horizon_grid,
         time_unit_days=auc_time_unit_days,
+        adjust_only_cols=adjust_cols,
     )
     train_dur_units = np.ceil(
         pd.to_numeric(train_mdf[duration_col], errors="coerce").to_numpy(dtype=float)
@@ -1357,7 +1380,7 @@ def fit_final_multivariable_model(
         "n_events_test": int(test[event_col].sum()),
         "selected_penalizer": used_penalizer,
         "selected_l1_ratio": float(l1_ratio),
-        "n_covariates": len(covariate_cols),
+        "n_covariates": n_predictive,
         "n_canonical_labs": len(canonical_labs),
         "train_val_c_index": train_c,
         "test_c_index": test_c,
@@ -1398,7 +1421,7 @@ def fit_final_multivariable_model(
     summary["is_age_covariate"] = summary["feature"].eq("age")
     summary["selected_penalizer"] = used_penalizer
     summary["selected_l1_ratio"] = float(l1_ratio)
-    summary["n_covariates"] = len(covariate_cols)
+    summary["n_covariates"] = n_predictive
     summary["train_val_c_index"] = train_c
     summary["test_c_index"] = test_c
     summary["train_val_mean_auc_t"] = train_mean_auc
@@ -1423,6 +1446,14 @@ def fit_final_multivariable_model(
         "auc_admin_censor_time_unit",
         "note",
     ]
+    if adjust_only_mode != "none":
+        # The adjust-only rows stay in the frame, flagged, so the runner can
+        # write them to a separate audit file; they never reach the
+        # coefficient table that figures and reports read.
+        summary["is_adjust_only"] = summary["feature"].isin(adjust_cols)
+        keep_cols.insert(keep_cols.index("is_age_covariate") + 1, "is_adjust_only")
+        metrics_row["adjust_only_mode"] = adjust_only_mode
+        metrics_row["n_adjust_only"] = len(adjust_cols)
     summary = summary[[c for c in keep_cols if c in summary.columns]]
     summary = summary.sort_values("coef", key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
 

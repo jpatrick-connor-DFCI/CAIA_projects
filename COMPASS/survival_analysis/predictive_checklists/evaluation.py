@@ -37,17 +37,37 @@ class ProbabilityCalibrator:
         return cls(state["method"], dict(state["parameters"]), dict(state.get("metadata", {})))
 
 
-def fit_calibrator(scores: Any, labels: Any, weights: Any, method: str = "logistic"
+# Ridge on the adjust-only calibration coefficients (per unit of normalized
+# weight, on standardized adjusters).
+ADJUSTER_RIDGE = 1e-2
+
+
+def fit_calibrator(scores: Any, labels: Any, weights: Any, method: str = "logistic",
+                   adjusters: Any = None, adjuster_names: Any = None
                    ) -> ProbabilityCalibrator:
     """Fit to training out-of-fold scores with unbalanced censoring weights.
 
     Callers must supply out-of-fold scores; this function cannot establish
     their provenance. The logistic slope is constrained nonnegative. A tiny
     slope ridge ensures finite estimates for separable checklist counts.
+
+    ``adjusters`` (n x k, standardized on the training block) are fitted
+    jointly as ``logit p = a + b*score + Z @ gamma`` with a ridge on gamma.
+    Only ``a`` and ``b`` are used for prediction, i.e. Z = 0 (the training
+    mean); gamma is recorded in the metadata for audit.
     """
     scores, labels, weights = [np.asarray(value) for value in (scores, labels, weights)]
     if scores.ndim != 1 or scores.shape != labels.shape or scores.shape != weights.shape:
         raise ValueError("calibration arrays must be equally sized and one-dimensional")
+    Z = None
+    if adjusters is not None:
+        Z = np.asarray(adjusters, dtype=float)
+        if Z.ndim != 2 or Z.shape[0] != scores.shape[0] or not np.isfinite(Z).all():
+            raise ValueError("calibration adjusters must be a finite (n, k) matrix")
+        if Z.shape[1] == 0:
+            Z = None
+        elif method != "logistic":
+            raise ValueError("calibration adjusters require the logistic method")
     if not np.isin(labels, [-1, 0, 1]).all():
         raise ValueError("calibration labels must be -1, 0, or 1")
     if not np.isfinite(weights).all() or (weights < 0).any():
@@ -56,6 +76,7 @@ def fit_calibrator(scores: Any, labels: Any, weights: Any, method: str = "logist
     if not known.any() or not np.isfinite(scores[known]).all():
         raise ValueError("finite out-of-fold scores and positive weights are required")
     x, y, w = scores[known].astype(float), labels[known].astype(float), weights[known].astype(float)
+    Z = None if Z is None else Z[known]
     prevalence = float(np.average(y, weights=w))
     metadata = {"n_known": int(known.sum()), "weight_sum": float(w.sum()),
                 "weighted_prevalence": prevalence, "class_balancing": False,
@@ -74,18 +95,31 @@ def fit_calibrator(scores: Any, labels: Any, weights: Any, method: str = "logist
     from scipy.special import expit, logit
     ridge = 1e-6
     w = w / w.sum()
+    n_adjusters = 0 if Z is None else Z.shape[1]
 
     def objective(beta: np.ndarray) -> tuple[float, np.ndarray]:
         z = beta[0] + beta[1] * x
+        if n_adjusters:
+            z = z + Z @ beta[2:]
         loss = np.dot(w, np.logaddexp(0.0, z) - y * z) + ridge * beta[1] ** 2 / 2
         residual = w * (expit(z) - y)
-        return float(loss), np.array([residual.sum(), np.dot(residual, x) + ridge * beta[1]])
+        gradient = [residual.sum(), np.dot(residual, x) + ridge * beta[1]]
+        if n_adjusters:
+            gamma = beta[2:]
+            loss += ADJUSTER_RIDGE * float(np.dot(gamma, gamma)) / 2
+            gradient.extend(Z.T @ residual + ADJUSTER_RIDGE * gamma)
+        return float(loss), np.array(gradient)
 
-    fitted = minimize(objective, [logit(prevalence), 0.0], jac=True, method="L-BFGS-B",
-                      bounds=[(None, None), (0.0, None)])
+    fitted = minimize(objective, [logit(prevalence), 0.0] + [0.0] * n_adjusters, jac=True,
+                      method="L-BFGS-B", bounds=[(None, None), (0.0, None)] + [(None, None)] * n_adjusters)
     if not fitted.success or not np.isfinite(fitted.x).all():
         raise RuntimeError(f"probability calibration failed: {fitted.message}")
     metadata["slope_ridge"] = ridge
+    if n_adjusters:
+        names = list(adjuster_names) if adjuster_names is not None else [
+            f"adjuster_{i}" for i in range(n_adjusters)]
+        metadata["adjust_only"] = {"ridge": ADJUSTER_RIDGE, "evaluated_at": "training_mean",
+                                   "coefficients": dict(zip(names, map(float, fitted.x[2:])))}
     return ProbabilityCalibrator("logistic", {"intercept": float(fitted.x[0]),
                                              "slope": float(fitted.x[1])}, metadata)
 
