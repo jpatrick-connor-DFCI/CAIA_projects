@@ -1596,13 +1596,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
     png_out <- file.path(output_dir, paste0(output_stem, ".png"))
     svg_out <- file.path(output_dir, paste0(output_stem, ".svg"))
+    pdf_out <- file.path(output_dir, paste0(output_stem, ".pdf"))
     if (!overwrite) {
       reuse_previous_figure_layout(png_out)
       reuse_previous_figure_layout(svg_out)
+      reuse_previous_figure_layout(pdf_out)
     }
     need_png <- overwrite || !figure_file_complete(png_out)
     need_svg <- overwrite || !figure_file_complete(svg_out)
-    if (!need_png && !need_svg) {
+    need_pdf <- overwrite || !figure_file_complete(pdf_out)
+    if (!need_png && !need_svg && !need_pdf) {
       message("skipped completed figure: ", stem)
       notify_progress("panel_skipped", stem)
       # Do not force a lazy plot expression when its files already exist.
@@ -1620,6 +1623,9 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       if (format == "svg") {
         ggsave(temporary, plot = plot, width = width, height = height, units = "in",
                bg = "white", device = grDevices::svg)
+      } else if (format == "pdf") {
+        ggsave(temporary, plot = plot, width = width, height = height, units = "in",
+               bg = "white", device = grDevices::cairo_pdf)
       } else if (HAS_RAGG) {
         ggsave(temporary, plot = plot, width = width, height = height, units = "in",
                dpi = save_dpi, bg = "white", device = ragg::agg_png)
@@ -1636,6 +1642,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     plot <- prepare_figure_text(plot, width)
     if (need_png) write_format(png_out)
     if (need_svg) write_format(svg_out, "svg")
+    if (need_pdf) write_format(pdf_out, "pdf")
 
     message(sprintf("rendered %s in %.1f seconds", stem,
                     proc.time()[["elapsed"]] - save_started))
@@ -4704,7 +4711,8 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     complete <- vapply(stems, function(stem) {
       base <- file.path(output_dir_for_stem(stem), COHORT_LEAF)
       figure_file_complete(paste0(base, ".png")) &&
-        figure_file_complete(paste0(base, ".svg"))
+        figure_file_complete(paste0(base, ".svg")) &&
+        figure_file_complete(paste0(base, ".pdf"))
     }, logical(1))
     if (!overwrite && all(complete)) {
       for (stem in stems) notify_progress("panel_skipped", stem)

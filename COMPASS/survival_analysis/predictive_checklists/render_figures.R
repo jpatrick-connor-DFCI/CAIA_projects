@@ -59,6 +59,8 @@ for (population in unique(metrics$population)) {
     draw(); dev.off()
     svg(paste0(stem, ".svg"), width = 11, height = 3.6 * length(landmarks))
     draw(); dev.off()
+    pdf(paste0(stem, ".pdf"), width = 11, height = 3.6 * length(landmarks))
+    draw(); dev.off()
   }
 }
 calibration_path <- file.path(root, "calibration.csv")
@@ -80,6 +82,8 @@ if (file.exists(calibration_path)) {
       type = if (capabilities("cairo")) "cairo" else getOption("bitmapType"))
   draw_calibration(); dev.off()
   svg(file.path(out, "checklist_calibration.svg"), width = 6, height = 6)
+  draw_calibration(); dev.off()
+  pdf(file.path(out, "checklist_calibration.pdf"), width = 6, height = 6)
   draw_calibration(); dev.off()
 }
 message("Figures written to ", out)

@@ -10,7 +10,7 @@
 figure_slug <- function(x) tolower(gsub("^_|_$", "", gsub("[^A-Za-z0-9]+", "_", x)))
 
 # Tables, legends, manifests and the HTML index sit in a "data" folder beside
-# the figures they describe, so each export folder lists only PNG/SVG figures.
+# the figures they describe, so each export folder lists only PNG/SVG/PDF figures.
 FIGURE_SIDECAR_DIR <- "data"
 figure_sidecar_path <- function(path) {
   if (basename(dirname(path)) == FIGURE_SIDECAR_DIR) return(path)
@@ -404,7 +404,7 @@ figure_write_catalog <- function(config, prepared) {
     root <- file.path(config$fig_root,arm)
     if(!dir.exists(root)) next
     figure_relocate_sidecars(root)
-    paths <- list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(png|pdf|csv|md)$")
+    paths <- list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(png|svg|pdf|csv|md)$")
     paths <- paths[!grepl("/by_figure/|/main/|/supplements/",paths) & basename(paths)!="manifest.csv"]
     if(!length(paths)) next
     rel <- substring(paths,nchar(root)+2)
@@ -501,7 +501,7 @@ figure_archive_old_exports <- function(config, prepared) {
   for(arm in c("ADT","ARPI")) {
     folders <- section_moved(arm)
     for(folder in folders$moved)
-      for(path in list.files(folder,full.names=TRUE,pattern="\\.(png|pdf)$")) {
+      for(path in list.files(folder,full.names=TRUE,pattern="\\.(png|svg|pdf)$")) {
         if(normalize(tools::file_path_sans_ext(path)) %in% current) next
         keep <- if(endsWith(folder,"/03_univariate/federated")) "federated" %in% successful else cohort_job_owns(path,arm)
         if(keep) paths <- c(paths,path)
@@ -512,14 +512,14 @@ figure_archive_old_exports <- function(config, prepared) {
         if(keep) paths <- c(paths,path)
       }
     for(folder in section_compiled(arm))
-      for(path in list.files(folder,recursive=TRUE,full.names=TRUE,pattern="\\.(png|pdf|csv|md)$")) {
+      for(path in list.files(folder,recursive=TRUE,full.names=TRUE,pattern="\\.(png|svg|pdf|csv|md)$")) {
         name <- tools::file_path_sans_ext(basename(path))
         keep <- if(grepl("^(cohort_forest_|event_incidence_|metastatic_label_overlap|cohort_km_cascade)",name))
           "cohort_overview" %in% successful else cohort_job_owns(path,arm)
         if(keep) paths <- c(paths,path)
       }
     root <- file.path(config$fig_root,arm,"by_figure")
-    candidates <- if(dir.exists(root)) list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(png|pdf|csv|md)$") else character()
+    candidates <- if(dir.exists(root)) list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(png|svg|pdf|csv|md)$") else character()
     for(path in candidates) {
       rel <- substring(path,nchar(root)+2); group <- strsplit(rel,"/",fixed=TRUE)[[1]][1]
       special <- if(group=="federated") "federated" else if(group=="cohort_comparison") "cohort_overview" else NULL
@@ -531,7 +531,7 @@ figure_archive_old_exports <- function(config, prepared) {
     for(folder in FIGURE_RETIRED_FOLDERS) {
       root <- file.path(config$fig_root,arm,folder)
       if(!dir.exists(root)) next
-      for(path in list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(png|pdf|csv|md|txt)$")) {
+      for(path in list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(png|svg|pdf|csv|md|txt)$")) {
         segments <- strsplit(substring(path,nchar(file.path(config$fig_root,arm))+2),"/",fixed=TRUE)[[1]]
         if(segments[1]=="compiled") segments <- segments[-1]
         name <- tools::file_path_sans_ext(basename(path))
@@ -815,7 +815,8 @@ save_federated_panel <- function(plot, path, width, height, dpi, overwrite) {
   }
   if (is.null(plot)) return(FALSE)
   complete <- exists("figure_file_complete", mode = "function") &&
-    figure_file_complete(path) && figure_file_complete(sub("\\.png$", ".svg", path))
+    figure_file_complete(path) && figure_file_complete(sub("\\.png$", ".svg", path)) &&
+    figure_file_complete(sub("\\.png$", ".pdf", path))
   if (!overwrite && complete) { message("Skipped ", path); return(TRUE) }
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   temp <- tempfile(".federated-", tmpdir = dirname(path), fileext = ".png")
@@ -823,12 +824,16 @@ save_federated_panel <- function(plot, path, width, height, dpi, overwrite) {
   ggplot2::ggsave(temp, plot, width = width, height = height, dpi = dpi, bg = "white",
                   device = if (requireNamespace("ragg", quietly = TRUE)) ragg::agg_png else "png")
   if (!file.rename(temp, path)) stop("Could not publish federated supplement panel: ", path)
-  svg_path <- sub("\\.png$", ".svg", path)
-  svg_temp <- tempfile(".federated-", tmpdir = dirname(path), fileext = ".svg")
-  on.exit(unlink(svg_temp), add = TRUE)
-  ggplot2::ggsave(svg_temp, plot, width = width, height = height, bg = "white", device = grDevices::svg)
-  if (!file.rename(svg_temp, svg_path)) stop("Could not publish federated supplement panel: ", svg_path)
-  message("Wrote ", path, " and ", svg_path)
+  for (format in c("svg", "pdf")) {
+    vector_path <- sub("\\.png$", paste0(".", format), path)
+    vector_temp <- tempfile(".federated-", tmpdir = dirname(path), fileext = paste0(".", format))
+    on.exit(unlink(vector_temp), add = TRUE)
+    ggplot2::ggsave(vector_temp, plot, width = width, height = height, bg = "white",
+                    device = if (format == "svg") grDevices::svg else grDevices::cairo_pdf)
+    if (!file.rename(vector_temp, vector_path))
+      stop("Could not publish federated supplement panel: ", vector_path)
+  }
+  message("Wrote ", path, " with SVG and PDF")
   TRUE
 }
 
@@ -3421,7 +3426,7 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
       legend_path <- figure_sidecar_path(paste0(destination,".md"))
       dir.create(dirname(legend_path),recursive=TRUE,showWarnings=FALSE)
       writeLines(c(paste0("# ",gsub("_"," ",item$spec$key)),"",
-        sprintf("Source-rendered manuscript figure: %.1f-inch width; 600-dpi PNG and vector PDF.",
+        sprintf("Source-rendered manuscript figure: %.1f-inch width; 600-dpi PNG with vector SVG and PDF.",
           item$spec$width),"",item$legend),legend_path)
       table_capture(legend_path)
       if(is.data.frame(item$data)) {
@@ -3525,7 +3530,7 @@ figure_archive_legacy_receipts <- function(fig_root, cache_root) {
 render_figure_scene <- function(scene, signature, dpi, pdf = FALSE, overwrite = FALSE) {
   grob <- NULL
   rendered <- 0L
-  for (format in c("png", "svg")) {
+  for (format in c("png", "svg", "pdf")) {
     path <- paste0(scene$destination, ".", format)
     receipt <- figure_receipt_path(scene, format)
     identity <- list(signature = signature, dpi = if (format == "png") dpi else NULL,
@@ -3539,7 +3544,8 @@ render_figure_scene <- function(scene, signature, dpi, pdf = FALSE, overwrite = 
     dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
     temporary <- tempfile(".figure-render-", tmpdir = dirname(path), fileext = paste0(".", format))
     tryCatch({
-      device <- if (format == "svg") grDevices::svg else if (HAS_RAGG) ragg::agg_png else "png"
+      device <- if (format == "svg") grDevices::svg else if (format == "pdf") grDevices::cairo_pdf else
+        if (HAS_RAGG) ragg::agg_png else "png"
       ggplot2::ggsave(temporary, grob, width = scene$width, height = scene$height,
                      dpi = dpi, bg = "white", device = device)
       if (!figure_file_complete(temporary) || !file.rename(temporary, path)) stop("Cannot publish ", path)
@@ -3551,7 +3557,7 @@ render_figure_scene <- function(scene, signature, dpi, pdf = FALSE, overwrite = 
 }
 
 figure_scene_complete <- function(scene, signature, dpi, pdf = FALSE) {
-  all(vapply(c("png", "svg"), function(format) {
+  all(vapply(c("png", "svg", "pdf"), function(format) {
     path <- paste0(scene$destination, ".", format)
     receipt <- figure_receipt_path(scene, format)
     if (!file.exists(receipt) || !figure_file_complete(path)) return(FALSE)
@@ -3585,7 +3591,7 @@ figure_retained_exports <- function(pipeline_path) {
   exports <- exports[nzchar(exports) & !startsWith(exports, "#")]
   if (!length(exports) || anyDuplicated(exports) ||
       any(startsWith(exports, "/") | grepl("(^|/)\\.\\.(/|$)", exports)) ||
-      any(!grepl("\\.(png|svg)$", exports)))
+      any(!grepl("\\.(png|svg|pdf)$", exports)))
     stop("Invalid curated figure export list: ", path)
   exports
 }
@@ -3875,7 +3881,8 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     }
     tasks <- Filter(function(task) figure_retained_image(
       task$scene$destination, config$fig_root, ".png", retained_exports) &&
-      figure_retained_image(task$scene$destination, config$fig_root, ".svg", retained_exports), tasks)
+      figure_retained_image(task$scene$destination, config$fig_root, ".svg", retained_exports) &&
+      figure_retained_image(task$scene$destination, config$fig_root, ".pdf", retained_exports), tasks)
     tasks <- lapply(tasks, function(task) { task$pdf <- FALSE; task })
     message("Rendering/checking ", length(tasks), " panels with ", render_workers, " workers ...")
     completed <- if (render_overwrite) rep(FALSE, length(tasks)) else
@@ -4014,6 +4021,8 @@ reformat_downloaded_figures <- function(input, output, landmark=0L) {
   tryCatch(draw(),finally=grDevices::dev.off())
   grDevices::svg(paste0(target,".svg"),width=width,height=height)
   tryCatch(draw(),finally=grDevices::dev.off())
+  grDevices::cairo_pdf(paste0(target,".pdf"),width=width,height=height)
+  tryCatch(draw(),finally=grDevices::dev.off())
   manifest <- file.path(output,FIGURE_SIDECAR_DIR,"manifest.csv")
   # Downloads made before tables moved into data/ keep the manifest at the root.
   if(!file.exists(manifest)) manifest <- file.path(output,"manifest.csv")
@@ -4022,7 +4031,7 @@ reformat_downloaded_figures <- function(input, output, landmark=0L) {
   moved <- metadata$path %in% selected
   metadata$path[moved] <- paste0("compiled/",metadata$path[moved])
   metadata$topic[moved] <- "compiled"
-  for(format in c("png","svg")) {
+  for(format in c("png","svg","pdf")) {
     row <- metadata[1,,drop=FALSE]
     row$path <- paste0("compiled/associations/",stem,".",format)
     row$topic <- "compiled"; row$figure_id <- sub("__.*$","",stem)

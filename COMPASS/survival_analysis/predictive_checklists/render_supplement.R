@@ -14,6 +14,7 @@ save_png <- function(plot, path, width, height, dpi, overwrite) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   ggplot2::ggsave(path, plot, width = width, height = height, dpi = dpi, bg = "white")
   ggplot2::ggsave(sub("\\.png$", ".svg", path), plot, width = width, height = height, bg = "white", device = grDevices::svg)
-  message("Wrote ", path, " and SVG")
+  ggplot2::ggsave(sub("\\.png$", ".pdf", path), plot, width = width, height = height, bg = "white", device = grDevices::cairo_pdf)
+  message("Wrote ", path, " with SVG and PDF")
 }
 render_checklist_supplement(root, out, 200, TRUE, save_png)
