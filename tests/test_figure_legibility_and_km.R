@@ -16,7 +16,7 @@ for (name in c("theme_fig", "figure_tertiles", "figure_extreme_quintiles", "figu
                "significant_mutation_features", "plot_stratified_platinum", "prepare_figure_text",
                "plot_model_discrimination", "render_discrimination_panel", "render_available_case_sensitivity",
                "read_endpoint_performance", "plot_volcano_panel", "labels_for_panel",
-               "q_threshold_neglog10p", "assign_category", "plot_sg_forest")) {
+               "prepare_mean_univariable", "q_threshold_neglog10p", "assign_category", "plot_sg_forest")) {
   for (expr in source_exprs) {
     assignment <- find_assignment(expr, name)
     if (!is.null(assignment)) eval(assignment)
@@ -174,7 +174,7 @@ v <- expand_grid(lab_name=names(CATEGORY_MAP),feature_stat=c("mean","min","max",
   mutate(coef_feature=c(-2.5,2.4,seq(-.8,.8,length.out=n()-2)), p_value=10^-seq(2,15,length.out=n()), q_value=.01)
 plots$volcano <- plot_volcano_panel(v,"Lab associations at +180 days")
 b <- ggplot_build(plots$volcano)
-stopifnot(b$layout$panel_params[[1]]$x.range[1] < -2.5, b$layout$panel_params[[1]]$x.range[2] > 2.4,
+stopifnot(plots$volcano$coordinates$limits$x[1] == 0, b$layout$panel_params[[1]]$x.range[2] > 2.5,
           plots$volcano$theme$legend.position == "bottom")
 
 review <- Sys.getenv("COMPASS_REVIEW_DIR", "")

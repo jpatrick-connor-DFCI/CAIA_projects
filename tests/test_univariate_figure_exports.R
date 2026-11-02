@@ -48,7 +48,7 @@ local({
     original <- source_plots[[paste0("figure3_univariate_platinum_landmark",lm)]]
     source_repel <- Filter(function(layer) inherits(layer$geom,"GeomTextRepel"),original$layers)[[1]]
     stopifnot(p$theme$axis.text$size>=12,p$theme$plot.caption$size>=11,repel$aes_params$size>=4.2,
-      nrow(repel$data)==nrow(d),identical(repel$data,source_repel$data),
+      nrow(repel$data)==sum(d$feature_stat=="mean"),identical(repel$data,source_repel$data),
       identical(p$labels$caption,original$labels$caption),
       identical(p$scales$get_scales("fill")$limits,LEGEND_ORDER))
   }

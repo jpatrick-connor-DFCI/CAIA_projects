@@ -36,7 +36,7 @@ stopifnot(identical(spec_keys[startsWith(spec_keys,"02_")],paste0("02_llm_nepc_a
 dfci_spec <- spec_by_key("03_dfci_univariable")
 stopifnot(dfci_spec$height==8.9,identical(dfci_spec$row_heights,c(1.5,.32,1,1)),
   identical(dfci_spec$shared_legend_panels,1:3),all(dfci_spec$layout[2,]==8),
-  identical(manuscript_dfci_volcano_ylim,c(-.2,20)),
+  identical(manuscript_dfci_volcano_ylim,c(-.2,36)),
   manuscript_dfci_km_landmark==180,
   grepl("landmark180",dfci_spec$members[5],fixed=TRUE),
   grepl("landmark180",dfci_spec$members[7],fixed=TRUE),
@@ -53,8 +53,7 @@ stopifnot(length(multivariable_spec$members)==7,
 # The HR direction guide sits under the shared volcano legend.
 direction <- hr_direction_grob()
 direction_text <- unname(unlist(lapply(direction$children,function(x) if(inherits(x,"text")) x$label)))
-stopifnot(inherits(direction,"gTree"),identical(direction_text,c("0","Lower risk / slower time to platinum",
-  "Higher risk / faster time to platinum")),
+stopifnot(inherits(direction,"gTree"),identical(direction_text,c("0","Larger association with platinum hazard in the labeled direction")),
   identical(MANUSCRIPT_UNIVARIABLE_KEYS,c("03_dfci_univariable","federated_03_univariable")))
 # The supplementary DFCI labs: trajectory beside KM, one row per lab.
 supplement <- figure_dfci_supplement_labs_spec(180)
@@ -111,7 +110,10 @@ stopifnot(setequal(basename(caption_md),paste0(c(paste0("figure",c(1,3,4,7,8)),"
   paste0("federated_figure",3:5),"federated_figure5_no_d"),".md")))
 for(path in caption_md) stopifnot(identical(readLines(path,warn=FALSE),
   readLines(sub("[.]md$",".txt",path),warn=FALSE)))
-caption_file <- function(section,name) file.path(caption_root,section,"manuscript","captions",paste0(name,".md"))
+caption_file <- function(section,name) file.path(caption_root,section,
+  if(section %in% c("03_univariate/internal","03_univariate/federated","05_transfer") &&
+     name %in% c("figure3","federated_figure3","federated_figure5","federated_figure5_no_d"))
+    "alternative_manuscript" else "manuscript","captions",paste0(name,".md"))
 stopifnot(startsWith(readLines(caption_file("03_univariate/internal","figure3"),n=1,warn=FALSE),"Figure 3. "),
   startsWith(readLines(caption_file("03_univariate/federated","federated_figure3"),n=1,warn=FALSE),"Federated Figure 3. "),
   file.exists(caption_file("01_cohort","figure1")),!file.exists(caption_file("02_llm","figure2")),

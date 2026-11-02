@@ -224,7 +224,8 @@ def _metrics(frame, endpoint, horizon, censoring, score, flag, probability, conf
                             seed=config.seed)
 
 
-def run_cell(data, endpoint, landmark, population, config, output_dir, *, resume=False):
+def run_cell(data, endpoint, landmark, population, config, output_dir, *, resume=False,
+             identity_metadata=None):
     output_dir.mkdir(parents=True, exist_ok=True)
     frame = data.frame.copy()
     if population == "resolved_nepc":
@@ -235,6 +236,7 @@ def run_cell(data, endpoint, landmark, population, config, output_dir, *, resume
         raise ValueError("Training/test patient overlap")
     identity = dict(endpoint=endpoint, landmark_days=landmark, population=population,
                     arm="adt", cohort="all", exclusion="none", dataset="test")
+    identity.update(identity_metadata or {})
     audit = {"identity": identity, "n_patients": len(frame), "n_train_val": len(train),
              "n_test": len(test), "n_events": int(frame[endpoint.upper()].sum()),
              "low_event_warning": int(frame[endpoint.upper()].sum()) < 50,
@@ -246,7 +248,8 @@ def run_cell(data, endpoint, landmark, population, config, output_dir, *, resume
     results = []
     if len(train) == 0 or len(test) == 0:
         results = [{**identity, "model": "checklist", "status": "underpowered",
-                    "reason": "Empty training or test risk set"}]
+                    "horizon_days": horizon, "reason": "Empty training or test risk set"}
+                   for horizon in config.horizons]
         write_json(output_dir / "metrics.json", results)
         return results
     td, te = _outcomes(train, endpoint)
@@ -398,7 +401,7 @@ def run(config, input_dirs, output_dir, *, preflight_only=False, overwrite=False
         # old successful models beside new failure records.
         archive = output_dir / "previous_runs" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         archive.mkdir(parents=True)
-        for name in ("platinum", "nepc", "run_manifest.json", "preflight.json", "metrics.json",
+        for name in ("platinum", "nepc", "avpc", "run_manifest.json", "preflight.json", "metrics.json",
                      "metrics.csv", "calibration.csv"):
             source = output_dir / name
             if source.exists():

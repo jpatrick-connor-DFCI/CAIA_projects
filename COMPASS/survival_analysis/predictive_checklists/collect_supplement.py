@@ -41,7 +41,7 @@ def collect(runs: dict[str, Path], horizon: int, population: str = "full"):
                    for key, value in row.items() if key != "calibration"}
             # The run labels its own feature set; the supplement keys on the run it came from.
             metrics.append({**row, "feature_set": feature_set})
-        for endpoint_dir in sorted(p for p in run_dir.iterdir() if p.is_dir() and p.name in ("platinum", "nepc")):
+        for endpoint_dir in sorted(p for p in run_dir.iterdir() if p.is_dir() and p.name in ("platinum", "nepc", "avpc")):
             for landmark_dir in sorted(endpoint_dir.glob("landmark_*"),
                                        key=lambda p: int(p.name.split("_")[1])):
                 landmark = int(landmark_dir.name.split("_")[1])
@@ -53,7 +53,10 @@ def collect(runs: dict[str, Path], horizon: int, population: str = "full"):
                 checklist = _read_json(folder / "checklist.json")
                 if checklist is None:
                     failure = _read_json(folder / "failure.json") or {}
-                    cell_metrics = _read_json(folder / "metrics.json") or []
+                    cell_metrics = _read_json(folder / "metrics.json") or [
+                        r for r in run_metrics if r.get("endpoint") == endpoint_dir.name
+                        and r.get("landmark_days") == landmark and r.get("population") == population
+                        and r.get("horizon_days") == horizon]
                     status = next((r for r in cell_metrics if r.get("model") == "checklist"), failure)
                     cells.append({**cell, "status": status.get("status", "not_fit"),
                                   "reason": status.get("reason", "No checklist exported")})

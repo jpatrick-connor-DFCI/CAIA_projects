@@ -147,7 +147,7 @@ local({
       figure_retained_image(s$destination, cfg$fig_root, ".png", retained_exports),
     unlist(lapply(first$prepared,`[[`,"scenes"),recursive=FALSE))
   stopifnot(length(manuscript_scenes)>=7L,
-    all(vapply(manuscript_scenes,function(s) grepl("/ADT/(0[1-5]_[a-z_]+(/internal|/federated|/cohort_sensitivity)?|0[78]_[a-z_]+)/manuscript/",s$destination) &&
+    all(vapply(manuscript_scenes,function(s) grepl("/ADT/(0[1-5]_[a-z_]+(/internal|/federated|/cohort_sensitivity)?|0[78]_[a-z_]+)/(alternative_manuscript|manuscript)/",s$destination) &&
       file.exists(paste0(s$destination,".pdf")) &&
       file.exists(figure_sidecar_path(paste0(s$destination,".md"))) && s$width==7.2,logical(1))))
   overview_stems <- vapply(first$prepared$cohort_overview$scenes,`[[`,character(1),"stem")

@@ -1223,33 +1223,59 @@ labels_for_panel <- function(sub, top_k, always_label) {
     distinct(lab_name, feature_stat, .keep_all = TRUE)
 }
 
+# Define the mean-feature testing family before any effect-size, CI, height,
+# labeling or plotting filters. Keep the supplied adjustment for auditability.
+prepare_mean_univariable <- function(d) {
+  d <- d %>% filter(tolower(feature_stat) == "mean")
+  if (!"q_value_original" %in% names(d))
+    d$q_value_original <- if ("q_value" %in% names(d)) d$q_value else NA_real_
+  groups <- intersect(c("analysis_label", "endpoint", "landmark_days"), names(d))
+  key <- c(groups, if ("feature" %in% names(d)) "feature" else "lab_name")
+  if (anyDuplicated(d[key])) stop("Duplicate mean-feature tests within a Figure 3 testing family")
+  if (!"q_value_mean" %in% names(d)) {
+    d <- d %>% group_by(across(all_of(groups))) %>% mutate(
+      q_value_mean = {
+        valid <- is.finite(p_value) & p_value >= 0 & p_value <= 1
+        q <- rep(NA_real_, n())
+        q[valid] <- stats::p.adjust(p_value[valid], method = "BH")
+        q
+      },
+      n_mean_tests = sum(is.finite(p_value) & p_value >= 0 & p_value <= 1)) %>% ungroup()
+  }
+  d <- d %>% mutate(q_value = q_value_mean,
+    risk_direction = if_else(coef_feature < 0, "Lower", "Higher"),
+    risk_coef = abs(coef_feature), risk_hr = exp(risk_coef),
+    risk_label = paste(risk_direction, lab_name))
+  if (all(c("ci_lower", "ci_upper") %in% names(d))) d <- d %>% mutate(
+    risk_ci_lower = if_else(coef_feature < 0, 1 / ci_upper, ci_lower),
+    risk_ci_upper = if_else(coef_feature < 0, 1 / ci_lower, ci_upper))
+  d
+}
+
 plot_volcano_panel <- function(sub, title) {
-  sub <- sub %>%
-    filter(!lab_name %in% DROP) %>%
+  sub <- prepare_mean_univariable(sub) %>%
+    filter(!lab_name %in% DROP, is.finite(risk_coef), is.finite(q_value)) %>%
     mutate(
       .point_id  = row_number(),
       category  = vapply(lab_name, assign_category, character(1)),
-      neglog10p = -log10(pmax(p_value, 1e-300)),
+      neglog10q = -log10(pmax(q_value, 1e-300)),
       sig       = q_value < 0.05,
-      capped    = neglog10p > Y_MAX_CAP,
-      y         = pmin(neglog10p, Y_MAX_CAP),
-      label     = sprintf("%s (%s)", lab_name, feature_stat)
+      capped    = neglog10q > Y_MAX_CAP,
+      y         = pmin(neglog10q, Y_MAX_CAP),
+      label     = risk_label
     )
   ns  <- sub %>% filter(!sig)
   sigd <- sub %>% filter(sig) %>%
     mutate(category = factor(category, levels = DRAW_ORDER),
            is_hero  = category == "Androgen axis")
   y_max <- if (nrow(sub)) max(sub$y) else 5
-  q_y <- q_threshold_neglog10p(sub)
+  q_y <- -log10(.05)
   lab_df <- labels_for_panel(sub, TOP_K_PER_PANEL, ALWAYS_LABEL)
   # Keep every point in the repel calculation, including unlabeled points, so
   # text cannot settle on top of a nearby observation.
   sub <- sub %>% mutate(repel_label = ifelse(.point_id %in% lab_df$.point_id, label, ""))
-  albumin_day180 <- grepl("180",title,fixed=TRUE) &
-    sub$lab_name=="Albumin" & sub$feature_stat=="min"
-  label_nudge_x <- ifelse(albumin_day180,ALBUMIN_DAY180_NUDGE[["x"]],
-    ifelse(sub$coef_feature < 0,-0.35,0.35))
-  label_nudge_y <- ifelse(albumin_day180,ALBUMIN_DAY180_NUDGE[["y"]],0.35)
+  label_nudge_x <- rep(.06, nrow(sub))
+  label_nudge_y <- rep(.35, nrow(sub))
 
   n_tested <- nrow(sub); n_sig <- sum(sub$sig)
   breakdown <- sub %>% filter(sig) %>% count(category)
@@ -1259,27 +1285,28 @@ plot_volcano_panel <- function(sub, title) {
     n <- breakdown$n[match(c, breakdown$category)]; if (is.na(n)) n <- 0
     sprintf("%s %d", short[[c]], n)
   }, character(1)), collapse = "  ")
-  footer <- sprintf("%d / %d q<0.05   \u00b7   %s", n_sig, n_tested, bd_str)
+  footer <- sprintf("%d / %d displayed means q<0.05; BH across %d mean tests   \u00b7   %s",
+    n_sig, n_tested, if(nrow(sub)) sub$n_mean_tests[1] else 0L, bd_str)
 
   p <- ggplot() +
     geom_vline(xintercept = 0, color = "grey", linewidth = 0.7) +
-    geom_vline(xintercept = c(-0.5, 0.5), color = "grey", linetype = "dashed",
+    geom_vline(xintercept = 0.5, color = "grey", linetype = "dashed",
                linewidth = 0.6, alpha = 0.7) +
     { if (!is.na(q_y)) geom_hline(yintercept = q_y, color = "black",
                                   linetype = "dotted", linewidth = 0.9) } +
-    geom_point(data = ns, aes(coef_feature, y), size = 1.6 * 1.5, color = NS_COLOR, alpha = 0.7) +
+    geom_point(data = ns, aes(risk_coef, y), size = 1.6 * 1.5, color = NS_COLOR, alpha = 0.7) +
     geom_point(data = sigd %>% filter(!capped),
-               aes(coef_feature, y, color = category, size = is_hero),
+               aes(risk_coef, y, color = category, size = is_hero),
                shape = 21, fill = NA, stroke = 0.9, show.legend = FALSE) +
     geom_point(data = sigd %>% filter(!capped),
-               aes(coef_feature, y, fill = category, size = is_hero),
+               aes(risk_coef, y, fill = category, size = is_hero),
                shape = 21, color = "white", stroke = 0.6, alpha = 0.92, show.legend = TRUE) +
     geom_point(data = sigd %>% filter(capped),
-               aes(coef_feature, y, fill = category), shape = 24,
+               aes(risk_coef, y, fill = category), shape = 24,
                size = 3.4 * 1.5, color = "white", stroke = 0.6, alpha = 0.92, show.legend = FALSE) +
     ggrepel::geom_text_repel(
       data = sub,
-      aes(coef_feature, pmin(neglog10p, Y_MAX_CAP), label = repel_label, color = category),
+      aes(risk_coef, y, label = repel_label, color = category),
       size = 4.2, fontface = "plain", segment.color = "#95a5a6", segment.size = 0.3,
       max.overlaps = Inf, min.segment.length = 0, box.padding = 0.55,
       point.padding = 1, point.size = 4, force = 3, force_pull = 0.2,
@@ -1291,9 +1318,9 @@ plot_volcano_panel <- function(sub, title) {
                       drop = FALSE, name = NULL) +
     guides(color = "none", fill = guide_legend(nrow = 2, override.aes = list(shape = 21, size = 3, alpha = 1))) +
     scale_size_manual(values = c(`TRUE` = 3.2 * 1.5, `FALSE` = 2.1 * 1.5), guide = "none") +
-    coord_cartesian(xlim = range(c(PANEL_XLIM, sub$coef_feature), finite = TRUE) * 1.08,
+    coord_cartesian(xlim = c(0, max(c(.7, sub$risk_coef), na.rm = TRUE) * 1.15),
                     ylim = c(-0.2, max(y_max * 1.20, 5))) +
-    labs(x = "Cox log HR per SD", y = expression(-log[10](p)), title = title,
+    labs(x = "Risk-direction log HR per SD", y = expression(-log[10](q)), title = title,
          caption = str_wrap(footer, 88)) +
     theme_fig() +
     theme(plot.title = element_text(face = "bold", size = 16),
@@ -2626,7 +2653,16 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
 
   uni <- map_dfr(LANDMARKS, load_uni) %>%
     filter(tolower(as.character(endpoint)) == ENDPOINT) %>%
-    drop_na(coef_feature, p_value, q_value)
+    prepare_mean_univariable()
+  mean_path <- file.path(output_dir_for_stem(paste0("figure3_univariate_",ENDPOINT,"_means")),COHORT_LEAF)
+  if(exists("figure_public_path",mode="function")) mean_path <- figure_public_path(mean_path)
+  if(exists("figure_sidecar_path",mode="function")) mean_path <- figure_sidecar_path(mean_path)
+  mean_path <- paste0(mean_path,".csv")
+  dir.create(dirname(mean_path),recursive=TRUE,showWarnings=FALSE)
+  write_csv(uni,mean_path)
+  capture <- getOption("compass.figure_table_capture")
+  if(is.function(capture)) capture(mean_path)
+  uni <- drop_na(uni,coef_feature,p_value,q_value)
   cat(sprintf("%d (lab x stat) rows across landmarks %s\n",
               nrow(uni), paste(sort(unique(uni$landmark_days)), collapse = ", ")))
 

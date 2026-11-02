@@ -208,12 +208,24 @@ section folder itself.
 
 The canonical ADT/platinum, cohort-overview and federated runs also write
 manuscript figures to a `manuscript/` subfolder of the section each summarizes
-(e.g. `ADT/03_univariate/internal/manuscript/03_dfci_univariable.{png,svg,pdf}`). These
+(e.g. `ADT/04_multivariate/internal/manuscript/04_multivariable_labs.{png,svg,pdf}`). These
 additional exports generally use a 7.2-inch manuscript width, consistent 7–9 pt plot text,
 lettered panels without subplot titles, and separate `.md` figure legends in
 `manuscript/data/`. `manuscript/captions/` contains manuscript-ready legends as matching
 `figureN.md` and `figureN.txt` files (`federated_figureN.*` for the federated set). They always include a
 600-dpi (or higher requested DPI) PNG, SVG and PDF on every render. Individual panels are always retained.
+
+The revised mean-only Figure 3 and transfer Figure 5 designs instead export to
+`alternative_manuscript/` within their respective sections:
+
+- `ADT/03_univariate/internal/alternative_manuscript/03_dfci_univariable.{png,svg,pdf}`
+- `ADT/03_univariate/federated/alternative_manuscript/federated_03_univariable.{png,svg,pdf}`
+- `ADT/05_transfer/alternative_manuscript/federated_05_transfer_no_dfci.{png,svg,pdf}`
+- `ADT/05_transfer/alternative_manuscript/federated_05_transfer_no_dfci__no_d.{png,svg,pdf}`
+
+Their tables/legends and captions use `alternative_manuscript/data/` and
+`alternative_manuscript/captions/`. Existing `manuscript/` files are preserved.
+Run stage `all` once after this path change to rebuild the cached destinations.
 
 The numbered manuscript set is: `01_cohort_overview`, `02_llm_nepc_avpc__<icd|adt|lm0>`
 (one per Figure 2 cohort, captions `figure2_<cohort>`, with a cohort header line),
@@ -228,8 +240,8 @@ elastic-net Cox and XGBoost models: test performance, coefficients, and gains).
 A separate federated set, written by the federated job, is numbered on its own:
 `federated_03_univariable` (the Figure 3 layout from the pooled four-site univariable Cox
 results and the aggregate `figure_data` PSA/testosterone trajectories and day-180
-extreme-decile KM curves; the volcano y-axis spans the data, capped at -log10(P)=30;
-an arrow under the color key marks positive log HR as higher risk/faster time to platinum),
+extreme-decile KM curves; mean-only association panels show absolute log HR per SD
+in the labeled higher/lower direction against -log10(q), capped at 30 with triangles),
 `federated_04_multivariable` (the Figure 8 layout, with the full models refit without
 Dana-Farber added as darker bars in the discrimination rows), and
 `federated_05_transfer_no_dfci` (the models trained without Dana-Farber scored on
@@ -243,6 +255,13 @@ strips give day-0 patients and events; e-g, platinum/AVPC/NEPC KM curves for the
 bottom 10% of the day-180 XGBoost score; h, 5-year event-free probability from sequencing date +180 days (sequenced patients) by transferred federated XGBoost score
 quartile, Gleason score and six mutually exclusive mutation groups (WT, TP53, PTEN, RB1, 2 MT, 3 MT)). `federated_05_transfer_no_dfci__no_d`
 (caption `federated_figure5_no_d`) drops panel d, so its KM curves are d-f and the gradient g.
+Figure 5 discrimination panels now default to horizontal confidence intervals,
+with directly labeled model rows and one color key for the landmarks. All three
+landmarks and both model families remain included. `COMPASS_TRANSFER_LAYOUT=scatter`
+restores the original point/shape layout; `COMPASS_TRANSFER_LANDMARKS=180` focuses
+the discrimination and clinical-comparison panels on day 180, including its actual
+patient/event counts. These settings enter the graphics-cache signature and the
+captions. KM/gradient panels remain at day 180 with their original time origins.
 The local Figure 3 stays on Dana-Farber patient-level data. The cohort
 sensitivity components are assembled into one continuous multipanel figure for
 each analysis setting. Federated manuscript plots reuse the original subplot
@@ -255,11 +274,22 @@ compiled counterpart. Figure titles remain in filenames/legends, not supertitles
 The cohort overview uses a 7.2 × 9.4-inch canvas (panel g is omitted, and f spans the
 row, without the federated within-site export); panels b–g omit their subtitles
 because those counts and notes are retained in the external legend.
-In the DFCI univariable manuscript figure, the three landmark volcanoes use an
+In both univariable manuscript figures, the three landmark association plots use an
 expanded first row, compact horizontal spacing, a shared y-axis displayed
-through -log10(P)=20, centered landmark headers, and one horizontal category legend.
-The day-180 Albumin-minimum annotation receives a fixed upper-left nudge so it
-does not overlap the Testosterone-maximum label. Panels e and g use a two-line
+through -log10(q)=30 (larger values capped with triangles), centered landmark
+headers, and one horizontal category legend. Only the mean statistic is included.
+Benjamini-Hochberg q-values are recalculated per endpoint/analysis/landmark across
+all available mean-feature tests with valid P values, before height, effect-size,
+CI, or annotation display filters. Raw two-sided P values are unchanged. The
+association tables retain `q_value_original`, `q_value_mean`, `n_mean_tests`, and
+the original signed coefficient; `q_value` now refers to the mean-only adjustment.
+Negative coefficients are displayed as positive magnitudes with "Lower" labels:
+HR becomes 1/HR and confidence limits become [1/upper, 1/lower]. This reverses
+the direction of a one-SD change in the modeled feature, rather than transforming
+the lab value to its reciprocal. Directions are descriptive and selected from
+the fitted coefficients. The horizontal threshold is fixed at q=0.05. The
+separate site/cohort forest supplements retain their original statistics and
+supplied q-values. Panels e and g use a two-line
 platinum-free-probability y-axis title whose shorter vertical extent remains
 separate from the panel letter.
 Trajectory patient-count/scale subtitles are kept in the external legend, and
@@ -427,8 +457,40 @@ Missing optional XGBoost files are reported and skipped independently. Run `06`
 again after this update to register both files (including absent paths), then
 run `07_figures/all.R` with stage `all`. All Python remains in `06`; graphics caches stay in data.
 
+The transfer notebooks' additional **locally trained** score + Gleason + mutation
+checklists write `clinical_checklists/checklist_{cells,items_long,metrics}.csv`.
+These fit 1-year and 5-year horizons using each frozen no-DFCI Cox/XGBoost score on
+the sequencing clock, Gleason and TP53/RB1/PTEN status. Existing endpoint-specific
+splits isolate local held-out patients from threshold selection, calibration and
+censoring estimation. Each family × endpoint gets a supplemental figure with
+held-out AUC(t) intervals and both horizons' M-of-N cards across landmarks:
+`05_transfer/transfer_clinical_checklist_<family>_<endpoint>__platinum`.
+The title identifies the evaluated endpoint; `__platinum` follows the source
+federated-model figure convention. These fits are separate from the frozen
+federated-checklist transfer supplement. Missing optional tables skip the figure;
+unsupported cells show their reasons. Rerun 06 after training to refresh the
+registered source fingerprints before rendering Figure 5 or `all.R`.
+
 
 ## Entry points
+
+To compare designs using an existing aggregate export tree without the cluster
+inputs, run from the repository root:
+
+```sh
+Rscript COMPASS/survival_analysis/07_figures/preview_03_05.R /path/to/ADT
+```
+
+This writes PNG/PDF previews for the one-sided mean association plots, a selected
+lab forest, all-landmark and day-180 transfer intervals, and paired day-180 AUC
+gains. The gain intervals use exported paired-bootstrap differences. Preview
+images go to `03_univariate/federated/alternative_manuscript/` and
+`05_transfer/alternative_manuscript/` within the supplied ADT directory, with
+preview tables and notes in each folder's `data/` subdirectory. An optional
+second argument selects a different output ADT root using the same structure.
+FDR values use the available exported means; older exports have already passed
+display filters, so final manuscript q-values require the raw-input production
+run. Use stage `all`, not `render`, to rebuild the updated scenes.
 
 Run `Rscript COMPASS/survival_analysis/07_figures/all.R` for the complete workflow, or run a numbered script in this directory for one manuscript figure and its section supplements. Run notebook `06_prep_figure_data.ipynb` first. Set `CAIA_PROJECT_ROOT` when using a checkout outside the cluster default. Each script honors the same `COMPASS_*` settings and `COMPASS_FIGURE_STAGE` (`all`, `prepare`, or `render`). Figure data and legends remain alongside exported figures in their `data/` folders; patient and graphics caches remain under `COMPASS_FIGURE_DATA_ROOT`.
 

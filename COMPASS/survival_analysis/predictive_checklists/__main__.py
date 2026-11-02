@@ -14,8 +14,9 @@ def main(argv=None):
         "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis"))
     parser.add_argument("--platinum-inputs", type=Path)
     parser.add_argument("--nepc-inputs", type=Path)
+    parser.add_argument("--avpc-inputs", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--endpoints", nargs="+", choices=["platinum", "nepc"])
+    parser.add_argument("--endpoints", nargs="+", choices=["platinum", "nepc", "avpc"])
     parser.add_argument("--landmarks", nargs="+", type=int)
     parser.add_argument("--horizons", nargs="+", type=int, help="Days after the landmark")
     parser.add_argument("--solver", choices=["highs", "cbc", "cplex"])
@@ -55,6 +56,8 @@ def main(argv=None):
         parser.error("Output run exists; choose a new --output-dir, pass --overwrite (archives prior "
                      "results) or --resume (reuses completed horizons)")
     if args.demo:
+        if "avpc" in config.endpoints:
+            parser.error("The built-in full-ADT demo provides platinum/NEPC only; supply AVPC inputs")
         from .demo import build_demo_inputs
         args.inputs_root = args.output_dir / "synthetic_inputs"
         build_demo_inputs(args.inputs_root, config.landmarks, seed=config.seed)
@@ -62,6 +65,7 @@ def main(argv=None):
     input_dirs = {
         "platinum": args.platinum_inputs or args.inputs_root / "prediction_inputs_adt",
         "nepc": args.nepc_inputs or args.inputs_root / "prediction_inputs_adt_nepc",
+        "avpc": args.avpc_inputs or args.inputs_root / "prediction_inputs_adt_avpc",
     }
     return run(config, input_dirs, args.output_dir, preflight_only=args.preflight_only,
                overwrite=args.overwrite, resume=args.resume)

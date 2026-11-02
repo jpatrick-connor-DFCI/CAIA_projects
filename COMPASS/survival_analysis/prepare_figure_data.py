@@ -185,6 +185,7 @@ FEDERATED_TRANSFER_NO_DFCI_FILES = (
     "transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv",
     "transfer_km_patients.csv")
 FEDERATED_TRANSFER_ALL_MODELS_FILES = ("transfer_metrics.csv", "transfer_auc_t.csv")
+FEDERATED_TRANSFER_CHECKLIST_FILES = ("checklist_cells.csv", "checklist_items_long.csv", "checklist_metrics.csv")
 # Federated multivariable exports beside the across-site results CSV
 # (mirrors FEDERATED_MULTIVARIABLE in figure_workflow.R). Each bundle also has
 # a refit without Dana-Farber in "<directory>_no_DFCI".
@@ -697,6 +698,8 @@ def prepare(config: dict) -> dict:
             for name in FEDERATED_TRANSFER_NO_DFCI_FILES]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / "all_models" / name)
             for name in FEDERATED_TRANSFER_ALL_MODELS_FILES]
+        federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / "clinical_checklists" / name)
+            for name in FEDERATED_TRANSFER_CHECKLIST_FILES]
         federated_sources += [fingerprint(federated_figure_data_dir(config) / name)
             for name in FEDERATED_FIGURE_DATA_FILES]
         manifest["federated"] = digest({"code": version, "force": manifest["force_version"],

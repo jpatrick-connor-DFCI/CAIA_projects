@@ -8,7 +8,7 @@ suppressPackageStartupMessages({library(dplyr); library(ggplot2)})
 
 CHECKLIST_FEATURE_SET_LABELS <- c(labs = "Labs only",
   labs_gleason_somatic = "Labs + Gleason + somatic")
-CHECKLIST_ENDPOINT_LABELS <- c(platinum = "Platinum", nepc = "NEPC")
+CHECKLIST_ENDPOINT_LABELS <- c(platinum = "Platinum", nepc = "NEPC", avpc = "AVPC")
 CHECKLIST_MODEL_LABELS <- c(checklist = "Checklist", age_cox = "Age Cox",
   elastic_net = "Elastic-Net Cox", xgboost = "XGBoost")
 CHECKLIST_WRAP_WIDTH <- 50L
@@ -38,12 +38,13 @@ load_checklist_tables <- function(data_dir) {
 
 # One card's text as a data frame of lines (text, fontface), top to bottom.
 # `cell$n_events_test`, when present, adds the held-out event count.
-checklist_card_lines <- function(cell, items, metrics, horizon_years, model_labels = CHECKLIST_MODEL_LABELS) {
+checklist_card_lines <- function(cell, items, metrics, horizon_years, model_labels = CHECKLIST_MODEL_LABELS,
+                                 origin = "ADT") {
   lines <- list()
   add <- function(text, face = "plain") for (piece in strsplit(text, "\n", fixed = TRUE)[[1L]])
     lines[[length(lines) + 1L]] <<- data.frame(text = piece, face = face, stringsAsFactors = FALSE)
   gap <- function() add(" ")
-  add(sprintf("Landmark ADT +%d days", cell$landmark_days), "bold")
+  add(sprintf("Landmark %s +%d days", origin, cell$landmark_days), "bold")
   gap()
   if (cell$status != "ok") {
     add("No checklist fit", "italic")

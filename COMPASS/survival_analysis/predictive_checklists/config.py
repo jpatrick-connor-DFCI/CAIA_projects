@@ -39,8 +39,8 @@ class RunConfig:
     feature_stats: str = "all"
 
     def validate(self):
-        if not self.endpoints or set(self.endpoints) - {"platinum", "nepc"}:
-            raise ValueError("endpoints must contain platinum and/or nepc")
+        if not self.endpoints or set(self.endpoints) - {"platinum", "nepc", "avpc"}:
+            raise ValueError("endpoints must contain platinum, nepc and/or avpc")
         for name in ("landmarks", "horizons", "max_items"):
             values = getattr(self, name)
             minimum = 0 if name == "landmarks" else 1

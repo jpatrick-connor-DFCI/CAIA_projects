@@ -20,6 +20,7 @@ import pandas as pd
 ENDPOINT_COLUMNS = {
     "platinum": ("t_platinum", "PLATINUM"),
     "nepc": ("t_nepc", "NEPC"),
+    "avpc": ("t_avpc", "AVPC"),
 }
 RESOLVED_NEPC_STATUSES = frozenset({
     "adjudicated", "reviewed", "resolved", "completed", "complete",
@@ -52,7 +53,7 @@ def resolved_nepc_mask(frame: pd.DataFrame) -> pd.Series:
 
 def _validate_manifest(manifest: dict[str, Any], endpoint: str, landmark: int) -> None:
     if endpoint not in ENDPOINT_COLUMNS:
-        raise ValueError("Checklist endpoint must be 'platinum' or 'nepc'.")
+        raise ValueError("Checklist endpoint must be 'platinum', 'nepc' or 'avpc'.")
     required = {
         "data", "anchor_col", "endpoint", "landmark_days", "split_mode",
         "restrict_to_mrns", "exclude_mrns", "time_unit_days",
