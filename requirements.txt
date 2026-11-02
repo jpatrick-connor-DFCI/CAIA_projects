@@ -50,3 +50,22 @@ lifelines==0.27.8        # unverified
 # itmoon7/survlatent_ode repo that survlatent_ode.py shells into (see
 # multivariate_longitudinal/README.md). Install it inside that repo's own
 # conda env (survlatent_ode_conda.yml), not here.
+
+# --- Optional: alternate predictive-checklist solvers ---
+# COMPASS/survival_analysis/predictive_checklists/ needs nothing beyond the pins
+# above: SciPy >=1.9 supplies the default HiGHS solver (milp), and the matched
+# comparators lazily import scikit-survival and xgboost. Uncomment only the
+# backend needed, in an isolated environment.
+# mip>=1.13,<3       # Local weighted CBC backend; platform CBC library required.
+# cplex>=20.1        # Local weighted CPLEX backend; usable solver license required.
+#
+# The pinned upstream reference (predictive_checklists/upstream.py) also imports
+# pandas, scikit-learn, imbalanced-learn, optbinning, matplotlib, and cplex (even
+# when using CBC). Install its own setup.py requirements in the separate
+# reference environment. Run upstream parity in a fresh process; CBC and OR-Tools
+# native libraries can conflict if both are loaded in the same process on macOS.
+# Authors' source: https://github.com/MLforHealth/predictive_checklists
+# Commit: d205245b9f62dd2cfd977171f0e5073c13d6aebf
+
+# --- Development / verification ---
+pytest>=7

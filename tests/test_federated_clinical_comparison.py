@@ -6,10 +6,11 @@ import sys
 
 import numpy as np
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from COMPASS.survival_analysis import federated_clinical_comparison as fcc  # noqa: E402
+from COMPASS.survival_analysis.federated import federated_clinical_comparison as fcc  # noqa: E402
 
 ANCHOR = pd.Timestamp("2018-06-01")
 FEATURES = ["TP53_ANY", "RB1_ANY", "PTEN_ANY", "AR_ANY"]
@@ -250,6 +251,76 @@ def test_km_patients_keeps_labs_scores_and_each_clock_own_strata(tmp_path):
                        en["risk_score"])
     fcc.write_outputs(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), tmp_path, km=km)
     assert len(pd.read_csv(tmp_path / fcc.KM_PATIENTS_FILE)) == len(km)
+
+
+# --------------------------------------------------------------------------- #
+# Figure 6 checklist tables
+# --------------------------------------------------------------------------- #
+def _checklist_tables():
+    """200 cases/controls with known rule accuracy, 30 patients outside the cohort,
+    and rows the Figure 6 filters must drop."""
+    n = 230
+    index = np.arange(n)
+    case = index < 60
+    flag = (index < 40) | ((index >= 165) & (index < 200))   # sensitivity 2/3, specificity 3/4
+    tsg = (index < 30) | ((index >= 172) & (index < 200))    # sensitivity 1/2, specificity 4/5
+    ids = 7000 + index
+    scores = pd.DataFrame({
+        "person_id": ids, "endpoint": "platinum", "bundle": "fed_checklist",
+        "model_family": "predictive_checklist", "config": "both", "landmark_days": 180,
+        "model_horizon_days": 1825, "evaluation_horizon_days": 1825, "risk_score": flag * 2 + 1,
+        "flag": flag, "duration_days": np.where(case, 500.0, 2500.0), "event": 1})
+    other = pd.concat([scores.assign(config="baseline"), scores.assign(landmark_days=90),
+                       scores.assign(model_horizon_days=365, evaluation_horizon_days=365),
+                       scores.assign(evaluation_horizon_days=365),
+                       scores.assign(model_family="xgboost_cox")], ignore_index=True)
+    clinical = pd.DataFrame({
+        "person_id": ids, "landmark_days": 180,
+        "GLEASON_SCORE": np.where(index >= 215, np.nan, np.where(flag, 9.0, 7.0)),
+        "HAS_SEQUENCING": np.where((index >= 200) & (index < 215), np.nan, True),
+        "TP53_ANY": np.where(tsg, 1.0, 0.0), "RB1_ANY": 0.0, "PTEN_ANY": np.nan})
+    return pd.concat([scores, other], ignore_index=True), clinical
+
+
+def test_checklist_patients_keep_one_row_per_patient_of_the_figure_model(tmp_path):
+    scores, clinical = _checklist_tables()
+    patients = fcc.checklist_patients(scores)
+    assert list(patients.columns) == fcc.CHECKLIST_PATIENT_COLUMNS
+    assert len(patients) == patients["person_id"].nunique() == 230
+    assert set(patients["flag"]) == {0, 1}
+    assert patients["flag"].eq(patients["risk_score"].ge(2).astype(int)).all()
+    comparison = fcc.checklist_rule_comparison(scores, clinical, n_bootstrap=20)
+    fcc.write_outputs(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), tmp_path, checklist=patients,
+                      checklist_comparison=comparison)
+    assert len(pd.read_csv(tmp_path / fcc.CHECKLIST_PATIENTS_FILE)) == 230
+    assert len(pd.read_csv(tmp_path / fcc.CHECKLIST_COMPARISON_FILE)) == 3
+
+
+def test_checklist_patients_require_the_figure_model():
+    scores, _ = _checklist_tables()
+    with pytest.raises(ValueError, match="no predictive_checklist scores"):
+        fcc.checklist_patients(scores[scores["landmark_days"] == 90])
+
+
+def test_checklist_rules_are_paired_balanced_accuracy_on_the_same_patients():
+    scores, clinical = _checklist_tables()
+    comparison = fcc.checklist_rule_comparison(scores, clinical, n_bootstrap=100)
+    assert list(comparison.columns) == fcc.CHECKLIST_COMPARISON_COLUMNS
+    rows = comparison.set_index("rule")
+    assert list(rows.index) == ["checklist", "gleason", "tsg"]
+    # Only sequenced patients with a Gleason score, and the same ones for every rule.
+    assert rows["n_patients"].eq(200).all() and rows["n_events"].eq(200).all()
+    assert rows["n_positive"].to_dict() == {"checklist": 75, "gleason": 75, "tsg": 58}
+    # No censoring here, so AUC at the horizon is (sensitivity + specificity) / 2.
+    assert np.isclose(rows.loc["checklist", "auc"], (2 / 3 + 3 / 4) / 2)
+    assert np.isclose(rows.loc["tsg", "auc"], (1 / 2 + 4 / 5) / 2)
+    # Gleason matches the flag patient for patient, so a paired delta is exactly zero.
+    assert rows.loc["gleason", "delta_auc_vs_checklist"] == 0
+    assert rows.loc["gleason", ["delta_auc_lo", "delta_auc_hi"]].eq(0).all()
+    assert rows.loc["gleason", "auc_hi"] > rows.loc["gleason", "auc_lo"]
+    expected = rows.loc["tsg", "auc"] - rows.loc["checklist", "auc"]
+    assert np.isclose(rows.loc["tsg", "delta_auc_vs_checklist"], expected)
+    assert rows.loc["tsg", "delta_auc_lo"] < expected < rows.loc["tsg", "delta_auc_hi"]
 
 
 # --------------------------------------------------------------------------- #

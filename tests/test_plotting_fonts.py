@@ -62,7 +62,7 @@ def test_preference_and_one_substitution_notice(monkeypatch, available, expected
 
 
 def test_clinical_comparison_renders_without_arial(monkeypatch, tmp_path):
-    from COMPASS.survival_analysis import federated_clinical_comparison as fcc
+    from COMPASS.survival_analysis.federated import federated_clinical_comparison as fcc
 
     original_findfont = font_manager.findfont
 
@@ -80,8 +80,8 @@ def test_clinical_comparison_renders_without_arial(monkeypatch, tmp_path):
         for model in (fcc.TRANSFERRED_LABS, fcc.CLINICAL_COX, fcc.COMBINED_COX)
     ])
     with pytest.warns(RuntimeWarning, match="using DejaVu Sans"):
-        fcc.plot_clinical_comparison(comparison, tmp_path / "comparison.png", ("platinum",))
-    assert (tmp_path / "comparison.png").read_bytes().startswith(b"\x89PNG")
+        fcc.plot_clinical_comparison(comparison, tmp_path / "plotted.pdf", ("platinum",))
+    assert (tmp_path / "plotted.pdf").read_bytes().startswith(b"%PDF")
     ax = plt.gcf().axes[0]
     assert ax.yaxis.label.get_family() == ["DejaVu Sans"]
     assert ax.yaxis.label.get_size() == plotting.FONT_SIZES["axis_title"]

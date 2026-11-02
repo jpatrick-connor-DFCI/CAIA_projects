@@ -10,9 +10,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_R = (
-    REPO_ROOT / "COMPASS" / "survival_analysis" / "COMPASS_generate_figures_pipeline.R"
+    REPO_ROOT / "COMPASS" / "survival_analysis" / "figure_pipeline" / "COMPASS_generate_figures_pipeline.R"
 )
-FIGURES_SCRIPT = REPO_ROOT / "COMPASS" / "survival_analysis" / "07_figures" / "_common.R"
+FIGURES_SCRIPT = REPO_ROOT / "COMPASS" / "figures" / "_common.R"
 
 
 def test_descriptive_longitudinal_uses_exact_base_cohort():
@@ -248,15 +248,14 @@ def test_figure_notebook_preloads_shared_data_before_forking():
     assert 'cell_started <- proc.time()[["elapsed"]]' in source
 
 
-def test_png_is_default_and_pdf_is_opt_in():
+def test_pdf_is_the_only_export_format():
     pipeline = PIPELINE_R.read_text()
     notebook = FIGURES_SCRIPT.read_text()
-    assert "save_pdf = FALSE" in pipeline
     assert 'ggsave(temporary, plot = plot' in pipeline
-    assert "need_pdf <- save_pdf &&" in pipeline
+    assert "device = figure_pdf_device" in pipeline
+    assert "agg_png" not in pipeline
+    assert "figure_svg_device" not in pipeline
     assert "kept existing" not in pipeline
-    assert 'Sys.getenv("COMPASS_RENDER_PDF", "false")' in notebook
-    assert "save_pdf = RENDER_PDF" in notebook
     assert 'RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 200' in notebook
 
 
@@ -268,7 +267,6 @@ def test_render_reuses_completed_outputs_with_explicit_overwrite():
     assert "list.files(" not in setup
     assert "list.dirs(" not in setup
     assert "dir.exists(" not in setup
-    assert "figure_file_complete(png_out)" in save
     assert "figure_file_complete(pdf_out)" in save
     assert "remove_legacy" not in save
     assert "overwrite ||" in save

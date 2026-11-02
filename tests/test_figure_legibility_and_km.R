@@ -1,7 +1,7 @@
-source("COMPASS/survival_analysis/figure_typography.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_typography.R")
 # Run with COMPASS_REVIEW_DIR=/tmp/compass-revised Rscript tests/test_figure_legibility_and_km.R
 suppressPackageStartupMessages({library(ggplot2); library(dplyr); library(tidyr); library(stringr); library(survival); library(readr)})
-source_exprs <- parse("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
+source_exprs <- parse("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
 find_assignment <- function(expr, name) {
   if (missing(expr) || !is.call(expr)) return(NULL)
   if (identical(expr[[1]], as.name("<-")) && identical(expr[[2]], as.name(name))) return(expr)
@@ -23,7 +23,7 @@ for (name in c("theme_fig", "figure_tertiles", "figure_extreme_quintiles", "figu
     if (!is.null(assignment)) eval(assignment)
   }
 }
-source("COMPASS/survival_analysis/figure_supplements.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_supplements.R")
 
 # Ties are preserved; degenerate distributions cannot be claimed to have tertiles.
 groups <- figure_tertiles(c(1,1,2,3,4,5,6,7,8,NA,Inf))
@@ -185,9 +185,9 @@ if (nzchar(review)) {
     is_forest <- startsWith(name,"forest_")
     w <- if (is_forest) COHORT_FOREST_SLIDE_SIZE[["width"]] else if (name == "sensitivity") 8.5 else 9
     p <- prepare_figure_text(plots[[name]],w)
-    ggsave(file.path(review,paste0(name,".png")),p,width=w,
+    ggsave(file.path(review,paste0(name,".pdf")),p,width=w,
            height=if(is_forest)COHORT_FOREST_SLIDE_SIZE[["height"]] else if(name == "sensitivity")5.5 else 7.5,
-           dpi=120,device=ragg::agg_png,bg="white")
+           device=grDevices::cairo_pdf,bg="white")
   }
 }
 cat("Legibility, tertile ties, indexed times, mutation selection, Gleason groups, and endpoint forests passed.\n")

@@ -206,7 +206,7 @@ class TestRunId:
     def test_it_matches_the_pipelines_own_constructor(self):
         """compass_pipeline.longitudinal_run_id builds the same name for the
         no-cut case; derive it rather than restating the literal."""
-        sys.path.insert(0, str(REPO / "COMPASS" / "survival_analysis"))
+        sys.path.insert(0, str(REPO / "COMPASS" / "survival_analysis" / "pipeline"))
         from unittest import mock
 
         with mock.patch.object(Path, "mkdir", lambda *a, **k: None):
@@ -330,7 +330,7 @@ class TestPipelineWiring:
     def cp(self):
         from unittest import mock
 
-        sys.path.insert(0, str(REPO / "COMPASS" / "survival_analysis"))
+        sys.path.insert(0, str(REPO / "COMPASS" / "survival_analysis" / "pipeline"))
         with mock.patch.object(Path, "mkdir", lambda *a, **k: None):
             import compass_pipeline
 

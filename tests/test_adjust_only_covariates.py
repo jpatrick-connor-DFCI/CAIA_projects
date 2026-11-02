@@ -16,8 +16,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from COMPASS.survival_analysis import compass_pipeline as cp
-from COMPASS.survival_analysis import cox_aggregated as ca
+from COMPASS.survival_analysis.pipeline import compass_pipeline as cp
+from COMPASS.survival_analysis.pipeline import cox_aggregated as ca
 from survival_common.cox_engine import adjust_only_columns, predictive_columns
 
 FEATURES = ["LAB_A__mean", "LAB_A__n_observations"]

@@ -3,7 +3,7 @@ guarantee that adding it left the platinum endpoint untouched.
 
 Grounded in survival_common/cohort.py (make_outcome_df's NEPC derivation,
 landmark rebasing, administrative censoring, and the ``require_nepc``-gated
-validity conditions) and COMPASS/survival_analysis/cox_aggregated.py
+validity conditions) and COMPASS/survival_analysis/pipeline/cox_aggregated.py
 (ENDPOINTS + OUTCOME_METADATA_COLUMNS).
 
 The central invariant here is the *gate*: ``t_nepc > 0`` makes NEPC an incident
@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from COMPASS.survival_analysis import cox_aggregated as cox
+from COMPASS.survival_analysis.pipeline import cox_aggregated as cox
 from survival_common.cohort import make_outcome_df
 
 

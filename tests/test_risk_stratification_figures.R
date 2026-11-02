@@ -1,8 +1,8 @@
 # Clinical-combination mean AUC(t), risk-stratification KM, and TP53/PTEN/RB1
 # co-mutation figures (Figure 4e-h). Run from the repo root:
 #   Rscript tests/test_risk_stratification_figures.R
-source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_workflow.R")
+source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
 
 root <- tempfile("riskstrat-figures-"); dir.create(root)
 on.exit(unlink(root, recursive = TRUE), add = TRUE)
@@ -69,7 +69,7 @@ stopifnot(any(vapply(p_default$layers, function(l) inherits(l$geom, "GeomRibbon"
           p_default$labels$y == "Platinum-free probability")
 
 # ---- figure 4e-h block, evaluated with stubbed save/table writers ----------
-lines <- readLines("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
+lines <- readLines("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
 start <- grep("^  # Clinical combinations \\(compass_pipeline", lines)
 end <- grep("^  # Retired: supplemental all-model comparison\\.", lines)
 stopifnot(length(start) == 1, length(end) == 1, start < end)
@@ -168,8 +168,8 @@ stopifnot(figure_public_path(file.path("/x/ADT/by_figure/figure4/e_combinations_
             "/x/ADT/03_univariate/cohort_sensitivity/metastatic_llm__incl/04_multivariate/internal/discrimination_auc__platinum__metastatic_llm__incl",
           figure_public_path("/x/ADT/by_figure/cohort_comparison/lm180/nepc__all__incl") ==
             "/x/ADT/03_univariate/cohort_sensitivity/cohort_forest_lm180__nepc__all__incl",
-          federated_output_path("/x/ADT", "xgboost_importance_no_dfci", ".png") ==
-            "/x/ADT/04_multivariate/federated/xgboost_importance_no_dfci__platinum.png",
+          federated_output_path("/x/ADT", "xgboost_importance_no_dfci", ".pdf") ==
+            "/x/ADT/04_multivariate/federated/xgboost_importance_no_dfci__platinum.pdf",
           federated_output_path("/x/ADT", "transfer_auc_t_no_dfci") == "/x/ADT/05_transfer/transfer_auc_t_no_dfci__platinum",
           federated_output_path("/x/ADT", "site_incidence_lm000") == "/x/ADT/01_cohort/site_incidence_lm000__platinum",
           federated_output_path("/x/ADT", "federated_km_quintile_psa_landmark0_by_site") ==
@@ -207,6 +207,7 @@ stopifnot(setequal(list.files(section), c("comutation_lm90__p.png", "comutation_
 html <- paste(readLines(file.path(arm, "data", "index.html")), collapse = "\n")
 manifest <- readr::read_csv(file.path(arm, "data", "manifest.csv"), show_col_types = FALSE)
 stopifnot(grepl('href="../03_univariate/internal/data/comutation_lm90__p.csv"', html, fixed = TRUE),
-          grepl('src="../03_univariate/internal/comutation_lm90__p.png"', html, fixed = TRUE),
+          grepl('src="../03_univariate/internal/comutation_lm90__p.pdf"', html, fixed = TRUE),
+          !any(grepl("\\.png$", manifest$path)),
           all(manifest$topic == "03_univariate/internal"))
 cat("risk stratification figure tests passed\n")

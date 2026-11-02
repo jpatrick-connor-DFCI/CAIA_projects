@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from COMPASS.survival_analysis import compass_pipeline as cp
+from COMPASS.survival_analysis.pipeline import compass_pipeline as cp
 from survival_common.heldout_bootstrap import percentile_ci, score_heldout
 from survival_common.helper import survival_columns
 
@@ -220,7 +220,7 @@ def test_modes_with_different_test_patients_are_refused(runs):
 
 
 def _notebook():
-    path = Path(cp.SURVIVAL_DIR) / "03c_multivariate_adjust_only.ipynb"
+    path = Path(cp.SURVIVAL_DIR).parent / "notebooks" / "03c_multivariate_adjust_only.ipynb"
     return {cell["id"]: "".join(cell["source"]) for cell in json.loads(path.read_text())["cells"]}
 
 

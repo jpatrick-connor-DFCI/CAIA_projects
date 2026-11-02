@@ -2,7 +2,7 @@
 
 Mirrors tests/test_out_of_fold_risk_scores.py (the elastic-net Cox scheme) for
 `compute_out_of_fold_risk_scores_xgb` in
-COMPASS/survival_analysis/multivariate_analysis.py (Plan §3). Before this
+COMPASS/survival_analysis/pipeline/multivariate_analysis.py (Plan §3). Before this
 function existed, XGBoost had no held-out-for-every-patient scoring path at
 all, so labs-vs-clinical stratification figures could only use the
 test-block score for that arm while elastic-net had a full-cohort cv_oof
@@ -29,7 +29,7 @@ pytest.importorskip("xgboost")
 pytest.importorskip("lifelines")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SURVIVAL_DIR = REPO_ROOT / "COMPASS" / "survival_analysis"
+SURVIVAL_DIR = REPO_ROOT / "COMPASS" / "survival_analysis" / "pipeline"
 for _p in (str(REPO_ROOT), str(SURVIVAL_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)

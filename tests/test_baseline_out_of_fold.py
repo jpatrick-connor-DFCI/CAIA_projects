@@ -25,7 +25,7 @@ import pytest
 pytest.importorskip("sksurv")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SURVIVAL_DIR = REPO_ROOT / "COMPASS" / "survival_analysis"
+SURVIVAL_DIR = REPO_ROOT / "COMPASS" / "survival_analysis" / "pipeline"
 for _p in (str(REPO_ROOT), str(SURVIVAL_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)

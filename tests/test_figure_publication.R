@@ -1,5 +1,5 @@
-source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_workflow.R")
+source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
 local({
   variable <- "COMPASS_COMBINED_KM_LANDMARK"
   previous <- Sys.getenv(variable,unset=NA_character_)
@@ -75,7 +75,7 @@ local({
   stopifnot(all(file.exists(file.path(output,"ADT","data",utils::URLdecode(urls[!startsWith(urls,"#")])))),
     identical(figure_href("trajectories/PSA test/a.png"),"trajectories/PSA%20test/a.png"))
   # Known regenerated identities archive without losing bytes; unselected
-  # endpoints stay untouched. Index generation does not copy PNG thumbnails.
+  # endpoints stay untouched. Index generation does not copy preview images.
   dir.create(dirname(old_paths[1]),recursive=TRUE)
   writeLines("old export",old_paths[1])
   unknown <- sub("platinum__","nepc__",old_paths[1]); writeLines("other cohort",unknown)
@@ -100,6 +100,12 @@ local({
   stopifnot(!any(file.exists(legacy[1:4])),all(file.exists(legacy[5:8])),
     !dir.exists(file.path(output,"ADT","associations","data")),
     length(list.files(file.path(cache,"previous_exports"),recursive=TRUE,pattern="png$"))==4)
+  # A re-rendered figure keeps its PDF; its PNG/SVG from earlier runs are archived.
+  rendered <- paste0(m$scenes[[1]]$destination,c(".pdf",".png",".svg"))
+  for(path in rendered[-1]) writeLines("old export",path)
+  figure_archive_old_exports(config,prepared)
+  stopifnot(file.exists(rendered[1]),!any(file.exists(rendered[-1])),
+    length(list.files(file.path(cache,"previous_exports"),recursive=TRUE,pattern="(png|svg)$"))==6)
   # Grouping stays within arm/cohort/endpoint. An incomplete cell retains its
   # subpanels, and complete figures follow the declared order of their panels.
   capture_mixed <- function() {

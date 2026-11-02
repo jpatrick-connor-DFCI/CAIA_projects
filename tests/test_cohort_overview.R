@@ -1,5 +1,5 @@
-source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_supplements.R")
+source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_supplements.R")
 cohorts <- c("adt", "adt_noprecastrate", "adt_metastatic_adt",
   "adt_metastatic_adt_noprecastrate", "adt_metastatic_llm", "adt_metastatic_llm_noprecastrate")
 counts <- tibble(cohort = rep(cohorts, each = 2), endpoint = rep(c("platinum", "nepc"), 6),
@@ -27,6 +27,6 @@ stopifnot(is.null(plot_cohort_event_overview(mutate(counts, status = "missing"),
 output <- Sys.getenv("COMPASS_TEST_OVERVIEW_OUTPUT", "")
 if (nzchar(output)) {
   dir.create(output, recursive = TRUE, showWarnings = FALSE)
-  for (name in names(plots)) ggsave(file.path(output, paste0(name, ".png")), plots[[name]], width = 16, height = 7.5, dpi = 120, bg = "white")
+  for (name in names(plots)) ggsave(file.path(output, paste0(name, ".pdf")), plots[[name]], width = 16, height = 7.5, bg = "white", device = grDevices::cairo_pdf)
 }
 cat("Cohort overview plots: complete, thin/zero-event, missing cells, unlabelled patients and KM cascade passed.\n")

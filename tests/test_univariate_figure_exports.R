@@ -1,5 +1,5 @@
-source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_workflow.R")
+source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
 local({
   root <- tempfile("volcano-exports-",tmpdir="/private/tmp"); dir.create(root)
   on.exit(unlink(root,recursive=TRUE))
@@ -58,7 +58,7 @@ local({
   for(p in compiled_panels[1:4]) stopifnot(identical(p$coordinates$limits$x,shared_x))
   for(p in source_plots[1:3]) stopifnot(shared_x[1]<=p$coordinates$limits$x[1],shared_x[2]>=p$coordinates$limits$x[2])
   for(scene in m$scenes) render_figure_scene(scene,m$signature,120,FALSE)
-  stopifnot(length(list.files(output,pattern="png$",recursive=TRUE))==8,
+  stopifnot(length(list.files(output,pattern="pdf$",recursive=TRUE))==8,
     length(list.files(output,pattern="rds$",recursive=TRUE))==0)
   # Warm preparation and rendering reuse both output forms.
   reused <- prepare_figure_scenes(file.path(root,"data"),"volcano-test",function() stop("Unexpected rebuild"))

@@ -1,6 +1,6 @@
 # Predictive checklists for the full ADT cohort
 
-This subproject applies [Zhang et al., Learning Optimal Predictive Checklists
+This package applies [Zhang et al., Learning Optimal Predictive Checklists
 (NeurIPS 2021)](https://arxiv.org/html/2112.01020v1) to first platinum exposure
 and first documented NEPC finding. Each model is a short, unit-weighted M-of-N
 checklist: flag a patient if at least M of its N conditions are true.
@@ -106,7 +106,7 @@ binary operating points.
 From the repository root, in the study environment:
 
 ```bash
-python -m pip install -r COMPASS/survival_analysis/predictive_checklists/requirements.txt
+python -m pip install -r requirements.txt
 
 # Inspect both endpoints and all three landmarks before training.
 python -m COMPASS.survival_analysis.predictive_checklists \
@@ -122,8 +122,10 @@ python -m COMPASS.survival_analysis.predictive_checklists \
 
 `--platinum-inputs` and `--nepc-inputs` override individual trees. For a baseline
 pilot use `--landmarks 0 --horizons 365`; `--no-baselines` and
-`--no-nepc-sensitivity` explicitly disable optional comparisons. The local
-`run_predictive_checklists.ipynb` supplies the same commands. Defaults allow 60
+`--no-nepc-sensitivity` explicitly disable optional comparisons. The Predictive
+checklists section of `../03_multivariate.ipynb` runs preflight and training for
+both configs. Training there is gated by `RUN_CHECKLISTS` and resumes unless
+`CHECKLIST_OVERWRITE` is set. Defaults allow 60
 seconds **per checklist fit**, shared across optimization stages; total runtime
 depends on folds, lengths, horizons and populations. No full-cohort runtime or
 event counts are assumed until preflight and a pilot have run on cluster data.
@@ -180,13 +182,10 @@ lab means as the only candidates. Age is never removed. Like
 `--adjust-only-mode`, these are CLI overrides: the JSON configs are unchanged,
 and settings left at their defaults are omitted from manifests and `model.json`.
 
-`10c_platinum_adjust_only_vs_full.ipynb` uses them to compare adjust-only and
-full checklists without vitals and with means only.
-
 ## Gleason + TP53/RB1/PTEN subset
 
-`run_predictive_checklists_gleason_trio.ipynb` with `gleason_trio_config.json`
-fits 5-year platinum and NEPC checklists on each endpoint's
+The `gleason_trio` run in `../03_multivariate.ipynb` uses `gleason_trio_config.json`
+to fit 5-year platinum and NEPC checklists on each endpoint's
 `somatic_gleason/gleason_somatic_available_case/` inputs (passed via
 `--platinum-inputs` / `--nepc-inputs`). That subset is anchored on the
 sequencing report date, not ADT start: landmarks are sequencing + D, and
@@ -202,7 +201,7 @@ this subset, and the resolved-label NEPC sensitivity is off.
 
 The transfer notebooks also reuse this optimizer, fold-specific preprocessing,
 calibrator and held-out evaluator for a separate supplemental arm implemented in
-`../federated_transfer_checklists.py`. Its candidates are a frozen no-DFCI
+`../federated/federated_transfer_checklists.py`. Its candidates are a frozen no-DFCI
 Cox/XGBoost score evaluated on the sequencing clock, Gleason and TP53/RB1/PTEN
 any-alteration status, with no separate age or lab items. It fits 365-/1825-day
 platinum, NEPC and AVPC models using existing patient splits. Endpoint-specific
@@ -214,7 +213,7 @@ directory and is rendered with Figure 5. It does not change the default full-ADT
 checklist runs or refit the federated bundles.
 
 The default HiGHS backend comes with SciPy's `milp`; CBC (`--solver cbc`) and
-CPLEX (`--solver cplex`) are optional. See `optional_requirements.txt` and
+CPLEX (`--solver cplex`) are optional. See the root `requirements.txt` and
 `upstream.py` for the pinned authors' package and reference-loading interface.
 The weighted formulation is local code, **not an unmodified upstream model**.
 The original package lacks a per-patient sample-weight API. `UPSTREAM_COMMIT`
@@ -255,9 +254,9 @@ Rscript COMPASS/survival_analysis/predictive_checklists/render_figures.R /tmp/ch
 
 For the manuscript supplement (platinum and NEPC, 5-year horizon, each landmark, labs only
 versus labs + Gleason + somatic), fit `default_config.json` and `gleason_trio_config.json` with
-`"horizons": [1825]`. The cached figure workflow picks the runs up on its own: notebook `06` flattens them
+`"horizons": [1825]`. The cached figure workflow picks the runs up on its own: notebook `05` flattens them
 (defaults `<data root>/survival_analysis/predictive_checklists/{full_adt,gleason_trio_labs}`, override with
-`COMPASS_CHECKLIST_LABS_RUN` / `COMPASS_CHECKLIST_TRIO_RUN`) and `07_figures/all.R` renders the figures into
+`COMPASS_CHECKLIST_LABS_RUN` / `COMPASS_CHECKLIST_TRIO_RUN`) and `COMPASS/figures/all.R` renders the figures into
 `04_multivariate/internal`. To preview two runs without the figure cache, flatten and draw them directly:
 
 ```bash

@@ -5,7 +5,7 @@ if (length(args) < 1L) {
   stop("Usage: Rscript render_figures.R <run-output-directory> [figure-directory]")
 }
 script_dir <- dirname(normalizePath(sub("^--file=", "", grep("^--file=", commandArgs(), value=TRUE)[1L])))
-source(file.path(script_dir, "..", "figure_typography.R"))
+source(file.path(script_dir, "..", "figure_pipeline", "figure_typography.R"))
 figure_require_font()
 root <- normalizePath(args[[1L]], mustWork = TRUE)
 out <- if (length(args) >= 2L) args[[2L]] else file.path(root, "figures")
@@ -58,11 +58,6 @@ for (population in unique(metrics$population)) {
       }
     }
     stem <- file.path(out, paste(endpoint, population, "held_out", sep = "_"))
-    png(paste0(stem, ".png"), width = 2200, height = 720 * length(landmarks), res = 200,
-        type = if (capabilities("cairo")) "cairo" else getOption("bitmapType"))
-    draw(); dev.off()
-    figure_svg_device(paste0(stem, ".svg"), width = 11, height = 3.6 * length(landmarks))
-    draw(); dev.off()
     figure_pdf_device(paste0(stem, ".pdf"), width = 11, height = 3.6 * length(landmarks))
     draw(); dev.off()
   }
@@ -83,11 +78,6 @@ if (file.exists(calibration_path)) {
     abline(0, 1, lty = 2, col = "grey60")
   }
   }
-  png(file.path(out, "checklist_calibration.png"), width = 1200, height = 1200, res = 200,
-      type = if (capabilities("cairo")) "cairo" else getOption("bitmapType"))
-  draw_calibration(); dev.off()
-  figure_svg_device(file.path(out, "checklist_calibration.svg"), width = 6, height = 6)
-  draw_calibration(); dev.off()
   figure_pdf_device(file.path(out, "checklist_calibration.pdf"), width = 6, height = 6)
   draw_calibration(); dev.off()
 }

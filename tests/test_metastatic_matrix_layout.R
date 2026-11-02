@@ -1,6 +1,6 @@
-source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_workflow.R")
-source("COMPASS/survival_analysis/figure_supplements.R")
+source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_supplements.R")
 local({
   root <- tempfile("matrix-layout-",tmpdir="/private/tmp"); dir.create(root)
   on.exit(unlink(root,recursive=TRUE))
@@ -37,7 +37,7 @@ local({
     stopifnot(scene$width==7,scene$height==6)
     render_figure_scene(scene,scenes$signature,120,FALSE)
   }
-  stopifnot(length(list.files(output,pattern="png$"))==3,
+  stopifnot(length(list.files(output,pattern="pdf$"))==3,
     length(list.files(output,pattern="rds$",recursive=TRUE))==0)
 })
 cat("Label matrices: 7x6 exports, square cells, unchanged counts/fractions and cached rendering passed.\n")

@@ -8,7 +8,7 @@ suppressPackageStartupMessages({
 })
 options(readr.num_threads = 1L)
 pipeline <- new.env(parent = globalenv())
-for (expr in parse("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")) {
+for (expr in parse("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")) {
   if (is.call(expr) && identical(expr[[1]], as.name("<-"))) eval(expr, pipeline)
 }
 

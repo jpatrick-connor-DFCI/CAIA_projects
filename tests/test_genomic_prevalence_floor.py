@@ -9,7 +9,7 @@ that whole tuple would incorrectly prevalence-filter the Gleason score as if
 it were a binary mutation indicator.
 
 The fix:
-  * ``COMPASS.survival_analysis.cox_aggregated.prepare_landmark_context``
+  * ``COMPASS.survival_analysis.pipeline.cox_aggregated.prepare_landmark_context``
     reads the ``feature_kind`` column in ``somatic_gleason_features.csv``
     (written by ``build_somatic_gleason_inputs.py``) to isolate the
     ``"somatic_binary"`` rows as ``genomic_feature_cols``, distinct from
@@ -119,7 +119,7 @@ class TestPrepareLandmarkContextSourceUsesFeatureKind:
     def test_source_reads_feature_kind_for_genomic_scoping(self):
         import inspect
 
-        import COMPASS.survival_analysis.cox_aggregated as compass_ca
+        import COMPASS.survival_analysis.pipeline.cox_aggregated as compass_ca
 
         source = inspect.getsource(compass_ca.prepare_landmark_context)
         assert "feature_kind" in source
@@ -131,7 +131,7 @@ class TestPrepareLandmarkContextSourceUsesFeatureKind:
         # (0.025). Not imported directly alongside COMPASS's module here: both
         # adapters mutate sys.path at import time in conflicting ways, so
         # importing both cox_aggregated modules in one process is unsafe.
-        import COMPASS.survival_analysis.cox_aggregated as compass_ca
+        import COMPASS.survival_analysis.pipeline.cox_aggregated as compass_ca
 
         assert compass_ca.DEFAULT_MIN_GENOMIC_PREVALENCE == 0.025
 
@@ -149,7 +149,7 @@ class TestGenomicFeatureSetArmsThePrevalenceFloor:
     def test_genomic_branch_scopes_and_excludes_non_snv(self):
         import inspect
 
-        import COMPASS.survival_analysis.cox_aggregated as compass_ca
+        import COMPASS.survival_analysis.pipeline.cox_aggregated as compass_ca
 
         source = inspect.getsource(compass_ca.prepare_landmark_context)
         # The branch must exist and must populate the scoping tuple.
@@ -157,7 +157,7 @@ class TestGenomicFeatureSetArmsThePrevalenceFloor:
         assert "always_include_feature_cols = genomic_feature_cols" in source
 
     def test_snv_only_regexes_are_defined(self):
-        import COMPASS.survival_analysis.cox_aggregated as compass_ca
+        import COMPASS.survival_analysis.pipeline.cox_aggregated as compass_ca
 
         # Testable set is SNV-only; the broad pattern exists so non-SNV
         # columns can be excluded rather than falling into the lab set.

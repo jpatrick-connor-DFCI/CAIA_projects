@@ -1,5 +1,5 @@
-source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_workflow.R")
+source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
 
 # The correction includes hidden height/unstable estimates, excludes non-mean
 # statistics, and remains separate by endpoint and landmark.
@@ -29,7 +29,13 @@ p <- plot_volcano_panel(m,"0 days")
 repel <- Filter(function(layer) inherits(layer$geom,"GeomTextRepel"),p$layers)[[1]]$data
 stopifnot(nrow(repel)==3,all(repel$risk_coef>=0),!"Body height" %in% repel$lab_name,
   all(repel$n_mean_tests==4),repel$q_value[repel$lab_name=="Testosterone"]==.04)
-invisible(ggplot_build(p))
+built <- ggplot_build(p)
+stopifnot(p$coordinates$limits$x[1]==1,
+  p$scales$get_scales("x")$trans$name=="log-10",
+  all(vapply(Filter(function(layer) inherits(layer$geom,"GeomPoint"),p$layers),
+    function(layer) rlang::as_label(layer$mapping$x)=="risk_hr",logical(1))),
+  isTRUE(all.equal(built$data[[1]]$xintercept,0)),
+  isTRUE(all.equal(built$data[[2]]$xintercept,log10(2))))
 path <- tempfile(fileext=".csv")
 readr::write_csv(d,path)
 export <- federated_volcano_data(path)

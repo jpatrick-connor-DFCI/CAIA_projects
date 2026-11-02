@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from COMPASS.survival_analysis import compass_pipeline as cp
+from COMPASS.survival_analysis.pipeline import compass_pipeline as cp
 from survival_common.longitudinal_targets import (
     CONFIG_ENDPOINTS,
     LONGITUDINAL_CONFIGS,

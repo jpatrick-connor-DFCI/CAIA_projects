@@ -46,7 +46,7 @@ def test_missing_horizon_is_reported_not_dropped(tmp_path):
 
 
 def test_prepare_checklist_supplement_caches_and_skips(tmp_path):
-    from COMPASS.survival_analysis.prepare_figure_data import prepare_checklist_supplement
+    from COMPASS.survival_analysis.figure_pipeline.prepare_figure_data import prepare_checklist_supplement
 
     config = {"cache_root": str(tmp_path / "cache"), "checklist_horizon": 365,
               "checklist_labs_run": str(tmp_path / "labs"),

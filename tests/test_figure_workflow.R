@@ -1,7 +1,7 @@
 # End-to-end synthetic workflow: two endpoints, independent federation, resume,
 # format-only rendering, and missing optional inputs. No clinical data needed.
-source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_workflow.R")
+source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
 local({
   root <- tempfile("figure-workflow-", tmpdir = Sys.getenv("COMPASS_TEST_OUTPUT_ROOT", tempdir())); dir.create(root)
   if (Sys.getenv("COMPASS_TEST_KEEP_OUTPUT") == "1") message("Synthetic outputs: ", root)
@@ -107,7 +107,7 @@ local({
       delta_lo=delta_c_vs_transferred-.05,delta_hi=delta_c_vs_transferred+.05,
       mean_auc=.66,mean_auc_lo=.6,mean_auc_hi=.72,delta_auc_vs_transferred=if_else(model=="transferred_labs",NA_real_,.03),
       delta_auc_lo=delta_auc_vs_transferred-.05,delta_auc_hi=delta_auc_vs_transferred+.05),no_dfci_clinical_path)
-  pipeline_path <- normalizePath("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
+  pipeline_path <- normalizePath("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
   cfg <- list(data_root = root, cache_root = file.path(root, "cache"), fig_root = file.path(root, "figures"),
     cohorts = "adt", endpoints = c("platinum", "nepc"), scope = "all", labs = ANDROGEN,
     classifier_path = file.path(root, "classifier"), gam = FALSE, adt_intent = FALSE,
@@ -129,7 +129,7 @@ local({
   # Fixture setup represents the separate notebook preparation stage. Python
   # is then unavailable for every R workflow stage, not just render-only.
   missing <- tryCatch(figure_notebook_manifest(cfg), error = identity)
-  stopifnot(inherits(missing, "error"), grepl("06_prep_figure_data.ipynb", conditionMessage(missing), fixed = TRUE))
+  stopifnot(inherits(missing, "error"), grepl("05_prep_figure_data.ipynb", conditionMessage(missing), fixed = TRUE))
   config_path <- file.path(root, "fixture-config.json")
   jsonlite::write_json(cfg, config_path, auto_unbox = TRUE)
   stopifnot(system2("python3", c(shQuote(file.path(dirname(pipeline_path), "prepare_figure_data.py")),
@@ -137,14 +137,14 @@ local({
   for (name in c("system", "system2")) assign(name, function(...) stop("Process launch forbidden during R figures"), .GlobalEnv)
   on.exit(rm(list = c("system", "system2"), envir = .GlobalEnv), add = TRUE)
   mismatch <- tryCatch(figure_notebook_manifest(modifyList(cfg, list(cohorts = "arpi"))), error = identity)
-  stopifnot(inherits(mismatch, "error"), grepl("06_prep_figure_data.ipynb", conditionMessage(mismatch), fixed = TRUE))
+  stopifnot(inherits(mismatch, "error"), grepl("05_prep_figure_data.ipynb", conditionMessage(mismatch), fixed = TRUE))
   t1 <- system.time(first <- run_cached_figure_workflow(cfg, pipeline_path, "all", dpi = 60,
     prepare_workers = 1L, render_workers = 2L, forest_config = forest, federated_config = fc))[["elapsed"]]
   retained_exports <- figure_retained_exports(pipeline_path)
   stopifnot(length(first$prepared) == 4L, length(first$rendered) > 20L,
-            all(vapply(first$rendered, function(x) x$rendered %in% c(1L, 2L), logical(1))))
+            all(vapply(first$rendered, function(x) x$rendered == 1L, logical(1))))
   manuscript_scenes <- Filter(function(s) isTRUE(s$manuscript) &&
-      figure_retained_image(s$destination, cfg$fig_root, ".png", retained_exports),
+      figure_retained_image(s$destination, cfg$fig_root, ".pdf", retained_exports),
     unlist(lapply(first$prepared,`[[`,"scenes"),recursive=FALSE))
   stopifnot(length(manuscript_scenes)>=7L,
     all(vapply(manuscript_scenes,function(s) grepl("/ADT/(0[1-5]_[a-z_]+(/internal|/federated|/cohort_sensitivity)?|0[78]_[a-z_]+)/(alternative_manuscript|manuscript)/",s$destination) &&
@@ -187,8 +187,8 @@ local({
     forest_config = forest, federated_config = fc)
   stopifnot(all(vapply(third$rendered, function(x) x$rendered == 0L, logical(1))))
   stale <- tryCatch(figure_notebook_manifest(cfg), error = identity)
-  stopifnot(inherits(stale, "error"), grepl("06_prep_figure_data.ipynb", conditionMessage(stale), fixed = TRUE))
-  # Run the actual 07_figures/all.R with a federation-only scope and raw patient
+  stopifnot(inherits(stale, "error"), grepl("05_prep_figure_data.ipynb", conditionMessage(stale), fixed = TRUE))
+  # Run the actual COMPASS/figures/all.R with a federation-only scope and raw patient
   # input hidden. This verifies configuration wiring as well as the helper API.
   variables <- c(CAIA_PROJECT_ROOT = normalizePath("."),
     COMPASS_DATA_ROOT = root, COMPASS_FIG_ROOT = cfg$fig_root,
@@ -204,7 +204,7 @@ local({
   stopifnot(file.rename(file.path(root, "survival_analysis", "local_runs_adt"),
                         file.path(root, "local_runs_hidden")))
   env <- new.env(parent = globalenv())
-  source(file.path(dirname(pipeline_path), "07_figures/all.R"), local = env)
+  source(file.path(dirname(dirname(dirname(pipeline_path))), "figures", "all.R"), local = env)
   stopifnot(identical(names(env$figure_run$prepared), "federated"))
   stopifnot(identical(vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem"),
                       c("psa_forest", "testosterone_forest", "site_incidence_lm000",
@@ -241,7 +241,7 @@ local({
             !any(dir.exists(file.path(cfg$fig_root,"ADT",FIGURE_RETIRED_FOLDERS))))
   stopifnot(nrow(site_export) == 2L, all(site_export$landmark_days == 0))
   federated_cfg <- cfg; federated_cfg$scope <- "federated"
-  # Elastic-net, XGBoost and 04 transfer files require a refreshed 06 manifest after source changes.
+  # Elastic-net, XGBoost and 04 transfer files require a refreshed 05 manifest after source changes.
   for(path in c(xgb_metrics_path,xgb_importance_path,cox_metrics_path,cox_coefficients_path,
                 transfer_metrics_path,no_dfci_clinical_path)) {
     original_time <- file.info(path)$mtime
@@ -259,7 +259,7 @@ local({
   Sys.setFileTime(site_path, file.info(site_path)$mtime + 5)
   changed_sites <- tryCatch(figure_notebook_manifest(federated_cfg), error = identity)
   stopifnot(inherits(changed_sites, "error"),
-            grepl("06_prep_figure_data.ipynb", conditionMessage(changed_sites), fixed = TRUE))
+            grepl("05_prep_figure_data.ipynb", conditionMessage(changed_sites), fixed = TRUE))
   # Optional DeepHit and checklist exports render after a later delivery. The
   # first workflow run above already exercised the missing-input fallback.
   for(suffix in c("","_no_DFCI")) {
@@ -278,7 +278,7 @@ local({
     all(dh_no_dfci$name=="Dynamic DeepHit, no DFCI"))
   render_federated_deephit_performance(file.path(cfg$fig_root,"ADT"),fed_path,60,TRUE)
   stopifnot(file.exists(federated_output_path(file.path(cfg$fig_root,"ADT"),
-    "deephit_performance",".png")))
+    "deephit_performance",".pdf")))
   perf <- bind_rows(
     read_csv(file.path(cfg$fig_root,"ADT","04_multivariate","federated","data",
       "elasticnet_performance__platinum.csv"),show_col_types=FALSE),
@@ -288,10 +288,10 @@ local({
     "xgboost_importance__platinum.csv"),show_col_types=FALSE)
   main_with_dynamic <- manuscript_federated_multivariable(perf,coefficient_export,importance_export)
   stopifnot("Dynamic DeepHit" %in% as.character(main_with_dynamic$data$name))
-  no_dfci_perf <- bind_rows(filter(perf,family!="dynamic_deephit"),dh_no_dfci)
-  main_no_dfci <- manuscript_federated_multivariable_no_dfci(perf,no_dfci_perf,
-    coefficient_export,importance_export)
-  stopifnot("Dynamic DeepHit, no DFCI" %in% as.character(main_no_dfci$data$name))
+  main_fig4 <- manuscript_federated_multivariable(perf,coefficient_export,importance_export,
+    key="federated_04_multivariable")
+  stopifnot(main_fig4$spec$key=="federated_04_multivariable",
+    !any(grepl("no DFCI",as.character(main_fig4$data$name),fixed=TRUE)))
   all_models_dir <- file.path(no_dfci_dir,"all_models"); dir.create(all_models_dir)
   write_csv(expand_grid(endpoint=c("platinum","nepc"),landmark_days=c(0,90,180),
       model_horizon_days=c(365,1825),config=c("both","baseline")) %>%
@@ -317,15 +317,15 @@ local({
     file.path(all_models_dir,"transfer_auc_t.csv"))
   render_federated_checklist_supplement(file.path(cfg$fig_root,"ADT"),all_models_dir,60,TRUE)
   stopifnot(file.exists(federated_output_path(file.path(cfg$fig_root,"ADT"),
-    "transfer_predictive_checklist_supplement",".png")))
+    "transfer_predictive_checklist_supplement",".pdf")))
   all_model_plot <- render_federated_all_model_transfer_supplement(
     file.path(cfg$fig_root,"ADT"),all_models_dir,60,TRUE)
   stopifnot(all(c("DeepHit landmark","DeepHit dynamic","Predictive checklist") %in%
     unique(all_model_plot$series)),
     file.exists(federated_output_path(file.path(cfg$fig_root,"ADT"),
-      "transfer_all_models_supplement",".png")))
+      "transfer_all_models_supplement",".pdf")))
   # Checklist supplement: cards for a fitted landmark and an unfit one, no workflow cache needed.
-  source("COMPASS/survival_analysis/checklist_supplement.R")
+  source("COMPASS/survival_analysis/figure_pipeline/checklist_supplement.R")
   checklist_dir <- file.path(root,"checklist_tables"); dir.create(checklist_dir)
   cells <- expand_grid(feature_set=c("labs","labs_gleason_somatic"),endpoint=c("platinum","nepc"),
       landmark_days=c(0,90)) %>%
@@ -349,8 +349,8 @@ local({
     function(plot,path,width,height,dpi,overwrite) {
       stopifnot(inherits(plot,"ggplot")); captured <<- c(captured,basename(path))
     }, figure_sidecar_path)
-  stopifnot(setequal(captured,c("figure4s_checklist_labs__platinum.png","figure4s_checklist_labs__nepc.png",
-      "figure4s_checklist_labs_gleason_somatic__platinum.png","figure4s_checklist_labs_gleason_somatic__nepc.png")),
+  stopifnot(setequal(captured,c("figure4s_checklist_labs__platinum.pdf","figure4s_checklist_labs__nepc.pdf",
+      "figure4s_checklist_labs_gleason_somatic__platinum.pdf","figure4s_checklist_labs_gleason_somatic__nepc.pdf")),
     file.exists(file.path(root,"checklist_figs","data","figure4s_checklist_items_long.csv")))
   stopifnot(is.null(suppressWarnings(render_checklist_supplement(file.path(root,"absent"),root,60,TRUE,NULL))))
   cat(sprintf("Synthetic workflow: first %.2fs; unchanged %.2fs; %d panels\n", t1, t2, length(first$rendered)))

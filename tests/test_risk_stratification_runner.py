@@ -30,7 +30,7 @@ if _inserted_source_stub:
     _source_stub.scan_source = lambda *_args, **_kwargs: None
     sys.modules[_source_module_name] = _source_stub
 
-from COMPASS.survival_analysis import compass_pipeline as cp  # noqa: E402
+from COMPASS.survival_analysis.pipeline import compass_pipeline as cp  # noqa: E402
 
 if _inserted_source_stub:
     del sys.modules[_source_module_name]

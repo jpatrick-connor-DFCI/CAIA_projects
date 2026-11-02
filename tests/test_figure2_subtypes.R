@@ -1,4 +1,4 @@
-source("COMPASS/survival_analysis/figure_typography.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_typography.R")
 # Run from the repository root: Rscript tests/test_figure2_subtypes.R
 suppressPackageStartupMessages({
   library(dplyr)
@@ -21,7 +21,7 @@ collect <- function(expr) {
     for (child in as.list(expr)[-1]) collect(child)
   }
 }
-for (expr in parse("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R"))
+for (expr in parse("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R"))
   collect(expr)
 
 # 3-class validation: y axis is manual truth, x axis is LLM prediction.
@@ -147,14 +147,14 @@ for (bad in list(tibble(DFCI_MRN = 1, updated_manual_low_confidence = "squamous"
 review_dir <- Sys.getenv("COMPASS_FIGURE2_REVIEW_DIR", "")
 if (nzchar(review_dir)) {
   dir.create(review_dir, recursive = TRUE, showWarnings = FALSE)
-  ggsave(file.path(review_dir, "panel_b.png"), landscape, width = 6.5, height = 8,
-         dpi = 120, device = ragg::agg_png)
-  ggsave(file.path(review_dir, "panel_c.png"), contrast, width = 4.5, height = 5.5,
-         dpi = 120, device = ragg::agg_png)
+  ggsave(file.path(review_dir, "panel_b.pdf"), landscape, width = 6.5, height = 8,
+         device = grDevices::cairo_pdf)
+  ggsave(file.path(review_dir, "panel_c.pdf"), contrast, width = 4.5, height = 5.5,
+         device = grDevices::cairo_pdf)
   for (key in names(cached_landscapes)) {
     scene <- cached_landscapes[[key]]
-    ggsave(file.path(review_dir, paste0(key, ".png")), scene$grob,
-           width = scene$width, height = 8, dpi = 200, device = ragg::agg_png)
+    ggsave(file.path(review_dir, paste0(key, ".pdf")), scene$grob,
+           width = scene$width, height = 8, device = grDevices::cairo_pdf)
   }
 }
 cat("Figure 2 subtype/enrichment checks passed.\n")

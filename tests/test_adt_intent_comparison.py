@@ -13,9 +13,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from COMPASS.survival_analysis import adt_intent_comparison as aic
-from COMPASS.survival_analysis import compass_pipeline as cp
-from COMPASS.survival_analysis import cox_aggregated as ca
+from COMPASS.survival_analysis.pipeline import adt_intent_comparison as aic
+from COMPASS.survival_analysis.pipeline import compass_pipeline as cp
+from COMPASS.survival_analysis.pipeline import cox_aggregated as ca
 
 
 def _tree(root, cohort, endpoint, kind):

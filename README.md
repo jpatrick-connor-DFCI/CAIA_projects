@@ -11,7 +11,7 @@ ICD-C61 cohort: `arpi` (anchored at first ARPI/chemo exposure) and `adt` (anchor
 exposure, years earlier in the treatment sequence). Entry requires a dated prostate diagnosis, male
 sex, at least five PSA measurements, and ADT on/after diagnosis; PARPi exposure, platinum before
 diagnosis, and bladder (C67), lung (C34), head-and-neck (C00-C14/C30-C32), or testicular (C62)
-cancer diagnosed strictly after first ADT are excluded. The paired, R-only `07_figures/all.R` script emits
+cancer diagnosed strictly after first ADT are excluded. The paired, R-only `COMPASS/figures/all.R` script emits
 manuscript figures for both.
 
 **Arm, cohort, and endpoint are three orthogonal axes.** The *arm* sets time 0 (the index-date
@@ -21,10 +21,10 @@ modelled. All three are selected independently, and the triple is what defines a
 
 | Axis | Registry | Declared in | Values |
 | --- | --- | --- | --- |
-| **Arm** (index date / time 0) | `_ARM_SPECS` | `COMPASS/survival_analysis/compass_pipeline.py` | `arpi`, `adt` |
-| **Cohort** (patient subset) | `COHORT_SPECS` | `COMPASS/survival_analysis/compass_pipeline.py` | `all`, `metastatic`, `localized` |
-| **Endpoint** (the event) | `ENDPOINTS` | `COMPASS/survival_analysis/cox_aggregated.py` | `platinum`, `nepc`, `avpc` |
-| **Landmark** (days after time 0) | `_ARM_SPECS[arm]["landmarks"]` | `COMPASS/survival_analysis/compass_pipeline.py` | `0`, `90`, `180` |
+| **Arm** (index date / time 0) | `_ARM_SPECS` | `COMPASS/survival_analysis/pipeline/compass_pipeline.py` | `arpi`, `adt` |
+| **Cohort** (patient subset) | `COHORT_SPECS` | `COMPASS/survival_analysis/pipeline/compass_pipeline.py` | `all`, `metastatic`, `localized` |
+| **Endpoint** (the event) | `ENDPOINTS` | `COMPASS/survival_analysis/pipeline/cox_aggregated.py` | `platinum`, `nepc`, `avpc` |
+| **Landmark** (days after time 0) | `_ARM_SPECS[arm]["landmarks"]` | `COMPASS/survival_analysis/pipeline/compass_pipeline.py` | `0`, `90`, `180` |
 
 > This README is the canonical reference for editing the pipeline. It documents the directory
 > layout, the data flow, every script's inputs/outputs, the **conventions and invariants that
@@ -73,48 +73,51 @@ COMPASS/
 │   ├── build_genomic_inputs.py           # legacy sample-anchored genomic + lab arm
 │   └── build_somatic_gleason_inputs.py   # sequencing and Gleason inputs
 │
+├── notebooks/                            # stage notebooks, run in this order from this directory
+│   ├── 01_preprocessing.ipynb            # cohort compile, ADT-intent strata + label review, preprocessing, diagnostics
+│   ├── 02_univariate.ipynb               # univariate arms + nominal-significance filter
+│   ├── 02a_cohort_comparison.ipynb       # read-only: 6 cohorts x 2 endpoints, landmark +180d
+│   ├── 03_multivariate.ipynb             # elastic-net + XGBoost + summary tables + predictive checklists
+│   ├── 03b_multivariate_longitudinal.ipynb # Dynamic-DeepHit (torch, optional; SurvLatent ODE off by default)
+│   ├── 03c_multivariate_adjust_only.ipynb # adjust-only refits into *_adjust_only trees
+│   ├── 04_federated_transfer.ipynb       # frozen rhino_data_v2 bundles scored on local DFCI endpoints
+│   └── 05_prep_figure_data.ipynb         # Polars figure tables + cache manifest for 07
+│
+├── figures/                              # one R entry point per manuscript figure; all.R runs all
+│
 └── survival_analysis/
-    ├── compass_pipeline.py               # shared setup/helper logic behind the 4 Python notebooks
-    ├── cox_aggregated.py                 # PROFILE adapter/config for shared survival code
-    ├── univariate_analysis.py            # ENTRY: univariate Cox associations
-    ├── multivariate_analysis.py          # ENTRY: elastic-net Cox or XGBoost survival:cox
-    ├── COMPASS_generate_figures_pipeline.R # per-cohort figure-generation implementation
-    ├── figure_workflow.R                 # 07 cached prepare/render, federated + manuscript figures, PNG reformat CLI
-    ├── figure_supplements.R              # cohort forest (05 CLI), cohort overview, metastatic-label figures
-    ├── checklist_supplement.R            # predictive-checklist cards (Fig 4S), sourced by 07 and render_supplement.R
-    ├── prepare_figure_data.py            # 06 Polars figure tables + metastatic labels
-    ├── 01_preprocessing.ipynb            # cohort compile, ADT-intent strata + label review, preprocessing, diagnostics
-    ├── 02_univariate.ipynb               # univariate arms + nominal-significance filter
-    ├── 03_multivariate.ipynb             # elastic-net + XGBoost + summary tables
-    ├── 03b_multivariate_longitudinal.ipynb # Dynamic-DeepHit (torch, optional; SurvLatent ODE off by default)
-    ├── 04_federated_transfer.ipynb       # frozen federated bundles scored on local DFCI endpoints
-    ├── 04a_transfer_updated.ipynb        # the same for rhino_data_v2: Cox, XGBoost, DeepHit, checklists
-    ├── 05_cohort_comparison.ipynb        # read-only: 6 cohorts x 2 endpoints, landmark +180d
-    ├── 06_prep_figure_data.ipynb         # Polars figure tables + cache manifest for 07
-    ├── 07_figures/                    # one R entry point per manuscript figure; all.R runs all
-    ├── 08_abstract_numbers.ipynb         # read-only: abstract/manuscript counts from built artifacts
-    ├── 10_platinum_feature_ablation.ipynb # Cox/XGBoost: vitals inclusion × summary-statistic sets, all landmarks, with paired CIs
-    ├── 10c_platinum_adjust_only_vs_full.ipynb # Cox/XGBoost/checklists: no vitals, means only; adjust-only vs full with paired CIs
+    ├── pipeline/
+    │   ├── compass_pipeline.py           # shared setup/helper logic behind the Python notebooks
+    │   ├── cox_aggregated.py             # PROFILE adapter/config for shared survival code
+    │   ├── univariate_analysis.py        # ENTRY: univariate Cox associations
+    │   ├── multivariate_analysis.py      # ENTRY: elastic-net Cox or XGBoost survival:cox
+    │   └── adt_intent_comparison.py      # ENTRY: read-only localized vs metastatic contrast
+    ├── federated/
+    │   ├── federated_clinical_comparison.py # 04 clinical comparison and transfer tables
+    │   └── federated_transfer_checklists.py # ENTRY: local checklists on frozen no-DFCI scores
+    ├── figure_pipeline/
+    │   ├── COMPASS_generate_figures_pipeline.R # per-cohort figure-generation implementation
+    │   ├── figure_workflow.R             # 07 cached prepare/render, federated + manuscript figures
+    │   ├── figure_supplements.R          # cohort forest (02a CLI), cohort overview, metastatic-label figures
+    │   ├── figure_typography.R           # shared typography, read from survival_common/figure_typography.json
+    │   ├── checklist_supplement.R        # predictive-checklist cards (Fig 4S), sourced by 07 and render_supplement.R
+    │   ├── prepare_figure_data.py        # 05 Polars figure tables + metastatic labels
+    │   └── risk_score_stratified_figures.py # ENTRY: risk-score stratified KM figures
     ├── multivariate_longitudinal/
     │   ├── dynamic_deephit.py            # ENTRY: thin CLI over survival_common/deephit_engine.py
     │   ├── survlatent_ode.py             # ENTRY: adapter around the bundled editable checkout
     │   └── README.md                     # bundled-checkout/conda-env prerequisites, chdir caveat
-    ├── predictive_checklists/            # full-ADT platinum/NEPC M-of-N horizon models with IPCW
-    │   ├── run_predictive_checklists.ipynb # preflight, optional training, held-out tables and R figures
-    │   ├── collect_supplement.py         # flattens finished runs into checklist cells/items/metrics CSVs
-    │   ├── render_supplement.R           # standalone preview CLI over checklist_supplement.R
-    │   └── README.md                     # censoring extension, solver setup, CLI and interpretation
-    └── GAM/
-        ├── gam_trajectory_features.R     # hierarchical longitudinal GAM features
-        ├── gam_cox_nonlinearity.R        # smooth-vs-linear Cox GAM tests
-        └── 04_gam.ipynb                  # R-kernel GAM runner on merged profile_data
+    └── predictive_checklists/            # platinum/NEPC M-of-N horizon models with IPCW; run from 03
+        ├── collect_supplement.py         # flattens finished runs into checklist cells/items/metrics CSVs
+        ├── render_supplement.R           # standalone preview CLI over checklist_supplement.R
+        └── README.md                     # censoring extension, solver setup, CLI and interpretation
 ```
 
 All numbered/lettered notebooks use the merged PROFILE_data_processing parquets and the
 standard `COMPASS` data/figure roots. The Python notebooks share `compass_pipeline.py`; no
 single-release baseline run is part of this workflow. `03b` is optional and torch-gated (see
-invariant #7 below) — the other notebooks never require torch. `05` and `08` are read-only
-reporting notebooks: they read already-generated artifacts and refit nothing.
+invariant #7 below) — the other notebooks never require torch. `02a` is a read-only
+reporting notebook: it reads already-generated artifacts and refit nothing.
 
 ---
 
@@ -139,14 +142,14 @@ reporting notebooks: they read already-generated artifacts and refit nothing.
         ├──► build_somatic_gleason_inputs.py
         │    prediction_inputs_<arm>/somatic_gleason/
         │
-        ▼  survival_analysis/univariate_analysis.py
-           survival_analysis/multivariate_analysis.py
+        ▼  survival_analysis/pipeline/univariate_analysis.py
+           survival_analysis/pipeline/multivariate_analysis.py
  local_runs_<arm>/ , local_runs_<arm>_nepc/
         │
-        ├──► 07_figures/all.R (R; 2 cohort arms: arpi, adt)
-        │    figures/
+        ├──► COMPASS/figures/all.R (R; 2 cohort arms: arpi, adt)
+        │    <fig_root>/ (PDF exports)
         │
-        ▼  05_cohort_comparison.ipynb (read-only; 6 cohorts x 2 endpoints)
+        ▼  02a_cohort_comparison.ipynb (read-only; 6 cohorts x 2 endpoints)
 ```
 
 Everything above `build_prediction_inputs.py` is endpoint-independent and shared: one survival
@@ -318,14 +321,6 @@ split within each landmark's risk set instead.
   `split_assignments_landmark{D}.csv`, the base-landmark compatibility copy
   `split_assignments.csv`, `landmark_mrn_availability.csv`, `canonical_labs_train_val.csv`,
   `landmark_attrition.json`, and `build_manifest.json`.
-- **Optional GAM trajectory features** (produced by `gam_trajectory_features.R`, not by this
-  script — see §2.3): `gam_trajectory_features_landmark{D}.csv` and
-  `gam_fit_diagnostics_landmark{D}.csv`, plus
-  `gam_trajectory_curves_landmark{D}.csv` containing the per-patient fitted grid used for figures.
-  When present in `prediction_inputs/`,
-  `load_prebuilt_landmark` (`survival_common/cox_models.py`) left-joins the features onto
-  `aggregated_landmark{D}.csv` before the split partition; when absent, behavior is unchanged
-  (the merge is a no-op by construction, not by convention).
 - `IPIO/data_preprocessing/build_genomic_inputs.py` builds the parallel
   `prediction_inputs/genomic/` landmark-0 arm anchored at IO start (`t_first_treatment`), restricts
   to patients with an actual somatic sample, attaches dynamic binary `<GENE>_SNV`
@@ -364,8 +359,6 @@ the input builder must be rerun after this change.
 | `univariate_analysis.py` | Cox: univariate n_obs-adjusted lab associations, or separate sequencing (SNV-only; any-alteration + altered-gene count) and Gleason COMPASS associations | `--landmark-days`, `--endpoints`; sequencing/Gleason use the observation nearest ADT as origin; IPIO supports `--feature-subset {labs,genomics,all}` |
 | `multivariate_analysis.py --model elastic-net` | Elastic-net Cox multivariable model (sksurv `CoxnetSurvivalAnalysis`, 5-fold CV, AGE unpenalized) | `--landmark-days`, `--endpoints`, `--n-folds`; IPIO also supports `--feature-subset {labs,genomics,all}` |
 | `multivariate_analysis.py --model xgboost` | XGBoost `survival:cox`, 5-fold CV grid (`max_depth × eta × min_child_weight`) | `--landmark-days`, `--endpoints`, `--max-features`; IPIO also supports `--feature-subset {labs,genomics,all}` |
-| `gam_trajectory_features.R` (COMPASS only) | Hierarchical GAM (`mgcv::bam`, `bs="fs"` factor-smooth per patient, shrinking sparse patients toward the population curve) per canonical lab, replacing the two-point `__delta` with `__gam_level` / `__gam_slope` / `__gam_curvature` / `__gam_auc` / `__gam_dev` evaluated at the landmark boundary | `--inputs-dir`, `--landmark-days`, `--k-pop`, `--k-pat`, `--trailing-window-days`, `--nthreads`, `--fit-split {all,train_val}` |
-| `gam_cox_nonlinearity.R` (COMPASS only) | Penalized-spline Cox (`mgcv::gam(family=cox.ph())`) per selected feature: fits a smooth and a linear model of the same feature and reports `edf`/`p_lrt`/`q_lrt`/`delta_aic` — flags features whose hazard association is not actually linear | `--inputs-dir`, `--output-dir`, `--landmark-days`, `--feature-selection-csv` |
 | `multivariate_longitudinal/dynamic_deephit.py` (COMPASS only, torch, optional) | Discrete-time competing-risks GRU (Dynamic-DeepHit) fit directly on the person-period lab sequence, in a cause-only config (death censored) or a competing config (`0=censored,1=cause,2=death`) | `--inputs-dir`, `--output-dir`, `--landmark-day`, `--config {platinum,competing,nepc,nepc_competing}` |
 | `multivariate_longitudinal/dynamic_deephit.py --dynamic` (COMPASS only, torch, optional) | The **dynamic arm**: the same GRU, but the unit of prediction becomes one `(patient, prediction time)` pair instead of one patient — a CIF at every observation time, from history up to that time only. Requires the full-follow-up frame. Off by default (`cp.RUN_DYNAMIC = False`) | adds `--dynamic` to the flags above; writes to `dynamic_deephit_dynamic/` with the `dynamic_deephit_dyn_` metrics prefix, so the two arms resume independently |
 | `multivariate_longitudinal/incremental_risk.py` (COMPASS only, **no torch**) | Does accruing lab history sharpen the 6-month estimate? Pure post-processing of the dynamic arm's predictions — no refit. Emits sequential-landmark metrics (5a, confounded by risk-set thinning) and a held-back-window ablation (5b, the one to lead with) | `--output-dir` (the dynamic arm's results dir), `--endpoint`, `--landmark-day` (**singular**), `--config`, `--cohort`, `--horizon-days`, `--delta-days`, `--grid-days`, `--min-risk-set`, `--min-events` |
@@ -376,57 +369,26 @@ and per-landmark context. The univariate/elastic-net CLI orchestration lives in
 `survival_common/cox_runners.py`; reusable Cox feature selection, CV, final-fit, and manifest helpers live in
 `survival_common/cox_models.py`; low-level Cox fitting/evaluation primitives live in
 `survival_common/cox_engine.py`; XGBoost orchestration lives in
-`COMPASS/survival_analysis/multivariate_analysis.py`'s `run_xgboost()`, which calls directly into
+`COMPASS/survival_analysis/pipeline/multivariate_analysis.py`'s `run_xgboost()`, which calls directly into
 low-level XGBoost mechanics in `survival_common/xgboost_engine.py`.
-
-**GAM stages — run order and leakage stance.** Both R scripts are base R + `mgcv` + `data.table`
-only (no `tidyverse`/`survminer`/`broom`, unlike `COMPASS_generate_figures_pipeline.R`) and live under
-`COMPASS/survival_analysis/`, with self-checking synthetic smoke tests in
-`COMPASS/survival_analysis/tests/`. `gam_trajectory_features.R` runs after
-`build_prediction_inputs.py` and before `univariate_analysis.py`: it reads
-`pre_treatment_lab_long_landmark{D}.csv` and `canonical_labs_train_val.csv` and writes
-`gam_trajectory_features_landmark{D}.csv` (one row per `DFCI_MRN`) plus a
-`gam_fit_diagnostics_landmark{D}.csv` sidecar recording which basis (`fs`, the random
-intercept+slope fallback, or the scalable two-stage ridge path) was used per lab, EDF, fit seconds,
-and convergence. It also writes
-`gam_trajectory_curves_landmark{D}.csv`, a long patient×lab×time grid of fitted values. The figure
-pipeline uses that grid for paired GAM-smoothed trajectory panels stratified by platinum exposure
-and classifier `has_nepc`; ribbons are 95% confidence intervals across patient-specific fitted
-curves, not `mgcv` coefficient intervals. To prevent out-of-memory kills from an all-patient
-factor-smooth design, labs with more than 500 patients automatically use a scalable decomposition:
-one population GAM plus independently ridge-shrunk patient intercept/slope deviations. Adjust the
-switch with `--max-fs-patients` and the shrinkage with `--patient-ridge-lambda`. The per-patient
-smooth is unsupervised — it never sees `t_platinum`/`PLATINUM` — and by default is fit on **all**
-cohort patients, not just train_val; pass `--fit-split train_val` to refit population smooths on
-train+valid only as a leakage sensitivity check. `univariate_analysis.py` then automatically tests
-the new `__gam_*` columns alongside the existing stats (`load_prebuilt_landmark` left-joins
-`gam_trajectory_features_landmark{D}.csv` onto `aggregated_landmark{D}.csv` when it exists; the merge
-is a no-op if the file is absent). `gam_cox_nonlinearity.R` runs **after** `univariate_analysis.py`,
-since it depends on the feature list in `cox_agg_feature_selection.csv`; it fits on the full merged
-table (train+valid+test), mirroring the same row-fitting asymmetry as
-`run_univariate_nobs_adjusted_associations`, and writes `gam_cox_nonlinearity_landmark{D}.csv`.
-The R stages are isolated in the R-kernel `GAM/04_gam.ipynb` so the Python run notebooks and
-the `mgcv` conda environment do not need to coexist. The enforced handoff is: build inputs in Python,
-run trajectory GAMs in R, set `REBUILD_PREDICTION_INPUTS = False` and rerun Python Stage 3 so its
-models consume the trajectory features, then return to R for nonlinear Cox GAMs. Stage B rejects a
-feature-selection file older than its trajectory-feature file, preventing a stale pre-GAM selection
-from being tested accidentally. The R notebook uses the merged-profile root exclusively.
 
 ### 2.4 — Notebooks
 
-The optional [predictive checklist subproject](COMPASS/survival_analysis/predictive_checklists/README.md)
-fits the Zhang et al. M-of-N model with a local inverse-censoring-weight extension on the full ADT
-cohort. Its runner reads the separate platinum/NEPC prebuilt input trees and existing splits;
-day 0 is primary, with day 90/180 secondary, and default horizons are 1/2/3 years after each
-landmark. It exports calibrated horizon risks, matched age/Cox/XGBoost comparisons, solver
-diagnostics, and R figures. These are independent horizon classifiers, not continuous survival
-curves or competing-risk cumulative incidence. Its manifest checks require rebuilding inputs
-that carry the old endpoint-metadata shadowing bug. Solver dependencies remain isolated from
-the existing Cox/XGBoost and torch workflows.
+The [predictive checklists](COMPASS/survival_analysis/predictive_checklists/README.md) section of
+`03_multivariate.ipynb` fits the Zhang et al. M-of-N model with a local inverse-censoring-weight
+extension on the full ADT cohort and on the Gleason + TP53/RB1/PTEN subset. Training is off by
+default (`RUN_CHECKLISTS`) until preflight counts have been reviewed. The runner reads the separate
+platinum/NEPC prebuilt input trees and existing splits; day 0 is primary, with day 90/180
+secondary, and default horizons are 1-5 years after each landmark. It exports calibrated horizon
+risks, matched age/Cox/XGBoost comparisons, solver diagnostics, and R figures. These are
+independent horizon classifiers, not continuous survival curves or competing-risk cumulative
+incidence. Its manifest checks require rebuilding inputs that carry the old endpoint-metadata
+shadowing bug. Solver dependencies remain isolated from the existing Cox/XGBoost and torch
+workflows.
 
 COMPASS PROFILE has four Python stage notebooks sharing `compass_pipeline.py` (three numbered plus
-`03b`), two read-only Python reporting notebooks (`05`, `08`), one R figure notebook, and one R GAM
-notebook. All operate on the merged `profile_data` run:
+`03b`), one read-only Python reporting notebook (`02a`), and one R figure notebook. All operate
+on the merged `profile_data` run:
 
 - `01_preprocessing.ipynb` — drives preprocessing (cohort compile, ADT-intent
   stratum build and label review, longitudinal preprocessing, prediction-input build, diagnostics) for whichever
@@ -488,29 +450,27 @@ notebook. All operate on the merged `profile_data` run:
   a univariate log-HR heterogeneity table (approximate Wald test on the difference of the two
   log-HRs, BH-adjusted within endpoint x landmark), and held-out performance deltas. Writes five
   CSVs under `survival_analysis/adt_intent_comparison/`, which the R figure pipeline's
-  supplemental section reads. Run it after `02`/`03`: `python COMPASS/survival_analysis/adt_intent_comparison.py`.
-- `08_abstract_numbers.ipynb` — read-only. Collects the cohort/event/performance counts quoted in
-  the abstract and manuscript from already-generated artifacts. Refits nothing.
-- `05_cohort_comparison.ipynb` — read-only. Compares the 6 patient cohorts (3 cohorts `all` /
+  supplemental section reads. Run it after `02`/`03`: `python COMPASS/survival_analysis/pipeline/adt_intent_comparison.py`.
+- `02a_cohort_comparison.ipynb` — read-only. Compares the 6 patient cohorts (3 cohorts `all` /
   `metastatic_adt` / `metastatic_llm` x 2 exclusions `none` / `pre_adt_castrate`) against both
   endpoints at the **+180d landmark only**: cohort and event counts (including how many diagnoses
   the incident gate removed as prevalent, and a loud warning when a cell has too few events to
   interpret), PSA and testosterone pre/post-treatment distributions stratified by event, univariate
   PSA/testosterone associations as a hazard-ratio forest plot across every cohort x endpoint cell,
-  and the cascade effect of narrowing `all` -> metastatic -> +noprecastrate. Requires `01`-`03` to have been run for **both** endpoints; missing artifacts are
+  and the cascade effect of narrowing `all` -> metastatic -> +noprecastrate. Requires `01`-`02` to have been run for **both** endpoints; missing artifacts are
   collected and reported rather than raising. Its header restates the two caveats that govern
   reading it — the cohorts are not the same patients, and the strict NEPC label is narrower than
   the Figure 2 classifier definition.
-- `07_figures/` — manuscript figure scripts: run `all.R` for the retained set or a numbered
-  script for one figure family. `retained_exports.txt` limits PNG/SVG/PDF output to the curated
+- `COMPASS/figures/` — manuscript figure scripts: run `all.R` for the retained set or a numbered
+  script for one figure family. `retained_exports.txt` limits PDF output to the curated
   `Desktop/ADT` figures. The scripts use `COMPASS_*` environment variables and
-  `COMPASS_generate_figures_pipeline.R`; see `07_figures/README.md`. Figure 1A reads
+  `COMPASS_generate_figures_pipeline.R`; see `COMPASS/figures/README.md`. Figure 1A reads
   `mrn_lists/icd_prostate_mrn_flags.csv` and displays cumulative ICD-C61 cohort selection through
   dated diagnosis, male sex, ≥5 PSA tests, post-diagnosis ADT, PARPi exclusion, pre-diagnosis
   platinum exclusion, and the requested post-ADT cancer exclusion; the ARPI arm additionally
   displays its post-diagnosis ARPI/docetaxel exposure criterion. Axis and table labels throughout
   name the arm's anchor ("ARPI/chemo initiation" vs. "ADT initiation") via `ANCHOR_LABEL`.
-  The cached `07_figures/all.R` workflow exports lettered multipanel figures alongside
+  The cached `COMPASS/figures/all.R` workflow exports lettered multipanel figures alongside
   all individual Figure 1 and Figure 2v3 panels: `01_cohort/compiled/figure1_cohort__<identity>`
   combines cohort selection, survival, and three timing distributions, while
   `02_llm/compiled/figure2v3_llm_<cohort>__platinum__all__incl` combines all four classifier/subtype
@@ -525,7 +485,7 @@ notebook. All operate on the merged `profile_data` run:
   confusion matrices also receive a combined `03_univariate/cohort_sensitivity/metastatic_label_agreement__<identity>`
   export. Filenames use `<identity> = <endpoint>__<subset>__<exclusion>` under each arm;
   Figure 2v3 is emitted only for canonical ADT/platinum. Run the default figure stage
-  (`all`) to prepare and render these additions, including SVGs and PDFs.
+  (`all`) to prepare and render these additions.
   Compiled exports sit in a `compiled/` subfolder of their section, without an overall supertitle.
   The new `03_univariate/internal/compiled/dfci_labs_overview_km_lm0__platinum__<subset>__<exclusion>`
   combines the three DFCI landmark volcanoes with PSA/testosterone log1p trajectories
@@ -534,8 +494,8 @@ notebook. All operate on the merged `profile_data` run:
   `03_univariate/internal/dfci_supplement_labs_lm<N>__platinum__<subset>__<exclusion>` is the
   matching supplement for LDH, hemoglobin, albumin and alkaline phosphatase: one row per lab,
   trajectory (log1p for LDH and ALP) beside the bottom-versus-top-10% KM curve.
-  `COMPASS_SUPPLEMENT_LABS` (comma-separated canonical names, read by both notebook 06 and
-  `07_figures/all.R`) changes the lab set.
+  `COMPASS_SUPPLEMENT_LABS` (comma-separated canonical names, read by both notebook 05 and
+  `COMPASS/figures/all.R`) changes the lab set.
   Figure 4 additionally emits `figure4c_sensitivity_gleason_auc`, the held-out
   available-case comparison of labs against Gleason features at every landmark. Figure 4a
   includes the death-censored dynamic-arm Dynamic-DeepHit (`dynamic_deephit_dynamic`, the
@@ -543,7 +503,7 @@ notebook. All operate on the merged `profile_data` run:
   figures plot discrimination as mean AUC(t); C-index stays in the CSVs. If optional
   `03b_multivariate_longitudinal.ipynb` results are absent, the Dynamic-DeepHit series is
   omitted with a message. The checklist supplement (`figure4s_checklist_*`) is part of the cached
-  07 workflow: `06` runs `predictive_checklists/collect_supplement.py` on the finished runs
+  07 workflow: `05` runs `predictive_checklists/collect_supplement.py` on the finished runs
   (`COMPASS_CHECKLIST_LABS_RUN`, `COMPASS_CHECKLIST_TRIO_RUN`) and `07` draws it into
   `04_multivariate/internal`. It is skipped when no run exists; `COMPASS_CHECKLIST_SUPPLEMENT=false` disables it.
   - **LLM label strata:** alongside the existing `LLM_v3_labels.tsv`-driven Figure 2, the pipeline
@@ -624,17 +584,17 @@ notebook. All operate on the merged `profile_data` run:
       data/                       index.html and manifest.csv
     ```
 
-    Filenames are `<figure>__<endpoint>__<subset>__<exclusion>.png` (federated:
-    `<figure>__platinum.png`); `__` separates axes, single underscores live inside a slug, and
+    Filenames are `<figure>__<endpoint>__<subset>__<exclusion>.pdf` (federated:
+    `<figure>__platinum.pdf`); `__` separates axes, single underscores live inside a slug, and
     `incl` names the no-exclusion case so every filename has the same shape. Each folder holds
-    only PNG/SVG/PDF figures: tables and legends go in its `data/` subfolder, compiled multipanel
+    only PDF figures: tables and legends go in its `data/` subfolder, compiled multipanel
     figures in its `compiled/` subfolder, and manuscript figures in its `manuscript/` subfolder
     (legends in `manuscript/data/`, captions in `manuscript/captions/`).
 
     Internally the pipeline still addresses each plot as
     `<arm>/by_figure/<group>/<plot-stem>/<endpoint>__<subset>__<exclusion>`, and
     `figure_public_path()` maps that address to the section folder; `by_figure/` is never left
-    on disk by `07_figures/all.R`. Per-lab panels use
+    on disk by `COMPASS/figures/all.R`. Per-lab panels use
     `by_figure/labs/<lab_category>/<lab_name>/<panel_type>/...`; a lab-aware branch in
     `figure_group()` uses `assign_category()` for CBC/CMP/LFT/Vitals/Androgen axis/Other. Any
     plot stem `figure_group()` can't route still raises `stop("Unmapped figure output stem")`.
@@ -645,7 +605,7 @@ notebook. All operate on the merged `profile_data` run:
   `02_univariate.ipynb`'s final section loads all shared-landmark univariate results for both
   `arpi` and `adt`, filters each to nominal `p_value < 0.05`, displays every hit, and exports a
   separate `cox/nominally_significant_univariate_results.csv` beneath each arm's run directory.
-- `compass_pipeline.py`, the figure notebook, and the GAM notebook all point directly to the
+- `compass_pipeline.py` and the figure notebook both point directly to the
   `PROFILE_DATA` source and `COMPASS` output roots; there is no data-variant selector.
 
 IPIO has a paired run/figure notebook as well:
@@ -920,7 +880,7 @@ Four properties of `nepc`/`avpc` differ from `platinum` and matter for interpret
   endpoints censor unresolved patients as 0 and demote undated positives, whereas the figures drop
   unresolved patients and do not need dates.
 - **Event counts may be low**, especially for `nepc`. Check
-  the Stage 1 summary and the `05` notebook's count table *before* spending modelling time; `05`
+  the Stage 1 summary and the `02a` notebook's count table *before* spending modelling time; `02a`
   prints an explicit underpowered warning below 50 events.
 - **Date provenance is carried, not filtered.** Endpoint-specific NEPC provenance rides through
   to prediction inputs; joint AVPC_NEPC provenance remains in the Stage-1 audit cohort only. Two are
@@ -1028,24 +988,21 @@ Run each notebook top to bottom; select ARPI/ADT with each Python notebook's `AR
 patient subsets with `COHORTS`, and the event(s) with `ENDPOINTS`
 (see [Arms, cohorts, and endpoints](#arms-cohorts-and-endpoints)):
 
-1. `COMPASS/survival_analysis/01_preprocessing.ipynb`
-2. `COMPASS/survival_analysis/02_univariate.ipynb`
-3. `COMPASS/survival_analysis/03_multivariate.ipynb`
-4. `COMPASS/survival_analysis/03b_multivariate_longitudinal.ipynb` (optional — requires torch;
-   see [Dependencies](#dependencies) and `multivariate_longitudinal/README.md`)
-5. `COMPASS/survival_analysis/GAM/04_gam.ipynb`
-6. `COMPASS/survival_analysis/04a_transfer_updated.ipynb` (scores the frozen federated bundles
-   on the local endpoints; needs the `rhino_data_v2/` delivery. `04_federated_transfer.ipynb`
-   is the same for the earlier `rhino_results/` delivery)
-7. `COMPASS/survival_analysis/05_cohort_comparison.ipynb` (read-only; only after steps 1-3 have
+1. `COMPASS/notebooks/01_preprocessing.ipynb`
+2. `COMPASS/notebooks/02_univariate.ipynb`
+3. `COMPASS/notebooks/02a_cohort_comparison.ipynb` (read-only; only after steps 1-2 have
    been run for **all** cohorts and endpoints being compared)
-8. `python COMPASS/survival_analysis/adt_intent_comparison.py` (read-only; writes the
-   localized-vs-metastatic tables the figure supplement reads — run **before** step 10, and only
-   after steps 2-3 have been run for both stratified cohorts)
-9. `COMPASS/survival_analysis/06_prep_figure_data.ipynb` (Polars figure tables; reads step 6's
+4. `COMPASS/notebooks/03_multivariate.ipynb`
+5. `COMPASS/notebooks/03b_multivariate_longitudinal.ipynb` (optional — requires torch;
+   see [Dependencies](#dependencies) and `multivariate_longitudinal/README.md`)
+6. `COMPASS/notebooks/04_federated_transfer.ipynb` (scores the frozen federated bundles
+   on the local endpoints; needs the `rhino_data_v2/` delivery)
+7. `python COMPASS/survival_analysis/pipeline/adt_intent_comparison.py` (read-only; writes the
+   localized-vs-metastatic tables the figure supplement reads — run **before** step 9, and only
+   after steps 2 and 4 have been run for both stratified cohorts)
+8. `COMPASS/notebooks/05_prep_figure_data.ipynb` (Polars figure tables; reads step 6's
    transfer outputs)
-10. `Rscript COMPASS/survival_analysis/07_figures/all.R`
-11. `COMPASS/survival_analysis/08_abstract_numbers.ipynb` (read-only; abstract/manuscript counts)
+9. `Rscript COMPASS/figures/all.R`
 
 The notebooks pass `PROFILE_DATA/*.parquet` paths explicitly to the lower-level scripts. Existing
 hand-curated `LLM_NEPC_labels/` inputs remain under the shared `COMPASS` data root.
@@ -1086,7 +1043,7 @@ surprised by them.
   (`--endpoint nepc|avpc`, or the deprecated
   `--require-nepc` alias for `nepc`) further removes prevalent events, so event counts can be far
   smaller than platinum's at the same landmark. Two consequences: multivariate results may be
-  underpowered rather than negative (`05` warns below 50 events), and **platinum-vs-nepc/avpc
+  underpowered rather than negative (`02a` warns below 50 events), and **platinum-vs-nepc/avpc
   metric differences are confounded by cohort composition** — they are not a
   like-for-like model comparison. Check each endpoint's own event count against the 50-event floor
   before treating it as adequately powered.
@@ -1205,7 +1162,7 @@ python -m survival_common.federated_endpoint_transfer \
 
 The CLI keys bundles by file name and rejects duplicates. The per-landmark
 XGBoost, DeepHit and checklist deliveries all share one file name per family,
-so score those through 04a (below), which merges them first.
+so score those through 04 (below), which merges them first.
 
 All federated inputs live in the `rhino_data_v2/` delivery under the COMPASS
 data root (override with `COMPASS_RHINO_ROOT`):
@@ -1217,14 +1174,14 @@ data root (override with `COMPASS_RHINO_ROOT`):
 | `federated_elastic_net_cox_{w,no}_DFCI/` | elastic-net Cox trained with and without DFCI; one bundle holds landmarks 0/90/180 × full/age-only |
 | `federated_predictive_checklists/lm_{0,90,180}/{w,no}_DFCI/` | one checklist bundle and its metrics per landmark |
 | `federated_xgboost*/lm_<days>/{w,no}_DFCI/`, `federated_*deephit*/lm_<days>/{w,no}_DFCI/` | landmark XGBoost and DeepHit, delivered like the checklists (optionally under `adt/`) |
-| `federated_transfer_adt_no_DFCI/` | 04a's output |
+| `federated_transfer_adt_no_DFCI/` | 04's output |
 | `figure_data/` | aggregate KM curves and trajectories; see below |
 
 To read the earlier `rhino_results/` delivery instead, set `COMPASS_RHINO_ROOT`
 to it, `COMPASS_FEDERATED_RESULTS` to its `federated_model_results/` CSV, and
 `COMPASS_FEDERATED_FIGURE_DATA` to its `misc_figure_data/`.
 
-`COMPASS/survival_analysis/04a_transfer_updated.ipynb` wraps the same call for
+`COMPASS/notebooks/04_federated_transfer.ipynb` wraps the same call for
 `rhino_data_v2`. It scores elastic-net Cox, XGBoost, DeepHit and the predictive
 checklists from the bundles trained on Fred Hutch, Johns Hopkins and MSK only. The
 bundles trained with DFCI are not scored (DFCI patients would be in-sample).
@@ -1243,7 +1200,7 @@ bundles trained with DFCI are not scored (DFCI patients would be in-sample).
   model's C and AUC(t) depend only on how it ranks age, so the comparator is the
   same.
 - **First-delivery fallback.** If `rhino_data_v2` has no no-DFCI XGBoost bundle,
-  04a scores `rhino_results/federated_model_results/federated_xgboost_no_DFCI/` instead.
+  04 scores `rhino_results/federated_model_results/federated_xgboost_no_DFCI/` instead.
   `COMPASS_RHINO_V1_ROOT` sets the earlier delivery's root, and
   `V1_FALLBACK_FAMILIES` sets which families may fall back; `()` turns this off.
   That bundle keeps its own age-only model if it has one. The bundle summary and
@@ -1251,12 +1208,6 @@ bundles trained with DFCI are not scored (DFCI patients would be in-sample).
 - **Comparison table.** The notebook shows each family's federated held-out test
   metrics next to the local platinum ones. Those are read from the metrics CSV
   beside each source bundle.
-
-`04_federated_transfer.ipynb` is the same analysis for the earlier
-`rhino_results/` delivery (Cox, XGBoost, DeepHit and checklist bundles under
-`federated_model_results/federated_*_no_DFCI/`). It writes to
-`rhino_results/federated_transfer_adt_no_DFCI/`, which the figures read only when
-`COMPASS_FEDERATED_TRANSFER_NO_DFCI` points there.
 
 The transfer module maps local `LAB_NAME` to the OMOP names via `OMOP_to_DFCI_lab_ids.csv`, puts
 each endpoint's date in the federated chain's event slot, and reuses
@@ -1273,7 +1224,7 @@ mismatch between the DFCI and OMOP lab pipelines. Resolve those before you read
 the discrimination metrics.
 
 The no-DFCI bundles never saw a DFCI patient, so this is an external
-validation on all three endpoints. 04a writes `transfer_metrics.csv` and
+validation on all three endpoints. 04 writes `transfer_metrics.csv` and
 `transfer_auc_t.csv` to `COMPASS_FEDERATED_TRANSFER_NO_DFCI` (default
 `$COMPASS_RHINO_ROOT/federated_transfer_adt_no_DFCI`). These primary tables hold
 elastic-net Cox and XGBoost only, one row per endpoint, bundle, landmark and
@@ -1281,9 +1232,9 @@ config, as Figure 5 requires. The sequencing-clock run and the Gleason /
 TP53-RB1-PTEN clinical comparison (Figure 5 b–h) also use those two families. Without
 an age-only XGBoost model, XGBoost's `transferred_age` rows in the clinical
 comparison stay empty, and its other comparisons are unaffected. Rerun
-`06_prep_figure_data.ipynb` after 04a, then
-`COMPASS_FIGURE_SCOPE=federated Rscript COMPASS/survival_analysis/07_figures/all.R`
-to render `figures/ADT/05_transfer/transfer_discrimination_no_dfci__platinum.{png,csv}`
+`05_prep_figure_data.ipynb` after 04, then
+`COMPASS_FIGURE_SCOPE=federated Rscript COMPASS/figures/all.R`
+to render `figures/ADT/05_transfer/transfer_discrimination_no_dfci__platinum.{pdf,csv}`
 (mean AUC(t) and paired ΔAUC(t) vs. age only, by endpoint) and federated manuscript
 Figure 5.
 
@@ -1303,7 +1254,7 @@ checklist probabilities, with censoring estimated on the DFCI cohort.
 For a CLI run, pass the additional JSON paths to the existing `--bundle` list,
 one bundle per file name. Only downloaded bundles from runs that excluded DFCI
 belong in this comparison.
-After rerunning `06_prep_figure_data.ipynb` and `07_figures/all.R`, the dynamic arm's
+After rerunning `05_prep_figure_data.ipynb` and `COMPASS/figures/all.R`, the dynamic arm's
 held-out federated metrics appear in the multivariate main figures when the
 corresponding DeepHit metrics CSV is available. The figures still render with
 Cox and XGBoost alone when it is absent. Transferred predictive checklist
@@ -1358,7 +1309,7 @@ weights use local development patients only. Performance is measured on local
 held-out patients, so it is distinct from frozen-model external validation.
 
 ```bash
-python -m COMPASS.survival_analysis.federated_transfer_checklists \
+python -m COMPASS.survival_analysis.federated.federated_transfer_checklists \
   --transfer-dir "$RHINO/federated_transfer_adt_no_DFCI" \
   --inputs-root /data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis \
   --resume
@@ -1368,9 +1319,9 @@ python -m COMPASS.survival_analysis.federated_transfer_checklists \
 readable M-of-N rules, patient predictions, CV diagnostics, metrics and aggregate
 `checklist_{cells,items_long,metrics}.csv` figure tables. Unsupported fits retain
 statuses/reasons. Resume verifies code/config/input fingerprints; `--overwrite`
-archives prior outputs. Rerun 06 to register these optional tables, then Figure 5's
-R entry point or `07_figures/all.R` to render
-`05_transfer/transfer_clinical_checklist_<family>_<endpoint>__platinum.{png,svg,pdf}`:
+archives prior outputs. Rerun 05 to register these optional tables, then Figure 5's
+R entry point or `COMPASS/figures/all.R` to render
+`05_transfer/transfer_clinical_checklist_<family>_<endpoint>__platinum.pdf`:
 held-out AUC(t) with 95% intervals and 1-/5-year checklist cards. The trailing
 `__platinum` denotes the federated source-model workflow; the evaluated endpoint is
 in the stem and title. These are independent horizon risks, with death censored;
@@ -1383,11 +1334,11 @@ Three resolution rules apply:
   `{fast_,}federated_deephit{,_no_DFCI}/`, wins over the per-landmark files.
 - XGBoost metrics/importance missing from `rhino_data_v2` are read from the first
   delivery, `rhino_results/federated_model_results/federated_xgboost{,_no_DFCI}/`
-  (`COMPASS_RHINO_V1_ROOT`), as 04a does for the transfer bundles. The panel captions
+  (`COMPASS_RHINO_V1_ROOT`), as 04 does for the transfer bundles. The panel captions
   say so. Without XGBoost, the federated Figure 4 and Figure 8 are skipped.
-- A landmark found twice fails as a duplicate. 06 fingerprints every export it
-  finds, so an export delivered after 06 last ran makes 07 stop and ask for a
-  rerun of 06.
+- A landmark found twice fails as a duplicate. 05 fingerprints every export it
+  finds, so an export delivered after 05 last ran makes 07 stop and ask for a
+  rerun of 05.
 
 `figure_data/` holds aggregate KM curves (`cohort_km.csv`,
 `lab_extreme_{km,summary}.csv`) and binned PSA/testosterone trajectories
@@ -1405,9 +1356,10 @@ subfolder of its section (`03_univariate/federated/`, `04_multivariate/federated
 | File | Content |
 |---|---|
 | `federated_03_univariable` | Figure 3 layout: pooled univariable Cox volcanoes at days 0/90/180 (with a log-HR direction arrow under the key), pooled PSA/testosterone trajectories and day-180 extreme-decile KM curves (site `extreme_fraction`, 10% by default) |
-| `federated_04_multivariable` | Figure 8 layout, with the full models refit without DFCI added to the AUC(t) row |
+| `federated_04_multivariable` | Figure 8 layout for the pooled four-site models |
 | `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/AVPC/NEPC: (a) mean AUC(t) of the full and age-only models; (b–d) mean AUC(t) of the transferred full models, local out-of-fold Cox models of Gleason + age (b), TP53/RB1/PTEN + age (c) and Gleason + TP53/RB1/PTEN + age (d), and combined Cox models of each transferred score + those covariates without age, in patients with a Gleason score (b), sequenced patients (c) and sequenced patients with a Gleason score (d); c and d on the sequencing-date clock; strips give day-0 patients/events. (e–g) Platinum, AVPC and NEPC KM curves, top vs bottom 10% of the day-180 XGBoost score. (h) 5-year event-free probability from sequencing date +180 days in sequenced patients using the transferred federated XGBoost score, Gleason score and six mutually exclusive mutation groups (WT, TP53, PTEN, RB1, 2 MT, 3 MT); every group on the sequencing clock |
 | `federated_05_transfer_no_dfci__no_d` | The same without panel d (KM curves d–f, gradient g); caption `federated_figure5_no_d` |
+| `federated_s1_feature_set` | Feature-set refits (`feature_set_models/`; missingness and observation-count columns adjust but cannot enter a score) vs regular models: (a) with-DFCI held-out platinum AUC, with a labelled empty slot until feature-set XGBoost is delivered; (b–d) no-DFCI 5-year checklists; (e) their DFCI AUC vs the regular checklists; (f–h) KM by checklist status from +180; caption `federated_figure_s1` |
 
 The local Figure 3 (`03_dfci_univariable`) still uses DFCI patient-level data.
 

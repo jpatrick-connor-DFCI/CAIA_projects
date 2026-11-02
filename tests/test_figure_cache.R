@@ -1,6 +1,6 @@
 # Rscript tests/test_figure_cache.R: differential preparation and render-cache tests.
-source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_workflow.R")
+source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
 options(readr.num_threads = 1L)
 local({
   root <- tempfile("figure-cache-test-")
@@ -33,7 +33,7 @@ local({
   config_path <- file.path(root, "config.json")
   jsonlite::write_json(config, config_path, auto_unbox = TRUE)
   status <- system2(Sys.getenv("COMPASS_FIGURE_PYTHON", "python3"),
-    c(shQuote("COMPASS/survival_analysis/prepare_figure_data.py"), "--config", shQuote(config_path)))
+    c(shQuote("COMPASS/survival_analysis/figure_pipeline/prepare_figure_data.py"), "--config", shQuote(config_path)))
   stopifnot(status == 0L)
   manifest <- jsonlite::read_json(file.path(root, "cache", "manifest.json"))
 
@@ -76,7 +76,7 @@ local({
   conflict <- tryCatch(nested$patient_bin_trajectory(legacy_labs, "PSA",
     stratum_values = tibble(DFCI_MRN = c("001", "001"), stratum = c("NEPC+", "NEPC-"))), error = identity)
   stopifnot(inherits(conflict, "error"), grepl("Conflicting trajectory labels for 1 patient", conditionMessage(conflict)))
-  source("COMPASS/survival_analysis/figure_supplements.R")
+  source("COMPASS/survival_analysis/figure_pipeline/figure_supplements.R")
   legacy_labels <- prepare_metastatic_figure_labels(config$metastatic_sources, legacy_patient) %>% arrange(DFCI_MRN)
   prepared_labels <- figure_read_parquet(manifest$metastatic_labels) %>% arrange(DFCI_MRN)
   label_comparison <- all.equal(as.data.frame(prepared_labels[names(legacy_labels)]),
@@ -100,28 +100,27 @@ local({
   clear_read_cache()
   options(compass.figure_data_manifest = NULL)
   first <- render_figure_scene(m$scenes[[1]], m$signature, 72, TRUE)
-  stopifnot(first$rendered == 2L, figure_file_complete(paste0(destination, ".png")),
-            figure_file_complete(paste0(destination, ".pdf")))
-  receipts <- vapply(c("png", "pdf"), function(format) figure_receipt_path(m$scenes[[1]], format), character(1))
-  stopifnot(all(file.exists(receipts)), all(startsWith(receipts, directory)),
+  stopifnot(first$rendered == 1L, figure_file_complete(paste0(destination, ".pdf")))
+  receipt <- figure_receipt_path(m$scenes[[1]], "pdf")
+  stopifnot(file.exists(receipt), startsWith(receipt, directory),
             length(list.files(file.path(root, "figures"), pattern = "\\.rds$", recursive = TRUE)) == 0L)
   # Migrate old sidecars into data, preserving exact contents and all images.
-  legacy <- paste0(destination, ".png.cache.rds")
-  file.copy(receipts[[1]], legacy)
+  legacy <- paste0(destination, ".pdf.cache.rds")
+  file.copy(receipt, legacy)
   original_hash <- unname(tools::md5sum(legacy))
-  images_before <- figure_file_identity(paste0(destination, c(".png", ".pdf")))
+  images_before <- figure_file_identity(paste0(destination, ".pdf"))
   stopifnot(figure_archive_legacy_receipts(file.path(root, "figures"), file.path(root, "cache")) == 1L,
             !file.exists(legacy), identical(images_before, figure_file_identity(images_before$path)))
   archived <- list.files(file.path(root, "cache", "legacy_render_receipts"), full.names = TRUE)
   stopifnot(length(archived) == 1L, identical(unname(tools::md5sum(archived)), original_hash),
             figure_archive_legacy_receipts(file.path(root, "figures"), file.path(root, "cache")) == 0L)
-  unchanged <- figure_file_identity(paste0(destination, c(".png", ".pdf")))
+  unchanged <- figure_file_identity(paste0(destination, ".pdf"))
   second <- render_figure_scene(m$scenes[[1]], m$signature, 72, TRUE)
   stopifnot(second$rendered == 0L, identical(unchanged, figure_file_identity(unchanged$path)))
-  higher <- render_figure_scene(m$scenes[[1]], m$signature, 90, TRUE)
-  stopifnot(higher$rendered == 1L,
-            identical(unchanged[2, ], figure_file_identity(unchanged$path)[2, ]))
-  con <- file(paste0(destination, ".png"), "wb"); writeBin(charToRaw("bad"), con); close(con)
+  # A vector PDF does not depend on the requested DPI.
+  stopifnot(render_figure_scene(m$scenes[[1]], m$signature, 90, TRUE)$rendered == 0L,
+            identical(unchanged, figure_file_identity(unchanged$path)))
+  con <- file(paste0(destination, ".pdf"), "wb"); writeBin(charToRaw("bad"), con); close(con)
   stopifnot(render_figure_scene(m$scenes[[1]], m$signature, 90, TRUE)$rendered == 1L)
   stopifnot(is.null(figure_scene_manifest(directory, "source-v2")))
 })

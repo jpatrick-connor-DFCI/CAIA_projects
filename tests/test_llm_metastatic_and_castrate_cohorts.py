@@ -5,7 +5,7 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from COMPASS.survival_analysis import compass_pipeline as cp
+from COMPASS.survival_analysis.pipeline import compass_pipeline as cp
 
 
 def _write_cohort(root, mrns):
@@ -421,7 +421,7 @@ def test_the_r_figure_pipeline_knows_every_python_run_label(monkeypatch, tmp_pat
     monkeypatch.setattr(cp, "_PROFILE_OUTPUT_ROOT", tmp_path)
 
     r_source = (
-        cp.SURVIVAL_DIR / "COMPASS_generate_figures_pipeline.R"
+        cp.SURVIVAL_DIR / "figure_pipeline" / "COMPASS_generate_figures_pipeline.R"
     ).read_text()
 
     def r_vector(name):

@@ -1,8 +1,8 @@
-source("COMPASS/survival_analysis/figure_typography.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_typography.R")
 # Run from the repository root: Rscript tests/test_figure_resume.R
-# Exercise the real writer with tiny PNG/PDF files, without cluster inputs.
+# Exercise the real writer with tiny PDF files, without cluster inputs.
 suppressPackageStartupMessages(library(ggplot2))
-expressions <- parse("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
+expressions <- parse("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
 find_assignment <- function(expr, name) {
   if (missing(expr) || !is.call(expr)) return(NULL)
   if (identical(expr[[1]], as.name("<-")) && identical(expr[[2]], as.name(name)))
@@ -26,10 +26,7 @@ local({
   }
   env$COHORT_LEAF <- "nepc__all__incl"
   env$output_dir_for_stem <- function(stem) file.path(root, stem)
-  env$save_dpi <- 50
-  env$save_pdf <- FALSE
   env$overwrite <- FALSE
-  env$HAS_RAGG <- requireNamespace("ragg", quietly = TRUE)
   env$events <- character()
   env$progress <- function(event, detail) env$events <- c(env$events, event)
   env$notify_progress <- env$progress
@@ -42,71 +39,56 @@ local({
   plot <- ggplot(data.frame(x = 1:3, y = 1:3), aes(x, y)) + geom_point()
   save <- function(...) suppressMessages(env$save_fig(..., out_dir = root,
                                                     stem = "test_panel", width = 2, height = 2))
-  png <- file.path(root, "test_panel", "nepc__all__incl.png")
-  pdf <- sub("png$", "pdf", png)
+  pdf <- file.path(root, "test_panel", "nepc__all__incl.pdf")
   bytes <- function(path) readBin(path, "raw", n = file.info(path)$size)
 
   save(plot)
-  stopifnot(identical(env$saves, "png"), env$figure_file_complete(png),
+  stopifnot(identical(env$saves, "pdf"), env$figure_file_complete(pdf),
             identical(tail(env$events, 1), "panel_done"))
-  png_bytes <- bytes(png)
-  save(stop("Completed figures must not force the plot expression"))
-  stopifnot(identical(env$saves, "png"),
-            identical(tail(env$events, 1), "panel_skipped"),
-            identical(bytes(png), png_bytes))
-
-  env$save_pdf <- TRUE
-  save(plot)
-  stopifnot(identical(env$saves, c("png", "pdf")), env$figure_file_complete(pdf),
-            identical(bytes(png), png_bytes))
   pdf_bytes <- bytes(pdf)
-  save(stop("Both requested formats already exist"))
-  stopifnot(length(env$saves) == 2L, tail(env$events, 1) == "panel_skipped")
+  save(stop("Completed figures must not force the plot expression"))
+  stopifnot(identical(env$saves, "pdf"),
+            identical(tail(env$events, 1), "panel_skipped"),
+            identical(bytes(pdf), pdf_bytes))
 
   # A different endpoint cannot reuse this endpoint's files.
   save(plot, prefix = "platinum__all__incl")
-  stopifnot(length(env$saves) == 4L)
+  stopifnot(length(env$saves) == 2L)
 
   # Main/supplement reorganization reuses only the same leaf and artifact.
-  old <- file.path(root, "by_figure", "main", "figure3", "test", "platinum__all__incl.png")
+  old <- file.path(root, "by_figure", "main", "figure3", "test", "platinum__all__incl.pdf")
   dir.create(dirname(old), recursive = TRUE)
-  file.copy(png, old)
-  new <- file.path(root, "by_figure", "figure3", "test", "platinum__all__incl.png")
+  file.copy(pdf, old)
+  new <- file.path(root, "by_figure", "figure3", "test", "platinum__all__incl.pdf")
   stopifnot(env$reuse_previous_figure_layout(new), identical(bytes(new), bytes(old)),
     !env$reuse_previous_figure_layout(sub("platinum__", "nepc__", new)),
     !env$reuse_previous_figure_layout(new))
 
-  # Empty/truncated images regenerate; an intact PDF is retained.
-  writeBin(raw(), png)
-  stopifnot(!env$figure_file_complete(png))
+  # Empty/truncated PDFs regenerate.
+  writeBin(raw(), pdf)
+  stopifnot(!env$figure_file_complete(pdf))
   save(plot)
-  stopifnot(tail(env$saves, 1) == "png", identical(bytes(pdf), pdf_bytes))
-  writeBin(png_bytes[seq_len(length(png_bytes) %/% 2)], png)
-  stopifnot(!env$figure_file_complete(png))
-  save(plot)
-  stopifnot(env$figure_file_complete(png))
+  stopifnot(length(env$saves) == 3L, env$figure_file_complete(pdf))
   writeBin(pdf_bytes[seq_len(length(pdf_bytes) %/% 2)], pdf)
   stopifnot(!env$figure_file_complete(pdf))
   save(plot)
-  stopifnot(tail(env$saves, 1) == "pdf", env$figure_file_complete(pdf))
+  stopifnot(length(env$saves) == 4L, env$figure_file_complete(pdf))
 
   env$overwrite <- TRUE
-  before <- length(env$saves)
   save(plot)
-  stopifnot(length(env$saves) == before + 2L,
-            identical(tail(env$saves, 2), c("png", "pdf")))
+  stopifnot(length(env$saves) == 5L, all(env$saves == "pdf"))
 
   # A failed overwrite must preserve the prior complete output and must not
   # publish the temporary partial file or emit a panel_done event.
-  png_bytes <- bytes(png)
+  pdf_bytes <- bytes(pdf)
   env$ggsave <- function(filename, ...) {
     writeBin(charToRaw("partial image"), filename)
     stop("synthetic graphics failure")
   }
   failure <- tryCatch(save(plot), error = identity)
-  stopifnot(inherits(failure, "error"), identical(bytes(png), png_bytes),
+  stopifnot(inherits(failure, "error"), identical(bytes(pdf), pdf_bytes),
             tail(env$events, 1) == "panel_start",
-            !any(startsWith(list.files(dirname(png), all.files = TRUE), ".compass-render-")))
+            !any(startsWith(list.files(dirname(pdf), all.files = TRUE), ".compass-render-")))
 })
 # Exercise the actual routing: PSA and testosterone share the new supplement
 # group, so their lab tokens must remain in the artifact name.
@@ -119,7 +101,7 @@ local({
       if (!is.null(assignment)) eval(assignment, env)
     }
   }
-  sys.source("COMPASS/survival_analysis/figure_supplements.R", env)
+  sys.source("COMPASS/survival_analysis/figure_pipeline/figure_supplements.R", env)
   env$FIG_ROOT <- tempdir()
   env$COHORT <- "adt"
   env$ENDPOINT <- "platinum"

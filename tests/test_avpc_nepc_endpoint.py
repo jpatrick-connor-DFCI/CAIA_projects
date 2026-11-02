@@ -8,8 +8,8 @@ modeling registry or carried as a longitudinal cause.
 import pandas as pd
 
 from COMPASS.data_preprocessing import build_prediction_inputs as bpi
-from COMPASS.survival_analysis import compass_pipeline as cp
-from COMPASS.survival_analysis import cox_aggregated as ca
+from COMPASS.survival_analysis.pipeline import compass_pipeline as cp
+from COMPASS.survival_analysis.pipeline import cox_aggregated as ca
 from survival_common import cohort
 from survival_common.longitudinal_targets import CONFIG_ENDPOINTS, LONGITUDINAL_CONFIGS
 

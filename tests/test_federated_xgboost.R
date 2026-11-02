@@ -1,6 +1,6 @@
-source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_workflow.R")
-source("COMPASS/survival_analysis/checklist_supplement.R")
+source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
+source("COMPASS/survival_analysis/figure_pipeline/checklist_supplement.R")
 fails <- function(expr,pattern) {
   e <- tryCatch(force(expr),error=identity)
   stopifnot(inherits(e,"error"),grepl(pattern,conditionMessage(e)))
@@ -196,7 +196,7 @@ local({
   stopifnot(identical(federated_multivariable_files(fed,"xgboost")$metrics,legacy))
 })
 local({
-  # XGBoost absent from rhino_data_v2 falls back to the first delivery (as in 04a);
+  # XGBoost absent from rhino_data_v2 falls back to the first delivery (as in 04);
   # elastic-net does not.
   root <- tempfile("federated-v1-",tmpdir="/private/tmp"); dir.create(root)
   on.exit(unlink(root,recursive=TRUE))
@@ -267,7 +267,7 @@ local({
   output <- file.path(root,"figures"); dir.create(output)
   render_federated_checklist_cards(output,fed,60,TRUE)
   out <- file.path(output,"04_multivariate","federated")
-  stopifnot(file.exists(file.path(out,"checklist_supplement__platinum.png")))
+  stopifnot(file.exists(file.path(out,"checklist_supplement__platinum.pdf")))
   sidecar <- read_csv(file.path(out,"data","checklist_supplement_metrics__platinum.csv"),show_col_types=FALSE)
   stopifnot(nrow(sidecar)==12L,nrow(read_csv(file.path(out,"data","checklist_supplement_items__platinum.csv"),
     show_col_types=FALSE))==18L)

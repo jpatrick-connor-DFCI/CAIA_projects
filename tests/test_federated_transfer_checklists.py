@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from COMPASS.survival_analysis import federated_transfer_checklists as ftc
+from COMPASS.survival_analysis.federated import federated_transfer_checklists as ftc
 from COMPASS.survival_analysis.predictive_checklists.inference import predict_bundle
 
 

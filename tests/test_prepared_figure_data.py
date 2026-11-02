@@ -6,8 +6,8 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from COMPASS.survival_analysis import prepare_figure_data as prep
-from COMPASS.survival_analysis.prepare_figure_data import build_labels
+from COMPASS.survival_analysis.figure_pipeline import prepare_figure_data as prep
+from COMPASS.survival_analysis.figure_pipeline.prepare_figure_data import build_labels
 
 
 def input_frame():
@@ -122,10 +122,20 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     v1_dir = Path(config["federated_path"]).parent.parent / "rhino_results" / "federated_model_results"
     v1_paths = [v1_dir / directory / path.name for directory in ("federated_xgboost", "federated_xgboost_no_DFCI")
                 for path in xgb_paths]
+    # Adjust-only refits and their transfer outputs; XGBoost is tracked before it arrives.
+    feature_set_root = Path(config["federated_path"]).parent / "feature_set_models"
+    feature_set_paths = [
+        feature_set_root / "w_DFCI" / "federated_cox" / "cox_federated_elasticnet_metrics_adt.csv",
+        feature_set_root / "w_DFCI" / "federated_xgboost" / "xgboost_federated_metrics_adt.csv"] + [
+        feature_set_root / marker / "predictive_checklists" / name for marker in ("w_DFCI", "no_DFCI")
+        for name in prep.FEDERATED_CHECKLIST_FILES]
     no_dfci_dir = rhino / "federated_transfer_adt_no_DFCI"
+    feature_set_paths += [no_dfci_dir / "feature_set_checklists" / name
+                          for name in prep.FEDERATED_TRANSFER_FEATURE_SET_FILES]
     no_dfci_paths = [no_dfci_dir / name for name in
                      ("transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv",
-                      "transfer_km_patients.csv")]
+                      "transfer_km_patients.csv", "transfer_checklist_patients.csv",
+                      "transfer_checklist_comparison.csv")]
     all_model_paths = [no_dfci_dir / "all_models" / name for name in
                        ("transfer_metrics.csv", "transfer_auc_t.csv")]
     checklist_paths = [no_dfci_dir / "clinical_checklists" / name
@@ -137,7 +147,7 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     assert [item["path"] for item in result["federated_sources"]] == [
         config["federated_path"], str(site_path), str(within_path), *map(str, xgb_paths),
         *map(str, cox_paths), *map(str, no_dfci_model_paths),
-        *map(str, deephit_paths), *map(str, v1_paths), *map(str, no_dfci_paths),
+        *map(str, deephit_paths), *map(str, v1_paths), *map(str, feature_set_paths), *map(str, no_dfci_paths),
         *map(str, all_model_paths), *map(str, checklist_paths), *map(str, figure_data_paths)]
     assert result["federated_sources"][1]["missing"]
     site_path.parent.mkdir()
@@ -167,7 +177,7 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     # or change reruns the federated job.
     for directory in (no_dfci_dir, no_dfci_dir / "all_models", figure_data_dir):
         directory.mkdir(parents=True)
-    for index, path in enumerate([*deephit_paths, *v1_paths, *no_dfci_paths,
+    for index, path in enumerate([*deephit_paths, *v1_paths, *feature_set_paths, *no_dfci_paths,
                                   *all_model_paths, *checklist_paths, *figure_data_paths], start=11):
         path.parent.mkdir(parents=True, exist_ok=True)
         assert previous["federated_sources"][index]["missing"]
@@ -178,16 +188,34 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
         previous = delivered
 
 
+def test_transfer_notebook_skips_feature_set_bundles(tmp_path):
+    """The feature-set refits share the regular file names, so 04 must not merge them."""
+    notebook = json.loads((Path(prep.__file__).parents[2] / "notebooks" / "04_federated_transfer.ipynb").read_text())
+    source = "".join(next(c["source"] for c in notebook["cells"] if "def find_bundles" in "".join(c["source"])))
+    helpers = source[source.index("def is_no_dfci"):source.index("BUNDLE_PATHS, DELIVERY")]
+    namespace = {"re": __import__("re"), "OUTPUT_DIR": tmp_path / "federated_transfer_adt_no_DFCI",
+                 "FEATURE_SET_DIR": prep.FEDERATED_FEATURE_SET_ROOT}
+    exec(helpers, namespace)
+    name = "predictive_checklist_federated_model_adt.json"
+    regular = tmp_path / "federated_predictive_checklists" / "lm_0" / "no_DFCI" / name
+    refit = tmp_path / prep.FEDERATED_FEATURE_SET_ROOT / "no_DFCI" / "predictive_checklists" / name
+    for path in (regular, refit):
+        path.parent.mkdir(parents=True)
+        path.write_text("{}")
+    assert namespace["find_bundles"](tmp_path, name) == [regular]
+
+
 def test_federated_transfer_path_override(tmp_path):
     config = make_config(tmp_path, "federated")
     config["federated"] = True
     config["federated_transfer_no_dfci_path"] = str(tmp_path / "external")
     config["federated_figure_data_path"] = str(tmp_path / "aggregates")
     sources = prep.prepare(config)["federated_sources"]
-    assert [s["path"] for s in sources[-19:-15]] == [
+    assert [s["path"] for s in sources[-21:-15]] == [
         str(tmp_path / "external" / name) for name in
         ("transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv",
-         "transfer_km_patients.csv")]
+         "transfer_km_patients.csv", "transfer_checklist_patients.csv",
+         "transfer_checklist_comparison.csv")]
     assert {Path(s["path"]).parent for s in sources[-15:-13]} == {tmp_path / "external" / "all_models"}
     assert {Path(s["path"]).parent for s in sources[-13:-10]} == {tmp_path / "external" / "clinical_checklists"}
     assert {Path(s["path"]).parent for s in sources[-10:]} == {tmp_path / "aggregates"}
@@ -197,7 +225,7 @@ def test_federated_rhino_root_override(tmp_path):
     config = make_config(tmp_path, "federated")
     config["federated"] = True
     config["federated_rhino_root"] = str(tmp_path / "delivery")
-    paths = [Path(s["path"]) for s in prep.prepare(config)["federated_sources"][-19:]]
+    paths = [Path(s["path"]) for s in prep.prepare(config)["federated_sources"][-21:]]
     assert {path.parent.name for path in paths} == {"federated_transfer_adt_no_DFCI", "all_models", "clinical_checklists", "figure_data"}
     assert all((path.parent.parent if path.parent.name not in {"all_models", "clinical_checklists"} else path.parent.parent.parent)
                == tmp_path / "delivery" for path in paths)
@@ -274,7 +302,7 @@ def test_preparation_notebook_runs_all_python_cells(tmp_path, monkeypatch):
     monkeypatch.delenv("COMPASS_PREPARE_OVERWRITE", raising=False)
     root = Path(__file__).resolve().parents[1]
     monkeypatch.chdir(root)
-    notebook = json.loads((root / "COMPASS/survival_analysis/06_prep_figure_data.ipynb").read_text())
+    notebook = json.loads((root / "COMPASS/notebooks/05_prep_figure_data.ipynb").read_text())
     state = {"display": lambda frame: None}
     for i, cell in enumerate(notebook["cells"]):
         if cell["cell_type"] == "code":

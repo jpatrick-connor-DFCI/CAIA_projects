@@ -1,6 +1,6 @@
-source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/checklist_supplement.R")
-source("COMPASS/survival_analysis/figure_workflow.R")
+source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/survival_analysis/figure_pipeline/checklist_supplement.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
 
 local({
   root <- tempfile("transfer-checklist-")
@@ -28,11 +28,11 @@ local({
   assign("save_federated_panel",function(p,path,width,height,dpi,overwrite) {
     stopifnot(inherits(p,"gtable"),isTRUE(all.equal(width,15.6)),height>8)
     captured[[length(captured)+1L]] <<- basename(path)
-    ggplot2::ggsave(file.path(root,basename(path)),p,width=width,height=height,dpi=60)
+    ggplot2::ggsave(file.path(root,basename(path)),p,width=width,height=height,device=figure_pdf_device)
   },envir=.GlobalEnv)
   withCallingHandlers(render_transfer_clinical_checklists(root,input,60,TRUE),
     warning=function(w) stop(w))
-  stopifnot(identical(captured[[1]],"transfer_clinical_checklist_xgboost_cox_avpc__platinum.png"))
+  stopifnot(identical(captured[[1]],"transfer_clinical_checklist_xgboost_cox_avpc__platinum.pdf"))
   lines <- checklist_card_lines(cells[1,],filter(items,landmark_days==0,horizon_days==365),
     metrics[1,],1,origin="sequencing")
   stopifnot(grepl("sequencing",lines$text[1]),!any(grepl("ADT",lines$text)))

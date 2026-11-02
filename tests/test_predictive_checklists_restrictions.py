@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from COMPASS.survival_analysis import cox_aggregated as ca
+from COMPASS.survival_analysis.pipeline import cox_aggregated as ca
 from COMPASS.survival_analysis.predictive_checklists import features
 from COMPASS.survival_analysis.predictive_checklists.__main__ import main
 from COMPASS.survival_analysis.predictive_checklists.config import RunConfig

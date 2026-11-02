@@ -1,6 +1,6 @@
 # Run from the repository root: Rscript tests/test_figure_progress.R
 # No plotting packages or cluster inputs needed.
-source_exprs <- parse("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
+source_exprs <- parse("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
 for (expr in source_exprs) {
   if (is.call(expr) && identical(expr[[1]], as.name("<-")) &&
       identical(expr[[2]], as.name("new_figure_progress"))) eval(expr)
@@ -34,7 +34,7 @@ local({
 # Exercise the actual notebook scheduler, including error handling and both
 # Exercise the scheduler shared by preparation and rendering, sequentially and
 # with forks. Failures are values so remaining jobs always complete.
-source("COMPASS/survival_analysis/figure_workflow.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
 for (workers in if (.Platform$OS.type == "windows") 1L else c(1L, 2L)) {
   results <- figure_parallel(as.list(1:4), function(i) {
     if (i == 2) stop("synthetic device failure")

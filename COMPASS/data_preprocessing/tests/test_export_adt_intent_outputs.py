@@ -168,7 +168,7 @@ class TestTimeToEvent(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             _, out = run(_meds(), follow_up=_follow_up(), longitudinal=None,
                          fig_root=d, verbose=False)
-            self.assertTrue((out / "km_death.png").exists())
+            self.assertTrue((out / "km_death.pdf").exists())
         # 4 of 12 died (every third patient: 3, 6, 9, 12). No summary table is
         # written any more, so the count is checked at its source.
         km = build_death_km_input(build_labels(_meds(), follow_up=_follow_up()),
@@ -180,15 +180,15 @@ class TestTimeToEvent(unittest.TestCase):
             _, out = run(_meds(), follow_up=_follow_up(), longitudinal=None,
                          fig_root=d, verbose=False)
             for endpoint in ("platinum", "nepc", "avpc"):
-                self.assertFalse((out / f"km_{endpoint}.png").exists())
+                self.assertFalse((out / f"km_{endpoint}.pdf").exists())
 
     def test_all_four_kms_render_with_longitudinal(self):
         with tempfile.TemporaryDirectory() as d:
             _, out = run(_meds(), follow_up=_follow_up(),
                          longitudinal=_longitudinal(d), fig_root=d, verbose=False)
             for endpoint in ("death", "platinum", "nepc", "avpc"):
-                self.assertTrue((out / f"km_{endpoint}.png").exists(),
-                                f"km_{endpoint}.png missing")
+                self.assertTrue((out / f"km_{endpoint}.pdf").exists(),
+                                f"km_{endpoint}.pdf missing")
 
     def test_km_event_counts_match_the_planted_rate(self):
         """The counts now ride on the figure rather than a CSV, so they are
@@ -197,7 +197,7 @@ class TestTimeToEvent(unittest.TestCase):
             labelled, out = run(_meds(), follow_up=_follow_up(),
                                 longitudinal=_longitudinal(d), fig_root=d,
                                 verbose=False)
-            self.assertTrue((out / "km_platinum.png").exists())
+            self.assertTrue((out / "km_platinum.pdf").exists())
             plat = summarize_km(
                 build_km_input(_longitudinal(d), labelled, "platinum")
             )
@@ -212,7 +212,7 @@ class TestTimeToEvent(unittest.TestCase):
             labelled, out = run(_meds(), follow_up=_follow_up(),
                                 longitudinal=_longitudinal(d), fig_root=d,
                                 verbose=False)
-            self.assertTrue((out / "lab_trajectories.png").exists())
+            self.assertTrue((out / "lab_trajectories.pdf").exists())
             log = write_lab_trajectories(
                 labelled, out, longitudinal=_longitudinal(d)
             )
@@ -225,7 +225,7 @@ class TestTimeToEvent(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             _, out = run(_meds(), follow_up=_follow_up(), longitudinal=None,
                          fig_root=d, verbose=False)
-            self.assertFalse((out / "lab_trajectories.png").exists())
+            self.assertFalse((out / "lab_trajectories.pdf").exists())
 
 
 class TestSurvivalPassthrough(unittest.TestCase):
@@ -249,7 +249,7 @@ class TestSurvivalPassthrough(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             labelled, out = run(_meds(), follow_up=_follow_up(), fig_root=d,
                                 verbose=False)
-            self.assertTrue((out / "km_death.png").exists())
+            self.assertTrue((out / "km_death.pdf").exists())
         km = build_death_km_input(labelled, _follow_up())
         self.assertEqual(km.height, 12)
         self.assertEqual(int(km["event"].sum()), 4)   # 4 of 12 died
@@ -258,7 +258,7 @@ class TestSurvivalPassthrough(unittest.TestCase):
         """No follow-up frame means no death curve, and the run says so."""
         with tempfile.TemporaryDirectory() as d:
             _, out = run(_meds(), follow_up=None, fig_root=d, verbose=False)
-            self.assertFalse((out / "km_death.png").exists())
+            self.assertFalse((out / "km_death.pdf").exists())
 
 
 class TestRun(unittest.TestCase):
@@ -268,8 +268,8 @@ class TestRun(unittest.TestCase):
                 _meds(), stage_note_level_path=_stage_notes(d),
                 fig_root=d, verbose=False,
             )
-            self.assertTrue((out / "stage_metburden.png").exists())
-            self.assertTrue((out / "max_stage.png").exists())
+            self.assertTrue((out / "stage_metburden.pdf").exists())
+            self.assertTrue((out / "max_stage.pdf").exists())
         # The label is returned, never written.
         self.assertEqual(labelled.height, 12)
 
@@ -291,7 +291,7 @@ class TestRun(unittest.TestCase):
                 llm_labels_path=_llm_labels(d), fig_root=d, verbose=False,
             )
             self.assertIn(LLM_LABEL_COL, labelled.columns)
-            self.assertTrue((out / "max_stage_llm.png").exists())
+            self.assertTrue((out / "max_stage_llm.pdf").exists())
 
     def test_nothing_is_written_as_csv(self):
         """The whole point of the export is PNGs; a stray CSV would mean a
@@ -301,7 +301,7 @@ class TestRun(unittest.TestCase):
                          stage_note_level_path=_stage_notes(d),
                          longitudinal=_longitudinal(d), fig_root=d, verbose=False)
             written = sorted(p.name for p in out.iterdir())
-        self.assertEqual([p for p in written if not p.endswith(".png")], [])
+        self.assertEqual([p for p in written if not p.endswith(".pdf")], [])
         self.assertGreater(len(written), 0)
 
     def test_absent_inputs_skip_figures_rather_than_drawing_empty_ones(self):
@@ -312,7 +312,7 @@ class TestRun(unittest.TestCase):
             # The stage joins are absent...
             self.assertNotIn("MAX_STAGE_BEFORE", labelled.columns)
             # ...but the panels that do not need them are still produced.
-            self.assertTrue((out / "max_stage.png").exists())
+            self.assertTrue((out / "max_stage.pdf").exists())
 
     def test_rerun_overwrites_in_place(self):
         """Regenerating must not accumulate stale variants beside the new ones."""

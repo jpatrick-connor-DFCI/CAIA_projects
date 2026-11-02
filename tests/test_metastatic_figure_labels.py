@@ -7,10 +7,10 @@ import subprocess
 import polars as pl
 import pytest
 
-from COMPASS.survival_analysis.prepare_figure_data import build_labels, collapse_stage
+from COMPASS.survival_analysis.figure_pipeline.prepare_figure_data import build_labels, collapse_stage
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "COMPASS/survival_analysis"
+SCRIPTS = ROOT / "COMPASS/survival_analysis/figure_pipeline"
 
 
 def fixture_inputs():
@@ -102,8 +102,8 @@ def test_r_comparisons_and_standalone_diagnostics(tmp_path):
       labels <- render_metastatic_supplements(config, patients, labs,
         save_panel = function(plot, stem, width, height) {{
           saved <<- c(saved, stem)
-          ggsave(file.path(root, paste0(stem, ".png")), plot, width = width, height = height,
-                 dpi = 100, device = ragg::agg_png)
+          ggsave(file.path(root, paste0(stem, ".pdf")), plot, width = width, height = height,
+                 device = grDevices::cairo_pdf)
         }}, notify = function(...) NULL)
       stopifnot(setequal(saved, metastatic_supplement_stems()), !anyDuplicated(saved))
       stopifnot(sum(labels$ANCHOR_DELTA_DAYS != 0, na.rm=TRUE)==6)
@@ -117,4 +117,4 @@ def test_r_comparisons_and_standalone_diagnostics(tmp_path):
     path.write_text(script)
     result = subprocess.run(["Rscript", str(path)], cwd=ROOT, text=True, capture_output=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert len(list(tmp_path.glob("*.png"))) == 3
+    assert len(list(tmp_path.glob("*.pdf"))) == 3

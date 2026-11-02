@@ -36,7 +36,7 @@ import pandas as pd
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
-SURVIVAL_DIR = PROJECT_DIR / "survival_analysis"
+SURVIVAL_DIR = PROJECT_DIR / "survival_analysis" / "pipeline"
 REPO_ROOT = PROJECT_DIR.parent
 for _p in (str(REPO_ROOT), str(PROJECT_DIR), str(SURVIVAL_DIR), str(SCRIPT_DIR)):
     if _p not in sys.path:

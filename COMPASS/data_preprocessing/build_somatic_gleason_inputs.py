@@ -43,7 +43,7 @@ import pandas as pd
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
-SURVIVAL_DIR = PROJECT_DIR / "survival_analysis"
+SURVIVAL_DIR = PROJECT_DIR / "survival_analysis" / "pipeline"
 REPO_ROOT = PROJECT_DIR.parent
 for _path in (REPO_ROOT, PROJECT_DIR, SURVIVAL_DIR, SCRIPT_DIR):
     if str(_path) not in sys.path:
@@ -892,7 +892,7 @@ def load_stage(stage_path: Path) -> pd.DataFrame:
     """Load the note-level regex stage table used by prepare_figure_data.py.
 
     Reads the same parquet as `METASTATIC_SOURCES["stage"]` in
-    06_prep_figure_data.ipynb (columns DFCI_MRN, EVENT_DATE,
+    05_prep_figure_data.ipynb (columns DFCI_MRN, EVENT_DATE,
     DERIVED_STAGE_MERGED). Read directly rather than imported from
     prepare_figure_data.py, since both files live in this repo -- the
     no-cross-repo-imports rule is only about the separate CTEP repo.

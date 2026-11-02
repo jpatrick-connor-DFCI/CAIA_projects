@@ -1,5 +1,6 @@
-source("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_workflow.R")
+source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
+source("COMPASS/survival_analysis/figure_pipeline/checklist_supplement.R")
 
 # Styling a manuscript copy must not mutate a layer shared by the standalone.
 p <- ggplot(tibble(x=1,y=2,label="Unchanged"),aes(x,y,label=label)) +
@@ -53,7 +54,7 @@ stopifnot(length(multivariable_spec$members)==7,
 # The HR direction guide sits under the shared volcano legend.
 direction <- hr_direction_grob()
 direction_text <- unname(unlist(lapply(direction$children,function(x) if(inherits(x,"text")) x$label)))
-stopifnot(inherits(direction,"gTree"),identical(direction_text,c("0","Larger association with platinum hazard in the labeled direction")),
+stopifnot(inherits(direction,"gTree"),identical(direction_text,c("1","Larger association with platinum hazard in the labeled direction")),
   identical(MANUSCRIPT_UNIVARIABLE_KEYS,c("03_dfci_univariable","federated_03_univariable")))
 # The supplementary DFCI labs: trajectory beside KM, one row per lab.
 supplement <- figure_dfci_supplement_labs_spec(180)
@@ -70,27 +71,33 @@ stopifnot(landmark_header$theme$plot.subtitle$face=="bold",
 # embedding project and retain figure-specific audit language.
 captions <- manuscript_captions()
 federated_keys <- c("federated_03_univariable","federated_04_multivariable","federated_05_transfer_no_dfci",
-  "federated_05_transfer_no_dfci__no_d")
+  "federated_05_transfer_no_dfci__no_d",
+  "federated_05_transfer_no_dfci__mean_landmarks_set1","federated_05_transfer_no_dfci__mean_landmarks_set2",
+  "federated_06_checklist_no_dfci","federated_s1_feature_set")
 figure2_keys <- paste0("02_llm_nepc_avpc__",c("icd","adt","lm0"))
 local_keys <- c("01_cohort_overview",figure2_keys,"03_dfci_univariable","04_multivariable_labs",
   "03_cohort_sensitivity_supplement","07_federated_incidence_associations","08_federated_multivariable")
 # Figure 5 (internal Gleason sensitivity) was removed; Gleason is compared in transfer.
-stopifnot(length(captions)==13,identical(names(captions),c(local_keys,federated_keys)),
+stopifnot(length(captions)==17,identical(names(captions),c(local_keys,federated_keys)),
   all(startsWith(unname(captions[local_keys]),paste0("Figure ",c(1,2,2,2,3,4,3,7,8),". "))),
-  all(grepl("^Federated Figure [3-5][. ]",unname(captions[federated_keys]))),
+  all(grepl("^Federated Figure (S1|[3-6])[. ]",unname(captions[federated_keys]))),
   setequal(unique(manuscript_base_key(names(captions))),names(MANUSCRIPT_SECTIONS)),
   grepl("ICD-10 prostate cancer cohort",captions[["02_llm_nepc_avpc__icd"]],fixed=TRUE),
   grepl("any dated platinum",captions[["02_llm_nepc_avpc__lm0"]],fixed=TRUE),
   grepl("(g) Observed platinum events",captions[["01_cohort_overview"]],fixed=TRUE),
   grepl("bottom and top 10%",captions[["federated_03_univariable"]],fixed=TRUE),
-  grepl("(e-g) Kaplan-Meier",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
+  grepl("(b-d) Kaplan-Meier",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
   grepl("(d-f) Kaplan-Meier",captions[["federated_05_transfer_no_dfci__no_d"]],fixed=TRUE),
-  grepl("Gleason score (d)",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
+  grepl("(e) Probability of platinum treatment within 5 years",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
+  !grepl("Elastic-Net Cox and XGBoost survival models",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
   !grepl("Gleason score (d)",captions[["federated_05_transfer_no_dfci__no_d"]],fixed=TRUE),
   !grepl("hazard ratio",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
   grepl("22,138 patients (664 platinum events)",captions[["federated_03_univariable"]],fixed=TRUE),
   grepl("without Dana-Farber",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
-  grepl("Gleason score and age (b)",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
+  grepl("Gleason score and age (b)",captions[["federated_05_transfer_no_dfci__no_d"]],fixed=TRUE),
+  grepl("(c-e) Kaplan-Meier",captions[["federated_06_checklist_no_dfci"]],fixed=TRUE),
+  grepl("same sequenced patients with a Gleason score",captions[["federated_06_checklist_no_dfci"]],fixed=TRUE),
+  grepl("(f-h) Kaplan-Meier",captions[["federated_s1_feature_set"]],fixed=TRUE),
   grepl("AUC(t)",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
   !any(grepl("C-index",unname(captions),fixed=TRUE)),
   grepl("180-day landmark",captions[["03_dfci_univariable"]],fixed=TRUE),
@@ -102,23 +109,25 @@ stopifnot(length(captions)==13,identical(names(captions),c(local_keys,federated_
   grepl("9,939/308",captions[["07_federated_incidence_associations"]],fixed=TRUE))
 caption_root <- tempfile("manuscript-caption-test-")
 caption_paths <- manuscript_write_captions(caption_root)
-stopifnot(length(caption_paths)==26,all(file.exists(caption_paths)))
+stopifnot(length(caption_paths)==34,all(file.exists(caption_paths)))
 # The federated set is numbered on its own and never overwrites local figure3-5;
 # each caption sits in the manuscript folder of its figure's section.
 caption_md <- caption_paths[endsWith(caption_paths,".md")]
 stopifnot(setequal(basename(caption_md),paste0(c(paste0("figure",c(1,3,4,7,8)),"figure3_supplement",paste0("figure2_",c("icd","adt","lm0")),
-  paste0("federated_figure",3:5),"federated_figure5_no_d"),".md")))
+  paste0("federated_figure",3:6),"federated_figure_s1","federated_figure5_no_d","federated_figure5_mean_landmarks_set1","federated_figure5_mean_landmarks_set2"),".md")))
 for(path in caption_md) stopifnot(identical(readLines(path,warn=FALSE),
   readLines(sub("[.]md$",".txt",path),warn=FALSE)))
 caption_file <- function(section,name) file.path(caption_root,section,
   if(section %in% c("03_univariate/internal","03_univariate/federated","05_transfer") &&
-     name %in% c("figure3","federated_figure3","federated_figure5","federated_figure5_no_d"))
+     name %in% c("figure3","federated_figure3","federated_figure5","federated_figure5_no_d","federated_figure6","federated_figure_s1"))
     "alternative_manuscript" else "manuscript","captions",paste0(name,".md"))
 stopifnot(startsWith(readLines(caption_file("03_univariate/internal","figure3"),n=1,warn=FALSE),"Figure 3. "),
   startsWith(readLines(caption_file("03_univariate/federated","federated_figure3"),n=1,warn=FALSE),"Federated Figure 3. "),
   file.exists(caption_file("01_cohort","figure1")),!file.exists(caption_file("02_llm","figure2")),
   all(file.exists(caption_file("02_llm",paste0("figure2_",c("icd","adt","lm0"))))),
   file.exists(caption_file("05_transfer","federated_figure5_no_d")),
+  startsWith(readLines(caption_file("05_transfer","federated_figure_s1"),n=1,warn=FALSE),"Federated Figure S1. "),
+  startsWith(readLines(caption_file("05_transfer","federated_figure6"),n=1,warn=FALSE),"Federated Figure 6. "),
   !file.exists(caption_file("04_multivariate/internal","figure5")),file.exists(caption_file("04_multivariate/internal","figure4")),file.exists(caption_file("03_univariate/cohort_sensitivity","figure3_supplement")),
   file.exists(caption_file("04_multivariate/federated","figure8")),file.exists(caption_file("05_transfer","federated_figure5")),
   setequal(names(MANUSCRIPT_SECTIONS),manuscript_base_key(names(captions))))
@@ -385,7 +394,7 @@ stopifnot(all(is.na(federated_transfer_score_quantile(c(rep(0,8),1,2)))),
 km_tables <- federated_transfer_km_tables(km_input)
 stopifnot(identical(names(km_tables),names(FEDERATED_TRANSFER_KM_TABLES)),
   identical(names(FEDERATED_TRANSFER_KM_TABLES),c("curves","summary","gradient")),
-  setequal(unique(km_tables$summary$view),names(FEDERATED_TRANSFER_KM_VIEWS)),
+  setequal(unique(km_tables$summary$view),setdiff(names(FEDERATED_TRANSFER_KM_VIEWS),"checklist")),
   !any(c("score_gleason","hr") %in% names(FEDERATED_TRANSFER_KM_VIEWS)),
   all(km_tables$summary$clock[km_tables$summary$view %in% c("trio","score_trio")]=="sequencing"),
   setequal(unique(km_tables$gradient$stratifier),names(FEDERATED_TRANSFER_GRADIENT)),
@@ -444,13 +453,157 @@ stopifnot(length(fig5_km_no_d$spec$titles)==7,identical(fig5_km_no_d$spec$layout
 fig5_km_a <- suppressMessages(manuscript_federated_transfer_no_dfci(transfer_metrics,NULL,km_tables))
 stopifnot(length(fig5_km_a$spec$titles)==5,grepl("b: Kaplan-Meier",fig5_km_a$legend,fixed=TRUE),
   identical(fig5_km_a$spec$layout[2,],rep(2:4,each=2)),all(fig5_km_a$spec$layout[3,]==5))
+# Main Figure 5: XGBoost only, the KM panels, then 5-year platinum by score decile, Gleason and any alteration.
+fig5_main <- manuscript_federated_transfer_no_dfci(transfer_metrics,NULL,km_tables,include=character(),
+  model_families="xgboost_cox",probability=TRUE)
+risk <- plot_federated_transfer_horizon_risk(km_tables,"xgboost_cox",180L)
+stopifnot(inherits(fig5_main$plot,"gtable"),length(fig5_main$spec$titles)==5,
+  tail(fig5_main$spec$titles,1)=="5-year platinum probability",
+  all(fig5_main$data$model_family=="xgboost_cox"),
+  fig5_main$spec$row_heights[1]==MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["single"]],
+  identical(fig5_main$spec$layout[2,],rep(2:4,each=2)),all(fig5_main$spec$layout[3,]==5),
+  grepl("e: Kaplan-Meier 5-year platinum probability",fig5_main$legend,fixed=TRUE),
+  inherits(risk,"ggplot"),all(risk$data$endpoint=="platinum"),all(risk$data$clock=="sequencing"),
+  setequal(unique(risk$data$stratifier),FEDERATED_TRANSFER_RISK_STRATIFIERS),
+  setequal(as.character(risk$data$group),c(FEDERATED_TRANSFER_GRADIENT$score_decile$levels,
+    FEDERATED_TRANSFER_GLEASON,FEDERATED_TRANSFER_TRIO_COUNTS)),
+  identical(risk$labels$y,"5-year platinum probability"),
+  # 1 - KM swaps the interval: the event-free upper bound gives the lower probability bound.
+  all(abs(risk$data$probability-(1-risk$data$event_free))<1e-12),
+  all(abs(risk$data$probability_lo-(1-risk$data$hi))<1e-12,na.rm=TRUE),
+  all(abs(risk$data$probability_hi-(1-risk$data$lo))<1e-12,na.rm=TRUE),
+  all(risk$data$probability_lo<=risk$data$probability & risk$data$probability<=risk$data$probability_hi,na.rm=TRUE))
+wrong_clock <- km_tables; wrong_clock$gradient$clock <- "adt"
+clock_error <- tryCatch(plot_federated_transfer_horizon_risk(wrong_clock,"xgboost_cox",180L),error=conditionMessage)
+stopifnot(grepl("sequencing-landmark",clock_error,fixed=TRUE))
+# Figure 6: checklist card and rule accuracy above KM curves by checklist status.
+checklist_dir <- tempfile("transfer-checklist-"); dir.create(checklist_dir)
+set.seed(66)
+checklist_patients <- tidyr::expand_grid(endpoint=c("PLATINUM","AVPC","NEPC"),person_id=seq_len(300)) %>%
+  mutate(bundle="predictive_checklist_no_dfci",landmark_days=180,model_horizon_days=1825,
+    risk_score=rep(0:4,length.out=n()),flag=as.integer(risk_score>=2),
+    duration_days=rexp(n(),.001*(1+flag)),event=rbinom(n(),1L,.4))
+readr::write_csv(checklist_patients,file.path(checklist_dir,FEDERATED_CHECKLIST_PATIENTS_FILE))
+readr::write_csv(tidyr::expand_grid(endpoint=names(FEDERATED_TRANSFER_ENDPOINTS),rule=names(FEDERATED_CHECKLIST_RULES)) %>%
+  mutate(bundle="predictive_checklist_no_dfci",landmark_days=180,horizon_days=1825,n_patients=400,n_events=30,
+    n_positive=120,auc=.6,auc_lo=.52,auc_hi=.68,delta_auc_vs_checklist=if_else(rule=="checklist",0,-.02),
+    delta_auc_lo=-.1,delta_auc_hi=.06),file.path(checklist_dir,FEDERATED_CHECKLIST_COMPARISON_FILE))
+checklist_items <- tibble(landmark_days=180,horizon_days=1825,config="both",position=1:5,
+  display_item=paste("Lab item",1:5),M=2L,N=5L)
+checklist_metrics <- tibble(landmark_days=180,horizon_days=1825,config=c("both","baseline"),
+  model=c("checklist","age_checklist"),status="ok",n=1200,n_cases=90,auc=c(.66,.55),auc_lower=c(.61,.5),
+  auc_upper=c(.71,.6),brier=.07,sensitivity=.6,specificity=.7,ppv=.15,npv=.95)
+real_load_federated_checklists <- load_federated_checklists
+load_federated_checklists <- function(federated_path,variant) list(
+  items=bind_rows(checklist_items,mutate(checklist_items,landmark_days=90,M=3L)),
+  metrics=bind_rows(checklist_metrics,mutate(checklist_metrics,landmark_days=90)))
+checklist_root <- tempfile("transfer-checklist-out-")
+checklist_tables <- write_federated_checklist_tables(checklist_root,"unused",checklist_dir)
+checklist_data <- setNames(file.path(checklist_root,FIGURE_SECTIONS[["transfer"]],"data",
+  paste0(FEDERATED_CHECKLIST_TABLES,"__platinum.csv")),names(FEDERATED_CHECKLIST_TABLES))
+stopifnot(all(file.exists(checklist_data)),
+  !any(grepl("person_id",unlist(lapply(checklist_data,readLines,n=1L)),fixed=TRUE)),
+  identical(as.integer(checklist_tables$items$position),1:5),all(checklist_tables$items$landmark_days==180),
+  all(checklist_tables$summary$view=="checklist"),all(checklist_tables$summary$clock=="adt"),
+  setequal(unique(checklist_tables$summary$endpoint),names(FEDERATED_TRANSFER_ENDPOINTS)),
+  setequal(checklist_tables$summary$stratum,FEDERATED_CHECKLIST_GROUPS))
+# Built from the sidecars, as manuscript_build does.
+fig6 <- manuscript_federated_checklist(lapply(checklist_data,readr::read_csv,show_col_types=FALSE))
+fig6_card <- federated_checklist_card_lines(checklist_tables$items,checklist_tables$metrics)
+stopifnot(fig6$spec$key=="federated_06_checklist_no_dfci",inherits(fig6$plot,"gtable"),
+  length(fig6$spec$titles)==5,
+  identical(fig6$spec$layout[1,],rep(1:2,each=3L)),identical(fig6$spec$layout[2,],rep(3:5,each=2L)),
+  length(fig6$spec$row_heights)==2,fig6$spec$row_heights[2]==MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["km"]],
+  any(grepl("Flag when at least 2 of 5 items",fig6_card$text,fixed=TRUE)),
+  sum(startsWith(fig6_card$text,"[ ] "))==5,
+  grepl("positive at 2 of 5 items",fig6$legend,fixed=TRUE),
+  grepl("Platinum Gleason ≥8 120, 0.60 (0.52-0.68), -0.02 (-0.10 to 0.06)",fig6$legend,fixed=TRUE),
+  !grepl("Checklist positive 120, 0.60 (0.52-0.68),",fig6$legend,fixed=TRUE),
+  grepl("c: Kaplan-Meier platinum-free survival",fig6$legend,fixed=TRUE),
+  grepl("e: Kaplan-Meier NEPC-free survival",fig6$legend,fixed=TRUE))
+# The drawn items must be the rule that assigned the patient groups.
+readr::write_csv(mutate(checklist_patients,flag=1L-flag),file.path(checklist_dir,FEDERATED_CHECKLIST_PATIENTS_FILE))
+flag_error <- tryCatch(write_federated_checklist_tables(checklist_root,"unused",checklist_dir),error=conditionMessage)
+stopifnot(grepl("2-of-5 checklist",flag_error,fixed=TRUE),
+  is.null(suppressWarnings(write_federated_checklist_tables(checklist_root,"unused",tempfile()))))
+load_federated_checklists <- real_load_federated_checklists
+# Feature-set supplement: real files on the delivery layout, regular rows beside them.
+fs_root <- tempfile("feature-set-"); dir.create(fs_root)
+fs_fed <- file.path(fs_root,"cox_federated_univariate_adt.csv")
+fs_put <- function(d,...) {
+  path <- file.path(fs_root,...)
+  dir.create(dirname(path),recursive=TRUE,showWarnings=FALSE)
+  readr::write_csv(d,path)
+}
+fs_survival <- function(model,auc,n_test=1000) tidyr::expand_grid(landmark_days=c(0,90,180),config=c("both","baseline")) %>%
+  mutate(analysis_label="adt",endpoint="platinum",model=model,cohort="all",test_mean_auc_t=auc,test_c_index=auc,
+    n_test=n_test,n_events_test=40)
+fs_items <- tidyr::expand_grid(landmark_days=c(0,90,180),horizon_days=c(365,1825),position=1:5) %>%
+  mutate(config="both",feature="age_at_anchor",op="<=",threshold_value=60+position,M=2L,N=5L)
+fs_metrics <- tidyr::expand_grid(landmark_days=c(0,90,180),horizon_days=c(365,1825),config=c("both","baseline")) %>%
+  mutate(dataset="test",status="ok",n=1000,n_cases=40,auc=.7,auc_lower=.65,auc_upper=.75,brier=.07,
+    sensitivity=.6,specificity=.7,ppv=.15,npv=.95)
+fs_cox <- FEDERATED_MULTIVARIABLE$elastic_net$files[["metrics"]]
+fs_xgb <- FEDERATED_MULTIVARIABLE$xgboost$files[["metrics"]]
+fs_put(fs_survival("elastic_net_cox",.8),"federated_cox_multivariate",fs_cox)
+fs_put(fs_survival("xgboost_cox",.82),"federated_xgboost",fs_xgb)
+fs_put(fs_survival("elastic_net_cox",.78),"feature_set_models","w_DFCI","federated_cox",fs_cox)
+for(directory in list("federated_checklists_w_DFCI","federated_checklists_no_DFCI",
+    c("feature_set_models","w_DFCI","predictive_checklists"),c("feature_set_models","no_DFCI","predictive_checklists"))) {
+  do.call(fs_put,c(list(fs_items),as.list(directory),FEDERATED_CHECKLIST_FILES[["items"]]))
+  do.call(fs_put,c(list(fs_metrics),as.list(directory),FEDERATED_CHECKLIST_FILES[["metrics"]]))
+}
+fs_transfer <- tidyr::expand_grid(endpoint=c("PLATINUM","AVPC","NEPC"),landmark_days=c(0,90,180),
+    model_horizon_days=c(365,1825),config=c("both","baseline")) %>%
+  mutate(model_family="predictive_checklist",evaluation_horizon_days=model_horizon_days,mean_auc=.64,
+    mean_auc_lo=.59,mean_auc_hi=.69,n_patients=400,n_events=30)
+fs_dir <- tempfile("feature-set-transfer-")
+for(directory in c("all_models",FEDERATED_FEATURE_SET_TRANSFER_DIR)) {
+  dir.create(file.path(fs_dir,directory),recursive=TRUE)
+  readr::write_csv(fs_transfer,file.path(fs_dir,directory,"transfer_metrics.csv"))
+}
+readr::write_csv(mutate(checklist_patients,bundle="predictive_checklist_feature_set"),
+  file.path(fs_dir,FEDERATED_FEATURE_SET_TRANSFER_DIR,FEDERATED_CHECKLIST_PATIENTS_FILE))
+fs_figure <- function(out) {
+  write_federated_feature_set_tables(out,fs_fed,fs_dir)
+  paths <- setNames(file.path(out,FIGURE_SECTIONS[["transfer"]],"data",
+    paste0(FEDERATED_FEATURE_SET_TABLES,"__platinum.csv")),names(FEDERATED_FEATURE_SET_TABLES))
+  stopifnot(all(file.exists(paths)),!any(grepl("person_id",unlist(lapply(paths,readLines,n=1L)),fixed=TRUE)))
+  manuscript_federated_feature_set(lapply(paths,readr::read_csv,show_col_types=FALSE))
+}
+fs_last_label <- function(p) p$layers[[length(p$layers)]]$data$label
+# Before 04 has run only the performance table exists, and the figure is skipped.
+fs_early <- tempfile("feature-set-out-")
+stopifnot(is.null(suppressWarnings(write_federated_feature_set_tables(fs_early,fs_fed,tempfile()))),
+  file.exists(file.path(fs_early,FIGURE_SECTIONS[["transfer"]],"data",
+    paste0(FEDERATED_FEATURE_SET_TABLES[["performance"]],"__platinum.csv"))))
+fs_supplement <- fs_figure(tempfile("feature-set-out-"))
+fs_performance <- load_federated_feature_set_performance(fs_fed)
+fs_empty <- plot_federated_feature_set_performance(fs_performance)
+stopifnot(fs_supplement$spec$key=="federated_s1_feature_set",inherits(fs_supplement$plot,"gtable"),
+  length(fs_supplement$spec$titles)==8,
+  identical(fs_supplement$spec$layout[2,],rep(2:4,each=2L)),identical(fs_supplement$spec$layout[3,],rep(5L,6L)),
+  identical(fs_supplement$spec$layout[4,],rep(6:8,each=2L)),
+  length(fs_supplement$spec$row_heights)==4,
+  !any(fs_performance$panel=="xgboost" & fs_performance$model_set=="Feature set"),
+  any(fs_performance$panel=="xgboost" & fs_performance$model_set=="Regular"),
+  identical(fs_last_label(fs_empty),"Feature-set XGBoost\nnot yet available"),
+  grepl("f: Kaplan-Meier platinum-free survival",fs_supplement$legend,fixed=TRUE),
+  grepl("h: Kaplan-Meier NEPC-free survival",fs_supplement$legend,fixed=TRUE))
+# The XGBoost slot fills itself when the file arrives; test sets must match.
+fs_put(fs_survival("xgboost_cox",.81),"feature_set_models","w_DFCI","federated_xgboost",fs_xgb)
+fs_filled <- plot_federated_feature_set_performance(load_federated_feature_set_performance(fs_fed))
+stopifnot(length(fs_filled$layers)==3,length(fs_empty$layers)==4)
+fs_put(fs_survival("xgboost_cox",.81,900),"feature_set_models","w_DFCI","federated_xgboost",fs_xgb)
+fs_warning <- tryCatch(load_federated_feature_set_performance(fs_fed),warning=conditionMessage)
+stopifnot(identical(fs_warning,"Regular and feature-set models have different test sets in: xgboost"))
 # Standalone pages land in 05_transfer/km/ with aggregate (not patient-level) sidecars.
 km_root <- tempfile("transfer-km-out-")
 render_federated_transfer_km(km_root,km_dir,dpi=40,overwrite=TRUE)
 km_out <- file.path(km_root,FIGURE_SECTIONS[["transfer"]],"km")
-stopifnot(file.exists(file.path(km_out,c("transfer_km_score_decile_nepc_elasticnet_landmark180__platinum.png",
-    "transfer_km_score_trio_avpc_xgboost_landmark180__platinum.png","transfer_km_grid_elasticnet_landmark180__platinum.png",
-    "transfer_km_gradient_xgboost_landmark180__platinum.png"))),
+stopifnot(file.exists(file.path(km_out,c("transfer_km_score_decile_nepc_elasticnet_landmark180__platinum.pdf",
+    "transfer_km_score_trio_avpc_xgboost_landmark180__platinum.pdf","transfer_km_grid_elasticnet_landmark180__platinum.pdf",
+    "transfer_km_gradient_xgboost_landmark180__platinum.pdf"))),
   !any(grepl("^transfer_km_(hr|score_gleason)_",list.files(km_out))),
   file.exists(file.path(km_out,"data",paste0(FEDERATED_TRANSFER_KM_TABLES,"__platinum.csv"))),
   !any(grepl("person_id",unlist(lapply(file.path(km_out,"data",paste0(FEDERATED_TRANSFER_KM_TABLES,"__platinum.csv")),

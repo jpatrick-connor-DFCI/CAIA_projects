@@ -9,24 +9,24 @@ Everything lands under a single directory, by default
 
     <FIG_ROOT>/ADT_METASTATIC_FILTERING/
 
-with FIG_ROOT matching 07_figures/all.R's
+with FIG_ROOT matching COMPASS/figures/all.R's
 `/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS`, overridable via the
 COMPASS_FIG_ROOT environment variable or --fig-root.
 
 Outputs
 -------
-PNG only. Nothing is written as CSV -- not the summaries, and not the label
+PDF only. Nothing is written as CSV -- not the summaries, and not the label
 itself. `run()` returns the labelled frame, so a caller that needs the
 per-patient label takes it from the return value rather than from disk.
 
-  stage_metburden.png            stage mix, burden distribution, site pattern
-  max_stage.png                  max-stage mix, stage IV rate
-  max_stage_llm.png              same max-stage panel, grouped by the LLM
+  stage_metburden.pdf            stage mix, burden distribution, site pattern
+  max_stage.pdf                  max-stage mix, stage IV rate
+  max_stage_llm.pdf              same max-stage panel, grouped by the LLM
                                  primary prostate-subtype label
-  km_death.png                   overall survival, all ADT-exposed
-  km_platinum.png / km_nepc.png / km_avpc.png
+  km_death.pdf                   overall survival, all ADT-exposed
+  km_platinum.pdf / km_nepc.pdf / km_avpc.pdf
                                  cohort-only endpoints; need `longitudinal`
-  lab_trajectories.png           testosterone and PSA around ADT start
+  lab_trajectories.pdf           testosterone and PSA around ADT start
 
 Because the summary tables are gone, the numbers that qualify a figure travel
 on the figure: each KM panel is annotated with per-class event counts, median
@@ -84,7 +84,7 @@ from COMPASS.data_preprocessing.validate_adt_intent import (  # noqa: E402
     load_stage_nearest_adt,
 )
 
-# Matches FIG_ROOT in COMPASS/survival_analysis/07_figures/all.R.
+# Matches FIG_ROOT in COMPASS/figures/all.R.
 DEFAULT_FIG_ROOT = os.environ.get(
     "COMPASS_FIG_ROOT", "/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS"
 )
@@ -236,7 +236,7 @@ def write_time_to_event(
     def _km_figure(km_input, endpoint, title, ylabel):
         """One KM panel. Returns False if there was nothing to draw."""
         if km_input.height == 0:
-            log.append(f"  [skip] km_{endpoint}.png -- no {endpoint} data")
+            log.append(f"  [skip] km_{endpoint}.pdf -- no {endpoint} data")
             return False
 
         counts = summarize_km(km_input)
@@ -249,7 +249,7 @@ def write_time_to_event(
             )
         except ModuleNotFoundError:
             plt.close(fig)
-            log.append(f"  [skip] km_{endpoint}.png -- lifelines not installed")
+            log.append(f"  [skip] km_{endpoint}.pdf -- lifelines not installed")
             return False
         ax.grid(alpha=0.2)
 
@@ -282,9 +282,9 @@ def write_time_to_event(
             bbox=dict(boxstyle="round", fc="white", ec="0.7", alpha=0.85),
         )
 
-        fig.savefig(out_dir / f"km_{endpoint}.png", dpi=FIGURE_DPI, bbox_inches="tight")
+        fig.savefig(out_dir / f"km_{endpoint}.pdf", dpi=FIGURE_DPI, bbox_inches="tight")
         plt.close(fig)
-        log.append(f"  wrote km_{endpoint}.png")
+        log.append(f"  wrote km_{endpoint}.pdf")
         return True
 
     # --- death: the full ADT-exposed population ---
@@ -294,7 +294,7 @@ def write_time_to_event(
                    "Overall survival by ADT intent (all ADT-exposed)",
                    "Survival probability")
     else:
-        log.append("  [skip] km_death.png -- no follow-up frame")
+        log.append("  [skip] km_death.pdf -- no follow-up frame")
 
     # --- cohort-only endpoints ---
     if longitudinal is None:
@@ -315,7 +315,7 @@ def write_lab_trajectories(
 ) -> list:
     """Testosterone and PSA trajectories around ADT start, by intent class."""
     if longitudinal is None:
-        return ["  [skip] lab_trajectories.png -- no longitudinal frame"]
+        return ["  [skip] lab_trajectories.pdf -- no longitudinal frame"]
 
     import matplotlib
     matplotlib.use("Agg")
@@ -351,9 +351,9 @@ def write_lab_trajectories(
         plot_lab_trajectory(ax, traj, title=f"{lab} around ADT start",
                             ylabel=ylabel, log_scale=log_scale, hlines=hlines)
     fig.tight_layout()
-    fig.savefig(out_dir / "lab_trajectories.png", dpi=FIGURE_DPI, bbox_inches="tight")
+    fig.savefig(out_dir / "lab_trajectories.pdf", dpi=FIGURE_DPI, bbox_inches="tight")
     plt.close(fig)
-    log.append("  wrote lab_trajectories.png")
+    log.append("  wrote lab_trajectories.pdf")
     return log
 
 
@@ -369,10 +369,10 @@ def write_figures(labelled: pl.DataFrame, out_dir: Path) -> list:
         ("max_stage", plot_max_stage_panel),
     ):
         fig, _ = fn(labelled)
-        path = out_dir / f"{name}.png"
+        path = out_dir / f"{name}.pdf"
         fig.savefig(path, dpi=FIGURE_DPI, bbox_inches="tight")
         plt.close(fig)
-        log.append(f"  wrote {name}.png")
+        log.append(f"  wrote {name}.pdf")
     if LLM_LABEL_COL in labelled.columns:
         llm_labelled = labelled.filter(pl.col(LLM_LABEL_COL).is_not_null())
         if llm_labelled.height:
@@ -383,10 +383,10 @@ def write_figures(labelled: pl.DataFrame, out_dir: Path) -> list:
                 class_order=LLM_LABEL_ORDER,
             )
             fig.suptitle("Max stage around ADT start, by LLM primary label", y=1.03)
-            path = out_dir / "max_stage_llm.png"
+            path = out_dir / "max_stage_llm.pdf"
             fig.savefig(path, dpi=FIGURE_DPI, bbox_inches="tight")
             plt.close(fig)
-            log.append("  wrote max_stage_llm.png")
+            log.append("  wrote max_stage_llm.pdf")
     return log
 
 
@@ -404,7 +404,7 @@ def run(
     """Classify, cross-reference, write every figure.
 
     Returns (labelled, out_dir). The labelled frame is returned rather than
-    written: nothing is persisted but PNGs, so a caller that needs the label
+    written: nothing is persisted but PDFs, so a caller that needs the label
     itself takes it from the return value.
     """
     out_dir = resolve_out_dir(fig_root)
@@ -446,7 +446,7 @@ def main() -> None:
     parser.add_argument(
         "--llm-labels-path", default=str(DEFAULT_LLM_LABELS_PATH),
         help=("primary_subtype_labels.parquet; when present, writes the "
-              "alternate max_stage_llm.png panel"),
+              "alternate max_stage_llm.pdf panel"),
     )
     parser.add_argument(
         "--longitudinal-path", default=None,

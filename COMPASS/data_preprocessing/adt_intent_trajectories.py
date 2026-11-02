@@ -137,7 +137,7 @@ CASTRATE_STRICT_NG_DL = 20.0
 PSA_LOG_FLOOR = 0.01
 
 # Endpoint -> (duration column, event column, human title). Mirrors
-# COMPASS.survival_analysis.cox_aggregated.ENDPOINTS, which is the authority
+# COMPASS.survival_analysis.pipeline.cox_aggregated.ENDPOINTS, which is the authority
 # for these pairings; kept as a literal here so this module does not import
 # the modelling stack just to plot.
 KM_ENDPOINTS = {
@@ -1068,9 +1068,9 @@ def main() -> None:
             log_scale=log_scale, hlines=hlines,
         )
     fig.tight_layout()
-    fig.savefig(out_dir / "adt_intent_lab_trajectories.png", dpi=150)
+    fig.savefig(out_dir / "adt_intent_lab_trajectories.pdf", dpi=150)
     plt.close(fig)
-    print(f"\nwrote {out_dir / 'adt_intent_lab_trajectories.png'}")
+    print(f"\nwrote {out_dir / 'adt_intent_lab_trajectories.pdf'}")
 
     # --- KM curves ---
     from survival_common.plotting import overlay_km
@@ -1091,9 +1091,9 @@ def main() -> None:
             ylabel="Event-free probability" if endpoint != "death" else "Survival probability",
         )
     fig.tight_layout()
-    fig.savefig(out_dir / "adt_intent_km_curves.png", dpi=150)
+    fig.savefig(out_dir / "adt_intent_km_curves.pdf", dpi=150)
     plt.close(fig)
-    print(f"\nwrote {out_dir / 'adt_intent_km_curves.png'}")
+    print(f"\nwrote {out_dir / 'adt_intent_km_curves.pdf'}")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """The R figure pipeline's endpoint wiring: results-tree paths, output
 separation, and per-endpoint metric selection.
 
-Grounded in COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R
+Grounded in COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R
 (read_endpoint_performance + the ENDPOINT_SUFFIXES/FIG_ROOT plumbing in
 generate_figures) and compass_pipeline.make_runs, whose ``output_suffix`` these
 paths must mirror: "" for platinum, "_nepc" for NEPC.
@@ -28,7 +28,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_R = (
-    REPO_ROOT / "COMPASS" / "survival_analysis" / "COMPASS_generate_figures_pipeline.R"
+    REPO_ROOT / "COMPASS" / "survival_analysis" / "figure_pipeline" / "COMPASS_generate_figures_pipeline.R"
 )
 
 pytestmark = pytest.mark.skipif(
@@ -263,7 +263,7 @@ def test_pipeline_parses(tmp_path):
 
 def _comparison_module_source() -> str:
     return (
-        REPO_ROOT / "COMPASS" / "survival_analysis" / "adt_intent_comparison.py"
+        REPO_ROOT / "COMPASS" / "survival_analysis" / "pipeline" / "adt_intent_comparison.py"
     ).read_text()
 
 
@@ -316,23 +316,23 @@ def test_supplement_never_refits_anything():
         )
 
 
-# ---- 07_figures/all.R render cross -----------------------------------------
+# ---- COMPASS/figures/all.R render cross -----------------------------------------
 #
-# 07_figures/all.R names its COHORTS and ENDPOINTS as literal vectors, so it is the one
+# COMPASS/figures/all.R names its COHORTS and ENDPOINTS as literal vectors, so it is the one
 # place that can drift out of the Python run cross without any import failing:
 # a retired endpoint left here dies in the ENDPOINT_SUFFIXES lookup, and a
 # missing cohort silently renders fewer figure sets than there are runs.
 
-FIGURES_SCRIPT = REPO_ROOT / "COMPASS" / "survival_analysis" / "07_figures" / "_common.R"
+FIGURES_SCRIPT = REPO_ROOT / "COMPASS" / "figures" / "_common.R"
 
 
 def _figures_vector(name: str) -> list[str]:
     body = re.search(rf"^{name} <- c\((.*?)\)", FIGURES_SCRIPT.read_text(), re.S | re.M)
     if body is None:
         default = re.search(rf'^{name} <- env_values\("[^"]+", "([^"]+)"\)', FIGURES_SCRIPT.read_text(), re.M)
-        assert default, f"{name} not found in 07_figures/all.R"
+        assert default, f"{name} not found in COMPASS/figures/all.R"
         return default.group(1).split(",")
-    assert body, f"{name} not found in 07_figures/all.R"
+    assert body, f"{name} not found in COMPASS/figures/all.R"
     return re.findall(r'"([^"]*)"', body.group(1))
 
 
@@ -341,7 +341,7 @@ def _python_run_labels() -> set[str]:
     import io
     import tempfile
 
-    from COMPASS.survival_analysis import compass_pipeline as cp
+    from COMPASS.survival_analysis.pipeline import compass_pipeline as cp
 
     original = cp._PROFILE_OUTPUT_ROOT
     try:
@@ -373,7 +373,7 @@ def test_the_figures_script_names_no_retired_endpoint():
 
     endpoints = _figures_vector("ENDPOINTS")
     assert set(endpoints) <= supported, (
-        f"07_figures/all.R requests endpoints the pipeline does not support: "
+        f"COMPASS/figures/all.R requests endpoints the pipeline does not support: "
         f"{sorted(set(endpoints) - supported)}"
     )
 
@@ -387,12 +387,12 @@ def test_a_failed_cohort_does_not_abandon_the_rest():
 
 
 def test_r_figure_workflow_never_launches_python():
-    """Python belongs exclusively to 06, including all/prepare stages in 05."""
-    paths = sorted(PIPELINE_R.parent.glob("*.R"))  # includes 07_figures/all.R
+    """Python belongs exclusively to 05, including all/prepare stages in 07."""
+    paths = sorted(PIPELINE_R.parent.glob("*.R"))
     for path in paths:
         code = path.read_text()
         assert not re.search(r"\b(?:system2?|py_run_file|py_run_string|source_python)\s*\(", code), path
         assert "reticulate::" not in code, path
     helper = (PIPELINE_R.parent / "figure_workflow.R").read_text()
     assert "figure_notebook_manifest(config" in helper
-    assert "Run 06_prep_figure_data.ipynb" in helper
+    assert "Run 05_prep_figure_data.ipynb" in helper

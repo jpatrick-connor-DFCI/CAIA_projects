@@ -1,6 +1,6 @@
 # Rscript tests/test_metastatic_figure_labels.R
 suppressPackageStartupMessages({library(dplyr); library(tidyr)})
-source("COMPASS/survival_analysis/figure_supplements.R")
+source("COMPASS/survival_analysis/figure_pipeline/figure_supplements.R")
 intent <- tibble(DFCI_MRN=1:6, ADT_FIRST_DATE="2020-01-01",
   ADT_INTENT=c("METASTATIC", "LOCALIZED_ADJUVANT", "METASTATIC",
                "LOCALIZED_ADJUVANT", "INDETERMINATE", "LOCALIZED_ADJUVANT"))
@@ -61,10 +61,10 @@ stopifnot(aligned_burden$N_MET_SITES[aligned_burden$DFCI_MRN=="1"]==3,
 failure <- tryCatch(build_metastatic_labels(intent,notes,llm,bind_rows(anchors,anchors[1,])),error=identity)
 stopifnot(inherits(failure,"error"), grepl("one row per patient",conditionMessage(failure)))
 
-# Python runs only in the 06 notebook; all R figure stages use its cache.
-active <- paste(readLines("COMPASS/survival_analysis/07_figures/_common.R"),
+# Python runs only in the 05 notebook; all R figure stages use its cache.
+active <- paste(readLines("COMPASS/figures/_common.R"),
                 collapse="\n")
-renderer <- paste(readLines("COMPASS/survival_analysis/figure_supplements.R"),collapse="\n")
+renderer <- paste(readLines("COMPASS/survival_analysis/figure_pipeline/figure_supplements.R"),collapse="\n")
 stopifnot(grepl("run_cached_figure_workflow", active),
           grepl("metastatic_labels", renderer),
           !grepl("system2\\(|config\\$python", renderer))
