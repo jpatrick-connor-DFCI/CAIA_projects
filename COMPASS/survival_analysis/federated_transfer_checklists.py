@@ -1,7 +1,8 @@
 """Locally trained checklists of sequencing-clock federated scores + clinical features.
 
-Consumes 04/04a's transfer_km_patients.csv and the endpoint-specific base ADT
-split assignments. Frozen no-DFCI scores remain fixed; the checklist is trained
+Consumes 04/04a's transfer_km_patients.csv and existing base ADT split assignments.
+Absent endpoint input trees fall back to the platinum split; endpoint outcomes
+always come from the transfer export. Frozen no-DFCI scores remain fixed; the checklist is trained
 on local development patients and evaluated only on local held-out patients.
 No raw lab summaries or separate age term enter the five-feature candidate pool.
 """
@@ -51,7 +52,48 @@ def _ids(values):
     return numeric.astype("int64").astype(str)
 
 
-def prepare_cells(patients_path, input_dirs, config):
+def _split_source(endpoint, input_dirs, config, fallback_inputs_dir):
+    """Resolve split provenance without relabeling a donor's build manifest.
+
+    Only an absent input pair permits fallback. A partial or invalid existing
+    endpoint input must be repaired, rather than silently changing its split.
+    """
+    requested = Path(input_dirs[endpoint])
+    folder, source_endpoint = requested, endpoint
+    files = ("build_manifest.json", "split_assignments.csv")
+    present = [(folder / name).is_file() for name in files]
+    fallback_reason = None
+    if not any(present) and endpoint != "platinum" and fallback_inputs_dir is not None:
+        folder, source_endpoint = Path(fallback_inputs_dir), "platinum"
+        fallback_reason = f"No endpoint input manifest or split assignments in {requested}"
+    missing = [str(folder / name) for name in files if not (folder / name).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"No complete existing patient split for {endpoint}; missing: {', '.join(missing)}. "
+            "Provide the endpoint inputs or, when both are absent, a complete platinum "
+            "input tree via fallback_inputs_dir (--split-fallback-inputs in the CLI)."
+        )
+    manifest_path, split_path = (folder / name for name in files)
+    manifest = json.loads(manifest_path.read_text())
+    for landmark in config.landmarks:
+        _validate_manifest(manifest, source_endpoint, landmark)
+    split = pd.read_csv(split_path, dtype={"DFCI_MRN": "string", "split": "string"})
+    if not {"DFCI_MRN", "split"}.issubset(split):
+        raise ValueError(f"Invalid split columns in {split_path}")
+    split[ID] = _ids(split.DFCI_MRN)
+    if split[ID].duplicated().any() or not split.split.isin(["train", "valid", "test"]).all():
+        raise ValueError(f"Invalid or duplicate split assignments in {split_path}")
+    source = dict(path=str(folder.resolve()), requested_path=str(requested.resolve()),
+                  source_endpoint=source_endpoint, fallback_reason=fallback_reason,
+                  source_manifest=manifest, manifest_sha256=runner.fingerprint(manifest_path),
+                  split_sha256=runner.fingerprint(split_path))
+    if fallback_reason:
+        print(f"Transfer checklist {endpoint}: using existing platinum patient split from {folder}; "
+              f"{endpoint} outcomes remain from the transfer export.", flush=True)
+    return split.set_index(ID)["split"], source
+
+
+def prepare_cells(patients_path, input_dirs, config, *, fallback_inputs_dir=None):
     """Validate all sources before fitting; retain the transfer's outcomes in days."""
     patients_path = Path(patients_path)
     patients = pd.read_csv(patients_path)
@@ -73,25 +115,11 @@ def prepare_cells(patients_path, input_dirs, config):
     if (shared[["duration_days", "event", "HAS_SEQUENCING", *FEATURES[1:]]]
             .nunique(dropna=False).gt(1).any().any()):
         raise ValueError("Outcomes or clinical features disagree across frozen models")
-    sources, splits, manifests = {}, {}, {}
+    if fallback_inputs_dir is None:
+        fallback_inputs_dir = input_dirs.get("platinum")
+    sources, splits = {}, {}
     for endpoint in config.endpoints:
-        folder = Path(input_dirs[endpoint])
-        manifest_path = folder / "build_manifest.json"
-        split_path = folder / "split_assignments.csv"
-        manifest = json.loads(manifest_path.read_text())
-        for landmark in config.landmarks:
-            _validate_manifest(manifest, endpoint, landmark)
-        split = pd.read_csv(split_path, dtype={"DFCI_MRN": "string", "split": "string"})
-        if not {"DFCI_MRN", "split"}.issubset(split):
-            raise ValueError(f"Invalid split columns in {split_path}")
-        split[ID] = _ids(split.DFCI_MRN)
-        if split[ID].duplicated().any() or not split.split.isin(["train", "valid", "test"]).all():
-            raise ValueError(f"Invalid or duplicate split assignments in {split_path}")
-        splits[endpoint] = split.set_index(ID)["split"]
-        manifests[endpoint] = manifest
-        sources[endpoint] = dict(path=str(folder.resolve()), source_manifest=manifest,
-                                 manifest_sha256=runner.fingerprint(manifest_path),
-                                 split_sha256=runner.fingerprint(split_path))
+        splits[endpoint], sources[endpoint] = _split_source(endpoint, input_dirs, config, fallback_inputs_dir)
     pending = []
     for (family, endpoint, landmark), group in patients.groupby(KEYS, sort=True):
         if group.bundle.isna().any() or group.bundle.nunique() != 1:
@@ -113,33 +141,44 @@ def prepare_cells(patients_path, input_dirs, config):
         # base split, preserving its membership even when sequencing precedes ADT.
         audit = dict(n_scored=len(group), n_sequenced_with_gleason=len(available),
                      n_without_base_split=int(available.split.isna().sum()),
+                     split_source_endpoint=sources[endpoint]["source_endpoint"],
+                     split_source_path=sources[endpoint]["path"],
+                     split_fallback_reason=sources[endpoint]["fallback_reason"],
                      prediction_time_origin="sequencing date", duration_units="days_after_landmark")
         available = available.loc[available.split.notna()].copy()
         frame = available.rename(columns={"risk_score": SCORE, "duration_days": f"t_{endpoint}",
                                           "event": endpoint.upper()})
         frame = frame[[ID, "split", f"t_{endpoint}", endpoint.upper(), *FEATURES]].reset_index(drop=True)
-        manifest = {**manifests[endpoint], "prediction_time_origin": "sequencing date"}
+        # This derived metadata describes the target checklist. The original
+        # split-source manifest stays unchanged in provenance, including its endpoint/grid.
+        source_manifest = sources[endpoint]["source_manifest"]
+        manifest = dict(endpoint=endpoint, prediction_time_origin="sequencing date",
+                        auc_max_time_units=source_manifest["auc_max_time_units"],
+                        auc_time_unit_days=source_manifest["auc_time_unit_days"],
+                        split_source=sources[endpoint], outcome_source=str(patients_path.resolve()))
         audit.update(n_patients=len(frame), split_counts=frame.split.value_counts().to_dict(),
                      n_test_events=int(frame.loc[frame.split.eq("test"), endpoint.upper()].sum()),
                      auc_max_days=float(manifest["auc_max_time_units"]) * float(manifest["auc_time_unit_days"]))
-        folder = Path(input_dirs[endpoint])
+        folder = Path(sources[endpoint]["path"])
         data = LandmarkData(frame, manifest, folder / "build_manifest.json", folder, audit)
         identity = dict(model_family=family, bundle=str(group.bundle.iloc[0]), clock="sequencing",
                         cohort=POPULATION, prediction_time_origin="sequencing date",
+                        split_source_endpoint=sources[endpoint]["source_endpoint"],
                         analysis="locally_trained_transfer_checklist", feature_set=family)
         pending.append((family, endpoint, int(landmark), data, identity))
     return pending, sources
 
 
 def run_transfer_checklists(patients_path, input_dirs, output_dir, *, config=None,
-                            resume=False, overwrite=False):
+                            resume=False, overwrite=False, fallback_inputs_dir=None):
     config = config or transfer_config()
     # Revalidate supplied configs through the same scope constraints.
     config = transfer_config(**config.to_dict())
     if resume and overwrite:
         raise ValueError("resume and overwrite are mutually exclusive")
     output_dir = Path(output_dir)
-    pending, sources = prepare_cells(patients_path, input_dirs, config)
+    pending, sources = prepare_cells(patients_path, input_dirs, config,
+                                     fallback_inputs_dir=fallback_inputs_dir)
     code = [Path(__file__), *sorted(Path(runner.__file__).parent.glob("*.py"))]
     signature = dict(config=config.to_dict(), inputs=sources,
                      patients_path=str(Path(patients_path).resolve()),
@@ -201,6 +240,9 @@ def main(argv=None):
     parser.add_argument("--transfer-dir", type=Path, required=True)
     parser.add_argument("--inputs-root", type=Path, required=True,
                         help="Directory containing endpoint-specific prediction_inputs_adt trees")
+    parser.add_argument("--split-fallback-inputs", type=Path,
+                        help="Existing platinum split for absent endpoint inputs; defaults to "
+                             "<inputs-root>/prediction_inputs_adt")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--endpoints", nargs="+", choices=["platinum", "nepc", "avpc"],
                         default=["platinum", "nepc", "avpc"])
@@ -220,7 +262,8 @@ def main(argv=None):
                              solver_time_limit=args.solver_time_limit)
     results = run_transfer_checklists(args.transfer_dir / "transfer_km_patients.csv", inputs,
         args.output_dir or args.transfer_dir / OUTPUT_SUBDIR, config=config,
-        resume=args.resume, overwrite=args.overwrite)
+        resume=args.resume, overwrite=args.overwrite,
+        fallback_inputs_dir=args.split_fallback_inputs or args.inputs_root / "prediction_inputs_adt")
     return 0 if results.status.eq("ok").any() else 2
 
 

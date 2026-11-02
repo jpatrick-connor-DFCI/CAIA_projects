@@ -1346,8 +1346,13 @@ platinum, NEPC and AVPC, separately for each frozen elastic-net Cox/XGBoost scor
 and landmark. The five candidate variables are the federated score recomputed
 before sequencing + landmark, pre-landmark Gleason, and TP53/RB1/PTEN any-alteration
 status from the anchoring specimen. No separate age or raw lab variables are added.
-Patients must have sequencing, Gleason and an existing endpoint-specific base ADT
-split; excluded counts are audited. The existing split is shared across landmarks.
+Patients must have sequencing, Gleason and an existing base ADT split; excluded
+counts are audited. Endpoint-specific splits take precedence. When an endpoint's
+input manifest and split file are both absent (for example AVPC), the arm reuses
+the existing platinum split, with its source and fallback reason recorded in the
+run manifest and cohort audits. Outcomes still come from the target endpoint's
+transfer export; no AVPC preprocessing run is required for this fallback. Partial
+or invalid existing inputs raise an error. The split is shared across landmarks.
 Checklist thresholds, size selection, probability calibration and IPCW censoring
 weights use local development patients only. Performance is measured on local
 held-out patients, so it is distinct from frozen-model external validation.

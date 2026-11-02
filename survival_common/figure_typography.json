@@ -1,5 +1,6 @@
 {
   "family": "Arial",
+  "fallback_families": ["Liberation Sans", "DejaVu Sans"],
   "sizes": {
     "body": 8,
     "axis_title": 9,

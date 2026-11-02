@@ -1759,7 +1759,7 @@ render_transfer_clinical_checklists <- function(root,directory,dpi,overwrite) {
     })
     caption <- paste(
       "Locally trained checklists of a frozen no-DFCI score, Gleason, and TP53/RB1/PTEN alteration status; sequencing-date clock.",
-      "Existing endpoint-specific patient splits; size selection, thresholds, calibration and censoring weights use development patients only.",
+      "Existing patient splits (platinum fallback for absent endpoint inputs); size selection, thresholds, calibration and IPCW use development patients only.",
       "IPCW metrics on local held-out patients; 95% patient-bootstrap intervals condition on the fitted model. Independent horizon risks; death censored.",sep="\n")
     heights <- c(3.2,rep(panel_in+.6,2))
     p <- gridExtra::arrangeGrob(grobs=lapply(c(list(auc),rows),figure_plot_grob),ncol=1,
@@ -3877,7 +3877,8 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     function(x) as.character(utils::packageVersion(x)), character(1)),
     code = unname(tools::md5sum(list.files(dirname(pipeline_path), pattern = "\\.R$", full.names = TRUE))),
     fig_root = config$fig_root, combined_km_landmark = figure_overview_km_landmark(),
-    transfer_display = manuscript_transfer_settings(), typography = FIGURE_TYPOGRAPHY)
+    transfer_display = manuscript_transfer_settings(), typography = FIGURE_TYPOGRAPHY,
+    resolved_font = FIGURE_FONT)
   jobs <- list()
   if (!identical(config$scope, "federated")) {
     for (cohort in config$cohorts) for (endpoint in config$endpoints) {

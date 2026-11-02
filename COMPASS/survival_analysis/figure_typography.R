@@ -2,25 +2,32 @@
 # feed the Python survival plots through the same JSON file.
 FIGURE_TYPOGRAPHY <- jsonlite::fromJSON(file.path(dirname(tail(Filter(Negate(is.null), lapply(sys.frames(), function(frame) frame$ofile)), 1)[[1]]),
   "..", "..", "survival_common", "figure_typography.json"))
-FIGURE_FONT <- FIGURE_TYPOGRAPHY$family
 FIGURE_FONT_SIZES <- unlist(FIGURE_TYPOGRAPHY$sizes)
 figure_font_face <- function(role) if(role %in% c("axis_title","strip","title","tag")) "bold" else "plain"
 
+# Resolve before constructing plots so measurement, text and devices agree.
+figure_resolve_font <- function(installed=if(requireNamespace("systemfonts",quietly=TRUE))
+    systemfonts::system_fonts()$family else character()) {
+  candidates <- c(FIGURE_TYPOGRAPHY$family,FIGURE_TYPOGRAPHY$fallback_families)
+  available <- candidates[tolower(candidates) %in% tolower(installed)]
+  if(length(available)) available[[1]] else "sans"
+}
+FIGURE_FONT <- figure_resolve_font()
+
 figure_require_font <- local({
-  checked <- FALSE
+  reported <- FALSE
   function() {
-    if(checked) return(invisible(TRUE))
-    if(!requireNamespace("systemfonts",quietly=TRUE))
-      stop("Figure rendering requires the systemfonts package to verify Arial availability.")
-    if(!any(tolower(systemfonts::system_fonts()$family)==tolower(FIGURE_FONT)))
-      stop("Arial is not installed on this rendering host. Install Arial before rebuilding figures; font substitution is disabled.")
-    checked <<- TRUE
-    invisible(TRUE)
+    if(!reported && FIGURE_FONT!=FIGURE_TYPOGRAPHY$family)
+      message(FIGURE_TYPOGRAPHY$family," is unavailable or could not be verified on this rendering host; using ",
+        FIGURE_FONT,". Figure sizes and styling are unchanged. For Arial output, install Arial and ",
+        "the systemfonts R package on this host, then restart R.")
+    reported <<- TRUE
+    invisible(FIGURE_FONT)
   }
 })
 
 # Cairo otherwise uses a separate default family for plotmath glyphs, even
-# when the surrounding grid text explicitly requests Arial.
+# when the surrounding grid text explicitly requests the resolved font.
 figure_pdf_device <- function(filename, width=7, height=7, ...) {
   figure_require_font()
   grDevices::cairo_pdf(filename, width=width, height=height, family=FIGURE_FONT,

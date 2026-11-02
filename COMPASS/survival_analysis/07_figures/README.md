@@ -84,20 +84,28 @@ are regenerated once.
 
 The notebook's Python kernel requires Polars. R needs its existing plotting
 packages plus `nanoparquet` or `arrow`; no Python installation is needed to run this script.
-All figure writers use Arial, with shared point sizes from
+All figure writers prefer Arial, with shared point sizes from
 `survival_common/figure_typography.json`: body text, annotations, tick labels,
 captions and legends are 8 pt; axes and facet headings are 9 pt bold;
 subtitles are 9 pt; titles are 11 pt bold; panel letters are 12 pt bold.
 The same settings apply to individual panels, manuscript composites,
-checklist supplements and the Python survival plots. Arial must be installed
-on the rendering host, and R requires `systemfonts`; rendering stops if Arial
-is unavailable. Cairo PDF/SVG devices explicitly select Arial for both text
-and mathematical symbols. PDF exports embed the font.
+checklist supplements and the Python survival plots. If Arial is unavailable,
+the writers try Liberation Sans, then DejaVu Sans, then the default sans-serif
+font, and report the substitution once per session. Sizes and styling stay the
+same. R uses `systemfonts` to check installed families; without it, R uses the
+default sans-serif font. Cairo PDF/SVG devices explicitly select the resolved
+font for text and mathematical symbols. PDF exports embed that font.
+
+For actual Arial output, install Arial on the rendering host and restart the
+Python/R session before rebuilding. A font installed on a laptop is not
+automatically available to a remote notebook kernel. After updating this code,
+restart the notebook kernel (or reload `survival_common.plotting`) to replace
+the earlier strict font check.
 
 Use `COMPASS_FIGURE_STAGE=all` after typography changes so the pipeline measures
 and rebuilds the graphics caches before exporting. The font configuration is
-part of the cache signature. Reassembling previously exported PNGs cannot
-change their embedded text; regenerate those panels from source.
+part of the cache signature, along with the resolved font. Reassembling previously
+exported PNGs cannot change their embedded text; regenerate those panels from source.
 
 The notebook controls `POLARS_MAX_THREADS`, defaulting to at most four and
 respecting the SLURM CPU allocation when available.
@@ -475,9 +483,11 @@ run `07_figures/all.R` with stage `all`. All Python remains in `06`; graphics ca
 The transfer notebooks' additional **locally trained** score + Gleason + mutation
 checklists write `clinical_checklists/checklist_{cells,items_long,metrics}.csv`.
 These fit 1-year and 5-year horizons using each frozen no-DFCI Cox/XGBoost score on
-the sequencing clock, Gleason and TP53/RB1/PTEN status. Existing endpoint-specific
-splits isolate local held-out patients from threshold selection, calibration and
-censoring estimation. Each family × endpoint gets a supplemental figure with
+the sequencing clock, Gleason and TP53/RB1/PTEN status. Existing patient splits
+isolate local held-out patients from threshold selection, calibration and censoring
+estimation. When endpoint inputs are absent, the runner uses the existing platinum
+split and records its provenance; target outcomes remain endpoint-specific.
+Each family × endpoint gets a supplemental figure with
 held-out AUC(t) intervals and both horizons' M-of-N cards across landmarks:
 `05_transfer/transfer_clinical_checklist_<family>_<endpoint>__platinum`.
 The title identifies the evaluated endpoint; `__platinum` follows the source

@@ -205,7 +205,10 @@ calibrator and held-out evaluator for a separate supplemental arm implemented in
 `../federated_transfer_checklists.py`. Its candidates are a frozen no-DFCI
 Cox/XGBoost score evaluated on the sequencing clock, Gleason and TP53/RB1/PTEN
 any-alteration status, with no separate age or lab items. It fits 365-/1825-day
-platinum, NEPC and AVPC models using existing endpoint-specific patient splits.
+platinum, NEPC and AVPC models using existing patient splits. Endpoint-specific
+inputs take precedence; an absent input tree falls back to the existing platinum
+split, with provenance recorded and target-endpoint outcomes retained from the
+transfer export. Partial or invalid existing inputs are rejected.
 This local training arm writes to the transfer output's `clinical_checklists/`
 directory and is rendered with Figure 5. It does not change the default full-ADT
 checklist runs or refit the federated bundles.

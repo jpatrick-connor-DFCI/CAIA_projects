@@ -16,6 +16,7 @@ from typing import Mapping
 from functools import lru_cache
 import json
 from pathlib import Path
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -58,14 +59,38 @@ RCPARAMS: dict = {
 
 
 @lru_cache(maxsize=1)
-def require_figure_font() -> None:
-    """Fail at rendering time if Arial would be silently substituted."""
+def require_figure_font() -> str:
+    """Resolve the preferred installed font once, without blocking cluster plots.
+
+    Keep the existing entry point and update RCPARAMS in place: callers import
+    that dictionary before entering their plotting context.
+    """
     from matplotlib.font_manager import FontProperties, findfont
 
-    try:
-        findfont(FontProperties(family=TYPOGRAPHY["family"]), fallback_to_default=False)
-    except ValueError as exc:
-        raise RuntimeError("Install Arial on the rendering host before rebuilding figures.") from exc
+    preferred = TYPOGRAPHY["family"]
+    for family in [preferred, *TYPOGRAPHY.get("fallback_families", [])]:
+        try:
+            findfont(FontProperties(family=[family]), fallback_to_default=False)
+            break
+        except ValueError:
+            continue
+    else:
+        path = findfont(FontProperties(family=["sans-serif"]), fallback_to_default=True)
+        family = FontProperties(fname=path).get_name()
+
+    RCPARAMS["font.family"] = family
+    for role in ("rm", "sf", "tt", "cal"):
+        RCPARAMS[f"mathtext.{role}"] = family
+    RCPARAMS["mathtext.it"] = family + ":italic"
+    RCPARAMS["mathtext.bf"] = family + ":bold"
+    if family != preferred:
+        warnings.warn(
+            f"{preferred} is unavailable on this rendering host; using {family}. "
+            "Figure sizes and styling are unchanged. For Arial output, install Arial "
+            "on this host and restart the Python session.",
+            RuntimeWarning, stacklevel=2,
+        )
+    return family
 
 
 CBC = {
