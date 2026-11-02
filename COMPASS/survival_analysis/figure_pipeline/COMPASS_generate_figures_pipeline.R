@@ -843,8 +843,9 @@ plot_model_discrimination <- function(data, metric, ylabel, colors,
       legend.direction = "horizontal", panel.grid.major.x = element_blank())
 }
 
-plot_model_importance <- function(df, kind, title, top_n=15) {
-  df <- df %>% filter(!lab_name %in% DROP) %>%
+plot_model_importance <- function(df, kind, title, top_n=15, exclude_drop=TRUE) {
+  if (exclude_drop) df <- df %>% filter(!lab_name %in% DROP)
+  df <- df %>%
     mutate(category = vapply(lab_name, assign_category, character(1)))
   if (nrow(df) == 0) {
     return(ggplot() + annotate("text", x = 0, y = 0, label = "(no features to display)",
@@ -860,6 +861,10 @@ plot_model_importance <- function(df, kind, title, top_n=15) {
   }
   df <- df %>% mutate(label = mapply(format_label, lab_name, feature_stat),
     category = factor(category, levels = LEGEND_ORDER))
+  if (anyDuplicated(df$label)) {
+    duplicates <- duplicated(df$label) | duplicated(df$label, fromLast=TRUE)
+    df$label[duplicates] <- paste0(df$label[duplicates], " [", df$feature[duplicates], "]")
+  }
   df$label <- factor(df$label, levels = rev(df$label))
   p <- ggplot(df, aes(value, label, fill = category)) +
     geom_col(color = "white", linewidth = 0.5, show.legend = TRUE) +

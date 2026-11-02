@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 # From the repository root:
 # Rscript COMPASS/figures/preview_03_05.R <exported-ADT> [output-ADT]
-# Defaults to alternative_manuscript/ inside each input figure section.
+# Defaults to manuscript/ inside each input figure section.
 # Aggregate-export previews only. Production figures use the raw testing family.
 args <- commandArgs(TRUE)
 if(!length(args) || length(args)>2L) stop("Expected exported ADT directory and optional output ADT root")
@@ -62,11 +62,11 @@ forest_plot <- ggplot(forest,aes(risk_hr,lab_name)) +
   theme_fig() + theme(strip.background=element_blank(),strip.text=element_text(face="bold"))
 save_review(forest_plot,"figure3_selected_forest",10,4.8,figure3_output)
 
-metrics <- readr::read_csv(file.path(input,"05_transfer/data/transfer_discrimination_no_dfci__platinum.csv"),
+metrics <- readr::read_csv(file.path(input,"05_transfer_survival/data/transfer_discrimination_no_dfci__platinum.csv"),
   show_col_types=FALSE)
-clinical <- readr::read_csv(file.path(input,"05_transfer/data/transfer_clinical_comparison_no_dfci__platinum.csv"),
+clinical <- readr::read_csv(file.path(input,"05_transfer_survival/data/transfer_clinical_comparison_no_dfci__platinum.csv"),
   show_col_types=FALSE)
-km_paths <- file.path(input,"05_transfer/km/data",paste0(FEDERATED_TRANSFER_KM_TABLES,"__platinum.csv"))
+km_paths <- file.path(input,"05_transfer_survival/km/data",paste0(FEDERATED_TRANSFER_KM_TABLES,"__platinum.csv"))
 km <- if(all(file.exists(km_paths))) setNames(lapply(km_paths,readr::read_csv,show_col_types=FALSE),
   names(FEDERATED_TRANSFER_KM_TABLES)) else NULL
 for(landmarks in list(c(0,90,180),180)) {

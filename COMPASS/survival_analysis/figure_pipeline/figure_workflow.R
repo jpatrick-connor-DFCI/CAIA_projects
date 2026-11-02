@@ -32,11 +32,11 @@ figure_sidecar_path <- function(path) {
 FIGURE_SECTIONS <- c(cohort = "01_cohort", llm = "02_llm",
   univariate_internal = "03_univariate/internal", univariate_federated = "03_univariate/federated",
   multivariate_internal = "04_multivariate/internal", multivariate_federated = "04_multivariate/federated",
-  transfer = "05_transfer", cohort_sensitivity = "03_univariate/cohort_sensitivity")
+  transfer = "05_transfer_survival", transfer_checklists = "06_transfer_checklists", cohort_sensitivity = "03_univariate/cohort_sensitivity")
 FIGURE_CANONICAL_COHORT <- "all__incl"
 # Pre-restructure top-level folders, archived once their job re-renders.
 FIGURE_RETIRED_FOLDERS <- c("cohort", "labels", "associations", "prediction",
-  "trajectories", "federated", "compiled", "manuscript figures", "06_cohort_sensitivity")
+  "trajectories", "federated", "compiled", "manuscript figures", "06_cohort_sensitivity", "05_transfer")
 
 figure_public_path <- function(path) {
   if (!grepl("/by_figure/", path, fixed = TRUE)) return(path)
@@ -86,7 +86,8 @@ figure_public_path <- function(path) {
 
 # Federated outputs are written by stem rather than through by_figure.
 figure_federated_section <- function(stem) {
-  section <- if (grepl("^transfer_", stem)) "transfer" else
+  section <- if (grepl("^transfer_(checklist_|clinical_checklist_|predictive_checklist_|all_models_supplement)", stem)) "transfer_checklists" else
+    if (grepl("^transfer_", stem)) "transfer" else
     if (grepl("^(elasticnet|xgboost|deephit|checklist)_", stem)) "multivariate_federated" else
     if (grepl("^(site_incidence|federated_cohort_km)", stem)) "cohort" else "univariate_federated"
   FIGURE_SECTIONS[[section]]
@@ -104,8 +105,7 @@ federated_output_path <- function(arm_root, stem, extension = "") {
     paste0(stem, "__platinum", extension))))
 }
 
-# Manuscript figures sit in their section; the revised Figures 3 and 5 use
-# alternative_manuscript so they can be reviewed alongside existing manuscripts.
+# Manuscript figures sit in their section.
 # A key may carry a "__<variant>" suffix (alternative versions of one figure);
 # variants share their base key's section.
 MANUSCRIPT_SECTIONS <- c(`01_cohort_overview` = "cohort", `02_llm_nepc_avpc` = "llm",
@@ -114,16 +114,13 @@ MANUSCRIPT_SECTIONS <- c(`01_cohort_overview` = "cohort", `02_llm_nepc_avpc` = "
   `07_federated_incidence_associations` = "univariate_federated",
   `08_federated_multivariable` = "multivariate_federated",
   federated_03_univariable = "univariate_federated", federated_04_multivariable = "multivariate_federated",
-  federated_05_transfer_no_dfci = "transfer", federated_06_checklist_no_dfci = "transfer",
+  federated_05_transfer_no_dfci = "transfer", federated_06_checklist_no_dfci = "transfer_checklists",
   federated_s1_feature_set = "transfer")
-ALTERNATIVE_MANUSCRIPT_KEYS <- c("03_dfci_univariable","federated_03_univariable",
-  "federated_05_transfer_no_dfci","federated_06_checklist_no_dfci","federated_s1_feature_set")
 manuscript_base_key <- function(key) sub("__.*$", "", key)
 manuscript_folder <- function(arm_root, key) {
   base <- manuscript_base_key(key)
   if (!base %in% names(MANUSCRIPT_SECTIONS)) stop("No manuscript section defined for: ", key)
-  folder <- if(base %in% ALTERNATIVE_MANUSCRIPT_KEYS) "alternative_manuscript" else "manuscript"
-  file.path(arm_root, FIGURE_SECTIONS[[MANUSCRIPT_SECTIONS[[base]]]], folder)
+  file.path(arm_root, FIGURE_SECTIONS[[MANUSCRIPT_SECTIONS[[base]]]], "manuscript")
 }
 
 figure_overview_km_landmark <- function() {
@@ -552,6 +549,8 @@ figure_archive_old_exports <- function(config, prepared) {
         job <- if(folder=="06_cohort_sensitivity" &&
             grepl("^(06_dfci_cohort_sensitivity|figure6$|cohort_forest_|event_incidence_|cohort_km_cascade|metastatic_label_overlap)",name)) {
           "cohort_overview"
+        } else if(folder=="05_transfer") {
+          "federated"
         } else if(folder=="manuscript figures") {
           if(grepl("^(federated|0[78]_|figure[78]$)",name)) "federated" else
             if(grepl("^(06_|figure6$)",name)) "cohort_overview" else "adt__platinum"
@@ -1987,7 +1986,7 @@ render_federated_transfer_clinical <- function(root, directory, dpi, overwrite) 
 }
 
 # Time-to-event views of the transferred labs score (Federated Figure 5 e-h and
-# 05_transfer/km/). Score groups use Dana-Farber cutpoints computed within each
+# 05_transfer_survival/km/). Score groups use Dana-Farber cutpoints computed within each
 # clock x endpoint x bundle x landmark cohort: each endpoint has its own at-risk
 # patients and scores. Gleason views run on the ADT clock and TP53/RB1/PTEN
 # views on the sequencing clock (no somatic data on the ADT clock). The panel-h
@@ -2000,7 +1999,7 @@ FEDERATED_TRANSFER_KM_HORIZON <- 1825
 # Panels with fewer events are not drawn.
 FEDERATED_TRANSFER_KM_MIN_EVENTS <- 5
 # Manuscript KM panels (top vs bottom 10% of this bundle's score, one per
-# endpoint) and gradient; other bundles, landmarks and views are in 05_transfer/km/.
+# endpoint) and gradient; other bundles, landmarks and views are in 05_transfer_survival/km/.
 FEDERATED_TRANSFER_KM_FIGURE <- list(model_family="xgboost_cox",landmark_days=180)
 FEDERATED_TRANSFER_GLEASON <- c("Gleason ≤7","Gleason ≥8")
 FEDERATED_TRANSFER_TRIO <- c("TP53/RB1/PTEN wild-type","TP53/RB1/PTEN altered")
@@ -2912,13 +2911,13 @@ manuscript_specs <- function() {
     # Figure 2 per cohort; manuscript_build adds the cohort header.
     lapply(names(FIGURE2_COHORTS),function(variant) spec(paste0("02_llm_nepc_avpc__",variant),
       figure2v3_stems(variant), 6.4, rbind(1:2,3:4),
-      c("Subtype: chart-review agreement","Subtype classification metrics","NEPC/AVPC proxy subtypes","Platinum enrichment"))),
+      c("Subtype: chart-review agreement","Subtype classification metrics","NEPC/AVPC proxy subtypes","Platinum enrichment"), width=18)),
     list(
     spec("03_dfci_univariable", figure_dfci_overview_spec(manuscript_dfci_km_landmark)$members, 8.9,
       rbind(c(1,1,2,2,3,3),rep(8,6),c(4,4,4,5,5,5),c(6,6,6,7,7,7)),
       c("Day 0","Day 90","Day 180","PSA trajectory","PSA: extreme deciles",
         "Testosterone trajectory","Testosterone: extreme deciles"),
-      row_heights=c(1.5,.32,1,1), shared_legend_panels=1:3),
+      row_heights=c(1.5,.32,1,1), shared_legend_panels=1:3, width=18),
     spec("04_multivariable_labs", c(
       "figure4a_discrimination_auc_platinum",
       paste0("figure4b_importance_platinum_cox_landmark",c(0,90,180)),
@@ -2932,7 +2931,7 @@ manuscript_specs <- function() {
       rbind(c(1,1,2,2,3,3),rep(8,6),c(4,4,4,5,5,5),c(6,6,6,7,7,7)),
       c("Day 0","Day 90","Day 180","PSA trajectory","PSA: extreme deciles",
         "Testosterone trajectory","Testosterone: extreme deciles"),
-      row_heights=c(1.5,.32,1,1), shared_legend_panels=1:3)))
+      row_heights=c(1.5,.32,1,1), shared_legend_panels=1:3, width=18)))
 }
 
 # Keys sharing the Figure 3 layout and restyling (manuscript_univariable_restyle).
@@ -3072,8 +3071,12 @@ manuscript_captions <- function() {
       "Panels a-c display features with finite estimates, absolute log hazard ratios of at most 4, and confidence-interval upper-to-lower ratios below 100; mean-feature q values were calculated before these display exclusions. Panels d-g were drawn from aggregate site exports (binned means and Kaplan-Meier curves) without patient-level data. Cohorts included 22,138 patients (664 platinum events) at day 0, 21,791 (608) at day 90, and 21,216 (564) at day 180; by site at day 0, Dana-Farber contributed 5,853 (231 events), Fred Hutch 3,277 (90), Johns Hopkins 3,069 (35), and MSK 9,939 (308). The trajectory analyses include 22,035 patients for PSA and 17,937 for testosterone. Cutoffs, group sizes, events, and log-rank P values for e and g are reported in federated_km_quintile_summary.csv. Within-site versions are provided as supplementary figures. ADT, androgen-deprivation therapy; CBC, complete blood count; CMP, comprehensive metabolic panel; LFT, liver-function test; PSA, prostate-specific antigen; SD, standard deviation."),
     federated_04_multivariable=caption(
       "Federated Figure 4. Federated multivariable laboratory models for prediction of platinum treatment.",
-      "(a) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), at 0, 90, and 180 days after ADT initiation for Elastic-Net Cox and XGBoost survival models trained on all four sites and age-only baselines (hatched). When available, the dynamic DeepHit arm is also shown in a. The dotted horizontal line marks 0.5. (b) Nonzero Elastic-Net Cox coefficients of the four-site model at each landmark, with up to 15 coefficients of largest absolute value displayed. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (c) XGBoost split-gain feature importance of the four-site model at each landmark, with up to 15 positive-gain features displayed. Colors in b and c identify laboratory categories.",
-      "Models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data; test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180. Performance values are from held-out test sets rather than training or tuning cross-validation. Age and body height are not displayed. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and are not signed effects or SHAP values. When shown, dynamic DeepHit has no age-only baseline or feature-level coefficients; its held-out metrics use the same horizon grid. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; SHAP, Shapley additive explanations."),
+      "(a) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), at 0, 90, and 180 days after ADT initiation for Elastic-Net Cox and XGBoost survival models trained on all four sites and an age-only Cox baseline (hatched). When available, the dynamic DeepHit arm is also shown in a. The dotted horizontal line marks 0.5. (b) Nonzero Elastic-Net Cox coefficients of the four-site model at each landmark, with up to 15 coefficients of largest absolute value displayed. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (c) XGBoost split-gain feature importance of the four-site model at each landmark, with up to 15 positive-gain features displayed. Colors in b and c identify laboratory categories.",
+      "Models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data; test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180. Performance values are from held-out test sets rather than training or tuning cross-validation. Age, body height, identifiers, observation counts and missingness indicators are excluded before ranking features in b and c. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and are not signed effects or SHAP values. When shown, dynamic DeepHit has no age-only baseline or feature-level coefficients; its held-out metrics use the same horizon grid. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; SHAP, Shapley additive explanations."),
+    federated_04_multivariable__full_features=caption(
+      "Federated Figure 4 supplement. Complete federated model performance and feature values.",
+      "(a) Held-out mean AUC(t) for the full models and both age-only baselines at each landmark. (b) All supplied Elastic-Net coefficients. (c) All supplied XGBoost split gains. Panels b and c include age, body height, observation counts, missingness indicators and zero-valued features when present. Colors identify feature categories.",
+      "Models pool four sites. Coefficients are signed log hazard ratios; gains measure split improvement and do not encode direction. Identifier features, if present, are retained for audit; consult the accompanying data legend."),
     federated_05_transfer_no_dfci=manuscript_transfer_xgboost_caption(),
     federated_05_transfer_no_dfci__no_d=manuscript_transfer_caption(no_d=TRUE),
     federated_05_transfer_no_dfci__mean_landmarks_set1=manuscript_transfer_mean_caption(1L),
@@ -3473,22 +3476,44 @@ manuscript_federated_feature_label <- function(x) {
   gsub("n_observations","n obs.",x,fixed=TRUE)
 }
 
-# Mirrors local Figure 4: four-series mean AUC(t) (a), elastic-net
-# coefficients (b) and XGBoost gains (c), from the captured supplement CSVs.
+# Select after excluding observation-count and missingness features so the
+# main figure fills each landmark with the strongest eligible measurements.
+federated_manuscript_features <- function(features, kind, landmark, full=FALSE) {
+  d <- features[features$landmark_days==landmark,,drop=FALSE]
+  if (full) return(d)
+  eligible <- !grepl("n_observations|missing",d$feature,ignore.case=TRUE) &
+    !grepl("n_observations|missing",d$feature_stat,ignore.case=TRUE) &
+    !tolower(d$feature) %in% c("age","person_id","patient_id","dfci_mrn","mrn") &
+    !d$lab_name %in% DROP
+  value <- if(kind=="cox") abs(d$coef) else d$gain
+  d <- d[eligible & is.finite(value) & value!=0,,drop=FALSE]
+  value <- if(kind=="cox") abs(d$coef) else d$gain
+  d[head(order(-value,as.character(d$feature)),15),,drop=FALSE]
+}
+
+# The separately numbered federated figure has a focused main view and an
+# exhaustive supplement. Figure 8 retains its existing presentation.
 manuscript_federated_multivariable <- function(performance,coefficients,importance,
-                                               key="08_federated_multivariable") {
+                                               key="08_federated_multivariable", full=FALSE) {
+  focused <- identical(key,"federated_04_multivariable") && !full
+  if(focused) performance <- performance[as.character(performance$name)!="XGBoost baseline (age)",,drop=FALSE]
   colors <- FEDERATED_MODEL_COLORS[names(FEDERATED_MODEL_COLORS) %in% unique(as.character(performance$name))]
   d <- performance %>% mutate(name=factor(name,levels=names(colors)))
   stopifnot(!anyNA(d$name),!anyDuplicated(d[c("name","landmark")]))
   plots <- list(plot_model_discrimination(d,"auc","Test mean AUC(t)",colors,show_legend=TRUE))
+  counts_by_kind <- numeric(2)
   for(kind in c("cox","xgb")) for(lm in c(0,90,180)) {
     features <- if(kind=="cox") coefficients else importance
-    selected <- features[features$landmark_days==lm & features$displayed %in% TRUE,,drop=FALSE]
-    plots[[length(plots)+1L]] <- plot_model_importance(selected,kind,NULL) +
+    selected <- if(focused || full) federated_manuscript_features(features,kind,lm,full) else
+      features[features$landmark_days==lm & features$displayed %in% TRUE,,drop=FALSE]
+    counts_by_kind[if(kind=="cox") 1 else 2] <- max(counts_by_kind[if(kind=="cox") 1 else 2],nrow(selected))
+    plots[[length(plots)+1L]] <- plot_model_importance(selected,kind,NULL,
+      top_n=if(full) max(1,nrow(selected)) else 15,exclude_drop=!full) +
       ggplot2::scale_y_discrete(labels=manuscript_federated_feature_label)
   }
-  spec <- list(key=key,width=8.5,height=9,layout=matrix(1:3,3),
-    row_heights=c(.9,1,1),
+  rows <- if(full) c(2.5,pmax(3,counts_by_kind*.16)) else c(.9,1,1)
+  spec <- list(key=key,width=if(full) 14 else 8.5,height=if(full) min(190,sum(rows)+1.5) else 9,
+    layout=matrix(1:3,3),row_heights=rows,
     titles=c("Test mean AUC(t)","Elastic-Net coefficients","XGBoost feature importance"))
   p <- manuscript_multivariable_labs(plots,spec)
   audit <- unique(as.character(c(performance$input_audit_note,coefficients$input_audit_note,
@@ -3497,10 +3522,13 @@ manuscript_federated_multivariable <- function(performance,coefficients,importan
   d <- arrange(d,name,landmark)
   counts <- paste(sprintf("Day %s, %s: test n=%s; events=%s",d$landmark,as.character(d$name),
     d$n_test,d$n_events_test),collapse="\n")
-  list(plot=p,spec=spec,data=d,legend=paste(
+  feature_note <- if(full) "All supplied features, including age, body height, observation counts, missingness indicators and zero-valued features, are shown." else if(focused)
+    "Up to 15 nonzero coefficients by absolute value or positive-gain features per landmark, selected after excluding age, body height, identifiers, observation counts and missingness indicators." else
+    "Up to 15 nonzero coefficients (by absolute value) or positive-gain features per landmark, using the local display exclusions (age, body height)."
+  list(plot=p,spec=spec,data=d,panels=plots,legend=paste(
     "a: test mean AUC(t). b: Elastic-Net coefficients at days 0, 90 and 180. c: XGBoost feature importance at days 0, 90 and 180.",
     "Held-out test metrics, not training or tuning CV. Local Figure 4 model colors (hatched age baselines) and lab-category colors.",
-    "Up to 15 nonzero coefficients (by absolute value) or positive-gain features per landmark, using the local display exclusions (age, body height).",
+    feature_note,
     "Coefficients are signed log hazard ratios; gains are supplied split gains, not signed effects or SHAP values.",
     counts,paste(audit,collapse="\n"),sep="\n"))
 }
@@ -3898,6 +3926,8 @@ manuscript_build <- function(items,tables,root) {
     result[["08"]] <- manuscript_federated_multivariable(performance,federated$coefficients,federated$importance)
     result[["federated_04"]] <- manuscript_federated_multivariable(performance,federated$coefficients,
       federated$importance,key="federated_04_multivariable")
+    result[["federated_04__full_features"]] <- manuscript_federated_multivariable(performance,federated$coefficients,
+      federated$importance,key="federated_04_multivariable__full_features",full=TRUE)
   } else if(any(available))
     message("Skipping manuscript Figures 8 and federated 4: missing captured federated ",
       paste(names(federated)[!available],collapse=", "))
@@ -4578,7 +4608,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
         if (figure_key == "07_federated_incidence_associations" &&
             stem == "site_incidence_lm000") return(TRUE)
         if (!grepl(section_path, destination, fixed = TRUE)) return(FALSE)
-        if (grepl("/(alternative_manuscript|manuscript)/", destination))
+        if (grepl("/manuscript/", destination))
           return(startsWith(stem, figure_key))
         if (figure_key == "07_federated_incidence_associations")
           return(grepl("^(psa_forest|testosterone_forest|federated_|site_incidence)", stem))

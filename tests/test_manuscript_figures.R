@@ -27,6 +27,7 @@ stopifnot(length(cohort_specs)==2,all(vapply(cohort_specs,`[[`,numeric(1),"heigh
 # Figure 2: one spec per cohort, keyed with a variant suffix.
 stopifnot(identical(spec_keys[startsWith(spec_keys,"02_")],paste0("02_llm_nepc_avpc__",names(FIGURE2_COHORTS))),
   identical(spec_by_key("02_llm_nepc_avpc__adt")$members,figure2v3_stems("adt")),
+  all(vapply(specs[startsWith(spec_keys,"02_")], `[[`, numeric(1), "width")==18),
   identical(figure2v3_variant(c("figure2v3_icd_metric_bar","figure2v3_lm0_enrichment","figure2v3_metric_bar",
     "figure2v3_xyz_enrichment")),c("icd","lm0",NA,NA)),
   identical(figure2v3_panel("figure2v3_lm0_subtype_landscape"),"subtype_landscape"),
@@ -35,7 +36,8 @@ stopifnot(identical(spec_keys[startsWith(spec_keys,"02_")],paste0("02_llm_nepc_a
     "Cohort: ADT-exposed with LLM label (n = 1,234)"),
   identical(manuscript_figure2_header("icd",NULL),"Cohort: ICD-10 prostate cancer with LLM label"))
 dfci_spec <- spec_by_key("03_dfci_univariable")
-stopifnot(dfci_spec$height==8.9,identical(dfci_spec$row_heights,c(1.5,.32,1,1)),
+stopifnot(dfci_spec$height==8.9,dfci_spec$width==18,
+  spec_by_key("federated_03_univariable")$width==18,identical(dfci_spec$row_heights,c(1.5,.32,1,1)),
   identical(dfci_spec$shared_legend_panels,1:3),all(dfci_spec$layout[2,]==8),
   identical(manuscript_dfci_volcano_ylim,c(-.2,36)),
   manuscript_dfci_km_landmark==180,
@@ -70,7 +72,7 @@ stopifnot(landmark_header$theme$plot.subtitle$face=="bold",
 # Captions mirror the paired Markdown/text layout used by the clinical text
 # embedding project and retain figure-specific audit language.
 captions <- manuscript_captions()
-federated_keys <- c("federated_03_univariable","federated_04_multivariable","federated_05_transfer_no_dfci",
+federated_keys <- c("federated_03_univariable","federated_04_multivariable","federated_04_multivariable__full_features","federated_05_transfer_no_dfci",
   "federated_05_transfer_no_dfci__no_d",
   "federated_05_transfer_no_dfci__mean_landmarks_set1","federated_05_transfer_no_dfci__mean_landmarks_set2",
   "federated_06_checklist_no_dfci","federated_s1_feature_set")
@@ -78,7 +80,7 @@ figure2_keys <- paste0("02_llm_nepc_avpc__",c("icd","adt","lm0"))
 local_keys <- c("01_cohort_overview",figure2_keys,"03_dfci_univariable","04_multivariable_labs",
   "03_cohort_sensitivity_supplement","07_federated_incidence_associations","08_federated_multivariable")
 # Figure 5 (internal Gleason sensitivity) was removed; Gleason is compared in transfer.
-stopifnot(length(captions)==17,identical(names(captions),c(local_keys,federated_keys)),
+stopifnot(length(captions)==18,identical(names(captions),c(local_keys,federated_keys)),
   all(startsWith(unname(captions[local_keys]),paste0("Figure ",c(1,2,2,2,3,4,3,7,8),". "))),
   all(grepl("^Federated Figure (S1|[3-6])[. ]",unname(captions[federated_keys]))),
   setequal(unique(manuscript_base_key(names(captions))),names(MANUSCRIPT_SECTIONS)),
@@ -109,27 +111,25 @@ stopifnot(length(captions)==17,identical(names(captions),c(local_keys,federated_
   grepl("9,939/308",captions[["07_federated_incidence_associations"]],fixed=TRUE))
 caption_root <- tempfile("manuscript-caption-test-")
 caption_paths <- manuscript_write_captions(caption_root)
-stopifnot(length(caption_paths)==34,all(file.exists(caption_paths)))
+stopifnot(length(caption_paths)==36,all(file.exists(caption_paths)))
 # The federated set is numbered on its own and never overwrites local figure3-5;
 # each caption sits in the manuscript folder of its figure's section.
 caption_md <- caption_paths[endsWith(caption_paths,".md")]
 stopifnot(setequal(basename(caption_md),paste0(c(paste0("figure",c(1,3,4,7,8)),"figure3_supplement",paste0("figure2_",c("icd","adt","lm0")),
-  paste0("federated_figure",3:6),"federated_figure_s1","federated_figure5_no_d","federated_figure5_mean_landmarks_set1","federated_figure5_mean_landmarks_set2"),".md")))
+  paste0("federated_figure",3:6),"federated_figure_s1","federated_figure4_full_features","federated_figure5_no_d","federated_figure5_mean_landmarks_set1","federated_figure5_mean_landmarks_set2"),".md")))
 for(path in caption_md) stopifnot(identical(readLines(path,warn=FALSE),
   readLines(sub("[.]md$",".txt",path),warn=FALSE)))
 caption_file <- function(section,name) file.path(caption_root,section,
-  if(section %in% c("03_univariate/internal","03_univariate/federated","05_transfer") &&
-     name %in% c("figure3","federated_figure3","federated_figure5","federated_figure5_no_d","federated_figure6","federated_figure_s1"))
-    "alternative_manuscript" else "manuscript","captions",paste0(name,".md"))
+  "manuscript","captions",paste0(name,".md"))
 stopifnot(startsWith(readLines(caption_file("03_univariate/internal","figure3"),n=1,warn=FALSE),"Figure 3. "),
   startsWith(readLines(caption_file("03_univariate/federated","federated_figure3"),n=1,warn=FALSE),"Federated Figure 3. "),
   file.exists(caption_file("01_cohort","figure1")),!file.exists(caption_file("02_llm","figure2")),
   all(file.exists(caption_file("02_llm",paste0("figure2_",c("icd","adt","lm0"))))),
-  file.exists(caption_file("05_transfer","federated_figure5_no_d")),
-  startsWith(readLines(caption_file("05_transfer","federated_figure_s1"),n=1,warn=FALSE),"Federated Figure S1. "),
-  startsWith(readLines(caption_file("05_transfer","federated_figure6"),n=1,warn=FALSE),"Federated Figure 6. "),
+  file.exists(caption_file("05_transfer_survival","federated_figure5_no_d")),
+  startsWith(readLines(caption_file("05_transfer_survival","federated_figure_s1"),n=1,warn=FALSE),"Federated Figure S1. "),
+  startsWith(readLines(caption_file("06_transfer_checklists","federated_figure6"),n=1,warn=FALSE),"Federated Figure 6. "),
   !file.exists(caption_file("04_multivariate/internal","figure5")),file.exists(caption_file("04_multivariate/internal","figure4")),file.exists(caption_file("03_univariate/cohort_sensitivity","figure3_supplement")),
-  file.exists(caption_file("04_multivariate/federated","figure8")),file.exists(caption_file("05_transfer","federated_figure5")),
+  file.exists(caption_file("04_multivariate/federated","figure8")),file.exists(caption_file("05_transfer_survival","federated_figure5")),
   setequal(names(MANUSCRIPT_SECTIONS),manuscript_base_key(names(captions))))
 unlink(caption_root,recursive=TRUE)
 
@@ -267,6 +267,23 @@ stopifnot(grepl("person_id",federated_models$legend,fixed=TRUE),
   identical(manuscript_federated_feature_label(c("Alkaline phosphatase (max)",
     "Neutrophils absolute (n_observations)","Diastolic blood pressure (min)")),
     c("ALP (max)","Neutrophils abs. (n obs.)","DBP (min)")))
+# Main ranking excludes auxiliary features before applying the 15-feature limit.
+extra <- tibble(landmark_days=0, feature=c("PSA__n_observations","PSA__mean__missing","age","Body_height__mean","PSA__mean"),
+  lab_name=c("PSA","PSA","age","Body height","PSA"),
+  feature_stat=c("n_observations","mean missing","","mean","mean"),
+  coefficient=c(9,8,7,6,.1),coef=coefficient,displayed=FALSE,identifier_feature=FALSE,input_audit_note=NA_character_)
+focused_coefficients <- bind_rows(coefficients,extra)
+focused <- manuscript_federated_multivariable(performance,focused_coefficients,importance,
+  key="federated_04_multivariable")
+full <- manuscript_federated_multivariable(performance,focused_coefficients,importance,
+  key="federated_04_multivariable__full_features",full=TRUE)
+stopifnot(!"XGBoost baseline (age)" %in% as.character(focused$data$name),
+  "XGBoost baseline (age)" %in% as.character(full$data$name),
+  "PSA__mean" %in% focused$panels[[2]]$data$feature,
+  !any(extra$feature[1:4] %in% focused$panels[[2]]$data$feature),
+  all(extra$feature %in% full$panels[[2]]$data$feature),
+  "person_id" %in% full$panels[[5]]$data$feature,
+  !"person_id" %in% focused$panels[[5]]$data$feature)
 unknown_series <- tryCatch(manuscript_federated_multivariable(
   mutate(performance,name=if_else(row_number()==1,"Other",name)),coefficients,importance),error=identity)
 stopifnot(inherits(unknown_series,"error"))
@@ -499,7 +516,7 @@ load_federated_checklists <- function(federated_path,variant) list(
   metrics=bind_rows(checklist_metrics,mutate(checklist_metrics,landmark_days=90)))
 checklist_root <- tempfile("transfer-checklist-out-")
 checklist_tables <- write_federated_checklist_tables(checklist_root,"unused",checklist_dir)
-checklist_data <- setNames(file.path(checklist_root,FIGURE_SECTIONS[["transfer"]],"data",
+checklist_data <- setNames(file.path(checklist_root,FIGURE_SECTIONS[["transfer_checklists"]],"data",
   paste0(FEDERATED_CHECKLIST_TABLES,"__platinum.csv")),names(FEDERATED_CHECKLIST_TABLES))
 stopifnot(all(file.exists(checklist_data)),
   !any(grepl("person_id",unlist(lapply(checklist_data,readLines,n=1L)),fixed=TRUE)),
@@ -597,7 +614,7 @@ stopifnot(length(fs_filled$layers)==3,length(fs_empty$layers)==4)
 fs_put(fs_survival("xgboost_cox",.81,900),"feature_set_models","w_DFCI","federated_xgboost",fs_xgb)
 fs_warning <- tryCatch(load_federated_feature_set_performance(fs_fed),warning=conditionMessage)
 stopifnot(identical(fs_warning,"Regular and feature-set models have different test sets in: xgboost"))
-# Standalone pages land in 05_transfer/km/ with aggregate (not patient-level) sidecars.
+# Standalone pages land in 05_transfer_survival/km/ with aggregate (not patient-level) sidecars.
 km_root <- tempfile("transfer-km-out-")
 render_federated_transfer_km(km_root,km_dir,dpi=40,overwrite=TRUE)
 km_out <- file.path(km_root,FIGURE_SECTIONS[["transfer"]],"km")

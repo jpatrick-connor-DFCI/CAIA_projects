@@ -580,7 +580,8 @@ on the merged `profile_data` run:
       04_multivariate/internal/   DFCI Elastic-Net/XGBoost discrimination, importance,
                                   Gleason/somatic sensitivity, combinations, risk strata
       04_multivariate/federated/  federated models, including the no-DFCI refits
-      05_transfer/                no-DFCI federated models scored at Dana-Farber
+      05_transfer_survival/       no-DFCI survival models scored at Dana-Farber
+      06_transfer_checklists/     predictive checklist transfer figures
       data/                       index.html and manifest.csv
     ```
 
@@ -1234,7 +1235,7 @@ an age-only XGBoost model, XGBoost's `transferred_age` rows in the clinical
 comparison stay empty, and its other comparisons are unaffected. Rerun
 `05_prep_figure_data.ipynb` after 04, then
 `COMPASS_FIGURE_SCOPE=federated Rscript COMPASS/figures/all.R`
-to render `figures/ADT/05_transfer/transfer_discrimination_no_dfci__platinum.{pdf,csv}`
+to render `figures/ADT/05_transfer_survival/transfer_discrimination_no_dfci__platinum.{pdf,csv}`
 (mean AUC(t) and paired ΔAUC(t) vs. age only, by endpoint) and federated manuscript
 Figure 5.
 
@@ -1259,9 +1260,9 @@ held-out federated metrics appear in the multivariate main figures when the
 corresponding DeepHit metrics CSV is available. The figures still render with
 Cox and XGBoost alone when it is absent. Transferred predictive checklist
 results appear separately as
-`05_transfer/transfer_predictive_checklist_supplement__platinum` with a metrics
+`06_transfer_checklists/transfer_predictive_checklist_supplement__platinum` with a metrics
 CSV beside the plot; they are not added to the main figures. The companion
-`05_transfer/transfer_all_models_supplement__platinum` compares Cox, XGBoost,
+`06_transfer_checklists/transfer_all_models_supplement__platinum` compares Cox, XGBoost,
 the landmark and dynamic DeepHit arms, and checklists on the same DFCI patients
 at the checklist horizons.
 
@@ -1321,7 +1322,7 @@ readable M-of-N rules, patient predictions, CV diagnostics, metrics and aggregat
 statuses/reasons. Resume verifies code/config/input fingerprints; `--overwrite`
 archives prior outputs. Rerun 05 to register these optional tables, then Figure 5's
 R entry point or `COMPASS/figures/all.R` to render
-`05_transfer/transfer_clinical_checklist_<family>_<endpoint>__platinum.pdf`:
+`06_transfer_checklists/transfer_clinical_checklist_<family>_<endpoint>__platinum.pdf`:
 held-out AUC(t) with 95% intervals and 1-/5-year checklist cards. The trailing
 `__platinum` denotes the federated source-model workflow; the evaluated endpoint is
 in the stem and title. These are independent horizon risks, with death censored;
@@ -1351,12 +1352,13 @@ per-site `_by_site` pages (`COMPASS_FEDERATED_FIGURE_DATA` overrides the folder)
 
 The federated job also writes a separate manuscript set, each figure in the `manuscript/`
 subfolder of its section (`03_univariate/federated/`, `04_multivariate/federated/`,
-`05_transfer/`), with captions in `manuscript/captions/federated_figureN.{md,txt}`:
+`05_transfer_survival/`, `06_transfer_checklists/`), with captions in `manuscript/captions/federated_figureN.{md,txt}`:
 
 | File | Content |
 |---|---|
 | `federated_03_univariable` | Figure 3 layout: pooled univariable Cox volcanoes at days 0/90/180 (with a log-HR direction arrow under the key), pooled PSA/testosterone trajectories and day-180 extreme-decile KM curves (site `extreme_fraction`, 10% by default) |
-| `federated_04_multivariable` | Figure 8 layout for the pooled four-site models |
+| `federated_04_multivariable` | Pooled four-site models; excludes the XGBoost age baseline and ranks measured features after excluding observation counts and missingness indicators |
+| `federated_04_multivariable__full_features` | Complete model comparison and all supplied coefficients and gains, including observation counts and missingness indicators |
 | `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/AVPC/NEPC: (a) mean AUC(t) of the full and age-only models; (b–d) mean AUC(t) of the transferred full models, local out-of-fold Cox models of Gleason + age (b), TP53/RB1/PTEN + age (c) and Gleason + TP53/RB1/PTEN + age (d), and combined Cox models of each transferred score + those covariates without age, in patients with a Gleason score (b), sequenced patients (c) and sequenced patients with a Gleason score (d); c and d on the sequencing-date clock; strips give day-0 patients/events. (e–g) Platinum, AVPC and NEPC KM curves, top vs bottom 10% of the day-180 XGBoost score. (h) 5-year event-free probability from sequencing date +180 days in sequenced patients using the transferred federated XGBoost score, Gleason score and six mutually exclusive mutation groups (WT, TP53, PTEN, RB1, 2 MT, 3 MT); every group on the sequencing clock |
 | `federated_05_transfer_no_dfci__no_d` | The same without panel d (KM curves d–f, gradient g); caption `federated_figure5_no_d` |
 | `federated_s1_feature_set` | Feature-set refits (`feature_set_models/`; missingness and observation-count columns adjust but cannot enter a score) vs regular models: (a) with-DFCI held-out platinum AUC, with a labelled empty slot until feature-set XGBoost is delivered; (b–d) no-DFCI 5-year checklists; (e) their DFCI AUC vs the regular checklists; (f–h) KM by checklist status from +180; caption `federated_figure_s1` |

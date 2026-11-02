@@ -213,7 +213,8 @@ Each arm root (`ADT/`, `ARPI/`) has five numbered section folders:
   04_multivariate/internal/  DFCI Elastic-Net/XGBoost discrimination, importance,
                              somatic sensitivity, combinations, risk strata
   04_multivariate/federated/ federated models, including the no-DFCI refits
-  05_transfer/               no-DFCI federated models scored at Dana-Farber
+  05_transfer_survival/      no-DFCI survival models scored at Dana-Farber
+  06_transfer_checklists/    predictive checklist transfer figures
 Local filenames are `<figure>__<endpoint>__<subset>__<exclusion>.pdf`; federated
 ones are `<figure>__platinum.pdf`. Every export folder holds only PDF figures:
 CSV/Markdown tables and legends go in a `data/` subfolder of the same folder
@@ -237,19 +238,18 @@ lettered panels without subplot titles, and separate `.md` figure legends in
 `figureN.md` and `figureN.txt` files (`federated_figureN.*` for the federated set). They always include a
 vector PDF on every render. Individual panels are always retained.
 
-The revised mean-only Figure 3, transfer Figure 5 and checklist Figure 6 designs instead export to
-`alternative_manuscript/` within their respective sections:
+The mean-only Figure 3, transfer Figure 5 and checklist Figure 6 designs export to
+`manuscript/` within their respective sections:
 
-- `ADT/03_univariate/internal/alternative_manuscript/03_dfci_univariable.pdf`
-- `ADT/03_univariate/federated/alternative_manuscript/federated_03_univariable.pdf`
-- `ADT/05_transfer/alternative_manuscript/federated_05_transfer_no_dfci.pdf`
-- `ADT/05_transfer/alternative_manuscript/federated_05_transfer_no_dfci__no_d.pdf`
-- `ADT/05_transfer/alternative_manuscript/federated_06_checklist_no_dfci.pdf`
-- `ADT/05_transfer/alternative_manuscript/federated_s1_feature_set.pdf`
+- `ADT/03_univariate/internal/manuscript/03_dfci_univariable.pdf`
+- `ADT/03_univariate/federated/manuscript/federated_03_univariable.pdf`
+- `ADT/05_transfer_survival/manuscript/federated_05_transfer_no_dfci.pdf`
+- `ADT/05_transfer_survival/manuscript/federated_05_transfer_no_dfci__no_d.pdf`
+- `ADT/06_transfer_checklists/manuscript/federated_06_checklist_no_dfci.pdf`
+- `ADT/05_transfer_survival/manuscript/federated_s1_feature_set.pdf`
 
-Their tables/legends and captions use `alternative_manuscript/data/` and
-`alternative_manuscript/captions/`. Existing `manuscript/` files are preserved.
-Run stage `all` once after this path change to rebuild the cached destinations.
+Their tables/legends and captions use `manuscript/data/` and
+`manuscript/captions/`. Run stage `all` once after this path change to rebuild the cached destinations and replace the previous manuscript exports.
 
 The numbered manuscript set is: `01_cohort_overview`, `02_llm_nepc_avpc__<icd|adt|lm0>`
 (one per Figure 2 cohort, captions `figure2_<cohort>`, with a cohort header line),
@@ -266,7 +266,11 @@ A separate federated set, written by the federated job, is numbered on its own:
 results and the aggregate `figure_data` PSA/testosterone trajectories and day-180
 extreme-decile KM curves; mean-only association panels show risk-oriented HR per SD on a logarithmic axis
 in the labeled higher/lower direction against -log10(q), capped at 30 with triangles),
-`federated_04_multivariable` (the Figure 8 layout for the pooled four-site models), and
+`federated_04_multivariable` (pooled four-site models, without the XGBoost age-only baseline;
+its feature panels rank up to 15 nonzero coefficients or positive gains after excluding age,
+height, identifiers, observation counts and missingness indicators). The companion
+`federated_04_multivariable__full_features` includes both age baselines and every supplied
+feature, including zero-valued features and any identifiers, for audit; and
 `federated_05_transfer_no_dfci` (the XGBoost model trained without Dana-Farber scored on
 Dana-Farber platinum/AVPC/NEPC, in that order: a, mean AUC(t) of the full model at each
 landmark, with facet strips giving day-0 patients and events; b-d, platinum/AVPC/NEPC KM
@@ -319,7 +323,7 @@ patient/event counts. These settings enter the graphics-cache signature and the
 captions. KM/gradient panels remain at day 180 with their original time origins.
 
 Two additional Figure 5 alternatives are exported automatically to
-`05_transfer/alternative_manuscript/`:
+`05_transfer_survival/manuscript/`:
 
 - `federated_05_transfer_no_dfci__mean_landmarks_set1`: three panels showing
   federated scores in the full cohort, Gleason comparisons, and somatic comparisons.
@@ -503,22 +507,22 @@ Federated transfer (`COMPASS_FEDERATED_TRANSFER_NO_DFCI`, default
 `transfer_auc_t.csv` written by `04_federated_transfer.ipynb`: the platinum-trained
 federated XGBoost and elastic-net bundles refit without Dana-Farber and scored on the
 local ADT cohort for platinum, NEPC, and AVPC, an external validation.
-`05_transfer/transfer_discrimination_no_dfci__platinum` shows IPCW mean AUC(t) and the
+`05_transfer_survival/transfer_discrimination_no_dfci__platinum` shows IPCW mean AUC(t) and the
 paired gain over the age-only model by landmark, faceted by endpoint. CSV sidecars keep
 all metrics (`transfer_discrimination_no_dfci__platinum.csv`) and per-horizon AUC(t)
 (`transfer_auc_t_no_dfci__platinum.csv`). `transfer_clinical_comparison.csv`
 (04's Gleason / TP53-RB1-PTEN / Gleason + TP53-RB1-PTEN section) renders
-`05_transfer/transfer_clinical_comparison_no_dfci__platinum` and feeds Federated Figure 5 b-d;
+`05_transfer_survival/transfer_clinical_comparison_no_dfci__platinum` and feeds Federated Figure 5 b-d;
 without it, Figure 5 is drawn with panel a only. `transfer_km_patients.csv` (04's patient-level
 transferred labs scores with Gleason and TP53/RB1/PTEN status on the ADT and sequencing clocks)
-renders `05_transfer/km/`: score × TP53/RB1/PTEN and top-vs-bottom-10% score KM curves per
+renders `05_transfer_survival/km/`: score × TP53/RB1/PTEN and top-vs-bottom-10% score KM curves per
 endpoint, a head-to-head grid (score | Gleason | TP53/RB1/PTEN) and the 5-year event-free
 gradient (score quartile, Gleason, six TP53/PTEN/RB1 alteration groups) per bundle × landmark, all on the sequencing clock (sequenced patients). Hazard-ratio
 forests and score × Gleason curves are no longer drawn. Only aggregate tables are exported
 (`transfer_km_{curves,summary,gradient}_no_dfci`); they feed Federated Figure 5 e-h
 (XGBoost, 180 days). Missing transfer outputs are reported and skipped.
 `all_models/transfer_metrics.csv`, when present, adds the horizon-specific
-predictive checklist supplement at `05_transfer/transfer_predictive_checklist_supplement__platinum`.
+predictive checklist supplement at `06_transfer_checklists/transfer_predictive_checklist_supplement__platinum`.
 With `all_models/transfer_auc_t.csv`, a second supplement compares the frozen
 Cox, XGBoost, landmark/dynamic DeepHit and checklist AUC(t) on common DFCI horizons.
 Missing optional XGBoost files are reported and skipped independently. Run `05`
@@ -534,7 +538,7 @@ estimation. When endpoint inputs are absent, the runner uses the existing platin
 split and records its provenance; target outcomes remain endpoint-specific.
 Each family × endpoint gets a supplemental figure with
 held-out AUC(t) intervals and both horizons' M-of-N cards across landmarks:
-`05_transfer/transfer_clinical_checklist_<family>_<endpoint>__platinum`.
+`06_transfer_checklists/transfer_clinical_checklist_<family>_<endpoint>__platinum`.
 The title identifies the evaluated endpoint; `__platinum` follows the source
 federated-model figure convention. These fits are separate from the frozen
 federated-checklist transfer supplement. Missing optional tables skip the figure;
@@ -554,8 +558,8 @@ Rscript COMPASS/figures/preview_03_05.R /path/to/ADT
 This writes PDF previews for the one-sided mean association plots, a selected
 lab forest, all-landmark and day-180 transfer intervals, and paired day-180 AUC
 gains. The gain intervals use exported paired-bootstrap differences. Preview
-images go to `03_univariate/federated/alternative_manuscript/` and
-`05_transfer/alternative_manuscript/` within the supplied ADT directory, with
+images go to `03_univariate/federated/manuscript/` and
+`05_transfer_survival/manuscript/` within the supplied ADT directory, with
 preview tables and notes in each folder's `data/` subdirectory. An optional
 second argument selects a different output ADT root using the same structure.
 FDR values use the available exported means; older exports have already passed

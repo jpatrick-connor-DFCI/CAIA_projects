@@ -170,7 +170,13 @@ stopifnot(figure_public_path(file.path("/x/ADT/by_figure/figure4/e_combinations_
             "/x/ADT/03_univariate/cohort_sensitivity/cohort_forest_lm180__nepc__all__incl",
           federated_output_path("/x/ADT", "xgboost_importance_no_dfci", ".pdf") ==
             "/x/ADT/04_multivariate/federated/xgboost_importance_no_dfci__platinum.pdf",
-          federated_output_path("/x/ADT", "transfer_auc_t_no_dfci") == "/x/ADT/05_transfer/transfer_auc_t_no_dfci__platinum",
+          federated_output_path("/x/ADT", "transfer_auc_t_no_dfci") == "/x/ADT/05_transfer_survival/transfer_auc_t_no_dfci__platinum",
+          all(vapply(c("transfer_checklist_items_no_dfci", "transfer_clinical_checklist_metrics",
+            "transfer_predictive_checklist_supplement", "transfer_all_models_supplement"),
+            function(stem) startsWith(federated_output_path("/x/ADT", stem),
+              "/x/ADT/06_transfer_checklists/"), logical(1))),
+          manuscript_folder("/x/ADT", "federated_06_checklist_no_dfci") ==
+            "/x/ADT/06_transfer_checklists/manuscript",
           federated_output_path("/x/ADT", "site_incidence_lm000") == "/x/ADT/01_cohort/site_incidence_lm000__platinum",
           federated_output_path("/x/ADT", "federated_km_quintile_psa_landmark0_by_site") ==
             "/x/ADT/03_univariate/federated/km/psa/federated_km_quintile_psa_landmark0_by_site__platinum",
@@ -191,8 +197,8 @@ compiled <- figure_combine(items, page_spec, tempdir())
 stopifnot(isTRUE(attr(compiled, "compass_compiled")), page_spec$height == 6.5)
 # Tables sit in a data/ folder beside the figures; legacy tables are moved there
 # and the catalog lives in <arm>/data/ with links back up to the figures.
-stopifnot(figure_sidecar_path("/x/ADT/05_transfer/a__p.csv") == "/x/ADT/05_transfer/data/a__p.csv",
-          figure_sidecar_path("/x/ADT/05_transfer/data/a__p.csv") == "/x/ADT/05_transfer/data/a__p.csv")
+stopifnot(figure_sidecar_path("/x/ADT/05_transfer_survival/a__p.csv") == "/x/ADT/05_transfer_survival/data/a__p.csv",
+          figure_sidecar_path("/x/ADT/05_transfer_survival/data/a__p.csv") == "/x/ADT/05_transfer_survival/data/a__p.csv")
 fig_root <- file.path(root, "export"); arm <- file.path(fig_root, "ADT")
 section <- file.path(arm, "03_univariate", "internal")
 dir.create(section, recursive = TRUE); dir.create(file.path(arm, "by_figure"))

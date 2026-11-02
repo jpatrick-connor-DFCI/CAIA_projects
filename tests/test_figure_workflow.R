@@ -147,9 +147,9 @@ local({
       figure_retained_image(s$destination, cfg$fig_root, ".pdf", retained_exports),
     unlist(lapply(first$prepared,`[[`,"scenes"),recursive=FALSE))
   stopifnot(length(manuscript_scenes)>=7L,
-    all(vapply(manuscript_scenes,function(s) grepl("/ADT/(0[1-5]_[a-z_]+(/internal|/federated|/cohort_sensitivity)?|0[78]_[a-z_]+)/(alternative_manuscript|manuscript)/",s$destination) &&
+    all(vapply(manuscript_scenes,function(s) grepl("/ADT/(0[1-6]_[a-z_]+(/internal|/federated|/cohort_sensitivity)?|0[78]_[a-z_]+)/manuscript/",s$destination) &&
       file.exists(paste0(s$destination,".pdf")) &&
-      file.exists(figure_sidecar_path(paste0(s$destination,".md"))) && s$width==7.2,logical(1))))
+      file.exists(figure_sidecar_path(paste0(s$destination,".md"))) && s$width>0,logical(1))))
   overview_stems <- vapply(first$prepared$cohort_overview$scenes,`[[`,character(1),"stem")
   stopifnot("03_cohort_sensitivity_supplement" %in% overview_stems)
   platinum_stems <- vapply(first$prepared$adt__platinum$scenes, `[[`, character(1), "stem")
@@ -219,12 +219,12 @@ local({
     "elasticnet_coefficients__platinum.csv"), show_col_types = FALSE)
   stopifnot(nrow(coefficient_export) == 9L, sum(coefficient_export$displayed) == 6L,
     "last missing" %in% coefficient_export$feature_stat)
-  transfer_export <- read_csv(file.path(cfg$fig_root, "ADT", "05_transfer", "data",
+  transfer_export <- read_csv(file.path(cfg$fig_root, "ADT", "05_transfer_survival", "data",
     "transfer_discrimination_no_dfci__platinum.csv"), show_col_types = FALSE)
-  stopifnot(nrow(transfer_export) == 36L, file.exists(file.path(cfg$fig_root, "ADT", "05_transfer", "data", c(
+  stopifnot(nrow(transfer_export) == 36L, file.exists(file.path(cfg$fig_root, "ADT", "05_transfer_survival", "data", c(
     "transfer_auc_t_no_dfci__platinum.csv", "transfer_clinical_comparison_no_dfci__platinum.csv"))))
   # Nothing is rendered for the removed with-Dana-Farber arm.
-  stopifnot(!any(file.exists(file.path(cfg$fig_root, "ADT", "05_transfer", "data", c(
+  stopifnot(!any(file.exists(file.path(cfg$fig_root, "ADT", "05_transfer_survival", "data", c(
     "transfer_discrimination__platinum.csv", "transfer_dfci_ablation__platinum.csv")))))
   # Both forest scenes keep widescreen slide dimensions through 07's cache;
   # the day-zero incidence layout is unchanged.

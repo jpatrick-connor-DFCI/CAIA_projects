@@ -34,7 +34,7 @@ for(set in 1:2) {
   stopifnot(inherits(result$plot,"gtable"),length(result$spec$titles)==if(set==1) 3 else 2,
     setequal(result$data$subpopulation,if(set==1) c("full","gleason","trio") else c("full","trio_gleason")),
     nrow(result$data)==if(set==1) 36 else 21,
-    grepl("alternative_manuscript",manuscript_folder("ADT",result$spec$key),fixed=TRUE),
+    grepl("manuscript",manuscript_folder("ADT",result$spec$key),fixed=TRUE),
     result$spec$key %in% names(manuscript_captions()))
 }
 stopifnot(is.null(manuscript_federated_transfer_means(metrics,filter(clinical,subpopulation!="trio_gleason"),2)))
