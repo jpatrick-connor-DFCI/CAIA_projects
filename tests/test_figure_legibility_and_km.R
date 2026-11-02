@@ -1,3 +1,4 @@
+source("COMPASS/survival_analysis/figure_typography.R")
 # Run with COMPASS_REVIEW_DIR=/tmp/compass-revised Rscript tests/test_figure_legibility_and_km.R
 suppressPackageStartupMessages({library(ggplot2); library(dplyr); library(tidyr); library(stringr); library(survival); library(readr)})
 source_exprs <- parse("COMPASS/survival_analysis/COMPASS_generate_figures_pipeline.R")

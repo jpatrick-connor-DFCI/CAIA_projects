@@ -1,3 +1,4 @@
+source("COMPASS/survival_analysis/figure_typography.R")
 # Run from the repository root: Rscript tests/test_figure2_subtypes.R
 suppressPackageStartupMessages({
   library(dplyr)

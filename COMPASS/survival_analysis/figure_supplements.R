@@ -1,3 +1,7 @@
+if (!exists("figure_style_plot", mode="function"))
+  source(file.path(dirname(tail(Filter(Negate(is.null), lapply(sys.frames(), function(frame) frame$ofile)), 1)[[1]]),
+    "figure_typography.R"), local=TRUE)
+
 # COMPASS supplementary figures sourced on demand by the pipeline and the
 # cached workflow: cohort forest, cohort overview, metastatic-label prep and
 # diagnostics.
@@ -127,10 +131,10 @@ overview_theme <- function() {
 }
 
 overview_combine <- function(a, b, title, subtitle) {
-  a <- ggplotGrob(a); b <- ggplotGrob(b)
+  a <- figure_plot_grob(a); b <- figure_plot_grob(b)
   a$heights <- b$heights <- grid::unit.pmax(a$heights, b$heights)
   combined <- gridExtra::arrangeGrob(a, b, ncol = 2, bottom = grid::textGrob(
-    subtitle, gp = grid::gpar(fontsize = 10)), padding = grid::unit(1, "lines"))
+    subtitle, gp = figure_text_gpar("body")), padding = grid::unit(1, "lines"))
   attr(combined,"compass_compiled") <- TRUE
   combined
 }

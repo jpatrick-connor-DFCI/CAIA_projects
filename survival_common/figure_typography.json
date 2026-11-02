@@ -1,0 +1,13 @@
+{
+  "family": "Arial",
+  "sizes": {
+    "body": 8,
+    "axis_title": 9,
+    "strip": 9,
+    "subtitle": 9,
+    "title": 11,
+    "tag": 12,
+    "caption": 8,
+    "legend": 8
+  }
+}

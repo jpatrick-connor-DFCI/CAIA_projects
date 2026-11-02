@@ -1,3 +1,7 @@
+if (!exists("figure_style_plot", mode="function"))
+  source(file.path(dirname(tail(Filter(Negate(is.null), lapply(sys.frames(), function(frame) frame$ofile)), 1)[[1]]),
+    "figure_typography.R"), local=TRUE)
+
 # Predictive-checklist supplement: one figure per endpoint x feature set, one
 # card per landmark, each showing the fitted M-of-N checklist and its held-out
 # metrics. Pure consumer of the CSVs written by
@@ -42,7 +46,9 @@ checklist_card_lines <- function(cell, items, metrics, horizon_years, model_labe
                                  origin = "ADT") {
   lines <- list()
   add <- function(text, face = "plain") for (piece in strsplit(text, "\n", fixed = TRUE)[[1L]])
-    lines[[length(lines) + 1L]] <<- data.frame(text = piece, face = face, stringsAsFactors = FALSE)
+    lines[[length(lines) + 1L]] <<- data.frame(text = piece, face = face,
+      metric_model=NA_character_, metric_auc=NA_character_, metric_brier=NA_character_,
+      stringsAsFactors = FALSE)
   gap <- function() add(" ")
   add(sprintf("Landmark %s +%d days", origin, cell$landmark_days), "bold")
   gap()
@@ -62,12 +68,16 @@ checklist_card_lines <- function(cell, items, metrics, horizon_years, model_labe
   add(sprintf("Held-out test, n = %s%s; %d-year horizon",
     if (is.finite(cell$n_test)) format(cell$n_test, big.mark = ",") else "NA", events, horizon_years), "bold")
   width <- max(16L, nchar(model_labels))
-  add(sprintf("%-*s %-18s %s", width, "Model", "AUC (95% CI)", "Brier"), "bold")
+  add_metrics <- function(model, auc, brier, face="plain") {
+    add(sprintf("%-*s %-18s %s",width,model,auc,brier),face)
+    lines[[length(lines)]][c("metric_model","metric_auc","metric_brier")] <<- list(model,auc,brier)
+  }
+  add_metrics("Model", "AUC (95% CI)", "Brier", "bold")
   for (model in names(model_labels)) {
     row <- metrics[metrics$model == model, , drop = FALSE]
     if (nrow(row) == 0L) next
-    add(sprintf("%-*s %-18s %s", width, model_labels[[model]], checklist_interval(row[1L, ], "auc"),
-                checklist_number(row$brier[1L], 3)))
+    add_metrics(model_labels[[model]],checklist_interval(row[1L, ], "auc"),
+                checklist_number(row$brier[1L], 3))
   }
   checklist <- metrics[metrics$model == "checklist", , drop = FALSE]
   if (cell$status == "ok" && nrow(checklist) > 0L) {
@@ -83,13 +93,25 @@ checklist_card_lines <- function(cell, items, metrics, horizon_years, model_labe
 
 plot_checklist_cards <- function(cards, title,
     caption = "Unit-weight M-of-N checklists with IPCW-calibrated horizon risk; baselines are fit on the same development patients.") {
-  ggplot(cards, aes(x = .03, y = y, label = text, fontface = face)) +
-    geom_text(hjust = 0, vjust = 1, family = "mono", size = 3) +
+  # Arial is proportional: position table cells explicitly instead of relying
+  # on spaces to align numeric columns. Keep the original text in sidecars.
+  cards$x <- .03
+  if("metric_model" %in% names(cards)) {
+    metric_rows <- !is.na(cards$metric_model)
+    table <- cards[metric_rows,,drop=FALSE]
+    columns <- c(metric_model=.03,metric_auc=.43,metric_brier=.82)
+    cells <- lapply(names(columns),function(column) {
+      cell <- table; cell$x <- columns[[column]]; cell$text <- cell[[column]]; cell
+    })
+    cards <- dplyr::bind_rows(c(list(cards[!metric_rows,,drop=FALSE]),cells))
+  }
+  ggplot(cards, aes(x = x, y = y, label = text, fontface = face)) +
+    geom_text(hjust = 0, vjust = 1, family = FIGURE_FONT, size = FIGURE_FONT_SIZES[["body"]] / ggplot2::.pt) +
     facet_wrap(~ landmark_label, nrow = 1) +
     scale_x_continuous(limits = c(0, 1), expand = c(0, 0)) +
     scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +
     labs(title = title, caption = caption) +
-    theme_void() +
+    theme_void(base_family=FIGURE_FONT, base_size=FIGURE_FONT_SIZES[["body"]]) +
     theme(panel.border = element_rect(colour = "grey40", fill = NA, linewidth = .5),
           strip.text = element_blank(), panel.spacing = grid::unit(.8, "lines"),
           plot.title = element_text(face = "bold", size = 12, margin = margin(b = 6)),

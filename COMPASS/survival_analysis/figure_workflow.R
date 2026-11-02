@@ -1,3 +1,11 @@
+if (!exists("figure_style_plot", mode="function")) {
+  .source_files <- Filter(Negate(is.null), lapply(sys.frames(), function(frame) frame$ofile))
+  .source_file <- if(length(.source_files)) tail(.source_files,1)[[1]] else
+    sub("^--file=", "", grep("^--file=", commandArgs(), value=TRUE)[1])
+  source(file.path(dirname(.source_file), "figure_typography.R"), local=TRUE)
+  rm(.source_files, .source_file)
+}
+
 # COMPASS figure workflow: presentation helpers, federated and manuscript
 # figures, the cached prepare/render bridge used by 07_figures/all.R, and the
 # downloaded-PNG reformatter. Source after COMPASS_generate_figures_pipeline.R.
@@ -254,6 +262,7 @@ figure_compilation_specs <- function(stem) {
 }
 
 figure_measure_device <- function(path, width, height) {
+  figure_require_font()
   if (requireNamespace("ragg", quietly=TRUE)) ragg::agg_png(path, width=width, height=height, units="in", res=144)
   else grDevices::png(path, width=width, height=height, units="in", res=144, type="cairo")
 }
@@ -262,7 +271,7 @@ figure_grob <- function(plot, width, height, directory=tempdir()) {
   path <- tempfile(".measure-", tmpdir=directory, fileext=".png")
   figure_measure_device(path, width, height)
   on.exit({grDevices::dev.off(); unlink(path)}, add=TRUE)
-  if (inherits(plot,"ggplot")) ggplot2::ggplotGrob(prepare_figure_text(plot,width)) else plot
+  if (inherits(plot,"ggplot")) figure_plot_grob(prepare_figure_text(plot,width)) else figure_style_grob(plot)
 }
 
 figure_combine <- function(items, spec, directory) {
@@ -360,7 +369,7 @@ figure_combine <- function(items, spec, directory) {
   if(length(legends)) bottom <- c(bottom,legends)
   if(length(caption) && nzchar(caption)) bottom <- c(bottom,list(grid::textGrob(
     paste(unlist(lapply(strsplit(caption,"\n",fixed=TRUE)[[1]],strwrap,
-      width=floor(spec$width*12))),collapse="\n"),gp=grid::gpar(fontsize=8))))
+      width=floor(spec$width*12))),collapse="\n"),gp=figure_text_gpar("body"))))
   # Reserve the actual legend/caption heights. Equal null rows can overlap or
   # clip multi-line captions when this footer is nested as arrangeGrob's bottom.
   footer <- if(length(bottom)) gridExtra::arrangeGrob(grobs=bottom,ncol=1,
@@ -801,14 +810,14 @@ plot_federated_sites <- function(d) {
     yscale(FALSE) + scale_x_continuous(limits = c(0, count_max*1.32), expand = expansion(mult = c(0,.01))) +
     labs(x = "Patients (events overlaid)", y = NULL, title = "(b) cohort size and event count",
       caption = "Pale = patients; solid = events; label = events/patients") + style
-  a <- ggplotGrob(a); b <- ggplotGrob(b)
+  a <- figure_plot_grob(a); b <- figure_plot_grob(b)
   a$heights <- b$heights <- grid::unit.pmax(a$heights, b$heights)
   gridExtra::arrangeGrob(a, b, ncol = 2, top = grid::textGrob(paste(
     "Federated | ADT platinum incidence by site | landmark 0d",
     sprintf("Hatched/* = <25 events (%d of %d available sites); read as power, not biology", sum(good$thin), nrow(good)),
-    sep = "\n"), gp = grid::gpar(fontsize = 14)),
+    sep = "\n"), gp = figure_text_gpar("title")),
     bottom = grid::textGrob("Observed events / analyzed patients during follow-up; not fixed-horizon cumulative incidence.",
-      gp = grid::gpar(fontsize = 10)), padding = grid::unit(2.3, "lines"))
+      gp = figure_text_gpar("body")), padding = grid::unit(2.3, "lines"))
 }
 
 save_federated_panel <- function(plot, path, width, height, dpi, overwrite) {
@@ -818,6 +827,8 @@ save_federated_panel <- function(plot, path, width, height, dpi, overwrite) {
     return(invisible(TRUE))
   }
   if (is.null(plot)) return(FALSE)
+  figure_require_font()
+  plot <- figure_style_plot(plot)
   complete <- exists("figure_file_complete", mode = "function") &&
     figure_file_complete(path) && figure_file_complete(sub("\\.png$", ".svg", path)) &&
     figure_file_complete(sub("\\.png$", ".pdf", path))
@@ -833,7 +844,7 @@ save_federated_panel <- function(plot, path, width, height, dpi, overwrite) {
     vector_temp <- tempfile(".federated-", tmpdir = dirname(path), fileext = paste0(".", format))
     on.exit(unlink(vector_temp), add = TRUE)
     ggplot2::ggsave(vector_temp, plot, width = width, height = height, bg = "white",
-                    device = if (format == "svg") grDevices::svg else grDevices::cairo_pdf)
+                    device = if (format == "svg") figure_svg_device else figure_pdf_device)
     if (!file.rename(vector_temp, vector_path))
       stop("Could not publish federated supplement panel: ", vector_path)
   }
@@ -1341,7 +1352,7 @@ render_federated_checklist_cards <- function(root,federated_path,dpi,overwrite,v
     plot_checklist_cards(d,sprintf("%s  %s checklists",letters[i+1L],names(cards)[i]),caption=NULL)
   })
   # Matching gtable widths line the AUC facets up with the card columns.
-  grobs <- lapply(c(list(auc),rows),ggplot2::ggplotGrob)
+  grobs <- lapply(c(list(auc),rows),figure_plot_grob)
   if(length(unique(vapply(grobs,function(g) length(g$widths),integer(1))))==1L) {
     widths <- do.call(grid::unit.pmax,lapply(grobs,function(g) g$widths))
     for(i in seq_along(grobs)) grobs[[i]]$widths <- widths
@@ -1353,8 +1364,8 @@ render_federated_checklist_cards <- function(root,federated_path,dpi,overwrite,v
     sep="\n")
   p <- gridExtra::arrangeGrob(grobs=grobs,ncol=1,heights=grid::unit(heights,"in"),
     top=grid::textGrob(paste0("Federated predictive checklists",version$label,": ADT, platinum endpoint"),
-      x=grid::unit(10,"pt"),hjust=0,gp=grid::gpar(fontsize=14,fontface="bold")),
-    bottom=grid::textGrob(caption,x=grid::unit(10,"pt"),hjust=0,gp=grid::gpar(fontsize=10,col="grey30")))
+      x=grid::unit(10,"pt"),hjust=0,gp=figure_text_gpar("title", fontface="bold")),
+    bottom=grid::textGrob(caption,x=grid::unit(10,"pt"),hjust=0,gp=figure_text_gpar("body", col="grey30")))
   save_federated_panel(p,federated_output_path(root,stem,".png"),15.6,sum(heights)+1.2,dpi,overwrite)
   invisible(loaded)
 }
@@ -1751,12 +1762,12 @@ render_transfer_clinical_checklists <- function(root,directory,dpi,overwrite) {
       "Existing endpoint-specific patient splits; size selection, thresholds, calibration and censoring weights use development patients only.",
       "IPCW metrics on local held-out patients; 95% patient-bootstrap intervals condition on the fitted model. Independent horizon risks; death censored.",sep="\n")
     heights <- c(3.2,rep(panel_in+.6,2))
-    p <- gridExtra::arrangeGrob(grobs=lapply(c(list(auc),rows),ggplotGrob),ncol=1,
+    p <- gridExtra::arrangeGrob(grobs=lapply(c(list(auc),rows),figure_plot_grob),ncol=1,
       heights=grid::unit(heights,"in"),
       top=grid::textGrob(sprintf("%s: %s score + Gleason + mutation checklists",
         FEDERATED_TRANSFER_ENDPOINTS[[ep]],family_labels[[family]]),
-        x=grid::unit(10,"pt"),hjust=0,gp=grid::gpar(fontsize=14,fontface="bold")),
-      bottom=grid::textGrob(caption,x=grid::unit(10,"pt"),hjust=0,gp=grid::gpar(fontsize=9,col="grey30")))
+        x=grid::unit(10,"pt"),hjust=0,gp=figure_text_gpar("title", fontface="bold")),
+      bottom=grid::textGrob(caption,x=grid::unit(10,"pt"),hjust=0,gp=figure_text_gpar("body", col="grey30")))
     stem <- paste("transfer_clinical_checklist",family,ep,sep="_")
     save_federated_panel(p,federated_output_path(root,stem,".png"),
       5.2*length(landmarks),sum(heights)+1.2,dpi,overwrite)
@@ -2103,13 +2114,14 @@ plot_federated_transfer_km_grid <- function(tables, model_family, landmark) {
     cells[[length(cells)+1]] <- if(is.null(p)) grid::nullGrob() else p
   }
   if(!any(vapply(cells,inherits,logical(1),"ggplot"))) return(NULL)
+  cells <- lapply(cells,function(p) if(inherits(p,"ggplot")) figure_plot_grob(p) else p)
   gridExtra::arrangeGrob(grobs=cells,ncol=3,top=grid::textGrob(sprintf(
     "%s trained without Dana-Farber: Dana-Farber event-free survival from the +%d-day landmark",
-    federated_transfer_model_label(model_family),as.integer(landmark)),gp=grid::gpar(fontsize=15,fontface="bold")),
+    federated_transfer_model_label(model_family),as.integer(landmark)),gp=figure_text_gpar("title", fontface="bold")),
     bottom=grid::textGrob(paste(
       "Score: top vs bottom 20% of the transferred labs score (Dana-Farber cutpoints within each endpoint), ADT clock.",
       "Gleason ≤7 vs ≥8 (available before the landmark), ADT clock. TP53/RB1/PTEN: any alteration vs none, sequenced patients, sequencing clock.",
-      sep="\n"),gp=grid::gpar(fontsize=10)),padding=grid::unit(1,"lines"))
+      sep="\n"),gp=figure_text_gpar("body")),padding=grid::unit(1,"lines"))
 }
 
 plot_federated_transfer_gradient <- function(tables, model_family, landmark, title=NULL, caption=NULL) {
@@ -2338,8 +2350,8 @@ federated_site_grid <- function(fig, make, title) {
   })
   plots <- Filter(Negate(is.null),plots)
   if(!length(plots)) return(NULL)
-  gridExtra::arrangeGrob(grobs=lapply(plots,ggplot2::ggplotGrob),ncol=2,
-    top=grid::textGrob(title,gp=grid::gpar(fontsize=15,fontface="bold")),
+  gridExtra::arrangeGrob(grobs=lapply(plots,figure_plot_grob),ncol=2,
+    top=grid::textGrob(title,gp=figure_text_gpar("title", fontface="bold")),
     padding=grid::unit(1.5,"lines"))
 }
 
@@ -2503,8 +2515,8 @@ manuscript_specs <- function() {
 MANUSCRIPT_UNIVARIABLE_KEYS <- c("03_dfci_univariable","federated_03_univariable")
 
 # Reading guide for the mean-only, risk-oriented association panels.
-hr_direction_grob <- function(fontsize=7, col="#52514e") {
-  gp <- grid::gpar(fontsize=fontsize,col=col,fontfamily="sans")
+hr_direction_grob <- function(fontsize=FIGURE_FONT_SIZES[["body"]], col="#52514e") {
+  gp <- figure_text_gpar("body", fontsize=fontsize,col=col)
   line <- grid::gpar(col=col,fill=col,lwd=.8)
   y <- grid::unit(.68,"npc"); tick <- grid::unit(3,"pt")
   grid::gTree(name="hr_direction",children=grid::gList(
@@ -2632,34 +2644,24 @@ manuscript_write_captions <- function(root,keys=names(manuscript_captions()),cap
 }
 
 manuscript_theme <- function() ggplot2::theme(
-  text=ggplot2::element_text(family="sans",size=8,color="#222222"),
-  plot.title=ggplot2::element_text(size=9,face="bold",margin=ggplot2::margin(b=5)),
-  plot.subtitle=ggplot2::element_text(size=7,margin=ggplot2::margin(b=4)),
-  plot.tag=ggplot2::element_text(size=11,face="bold"),
-  axis.text=ggplot2::element_text(size=7,color="#222222"),
-  axis.text.x=ggplot2::element_text(size=7,color="#222222"),
-  axis.text.y=ggplot2::element_text(size=7,color="#222222"),
-  axis.title=ggplot2::element_text(size=8,face="bold"),
-  axis.title.x=ggplot2::element_text(size=8,face="bold"),
-  axis.title.y=ggplot2::element_text(size=8,face="bold"),
-  strip.text=ggplot2::element_text(size=8,face="bold"),
-  legend.text=ggplot2::element_text(size=7,margin=ggplot2::margin(l=2,r=4)),
-  legend.title=ggplot2::element_text(size=7), legend.position="bottom",
+  text=ggplot2::element_text(color="#222222"),
+  plot.title=ggplot2::element_text(margin=ggplot2::margin(b=5)),
+  plot.subtitle=ggplot2::element_text(margin=ggplot2::margin(b=4)),
+  axis.text=ggplot2::element_text(color="#222222"),
+  legend.text=ggplot2::element_text(margin=ggplot2::margin(l=2,r=4)),
+  legend.position="bottom",
   legend.justification="center",legend.box.just="center",
   legend.key.size=grid::unit(9,"pt"),legend.spacing.x=grid::unit(3,"pt"),
   legend.key.width=grid::unit(9,"pt"),legend.key.height=grid::unit(9,"pt"),
   legend.margin=ggplot2::margin(0,0,0,0),legend.box.margin=ggplot2::margin(0,0,0,0),
   panel.spacing=grid::unit(6,"pt"),plot.title.position="plot",
-  plot.margin=ggplot2::margin(5,5,5,5))
+  plot.margin=ggplot2::margin(5,5,5,5)) + figure_font_theme()
 
 manuscript_style <- function(p, title=NULL, tag=NULL) {
   if(!inherits(p,"ggplot")) return(p)
   # Clone layers: ggproto layers are references also held by the individual plot.
   p$layers <- lapply(p$layers,function(layer) {
     copy <- ggplot2::ggproto(NULL,layer)
-    if(inherits(layer$geom,"GeomText") || inherits(layer$geom,"GeomLabel") ||
-       inherits(layer$geom,"GeomTextRepel") || inherits(layer$geom,"GeomLabelRepel"))
-      copy$aes_params$size <- min(2.5,if(is.null(layer$aes_params$size)) 2.5 else layer$aes_params$size)
     if(inherits(layer$geom,"GeomPoint") && !is.null(layer$aes_params$size))
       copy$aes_params$size <- min(1.8,layer$aes_params$size)
     copy
@@ -2670,14 +2672,14 @@ manuscript_style <- function(p, title=NULL, tag=NULL) {
     if(inherits(p$theme[[field]],"element_blank") ||
        (startsWith(field,"axis.text.") && inherits(p$theme$axis.text,"element_blank")))
       result$theme[[field]] <- ggplot2::element_blank()
-  result
+  figure_style_plot(result)
 }
 
 manuscript_grob <- function(p,width,height) {
   path <- tempfile(fileext=".png")
   figure_measure_device(path,width,height)
   on.exit({grDevices::dev.off();unlink(path)})
-  if(inherits(p,"ggplot")) ggplot2::ggplotGrob(p) else p
+  if(inherits(p,"ggplot")) figure_plot_grob(p) else figure_style_grob(p)
 }
 
 manuscript_combine <- function(plots,spec,shared_legend=FALSE,tag_offset=0L) {
@@ -2688,7 +2690,7 @@ manuscript_combine <- function(plots,spec,shared_legend=FALSE,tag_offset=0L) {
     p <- manuscript_style(plots[[i]],spec$titles[i],
       if(length(plots)>1) letters[i+tag_offset] else NULL)
     if(spec$key %in% MANUSCRIPT_UNIVARIABLE_KEYS && i<=3) p <- p + ggplot2::theme(
-      plot.subtitle=ggplot2::element_text(size=8,face="bold",hjust=.5,
+      plot.subtitle=ggplot2::element_text(size=FIGURE_FONT_SIZES[["subtitle"]],face="bold",hjust=.5,
         margin=ggplot2::margin(b=2)),
       plot.margin=ggplot2::margin(4,1,4,1))
     if(inherits(p,"ggplot")) {
@@ -2718,7 +2720,7 @@ manuscript_combine <- function(plots,spec,shared_legend=FALSE,tag_offset=0L) {
   }
   footer <- if(length(legends) && !length(inline_legend_panels)) legends[[1]] else NULL
   header <- if(length(spec$header)) grid::textGrob(spec$header,
-    gp=grid::gpar(fontsize=9,fontface="bold",fontfamily="sans",col="#222222")) else NULL
+    gp=figure_text_gpar("strip", fontface="bold",col="#222222")) else NULL
   gridExtra::arrangeGrob(grobs=grobs,layout_matrix=spec$layout,heights=row_heights,bottom=footer,
     top=header,padding=grid::unit(3,"pt"))
 }
@@ -2730,7 +2732,7 @@ manuscript_legend <- function(p,width,height) {
 }
 
 manuscript_center_landmark_header <- function(p) p + ggplot2::theme(
-  plot.subtitle=ggplot2::element_text(size=8,face="bold",hjust=.5,
+  plot.subtitle=ggplot2::element_text(size=FIGURE_FONT_SIZES[["subtitle"]],face="bold",hjust=.5,
     margin=ggplot2::margin(b=3)))
 
 # Discrimination panel(s) first, then three Elastic-Net and three XGBoost
@@ -2760,7 +2762,7 @@ manuscript_multivariable_labs <- function(plots,spec,legend_nrow=1) {
       spec$width/3,spec$height*.24)
   }
   tag <- function(letter) grid::textGrob(tolower(letter),x=grid::unit(0,"npc"),hjust=0,
-    gp=grid::gpar(fontfamily="sans",fontsize=11,fontface="bold",col="#222222"))
+    gp=figure_text_gpar("tag", fontface="bold",col="#222222"))
   coefficient_row <- gridExtra::arrangeGrob(grobs=importance[1:3],ncol=3,top=tag(letters[n_perf+1]),
     padding=grid::unit(1,"pt"))
   xgboost_row <- gridExtra::arrangeGrob(grobs=importance[4:6],ncol=3,top=tag(letters[n_perf+2]),
@@ -3222,7 +3224,7 @@ manuscript_univariable_restyle <- function(plots, federated=FALSE) {
   }
   for(i in 1:3) {
     plots[[i]] <- plots[[i]] + ggplot2::labs(
-      subtitle=manuscript_dfci_landmark_headers[i],y=if(i==1) expression(-log[10](q)) else NULL) +
+      subtitle=manuscript_dfci_landmark_headers[i],y=if(i==1) "−log10(q)" else NULL) +
       ggplot2::guides(color="none",fill=ggplot2::guide_legend(nrow=1,byrow=TRUE,
         override.aes=list(shape=21,size=1.8,alpha=1)))
     if(i>1) plots[[i]] <- plots[[i]] + ggplot2::theme(
@@ -3684,11 +3686,14 @@ render_figure_scene <- function(scene, signature, dpi, pdf = FALSE, overwrite = 
       identical(r$identity, identity) && identical(r$file, figure_file_identity(path))
     }, error = function(e) FALSE) else FALSE
     if (!overwrite && fresh && figure_file_complete(path)) next
-    if (is.null(grob)) grob <- readRDS(scene$path)
+    if (is.null(grob)) {
+      figure_require_font()
+      grob <- figure_style_grob(readRDS(scene$path))
+    }
     dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
     temporary <- tempfile(".figure-render-", tmpdir = dirname(path), fileext = paste0(".", format))
     tryCatch({
-      device <- if (format == "svg") grDevices::svg else if (format == "pdf") grDevices::cairo_pdf else
+      device <- if (format == "svg") figure_svg_device else if (format == "pdf") figure_pdf_device else
         if (HAS_RAGG) ragg::agg_png else "png"
       ggplot2::ggsave(temporary, grob, width = scene$width, height = scene$height,
                      dpi = dpi, bg = "white", device = device)
@@ -3872,7 +3877,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     function(x) as.character(utils::packageVersion(x)), character(1)),
     code = unname(tools::md5sum(list.files(dirname(pipeline_path), pattern = "\\.R$", full.names = TRUE))),
     fig_root = config$fig_root, combined_km_landmark = figure_overview_km_landmark(),
-    transfer_display = manuscript_transfer_settings())
+    transfer_display = manuscript_transfer_settings(), typography = FIGURE_TYPOGRAPHY)
   jobs <- list()
   if (!identical(config$scope, "federated")) {
     for (cohort in config$cohorts) for (endpoint in config$endpoints) {
@@ -4099,7 +4104,7 @@ download_draw_panel <- function(p, x,y,width,height,heading=NULL,canvas_width,ca
   if(length(heading)) grid::grid.text(heading,
     x=grid::unit((available_w-ncol(p)*scale)/2,"in")+grid::unit(8,"pt"),
     y=grid::unit(1,"npc")-grid::unit(8,"pt"),
-    just=c("left","top"),gp=grid::gpar(fontsize=17,fontface="bold"))
+    just=c("left","top"),gp=figure_text_gpar("tag", fontface="bold"))
   grid::grid.raster(download_native_raster(p),x=.5,y=grid::unit(1,"npc")-grid::unit(header,"in"),
     just=c("center","top"),width=grid::unit(ncol(p)*scale,"in"),height=grid::unit(nrow(p)*scale,"in"),
     interpolate=FALSE)
@@ -4152,7 +4157,7 @@ reformat_downloaded_figures <- function(input, output, landmark=0L) {
     grid::grid.newpage()
     for(i in 1:3) grid::grid.text(paste(letters[i],"  DFCI — landmark",c(0,90,180)[i],"days"),
       x=grid::unit((i-1)*8+.12,"in"),y=grid::unit(height-.12,"in"),just=c("left","top"),
-      gp=grid::gpar(fontsize=17,fontface="bold"))
+      gp=figure_text_gpar("tag", fontface="bold"))
     download_draw_panel(volcano,.5,1-(.4+7.6/2)/height,1,7.6/height,
       canvas_width=width,canvas_height=height)
     extremes <- sprintf("bottom vs top %d%%",round(100*LAB_EXTREME_FRACTION))
@@ -4166,9 +4171,9 @@ reformat_downloaded_figures <- function(input, output, landmark=0L) {
   }
   ragg::agg_png(paste0(target,".png"),width=width,height=height,units="in",res=200,background="white")
   tryCatch(draw(),finally=grDevices::dev.off())
-  grDevices::svg(paste0(target,".svg"),width=width,height=height)
+  figure_svg_device(paste0(target,".svg"),width=width,height=height)
   tryCatch(draw(),finally=grDevices::dev.off())
-  grDevices::cairo_pdf(paste0(target,".pdf"),width=width,height=height)
+  figure_pdf_device(paste0(target,".pdf"),width=width,height=height)
   tryCatch(draw(),finally=grDevices::dev.off())
   manifest <- file.path(output,FIGURE_SIDECAR_DIR,"manifest.csv")
   # Downloads made before tables moved into data/ keep the manifest at the root.

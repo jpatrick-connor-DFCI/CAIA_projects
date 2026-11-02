@@ -4,6 +4,9 @@ args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 1L) {
   stop("Usage: Rscript render_figures.R <run-output-directory> [figure-directory]")
 }
+script_dir <- dirname(normalizePath(sub("^--file=", "", grep("^--file=", commandArgs(), value=TRUE)[1L])))
+source(file.path(script_dir, "..", "figure_typography.R"))
+figure_require_font()
 root <- normalizePath(args[[1L]], mustWork = TRUE)
 out <- if (length(args) >= 2L) args[[2L]] else file.path(root, "figures")
 dir.create(out, recursive = TRUE, showWarnings = FALSE)
@@ -39,7 +42,7 @@ plot_panel <- function(rows, metric, landmark, endpoint, population) {
     }
   }
   legend(if (metric == "auc") "bottomright" else "topright", legend = models,
-         col = colors, lty = 1, pch = 16, bty = "n", cex = .8)
+         col = colors, lty = 1, pch = 16, bty = "n", cex = 1)
 }
 for (population in unique(metrics$population)) {
   for (endpoint in unique(metrics$endpoint)) {
@@ -48,6 +51,7 @@ for (population in unique(metrics$population)) {
     landmarks <- sort(unique(rows$landmark_days))
     draw <- function() {
       par(mfrow = c(length(landmarks), 2L), mar = c(4.2, 4.3, 3, 1))
+      figure_base_par()
       for (landmark in landmarks) {
         plot_panel(rows, "auc", landmark, endpoint, population)
         plot_panel(rows, "brier", landmark, endpoint, population)
@@ -57,9 +61,9 @@ for (population in unique(metrics$population)) {
     png(paste0(stem, ".png"), width = 2200, height = 720 * length(landmarks), res = 200,
         type = if (capabilities("cairo")) "cairo" else getOption("bitmapType"))
     draw(); dev.off()
-    svg(paste0(stem, ".svg"), width = 11, height = 3.6 * length(landmarks))
+    figure_svg_device(paste0(stem, ".svg"), width = 11, height = 3.6 * length(landmarks))
     draw(); dev.off()
-    pdf(paste0(stem, ".pdf"), width = 11, height = 3.6 * length(landmarks))
+    figure_pdf_device(paste0(stem, ".pdf"), width = 11, height = 3.6 * length(landmarks))
     draw(); dev.off()
   }
 }
@@ -68,6 +72,7 @@ if (file.exists(calibration_path)) {
   calibration <- read.csv(calibration_path, stringsAsFactors = FALSE)
   calibration <- calibration[calibration$model == "checklist", , drop = FALSE]
   draw_calibration <- function() {
+  figure_base_par()
   all_keys <- as.character(interaction(calibration$endpoint, calibration$landmark_days,
                                        calibration$population, calibration$horizon_days, drop = TRUE))
   for (key in unique(all_keys)) {
@@ -81,9 +86,9 @@ if (file.exists(calibration_path)) {
   png(file.path(out, "checklist_calibration.png"), width = 1200, height = 1200, res = 200,
       type = if (capabilities("cairo")) "cairo" else getOption("bitmapType"))
   draw_calibration(); dev.off()
-  svg(file.path(out, "checklist_calibration.svg"), width = 6, height = 6)
+  figure_svg_device(file.path(out, "checklist_calibration.svg"), width = 6, height = 6)
   draw_calibration(); dev.off()
-  pdf(file.path(out, "checklist_calibration.pdf"), width = 6, height = 6)
+  figure_pdf_device(file.path(out, "checklist_calibration.pdf"), width = 6, height = 6)
   draw_calibration(); dev.off()
 }
 message("Figures written to ", out)

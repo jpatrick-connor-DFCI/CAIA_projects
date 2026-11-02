@@ -630,7 +630,9 @@ def plot_panels(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from survival_common.plotting import RCPARAMS, overlay_km
+    from survival_common.plotting import RCPARAMS, overlay_km, require_figure_font
+
+    require_figure_font()
 
     n = len(stratifiers)
     ncols = min(3, n)
@@ -668,14 +670,14 @@ def plot_panels(
                 ax.text(
                     0.03, 0.06,
                     f"log-rank p = {p:.3g}" if p >= 1e-4 else "log-rank p < 1e-4",
-                    transform=ax.transAxes, fontsize=9,
+                    transform=ax.transAxes,
                 )
             if max_days:
                 ax.set_xlim(0, max_days)
-            ax.legend(fontsize=8, loc="upper right")
+            ax.legend(loc="upper right")
         for ax in flat[n:]:
             ax.set_visible(False)
-        fig.suptitle(title, fontsize=13)
+        fig.suptitle(title)
         fig.tight_layout()
     return fig
 
@@ -856,7 +858,9 @@ def plot_within_stratum(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from survival_common.plotting import RCPARAMS, overlay_km
+    from survival_common.plotting import RCPARAMS, overlay_km, require_figure_font
+
+    require_figure_font()
 
     risk_labels = risk_group(frame, cutpoint=global_cutpoint)
 
@@ -876,7 +880,7 @@ def plot_within_stratum(
         with plt.rc_context(RCPARAMS):
             fig, ax = plt.subplots(figsize=(5.2, 4.2))
             ax.set_visible(False)
-            fig.suptitle(title, fontsize=13)
+            fig.suptitle(title)
         return fig
 
     ncols = min(3, len(panels))
@@ -903,10 +907,10 @@ def plot_within_stratum(
             )
             if max_days:
                 ax.set_xlim(0, max_days)
-            ax.legend(fontsize=8, loc="upper right")
+            ax.legend(loc="upper right")
         for ax in flat[len(panels):]:
             ax.set_visible(False)
-        fig.suptitle(title, fontsize=13)
+        fig.suptitle(title)
         fig.tight_layout()
     return fig
 
@@ -1026,6 +1030,9 @@ def run(args: argparse.Namespace) -> None:
     if args.no_plot:
         return
 
+    import matplotlib
+    from survival_common.plotting import RCPARAMS
+
     if clinical_stratifiers:
         within_fig = plot_within_stratum(
             frame, clinical_stratifiers, global_cutpoint=cutpoint,
@@ -1040,7 +1047,8 @@ def run(args: argparse.Namespace) -> None:
         )
         for ext in args.formats:
             within_path = output_dir / f"risk_within_stratum_km{suffix}.{ext}"
-            within_fig.savefig(within_path)
+            with matplotlib.rc_context(RCPARAMS):
+                within_fig.savefig(within_path)
             print(f"Saved {within_path.name}")
 
     fig = plot_panels(
@@ -1056,7 +1064,8 @@ def run(args: argparse.Namespace) -> None:
     )
     for ext in args.formats:
         path = output_dir / f"risk_stratified_km{suffix}.{ext}"
-        fig.savefig(path)
+        with matplotlib.rc_context(RCPARAMS):
+            fig.savefig(path)
         print(f"Saved {path.name}")
 
 

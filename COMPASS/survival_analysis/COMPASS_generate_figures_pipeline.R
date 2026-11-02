@@ -3,7 +3,7 @@
 #
 # Required packages (install once on the cluster):
 #   install.packages(c("tidyverse", "survival", "survminer", "broom",
-#                       "ggrepel", "jsonlite", "scales", "mgcv"))
+#                       "ggrepel", "jsonlite", "scales", "mgcv", "systemfonts"))
 #   # optional: install.packages(c("ggpattern", "ragg"))
 #   #   ggpattern -> striped baseline bars in Fig 4a
 #   #   ragg      -> crisper high-DPI PNG device (falls back to default if absent)
@@ -16,6 +16,7 @@ suppressPackageStartupMessages({
   library(jsonlite)
   library(scales)
 })
+source(file.path(dirname(tail(Filter(Negate(is.null), lapply(sys.frames(), function(frame) frame$ofile)), 1)[[1]]), "figure_typography.R"), local=TRUE)
 
 # ---- Publication-quality rendering defaults (parallels the Python rcParams) ----
 # 600-dpi PNGs on a white background; use the crisper {ragg} device when available.
@@ -23,8 +24,8 @@ SAVE_DPI <- 600
 HAS_RAGG <- requireNamespace("ragg", quietly = TRUE)
 
 # Shared ggplot theme: publication typography, thin spines, white background.
-theme_fig <- function(base_size = 11) {
-  theme_classic(base_size = base_size) +
+theme_fig <- function(base_size = FIGURE_FONT_SIZES[["body"]]) {
+  theme_classic(base_size = base_size, base_family = FIGURE_FONT) +
     theme(
       plot.title        = element_text(face = "bold", size = base_size + 1),
       plot.subtitle     = element_text(size = base_size - 1, color = "#52514e"),
@@ -41,7 +42,7 @@ theme_fig <- function(base_size = 11) {
       legend.box         = "horizontal",
       legend.key.width   = grid::unit(14, "pt"),
       plot.margin        = margin(12, 16, 12, 12)
-    )
+    ) + figure_font_theme()
 }
 theme_set(theme_fig())
 
@@ -266,7 +267,7 @@ risk_stratum_order <- function(meta, key) {
 }
 
 prepare_figure_text <- function(plot, width) {
-  if (!inherits(plot, "ggplot")) return(plot)
+  if (!inherits(plot, "ggplot")) return(figure_style_grob(plot))
   # Wrap outside-panel text against the output width, without changing labels
   # embedded in the data. plot alignment gives captions the full device width.
   widths <- c(title = floor(width * 8), subtitle = floor(width * 10), caption = floor(width * 12))
@@ -276,11 +277,11 @@ prepare_figure_text <- function(plot, width) {
       plot$labels[[field]] <- paste(vapply(strsplit(value, "\n", fixed = TRUE)[[1]],
         function(line) paste(strwrap(line, width = widths[[field]]), collapse = "\n"), character(1)), collapse = "\n")
   }
-  plot + theme(plot.title.position = "plot", plot.caption.position = "plot",
+  figure_style_plot(plot + theme(plot.title.position = "plot", plot.caption.position = "plot",
                legend.text = element_text(margin = margin(l = 5, r = 10)),
                legend.spacing.x = grid::unit(10,"pt"),
                axis.title.y = element_text(margin = margin(r = 10)),
-               plot.margin = margin(12, 16, 12, 12))
+               plot.margin = margin(12, 16, 12, 12)))
 }
 
 
@@ -1320,11 +1321,11 @@ plot_volcano_panel <- function(sub, title) {
     scale_size_manual(values = c(`TRUE` = 3.2 * 1.5, `FALSE` = 2.1 * 1.5), guide = "none") +
     coord_cartesian(xlim = c(0, max(c(.7, sub$risk_coef), na.rm = TRUE) * 1.15),
                     ylim = c(-0.2, max(y_max * 1.20, 5))) +
-    labs(x = "Risk-direction log HR per SD", y = expression(-log[10](q)), title = title,
+    labs(x = "Risk-direction log HR per SD", y = "−log10(q)", title = title,
          caption = str_wrap(footer, 88)) +
     theme_fig() +
     theme(plot.title = element_text(face = "bold", size = 16),
-          plot.caption = element_text(size = 11, color = "#5d6d7e", family = "sans",
+          plot.caption = element_text(size = 11, color = "#5d6d7e", family = FIGURE_FONT,
                                       hjust = 0, lineheight = 1.05),
           axis.title = element_text(size = 14),
           axis.text  = element_text(size = 12),
@@ -1357,10 +1358,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   }
   # Rscript opens `Rplots.pdf` when any plot is drawn without an explicit device.
   # All intended outputs below use ggsave(), so route any incidental drawing to a
-  # temporary null PDF device during non-interactive runs.
+  # temporary Arial-capable PDF device during non-interactive runs.
   if (!show) {
     previous_device_option <- getOption("device")
-    options(device = function(...) grDevices::pdf(file = NULL, ...))
+    options(device = function(...) figure_pdf_device(tempfile(fileext=".pdf"), ...))
     on.exit(options(device = previous_device_option), add = TRUE)
   }
 
@@ -1649,10 +1650,10 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       on.exit(unlink(temporary))
       if (format == "svg") {
         ggsave(temporary, plot = plot, width = width, height = height, units = "in",
-               bg = "white", device = grDevices::svg)
+               bg = "white", device = figure_svg_device)
       } else if (format == "pdf") {
         ggsave(temporary, plot = plot, width = width, height = height, units = "in",
-               bg = "white", device = grDevices::cairo_pdf)
+               bg = "white", device = figure_pdf_device)
       } else if (HAS_RAGG) {
         ggsave(temporary, plot = plot, width = width, height = height, units = "in",
                dpi = save_dpi, bg = "white", device = ragg::agg_png)
@@ -1667,6 +1668,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       message("wrote ", destination)
     }
     plot <- prepare_figure_text(plot, width)
+    figure_require_font()
     if (need_png) write_format(png_out)
     if (need_svg) write_format(svg_out, "svg")
     if (need_pdf) write_format(pdf_out, "pdf")
@@ -2629,11 +2631,11 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                          guide = guide_legend(override.aes = list(size = 4.5, alpha = 1))) +
       coord_cartesian(xlim = range(c(PANEL_XLIM, sub$coef_feature), finite = TRUE) * 1.08,
                       ylim = c(-0.2, max(y_max * 1.20, 5))) +
-      labs(x = "Cox log HR per SD", y = expression(-log[10](p)), title = title,
+      labs(x = "Cox log HR per SD", y = "−log10(p)", title = title,
            caption = footer) +
       theme_fig() +
       theme(plot.title = element_text(face = "bold", size = 14),
-            plot.caption = element_text(size = 9, color = "#5d6d7e", family = "sans",
+            plot.caption = element_text(size = 9, color = "#5d6d7e", family = FIGURE_FONT,
                                         hjust = 0),
             axis.title = element_text(size = 12),
             axis.text  = element_text(size = 10),
@@ -2845,7 +2847,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         point.size = 4, nudge_x = ifelse(d$coef_feature < 0, -1, 1) * x_span * .08,
         nudge_y = .25, force = 2, max.time = 4, max.iter = 100000, seed = 0) +
       coord_cartesian(xlim = c(-x_span, x_span)) +
-      labs(x = "Cox log HR per SD", y = expression(-log[10](p)),
+      labs(x = "Cox log HR per SD", y = "−log10(p)",
            title = title, subtitle = subtitle,
            caption = sprintf("%d / %d features q<0.05", n_sig, nrow(d))) +
       theme_fig() +
@@ -3563,7 +3565,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     pval <- 1 - pchisq(sd$chisq, length(sd$n) - 1)
     ann <- sprintf("%s\nlog-rank p = %.3g", ann, pval)
     p + annotate("text", x = Inf, y = 0, label = ann, hjust = 1.05, vjust = 0,
-                 size = 2.6, color = "#5d6d7e", family = "sans")
+                 size = 2.6, color = "#5d6d7e", family = FIGURE_FONT)
   }
 
   # Extreme-group contrast, using the same incident risk set and pre-landmark
@@ -3680,7 +3682,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         }
       }
       p + annotate("text", x = Inf, y = 0, label = ann, hjust = 1.05, vjust = 0,
-                   size = 2.6, color = "#5d6d7e", family = "sans")
+                   size = 2.6, color = "#5d6d7e", family = FIGURE_FONT)
     }
 
     for (scheme_name in names(FIGURE_LLM_STRATA)) {
@@ -3741,7 +3743,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       coord_cartesian(xlim = c(lo, hi)) +
       labs(x = xlab, y = "Density", title = ttl) +
       annotate("text", x = Inf, y = Inf, label = ann_lines, hjust = 1.05, vjust = 1.5,
-               size = 2.6, color = "#5d6d7e", family = "sans") +
+               size = 2.6, color = "#5d6d7e", family = FIGURE_FONT) +
       theme_fig() +
       theme(plot.title = element_text(face = "bold", size = 10),
             legend.position = c(0.98, 0.72), legend.justification = c(1, 1))

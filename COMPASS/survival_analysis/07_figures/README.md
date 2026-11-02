@@ -84,6 +84,21 @@ are regenerated once.
 
 The notebook's Python kernel requires Polars. R needs its existing plotting
 packages plus `nanoparquet` or `arrow`; no Python installation is needed to run this script.
+All figure writers use Arial, with shared point sizes from
+`survival_common/figure_typography.json`: body text, annotations, tick labels,
+captions and legends are 8 pt; axes and facet headings are 9 pt bold;
+subtitles are 9 pt; titles are 11 pt bold; panel letters are 12 pt bold.
+The same settings apply to individual panels, manuscript composites,
+checklist supplements and the Python survival plots. Arial must be installed
+on the rendering host, and R requires `systemfonts`; rendering stops if Arial
+is unavailable. Cairo PDF/SVG devices explicitly select Arial for both text
+and mathematical symbols. PDF exports embed the font.
+
+Use `COMPASS_FIGURE_STAGE=all` after typography changes so the pipeline measures
+and rebuilds the graphics caches before exporting. The font configuration is
+part of the cache signature. Reassembling previously exported PNGs cannot
+change their embedded text; regenerate those panels from source.
+
 The notebook controls `POLARS_MAX_THREADS`, defaulting to at most four and
 respecting the SLURM CPU allocation when available.
 `COMPASS_PREPARE_WORKERS` defaults to one to limit memory use;

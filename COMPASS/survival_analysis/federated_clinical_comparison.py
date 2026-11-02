@@ -630,6 +630,7 @@ def write_outputs(comparison, coefs, summary, out_dir, km=None) -> None:
 def plot_clinical_comparison(comparison: pd.DataFrame, path=None, endpoints=fet.DEFAULT_ENDPOINTS):
     """Quick check: mean AUC(t) by landmark, rows = subpopulation, columns = endpoint."""
     import matplotlib.pyplot as plt
+    from survival_common.plotting import RCPARAMS, require_figure_font
 
     d = comparison[comparison["model"] != TRANSFERRED_AGE].dropna(subset=["mean_auc"])
     subs = [s for s in SUBPOPULATIONS if s in set(d["subpopulation"])]
@@ -643,34 +644,35 @@ def plot_clinical_comparison(comparison: pd.DataFrame, path=None, endpoints=fet.
               + [(b, COMBINED_COX) for b in bundles])
     colors = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#8e44ad"]
     width = 0.8 / len(series)
-    fig, axes = plt.subplots(len(subs), len(eps), figsize=(4.2 * len(eps), 3.2 * len(subs)),
-                             sharey=True, squeeze=False)
-    for i, sub in enumerate(subs):
-        for j, ep in enumerate(eps):
-            ax = axes[i][j]
-            dd = d[(d["subpopulation"] == sub) & (d["endpoint"] == ep)]
-            for k, (bundle, model) in enumerate(series):
-                r = dd[dd["model"] == model]
-                r = (r[r["bundle"] == bundle] if bundle else r.drop_duplicates("landmark_days"))
-                r = r.set_index("landmark_days").reindex(lms)
-                x = np.arange(len(lms)) + (k - (len(series) - 1) / 2) * width
-                label = (SUBPOPULATIONS[sub]["label"] if bundle is None
-                         else f"{bundle} + clinical" if model == COMBINED_COX else bundle)
-                ax.errorbar(x, r["mean_auc"], yerr=np.vstack([r["mean_auc"] - r["mean_auc_lo"],
-                                                             r["mean_auc_hi"] - r["mean_auc"]]),
-                            fmt={TRANSFERRED_LABS: "o", CLINICAL_COX: "D", COMBINED_COX: "^"}[model],
-                            ms=6, capsize=0, color=colors[k % len(colors)], label=label)
-            ax.axhline(0.5, color="#8a8a86", lw=1, ls="--", zorder=0)
-            ax.set_xticks(range(len(lms)), [f"{lm}d" for lm in lms])
-            n = dd.groupby("landmark_days")[["n_patients", "n_events"]].first().reindex(lms)
-            ax.set_title(f"{ep.upper()} · {sub}  (n/events: "
-                         + ", ".join(f"{int(a)}/{int(b)}" for a, b in n.fillna(0).to_numpy()) + ")",
-                         fontsize=9)
-            ax.grid(axis="y", color="#e6e5df", lw=0.8)
-            ax.spines[["top", "right"]].set_visible(False)
-        axes[i][0].set_ylabel("Mean AUC(t)")
-        axes[i][-1].legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
-    fig.tight_layout()
-    if path is not None:
-        fig.savefig(path, dpi=200, bbox_inches="tight")
-    plt.show()
+    require_figure_font()
+    with plt.rc_context(RCPARAMS):
+        fig, axes = plt.subplots(len(subs), len(eps), figsize=(4.2 * len(eps), 3.2 * len(subs)),
+                                 sharey=True, squeeze=False)
+        for i, sub in enumerate(subs):
+            for j, ep in enumerate(eps):
+                ax = axes[i][j]
+                dd = d[(d["subpopulation"] == sub) & (d["endpoint"] == ep)]
+                for k, (bundle, model) in enumerate(series):
+                    r = dd[dd["model"] == model]
+                    r = (r[r["bundle"] == bundle] if bundle else r.drop_duplicates("landmark_days"))
+                    r = r.set_index("landmark_days").reindex(lms)
+                    x = np.arange(len(lms)) + (k - (len(series) - 1) / 2) * width
+                    label = (SUBPOPULATIONS[sub]["label"] if bundle is None
+                             else f"{bundle} + clinical" if model == COMBINED_COX else bundle)
+                    ax.errorbar(x, r["mean_auc"], yerr=np.vstack([r["mean_auc"] - r["mean_auc_lo"],
+                                                                 r["mean_auc_hi"] - r["mean_auc"]]),
+                                fmt={TRANSFERRED_LABS: "o", CLINICAL_COX: "D", COMBINED_COX: "^"}[model],
+                                ms=6, capsize=0, color=colors[k % len(colors)], label=label)
+                ax.axhline(0.5, color="#8a8a86", lw=1, ls="--", zorder=0)
+                ax.set_xticks(range(len(lms)), [f"{lm}d" for lm in lms])
+                n = dd.groupby("landmark_days")[["n_patients", "n_events"]].first().reindex(lms)
+                ax.set_title(f"{ep.upper()} · {sub}  (n/events: "
+                             + ", ".join(f"{int(a)}/{int(b)}" for a, b in n.fillna(0).to_numpy()) + ")")
+                ax.grid(axis="y", color="#e6e5df", lw=0.8)
+                ax.spines[["top", "right"]].set_visible(False)
+            axes[i][0].set_ylabel("Mean AUC(t)")
+            axes[i][-1].legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False)
+        fig.tight_layout()
+        if path is not None:
+            fig.savefig(path, dpi=200, bbox_inches="tight")
+        plt.show()

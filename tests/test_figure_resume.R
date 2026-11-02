@@ -1,3 +1,4 @@
+source("COMPASS/survival_analysis/figure_typography.R")
 # Run from the repository root: Rscript tests/test_figure_resume.R
 # Exercise the real writer with tiny PNG/PDF files, without cluster inputs.
 suppressPackageStartupMessages(library(ggplot2))

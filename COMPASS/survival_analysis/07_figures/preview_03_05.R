@@ -14,10 +14,12 @@ figure5_output <- manuscript_folder(output,"federated_05_transfer_no_dfci")
 for(folder in c(figure3_output,figure5_output))
   dir.create(file.path(folder,"data"),recursive=TRUE,showWarnings=FALSE)
 save_review <- function(plot,stem,width,height,folder) {
+  figure_require_font()
+  plot <- figure_style_plot(plot)
   ggplot2::ggsave(file.path(folder,paste0(stem,".png")),plot,width=width,height=height,
     dpi=200,device=ragg::agg_png,bg="white")
   ggplot2::ggsave(file.path(folder,paste0(stem,".pdf")),plot,width=width,height=height,
-    device=grDevices::cairo_pdf,bg="white")
+    device=figure_pdf_device,bg="white")
 }
 
 associations <- bind_rows(lapply(c(0,90,180),function(lm) readr::read_csv(file.path(input,
@@ -35,7 +37,7 @@ for(i in 1:3) plots[[i]] <- plots[[i]] +
   coord_cartesian(xlim=c(0,max(.75,max(means$risk_coef,na.rm=TRUE)*1.15)),ylim=c(-.2,36)) +
   scale_size_manual(values=c(`TRUE`=1.8,`FALSE`=1.2),guide="none") +
   guides(fill=guide_legend(nrow=1,override.aes=list(shape=21,size=1.8,alpha=1))) +
-  labs(y=if(i==1) expression(-log[10](q)) else NULL)
+  labs(y=if(i==1) "−log10(q)" else NULL)
 spec <- list(key="federated_03_univariable",width=10,height=4.5,
   layout=rbind(1:3,rep(4,3)),row_heights=c(1,.15),titles=rep("",3),shared_legend_panels=1:3)
 save_review(manuscript_combine(plots,spec),"figure3_risk_direction",10,4.5,figure3_output)

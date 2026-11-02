@@ -13,21 +13,59 @@ Used by PROFILE figure-generation notebooks and scripts. Centralises:
 from __future__ import annotations
 
 from typing import Mapping
+from functools import lru_cache
+import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
 
+TYPOGRAPHY = json.loads(Path(__file__).with_name("figure_typography.json").read_text())
+FONT_SIZES = TYPOGRAPHY["sizes"]
+
 RCPARAMS: dict = {
     "figure.dpi": 130,
     "savefig.dpi": 220,
     "savefig.bbox": "tight",
-    "font.size": 11,
+    "font.family": TYPOGRAPHY["family"],
+    "font.size": FONT_SIZES["body"],
+    "axes.labelsize": FONT_SIZES["axis_title"],
+    "axes.labelweight": "bold",
+    "axes.titlesize": FONT_SIZES["title"],
+    "axes.titleweight": "bold",
+    "xtick.labelsize": FONT_SIZES["body"],
+    "ytick.labelsize": FONT_SIZES["body"],
+    "legend.fontsize": FONT_SIZES["legend"],
+    "legend.title_fontsize": FONT_SIZES["legend"],
+    "figure.titlesize": FONT_SIZES["title"],
+    "figure.titleweight": "bold",
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+    "mathtext.fontset": "custom",
+    "mathtext.rm": TYPOGRAPHY["family"],
+    "mathtext.it": TYPOGRAPHY["family"] + ":italic",
+    "mathtext.bf": TYPOGRAPHY["family"] + ":bold",
+    "mathtext.sf": TYPOGRAPHY["family"],
+    "mathtext.tt": TYPOGRAPHY["family"],
+    "mathtext.cal": TYPOGRAPHY["family"],
+    "mathtext.fallback": None,
     "axes.spines.top": False,
     "axes.spines.right": False,
     "legend.frameon": False,
 }
+
+
+@lru_cache(maxsize=1)
+def require_figure_font() -> None:
+    """Fail at rendering time if Arial would be silently substituted."""
+    from matplotlib.font_manager import FontProperties, findfont
+
+    try:
+        findfont(FontProperties(family=TYPOGRAPHY["family"]), fallback_to_default=False)
+    except ValueError as exc:
+        raise RuntimeError("Install Arial on the rendering host before rebuilding figures.") from exc
 
 
 CBC = {
@@ -200,7 +238,7 @@ def overlay_hist(
             edgecolor="white",
             linewidth=0.3,
         )
-    ax.legend(fontsize=9, loc="best")
+    ax.legend(fontsize=FONT_SIZES["legend"], loc="best")
 
 
 def overlay_km(

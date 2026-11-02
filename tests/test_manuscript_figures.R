@@ -6,8 +6,8 @@ p <- ggplot(tibble(x=1,y=2,label="Unchanged"),aes(x,y,label=label)) +
   geom_text(size=6) + theme_classic() +
   theme(axis.title.y=element_text(size=20),axis.text.x=element_text(size=18))
 q <- manuscript_style(p,"Copy","A")
-stopifnot(p$layers[[1]]$aes_params$size==6,q$layers[[1]]$aes_params$size==2.5,
-  q$theme$axis.title.y$size==8,q$theme$axis.title.y$face=="bold",q$theme$axis.text.x$size==7,
+stopifnot(p$layers[[1]]$aes_params$size==6,q$layers[[1]]$aes_params$size==FIGURE_FONT_SIZES[["body"]]/ggplot2::.pt,
+  q$theme$axis.title.y$size==9,q$theme$axis.title.y$face=="bold",q$theme$axis.text.x$size==8,
   identical(p$data,q$data),is.null(q$labels$title),identical(q$labels$tag,"a"))
 flow <- manuscript_style(p+theme(axis.text=element_blank()),"Flow","A")
 stopifnot(inherits(flow$theme$axis.text.x,"element_blank"),inherits(flow$theme$axis.text.y,"element_blank"))
@@ -64,7 +64,7 @@ stopifnot(supplement$key=="dfci_supplement_labs_lm180",length(supplement$members
 landmark_header <- manuscript_center_landmark_header(ggplot()+labs(subtitle="+90 days"))
 stopifnot(landmark_header$theme$plot.subtitle$face=="bold",
   landmark_header$theme$plot.subtitle$hjust==.5,
-  landmark_header$theme$plot.subtitle$size==8)
+  landmark_header$theme$plot.subtitle$size==9)
 
 # Captions mirror the paired Markdown/text layout used by the clinical text
 # embedding project and retain figure-specific audit language.
