@@ -1,4 +1,4 @@
-# Per-cohort figure-generation pipeline called from COMPASS/figures/run_figures.R once per
+# Per-cohort figure-generation pipeline called from COMPASS/figures/figure_run.R once per
 # cohort in the same R session.
 #
 # Required packages (install once on the cluster):
@@ -344,7 +344,7 @@ FIGURE_LLM_STRATA <- LLM_STRATA["has_nepc"]
 #
 # Correctness note: the cache lives for the R session, so a run that
 # regenerates an input mid-run would serve a stale frame. That does not happen
-# here -- 01/02/03 finish before COMPASS/figures/run_figures.R runs -- but clear_read_cache()
+# here -- 01/02/03 finish before COMPASS/figures/figure_run.R runs -- but clear_read_cache()
 # exists for interactive use after rebuilding inputs.
 .read_cache <- new.env(parent = emptyenv())
 
@@ -1370,7 +1370,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   # Each subpanel keeps its own
   # artifact directory and endpoint/subset/exclusion leaf to avoid collisions.
   COHORT_ARM_DIR <- toupper(cohort_arm(COHORT))
-  FIG_ROOT <- file.path(fig_root, COHORT_ARM_DIR)
+  FIG_ROOT <- file.path(fig_root, paste0(COHORT_ARM_DIR, "_figures"))
   # Leaf identity for this run: which of the 12 cohort x endpoint cells a file
   # represents. Endpoint leads so a directory listing groups by endpoint first.
   COHORT_LEAF <- paste0(ENDPOINT, "__", cohort_leaf_slug(COHORT))
@@ -1899,7 +1899,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       if (show) print(pD)
     }
     # Federated per-site counts come from the within-site export; the plot
-    # helpers live in figure_workflow.R, which COMPASS/figures/run_figures.R sources alongside.
+    # helpers live in figure_workflow.R, which COMPASS/figures/figure_run.R sources alongside.
     sites <- if (is.null(federated_path)) NULL else load_federated_sites(federated_path)
     if (!is.null(sites)) {
       pE <- figure1_site_counts_plot(sites)

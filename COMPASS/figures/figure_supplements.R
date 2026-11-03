@@ -204,7 +204,7 @@ render_cohort_overview <- function(manifest, config, forest_config=NULL) {
   landmark <- config$forest_landmark
   plots <- list(event_incidence = plot_cohort_event_overview(incidence, config$forest_cohorts, landmark))
   tables <- list(event_incidence = incidence)
-  base <- file.path(config$fig_root, "ADT", "by_figure", "cohort_comparison")
+  base <- file.path(figure_arm_root(config$fig_root, "ADT"), "by_figure", "cohort_comparison")
   for (name in names(plots)) {
     if (is.null(plots[[name]])) { message("Cohort overview skipped: ", name, " (no available inputs)"); next }
     leaf <- paste0(name, "_landmark", landmark)
@@ -237,13 +237,13 @@ render_cohort_overview <- function(manifest, config, forest_config=NULL) {
 # ============================================================================
 # ---- metastatic-label preparation (R fallback for notebook 05's Polars prep) 
 # ============================================================================
-# R-only preparation for COMPASS/figures/run_figures.R. Uses the existing intent labels,
+# R-only preparation for COMPASS/figures/figure_run.R. Uses the existing intent labels,
 # metastatic-diagnosis LLM task and dated regex stages; no model refits.
 metastatic_parquet_backend <- function() {
   if (requireNamespace("arrow", quietly = TRUE)) return("arrow")
   if (requireNamespace("nanoparquet", quietly = TRUE)) return("nanoparquet")
   stop('Metastatic figures need an R Parquet reader. Run install.packages("nanoparquet") ',
-       'in this R environment, then rerun COMPASS/figures/run_figures.R. The R package arrow is also supported.', call. = FALSE)
+       'in this R environment, then rerun COMPASS/figures/figure_run.R. The R package arrow is also supported.', call. = FALSE)
 }
 
 read_metastatic_parquet <- function(path, columns) {
@@ -389,7 +389,7 @@ prepare_metastatic_figure_labels <- function(config, analysis_anchors = NULL) {
 # ============================================================================
 # ---- metastatic-label diagnostics ------------------------------------------
 # ============================================================================
-# Standalone ADT/LLM/regex diagnostics used by COMPASS/figures/run_figures.R. All writes use
+# Standalone ADT/LLM/regex diagnostics used by COMPASS/figures/figure_run.R. All writes use
 # the main pipeline's save_fig, so progress, atomic saves and overwrite apply.
 # The three requested confusion matrices: each of the LLM and ADT metastatic
 # labels against the regex maximum stage across the record, plus ADT vs LLM.

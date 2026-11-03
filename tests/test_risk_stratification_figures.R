@@ -195,25 +195,28 @@ page_spec <- figure_compilation_spec(items[[1]]$stem)
 page_spec$height <- page_spec[["page_row_height"]] * ceiling(length(items) / page_spec$cols)
 compiled <- figure_combine(items, page_spec, tempdir())
 stopifnot(isTRUE(attr(compiled, "compass_compiled")), page_spec$height == 6.5)
-# Tables sit in a data/ folder beside the figures; legacy tables are moved there
-# and the catalog lives in <arm>/data/ with links back up to the figures.
-stopifnot(figure_sidecar_path("/x/ADT/05_transfer_survival/a__p.csv") == "/x/ADT/05_transfer_survival/data/a__p.csv",
-          figure_sidecar_path("/x/ADT/05_transfer_survival/data/a__p.csv") == "/x/ADT/05_transfer_survival/data/a__p.csv")
-fig_root <- file.path(root, "export"); arm <- file.path(fig_root, "ADT")
+# Each arm has <arm>_figures (PDFs only) and <arm>_figure_data (tables, legends,
+# captions, manifest and index); legacy tables are moved over and the catalog
+# lives in the data folder with links across to the figures.
+stopifnot(figure_sidecar_path("/x/ADT_figures/05_transfer_survival/a__p.csv") == "/x/ADT_figure_data/05_transfer_survival/a__p.csv",
+          figure_sidecar_path("/x/ADT_figure_data/05_transfer_survival/a__p.csv") == "/x/ADT_figure_data/05_transfer_survival/a__p.csv",
+          figure_sidecar_path("/x/scratch/a__p.csv") == "/x/scratch/data/a__p.csv")
+fig_root <- file.path(root, "export"); arm <- file.path(fig_root, "ADT_figures"); data_arm <- file.path(fig_root, "ADT_figure_data")
 section <- file.path(arm, "03_univariate", "internal")
 dir.create(section, recursive = TRUE); dir.create(file.path(arm, "by_figure"))
 file.create(file.path(section, c("comutation_lm90__p.png", "comutation_lm90__p.pdf",
-  "comutation_lm90__p.csv", "comutation_lm90__p.md")), file.path(arm, c("manifest.csv", "index.html")),
+  "comutation_lm90__p.csv", "comutation_lm90__p.md")),
   file.path(arm, "by_figure", "old.csv"))
 figure_write_catalog(list(fig_root = fig_root), list())
-stopifnot(setequal(list.files(section), c("comutation_lm90__p.png", "comutation_lm90__p.pdf", "data")),
-          setequal(list.files(file.path(section, "data")), c("comutation_lm90__p.csv", "comutation_lm90__p.md")),
-          setequal(list.files(arm), c("by_figure", "data", "03_univariate")),
+stopifnot(setequal(list.files(section), c("comutation_lm90__p.png", "comutation_lm90__p.pdf")),
+          setequal(list.files(file.path(data_arm, "03_univariate", "internal")), c("comutation_lm90__p.csv", "comutation_lm90__p.md")),
+          setequal(list.files(arm), c("by_figure", "03_univariate")),
+          setequal(list.files(data_arm), c("03_univariate", "manifest.csv", "index.html")),
           file.exists(file.path(arm, "by_figure", "old.csv")))
-html <- paste(readLines(file.path(arm, "data", "index.html")), collapse = "\n")
-manifest <- readr::read_csv(file.path(arm, "data", "manifest.csv"), show_col_types = FALSE)
-stopifnot(grepl('href="../03_univariate/internal/data/comutation_lm90__p.csv"', html, fixed = TRUE),
-          grepl('src="../03_univariate/internal/comutation_lm90__p.pdf"', html, fixed = TRUE),
+html <- paste(readLines(file.path(data_arm, "index.html")), collapse = "\n")
+manifest <- readr::read_csv(file.path(data_arm, "manifest.csv"), show_col_types = FALSE)
+stopifnot(grepl('href="03_univariate/internal/comutation_lm90__p.csv"', html, fixed = TRUE),
+          grepl('src="../ADT_figures/03_univariate/internal/comutation_lm90__p.pdf"', html, fixed = TRUE),
           !any(grepl("\\.png$", manifest$path)),
           all(manifest$topic == "03_univariate/internal"))
 cat("risk stratification figure tests passed\n")

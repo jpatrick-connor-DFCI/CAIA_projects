@@ -249,7 +249,7 @@ python -m COMPASS.multivariable_models.predictive_checklists.collect_supplement 
 ```
 
 The DFCI checklist supplement figure is no longer rendered; the manuscript checklist figures
-are the federated ones drawn by `COMPASS/figures/run_figures.R` (`federated_multivariable`
+are the federated ones drawn by `COMPASS/notebooks/run_figure_render.R` (`federated_multivariable`
 and `transfer_checklists`). The labs + Gleason + somatic run uses the sequencing-anchored
 available-case cohort, so its metrics are not directly comparable with the labs-only run.
 

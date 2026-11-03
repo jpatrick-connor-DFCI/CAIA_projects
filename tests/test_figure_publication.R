@@ -35,7 +35,7 @@ local({
     family <- if(startsWith(stem,"figure1")) "figure1" else if(startsWith(stem,"adt_labels_")) "metastatic_labels" else
       if(startsWith(stem,"figure2")) "figure2v3_llm" else if(startsWith(stem,"figure4")) "figure4" else if(startsWith(stem,"figure3")) "figure3b" else
       paste0("labs/Androgen axis/",if(grepl("testosterone",stem)) "Testosterone" else "PSA","/km_quintile")
-    destination <- file.path(output,"ADT","by_figure",family,stem,"platinum__all__incl")
+    destination <- file.path(output,"ADT_figures","by_figure",family,stem,"platinum__all__incl")
     old_paths <<- c(old_paths,paste0(destination,".png"))
     p <- plot
     if(grepl("sensitivity",stem)) p <- p+labs(title="Sensitivity\n0d: n=40; +90d: n=39; +180d: n=38")
@@ -66,13 +66,14 @@ local({
   prepared <- list(adt__platinum=m)
   config <- list(fig_root=output,cache_root=cache)
   figure_write_catalog(config,prepared)
-  registry <- read_csv(file.path(output,"ADT","data","manifest.csv"),show_col_types=FALSE)
-  stopifnot(nrow(registry)==31,all(file.exists(file.path(output,"ADT",registry$path))),
-    !any(grepl(root,registry$path,fixed=TRUE)),file.exists(file.path(output,"ADT","data","index.html")))
-  html <- paste(readLines(file.path(output,"ADT","data","index.html")),collapse="\n")
+  registry <- read_csv(file.path(output,"ADT_figure_data","manifest.csv"),show_col_types=FALSE)
+  stopifnot(nrow(registry)==31,all(file.exists(file.path(output,"ADT_figures",registry$path)) |
+      file.exists(file.path(output,"ADT_figure_data",registry$path))),
+    !any(grepl(root,registry$path,fixed=TRUE)),file.exists(file.path(output,"ADT_figure_data","index.html")))
+  html <- paste(readLines(file.path(output,"ADT_figure_data","index.html")),collapse="\n")
   urls <- regmatches(html,gregexpr('(?:href|src)="[^"]+"',html,perl=TRUE))[[1]]
   urls <- sub('^[^=]+="(.*)"$',"\\1",urls)
-  stopifnot(all(file.exists(file.path(output,"ADT","data",utils::URLdecode(urls[!startsWith(urls,"#")])))),
+  stopifnot(all(file.exists(file.path(output,"ADT_figure_data",utils::URLdecode(urls[!startsWith(urls,"#")])))),
     identical(figure_href("trajectories/PSA test/a.png"),"trajectories/PSA%20test/a.png"))
   # Known regenerated identities archive without losing bytes; unselected
   # endpoints stay untouched. Index generation does not copy preview images.
@@ -89,7 +90,7 @@ local({
     length(list.files(output,recursive=TRUE,pattern="rds$"))==0)
   # The pre-section layout is retired per job: the re-rendered ADT/platinum
   # identity and its manuscript figures go; other cohorts and jobs stay.
-  legacy <- file.path(output,"ADT",c("associations/labs_univariate__platinum__all__incl.png",
+  legacy <- file.path(output,"ADT_figures",c("associations/labs_univariate__platinum__all__incl.png",
     "associations/data/labs_univariate__platinum__all__incl.csv",
     "manuscript figures/03_dfci_univariable.png","manuscript figures/captions/figure3.md",
     "associations/labs_univariate__platinum__metastatic_llm__incl.png",
@@ -98,7 +99,7 @@ local({
   for(path in legacy) { dir.create(dirname(path),recursive=TRUE,showWarnings=FALSE); writeLines("legacy",path) }
   figure_archive_old_exports(config,prepared)
   stopifnot(!any(file.exists(legacy[1:4])),all(file.exists(legacy[5:8])),
-    !dir.exists(file.path(output,"ADT","associations","data")),
+    !dir.exists(file.path(output,"ADT_figures","associations","data")),
     length(list.files(file.path(cache,"previous_exports"),recursive=TRUE,pattern="png$"))==4)
   # A re-rendered figure keeps its PDF; its PNG/SVG from earlier runs are archived.
   rendered <- paste0(m$scenes[[1]]$destination,c(".pdf",".png",".svg"))
@@ -113,7 +114,7 @@ local({
       selected <- rev(stems[5:9])
       if(arm=="ARPI" && startsWith(identity,"nepc")) selected <- selected[-1]
       for(stem in selected) getOption("compass.figure_capture")(
-        plot+labs(title=stem),file.path(output,arm,"by_figure","figure1",stem,identity),8,6,stem)
+        plot+labs(title=stem),file.path(output,paste0(arm,"_figures"),"by_figure","figure1",stem,identity),8,6,stem)
     }
   }
   mixed <- prepare_figure_scenes(file.path(cache,"mixed"),"mixed",capture_mixed)

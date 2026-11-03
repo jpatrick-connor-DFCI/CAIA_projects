@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_R = (
     REPO_ROOT / "COMPASS" / "figures" / "COMPASS_generate_figures_pipeline.R"
 )
-FIGURES_SCRIPT = REPO_ROOT / "COMPASS" / "figures" / "run_figures.R"
+FIGURES_SCRIPT = REPO_ROOT / "COMPASS" / "figures" / "figure_run.R"
 
 
 def test_by_figure_is_the_only_output_layout():

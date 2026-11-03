@@ -6,7 +6,7 @@ if (!exists("figure_style_plot", mode="function"))
 # M-of-N checklist and its held-out metrics. Used by the federated no-DFCI
 # transfer checklist figures (render_federated_checklist_cards in
 # figure_workflow.R); never fits, reads patient data or calls Python.
-# Sourced by COMPASS/figures/run_figures.R.
+# Sourced by COMPASS/figures/figure_run.R.
 suppressPackageStartupMessages({library(dplyr); library(ggplot2)})
 
 CHECKLIST_MODEL_LABELS <- c(checklist = "Checklist", age_cox = "Age Cox",

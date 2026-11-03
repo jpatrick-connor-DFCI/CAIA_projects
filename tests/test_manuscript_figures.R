@@ -552,11 +552,11 @@ stopifnot(nrow(renders_plan)==5L+1L+2L+2L+6L+6L,!anyDuplicated(renders_plan$targ
   all(renders_plan$source %in% readLines("COMPASS/figures/retained_exports.txt")))
 renders_root <- tempfile("renders-")
 for(source in renders_plan$source[-1L]) {
-  dir.create(dirname(file.path(renders_root,"ADT",source)),recursive=TRUE,showWarnings=FALSE)
-  writeLines(source,file.path(renders_root,"ADT",source))
+  dir.create(dirname(file.path(renders_root,"ADT_figures",source)),recursive=TRUE,showWarnings=FALSE)
+  writeLines(source,file.path(renders_root,"ADT_figures",source))
 }
 suppressMessages(figure_publish_manuscript_renders(renders_root))
-published <- file.path(renders_root,"ADT",MANUSCRIPT_RENDERS_DIR,renders_plan$target)
+published <- file.path(renders_root,"ADT_figures",MANUSCRIPT_RENDERS_DIR,renders_plan$target)
 stopifnot(identical(file.exists(published),c(FALSE,rep(TRUE,nrow(renders_plan)-1L))),
   identical(readLines(published[2L]),renders_plan$source[2L]))
 # The drawn items must be the rule that assigned the patient groups.

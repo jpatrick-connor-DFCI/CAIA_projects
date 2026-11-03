@@ -7,7 +7,7 @@ if (!exists("figure_style_plot", mode="function")) {
 }
 
 # COMPASS figure workflow: presentation helpers, federated and manuscript
-# figures, and the cached prepare/render bridge used by COMPASS/figures/run_figures.R.
+# figures, and the cached prepare/render bridge used by COMPASS/figures/figure_run.R.
 # Source after COMPASS_generate_figures_pipeline.R.
 
 # ============================================================================
@@ -16,10 +16,20 @@ if (!exists("figure_style_plot", mode="function")) {
 # Presentation-only compilation. Statistical inputs and cached RDS stay in data.
 figure_slug <- function(x) tolower(gsub("^_|_$", "", gsub("[^A-Za-z0-9]+", "_", x)))
 
-# Tables, legends, manifests and the HTML index sit in a "data" folder beside
-# the figures they describe, so each export folder lists only PDF figures.
+# Each arm has two sibling folders under the figure root: <arm>_figures holds
+# only the PDF figures, and <arm>_figure_data holds everything else (tables,
+# legends, captions, manifest and the HTML index) in the same section layout.
+figure_arm_root <- function(fig_root, arm = "ADT") file.path(fig_root, paste0(arm, "_figures"))
+figure_arm_data_root <- function(fig_root, arm = "ADT") file.path(fig_root, paste0(arm, "_figure_data"))
+figure_arm_data_path <- function(path) sub("/(ADT|ARPI)_figures/", "/\\1_figure_data/", path)
+
+# Paths outside an arm root (scratch directories) keep the older layout: a
+# "data" folder beside the figures.
 FIGURE_SIDECAR_DIR <- "data"
 figure_sidecar_path <- function(path) {
+  if (grepl("/(ADT|ARPI)_figure_data/", path)) return(path)
+  mapped <- figure_arm_data_path(path)
+  if (!identical(mapped, path)) return(mapped)
   if (basename(dirname(path)) == FIGURE_SIDECAR_DIR) return(path)
   file.path(dirname(path), FIGURE_SIDECAR_DIR, basename(path))
 }
@@ -386,10 +396,14 @@ figure_href <- function(path) paste(vapply(strsplit(path,"/",fixed=TRUE)[[1]],
 figure_relocate_sidecars <- function(root) {
   paths <- list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(csv|md|txt|html)$")
   rel <- substring(paths,nchar(root)+2)
+  in_arm <- grepl("/(ADT|ARPI)_figures$",root)
   stray <- !grepl("(^|/)(by_figure|main|supplements)/",rel) &
-    !basename(dirname(paths)) %in% c(FIGURE_SIDECAR_DIR,"captions")
+    (in_arm | !basename(dirname(paths)) %in% c(FIGURE_SIDECAR_DIR,"captions"))
   for(path in paths[stray]) {
     target <- figure_sidecar_path(path)
+    # Older exports kept tables in a data/ subfolder; the data tree mirrors the sections directly.
+    if(in_arm && basename(dirname(target))==FIGURE_SIDECAR_DIR)
+      target <- file.path(dirname(dirname(target)),basename(target))
     dir.create(dirname(target),recursive=TRUE,showWarnings=FALSE)
     if(file.exists(target) && file.mtime(target) >= file.mtime(path)) {
       if(unlink(path)!=0) stop("Cannot remove superseded table: ",path)
@@ -432,7 +446,7 @@ manuscript_renders_plan <- function() {
 }
 
 figure_publish_manuscript_renders <- function(fig_root) {
-  adt_root <- file.path(fig_root,"ADT")
+  adt_root <- figure_arm_root(fig_root,"ADT")
   plan <- manuscript_renders_plan()
   copied <- 0L
   for(i in seq_len(nrow(plan))) {
@@ -456,13 +470,17 @@ figure_publish_manuscript_renders <- function(fig_root) {
 figure_write_catalog <- function(config, prepared) {
   scenes <- unlist(lapply(prepared,function(m) m$scenes),recursive=FALSE)
   for (arm in c("ADT","ARPI")) {
-    root <- file.path(config$fig_root,arm)
+    root <- figure_arm_root(config$fig_root,arm); data_root <- figure_arm_data_root(config$fig_root,arm)
     if(!dir.exists(root)) next
     figure_relocate_sidecars(root)
-    paths <- list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(pdf|csv|md)$")
-    paths <- paths[!grepl("/by_figure/|/main/|/supplements/|/manuscript_renders/",paths) & basename(paths)!="manifest.csv"]
+    skip <- "/by_figure/|/main/|/supplements/|/manuscript_renders/"
+    fig_paths <- list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.pdf$")
+    data_paths <- if(dir.exists(data_root)) list.files(data_root,recursive=TRUE,full.names=TRUE,pattern="\\.(csv|md)$") else character()
+    data_paths <- data_paths[dirname(data_paths)!=data_root | basename(data_paths)!="manifest.csv"]
+    fig_paths <- fig_paths[!grepl(skip,fig_paths)]; data_paths <- data_paths[!grepl(skip,data_paths)]
+    paths <- c(fig_paths,data_paths)
     if(!length(paths)) next
-    rel <- substring(paths,nchar(root)+2)
+    rel <- c(substring(fig_paths,nchar(root)+2),substring(data_paths,nchar(data_root)+2))
     # Index sections are the export sections, internal/federated kept apart.
     split_sections <- unique(dirname(FIGURE_SECTIONS[grepl("/",FIGURE_SECTIONS)]))
     records <- lapply(seq_along(paths),function(i) {
@@ -480,7 +498,7 @@ figure_write_catalog <- function(config, prepared) {
     })
     registry <- do.call(rbind,records)
     # Keep metadata for previously rendered cohorts outside this run's scope.
-    old_path <- file.path(root,FIGURE_SIDECAR_DIR,"manifest.csv")
+    old_path <- file.path(data_root,"manifest.csv")
     if(file.exists(old_path)) {
       previous <- readr::read_csv(old_path,show_col_types=FALSE,col_types=readr::cols(.default="c"))
       for(i in seq_len(nrow(registry))) {
@@ -494,11 +512,10 @@ figure_write_catalog <- function(config, prepared) {
     readr::write_csv(registry,old_path)
     cards <- vapply(which(registry$format=="pdf"),function(i) {
       row <- registry[i,]; stem <- tools::file_path_sans_ext(row$path)
-      figure_stem <- sub(paste0("(^|/)",FIGURE_SIDECAR_DIR,"/([^/]+)$"),"\\1\\2",
-        tools::file_path_sans_ext(registry$path))
+      figure_stem <- tools::file_path_sans_ext(registry$path)
       sidecars <- registry$path[figure_stem==stem & registry$format!="pdf"]
-      # The index lives in <arm>/data/, one level below the figures it links.
-      href <- function(p) paste0("../",figure_href(p))
+      # The index lives in <arm>_figure_data/; figures are in the sibling <arm>_figures/.
+      href <- function(p) if(endsWith(p,".pdf")) paste0("../",basename(root),"/",figure_href(p)) else figure_href(p)
       paste0('<article><iframe loading="lazy" src="',href(row$path),
         '" title="',figure_html_escape(row$title),'"></iframe><h3>',figure_html_escape(row$title),'</h3><p>',
         figure_html_escape(paste(row$topic,row$endpoint,row$cohort,row$landmark,sep=" · ")),'</p>',
@@ -514,9 +531,9 @@ figure_write_catalog <- function(config, prepared) {
       '<style>body{font:16px system-ui;margin:2rem;background:#f7f8fa;color:#20242a}main{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:1rem}article{background:white;padding:1rem;border:1px solid #ddd;border-radius:8px}iframe{width:100%;height:260px;border:0}h3{font-size:1rem}p{color:#555}a{color:#165b91}</style></head><body>',
       paste0('<h1>',arm,' figures</h1><p>Open a PDF link for the full-size figure. <a href="manifest.csv">Download manifest</a>.</p>'),
       paste(vapply(unique(figure_topics),function(topic) paste0('<a href="#',topic,'">',figure_html_escape(topic),'</a>'),character(1)),collapse=" · "),sections,
-      '<h2>Tables</h2><ul>',vapply(tables,function(p) paste0('<li><a href="../',figure_href(p),'">',figure_html_escape(p),'</a></li>'),character(1)),
+      '<h2>Tables</h2><ul>',vapply(tables,function(p) paste0('<li><a href="',figure_href(p),'">',figure_html_escape(p),'</a></li>'),character(1)),
       '</ul></body></html>')
-    writeLines(html,file.path(root,FIGURE_SIDECAR_DIR,"index.html"))
+    writeLines(html,file.path(data_root,"index.html"))
   }
 }
 
@@ -528,11 +545,11 @@ figure_archive_retired_transfer_checklists <- function(config, prepared) {
   if(is.null(job) || !is.null(job$error) || !length(job$scenes)) return(invisible(character()))
   paths <- character()
   for(arm in c("ADT","ARPI")) for(section in c("05_transfer","05_transfer_survival","06_transfer_checklists")) {
-    folder <- file.path(config$fig_root,arm,section)
+    folder <- file.path(figure_arm_root(config$fig_root,arm),section)
     if(!dir.exists(folder)) next
     paths <- c(paths,list.files(folder,full.names=TRUE,
       pattern="^transfer_clinical_checklist_(elastic_net_cox|xgboost_cox)_(platinum|nepc|avpc)__platinum[.](pdf|png|svg)$"))
-    sidecars <- file.path(folder,"data")
+    sidecars <- file.path(figure_arm_data_root(config$fig_root,arm),section)
     if(dir.exists(sidecars)) paths <- c(paths,list.files(sidecars,full.names=TRUE,
       pattern="^transfer_clinical_checklist_(cells|items|metrics)__platinum[.]csv$"))
   }
@@ -570,7 +587,7 @@ figure_archive_old_exports <- function(config, prepared) {
   # Section compiled/ folders (compiled figures now sit beside their panels, or
   # only in manuscript/ when they duplicate a manuscript figure).
   section_compiled <- function(arm) {
-    root <- file.path(config$fig_root,arm)
+    root <- figure_arm_root(config$fig_root,arm)
     dirs <- if(dir.exists(root)) list.dirs(root,recursive=TRUE) else character()
     dirs[basename(dirs)=="compiled" & dirname(dirs)!=root & !grepl("/by_figure(/|$)",dirs)]
   }
@@ -580,7 +597,7 @@ figure_archive_old_exports <- function(config, prepared) {
   destinations <- as.character(unlist(lapply(prepared[successful],function(m) vapply(m$scenes,`[[`,character(1),"destination"))))
   current <- normalize(destinations)
   section_moved <- function(arm) {
-    root <- file.path(config$fig_root,arm)
+    root <- figure_arm_root(config$fig_root,arm)
     dirs <- if(dir.exists(root)) list.dirs(root,recursive=TRUE) else character()
     rel <- substring(dirs,nchar(root)+2)
     list(moved=dirs[grepl("^(06_cohort_sensitivity/[^/]+/)?03_univariate/(internal(/trajectories/[^/]+)?|federated)$",rel)],
@@ -606,7 +623,7 @@ figure_archive_old_exports <- function(config, prepared) {
           "cohort_overview" %in% successful else cohort_job_owns(path,arm)
         if(keep) paths <- c(paths,path)
       }
-    root <- file.path(config$fig_root,arm,"by_figure")
+    root <- file.path(figure_arm_root(config$fig_root,arm),"by_figure")
     candidates <- if(dir.exists(root)) list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(png|svg|pdf|csv|md)$") else character()
     for(path in candidates) {
       rel <- substring(path,nchar(root)+2); group <- strsplit(rel,"/",fixed=TRUE)[[1]][1]
@@ -617,10 +634,10 @@ figure_archive_old_exports <- function(config, prepared) {
     # The pre-section layout (topic folders, top-level compiled/ and
     # "manuscript figures/") is retired per job once that job has re-rendered.
     for(folder in FIGURE_RETIRED_FOLDERS) {
-      root <- file.path(config$fig_root,arm,folder)
+      root <- file.path(figure_arm_root(config$fig_root,arm),folder)
       if(!dir.exists(root)) next
       for(path in list.files(root,recursive=TRUE,full.names=TRUE,pattern="\\.(png|svg|pdf|csv|md|txt)$")) {
-        segments <- strsplit(substring(path,nchar(file.path(config$fig_root,arm))+2),"/",fixed=TRUE)[[1]]
+        segments <- strsplit(substring(path,nchar(figure_arm_root(config$fig_root,arm))+2),"/",fixed=TRUE)[[1]]
         if(segments[1]=="compiled") segments <- segments[-1]
         name <- tools::file_path_sans_ext(basename(path))
         job <- if(folder=="06_cohort_sensitivity" &&
@@ -651,7 +668,7 @@ figure_archive_old_exports <- function(config, prepared) {
       stop("Cannot verify archived export; original retained: ",path)
   }
   for(path in paths) if(unlink(path)!=0) stop("Cannot remove verified legacy export: ",path)
-  for(arm in c("ADT","ARPI")) for(folder in c(file.path(config$fig_root,arm,c("by_figure",FIGURE_RETIRED_FOLDERS)),
+  for(arm in c("ADT","ARPI")) for(folder in c(file.path(figure_arm_root(config$fig_root,arm),c("by_figure",FIGURE_RETIRED_FOLDERS)),
                                                   section_compiled(arm))) {
     if(!dir.exists(folder)) next
     dirs <- list.dirs(folder,recursive=TRUE)
@@ -1167,7 +1184,7 @@ load_federated_checklists <- function(federated_path,variant="pooled",
 }
 
 # Held-out AUC(t) per landmark (a) above the 1-year (b) and 5-year (c) checklists,
-# one column per landmark. Cards come from checklist_supplement.R (sourced by run_figures.R).
+# one column per landmark. Cards come from checklist_supplement.R (sourced by figure_run.R).
 render_federated_checklist_cards <- function(root,federated_path,dpi,overwrite,variant="pooled") {
   loaded <- load_federated_checklists(federated_path,variant)
   if(is.null(loaded) || !nrow(loaded$metrics)) return(invisible(NULL))
@@ -2419,7 +2436,7 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
   # Validates the pooled univariable export; the forests drawn from it are retired.
   d <- load_federated_forest(federated_path)
   # Arm root; each output is routed to its section by federated_output_path().
-  root <- file.path(fig_root, "ADT")
+  root <- figure_arm_root(fig_root, "ADT")
   dir.create(root, recursive = TRUE, showWarnings = FALSE)
   for(variant in names(FEDERATED_MULTIVARIABLE_VARIANTS)) for(family in names(FEDERATED_MULTIVARIABLE))
     render_federated_multivariable(root,federated_path,family,dpi,overwrite,variant)
@@ -2653,6 +2670,7 @@ manuscript_write_captions <- function(root,keys=names(manuscript_captions()),cap
   paths <- character()
   for(key in keys) {
     caption_root <- file.path(manuscript_folder(root,key),"captions")
+    caption_root <- figure_arm_data_path(caption_root)
     dir.create(caption_root,recursive=TRUE,showWarnings=FALSE)
     # The cohort sensitivity supplement shares Figure 3's number in its own folder.
     # Other variants keep their existing numbered captions.
@@ -3673,7 +3691,7 @@ figure_receipt_path <- function(scene, format) {
 figure_flatten_export_layout <- function(fig_root) {
   moves <- list(); roots <- character()
   for (arm in c("ADT", "ARPI")) {
-    base <- file.path(fig_root, arm, "by_figure")
+    base <- file.path(figure_arm_root(fig_root, arm), "by_figure")
     for (tier in c("main", "supplements")) {
       old <- file.path(base, tier)
       if (!dir.exists(old)) next
@@ -3683,7 +3701,7 @@ figure_flatten_export_layout <- function(fig_root) {
         to = file.path(base, substring(path, nchar(old)+2L)))
     }
     # Notebook 02a previously wrote standalone cohort-comparison panels here.
-    old <- file.path(fig_root, arm, "supplements")
+    old <- file.path(figure_arm_root(fig_root, arm), "supplements")
     if (dir.exists(old)) {
       roots <- c(roots, old)
       paths <- list.files(old, recursive = TRUE, full.names = TRUE, all.files = TRUE, no.. = TRUE)
@@ -3808,7 +3826,7 @@ figure_retained_exports <- function(pipeline_path) {
 }
 
 figure_retained_image <- function(destination, fig_root, extension, exports) {
-  adt_root <- paste0(file.path(fig_root, "ADT"), "/")
+  adt_root <- paste0(figure_arm_root(fig_root, "ADT"), "/")
   if (!startsWith(destination, adt_root)) return(FALSE)
   relative <- substring(destination, nchar(adt_root) + 1L)
   paste0(relative, extension) %in% exports
@@ -3827,7 +3845,7 @@ figure_parallel <- function(items, fun, workers) {
 }
 
 figure_notebook_manifest <- function(config, check_sources = TRUE) {
-  guidance <- "Run 05_prep_figure_data.ipynb with the requested settings, then rerun COMPASS/figures/run_figures.R."
+  guidance <- "Run 05_prep_figure_data.ipynb with the requested settings, then rerun COMPASS/figures/figure_run.R."
   fail <- function(detail) stop(detail, "\n", guidance, call. = FALSE)
   path <- file.path(config$cache_root, "manifest.json")
   if (!file.exists(path)) fail(paste("Missing notebook-prepared manifest:", path))
@@ -3900,8 +3918,8 @@ figure_notebook_manifest <- function(config, check_sources = TRUE) {
   manifest
 }
 
-# Figure groups toggled from run_figures.R: the prepared jobs each group needs,
-# and the export folder (relative to <fig_root>/ADT) its PDFs are written to.
+# Figure groups toggled from figure_run.R: the prepared jobs each group needs,
+# and the export folder (relative to <fig_root>/ADT_figures) its PDFs are written to.
 # Manuscript composites are built from member panels, so a group prepares every
 # job contributing a member even when only the composite PDF is retained.
 FIGURE_GROUPS <- list(
@@ -4014,7 +4032,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     }
     prepare_figure_scenes(job$directory, job$signature, build, force = prepare_overwrite,
       manuscript_root=if(job$name %in% c("adt__platinum","cohort_overview","federated"))
-        file.path(config$fig_root,"ADT") else NULL, include_internal=FALSE)
+        figure_arm_root(config$fig_root,"ADT") else NULL, include_internal=FALSE)
   }
   # Only pending jobs warm tables. A resumed all-mode run reads no patient
   # Parquet at all when every scene snapshot is current.
@@ -4042,7 +4060,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
       lapply(m$scenes, function(scene) list(scene = scene, signature = m$signature))
     }), recursive = FALSE)
     prefixes <- vapply(FIGURE_GROUPS[groups], `[[`, character(1), "prefix")
-    adt_root <- paste0(file.path(config$fig_root, "ADT"), "/")
+    adt_root <- paste0(figure_arm_root(config$fig_root, "ADT"), "/")
     tasks <- Filter(function(task) {
       destination <- task$scene$destination
       figure_retained_image(destination, config$fig_root, ".pdf", retained_exports) &&

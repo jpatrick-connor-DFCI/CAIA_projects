@@ -11,7 +11,7 @@ ICD-C61 cohort: `arpi` (anchored at first ARPI/chemo exposure) and `adt` (anchor
 exposure, years earlier in the treatment sequence). Entry requires a dated prostate diagnosis, male
 sex, at least five PSA measurements, and ADT on/after diagnosis; PARPi exposure, platinum before
 diagnosis, and bladder (C67), lung (C34), head-and-neck (C00-C14/C30-C32), or testicular (C62)
-cancer diagnosed strictly after first ADT are excluded. The R-only `COMPASS/figures/run_figures.R` script emits
+cancer diagnosed strictly after first ADT are excluded. The R-only `COMPASS/notebooks/run_figure_render.R` script emits
 the manuscript figures for the ADT arm.
 
 **Arm, cohort, and endpoint are three orthogonal axes.** The *arm* sets time 0 (the index-date
@@ -100,7 +100,8 @@ COMPASS/
 ├── federated_models/                     # 04
 │   └── federated_clinical_comparison.py  # clinical comparison and transfer tables
 └── figures/                              # 05 prep + R figures
-    ├── run_figures.R                     # ENTRY: one toggle per figure group
+    ├── figure_run.R                      # toggles/paths shared by the two entry scripts in notebooks/
+    │                                     #   (final_figure_data_prep.R, run_figure_render.R)
     ├── figure_workflow.R                 # cached prepare/render, federated + manuscript figures
     ├── COMPASS_generate_figures_pipeline.R # per-cohort DFCI figures (Figs 1-2)
     ├── figure_supplements.R              # cohort forest, cohort overview, metastatic labels
@@ -144,7 +145,7 @@ reporting notebook: it reads already-generated artifacts and refit nothing.
            multivariable_models/multivariate_analysis.py
  local_runs_<arm>/ , local_runs_<arm>_nepc/
         │
-        ├──► 05_prep_figure_data.ipynb, then COMPASS/figures/run_figures.R (R; ADT, platinum)
+        ├──► 05_prep_figure_data.ipynb, then COMPASS/notebooks/run_figure_render.R (R; ADT, platinum)
         │    <fig_root>/ (PDF exports)
         │
         ▼  02a_cohort_comparison.ipynb (read-only; 6 cohorts x 2 endpoints)
@@ -450,7 +451,7 @@ on the merged `profile_data` run:
   reading it — the cohorts are not the same patients, and the strict NEPC label is narrower than
   the Figure 2 classifier definition.
 - `COMPASS/figures/` — R manuscript figures for the ADT cohort, platinum endpoint. Run
-  `Rscript COMPASS/figures/run_figures.R` after `05_prep_figure_data.ipynb`; the `FIGURES`
+  `Rscript COMPASS/notebooks/run_figure_render.R` after `05_prep_figure_data.ipynb`; the `FIGURES`
   toggles at its top (or `COMPASS_FIGURE_GROUPS`) select the figure groups `cohort`, `llm`,
   `cohort_sensitivity`, `federated_univariable`, `federated_multivariable`,
   `transfer_survival` and `transfer_checklists`. Only the PDFs in
@@ -837,7 +838,7 @@ patient subsets with `COHORTS`, and the event(s) with `ENDPOINTS`
    on the local endpoints; needs the `rhino_data_v2/` delivery)
 7. `COMPASS/notebooks/05_prep_figure_data.ipynb` (Polars figure tables; reads step 6's
    transfer outputs)
-8. `Rscript COMPASS/figures/run_figures.R` (toggle figure groups at the top of the script)
+8. `Rscript COMPASS/notebooks/run_figure_render.R` (toggle figure groups at the top of the script)
 
 The notebooks pass `PROFILE_DATA/*.parquet` paths explicitly to the lower-level scripts. Existing
 hand-curated `LLM_NEPC_labels/` inputs remain under the shared `COMPASS` data root.
@@ -1064,8 +1065,8 @@ TP53-RB1-PTEN clinical comparison (Figure 5 b–h) also use those two families. 
 an age-only XGBoost model, XGBoost's `transferred_age` rows in the clinical
 comparison stay empty, and its other comparisons are unaffected. Rerun
 `05_prep_figure_data.ipynb` after 04, then
-`COMPASS_FIGURE_GROUPS=transfer_survival Rscript COMPASS/figures/run_figures.R`
-to render `figures/ADT/05_transfer_survival/transfer_discrimination_no_dfci__platinum.{pdf,csv}`
+`COMPASS_FIGURE_GROUPS=transfer_survival Rscript COMPASS/notebooks/run_figure_render.R`
+to render `figures/ADT_figures/05_transfer_survival/transfer_discrimination_no_dfci__platinum.pdf` (table in `figures/ADT_figure_data/05_transfer_survival/`
 (mean AUC(t) and paired ΔAUC(t) vs. age only, by endpoint) and federated manuscript
 Figure 5.
 
@@ -1081,7 +1082,7 @@ checklist probabilities, with censoring estimated on the DFCI cohort.
 For a CLI run, pass the additional JSON paths to the existing `--bundle` list,
 one bundle per file name. Only downloaded bundles from runs that excluded DFCI
 belong in this comparison.
-After rerunning `05_prep_figure_data.ipynb` and `COMPASS/figures/run_figures.R`, the dynamic arm's
+After rerunning `05_prep_figure_data.ipynb` and `COMPASS/notebooks/run_figure_render.R`, the dynamic arm's
 held-out federated metrics appear in the multivariate main figures when the
 corresponding DeepHit metrics CSV is available. The figures still render with
 Cox and XGBoost alone when it is absent. Transferred predictive checklist
@@ -1091,7 +1092,7 @@ The same federated run also renders the pooled federated models themselves,
 from the exports trained with DFCI next to the univariate CSV. Elastic-net Cox
 comes from `federated_elastic_net_cox_w_DFCI/`; XGBoost and DeepHit come from
 their `lm_<days>/w_DFCI/` files, which are stacked into one table. The outputs are
-`figures/ADT/04_multivariate/federated/{elasticnet,xgboost}_performance__platinum`,
+`figures/ADT_figures/04_multivariate/federated/{elasticnet,xgboost}_performance__platinum`,
 `elasticnet_coefficients__platinum`, and `xgboost_importance__platinum`.
 Manuscript Figure 8 (`08_federated_multivariable`) puts them in the local
 Figure 4 layout. The `no_DFCI` exports render as `*_no_dfci__platinum`.
@@ -1099,7 +1100,7 @@ XGBoost exports no age-only model, so its baseline series is left empty.
 
 The default predictive checklists trained with DFCI
 (the feature-set refits in `feature_set_models/w_DFCI/predictive_checklists/`) render as
-`figures/ADT/04_multivariate/federated/checklist_supplement__platinum`. It has
+`figures/ADT_figures/04_multivariate/federated/checklist_supplement__platinum`. It has
 one column per landmark (0/90/180 days) and three rows:
 
 - a: held-out test AUC(t) at 1 and 5 years, with 95% intervals, for the checklist and the age-only checklist;
@@ -1144,9 +1145,9 @@ subfolder of its section (`03_univariate/federated/`, `04_multivariate/federated
 | `federated_04_multivariable` | Pooled four-site models; excludes the XGBoost age baseline and ranks measured features after excluding observation counts and missingness indicators |
 | `federated_04_multivariable__full_features` | Complete model comparison and all supplied coefficients and gains, including observation counts and missingness indicators |
 | `federated_05_transfer_no_dfci__no_d` | Panels a–c only (no KM curves or probability panel); caption `federated_figure5_no_d` |
-| `federated_06_checklist_no_dfci__lm{0,90,180}_h{365,1825}` | Figure 6 for each landmark × horizon, from `checklist_grid/` (notebook 04); copied with the main and supplement figures to `ADT/manuscript_renders/` |
-| `federated_06_checklist_guideline_no_dfci__lm{0,90,180}_h{365,1825}` | Generalized (guideline) version of the grid: same checklists with item thresholds rounded (<1 → nearest 0.25; single digits → whole number; tens → multiple of 5; hundreds → 10; thousands → 100, and so on), from `checklist_grid_guidelines/` (notebook 04); copied to `ADT/manuscript_renders/supplement/generalized_federated_checklist_transfer/` |
-| `03_cohort_sensitivity_supplement`, `adt_vs_llm__platinum__all__incl` | Copied unchanged to `ADT/manuscript_renders/supplement/`. Figure 1 (`01_cohort_overview`) has panels a-e only. Checklist transfer figures gain a full-DFCI-cohort accuracy panel (b) from `transfer_checklist_full_accuracy*.csv` (rerun notebook 04); older exports fall back to the three-panel layout |
+| `federated_06_checklist_no_dfci__lm{0,90,180}_h{365,1825}` | Figure 6 for each landmark × horizon, from `checklist_grid/` (notebook 04); copied with the main and supplement figures to `ADT_figures/manuscript_renders/` |
+| `federated_06_checklist_guideline_no_dfci__lm{0,90,180}_h{365,1825}` | Generalized (guideline) version of the grid: same checklists with item thresholds rounded (<1 → nearest 0.25; single digits → whole number; tens → multiple of 5; hundreds → 10; thousands → 100, and so on), from `checklist_grid_guidelines/` (notebook 04); copied to `ADT_figures/manuscript_renders/supplement/generalized_federated_checklist_transfer/` |
+| `03_cohort_sensitivity_supplement`, `adt_vs_llm__platinum__all__incl` | Copied unchanged to `ADT_figures/manuscript_renders/supplement/`. Figure 1 (`01_cohort_overview`) has panels a-e only. Checklist transfer figures gain a full-DFCI-cohort accuracy panel (b) from `transfer_checklist_full_accuracy*.csv` (rerun notebook 04); older exports fall back to the three-panel layout |
 
 The local Figure 3 (`03_dfci_univariable`) still uses DFCI patient-level data.
 

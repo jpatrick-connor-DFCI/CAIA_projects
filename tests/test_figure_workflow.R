@@ -147,7 +147,7 @@ local({
       figure_retained_image(s$destination, cfg$fig_root, ".pdf", retained_exports),
     unlist(lapply(first$prepared,`[[`,"scenes"),recursive=FALSE))
   stopifnot(length(manuscript_scenes)>=7L,
-    all(vapply(manuscript_scenes,function(s) grepl("/ADT/(0[1-6]_[a-z_]+(/internal|/federated|/cohort_sensitivity)?|0[78]_[a-z_]+)/manuscript/",s$destination) &&
+    all(vapply(manuscript_scenes,function(s) grepl("/ADT_figures/(0[1-6]_[a-z_]+(/internal|/federated|/cohort_sensitivity)?|0[78]_[a-z_]+)/manuscript/",s$destination) &&
       file.exists(paste0(s$destination,".pdf")) &&
       file.exists(figure_sidecar_path(paste0(s$destination,".md"))) && s$width>0,logical(1))))
   overview_stems <- vapply(first$prepared$cohort_overview$scenes,`[[`,character(1),"stem")
@@ -186,7 +186,7 @@ local({
   stopifnot(all(vapply(third$rendered, function(x) x$rendered == 0L, logical(1))))
   stale <- tryCatch(figure_notebook_manifest(cfg), error = identity)
   stopifnot(inherits(stale, "error"), grepl("05_prep_figure_data.ipynb", conditionMessage(stale), fixed = TRUE))
-  # Run the actual COMPASS/figures/run_figures.R with only federated groups
+  # Run the actual COMPASS/figures/figure_run.R with only federated groups
   # enabled and raw patient input hidden. This verifies the toggle wiring as
   # well as the helper API.
   variables <- c(CAIA_PROJECT_ROOT = normalizePath("."),
@@ -204,7 +204,8 @@ local({
   stopifnot(file.rename(file.path(root, "survival_analysis", "local_runs_adt"),
                         file.path(root, "local_runs_hidden")))
   env <- new.env(parent = globalenv())
-  source(file.path(dirname(pipeline_path), "run_figures.R"), local = env)
+  env$script_dir <- dirname(pipeline_path); env$FIGURE_STAGE <- "all"
+  source(file.path(dirname(pipeline_path), "figure_run.R"), local = env)
   stopifnot(identical(names(env$figure_run$prepared), "federated"),
             identical(env$figure_config$scope, "federated"))
   federated_stems <- vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem")
@@ -215,21 +216,23 @@ local({
                   "federated_05_transfer_no_dfci__no_d") %in% federated_stems),
             !any(c("psa_forest", "testosterone_forest", "site_incidence_lm000",
                    "08_federated_multivariable") %in% federated_stems))
-  coefficient_export <- read_csv(file.path(cfg$fig_root, "ADT", "04_multivariate", "federated", "data",
+  coefficient_export <- read_csv(file.path(cfg$fig_root, "ADT_figure_data", "04_multivariate", "federated",
     "elasticnet_coefficients__platinum.csv"), show_col_types = FALSE)
   stopifnot(nrow(coefficient_export) == 9L, sum(coefficient_export$displayed) == 6L,
     "last missing" %in% coefficient_export$feature_stat)
-  transfer_export <- read_csv(file.path(cfg$fig_root, "ADT", "05_transfer_survival", "data",
+  transfer_export <- read_csv(file.path(cfg$fig_root, "ADT_figure_data", "05_transfer_survival",
     "transfer_discrimination_no_dfci__platinum.csv"), show_col_types = FALSE)
-  stopifnot(nrow(transfer_export) == 36L, file.exists(file.path(cfg$fig_root, "ADT", "05_transfer_survival", "data", c(
+  stopifnot(nrow(transfer_export) == 36L, file.exists(file.path(cfg$fig_root, "ADT_figure_data", "05_transfer_survival", c(
     "transfer_auc_t_no_dfci__platinum.csv", "transfer_clinical_comparison_no_dfci__platinum.csv"))))
   # Nothing is rendered for the removed with-Dana-Farber arm.
-  stopifnot(!any(file.exists(file.path(cfg$fig_root, "ADT", "05_transfer_survival", "data", c(
+  stopifnot(!any(file.exists(file.path(cfg$fig_root, "ADT_figure_data", "05_transfer_survival", c(
     "transfer_discrimination__platinum.csv", "transfer_dfci_ablation__platinum.csv")))))
-  stopifnot(file.exists(file.path(cfg$fig_root,"ADT","data","index.html")),
-            file.exists(file.path(cfg$fig_root,"ADT","data","manifest.csv")),
-            !dir.exists(file.path(cfg$fig_root,"ADT","by_figure")),
-            !any(dir.exists(file.path(cfg$fig_root,"ADT",FIGURE_RETIRED_FOLDERS))))
+  stopifnot(file.exists(file.path(cfg$fig_root,"ADT_figure_data","index.html")),
+            file.exists(file.path(cfg$fig_root,"ADT_figure_data","manifest.csv")),
+            !dir.exists(file.path(cfg$fig_root,"ADT_figures","by_figure")),
+            !any(dir.exists(file.path(cfg$fig_root,"ADT_figures",FIGURE_RETIRED_FOLDERS))),
+            # The figures folder holds PDFs only; tables, captions and the index live in the data folder.
+            !length(list.files(file.path(cfg$fig_root,"ADT_figures"),recursive=TRUE,pattern="\\.(csv|md|txt|html)$")))
   federated_cfg <- cfg; federated_cfg$scope <- "federated"
   # Elastic-net, XGBoost and 04 transfer files require a refreshed 05 manifest after source changes.
   for(path in c(xgb_metrics_path,xgb_importance_path,cox_metrics_path,cox_coefficients_path,
@@ -262,15 +265,15 @@ local({
   stopifnot(nrow(dh)==3L,nrow(dh_no_dfci)==3L,
     all(dh$name=="Dynamic DeepHit"),
     all(dh_no_dfci$name=="Dynamic DeepHit, no DFCI"))
-  render_federated_deephit_performance(file.path(cfg$fig_root,"ADT"),fed_path,60,TRUE)
-  stopifnot(file.exists(federated_output_path(file.path(cfg$fig_root,"ADT"),
+  render_federated_deephit_performance(file.path(cfg$fig_root,"ADT_figures"),fed_path,60,TRUE)
+  stopifnot(file.exists(federated_output_path(file.path(cfg$fig_root,"ADT_figures"),
     "deephit_performance",".pdf")))
   perf <- bind_rows(
-    read_csv(file.path(cfg$fig_root,"ADT","04_multivariate","federated","data",
+    read_csv(file.path(cfg$fig_root,"ADT_figure_data","04_multivariate","federated",
       "elasticnet_performance__platinum.csv"),show_col_types=FALSE),
-    read_csv(file.path(cfg$fig_root,"ADT","04_multivariate","federated","data",
+    read_csv(file.path(cfg$fig_root,"ADT_figure_data","04_multivariate","federated",
       "xgboost_performance__platinum.csv"),show_col_types=FALSE),dh)
-  importance_export <- read_csv(file.path(cfg$fig_root,"ADT","04_multivariate","federated","data",
+  importance_export <- read_csv(file.path(cfg$fig_root,"ADT_figure_data","04_multivariate","federated",
     "xgboost_importance__platinum.csv"),show_col_types=FALSE)
   main_with_dynamic <- manuscript_federated_multivariable(perf,coefficient_export,importance_export)
   stopifnot("Dynamic DeepHit" %in% as.character(main_with_dynamic$data$name))

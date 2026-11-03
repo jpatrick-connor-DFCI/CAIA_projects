@@ -5,11 +5,12 @@ local({
   root <- tempfile("retired-transfer-checklists-"); dir.create(root)
   on.exit(unlink(root,recursive=TRUE))
   config <- list(fig_root=file.path(root,"figures"),cache_root=file.path(root,"cache"))
-  folder <- file.path(config$fig_root,"ADT","06_transfer_checklists")
-  dir.create(file.path(folder,"data"),recursive=TRUE)
-  retired <- file.path(folder,c("transfer_clinical_checklist_xgboost_cox_avpc__platinum.pdf",
-    "transfer_clinical_checklist_elastic_net_cox_nepc__platinum.png",
-    "data/transfer_clinical_checklist_metrics__platinum.csv"))
+  folder <- file.path(config$fig_root,"ADT_figures","06_transfer_checklists")
+  data_folder <- file.path(config$fig_root,"ADT_figure_data","06_transfer_checklists")
+  dir.create(folder,recursive=TRUE); dir.create(data_folder,recursive=TRUE)
+  retired <- c(file.path(folder,c("transfer_clinical_checklist_xgboost_cox_avpc__platinum.pdf",
+    "transfer_clinical_checklist_elastic_net_cox_nepc__platinum.png")),
+    file.path(data_folder,"transfer_clinical_checklist_metrics__platinum.csv"))
   keep <- file.path(folder,c("transfer_predictive_checklist_supplement__platinum.pdf",
     "transfer_clinical_checklist_other_avpc__platinum.pdf"))
   for(path in c(retired,keep)) writeLines(basename(path),path)

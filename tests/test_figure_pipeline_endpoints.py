@@ -219,7 +219,7 @@ def test_figure_roots_do_not_collide():
     """Arm, figure family, artifact and endpoint/subset/exclusion identify each panel."""
     source = _pipeline_source()
     assert "COHORT_ARM_DIR <- toupper(cohort_arm(COHORT))" in source
-    assert "FIG_ROOT <- file.path(fig_root, COHORT_ARM_DIR)" in source
+    assert 'FIG_ROOT <- file.path(fig_root, paste0(COHORT_ARM_DIR, "_figures"))' in source
     assert 'COHORT_LEAF <- paste0(ENDPOINT, "__", cohort_leaf_slug(COHORT))' in source
     assert 'file.path(FIG_ROOT, "by_figure", group, artifact_name_for_stem(plot_stem, group))' in source
 
@@ -251,18 +251,18 @@ def test_pipeline_parses(tmp_path):
     assert _run_r(script, tmp_path).strip() == "OK"
 
 
-# ---- COMPASS/figures/run_figures.R render cross ---------------------------------
+# ---- COMPASS/figures/figure_run.R render cross ---------------------------------
 #
-# run_figures.R names the cohort-sensitivity cohorts as a literal vector, so it
+# figure_run.R names the cohort-sensitivity cohorts as a literal vector, so it
 # is the one place that can drift out of the Python run cross without any
 # import failing.
 
-FIGURES_SCRIPT = REPO_ROOT / "COMPASS" / "figures" / "run_figures.R"
+FIGURES_SCRIPT = REPO_ROOT / "COMPASS" / "figures" / "figure_run.R"
 
 
 def _figures_vector(name: str) -> list[str]:
     body = re.search(rf"^{name} <- c\((.*?)\)", FIGURES_SCRIPT.read_text(), re.S | re.M)
-    assert body, f"{name} not found in COMPASS/figures/run_figures.R"
+    assert body, f"{name} not found in COMPASS/figures/figure_run.R"
     return re.findall(r'"([^"]*)"', body.group(1))
 
 
@@ -295,7 +295,7 @@ def test_the_figures_script_keeps_every_modelled_run_selectable():
 
 
 def test_the_figures_script_toggles_every_figure_group():
-    """Each FIGURE_GROUPS entry has a toggle in run_figures.R, and nothing else does."""
+    """Each FIGURE_GROUPS entry has a toggle in figure_run.R, and nothing else does."""
     toggles = re.search(r"^FIGURES <- c\((.*?)\)\s*#", FIGURES_SCRIPT.read_text(), re.S | re.M)
     names = re.findall(r"^\s*(\w+)\s*=\s*(?:TRUE|FALSE)", toggles.group(1), re.M)
     helper = (PIPELINE_R.parent / "figure_workflow.R").read_text()

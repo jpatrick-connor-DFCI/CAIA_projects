@@ -1,21 +1,21 @@
-#!/usr/bin/env Rscript
-# COMPASS manuscript figures (ADT cohort, platinum endpoint).
-#
-# Run 05_prep_figure_data.ipynb first; this script only consumes its prepared
-# cache. Flip the toggles below to render a subset of figure groups. Only PDFs
-# listed in retained_exports.txt are rendered. A run with every group enabled
-# also archives retired exports and flattens the export tree.
-#
-#   Rscript COMPASS/figures/run_figures.R
+# Shared run logic for the COMPASS manuscript figures (ADT cohort, platinum endpoint).
+# Sourced by the two entry scripts in COMPASS/notebooks/:
+#   final_figure_data_prep.R  stage "prepare": builds the cached figure data R needs
+#   run_figure_render.R       stage "render":  draws PDFs and writes figure data tables
+# Both expect `script_dir` (this folder) and `FIGURE_STAGE` to be set before sourcing.
+# Run 05_prep_figure_data.ipynb first. Flip the toggles below to run a subset of
+# figure groups. Only PDFs listed in retained_exports.txt are rendered. A run with
+# every group enabled also archives retired exports and flattens the export tree.
 #
 # Paths and render settings can be overridden with the environment variables
 # read in the configuration section. COMPASS_FIGURE_GROUPS (comma-separated
 # group names) overrides the toggles, e.g. for cluster jobs:
 #
-#   COMPASS_FIGURE_GROUPS=transfer_survival,transfer_checklists Rscript COMPASS/figures/run_figures.R
+#   COMPASS_FIGURE_GROUPS=transfer_survival,transfer_checklists Rscript COMPASS/notebooks/run_figure_render.R
 
 # ---- Figure groups ----------------------------------------------------------
-# Each group maps to one export folder under <COMPASS_FIG_ROOT>/ADT/.
+# Each group maps to one export folder under <COMPASS_FIG_ROOT>/ADT_figures/ (PDFs only);
+# tables, legends, captions, manifest and index go to <COMPASS_FIG_ROOT>/ADT_figure_data/.
 FIGURES <- c(
   cohort                  = TRUE,  # 01_cohort: Fig 1 (consort, KM, spans, DFCI data, site counts)
   llm                     = TRUE,  # 02_llm: Fig 2 LLM subtype validation, day-0 cohort
@@ -28,14 +28,8 @@ FIGURES <- c(
 # ---- Configuration ----------------------------------------------------------
 options(readr.num_threads = 1L, readr.read_lazy = FALSE)
 
-script_dir <- local({
-  frames <- Filter(function(path) is.character(path) && length(path) == 1L && nzchar(path),
-    lapply(sys.frames(), function(frame) frame$ofile))
-  path <- if (length(frames)) tail(frames, 1L)[[1L]] else
-    sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)[1L])
-  if (is.na(path)) file.path(Sys.getenv("CAIA_PROJECT_ROOT", "/data/gusev/USERS/jpconnor/code/CAIA"),
-    "COMPASS", "figures") else dirname(normalizePath(path, mustWork = TRUE))
-})
+if (!exists("script_dir")) script_dir <- file.path(Sys.getenv("CAIA_PROJECT_ROOT",
+  "/data/gusev/USERS/jpconnor/code/CAIA"), "COMPASS", "figures")
 pipeline_path <- normalizePath(file.path(script_dir, "COMPASS_generate_figures_pipeline.R"), mustWork = TRUE)
 source(pipeline_path)
 source(file.path(script_dir, "figure_workflow.R"))
@@ -56,7 +50,7 @@ env_workers <- function(name, default) {
 NEPC_PROJ_PATH <- Sys.getenv("COMPASS_DATA_ROOT", "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS")
 FIG_ROOT <- Sys.getenv("COMPASS_FIG_ROOT", "/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS")
 FIGURE_DATA_ROOT <- Sys.getenv("COMPASS_FIGURE_DATA_ROOT", file.path(NEPC_PROJ_PATH, "figure_data"))
-FIGURE_STAGE <- match.arg(Sys.getenv("COMPASS_FIGURE_STAGE", "all"), c("all", "prepare", "render"))
+FIGURE_STAGE <- match.arg(get0("FIGURE_STAGE", ifnotfound = "all"), c("all", "prepare", "render"))
 
 # Cohorts compared in the Figure 3 cohort-sensitivity forest. Must match the 05 notebook.
 ADT_COHORT_OPTIONS <- c("adt", "adt_noprecastrate", "adt_metastatic_adt",

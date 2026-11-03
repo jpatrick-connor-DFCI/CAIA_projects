@@ -275,7 +275,7 @@ def atomic_json(path: Path, value) -> None:
 
 @contextmanager
 def preparation_lock(root: Path):
-    # Cluster workers and simultaneous COMPASS/figures/run_figures.R runs must not publish partial caches.
+    # Cluster workers and simultaneous COMPASS/notebooks/run_figure_render.R runs must not publish partial caches.
     import fcntl
     root.mkdir(parents=True, exist_ok=True)
     with (root / ".prepare.lock").open("a") as stream:
