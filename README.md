@@ -1146,6 +1146,7 @@ subfolder of its section (`03_univariate/federated/`, `04_multivariate/federated
 | `federated_05_transfer_no_dfci__no_d` | Panels a–c only (no KM curves or probability panel); caption `federated_figure5_no_d` |
 | `federated_06_checklist_no_dfci__lm{0,90,180}_h{365,1825}` | Figure 6 for each landmark × horizon, from `checklist_grid/` (notebook 04); copied with the main and supplement figures to `ADT/manuscript_renders/` |
 | `federated_06_checklist_guideline_no_dfci__lm{0,90,180}_h{365,1825}` | Generalized (guideline) version of the grid: same checklists with item thresholds rounded (<1 → nearest 0.25; single digits → whole number; tens → multiple of 5; hundreds → 10; thousands → 100, and so on), from `checklist_grid_guidelines/` (notebook 04); copied to `ADT/manuscript_renders/supplement/generalized_federated_checklist_transfer/` |
+| `03_cohort_sensitivity_supplement`, `adt_vs_llm__platinum__all__incl` | Copied unchanged to `ADT/manuscript_renders/supplement/`. Figure 1 (`01_cohort_overview`) has panels a-e only. Checklist transfer figures gain a full-DFCI-cohort accuracy panel (b) from `transfer_checklist_full_accuracy*.csv` (rerun notebook 04); older exports fall back to the three-panel layout |
 
 The local Figure 3 (`03_dfci_univariable`) still uses DFCI patient-level data.
 

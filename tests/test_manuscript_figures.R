@@ -15,15 +15,11 @@ stopifnot(inherits(flow$theme$axis.text.x,"element_blank"),inherits(flow$theme$a
 specs <- manuscript_specs()
 spec_keys <- vapply(specs,`[[`,character(1),"key")
 spec_by_key <- function(key) specs[[match(key,spec_keys)]]
-# Figure 1: the full version (DFCI data + federated site panels) comes first,
-# then the fallback without the federated site panel.
+# Figure 1 has panels a-e only (no data-availability or federated site-count panels).
 cohort_specs <- specs[spec_keys=="01_cohort_overview"]
-stopifnot(length(cohort_specs)==2,all(vapply(cohort_specs,`[[`,numeric(1),"height")==9.4),
-  identical(tail(cohort_specs[[1]]$members,2),c("figure1d_dfci_data","figure1e_site_counts")),
-  tail(cohort_specs[[2]]$members,1)=="figure1d_dfci_data",
-  max(cohort_specs[[1]]$layout)==7,max(cohort_specs[[2]]$layout)==6,
-  all(cohort_specs[[2]]$layout[4,]==6),
-  length(cohort_specs[[1]]$titles)==7)
+stopifnot(length(cohort_specs)==1,cohort_specs[[1]]$height==7.1,
+  identical(cohort_specs[[1]]$members,MANUSCRIPT_COHORT_MEMBERS),
+  max(cohort_specs[[1]]$layout)==5,length(cohort_specs[[1]]$titles)==5)
 # Figure 2: one spec per cohort (the ADT day-0 cohort), keyed with a variant suffix.
 stopifnot(identical(spec_keys[startsWith(spec_keys,"02_")],paste0("02_llm_nepc_avpc__",names(FIGURE2_COHORTS))),
   identical(names(FIGURE2_COHORTS),"lm0"),
@@ -69,7 +65,7 @@ stopifnot(length(captions)==15,setequal(names(captions),c(local_keys,federated_k
   all(grepl("^Federated Figure ([3-6])[. ]",unname(captions[federated_keys[c(1,2,5,6)]]))),
   setequal(unique(manuscript_base_key(names(captions))),names(MANUSCRIPT_SECTIONS)),
   grepl("any dated platinum",captions[["02_llm_nepc_avpc__lm0"]],fixed=TRUE),
-  grepl("(g) Observed platinum events",captions[["01_cohort_overview"]],fixed=TRUE),
+  !grepl("(f) DFCI patients",captions[["01_cohort_overview"]],fixed=TRUE),
   grepl("bottom and top 10%",captions[["federated_03_univariable"]],fixed=TRUE),
   !grepl("Kaplan-Meier",captions[["federated_05_transfer_no_dfci__no_d"]],fixed=TRUE),
   !grepl("Gleason score (d)",captions[["federated_05_transfer_no_dfci__no_d"]],fixed=TRUE),
@@ -143,16 +139,15 @@ stopifnot(inherits(fed_km,"ggplot"),grepl("bottom vs top 10%",fed_km$labels$titl
   grepl("bottom vs top 20%",fed_km_legacy$labels$title,fixed=TRUE),
   federated_extreme_pct(fed_km_fixture(.1))==10)
 
-# Figure 1 falls back to the spec without the federated site panel; Figure 2
+# Figure 1 is panels a-e only; Figure 2
 # gets a cohort header from the captured caption.
 blank <- function(caption=NULL) list(plot=ggplot(tibble(x=1,y=1),aes(x,y))+geom_point()+labs(caption=caption))
-cohort_items <- setNames(lapply(c(MANUSCRIPT_COHORT_MEMBERS,"figure1d_dfci_data"),function(stem) blank()),
-  c(MANUSCRIPT_COHORT_MEMBERS,"figure1d_dfci_data"))
+cohort_items <- setNames(lapply(MANUSCRIPT_COHORT_MEMBERS,function(stem) blank()),MANUSCRIPT_COHORT_MEMBERS)
 figure2_items <- setNames(lapply(figure2v3_stems("lm0"),function(stem)
   blank("ADT day-0 prediction cohort (N=2,239; 2,100 with an LLM label)")),figure2v3_stems("lm0"))
 built <- manuscript_build(c(cohort_items,figure2_items),character(),tempdir())
 stopifnot(setequal(names(built),c("01_cohort_overview","02_llm_nepc_avpc__lm0")),
-  max(built[["01_cohort_overview"]]$spec$layout)==6,
+  max(built[["01_cohort_overview"]]$spec$layout)==5,
   identical(built[["02_llm_nepc_avpc__lm0"]]$spec$header,
     "Cohort: ADT day-0 prediction cohort with LLM label (n = 2,100)"),
   inherits(built[["02_llm_nepc_avpc__lm0"]]$plot,"gtable"))
@@ -541,10 +536,12 @@ stopifnot(length(list.files(file.path(grid_root,FIGURE_SECTIONS[["transfer_check
     manuscript_folder("root","federated_06_checklist_no_dfci")))
 # manuscript_renders/: main, supplement, and one checklist figure per landmark x horizon.
 renders_plan <- manuscript_renders_plan()
-stopifnot(nrow(renders_plan)==5L+1L+2L+6L+6L,!anyDuplicated(renders_plan$target),
+stopifnot(nrow(renders_plan)==5L+1L+2L+2L+6L+6L,!anyDuplicated(renders_plan$target),
   setequal(dirname(renders_plan$target),c("main","supplement",file.path("supplement","federated_checklist_transfer"),
     file.path("supplement","generalized_federated_checklist_transfer"))),
   sum(dirname(renders_plan$target)=="main")==5L,
+  all(c("supplement/03_cohort_sensitivity_supplement.pdf","supplement/adt_vs_llm__platinum__all__incl.pdf") %in%
+    renders_plan$target),
   sum(dirname(renders_plan$target)==file.path("supplement","federated_checklist_transfer"))==6L,
   sum(dirname(renders_plan$target)==file.path("supplement","generalized_federated_checklist_transfer"))==6L,
   "supplement/generalized_federated_checklist_transfer/federated_06_checklist_guideline_no_dfci__lm0_h1825.pdf" %in% renders_plan$target,

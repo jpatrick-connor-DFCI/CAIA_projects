@@ -421,6 +421,10 @@ manuscript_renders_plan <- function() {
       target=file.path("supplement",paste0(keys$supplement,".pdf"))),
     data.frame(source=vapply(grid,manuscript,character(1)),
       target=file.path("supplement","federated_checklist_transfer",paste0(grid,".pdf"))),
+    # Cohort sensitivity: the compiled supplement page and the ADT-vs-LLM comparison.
+    data.frame(source=c(manuscript("03_cohort_sensitivity_supplement"),
+        file.path(FIGURE_SECTIONS[["cohort_sensitivity"]],"adt_vs_llm__platinum__all__incl.pdf")),
+      target=file.path("supplement",c("03_cohort_sensitivity_supplement.pdf","adt_vs_llm__platinum__all__incl.pdf"))),
     data.frame(source=vapply(guideline,manuscript,character(1)),
       target=file.path("supplement",FEDERATED_GUIDELINE_SUPPLEMENT_DIR,paste0(guideline,".pdf"))))
   rownames(plan) <- NULL
@@ -1958,6 +1962,11 @@ FEDERATED_CHECKLIST_RULES <- c(checklist="Checklist positive",gleason="Gleason �
 # Generalized (guideline) version of the grid: the same checklists with item thresholds rounded to practical
 # values (04 writes checklist_grid_guidelines/, with the rounded items beside the patient and comparison tables).
 # Its table stems and figure keys carry "guideline"; the PDFs are copied to the generalized supplement folder.
+# Checklist accuracy per endpoint in the full within-Dana-Farber ADT cohort (04 writes it beside the other
+# checklist tables; older exports lack it and Figure 6 then keeps its three-panel top row).
+FEDERATED_CHECKLIST_FULL_FILE <- "transfer_checklist_full_accuracy.csv"
+FEDERATED_CHECKLIST_FULL_STEM <- "transfer_checklist_full_accuracy_no_dfci"
+FEDERATED_GUIDELINE_FULL_STEM <- "transfer_checklist_full_accuracy_guideline_no_dfci"
 FEDERATED_GUIDELINE_GRID_DIR <- "checklist_grid_guidelines"
 FEDERATED_GUIDELINE_ITEMS_FILE <- "transfer_checklist_guideline_items.csv"
 FEDERATED_GUIDELINE_TABLES <- c(items="transfer_checklist_items_guideline_no_dfci",
@@ -1999,6 +2008,17 @@ load_federated_checklist_comparison <- function(directory) {
   if(length(missing)) stop("Federated checklist comparison is missing: ",paste(missing,collapse=", "))
   if(any(!d$rule %in% names(FEDERATED_CHECKLIST_RULES))) stop("Unknown rule in ",path)
   filter(mutate(d,endpoint=tolower(endpoint)),endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS))
+}
+
+load_federated_checklist_full_accuracy <- function(directory) {
+  path <- file.path(directory,FEDERATED_CHECKLIST_FULL_FILE)
+  if(!file.exists(path)) return(NULL)
+  d <- readr::read_csv(path,show_col_types=FALSE)
+  needed <- c("endpoint","landmark_days","horizon_days","rule","n_patients","n_events","n_positive","auc","auc_lo","auc_hi")
+  missing <- setdiff(needed,names(d))
+  if(length(missing)) stop("Federated checklist full-cohort accuracy is missing: ",paste(missing,collapse=", "))
+  filter(mutate(d,endpoint=tolower(endpoint)),endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS),
+    rule==FEDERATED_CHECKLIST_RULE)
 }
 
 # The guideline checklist's items (thresholds already rounded by 04), in the layout of the exported items.
@@ -2077,6 +2097,15 @@ write_federated_checklist_tables <- function(root, federated_path, directory, f=
   stems <- if(guideline) FEDERATED_GUIDELINE_TABLES else FEDERATED_CHECKLIST_TABLES
   for(name in names(stems)) if(nrow(tables[[name]]))
     write_federated_transfer_table(root,tables[[name]],paste0(stems[[name]],suffix))
+  full <- load_federated_checklist_full_accuracy(directory)
+  if(!is.null(full)) {
+    full <- dplyr::filter(full,landmark_days==f$landmark_days,horizon_days==f$horizon_days)
+    if(nrow(full)) {
+      tables$full <- full
+      write_federated_transfer_table(root,full,paste0(
+        if(guideline) FEDERATED_GUIDELINE_FULL_STEM else FEDERATED_CHECKLIST_FULL_STEM,suffix))
+    }
+  }
   invisible(tables)
 }
 
@@ -2097,8 +2126,9 @@ write_federated_checklist_guideline_tables <- function(root, federated_path, dir
 }
 
 # Text lines of the Figure 6a card; `y` needs the panel height, so it is left to the caller.
-# The guideline card stops before the held-out block: the rounded checklist has no training-site metrics.
-federated_checklist_card_lines <- function(items, metrics, f=FEDERATED_CHECKLIST_FIGURE, guideline=FALSE) {
+# The card stops before the held-out block: accuracy is shown in its own panels (the guideline checklist has no
+# training-site metrics at all). Pass guideline=FALSE to keep the block (standalone use).
+federated_checklist_card_lines <- function(items, metrics, f=FEDERATED_CHECKLIST_FIGURE, guideline=TRUE) {
   full <- dplyr::filter(metrics,model=="checklist")
   cell <- data.frame(landmark_days=f$landmark_days,status=if(guideline || identical(full$status,"ok")) "ok" else "missing",
     reason=if(nrow(full)) paste("export status",full$status) else "No checklist exported",
@@ -2419,13 +2449,10 @@ manuscript_specs <- function() {
     width=width, height=height, layout=layout, titles=titles,
     row_heights=row_heights, shared_legend_panels=shared_legend_panels)
   c(list(
-    spec("01_cohort_overview", c(MANUSCRIPT_COHORT_MEMBERS,"figure1d_dfci_data","figure1e_site_counts"), 9.4,
-      rbind(c(1,1,2,2),c(1,1,3,3),c(4,4,5,5),c(6,6,7,7)),
-      c(MANUSCRIPT_COHORT_TITLES,"Data availability (DFCI)","Federated sites: events/patients")),
-    # Without the federated within-site export, Figure 1 keeps the DFCI panels.
-    spec("01_cohort_overview", c(MANUSCRIPT_COHORT_MEMBERS,"figure1d_dfci_data"), 9.4,
-      rbind(c(1,1,2,2),c(1,1,3,3),c(4,4,5,5),c(6,6,6,6)),
-      c(MANUSCRIPT_COHORT_TITLES,"Data availability (DFCI)"))),
+    # Panels a-e only: the data-availability and federated site-count panels are not part of the figure.
+    spec("01_cohort_overview", MANUSCRIPT_COHORT_MEMBERS, 7.1,
+      rbind(c(1,1,2,2),c(1,1,3,3),c(4,4,5,5)),
+      MANUSCRIPT_COHORT_TITLES)),
     # Figure 2 per cohort; manuscript_build adds the cohort header.
     lapply(names(FIGURE2_COHORTS),function(variant) spec(paste0("02_llm_nepc_avpc__",variant),
       figure2v3_stems(variant), 8, rbind(1:2,3:4),
@@ -2434,11 +2461,11 @@ manuscript_specs <- function() {
     # Federated Figure 3: the local Figure 3 layout drawn from pooled federated results.
     spec("federated_03_univariable", c(paste0("fed3_volcano_landmark",c(0,90,180)),
       "fed3_trajectory_psa",paste0("fed3_km_quintile_psa_landmark",manuscript_dfci_km_landmark),
-      "fed3_trajectory_testosterone",paste0("fed3_km_quintile_testosterone_landmark",manuscript_dfci_km_landmark)), 8.9,
+      "fed3_trajectory_testosterone",paste0("fed3_km_quintile_testosterone_landmark",manuscript_dfci_km_landmark)), 9.7,
       rbind(c(1,1,2,2,3,3),rep(8,6),c(4,4,4,5,5,5),c(6,6,6,7,7,7)),
       c("Day 0","Day 90","Day 180","PSA trajectory","PSA: extreme deciles",
         "Testosterone trajectory","Testosterone: extreme deciles"),
-      row_heights=c(1.5,.32,1,1), shared_legend_panels=1:3, width=10)))
+      row_heights=c(1.5,.32,1.4,1.4), shared_legend_panels=1:3, width=10)))
 }
 
 # Keys sharing the Figure 3 layout and restyling (manuscript_univariable_restyle).
@@ -2528,19 +2555,20 @@ manuscript_guideline_caption <- function(f=FEDERATED_CHECKLIST_FIGURE) {
   caption <- sub("^Federated Figure 6\\.|^Federated checklist transfer supplement\\.",
     "Generalized federated checklist transfer supplement.",caption)
   caption <- sub("Items and threshold of a unit-weight","Items of a unit-weight",caption,fixed=TRUE)
-  sub(paste0(", and metrics are from those sites' held-out test patients. "),
-    paste0(", with item thresholds rounded for use in practice (below 1 to the nearest quarter, single digits to the nearest ",
+  sub("items are checked. ",
+    paste0("items are checked, with item thresholds rounded for use in practice (below 1 to the nearest quarter, single digits to the nearest ",
       "whole number, tens to the nearest 5, hundreds to the nearest 10, thousands to the nearest 100, and so on); item selection ",
-      "and the M-of-N rule are those of the exact checklist and no held-out training-site metrics are shown. "),caption,fixed=TRUE)
+      "and the M-of-N rule are those of the exact checklist. "),caption,fixed=TRUE)
 }
 
 manuscript_checklist_caption_text <- function() paste(c(
   "Federated Figure 6. A federated 1-year platinum checklist from 180 days after ADT initiation, trained without Dana-Farber and validated at Dana-Farber.",
-  paste0("(a) Items and threshold of a unit-weight M-of-N predictive checklist (feature-set refit: missingness indicators and observation counts adjusted the fit but cannot be items) trained for 1-year platinum treatment from the 180-day landmark on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data; patients are checklist positive when at least M of the N items are checked, and metrics are from those sites' held-out test patients. ",
-    "(b) Accuracy at Dana-Farber of three yes/no rules for platinum treatment, aggressive-variant prostate cancer (AVPC), and neuroendocrine prostate cancer (NEPC) within 1 year: checklist positive, Gleason ≥8, and any alteration in a tumor suppressor gene (TSG; mutation, deletion, amplification, or structural variant in TP53, RB1, or PTEN). Accuracy is the inverse-probability-of-censoring-weighted AUC at 1 year, which for a yes/no rule equals balanced accuracy. All three rules are evaluated on the same sequenced patients with a Gleason score, from 180 days after the sequencing date; bars denote 95% bootstrap confidence intervals over patients, dotted lines mark 0.5, and column strips give patients and events. ",
-    "(c-e) Kaplan-Meier platinum-free (c), AVPC-free (d), and NEPC-free (e) survival at Dana-Farber from the 180-day landmark after ADT initiation by checklist status; shading denotes pointwise 95% confidence intervals, P values are from log-rank tests, and the vertical axes are truncated below 1."),
-  paste0("No Dana-Farber patient contributed to checklist training, so every endpoint, including platinum, is out of sample. The checklist and its threshold were applied unchanged. Panels c-e use the ADT-initiation clock. ",
-    "For b, the checklist was rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation, and Gleason scores were used only if available before the landmark. ",
+  paste0("(a) Items and threshold of a unit-weight M-of-N predictive checklist (feature-set refit: missingness indicators and observation counts adjusted the fit but cannot be items) trained for 1-year platinum treatment from the 180-day landmark on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data; patients are checklist positive when at least M of the N items are checked. ",
+    "(b) Accuracy of the checklist at Dana-Farber for platinum treatment, aggressive-variant prostate cancer (AVPC), and neuroendocrine prostate cancer (NEPC) within 1 year in all patients of the ADT cohort with the checklist's laboratory data, scored from 180 days after ADT initiation; the inverse-probability-of-censoring-weighted AUC at 1 year equals balanced accuracy for a yes/no rule, and bars denote 95% bootstrap confidence intervals over patients. ",
+    "(c) Accuracy at Dana-Farber of three yes/no rules for platinum treatment, aggressive-variant prostate cancer (AVPC), and neuroendocrine prostate cancer (NEPC) within 1 year: checklist positive, Gleason ≥8, and any alteration in a tumor suppressor gene (TSG; mutation, deletion, amplification, or structural variant in TP53, RB1, or PTEN). Accuracy is the inverse-probability-of-censoring-weighted AUC at 1 year, which for a yes/no rule equals balanced accuracy. All three rules are evaluated on the same sequenced patients with a Gleason score, from 180 days after the sequencing date; bars denote 95% bootstrap confidence intervals over patients, dotted lines mark 0.5, and column strips give patients and events. ",
+    "(d-f) Kaplan-Meier platinum-free (d), AVPC-free (e), and NEPC-free (f) survival at Dana-Farber from the 180-day landmark after ADT initiation by checklist status; shading denotes pointwise 95% confidence intervals, P values are from log-rank tests, and the vertical axes are truncated below 1."),
+  paste0("No Dana-Farber patient contributed to checklist training, so every endpoint, including platinum, is out of sample. The checklist and its threshold were applied unchanged. Panels b and d-f use the ADT-initiation clock. ",
+    "For c, the checklist was rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation, and Gleason scores were used only if available before the landmark. ",
     "ADT, androgen-deprivation therapy; AUC, area under the receiver-operating-characteristic curve.")),
   collapse="\n\n")
 
@@ -2569,7 +2597,7 @@ manuscript_captions <- function() {
   c(
     `01_cohort_overview`=caption(
       "Figure 1. Cohort assembly, follow-up, and platinum treatment after androgen-deprivation therapy.",
-      "(a) Cumulative selection of the PROFILE prostate cancer cohort, from patients identified by International Classification of Diseases codes through the final laboratory-analysis cohort. (b) Kaplan-Meier estimate of platinum-free survival from androgen-deprivation therapy (ADT) initiation; shading denotes the pointwise 95% confidence interval. (c) Distribution of each patient's laboratory-record span. (d) Distribution of time from prostate cancer diagnosis to ADT initiation, displayed through the 99th percentile. (e) Distribution of time from ADT initiation to platinum treatment among patients who received platinum. (f) DFCI patients with each data type: ICD-10 prostate cancer, ADT exposure, Gleason grade recorded before ADT initiation, tumor sequencing, and the ADT day-0 prediction cohort; Gleason and sequencing counts are restricted to the day-0 cohort, and sequenced patients must be at risk at the sequencing report. (g) Observed platinum events and analyzed patients per federated site in the ADT cohort at day 0; pale bars show patients, solid bars show events, labels are events/patients, and a dagger marks sites with fewer than 25 events.",
+      "(a) Cumulative selection of the PROFILE prostate cancer cohort, from patients identified by International Classification of Diseases codes through the final laboratory-analysis cohort. (b) Kaplan-Meier estimate of platinum-free survival from androgen-deprivation therapy (ADT) initiation; shading denotes the pointwise 95% confidence interval. (c) Distribution of each patient's laboratory-record span. (d) Distribution of time from prostate cancer diagnosis to ADT initiation, displayed through the 99th percentile. (e) Distribution of time from ADT initiation to platinum treatment among patients who received platinum.",
       "Panels b and c include 2,239 patients. Panel d displays 2,216 of 2,239 patients, and panel e displays 162 of 198 platinum-treated patients. ADT, androgen-deprivation therapy; PARPi, poly(ADP-ribose) polymerase inhibitor; PSA, prostate-specific antigen."),
     `02_llm_nepc_avpc__lm0`=manuscript_figure2_caption("lm0"),
     `03_cohort_sensitivity_supplement`=caption(
@@ -2583,22 +2611,19 @@ manuscript_captions <- function() {
       "Panels a-c display features with finite estimates, absolute log hazard ratios of at most 4, and confidence-interval upper-to-lower ratios below 100; mean-feature q values were calculated before these display exclusions. Panels d-g were drawn from aggregate site exports (binned means and Kaplan-Meier curves) without patient-level data. Cohorts included 22,138 patients (664 platinum events) at day 0, 21,791 (608) at day 90, and 21,216 (564) at day 180; by site at day 0, Dana-Farber contributed 5,853 (231 events), Fred Hutch 3,277 (90), Johns Hopkins 3,069 (35), and MSK 9,939 (308). The trajectory analyses include 22,035 patients for PSA and 17,937 for testosterone. Cutoffs, group sizes, events, and log-rank P values for e and g are reported in federated_km_quintile_summary.csv. Within-site versions are provided as supplementary figures. ADT, androgen-deprivation therapy; CBC, complete blood count; CMP, comprehensive metabolic panel; LFT, liver-function test; PSA, prostate-specific antigen; SD, standard deviation."),
     federated_04_multivariable=caption(
       "Federated Figure 4. Federated multivariable laboratory models for prediction of platinum treatment.",
-      "(a) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), at 0, 90, and 180 days after ADT initiation for Elastic-Net Cox and XGBoost survival models trained on all four sites and an age-only Cox baseline (hatched). When available, the dynamic DeepHit arm is also shown in a. The dotted horizontal line marks 0.5. (b) Nonzero Elastic-Net Cox coefficients of the four-site model at each landmark, with up to 15 coefficients of largest absolute value displayed. Positive coefficients indicate higher platinum hazard and negative coefficients indicate lower hazard, conditional on the other selected features. (c) XGBoost split-gain feature importance of the four-site model at each landmark, with up to 15 positive-gain features displayed. Colors in b and c identify laboratory categories.",
+      "(a) Held-out test mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), at 0, 90, and 180 days after ADT initiation for Elastic-Net Cox and XGBoost survival models trained on all four sites and an age-only Cox baseline (hatched). When available, the dynamic DeepHit arm is also shown in a. The dotted horizontal line marks 0.5. (b) Nonzero Elastic-Net Cox coefficients of the four-site model at each landmark, with up to 15 coefficients of largest absolute value displayed. Coefficients are plotted as hazard ratios (exponentiated coefficients) on a logarithmic axis centered at 1: ratios above 1 indicate higher platinum hazard and ratios below 1 lower hazard, conditional on the other selected features. Androgen-axis features are in bold in b and c. (c) XGBoost split-gain feature importance of the four-site model at each landmark, with up to 15 positive-gain features displayed. Colors in b and c identify laboratory categories.",
       "Models were trained on pooled Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data; test-set sample sizes/events were 4,429/133 at day 0, 4,360/121 at day 90, and 4,245/113 at day 180. Performance values are from held-out test sets rather than training or tuning cross-validation. Age, body height, identifiers, observation counts and missingness indicators are excluded before ranking features in b and c. Elastic-Net coefficients are signed log hazard-ratio coefficients. XGBoost gains are unsigned measures of split improvement and are not signed effects or SHAP values. When shown, dynamic DeepHit has no age-only baseline or feature-level coefficients; its held-out metrics use the same horizon grid. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve; SHAP, Shapley additive explanations."),
     federated_04_multivariable__full_features=caption(
       "Federated Figure 4 supplement. Federated model performance and the strongest feature values.",
       "(a) Held-out mean AUC(t) for the full models and both age-only baselines at each landmark. (b) Up to 20 Elastic-Net coefficients per landmark, ranked by absolute value. (c) Up to 20 XGBoost split gains per landmark. Panels b and c are chosen from all supplied features, including age, body height, observation counts, missingness indicators and zero-valued features when present. Colors identify feature categories.",
       "Models pool four sites. Coefficients are signed log hazard ratios; gains measure split improvement and do not encode direction. Identifier features, if present, are retained for audit; consult the accompanying data legend."),
-    federated_05_transfer_no_dfci__top_bottom_20_all_endpoints=gsub(
-      "by the top and bottom 20% of the transferred XGBoost score, Gleason group",
-      "by the top and bottom tertile of the transferred XGBoost score, Gleason group",
-      gsub("\\(e\\) Probability of platinum treatment within 5 years",
+    federated_05_transfer_no_dfci__top_bottom_20_all_endpoints=gsub("\\(e\\) Probability of platinum treatment within 5 years",
       "(e-g) Probability of platinum treatment, AVPC, and NEPC, respectively, within 5 years",
       gsub("platinum-free probability", "endpoint-free probability",
         gsub("among sequenced patients in e;", "among sequenced patients in e-g;",
           gsub("all groups in e use", "all groups in e-g use",
             gsub("For e,", "For e-g,", manuscript_transfer_xgboost_caption(20L), fixed=TRUE), fixed=TRUE), fixed=TRUE), fixed=TRUE),
-      fixed=TRUE), fixed=TRUE),
+      fixed=TRUE),
     federated_05_transfer_no_dfci__no_d=manuscript_transfer_caption(no_d=TRUE,km_panels=FALSE),
     federated_06_checklist_no_dfci=manuscript_checklist_caption(),
     grid_captions,
@@ -2741,9 +2766,25 @@ manuscript_multivariable_labs <- function(plots,spec) {
   importance <- vector("list",6)
   category_legend <- NULL
   for(i in seq_len(6)) {
-    p <- manuscript_style(plots[[i+n_perf]] + ggplot2::labs(subtitle=landmarks[(i-1)%%3+1]),NULL,NULL) +
+    panel <- plots[[i+n_perf]] + ggplot2::labs(subtitle=landmarks[(i-1)%%3+1])
+    # The focused Figure 4 draws Elastic-Net coefficients as hazard ratios: a log axis centered at HR = 1.
+    if(identical(spec$key,"federated_04_multivariable") && i<=3 && inherits(panel,"ggplot") && nrow(panel$data))
+      panel <- panel + ggplot2::scale_x_continuous(name="Hazard ratio (log scale)",
+        breaks=function(limits) {
+          candidates <- log(c(.25,.5,.67,1,1.5,2,3,4,6))
+          keep <- candidates[candidates>=limits[1] & candidates<=limits[2]]
+          if(length(keep)>=3) keep else pretty(limits,n=4)
+        },
+        labels=function(x) format(signif(exp(x),2),trim=TRUE,drop0trailing=TRUE))
+    p <- manuscript_style(panel,NULL,NULL) +
       ggplot2::guides(color="none",fill=ggplot2::guide_legend(nrow=1,byrow=TRUE,
         override.aes=list(alpha=1)))
+    # Androgen-axis features are bold; manuscript_style fixes one face, so set it per label afterward.
+    if(inherits(panel,"ggplot") && all(c("label","category") %in% names(panel$data)) && nrow(panel$data)) {
+      shown <- levels(panel$data$label)
+      p <- p + ggplot2::theme(axis.text.y=ggplot2::element_text(face=ifelse(
+        panel$data$category[match(shown,panel$data$label)] %in% "Androgen axis","bold","plain")))
+    }
     p <- manuscript_center_landmark_header(p)
     if(is.null(category_legend)) category_legend <- manuscript_legend(p,spec$width,spec$height)
     importance[[i]] <- manuscript_grob(p + ggplot2::theme(legend.position="none"),
@@ -2958,7 +2999,7 @@ manuscript_federated_multivariable <- function(performance,coefficients,importan
       ggplot2::scale_y_discrete(labels=manuscript_federated_feature_label)
   }
   rows <- if(full) c(2.5,pmax(3,counts_by_kind*.2)) else c(.9,1,1)
-  spec <- list(key=key,width=if(full) 14 else 8.5,height=if(full) min(190,sum(rows)+1.5) else 9,
+  spec <- list(key=key,width=if(full) 14 else 8.5,height=if(full) min(190,sum(rows)+1.5) else 9.5,
     layout=matrix(1:3,3),row_heights=rows,
     titles=c("Test mean AUC(t)","Elastic-Net coefficients","XGBoost feature importance"))
   p <- manuscript_multivariable_labs(plots,spec)
@@ -3065,7 +3106,7 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
   }
   if(length(extra$probability_panels)) {
     rows <- c(rows,list(n+k+rep(seq_along(extra$probability_panels),each=2L)))
-    row_heights <- c(row_heights,4.0)
+    row_heights <- c(row_heights,7.0)
   } else if(!is.null(extra$gradient)) {
     rows <- c(rows,list(rep(n+k+1L,6L)))
     row_heights <- c(row_heights,MANUSCRIPT_TRANSFER_ROW_HEIGHTS["gradient"])
@@ -3174,7 +3215,7 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
                                            guideline=FALSE) {
   landmark <- as.integer(f$landmark_days)
   if(guideline && is.null(tables$metrics)) tables$metrics <- tibble::tibble(model=character())
-  lines <- federated_checklist_card_lines(tables$items,tables$metrics,f,guideline)
+  lines <- federated_checklist_card_lines(tables$items,tables$metrics,f)
   line_in <- .17
   card_in <- line_in*(nrow(lines)+1.5)
   lines$y <- 1-.02-(seq_len(nrow(lines))-1L)*line_in/card_in
@@ -3182,14 +3223,20 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
   # One card, so no facet; manuscript_style would restore its strip and axis text.
   card <- plot_checklist_cards(lines,NULL,caption=NULL) + ggplot2::facet_null() +
     ggplot2::labs(x=NULL,y=NULL) + ggplot2::theme(axis.text=ggplot2::element_blank())
-  plots <- list(card,plot_federated_checklist_comparison(tables$comparison,f))
-  titles <- c("Checklist","Accuracy")
+  has_full <- !is.null(tables$full) && nrow(tables$full)
+  plots <- c(list(card),if(has_full) list(plot_federated_checklist_comparison(tables$full,f)),
+    list(plot_federated_checklist_comparison(tables$comparison,f)))
+  titles <- c("Checklist",if(has_full) "Accuracy: all patients","Accuracy")
   rows <- tables$comparison %>% arrange(match(endpoint,names(FEDERATED_TRANSFER_ENDPOINTS)),
     match(rule,names(FEDERATED_CHECKLIST_RULES)))
   legend <- c(
     sprintf("a: unit-weight federated checklist for %s platinum from the %d-day ADT landmark, trained without Dana-Farber; positive at %s.%s",federated_transfer_horizon_label(f$horizon_days),landmark,rule,
-      if(guideline) " Item thresholds are rounded to guideline values; item selection and the rule are unchanged." else " Metrics are from held-out test patients at the training sites."),
-    paste0("b: ",federated_transfer_horizon_label(f$horizon_days)," IPCW AUC (equal to balanced accuracy for a yes/no rule) at Dana-Farber in the same sequenced patients with a Gleason score, on the sequencing clock. Rule, n positive, AUC (95% CI), and difference from the checklist (95% CI): ",
+      if(guideline) " Item thresholds are rounded to guideline values; item selection and the rule are unchanged." else ""),
+    if(has_full) paste0("b: ",federated_transfer_horizon_label(f$horizon_days),
+      " IPCW AUC (equal to balanced accuracy for a yes/no rule) of the checklist at Dana-Farber in all patients of the ADT cohort (ADT clock), by endpoint. n positive, AUC (95% CI): ",
+      paste(sprintf("%s %s, %.2f (%.2f-%.2f)",FEDERATED_TRANSFER_ENDPOINTS_SHORT[tables$full$endpoint],
+        scales::comma(tables$full$n_positive),tables$full$auc,tables$full$auc_lo,tables$full$auc_hi),collapse="; "),"."),
+    paste0(if(has_full) "c: " else "b: ",federated_transfer_horizon_label(f$horizon_days)," IPCW AUC (equal to balanced accuracy for a yes/no rule) at Dana-Farber in the same sequenced patients with a Gleason score, on the sequencing clock. Rule, n positive, AUC (95% CI), and difference from the checklist (95% CI): ",
       paste0(sprintf("%s %s %s, %.2f (%.2f-%.2f)",FEDERATED_TRANSFER_ENDPOINTS_SHORT[rows$endpoint],
         FEDERATED_CHECKLIST_RULES[rows$rule],scales::comma(rows$n_positive),rows$auc,rows$auc_lo,rows$auc_hi),
         if_else(rows$rule==FEDERATED_CHECKLIST_RULE,"",sprintf(", %+.2f (%.2f to %.2f)",
@@ -3206,10 +3253,14 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
       paste(sprintf("%s %s/%s",counts$stratum,scales::comma(counts$n),scales::comma(counts$events)),collapse="; "),
       counts$logrank_p[[1]]))
   }
-  k <- length(plots)-2L
-  row_heights <- c(max(2.7,card_in+.35),if(k) MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["km"]])
+  n_top <- 2L+has_full
+  k <- length(plots)-n_top
+  # With the all-patient panel, the card and b share the top row and c spans the next one.
+  top <- if(has_full) rbind(rep(1:2,each=3L),rep(3L,6L)) else rbind(rep(1:2,each=3L))
+  row_heights <- c(max(2.7,card_in+.35),if(has_full) MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["clinical"]],
+    if(k) MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["km"]])
   spec <- list(key=key,width=10,height=sum(row_heights),
-    layout=rbind(rep(1:2,each=3L),if(k) 2L+rep(seq_len(k),each=6L%/%k)),titles=titles,
+    layout=rbind(top,if(k) n_top+rep(seq_len(k),each=6L%/%k)),titles=titles,
     row_heights=row_heights,shared_legend_panels=integer())
   list(plot=manuscript_combine(plots,spec),spec=spec,data=tables$comparison,legend=paste(legend,collapse="\n"))
 }
@@ -3253,8 +3304,10 @@ manuscript_univariable_restyle <- function(plots, federated=FALSE) {
     x="Years from ADT initiation",y=paste0("Mean log1p(",if(i==4) "PSA" else "testosterone", ")\n(95% CI)"))
   for(i in c(5,7)) {
     logrank <- plots[[i]]$labels$subtitle
-    plots[[i]] <- plots[[i]] + ggplot2::labs(subtitle=NULL,
-      x=paste0("Days from day-",manuscript_dfci_km_landmark," landmark"),y=manuscript_km_y_label)
+    # The panel title is not drawn, so name the laboratory in a subtitle.
+    plots[[i]] <- plots[[i]] + ggplot2::labs(subtitle=if(i==5) "PSA" else "Testosterone",
+      x=paste0("Days from day-",manuscript_dfci_km_landmark," landmark"),y=manuscript_km_y_label) +
+      ggplot2::theme(plot.subtitle=ggplot2::element_text(face="bold",hjust=.5,margin=ggplot2::margin(b=2)))
     if(is.character(logrank) && length(logrank)==1 && nzchar(logrank))
       plots[[i]] <- plots[[i]] + ggplot2::annotate("text",x=Inf,y=-Inf,label=logrank,
         hjust=1.08,vjust=-.6,size=2.3,color="#52514e")
@@ -3356,27 +3409,35 @@ manuscript_build <- function(items,tables,root) {
     # sequenced-with-Gleason panel (d).
     if (!is.null(km)) result[["federated_05__top_bottom_20_all_endpoints"]] <- manuscript_federated_transfer_no_dfci(
       transfer,NULL,km,include=character(),key="federated_05_transfer_no_dfci__top_bottom_20_all_endpoints",
-      model_families="xgboost_cox",probability=TRUE,extreme_percent=20L,probability_endpoints=TRUE,probability_tertile=TRUE)
+      model_families="xgboost_cox",probability=TRUE,extreme_percent=20L,probability_endpoints=TRUE,probability_tertile=FALSE)
     # Supplement: panels a-c only (discrimination and clinical comparisons), no KM or probability panels.
     result[["federated_05__no_d"]] <- manuscript_federated_transfer_no_dfci(transfer,clinical,NULL,
       include=c("gleason","trio"),key="federated_05_transfer_no_dfci__no_d")
     checklist <- lapply(FEDERATED_CHECKLIST_TABLES,function(stem) read(paste0("^",stem,"__platinum[.]csv$")))
-    if(all(!vapply(checklist,is.null,logical(1)))) result[["federated_06"]] <- manuscript_federated_checklist(checklist)
+    if(all(!vapply(checklist,is.null,logical(1)))) {
+      # Optional full-cohort accuracy table (absent in older exports: three-panel layout).
+      checklist$full <- read(paste0("^",FEDERATED_CHECKLIST_FULL_STEM,"__platinum[.]csv$"))
+      result[["federated_06"]] <- manuscript_federated_checklist(checklist)
+    }
     else message("Skipping federated manuscript Figure 6: missing checklist tables")
     for(i in seq_len(nrow(FEDERATED_CHECKLIST_GRID))) {
       f <- federated_checklist_cell(FEDERATED_CHECKLIST_GRID$landmark_days[i],FEDERATED_CHECKLIST_GRID$horizon_days[i])
       grid <- lapply(FEDERATED_CHECKLIST_TABLES,function(stem)
         read(paste0("^",stem,federated_checklist_cell_suffix(f),"__platinum[.]csv$")))
-      if(all(!vapply(grid,is.null,logical(1)))) result[[paste0("federated_06",sub("^_","__",
-        federated_checklist_cell_suffix(f)))]] <- manuscript_federated_checklist(grid,federated_checklist_grid_key(f),f)
-      else message("Skipping federated checklist transfer landmark ",f$landmark_days,", horizon ",f$horizon_days,
+      if(all(!vapply(grid,is.null,logical(1)))) {
+        grid$full <- read(paste0("^",FEDERATED_CHECKLIST_FULL_STEM,federated_checklist_cell_suffix(f),"__platinum[.]csv$"))
+        result[[paste0("federated_06",sub("^_","__",
+          federated_checklist_cell_suffix(f)))]] <- manuscript_federated_checklist(grid,federated_checklist_grid_key(f),f)
+      } else message("Skipping federated checklist transfer landmark ",f$landmark_days,", horizon ",f$horizon_days,
         ": missing tables")
       guideline <- lapply(FEDERATED_GUIDELINE_TABLES,function(stem)
         read(paste0("^",stem,federated_checklist_cell_suffix(f),"__platinum[.]csv$")))
-      if(all(!vapply(guideline,is.null,logical(1)))) result[[paste0("federated_06_guideline",sub("^_","__",
-        federated_checklist_cell_suffix(f)))]] <- manuscript_federated_checklist(guideline,federated_guideline_grid_key(f),f,
-        guideline=TRUE)
-      else message("Skipping generalized federated checklist transfer landmark ",f$landmark_days,", horizon ",
+      if(all(!vapply(guideline,is.null,logical(1)))) {
+        guideline$full <- read(paste0("^",FEDERATED_GUIDELINE_FULL_STEM,federated_checklist_cell_suffix(f),"__platinum[.]csv$"))
+        result[[paste0("federated_06_guideline",sub("^_","__",
+          federated_checklist_cell_suffix(f)))]] <- manuscript_federated_checklist(guideline,federated_guideline_grid_key(f),f,
+          guideline=TRUE)
+      } else message("Skipping generalized federated checklist transfer landmark ",f$landmark_days,", horizon ",
         f$horizon_days,": missing tables")
     }
   }

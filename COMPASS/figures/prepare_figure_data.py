@@ -166,7 +166,10 @@ FEDERATED_TRANSFER_NO_DFCI_FILES = (
     "transfer_km_patients.csv", "transfer_checklist_patients.csv", "transfer_checklist_comparison.csv")
 # The same two tables at every landmark x horizon (federated checklist supplement), in a subdirectory.
 FEDERATED_CHECKLIST_GRID_DIR = "checklist_grid"
-FEDERATED_CHECKLIST_GRID_FILES = ("transfer_checklist_patients.csv", "transfer_checklist_comparison.csv")
+# Checklist accuracy per endpoint in the full within-DFCI cohort (Figure 6 panel b); also written at the top level.
+FEDERATED_CHECKLIST_FULL_ACCURACY_FILE = "transfer_checklist_full_accuracy.csv"
+FEDERATED_CHECKLIST_GRID_FILES = ("transfer_checklist_patients.csv", "transfer_checklist_comparison.csv",
+                                  FEDERATED_CHECKLIST_FULL_ACCURACY_FILE)
 # Guideline (rounded-threshold) version of the grid; the rounded items travel with the same two tables.
 FEDERATED_GUIDELINE_GRID_DIR = "checklist_grid_guidelines"
 FEDERATED_GUIDELINE_GRID_FILES = FEDERATED_CHECKLIST_GRID_FILES + ("transfer_checklist_guideline_items.csv",)
@@ -549,6 +552,8 @@ def prepare(config: dict) -> dict:
             for name in FEDERATED_CHECKLIST_GRID_FILES]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / FEDERATED_GUIDELINE_GRID_DIR / name)
             for name in FEDERATED_GUIDELINE_GRID_FILES]
+        federated_sources.append(fingerprint(federated_transfer_no_dfci_dir(config)
+                                             / FEDERATED_CHECKLIST_FULL_ACCURACY_FILE))
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / name)
             for name in FEDERATED_TRANSFER_NO_DFCI_FILES]
         federated_sources += [fingerprint(federated_figure_data_dir(config) / name)

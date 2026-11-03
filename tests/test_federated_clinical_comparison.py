@@ -468,3 +468,18 @@ def test_guideline_items_follow_selection_order_and_write_the_grid(tmp_path):
     grid = tmp_path / fcc.GUIDELINE_GRID_DIR
     assert sorted(p.name for p in grid.iterdir()) == sorted(
         [fcc.CHECKLIST_PATIENTS_FILE, fcc.CHECKLIST_COMPARISON_FILE, fcc.GUIDELINE_ITEMS_FILE])
+
+
+def test_checklist_full_accuracy_uses_every_scored_patient_and_writes_beside_the_grid(tmp_path):
+    scores, _ = _checklist_tables()
+    full = fcc.checklist_full_accuracy(scores, n_bootstrap=20)
+    assert list(full.columns) == fcc.CHECKLIST_FULL_ACCURACY_COLUMNS
+    assert set(full["rule"]) == {fcc.CHECKLIST_RULE}
+    assert (full["n_patients"] == full.groupby("endpoint")["n_patients"].transform("max")).all()
+    assert full["auc_lo"].le(full["auc"] + 1e-9).all() and full["auc"].le(full["auc_hi"] + 1e-9).all()
+    grid = fcc.checklist_full_accuracy_grid(scores, n_bootstrap=20)
+    assert set(zip(grid["landmark_days"], grid["horizon_days"])) <= {(l, h) for l in fcc.CHECKLIST_GRID_LANDMARKS
+                                                                      for h in fcc.CHECKLIST_GRID_HORIZONS}
+    patients, comparison = fcc.checklist_grid(scores, scores, _checklist_tables()[1], n_bootstrap=20)
+    fcc.write_checklist_grid(patients, comparison, tmp_path, full_accuracy=grid)
+    assert (tmp_path / fcc.CHECKLIST_GRID_DIR / fcc.CHECKLIST_FULL_ACCURACY_FILE).exists()
