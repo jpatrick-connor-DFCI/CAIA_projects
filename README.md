@@ -1069,17 +1069,13 @@ to render `figures/ADT/05_transfer_survival/transfer_discrimination_no_dfci__pla
 (mean AUC(t) and paired ΔAUC(t) vs. age only, by endpoint) and federated manuscript
 Figure 5.
 
-DeepHit and the predictive checklists are scored in a second pass on the same
-frames and bootstrap resamples, so a failure in either cannot block the Figure 5
-outputs. The landmark and dynamic DeepHit arms are scored from strictly
-pre-landmark lab histories, and each checklist at its exported horizon. The
-dynamic arm is paired with the landmark arm's age-only model. All four families,
-the Cox and XGBoost rows included, are written to
-`federated_transfer_adt_no_DFCI/all_models/`.
+The feature-set predictive checklists are scored in a second pass on the same
+frames and bootstrap resamples, each at its exported horizon; their patient
+flags feed Figure 6. DeepHit, the regular checklists and display-only summaries
+are not run here because no wired figure reads them.
 The `training_arm`, `model_horizon_days`, and `evaluation_horizon_days` columns
 identify each prediction. Checklist `risk_score` is the raw item count;
 `probability` and `flag` are the frozen calibrator and decision output.
-DeepHit uses its frozen cumulative incidence at each evaluation horizon.
 The horizon-specific rows also report an IPCW Brier score for DeepHit and
 checklist probabilities, with censoring estimated on the DFCI cohort.
 For a CLI run, pass the additional JSON paths to the existing `--bundle` list,

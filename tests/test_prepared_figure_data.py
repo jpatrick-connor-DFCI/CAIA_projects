@@ -112,18 +112,12 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
         feature_set_root / marker / "predictive_checklists" / name for marker in ("w_DFCI", "no_DFCI")
         for name in prep.FEDERATED_CHECKLIST_FILES]
     no_dfci_dir = rhino / "federated_transfer_adt_no_DFCI"
-    feature_set_paths += [no_dfci_dir / "feature_set_checklists" / name
-                          for name in prep.FEDERATED_TRANSFER_FEATURE_SET_FILES]
-    feature_set_paths += [no_dfci_dir / "regular_checklists" / name
-                          for name in prep.FEDERATED_TRANSFER_REGULAR_FILES]
     feature_set_paths += [no_dfci_dir / prep.FEDERATED_CHECKLIST_GRID_DIR / name
                           for name in prep.FEDERATED_CHECKLIST_GRID_FILES]
     no_dfci_paths = [no_dfci_dir / name for name in
                      ("transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv",
                       "transfer_km_patients.csv", "transfer_checklist_patients.csv",
                       "transfer_checklist_comparison.csv")]
-    all_model_paths = [no_dfci_dir / "all_models" / name for name in
-                       ("transfer_metrics.csv", "transfer_auc_t.csv")]
     figure_data_dir = rhino / "figure_data"
     figure_data_paths = [figure_data_dir / name for name in ("manifest.json", "cohort_km.csv")] + [
         figure_data_dir / (prefix + name) for prefix in ("", "within_site_") for name in (
@@ -132,7 +126,7 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
         config["federated_path"], str(site_path), *map(str, xgb_paths),
         *map(str, cox_paths), *map(str, no_dfci_model_paths),
         *map(str, deephit_paths), *map(str, v1_paths), *map(str, feature_set_paths), *map(str, no_dfci_paths),
-        *map(str, all_model_paths), *map(str, figure_data_paths)]
+        *map(str, figure_data_paths)]
     assert result["federated_sources"][1]["missing"]
     site_path.parent.mkdir()
     pl.DataFrame({"site_name": ["site_a"], "n_patients": [10], "n_events": [2]}).write_csv(site_path)
@@ -154,10 +148,10 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
         previous = updated_xgb
     # 04 transfer outputs and the aggregate figure data are optional; their delivery
     # or change reruns the federated job.
-    for directory in (no_dfci_dir, no_dfci_dir / "all_models", figure_data_dir):
+    for directory in (no_dfci_dir, figure_data_dir):
         directory.mkdir(parents=True)
     for index, path in enumerate([*deephit_paths, *v1_paths, *feature_set_paths, *no_dfci_paths,
-                                  *all_model_paths, *figure_data_paths], start=10):
+                                  *figure_data_paths], start=10):
         path.parent.mkdir(parents=True, exist_ok=True)
         assert previous["federated_sources"][index]["missing"]
         pl.DataFrame({"endpoint": ["nepc"]}).write_csv(path)
@@ -190,12 +184,11 @@ def test_federated_transfer_path_override(tmp_path):
     config["federated_transfer_no_dfci_path"] = str(tmp_path / "external")
     config["federated_figure_data_path"] = str(tmp_path / "aggregates")
     sources = prep.prepare(config)["federated_sources"]
-    assert [s["path"] for s in sources[-18:-12]] == [
+    assert [s["path"] for s in sources[-16:-10]] == [
         str(tmp_path / "external" / name) for name in
         ("transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv",
          "transfer_km_patients.csv", "transfer_checklist_patients.csv",
          "transfer_checklist_comparison.csv")]
-    assert {Path(s["path"]).parent for s in sources[-12:-10]} == {tmp_path / "external" / "all_models"}
     assert {Path(s["path"]).parent for s in sources[-10:]} == {tmp_path / "aggregates"}
 
 
@@ -203,10 +196,9 @@ def test_federated_rhino_root_override(tmp_path):
     config = make_config(tmp_path, "federated")
     config["federated"] = True
     config["federated_rhino_root"] = str(tmp_path / "delivery")
-    paths = [Path(s["path"]) for s in prep.prepare(config)["federated_sources"][-18:]]
-    assert {path.parent.name for path in paths} == {"federated_transfer_adt_no_DFCI", "all_models", "figure_data"}
-    assert all((path.parent.parent if path.parent.name != "all_models" else path.parent.parent.parent)
-               == tmp_path / "delivery" for path in paths)
+    paths = [Path(s["path"]) for s in prep.prepare(config)["federated_sources"][-16:]]
+    assert {path.parent.name for path in paths} == {"federated_transfer_adt_no_DFCI", "figure_data"}
+    assert all(path.parent.parent == tmp_path / "delivery" for path in paths)
 
 
 def test_federated_within_site_accepts_legacy_folder(tmp_path):

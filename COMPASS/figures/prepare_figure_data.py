@@ -167,7 +167,6 @@ FEDERATED_TRANSFER_NO_DFCI_FILES = (
 # The same two tables at every landmark x horizon (federated checklist supplement), in a subdirectory.
 FEDERATED_CHECKLIST_GRID_DIR = "checklist_grid"
 FEDERATED_CHECKLIST_GRID_FILES = ("transfer_checklist_patients.csv", "transfer_checklist_comparison.csv")
-FEDERATED_TRANSFER_ALL_MODELS_FILES = ("transfer_metrics.csv", "transfer_auc_t.csv")
 # Federated multivariable exports beside the across-site results CSV
 # (mirrors FEDERATED_MULTIVARIABLE in figure_workflow.R). Each bundle also has
 # a refit without Dana-Farber in "<directory>_no_DFCI".
@@ -227,10 +226,6 @@ FEDERATED_FEATURE_SET_FILES = (
     ("w_DFCI", "federated_xgboost", "xgboost_federated_metrics_adt.csv"),
     *((marker, "predictive_checklists", name)
       for marker in FEDERATED_V2_VARIANT_MARKERS for name in FEDERATED_CHECKLIST_FILES))
-# 04_federated_transfer.ipynb outputs for the feature-set checklist's 5-year patients, and for the
-# regular checklist it is compared with (the feature-set metrics are in all_models/).
-FEDERATED_TRANSFER_FEATURE_SET_FILES = ("transfer_checklist_patients.csv",)
-FEDERATED_TRANSFER_REGULAR_FILES = ("transfer_metrics.csv",)
 
 
 def federated_feature_set_file(federated_path: Path, marker: str, part: str, filename: str) -> Path:
@@ -547,16 +542,10 @@ def prepare(config: dict) -> dict:
                               for directory, name in FEDERATED_V1_FALLBACK_FILES]
         federated_sources += [fingerprint(federated_feature_set_file(federated_path, *item))
             for item in FEDERATED_FEATURE_SET_FILES]
-        federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / "feature_set_checklists" / name)
-            for name in FEDERATED_TRANSFER_FEATURE_SET_FILES]
-        federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / "regular_checklists" / name)
-            for name in FEDERATED_TRANSFER_REGULAR_FILES]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / FEDERATED_CHECKLIST_GRID_DIR / name)
             for name in FEDERATED_CHECKLIST_GRID_FILES]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / name)
             for name in FEDERATED_TRANSFER_NO_DFCI_FILES]
-        federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / "all_models" / name)
-            for name in FEDERATED_TRANSFER_ALL_MODELS_FILES]
         federated_sources += [fingerprint(federated_figure_data_dir(config) / name)
             for name in FEDERATED_FIGURE_DATA_FILES]
         manifest["federated"] = digest({"code": version, "force": manifest["force_version"],

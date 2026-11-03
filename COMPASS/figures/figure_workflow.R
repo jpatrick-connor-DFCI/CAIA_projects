@@ -2300,12 +2300,6 @@ render_federated_figure_data <- function(root, federated_path, figure_data_dir, 
 FEDERATED_FEATURE_SET_ROOT <- "feature_set_models"
 FEDERATED_FEATURE_SET_PARTS <- c(elastic_net="federated_cox",xgboost="federated_xgboost",
   checklist="predictive_checklists")
-FEDERATED_FEATURE_SET_TRANSFER_DIR <- "feature_set_checklists"
-# 04 scores the feature-set checklist into all_models/ (the default) and writes its 5-year patients
-# here; the regular checklist is scored last into regular_checklists/.
-FEDERATED_TRANSFER_FEATURE_SET_FILES <- FEDERATED_CHECKLIST_PATIENTS_FILE
-FEDERATED_REGULAR_TRANSFER_DIR <- "regular_checklists"
-FEDERATED_REGULAR_TRANSFER_FILES <- "transfer_metrics.csv"
 
 federated_feature_set_file <- function(federated_path,part,file,variant="pooled")
   file.path(dirname(federated_path),FEDERATED_FEATURE_SET_ROOT,
@@ -3718,13 +3712,7 @@ figure_notebook_manifest <- function(config, check_sources = TRUE) {
       unlist(lapply(names(FEDERATED_MULTIVARIABLE_VARIANTS),function(variant)
         federated_regular_checklist_files(config$federated_path,variant)),use.names=FALSE),
       federated_feature_set_inputs(config$federated_path),
-      file.path(federated_transfer_no_dfci_dir(config),FEDERATED_FEATURE_SET_TRANSFER_DIR,
-        FEDERATED_TRANSFER_FEATURE_SET_FILES),
-      file.path(federated_transfer_no_dfci_dir(config),FEDERATED_REGULAR_TRANSFER_DIR,
-        FEDERATED_REGULAR_TRANSFER_FILES),
       file.path(federated_transfer_no_dfci_dir(config), FEDERATED_TRANSFER_NO_DFCI_FILES),
-      file.path(federated_transfer_no_dfci_dir(config),"all_models",
-        c("transfer_metrics.csv","transfer_auc_t.csv")),
       file.path(federated_figure_data_dir(config), FEDERATED_FIGURE_DATA_FILES))
     if (!same_path(federated_transfer_no_dfci_dir(prepared), federated_transfer_no_dfci_dir(config)))
       fail("Prepared no-Dana-Farber federated transfer path does not match.")
