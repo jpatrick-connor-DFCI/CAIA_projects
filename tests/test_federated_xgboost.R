@@ -14,6 +14,21 @@ stopifnot(identical(federated_feature_stat(c(
   c("delta missing","n_observations missing","min","missing","")))
 stopifnot(identical(federated_lab_label(c("aPTT_in_Blood_by_Coagulation_assay__max",
   "Lactate_dehydrogenase__Enzymatic_activity_volume__in_Serum_or_Plasma__last")),c("aPTT","LDH")))
+# The three requested models keep their left-to-right order even when the
+# caller supplies factor levels in a different order. Additional series follow.
+local({
+  expected <- c("Cox baseline (age)","Elastic-Net Cox","XGBoost Survival","XGBoost baseline (age)")
+  input <- expand_grid(landmark=c(0,90,180),name=rev(expected)) %>%
+    mutate(name=factor(name,levels=rev(expected)),auc=.7)
+  colors <- FEDERATED_MODEL_COLORS[expected]
+  p <- plot_model_discrimination(input,"auc","AUC",colors,show_legend=TRUE)
+  stopifnot(identical(levels(p$data$name),expected))
+  bars <- ggplot2::ggplot_build(p)$data[[1]]
+  for (landmark in 1:3) {
+    group <- bars[abs(as.numeric(bars$x)-landmark)<.5,]
+    stopifnot(identical(group$fill[order(as.numeric(group$x))],unname(colors)))
+  }
+})
 local({
   root <- tempfile("federated-xgb-",tmpdir="/private/tmp"); dir.create(root)
   on.exit(unlink(root,recursive=TRUE))

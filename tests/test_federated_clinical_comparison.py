@@ -268,11 +268,11 @@ def _checklist_tables():
     scores = pd.DataFrame({
         "person_id": ids, "endpoint": "platinum", "bundle": "fed_checklist",
         "model_family": "predictive_checklist", "config": "both", "landmark_days": 180,
-        "model_horizon_days": 1825, "evaluation_horizon_days": 1825, "risk_score": flag * 2 + 1,
-        "flag": flag, "duration_days": np.where(case, 500.0, 2500.0), "event": 1})
+        "model_horizon_days": 365, "evaluation_horizon_days": 365, "risk_score": flag * 2 + 1,
+        "flag": flag, "duration_days": np.where(case, 200.0, 2500.0), "event": 1})
     other = pd.concat([scores.assign(config="baseline"), scores.assign(landmark_days=90),
-                       scores.assign(model_horizon_days=365, evaluation_horizon_days=365),
-                       scores.assign(evaluation_horizon_days=365),
+                       scores.assign(model_horizon_days=1825, evaluation_horizon_days=1825),
+                       scores.assign(evaluation_horizon_days=1825),
                        scores.assign(model_family="xgboost_cox")], ignore_index=True)
     clinical = pd.DataFrame({
         "person_id": ids, "landmark_days": 180,
@@ -287,9 +287,12 @@ def test_checklist_patients_keep_one_row_per_patient_of_the_figure_model(tmp_pat
     patients = fcc.checklist_patients(scores)
     assert list(patients.columns) == fcc.CHECKLIST_PATIENT_COLUMNS
     assert len(patients) == patients["person_id"].nunique() == 230
+    assert patients["landmark_days"].eq(180).all() and patients["model_horizon_days"].eq(365).all()
     assert set(patients["flag"]) == {0, 1}
     assert patients["flag"].eq(patients["risk_score"].ge(2).astype(int)).all()
     comparison = fcc.checklist_rule_comparison(scores, clinical, n_bootstrap=20)
+    assert comparison["landmark_days"].eq(180).all() and comparison["horizon_days"].eq(365).all()
+    assert fcc.checklist_patients(scores, landmark=180, horizon=1825)["model_horizon_days"].eq(1825).all()
     fcc.write_outputs(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), tmp_path, checklist=patients,
                       checklist_comparison=comparison)
     assert len(pd.read_csv(tmp_path / fcc.CHECKLIST_PATIENTS_FILE)) == 230

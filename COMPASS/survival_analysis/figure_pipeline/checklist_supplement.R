@@ -42,15 +42,14 @@ load_checklist_tables <- function(data_dir) {
 
 # One card's text as a data frame of lines (text, fontface), top to bottom.
 # `cell$n_events_test`, when present, adds the held-out event count.
-checklist_card_lines <- function(cell, items, metrics, horizon_years, model_labels = CHECKLIST_MODEL_LABELS,
-                                 origin = "ADT") {
+checklist_card_lines <- function(cell, items, metrics, horizon_years, model_labels = CHECKLIST_MODEL_LABELS) {
   lines <- list()
   add <- function(text, face = "plain") for (piece in strsplit(text, "\n", fixed = TRUE)[[1L]])
     lines[[length(lines) + 1L]] <<- data.frame(text = piece, face = face,
       metric_model=NA_character_, metric_auc=NA_character_, metric_brier=NA_character_,
       stringsAsFactors = FALSE)
   gap <- function() add(" ")
-  add(sprintf("Landmark %s +%d days", origin, cell$landmark_days), "bold")
+  add(sprintf("Landmark ADT +%d days", cell$landmark_days), "bold")
   gap()
   if (cell$status != "ok") {
     add("No checklist fit", "italic")

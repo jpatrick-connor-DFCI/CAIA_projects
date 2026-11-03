@@ -171,7 +171,7 @@ stopifnot(figure_public_path(file.path("/x/ADT/by_figure/figure4/e_combinations_
           federated_output_path("/x/ADT", "xgboost_importance_no_dfci", ".pdf") ==
             "/x/ADT/04_multivariate/federated/xgboost_importance_no_dfci__platinum.pdf",
           federated_output_path("/x/ADT", "transfer_auc_t_no_dfci") == "/x/ADT/05_transfer_survival/transfer_auc_t_no_dfci__platinum",
-          all(vapply(c("transfer_checklist_items_no_dfci", "transfer_clinical_checklist_metrics",
+          all(vapply(c("transfer_checklist_items_no_dfci",
             "transfer_predictive_checklist_supplement", "transfer_all_models_supplement"),
             function(stem) startsWith(federated_output_path("/x/ADT", stem),
               "/x/ADT/06_transfer_checklists/"), logical(1))),

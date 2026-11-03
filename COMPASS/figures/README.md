@@ -237,6 +237,9 @@ lettered panels without subplot titles, and separate `.md` figure legends in
 `manuscript/data/`. `manuscript/captions/` contains manuscript-ready legends as matching
 `figureN.md` and `figureN.txt` files (`federated_figureN.*` for the federated set). They always include a
 vector PDF on every render. Individual panels are always retained.
+The Figure 2 cohort variants and the local and federated Figure 3 manuscript figures use
+10-inch widths. Figure 4 discrimination bars begin with the age-only Cox baseline,
+followed by elastic-net Cox and XGBoost survival; any additional model series follow.
 
 The mean-only Figure 3, transfer Figure 5 and checklist Figure 6 designs export to
 `manuscript/` within their respective sections:
@@ -273,14 +276,15 @@ height, identifiers, observation counts and missingness indicators). The compani
 feature, including zero-valued features and any identifiers, for audit; and
 `federated_05_transfer_no_dfci` (the XGBoost model trained without Dana-Farber scored on
 Dana-Farber platinum/AVPC/NEPC, in that order: a, mean AUC(t) of the full model at each
-landmark, with facet strips giving day-0 patients and events; b-d, platinum/AVPC/NEPC KM
+landmark on a vertical AUC axis, with facet strips giving day-0 patients and events; b-d, platinum/AVPC/NEPC KM
 curves for the top vs bottom 10% of the day-180 score on the ADT clock; e, 5-year platinum
 probability (1 - KM) from sequencing date +180 days in sequenced patients, by top vs bottom
 10% of the score, Gleason ≤7 vs ≥8, and 0 vs ≥1 of TP53/RB1/PTEN altered. The deciles in e
-are recomputed within sequenced patients) and
-`federated_06_checklist_no_dfci` (the unit-weight 5-year platinum checklist from +180 days,
+are recomputed within sequenced patients; groups lacking an estimable probability or
+patients remain visible and are labeled) and
+`federated_06_checklist_no_dfci` (the unit-weight 1-year platinum checklist from +180 days,
 trained without Dana-Farber: a, checklist items and held-out metrics at the training sites;
-b, 5-year IPCW AUC at Dana-Farber, which equals balanced accuracy for a yes/no rule, of the
+b, 1-year IPCW AUC at Dana-Farber, which equals balanced accuracy for a yes/no rule, of the
 checklist, Gleason ≥8 and any TP53/RB1/PTEN alteration, in the same sequenced patients with
 a Gleason score on the sequencing clock; c-e, platinum/AVPC/NEPC KM curves by checklist
 status from the 180-day landmark on the ADT clock).
@@ -528,23 +532,6 @@ Cox, XGBoost, landmark/dynamic DeepHit and checklist AUC(t) on common DFCI horiz
 Missing optional XGBoost files are reported and skipped independently. Run `05`
 again after this update to register both files (including absent paths), then
 run `COMPASS/figures/all.R` with stage `all`. All Python remains in `05`; graphics caches stay in data.
-
-The transfer notebooks' additional **locally trained** score + Gleason + mutation
-checklists write `clinical_checklists/checklist_{cells,items_long,metrics}.csv`.
-These fit 1-year and 5-year horizons using each frozen no-DFCI Cox/XGBoost score on
-the sequencing clock, Gleason and TP53/RB1/PTEN status. Existing patient splits
-isolate local held-out patients from threshold selection, calibration and censoring
-estimation. When endpoint inputs are absent, the runner uses the existing platinum
-split and records its provenance; target outcomes remain endpoint-specific.
-Each family × endpoint gets a supplemental figure with
-held-out AUC(t) intervals and both horizons' M-of-N cards across landmarks:
-`06_transfer_checklists/transfer_clinical_checklist_<family>_<endpoint>__platinum`.
-The title identifies the evaluated endpoint; `__platinum` follows the source
-federated-model figure convention. These fits are separate from the frozen
-federated-checklist transfer supplement. Missing optional tables skip the figure;
-unsupported cells show their reasons. Rerun 05 after training to refresh the
-registered source fingerprints before rendering Figure 5 or `all.R`.
-
 
 ## Entry points
 

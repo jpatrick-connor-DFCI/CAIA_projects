@@ -811,8 +811,13 @@ parse_feature <- function(name) {
 # held-out metrics and feature gains; these functions never fit or pool models.
 plot_model_discrimination <- function(data, metric, ylabel, colors,
                                      landmarks=c(0,90,180), show_legend=FALSE) {
+  preferred <- c("Cox baseline (age)", "Elastic-Net Cox", "XGBoost Survival")
+  existing <- if (is.factor(data$name)) levels(data$name) else unique(as.character(data$name))
+  existing <- unique(c(existing, as.character(data$name)))
+  series_order <- c(intersect(preferred, existing), setdiff(existing, preferred))
   d <- data %>%
-    transmute(name, baseline = name %in% c("Cox baseline (age)","XGBoost baseline (age)"),
+    transmute(name = factor(as.character(name), levels = series_order),
+      baseline = name %in% c("Cox baseline (age)","XGBoost baseline (age)"),
       landmark = factor(sprintf("%s%d days", ifelse(landmark > 0, "+", ""), landmark),
         levels = sprintf("%s%d days", ifelse(landmarks > 0,"+",""), landmarks)),
       value = .data[[metric]])

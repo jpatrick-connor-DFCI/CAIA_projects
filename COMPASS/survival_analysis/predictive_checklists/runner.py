@@ -224,8 +224,7 @@ def _metrics(frame, endpoint, horizon, censoring, score, flag, probability, conf
                             seed=config.seed)
 
 
-def run_cell(data, endpoint, landmark, population, config, output_dir, *, resume=False,
-             identity_metadata=None):
+def run_cell(data, endpoint, landmark, population, config, output_dir, *, resume=False):
     output_dir.mkdir(parents=True, exist_ok=True)
     frame = data.frame.copy()
     if population == "resolved_nepc":
@@ -236,7 +235,6 @@ def run_cell(data, endpoint, landmark, population, config, output_dir, *, resume
         raise ValueError("Training/test patient overlap")
     identity = dict(endpoint=endpoint, landmark_days=landmark, population=population,
                     arm="adt", cohort="all", exclusion="none", dataset="test")
-    identity.update(identity_metadata or {})
     audit = {"identity": identity, "n_patients": len(frame), "n_train_val": len(train),
              "n_test": len(test), "n_events": int(frame[endpoint.upper()].sum()),
              "low_event_warning": int(frame[endpoint.upper()].sum()) < 50,

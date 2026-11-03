@@ -27,7 +27,7 @@ stopifnot(length(cohort_specs)==2,all(vapply(cohort_specs,`[[`,numeric(1),"heigh
 # Figure 2: one spec per cohort, keyed with a variant suffix.
 stopifnot(identical(spec_keys[startsWith(spec_keys,"02_")],paste0("02_llm_nepc_avpc__",names(FIGURE2_COHORTS))),
   identical(spec_by_key("02_llm_nepc_avpc__adt")$members,figure2v3_stems("adt")),
-  all(vapply(specs[startsWith(spec_keys,"02_")], `[[`, numeric(1), "width")==18),
+  all(vapply(specs[startsWith(spec_keys,"02_")], `[[`, numeric(1), "width")==10),
   identical(figure2v3_variant(c("figure2v3_icd_metric_bar","figure2v3_lm0_enrichment","figure2v3_metric_bar",
     "figure2v3_xyz_enrichment")),c("icd","lm0",NA,NA)),
   identical(figure2v3_panel("figure2v3_lm0_subtype_landscape"),"subtype_landscape"),
@@ -36,8 +36,8 @@ stopifnot(identical(spec_keys[startsWith(spec_keys,"02_")],paste0("02_llm_nepc_a
     "Cohort: ADT-exposed with LLM label (n = 1,234)"),
   identical(manuscript_figure2_header("icd",NULL),"Cohort: ICD-10 prostate cancer with LLM label"))
 dfci_spec <- spec_by_key("03_dfci_univariable")
-stopifnot(dfci_spec$height==8.9,dfci_spec$width==18,
-  spec_by_key("federated_03_univariable")$width==18,identical(dfci_spec$row_heights,c(1.5,.32,1,1)),
+stopifnot(dfci_spec$height==8.9,dfci_spec$width==10,
+  spec_by_key("federated_03_univariable")$width==10,identical(dfci_spec$row_heights,c(1.5,.32,1,1)),
   identical(dfci_spec$shared_legend_panels,1:3),all(dfci_spec$layout[2,]==8),
   identical(manuscript_dfci_volcano_ylim,c(-.2,36)),
   manuscript_dfci_km_landmark==180,
@@ -486,7 +486,7 @@ stopifnot(inherits(fig5_main$plot,"gtable"),length(fig5_main$spec$titles)==5,
     FEDERATED_TRANSFER_GLEASON,FEDERATED_TRANSFER_TRIO_COUNTS)),
   identical(risk$labels$y,"5-year platinum probability"),
   # 1 - KM swaps the interval: the event-free upper bound gives the lower probability bound.
-  all(abs(risk$data$probability-(1-risk$data$event_free))<1e-12),
+  all(abs(risk$data$probability-(1-risk$data$event_free))<1e-12,na.rm=TRUE),
   all(abs(risk$data$probability_lo-(1-risk$data$hi))<1e-12,na.rm=TRUE),
   all(abs(risk$data$probability_hi-(1-risk$data$lo))<1e-12,na.rm=TRUE),
   all(risk$data$probability_lo<=risk$data$probability & risk$data$probability<=risk$data$probability_hi,na.rm=TRUE))
@@ -497,17 +497,17 @@ stopifnot(grepl("sequencing-landmark",clock_error,fixed=TRUE))
 checklist_dir <- tempfile("transfer-checklist-"); dir.create(checklist_dir)
 set.seed(66)
 checklist_patients <- tidyr::expand_grid(endpoint=c("PLATINUM","AVPC","NEPC"),person_id=seq_len(300)) %>%
-  mutate(bundle="predictive_checklist_no_dfci",landmark_days=180,model_horizon_days=1825,
+  mutate(bundle="predictive_checklist_no_dfci",landmark_days=180,model_horizon_days=365,
     risk_score=rep(0:4,length.out=n()),flag=as.integer(risk_score>=2),
     duration_days=rexp(n(),.001*(1+flag)),event=rbinom(n(),1L,.4))
 readr::write_csv(checklist_patients,file.path(checklist_dir,FEDERATED_CHECKLIST_PATIENTS_FILE))
 readr::write_csv(tidyr::expand_grid(endpoint=names(FEDERATED_TRANSFER_ENDPOINTS),rule=names(FEDERATED_CHECKLIST_RULES)) %>%
-  mutate(bundle="predictive_checklist_no_dfci",landmark_days=180,horizon_days=1825,n_patients=400,n_events=30,
+  mutate(bundle="predictive_checklist_no_dfci",landmark_days=180,horizon_days=365,n_patients=400,n_events=30,
     n_positive=120,auc=.6,auc_lo=.52,auc_hi=.68,delta_auc_vs_checklist=if_else(rule=="checklist",0,-.02),
     delta_auc_lo=-.1,delta_auc_hi=.06),file.path(checklist_dir,FEDERATED_CHECKLIST_COMPARISON_FILE))
-checklist_items <- tibble(landmark_days=180,horizon_days=1825,config="both",position=1:5,
+checklist_items <- tibble(landmark_days=180,horizon_days=365,config="both",position=1:5,
   display_item=paste("Lab item",1:5),M=2L,N=5L)
-checklist_metrics <- tibble(landmark_days=180,horizon_days=1825,config=c("both","baseline"),
+checklist_metrics <- tibble(landmark_days=180,horizon_days=365,config=c("both","baseline"),
   model=c("checklist","age_checklist"),status="ok",n=1200,n_cases=90,auc=c(.66,.55),auc_lower=c(.61,.5),
   auc_upper=c(.71,.6),brier=.07,sensitivity=.6,specificity=.7,ppv=.15,npv=.95)
 real_load_federated_checklists <- load_federated_checklists
@@ -521,9 +521,21 @@ checklist_data <- setNames(file.path(checklist_root,FIGURE_SECTIONS[["transfer_c
 stopifnot(all(file.exists(checklist_data)),
   !any(grepl("person_id",unlist(lapply(checklist_data,readLines,n=1L)),fixed=TRUE)),
   identical(as.integer(checklist_tables$items$position),1:5),all(checklist_tables$items$landmark_days==180),
+  all(checklist_tables$items$horizon_days==365),all(checklist_tables$comparison$horizon_days==365),
   all(checklist_tables$summary$view=="checklist"),all(checklist_tables$summary$clock=="adt"),
   setequal(unique(checklist_tables$summary$endpoint),names(FEDERATED_TRANSFER_ENDPOINTS)),
   setequal(checklist_tables$summary$stratum,FEDERATED_CHECKLIST_GROUPS))
+stopifnot(FEDERATED_CHECKLIST_FIGURE$landmark_days==180,
+  FEDERATED_CHECKLIST_FIGURE$horizon_days==365,
+  FEDERATED_FEATURE_SET_FIGURE$horizon_days==1825)
+stale_patient <- tryCatch(validate_federated_checklist_cell(
+  mutate(checklist_patients,model_horizon_days=1825),FEDERATED_CHECKLIST_FIGURE,
+  "model_horizon_days","patients"),error=conditionMessage)
+stale_comparison <- tryCatch(validate_federated_checklist_cell(
+  mutate(checklist_tables$comparison,horizon_days=1825),FEDERATED_CHECKLIST_FIGURE,
+  "horizon_days","comparison"),error=conditionMessage)
+stopifnot(grepl("expected landmark 180 and horizon 365",stale_patient,fixed=TRUE),
+  grepl("expected landmark 180 and horizon 365",stale_comparison,fixed=TRUE))
 # Built from the sidecars, as manuscript_build does.
 fig6 <- manuscript_federated_checklist(lapply(checklist_data,readr::read_csv,show_col_types=FALSE))
 fig6_card <- federated_checklist_card_lines(checklist_tables$items,checklist_tables$metrics)
@@ -531,6 +543,7 @@ stopifnot(fig6$spec$key=="federated_06_checklist_no_dfci",inherits(fig6$plot,"gt
   length(fig6$spec$titles)==5,
   identical(fig6$spec$layout[1,],rep(1:2,each=3L)),identical(fig6$spec$layout[2,],rep(3:5,each=2L)),
   length(fig6$spec$row_heights)==2,fig6$spec$row_heights[2]==MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["km"]],
+  grepl("1-year platinum",fig6$legend,fixed=TRUE),grepl("1-year IPCW AUC",fig6$legend,fixed=TRUE),
   any(grepl("Flag when at least 2 of 5 items",fig6_card$text,fixed=TRUE)),
   sum(startsWith(fig6_card$text,"[ ] "))==5,
   grepl("positive at 2 of 5 items",fig6$legend,fixed=TRUE),
@@ -579,7 +592,7 @@ for(directory in c("all_models",FEDERATED_FEATURE_SET_TRANSFER_DIR)) {
   dir.create(file.path(fs_dir,directory),recursive=TRUE)
   readr::write_csv(fs_transfer,file.path(fs_dir,directory,"transfer_metrics.csv"))
 }
-readr::write_csv(mutate(checklist_patients,bundle="predictive_checklist_feature_set"),
+readr::write_csv(mutate(checklist_patients,bundle="predictive_checklist_feature_set",model_horizon_days=1825),
   file.path(fs_dir,FEDERATED_FEATURE_SET_TRANSFER_DIR,FEDERATED_CHECKLIST_PATIENTS_FILE))
 fs_figure <- function(out) {
   write_federated_feature_set_tables(out,fs_fed,fs_dir)

@@ -617,12 +617,12 @@ def km_patients(clocks: dict, config: str = "both") -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)[KM_PATIENT_COLUMNS]
 
 
-# Federated Figure 6: the frozen 5-year checklist from the +180-day landmark.
+# Federated Figure 6: the frozen 1-year checklist from the +180-day landmark.
 CHECKLIST_PATIENTS_FILE = "transfer_checklist_patients.csv"
 CHECKLIST_COMPARISON_FILE = "transfer_checklist_comparison.csv"
 CHECKLIST_FAMILY = "predictive_checklist"
 CHECKLIST_LANDMARK_DAYS = 180
-CHECKLIST_HORIZON_DAYS = 1825
+CHECKLIST_HORIZON_DAYS = 365
 CHECKLIST_RULE = "checklist"
 GLEASON_HIGH_MIN = 8
 CHECKLIST_PATIENT_COLUMNS = ["endpoint", "bundle", "landmark_days", "model_horizon_days", ID_COL,

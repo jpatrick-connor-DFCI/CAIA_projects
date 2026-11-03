@@ -93,8 +93,7 @@ COMPASS/
     │   ├── multivariate_analysis.py      # ENTRY: elastic-net Cox or XGBoost survival:cox
     │   └── adt_intent_comparison.py      # ENTRY: read-only localized vs metastatic contrast
     ├── federated/
-    │   ├── federated_clinical_comparison.py # 04 clinical comparison and transfer tables
-    │   └── federated_transfer_checklists.py # ENTRY: local checklists on frozen no-DFCI scores
+    │   └── federated_clinical_comparison.py # 04 clinical comparison and transfer tables
     ├── figure_pipeline/
     │   ├── COMPASS_generate_figures_pipeline.R # per-cohort figure-generation implementation
     │   ├── figure_workflow.R             # 07 cached prepare/render, federated + manuscript figures
@@ -1290,43 +1289,6 @@ Brier for both models, and the flag operating point. Held-out metrics are pooled
 over the four sites' test patients; the export has no per-site breakdown. The
 `_items` and `_metrics` CSV sidecars keep exact thresholds and every interval.
 The no-DFCI checklists are shown only in the transfer supplement.
-
-Both transfer notebooks also include a **locally trained supplemental checklist arm**
-(`federated_transfer_checklists.py`). It consumes the sequencing-clock rows of
-`transfer_km_patients.csv` and fits independent 365-day and 1825-day checklists for
-platinum, NEPC and AVPC, separately for each frozen elastic-net Cox/XGBoost score
-and landmark. The five candidate variables are the federated score recomputed
-before sequencing + landmark, pre-landmark Gleason, and TP53/RB1/PTEN any-alteration
-status from the anchoring specimen. No separate age or raw lab variables are added.
-Patients must have sequencing, Gleason and an existing base ADT split; excluded
-counts are audited. Endpoint-specific splits take precedence. When an endpoint's
-input manifest and split file are both absent (for example AVPC), the arm reuses
-the existing platinum split, with its source and fallback reason recorded in the
-run manifest and cohort audits. Outcomes still come from the target endpoint's
-transfer export; no AVPC preprocessing run is required for this fallback. Partial
-or invalid existing inputs raise an error. The split is shared across landmarks.
-Checklist thresholds, size selection, probability calibration and IPCW censoring
-weights use local development patients only. Performance is measured on local
-held-out patients, so it is distinct from frozen-model external validation.
-
-```bash
-python -m COMPASS.survival_analysis.federated.federated_transfer_checklists \
-  --transfer-dir "$RHINO/federated_transfer_adt_no_DFCI" \
-  --inputs-root /data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis \
-  --resume
-```
-
-`clinical_checklists/` contains per-family/endpoint/landmark/horizon portable models,
-readable M-of-N rules, patient predictions, CV diagnostics, metrics and aggregate
-`checklist_{cells,items_long,metrics}.csv` figure tables. Unsupported fits retain
-statuses/reasons. Resume verifies code/config/input fingerprints; `--overwrite`
-archives prior outputs. Rerun 05 to register these optional tables, then Figure 5's
-R entry point or `COMPASS/figures/all.R` to render
-`06_transfer_checklists/transfer_clinical_checklist_<family>_<endpoint>__platinum.pdf`:
-held-out AUC(t) with 95% intervals and 1-/5-year checklist cards. The trailing
-`__platinum` denotes the federated source-model workflow; the evaluated endpoint is
-in the stem and title. These are independent horizon risks, with death censored;
-the fitted horizons are not interpolated into survival curves.
 
 Three resolution rules apply:
 
