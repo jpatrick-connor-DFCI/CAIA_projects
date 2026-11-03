@@ -112,7 +112,8 @@ federated_output_path <- function(arm_root, stem, extension = "") {
 MANUSCRIPT_SECTIONS <- c(`01_cohort_overview` = "cohort", `02_llm_nepc_avpc` = "llm",
   `03_cohort_sensitivity_supplement` = "cohort_sensitivity",
   federated_03_univariable = "univariate_federated", federated_04_multivariable = "multivariate_federated",
-  federated_05_transfer_no_dfci = "transfer", federated_06_checklist_no_dfci = "transfer_checklists")
+  federated_05_transfer_no_dfci = "transfer", federated_06_checklist_no_dfci = "transfer_checklists",
+  federated_06_checklist_guideline_no_dfci = "transfer_checklists")
 manuscript_base_key <- function(key) sub("__.*$", "", key)
 manuscript_folder <- function(arm_root, key) {
   base <- manuscript_base_key(key)
@@ -409,6 +410,8 @@ manuscript_renders_plan <- function() {
     supplement=c("federated_04_multivariable__full_features","federated_05_transfer_no_dfci__no_d"))
   grid <- vapply(seq_len(nrow(FEDERATED_CHECKLIST_GRID)),function(i) federated_checklist_grid_key(
     federated_checklist_cell(FEDERATED_CHECKLIST_GRID$landmark_days[i],FEDERATED_CHECKLIST_GRID$horizon_days[i])),character(1))
+  guideline <- vapply(seq_len(nrow(FEDERATED_CHECKLIST_GRID)),function(i) federated_guideline_grid_key(
+    federated_checklist_cell(FEDERATED_CHECKLIST_GRID$landmark_days[i],FEDERATED_CHECKLIST_GRID$horizon_days[i])),character(1))
   plan <- rbind(
     data.frame(source=vapply(keys$main,manuscript,character(1)),
       target=file.path("main",paste0(keys$main,".pdf"))),
@@ -417,7 +420,9 @@ manuscript_renders_plan <- function() {
     data.frame(source=vapply(keys$supplement,manuscript,character(1)),
       target=file.path("supplement",paste0(keys$supplement,".pdf"))),
     data.frame(source=vapply(grid,manuscript,character(1)),
-      target=file.path("supplement","federated_checklist_transfer",paste0(grid,".pdf"))))
+      target=file.path("supplement","federated_checklist_transfer",paste0(grid,".pdf"))),
+    data.frame(source=vapply(guideline,manuscript,character(1)),
+      target=file.path("supplement",FEDERATED_GUIDELINE_SUPPLEMENT_DIR,paste0(guideline,".pdf"))))
   rownames(plan) <- NULL
   plan
 }
@@ -1950,6 +1955,17 @@ federated_checklist_cell_suffix <- function(f) sprintf("_lm%d_h%d",as.integer(f$
 federated_checklist_grid_key <- function(f)
   paste0("federated_06_checklist_no_dfci",sub("^_","__",federated_checklist_cell_suffix(f)))
 FEDERATED_CHECKLIST_RULES <- c(checklist="Checklist positive",gleason="Gleason ≥8",tsg="≥1 TSG altered")
+# Generalized (guideline) version of the grid: the same checklists with item thresholds rounded to practical
+# values (04 writes checklist_grid_guidelines/, with the rounded items beside the patient and comparison tables).
+# Its table stems and figure keys carry "guideline"; the PDFs are copied to the generalized supplement folder.
+FEDERATED_GUIDELINE_GRID_DIR <- "checklist_grid_guidelines"
+FEDERATED_GUIDELINE_ITEMS_FILE <- "transfer_checklist_guideline_items.csv"
+FEDERATED_GUIDELINE_TABLES <- c(items="transfer_checklist_items_guideline_no_dfci",
+  comparison="transfer_checklist_comparison_guideline_no_dfci",
+  curves="transfer_checklist_km_curves_guideline_no_dfci",summary="transfer_checklist_km_summary_guideline_no_dfci")
+FEDERATED_GUIDELINE_SUPPLEMENT_DIR <- "generalized_federated_checklist_transfer"
+federated_guideline_grid_key <- function(f)
+  paste0("federated_06_checklist_guideline_no_dfci",sub("^_","__",federated_checklist_cell_suffix(f)))
 
 load_federated_checklist_patients <- function(directory) {
   path <- file.path(directory,FEDERATED_CHECKLIST_PATIENTS_FILE)
@@ -1985,6 +2001,23 @@ load_federated_checklist_comparison <- function(directory) {
   filter(mutate(d,endpoint=tolower(endpoint)),endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS))
 }
 
+# The guideline checklist's items (thresholds already rounded by 04), in the layout of the exported items.
+load_federated_guideline_items <- function(directory) {
+  path <- file.path(directory,FEDERATED_GUIDELINE_ITEMS_FILE)
+  if(!file.exists(path)) {
+    warning("Federated guideline checklist items unavailable; missing: ",path)
+    return(NULL)
+  }
+  d <- readr::read_csv(path,show_col_types=FALSE)
+  needed <- c("landmark_days","horizon_days","config","position","feature","op","threshold_value","M","N")
+  missing <- setdiff(needed,names(d))
+  if(length(missing)) stop("Federated guideline checklist items are missing: ",paste(missing,collapse=", "))
+  d <- dplyr::filter(d,config=="both")
+  if(anyDuplicated(d[c("landmark_days","horizon_days","position")]))
+    stop("Duplicate landmark/horizon/position rows in ",path)
+  dplyr::mutate(d,display_item=federated_checklist_item_label(feature,op,threshold_value))
+}
+
 # KM curves and counts by checklist status for each endpoint, shaped like
 # federated_transfer_km_tables so plot_federated_transfer_km can draw them.
 federated_checklist_km_tables <- function(patients, f=FEDERATED_CHECKLIST_FIGURE) {
@@ -2009,12 +2042,15 @@ validate_federated_checklist_cell <- function(d, f, horizon_column, filename) {
 # Empty tables are not written, so Figure 6 is skipped rather than half drawn.
 # `grid` selects one cell of the checklist_grid/ tables; their stems then carry the cell.
 write_federated_checklist_tables <- function(root, federated_path, directory, f=FEDERATED_CHECKLIST_FIGURE,
-                                             grid=FALSE) {
+                                             grid=FALSE, guideline=FALSE) {
   suffix <- if(grid) federated_checklist_cell_suffix(f) else ""
-  checklists <- load_federated_checklists(federated_path,"no_dfci")
+  # The guideline version has no held-out training-site metrics: only its rounded items, and Dana-Farber rows.
+  checklists <- if(guideline) NULL else load_federated_checklists(federated_path,"no_dfci")
+  guideline_items <- if(guideline) load_federated_guideline_items(directory) else NULL
   patients <- load_federated_checklist_patients(directory)
   comparison <- load_federated_checklist_comparison(directory)
-  if(is.null(checklists) || is.null(patients) || is.null(comparison)) return(invisible(NULL))
+  if((if(guideline) is.null(guideline_items) else is.null(checklists)) || is.null(patients) || is.null(comparison))
+    return(invisible(NULL))
   if(grid) {
     patients <- dplyr::filter(patients,landmark_days==f$landmark_days,model_horizon_days==f$horizon_days)
     comparison <- dplyr::filter(comparison,landmark_days==f$landmark_days,horizon_days==f$horizon_days)
@@ -2026,7 +2062,7 @@ write_federated_checklist_tables <- function(root, federated_path, directory, f=
   validate_federated_checklist_cell(patients,f,"model_horizon_days",FEDERATED_CHECKLIST_PATIENTS_FILE)
   validate_federated_checklist_cell(comparison,f,"horizon_days",FEDERATED_CHECKLIST_COMPARISON_FILE)
   cell <- function(d) dplyr::filter(d,landmark_days==f$landmark_days,horizon_days==f$horizon_days)
-  items <- dplyr::arrange(dplyr::filter(cell(checklists$items),config==f$config),position)
+  items <- dplyr::arrange(dplyr::filter(cell(if(guideline) guideline_items else checklists$items),config==f$config),position)
   if(!nrow(items)) {
     warning("No federated no-DFCI checklist at landmark ",f$landmark_days,", horizon ",f$horizon_days)
     return(invisible(NULL))
@@ -2036,10 +2072,11 @@ write_federated_checklist_tables <- function(root, federated_path, directory, f=
   if(any(patients$flag!=(patients$risk_score>=items$M[1L])))
     stop("Patients in ",FEDERATED_CHECKLIST_PATIENTS_FILE," were not flagged by the exported ",
       items$M[1L],"-of-",items$N[1L]," checklist")
-  tables <- c(list(items=items,metrics=cell(checklists$metrics),comparison=comparison),
+  tables <- c(list(items=items,metrics=if(guideline) NULL else cell(checklists$metrics),comparison=comparison),
     federated_checklist_km_tables(patients,f))
-  for(name in names(FEDERATED_CHECKLIST_TABLES)) if(nrow(tables[[name]]))
-    write_federated_transfer_table(root,tables[[name]],paste0(FEDERATED_CHECKLIST_TABLES[[name]],suffix))
+  stems <- if(guideline) FEDERATED_GUIDELINE_TABLES else FEDERATED_CHECKLIST_TABLES
+  for(name in names(stems)) if(nrow(tables[[name]]))
+    write_federated_transfer_table(root,tables[[name]],paste0(stems[[name]],suffix))
   invisible(tables)
 }
 
@@ -2051,15 +2088,29 @@ write_federated_checklist_grid_tables <- function(root, federated_path, director
       grid=TRUE)
 }
 
+write_federated_checklist_guideline_tables <- function(root, federated_path, directory) {
+  grid_directory <- file.path(directory,FEDERATED_GUIDELINE_GRID_DIR)
+  for(i in seq_len(nrow(FEDERATED_CHECKLIST_GRID)))
+    write_federated_checklist_tables(root,federated_path,grid_directory,
+      federated_checklist_cell(FEDERATED_CHECKLIST_GRID$landmark_days[i],FEDERATED_CHECKLIST_GRID$horizon_days[i]),
+      grid=TRUE,guideline=TRUE)
+}
+
 # Text lines of the Figure 6a card; `y` needs the panel height, so it is left to the caller.
-federated_checklist_card_lines <- function(items, metrics, f=FEDERATED_CHECKLIST_FIGURE) {
+# The guideline card stops before the held-out block: the rounded checklist has no training-site metrics.
+federated_checklist_card_lines <- function(items, metrics, f=FEDERATED_CHECKLIST_FIGURE, guideline=FALSE) {
   full <- dplyr::filter(metrics,model=="checklist")
-  cell <- data.frame(landmark_days=f$landmark_days,status=if(identical(full$status,"ok")) "ok" else "missing",
+  cell <- data.frame(landmark_days=f$landmark_days,status=if(guideline || identical(full$status,"ok")) "ok" else "missing",
     reason=if(nrow(full)) paste("export status",full$status) else "No checklist exported",
     threshold=items$M[1L],n_items=nrow(items),n_test=if(nrow(full)) full$n[1L] else NA,
     n_events_test=if(nrow(full)) full$n_cases[1L] else NA)
-  checklist_card_lines(cell,dplyr::transmute(items,item_order=position,name=display_item),
+  lines <- checklist_card_lines(cell,dplyr::transmute(items,item_order=position,name=display_item),
     metrics,round(f$horizon_days/365),FEDERATED_CHECKLIST_MODELS)
+  if(guideline) {
+    held_out <- grep("^Held-out test",lines$text)
+    if(length(held_out)) lines <- lines[seq_len(held_out[1L]-1L),,drop=FALSE]
+  }
+  lines
 }
 
 # Each yes/no rule's horizon AUC (its IPCW balanced accuracy) per endpoint.
@@ -2341,6 +2392,7 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
       render_federated_transfer_km(root, transfer_no_dfci_dir, dpi, overwrite)
       write_federated_checklist_tables(root, federated_path, transfer_no_dfci_dir)
       write_federated_checklist_grid_tables(root, federated_path, transfer_no_dfci_dir)
+      write_federated_checklist_guideline_tables(root, federated_path, transfer_no_dfci_dir)
     }
   }
   invisible(d)
@@ -2470,6 +2522,18 @@ manuscript_checklist_caption <- function(f=FEDERATED_CHECKLIST_FIGURE) {
   gsub("180 days",sprintf("%d days",as.integer(f$landmark_days)),caption,fixed=TRUE)
 }
 
+# Guideline version of a grid caption: same text, with the rounded-threshold description in place of the metrics clause.
+manuscript_guideline_caption <- function(f=FEDERATED_CHECKLIST_FIGURE) {
+  caption <- manuscript_checklist_caption(f)
+  caption <- sub("^Federated Figure 6\\.|^Federated checklist transfer supplement\\.",
+    "Generalized federated checklist transfer supplement.",caption)
+  caption <- sub("Items and threshold of a unit-weight","Items of a unit-weight",caption,fixed=TRUE)
+  sub(paste0(", and metrics are from those sites' held-out test patients. "),
+    paste0(", with item thresholds rounded for use in practice (below 1 to the nearest quarter, single digits to the nearest ",
+      "whole number, tens to the nearest 5, hundreds to the nearest 10, thousands to the nearest 100, and so on); item selection ",
+      "and the M-of-N rule are those of the exact checklist and no held-out training-site metrics are shown. "),caption,fixed=TRUE)
+}
+
 manuscript_checklist_caption_text <- function() paste(c(
   "Federated Figure 6. A federated 1-year platinum checklist from 180 days after ADT initiation, trained without Dana-Farber and validated at Dana-Farber.",
   paste0("(a) Items and threshold of a unit-weight M-of-N predictive checklist (feature-set refit: missingness indicators and observation counts adjusted the fit but cannot be items) trained for 1-year platinum treatment from the 180-day landmark on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data; patients are checklist positive when at least M of the N items are checked, and metrics are from those sites' held-out test patients. ",
@@ -2500,6 +2564,8 @@ manuscript_captions <- function() {
     FEDERATED_CHECKLIST_GRID$landmark_days[i],FEDERATED_CHECKLIST_GRID$horizon_days[i]))
   grid_captions <- setNames(vapply(cells,manuscript_checklist_caption,character(1)),
     vapply(cells,federated_checklist_grid_key,character(1)))
+  guideline_captions <- setNames(vapply(cells,manuscript_guideline_caption,character(1)),
+    vapply(cells,federated_guideline_grid_key,character(1)))
   c(
     `01_cohort_overview`=caption(
       "Figure 1. Cohort assembly, follow-up, and platinum treatment after androgen-deprivation therapy.",
@@ -2535,7 +2601,8 @@ manuscript_captions <- function() {
       fixed=TRUE), fixed=TRUE),
     federated_05_transfer_no_dfci__no_d=manuscript_transfer_caption(no_d=TRUE,km_panels=FALSE),
     federated_06_checklist_no_dfci=manuscript_checklist_caption(),
-    grid_captions
+    grid_captions,
+    guideline_captions
   )
 }
 
@@ -3103,9 +3170,11 @@ manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRAN
 
 # Federated Figure 6: the checklist and its accuracy against Gleason and TSG
 # status above KM curves by checklist status for platinum, AVPC and NEPC.
-manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no_dfci",f=FEDERATED_CHECKLIST_FIGURE) {
+manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no_dfci",f=FEDERATED_CHECKLIST_FIGURE,
+                                           guideline=FALSE) {
   landmark <- as.integer(f$landmark_days)
-  lines <- federated_checklist_card_lines(tables$items,tables$metrics,f)
+  if(guideline && is.null(tables$metrics)) tables$metrics <- tibble::tibble(model=character())
+  lines <- federated_checklist_card_lines(tables$items,tables$metrics,f,guideline)
   line_in <- .17
   card_in <- line_in*(nrow(lines)+1.5)
   lines$y <- 1-.02-(seq_len(nrow(lines))-1L)*line_in/card_in
@@ -3118,7 +3187,8 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
   rows <- tables$comparison %>% arrange(match(endpoint,names(FEDERATED_TRANSFER_ENDPOINTS)),
     match(rule,names(FEDERATED_CHECKLIST_RULES)))
   legend <- c(
-    sprintf("a: unit-weight federated checklist for %s platinum from the %d-day ADT landmark, trained without Dana-Farber; positive at %s. Metrics are from held-out test patients at the training sites.",federated_transfer_horizon_label(f$horizon_days),landmark,rule),
+    sprintf("a: unit-weight federated checklist for %s platinum from the %d-day ADT landmark, trained without Dana-Farber; positive at %s.%s",federated_transfer_horizon_label(f$horizon_days),landmark,rule,
+      if(guideline) " Item thresholds are rounded to guideline values; item selection and the rule are unchanged." else " Metrics are from held-out test patients at the training sites."),
     paste0("b: ",federated_transfer_horizon_label(f$horizon_days)," IPCW AUC (equal to balanced accuracy for a yes/no rule) at Dana-Farber in the same sequenced patients with a Gleason score, on the sequencing clock. Rule, n positive, AUC (95% CI), and difference from the checklist (95% CI): ",
       paste0(sprintf("%s %s %s, %.2f (%.2f-%.2f)",FEDERATED_TRANSFER_ENDPOINTS_SHORT[rows$endpoint],
         FEDERATED_CHECKLIST_RULES[rows$rule],scales::comma(rows$n_positive),rows$auc,rows$auc_lo,rows$auc_hi),
@@ -3301,6 +3371,13 @@ manuscript_build <- function(items,tables,root) {
         federated_checklist_cell_suffix(f)))]] <- manuscript_federated_checklist(grid,federated_checklist_grid_key(f),f)
       else message("Skipping federated checklist transfer landmark ",f$landmark_days,", horizon ",f$horizon_days,
         ": missing tables")
+      guideline <- lapply(FEDERATED_GUIDELINE_TABLES,function(stem)
+        read(paste0("^",stem,federated_checklist_cell_suffix(f),"__platinum[.]csv$")))
+      if(all(!vapply(guideline,is.null,logical(1)))) result[[paste0("federated_06_guideline",sub("^_","__",
+        federated_checklist_cell_suffix(f)))]] <- manuscript_federated_checklist(guideline,federated_guideline_grid_key(f),f,
+        guideline=TRUE)
+      else message("Skipping generalized federated checklist transfer landmark ",f$landmark_days,", horizon ",
+        f$horizon_days,": missing tables")
     }
   }
   result

@@ -47,6 +47,8 @@ landmark, and the anchoring specimen defines membership at every landmark.
 """
 
 from __future__ import annotations
+import copy
+import math
 
 import sys
 import warnings
@@ -709,6 +711,80 @@ def checklist_grid(scores, scores_seq, clinical_seq, n_bootstrap=200, seed=0, la
     if not patients:
         raise ValueError("no checklist scores at any landmark and horizon")
     return (pd.concat(patients, ignore_index=True), pd.concat(comparison, ignore_index=True))
+
+
+# Guideline checklists: the frozen checklist with every item threshold rounded to a value a clinician can apply
+# without a calculator. Item selection, unit weights, the M-of-N rule and the calibrator are unchanged.
+GUIDELINE_SUFFIX = "_guideline"
+GUIDELINE_GRID_DIR = "checklist_grid_guidelines"
+GUIDELINE_ITEMS_FILE = "transfer_checklist_guideline_items.csv"
+GUIDELINE_ITEM_COLUMNS = ["landmark_days", "horizon_days", "config", "position", "feature", "op",
+                          "threshold_value", "threshold_exact", "M", "N"]
+
+
+def guideline_threshold(value) -> float:
+    """Round a checklist threshold by magnitude, to the nearest step (halves round away from zero).
+
+    |x| < 1: quarter (0.25, 0.5, 0.75); 1 <= |x| < 10: whole number; tens: multiple of 5;
+    hundreds: multiple of 10; thousands: multiple of 100; each further decade multiplies the step by 10.
+    The sign is kept, so a negative threshold rounds by its magnitude.
+    """
+    x = float(value)
+    if not math.isfinite(x):
+        raise ValueError(f"cannot round a non-finite threshold: {value!r}")
+    a = abs(x)
+    if a < 1:
+        step = 0.25
+    elif a < 10:
+        step = 1.0
+    else:
+        decade = int(math.floor(math.log10(a)))   # 1 = tens, 2 = hundreds, 3 = thousands
+        step = 5.0 if decade == 1 else 10.0 ** (decade - 1)
+    rounded = math.floor(a / step + 0.5) * step
+    return math.copysign(rounded, x) if rounded else 0.0
+
+
+def guideline_bundle(bundle: dict) -> dict:
+    """Copy of a predictive-checklist bundle with every item threshold passed through `guideline_threshold`."""
+    if bundle.get("model_family") != CHECKLIST_FAMILY:
+        raise ValueError(f"guideline rounding applies to {CHECKLIST_FAMILY} bundles, not {bundle.get('model_family')!r}")
+    out = copy.deepcopy(bundle)
+    for model in out["models"]:
+        for item in model["checklist"]["binarizer"]["items"]:
+            if item["op"] != "is_missing":
+                item["threshold"] = guideline_threshold(item["threshold"])
+    return out
+
+
+def guideline_items(bundle: dict, original: dict | None = None) -> pd.DataFrame:
+    """The selected items of each checklist model in the layout of the exported checklist items table.
+
+    `bundle` is the guideline bundle; `original` (the unrounded bundle) adds the exact threshold beside it.
+    """
+    rows = []
+    for k, model in enumerate(bundle["models"]):
+        payload = model["checklist"]
+        items = payload["binarizer"]["items"]
+        selected = payload["model"]["selected_indices"]
+        exact = original["models"][k]["checklist"]["binarizer"]["items"] if original is not None else None
+        for position, index in enumerate(selected, start=1):
+            item = items[index]
+            rows.append({"landmark_days": int(model["landmark_days"]), "horizon_days": model.get("horizon_days"),
+                         "config": model.get("config"), "position": position, "feature": item["feature"],
+                         "op": item["op"], "threshold_value": item["threshold"],
+                         "threshold_exact": exact[index]["threshold"] if exact is not None else None,
+                         "M": int(payload["model"]["threshold"]), "N": len(selected)})
+    return pd.DataFrame(rows, columns=GUIDELINE_ITEM_COLUMNS)
+
+
+def write_guideline_grid(patients, comparison, items, out_dir) -> None:
+    """The guideline Figure 6 tables (every landmark × horizon) plus the rounded item thresholds."""
+    out_dir = Path(out_dir) / GUIDELINE_GRID_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    patients.to_csv(out_dir / CHECKLIST_PATIENTS_FILE, index=False)
+    comparison.to_csv(out_dir / CHECKLIST_COMPARISON_FILE, index=False)
+    items.to_csv(out_dir / GUIDELINE_ITEMS_FILE, index=False)
+    print(f"wrote guideline checklist grid -> {out_dir}")
 
 
 def write_checklist_grid(patients, comparison, out_dir) -> None:

@@ -541,10 +541,15 @@ stopifnot(length(list.files(file.path(grid_root,FIGURE_SECTIONS[["transfer_check
     manuscript_folder("root","federated_06_checklist_no_dfci")))
 # manuscript_renders/: main, supplement, and one checklist figure per landmark x horizon.
 renders_plan <- manuscript_renders_plan()
-stopifnot(nrow(renders_plan)==5L+1L+2L+6L,!anyDuplicated(renders_plan$target),
-  setequal(dirname(renders_plan$target),c("main","supplement",file.path("supplement","federated_checklist_transfer"))),
+stopifnot(nrow(renders_plan)==5L+1L+2L+6L+6L,!anyDuplicated(renders_plan$target),
+  setequal(dirname(renders_plan$target),c("main","supplement",file.path("supplement","federated_checklist_transfer"),
+    file.path("supplement","generalized_federated_checklist_transfer"))),
   sum(dirname(renders_plan$target)=="main")==5L,
   sum(dirname(renders_plan$target)==file.path("supplement","federated_checklist_transfer"))==6L,
+  sum(dirname(renders_plan$target)==file.path("supplement","generalized_federated_checklist_transfer"))==6L,
+  "supplement/generalized_federated_checklist_transfer/federated_06_checklist_guideline_no_dfci__lm0_h1825.pdf" %in% renders_plan$target,
+  identical(manuscript_folder("root","federated_06_checklist_guideline_no_dfci__lm0_h365"),
+    manuscript_folder("root","federated_06_checklist_no_dfci")),
   "main/federated_05_transfer_no_dfci__top_bottom_20_all_endpoints.pdf" %in% renders_plan$target,
   "supplement/federated_checklist_transfer/federated_06_checklist_no_dfci__lm0_h1825.pdf" %in% renders_plan$target,
   all(renders_plan$source %in% readLines("COMPASS/figures/retained_exports.txt")))

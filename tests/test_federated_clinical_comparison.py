@@ -416,3 +416,55 @@ def test_compare_by_subpopulation_scores_each_arm_on_its_own_inputs():
         got = comp[comp["subpopulation"] == sub].reset_index(drop=True)
         pd.testing.assert_frame_equal(got, expected.reset_index(drop=True))
 
+
+
+@pytest.mark.parametrize("value,expected", [
+    (0.3, 0.25), (0.6, 0.5), (0.9, 1.0), (0.1, 0.0), (1.4, 1.0), (9.4, 9.0), (9.6, 10.0),
+    (13.2, 15.0), (22.4, 20.0), (67.0, 65.0), (148.0, 150.0), (1234.0, 1200.0), (15250.0, 15000.0),
+    (-0.6, -0.5), (-13.2, -15.0)])
+def test_guideline_threshold_rounds_by_magnitude(value, expected):
+    assert fcc.guideline_threshold(value) == expected
+
+
+def test_guideline_threshold_rejects_non_finite():
+    with pytest.raises(ValueError, match="non-finite"):
+        fcc.guideline_threshold(float("nan"))
+
+
+def _checklist_bundle():
+    items = [{"feature": "age_at_anchor", "op": ">=", "threshold": 67.3, "group": "age"},
+             {"feature": "ALB_mean", "op": "<=", "threshold": 3.84, "group": "lab"},
+             {"feature": "PSA_max", "op": ">=", "threshold": 0.37, "group": "lab"},
+             {"feature": "ALB_mean", "op": "is_missing", "threshold": None, "group": "lab"}]
+    model = {"landmark_days": 180, "horizon_days": 365, "config": "both", "checklist": {
+        "schema_version": 1, "binarizer": {"items": items},
+        "model": {"selected_indices": [2, 0, 1], "threshold": 2}}}
+    return {"model_family": "predictive_checklist", "models": [model]}
+
+
+def test_guideline_bundle_rounds_thresholds_without_touching_the_original():
+    bundle = _checklist_bundle()
+    rounded = fcc.guideline_bundle(bundle)
+    items = rounded["models"][0]["checklist"]["binarizer"]["items"]
+    assert [i["threshold"] for i in items] == [65.0, 4.0, 0.25, None]
+    assert bundle["models"][0]["checklist"]["binarizer"]["items"][0]["threshold"] == 67.3
+    assert rounded["models"][0]["checklist"]["model"] == bundle["models"][0]["checklist"]["model"]
+    with pytest.raises(ValueError, match="predictive_checklist"):
+        fcc.guideline_bundle({"model_family": "xgboost_cox", "models": []})
+
+
+def test_guideline_items_follow_selection_order_and_write_the_grid(tmp_path):
+    bundle = _checklist_bundle()
+    table = fcc.guideline_items(fcc.guideline_bundle(bundle), bundle)
+    assert list(table.columns) == fcc.GUIDELINE_ITEM_COLUMNS
+    assert table["feature"].tolist() == ["PSA_max", "age_at_anchor", "ALB_mean"]
+    assert table["threshold_value"].tolist() == [0.25, 65.0, 4.0]
+    assert table["threshold_exact"].tolist() == [0.37, 67.3, 3.84]
+    assert set(table["M"]) == {2} and set(table["N"]) == {3} and table["position"].tolist() == [1, 2, 3]
+    scores, clinical = _checklist_tables()
+    patients, comparison = fcc.checklist_grid(scores, scores, clinical, n_bootstrap=20,
+                                              landmarks=(180,), horizons=(365,))
+    fcc.write_guideline_grid(patients, comparison, table, tmp_path)
+    grid = tmp_path / fcc.GUIDELINE_GRID_DIR
+    assert sorted(p.name for p in grid.iterdir()) == sorted(
+        [fcc.CHECKLIST_PATIENTS_FILE, fcc.CHECKLIST_COMPARISON_FILE, fcc.GUIDELINE_ITEMS_FILE])

@@ -114,6 +114,8 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     no_dfci_dir = rhino / "federated_transfer_adt_no_DFCI"
     feature_set_paths += [no_dfci_dir / prep.FEDERATED_CHECKLIST_GRID_DIR / name
                           for name in prep.FEDERATED_CHECKLIST_GRID_FILES]
+    feature_set_paths += [no_dfci_dir / prep.FEDERATED_GUIDELINE_GRID_DIR / name
+                          for name in prep.FEDERATED_GUIDELINE_GRID_FILES]
     no_dfci_paths = [no_dfci_dir / name for name in
                      ("transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv",
                       "transfer_km_patients.csv", "transfer_checklist_patients.csv",
