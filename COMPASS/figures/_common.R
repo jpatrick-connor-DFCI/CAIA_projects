@@ -88,6 +88,7 @@ figure_config <- list(
   metastatic = PLOT_METASTATIC_LABEL_SUPPLEMENT, metastatic_extra = metastatic_extra_panels_enabled(),
   metastatic_sources = METASTATIC_SUPPLEMENT[c("intent", "stage", "llm", "icd")],
   federated = PLOT_FEDERATED_SUPPLEMENT,
+  internal = env_flag("COMPASS_INTERNAL_FIGURES"),
   federated_path = FEDERATED_SUPPLEMENT$results,
   federated_transfer_no_dfci_path = FEDERATED_SUPPLEMENT$transfer_no_dfci,
   federated_figure_data_path = FEDERATED_SUPPLEMENT$figure_data,

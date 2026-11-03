@@ -95,6 +95,16 @@ local({
   }
   m <- prepare_figure_scenes(directory, "source-v1", build)
   stopifnot(builds == 1L, length(m$scenes) == 1L, file.size(m$scenes[[1]]$path) < 1000000)
+  toggle_build <- function() {
+    plot <- ggplot(data.frame(x = 1, y = 1), aes(x, y)) + geom_point()
+    for (section in c("03_univariate/internal", "04_multivariate/internal", "03_univariate/federated"))
+      getOption("compass.figure_capture")(plot, file.path(root, "ADT", section, "panel"), 4, 3, "toggle")
+  }
+  hidden <- prepare_figure_scenes(file.path(root, "toggle-off"), "off", toggle_build, include_internal = FALSE)
+  shown <- prepare_figure_scenes(file.path(root, "toggle-on"), "on", toggle_build, include_internal = TRUE)
+  stopifnot(length(hidden$scenes) == 1L, length(shown$scenes) == 3L,
+            !figure_internal_path(hidden$scenes[[1]]$destination),
+            sum(vapply(shown$scenes, function(s) figure_internal_path(s$destination), logical(1))) == 2L)
   prepare_figure_scenes(directory, "source-v1", build)
   stopifnot(builds == 1L)
   clear_read_cache()

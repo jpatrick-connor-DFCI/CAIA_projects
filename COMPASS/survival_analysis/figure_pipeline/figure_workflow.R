@@ -34,6 +34,7 @@ FIGURE_SECTIONS <- c(cohort = "01_cohort", llm = "02_llm",
   multivariate_internal = "04_multivariate/internal", multivariate_federated = "04_multivariate/federated",
   transfer = "05_transfer_survival", transfer_checklists = "06_transfer_checklists", cohort_sensitivity = "03_univariate/cohort_sensitivity")
 FIGURE_CANONICAL_COHORT <- "all__incl"
+figure_internal_path <- function(path) grepl("/(03_univariate|04_multivariate)/internal(/|$)", path)
 # Pre-restructure top-level folders, archived once their job re-renders.
 FIGURE_RETIRED_FOLDERS <- c("cohort", "labels", "associations", "prediction",
   "trajectories", "federated", "compiled", "manuscript figures", "06_cohort_sensitivity", "05_transfer")
@@ -597,6 +598,7 @@ figure_archive_old_exports <- function(config, prepared) {
   # re-rendered figure are archived with the rest.
   for(destination in destinations) paths <- c(paths,Filter(file.exists,paste0(destination,c(".png",".svg"))))
   paths <- unique(paths)
+  if (!isTRUE(config$internal)) paths <- paths[!figure_internal_path(paths)]
   archive <- tempfile("export-",tmpdir=file.path(config$cache_root,"previous_exports"))
   for(path in paths) {
     target <- file.path(archive,substring(path,nchar(config$fig_root)+2))
@@ -2886,7 +2888,7 @@ manuscript_specs <- function() {
       c(MANUSCRIPT_COHORT_TITLES,"Data availability (DFCI)"))),
     # Figure 2 per cohort; manuscript_build adds the cohort header.
     lapply(names(FIGURE2_COHORTS),function(variant) spec(paste0("02_llm_nepc_avpc__",variant),
-      figure2v3_stems(variant), 6.4, rbind(1:2,3:4),
+      figure2v3_stems(variant), 8, rbind(1:2,3:4),
       c("Subtype: chart-review agreement","Subtype classification metrics","NEPC/AVPC proxy subtypes","Platinum enrichment"), width=10)),
     list(
     spec("03_dfci_univariable", figure_dfci_overview_spec(manuscript_dfci_km_landmark)$members, 8.9,
@@ -4019,7 +4021,8 @@ figure_scene_manifest <- function(directory, signature) {
   }, error = function(e) NULL)
 }
 
-prepare_figure_scenes <- function(directory, signature, build, force = FALSE, manuscript_root = NULL) {
+prepare_figure_scenes <- function(directory, signature, build, force = FALSE, manuscript_root = NULL,
+                                  include_internal = TRUE) {
   m <- if (!force) figure_scene_manifest(directory, signature) else NULL
   if (!is.null(m)) { message("Reused prepared figures: ", basename(dirname(directory))); return(m) }
   dir.create(directory, recursive = TRUE, showWarnings = FALSE)
@@ -4027,6 +4030,7 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
   dir.create(generation)
   scenes <- list(); tables <- character(); bundles <- list(); manuscript_items <- list()
   publish <- function(plot, destination, width, height, stem, title = NULL, landmarks = "", manuscript = FALSE) {
+    if (!include_internal && figure_internal_path(figure_public_path(destination))) return(invisible(NULL))
     path <- file.path(generation, sprintf("panel-%04d.rds", length(scenes) + 1L))
     if(is.null(title)) title <- if(inherits(plot,"ggplot") && length(plot$labels$title))
       paste(plot$labels$title,collapse=" ") else gsub("_"," ",stem)
@@ -4050,6 +4054,7 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
     if(!is.null(manuscript_root) && inherits(plot,"ggplot") &&
        basename(destination)=="platinum__all__incl")
       manuscript_items[[stem]] <<- list(plot=plot)
+    if (!include_internal && figure_internal_path(figure_public_path(destination))) return(invisible(NULL))
     specs <- figure_compilation_specs(stem)
     specs <- Filter(function(spec) is.null(spec$endpoint) ||
       startsWith(basename(destination),paste0(spec$endpoint,"__")),specs)
@@ -4072,6 +4077,7 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
   table_capture <- function(paths) {
     for(path in paths) {
       target <- figure_public_path(path)
+      if (!include_internal && figure_internal_path(target)) next
       if(!identical(path,target)) {
         target <- figure_sidecar_path(target)
         dir.create(dirname(target),recursive=TRUE,showWarnings=FALSE)
@@ -4140,6 +4146,8 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
   }
   if(!is.null(manuscript_root)) {
     manuscripts <- manuscript_build(manuscript_items,tables,manuscript_root)
+    if (!include_internal) manuscripts <- Filter(function(item)
+      !figure_internal_path(manuscript_folder(manuscript_root,item$spec$key)), manuscripts)
     for(item in manuscripts) {
       destination <- file.path(manuscript_folder(manuscript_root,item$spec$key),item$spec$key)
       dir.create(dirname(destination),recursive=TRUE,showWarnings=FALSE)
@@ -4442,7 +4450,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     code = unname(tools::md5sum(list.files(dirname(pipeline_path), pattern = "\\.R$", full.names = TRUE))),
     fig_root = config$fig_root, combined_km_landmark = figure_overview_km_landmark(),
     transfer_display = manuscript_transfer_settings(), typography = FIGURE_TYPOGRAPHY,
-    resolved_font = FIGURE_FONT)
+    resolved_font = FIGURE_FONT, internal = isTRUE(config$internal))
   jobs <- list()
   if (!identical(config$scope, "federated")) {
     for (cohort in config$cohorts) for (endpoint in config$endpoints) {
@@ -4468,7 +4476,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     jobs$cohort_overview <- list(name = "cohort_overview", signature = signature,
       directory = file.path(config$cache_root, "scenes", "cohort_overview", signature))
   }
-  checklist_enabled <- isTRUE(config$checklist_supplement) && !identical(config$scope, "federated") &&
+  checklist_enabled <- isTRUE(config$internal) && isTRUE(config$checklist_supplement) && !identical(config$scope, "federated") &&
     "adt" %in% config$cohorts
   if (checklist_enabled) {
     if (is.null(manifest$checklist)) {
@@ -4548,7 +4556,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     }
     prepare_figure_scenes(job$directory, job$signature, build, force = prepare_overwrite,
       manuscript_root=if(job$name %in% c("adt__platinum","cohort_overview","federated"))
-        file.path(config$fig_root,"ADT") else NULL)
+        file.path(config$fig_root,"ADT") else NULL, include_internal=isTRUE(config$internal))
   }
   # Only pending jobs warm tables. A resumed all-mode run reads no patient
   # Parquet at all when every scene snapshot is current.

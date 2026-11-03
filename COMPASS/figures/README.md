@@ -229,6 +229,12 @@ Compiled figures retain panel letters, with no descriptive panel titles or overa
 supertitle remain in panel subtitles or footnotes. Standalone panels stay in the
 section folder itself.
 
+DFCI-only figures under `03_univariate/internal/` and `04_multivariate/internal/`
+are disabled by default, including their manuscript figures and checklist supplement.
+Set `COMPASS_INTERNAL_FIGURES=true` to include them. Use the same setting for
+both the prepare and render stages. Existing exports are not removed when the
+setting is off.
+
 The canonical ADT/platinum, cohort-overview and federated runs also write
 manuscript figures to a `manuscript/` subfolder of the section each summarizes
 (e.g. `ADT/04_multivariate/internal/manuscript/04_multivariable_labs.pdf`). These
