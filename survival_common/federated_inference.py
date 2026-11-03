@@ -237,7 +237,9 @@ def build_design_matrix(
     scales = dict(pre.get("scales") or {})
     missing_cols = set(pre.get("missing_indicator_cols") or [])
 
-    out = pd.DataFrame(index=df.index)
+    # Columns are collected and concatenated once: inserting ~hundreds of
+    # columns one at a time fragments the frame (PerformanceWarning).
+    data: dict[str, np.ndarray | pd.Series] = {}
     missing_from_frame: list[str] = []
 
     for col in cols:
@@ -251,23 +253,25 @@ def build_design_matrix(
         else:
             missing_from_frame.append(col)
             values = pd.Series(np.nan, index=df.index, dtype=float)
-        out[col] = values.astype(float)
+        data[col] = values.astype(float)
 
     # Indicators describe the RAW data, so they must be computed before imputing.
     for col in cols:
         if col not in missing_cols:
             continue
         base = col[: -len("__missing")]
-        if base in out.columns:
-            out[col] = (~np.isfinite(out[base].to_numpy(dtype=float))).astype(float)
+        if base in data:
+            data[col] = (~np.isfinite(data[base].to_numpy(dtype=float))).astype(float)
         else:
             src = source.get(base, base)
             if src in df.columns:
                 raw = pd.to_numeric(df[src], errors="coerce").to_numpy(dtype=float)
-                out[col] = (~np.isfinite(raw)).astype(float)
+                data[col] = (~np.isfinite(raw)).astype(float)
             else:
                 missing_from_frame.append(col)
-                out[col] = 1.0
+                data[col] = np.ones(len(df))
+
+    out = pd.DataFrame(data, index=df.index)
 
     for col in cols:
         if col in missing_cols:
