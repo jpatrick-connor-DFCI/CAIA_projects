@@ -1,6 +1,6 @@
 """Component-based Gleason/somatic/labs feature-set tokens (Plan §2a).
 
-Exercises COMPASS.survival_analysis.pipeline.cox_aggregated.prepare_landmark_context
+Exercises COMPASS.pipeline.cox_aggregated.prepare_landmark_context
 directly against a small on-disk fixture (aggregated_landmark{D}.csv,
 pre_treatment_lab_long_landmark{D}.csv, somatic_gleason_features.csv) to
 confirm each new token selects exactly the expected columns:
@@ -22,9 +22,9 @@ import pandas as pd
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SURVIVAL_DIR = REPO_ROOT / "COMPASS" / "survival_analysis" / "pipeline"
+PIPELINE_DIR = REPO_ROOT / "COMPASS" / "pipeline"
 DATA_PREP_DIR = REPO_ROOT / "COMPASS" / "data_preprocessing"
-for _p in (str(REPO_ROOT), str(DATA_PREP_DIR), str(SURVIVAL_DIR)):
+for _p in (str(REPO_ROOT), str(DATA_PREP_DIR), str(PIPELINE_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

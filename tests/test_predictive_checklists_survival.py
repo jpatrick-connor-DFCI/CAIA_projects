@@ -7,14 +7,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from COMPASS.survival_analysis.predictive_checklists.baselines import _Preprocessor, fit_baselines
-from COMPASS.survival_analysis.predictive_checklists.evaluation import (
+from COMPASS.multivariable_models.predictive_checklists.baselines import _Preprocessor, fit_baselines
+from COMPASS.multivariable_models.predictive_checklists.evaluation import (
     ProbabilityCalibrator,
     evaluate_horizon,
     fit_calibrator,
     weighted_auc,
 )
-from COMPASS.survival_analysis.predictive_checklists.survival import (
+from COMPASS.multivariable_models.predictive_checklists.survival import (
     CensoringDistribution,
     UnsupportedHorizonError,
     horizon_targets,

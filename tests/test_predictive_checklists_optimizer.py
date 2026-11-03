@@ -11,9 +11,9 @@ import sys
 import numpy as np
 import pytest
 
-from COMPASS.survival_analysis.predictive_checklists import optimizer
-from COMPASS.survival_analysis.predictive_checklists.optimizer import ChecklistModel, fit_checklist
-from COMPASS.survival_analysis.predictive_checklists.upstream import (
+from COMPASS.multivariable_models.predictive_checklists import optimizer
+from COMPASS.multivariable_models.predictive_checklists.optimizer import ChecklistModel, fit_checklist
+from COMPASS.multivariable_models.predictive_checklists.upstream import (
     UPSTREAM_COMMIT, inspect_checkout, provenance,
 )
 
@@ -191,8 +191,8 @@ def test_optional_actual_upstream_parity(labels):
     script = """
 import json, sys
 import numpy as np
-from COMPASS.survival_analysis.predictive_checklists.optimizer import fit_checklist
-from COMPASS.survival_analysis.predictive_checklists.upstream import fit_upstream_reference
+from COMPASS.multivariable_models.predictive_checklists.optimizer import fit_checklist
+from COMPASS.multivariable_models.predictive_checklists.upstream import fit_upstream_reference
 X = np.array([[0, 0], [1, 0], [0, 1], [1, 1]], dtype=np.uint8)
 y = np.array(json.loads(sys.argv[2]), dtype=np.uint8)
 ours = fit_checklist(X, y, max_items=2)

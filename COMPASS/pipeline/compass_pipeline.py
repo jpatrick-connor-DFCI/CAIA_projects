@@ -1,0 +1,2540 @@
+"""Shared driver logic for the COMPASS PROFILE survival pipeline notebooks.
+
+The pipeline uses the merged ``profile_data`` parquets for every stage (cohort
+compile, longitudinal preprocessing, prediction-input build, univariate, and
+multivariate), so the stage notebooks
+(`01_preprocessing.ipynb` .. `03_multivariate.ipynb`) are thin wrappers over
+it. See `REORGANIZATION_PLAN.md` for the motivation.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+PIPELINE_DIR = Path(__file__).resolve().parent
+COMPASS_DIR = PIPELINE_DIR.parent
+PROJECT_ROOT = COMPASS_DIR.parent
+DATA_PREPROCESSING_DIR = COMPASS_DIR / "data_preprocessing"
+LAB_ASSOCIATIONS_DIR = COMPASS_DIR / "lab_associations"
+MULTIVARIABLE_DIR = COMPASS_DIR / "multivariable_models"
+LONGITUDINAL_DIR = MULTIVARIABLE_DIR / "longitudinal"
+
+for _p in (str(PROJECT_ROOT),):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+# Must precede the first Polars import (oncdrs_sources below). Uncapped, Polars
+# sizes its thread pools to every core on the node rather than the SLURM
+# allocation, and the async executor behind lazy scan().collect() panics with
+# EAGAIN once the per-user thread limit is hit. Subprocesses inherit the cap.
+os.environ.setdefault(
+    "POLARS_MAX_THREADS", str(max(1, int(os.environ.get("SLURM_CPUS_PER_TASK", "4"))))
+)
+
+from data_preprocessing_common.oncdrs_sources import TABLE_FILES  # noqa: E402
+from data_preprocessing_common.oncdrs_sources import scan_source  # noqa: E402
+from COMPASS.pipeline import cox_aggregated as _ca  # noqa: E402
+from survival_common.heldout_bootstrap import (  # noqa: E402
+    DURATION_COL,
+    EVENT_COL,
+    assert_reproduces_stored,
+    bootstrap_heldout,
+    percentile_ci,
+)
+from survival_common.helper import resolve_auc_max_time_units  # noqa: E402
+from survival_common.metrics_schema import DEFAULT_COHORT  # noqa: E402
+from survival_common.cox_engine import (  # noqa: E402
+    DEFAULT_ADJUST_ONLY_MODE,
+    validate_adjust_only_mode,
+)
+
+PYTHON = sys.executable
+
+# ---------------------------------------------------------------------------
+# Data source
+# ---------------------------------------------------------------------------
+#
+# All COMPASS runs read the merged PROFILE_data_processing parquets and write
+# beneath the standard COMPASS output root.
+
+_PROFILE_DATA_ROOT = Path("/data/gusev/USERS/jpconnor/data/PROFILE_DATA")
+_PROFILE_OUTPUT_ROOT = Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/")
+
+SOURCE_TABLES = [
+    "EHR_DIAGNOSES",
+    "MEDICATIONS",
+    "LABS",
+    "HEALTH_HISTORY",
+    "PT_INFO_STATUS_REGISTRATION",
+]
+
+PROFILE_SOURCES = {
+    table: _PROFILE_DATA_ROOT / TABLE_FILES[table][0]
+    for table in SOURCE_TABLES
+}
+
+# ---------------------------------------------------------------------------
+# Module-level knobs. Notebooks override by assigning cp.<NAME> = ... before
+# calling the functions below, mirroring the original notebooks' top-level cells.
+# ---------------------------------------------------------------------------
+N_FOLDS = 5
+FORCE_RERUN = True
+REBUILD_PREDICTION_INPUTS = True
+# Plan §3: nested-CV held-out risk for every patient (dataset="cv_oof"),
+# written alongside the always-on held-out test-block score (dataset="test").
+# Costs ~oof-outer-folds times a normal elastic-net/XGBoost run since
+# hyperparameters are re-tuned inside each outer fold. test and cv_oof scores
+# are never pooled -- see survival_common.cox_runners.add_out_of_fold_risk_args.
+OUT_OF_FOLD_RISKS = True
+# Store each test patient's S(t|x) in the elastic-net/XGBoost patient-risk files
+# (surv_t<h> columns). Off by default so default outputs stay unchanged; bootstrap
+# intervals on integrated Brier need it, while C-index and AUC(t) do not.
+SAVE_TEST_SURVIVAL = False
+# Which event is modeled. Must be a key of
+# COMPASS.pipeline.cox_aggregated.ENDPOINTS. "platinum" is the
+# original endpoint; "nepc" is time from the ADT anchor to the LLM-adjudicated
+# NEPC diagnosis. Each endpoint belongs in its own inputs/output tree; new
+# notebooks use make_endpoint_runs() to construct both trees together.
+ENDPOINT = "platinum"
+
+# multivariate_longitudinal (Dynamic-DeepHit) knobs.
+MAX_PRED_WINDOW = 260
+# Also build the full-follow-up longitudinal inputs (post-landmark labs
+# retained), which the dynamic per-timepoint DeepHit arm reads. Off by default:
+# it is a second person-period build per landmark, and only RUN_DYNAMIC
+# consumes it. Set this in 01_preprocessing.ipynb BEFORE building inputs --
+# turning on RUN_DYNAMIC in 03b cannot retroactively create these files, and
+# the runner will refuse to start without them.
+BUILD_FULL_FOLLOWUP = False
+# These analyses use the baseline ADT cohort and run once per endpoint, on the
+# full cohort only (cohort "all", no exclusion -- see is_full_cohort_run); the
+# metastatic / pre-ADT-castrate runs skip them. Sequencing and Gleason get their
+# own observation-date origins. The two sequencing screens share one cohort:
+# sequencing_snv tests SNV-only calls unadjusted; sequencing_any tests
+# any-alteration calls adjusted for the per-patient altered-gene count.
+SOMATIC_GLEASON_LANDMARKS = (0,)
+SOMATIC_GLEASON_INDEX_ANALYSES = ("gleason", "sequencing_snv", "sequencing_any")
+
+# A cohort is a patient-subset restriction applied at Stage 3 via
+# --restrict-to-mrns.  "all" is the arm's full Stage-1 survival cohort; the
+# others restrict to a precomputed MRN list.
+#
+# Two independent label sources produce those lists, distinguished by `source`:
+#   "adt_intent" -- retrospective, medication-derived ADT-intent strata, written
+#                   by build_adt_intent_mrn_lists().
+#   "llm_met"    -- LLM-adjudicated metastatic status from the met_diagnosis
+#                   pipeline, written by build_llm_met_mrn_lists().
+# `source` (not `retrospective`) keys the per-source registries below, so the
+# two families stay separable even though both are retrospective labels.
+#
+# These are deliberately not entries in _ARM_SPECS: Stage 1 and Stage 2 still
+# run once per treatment anchor, and only Stage 3 onward splits.  Treating a
+# cohort as an ordinary arm would incorrectly ask compile_COMPASS_cohort_data.py
+# for a new treatment anchor.
+#
+# `label_suffix` and `title_suffix` compose onto the arm's, so the directory
+# convention is unchanged: cohort "metastatic_adt" on arm "adt" yields the label
+# "adt_metastatic_adt" and therefore prediction_inputs_adt_metastatic_adt /
+# local_runs_adt_metastatic_adt, exactly as the dedicated ADT-intent factory built
+# them before the cohorts were folded into the main cross.
+COHORT_SPECS = {
+    "all": {
+        "label_suffix": "",
+        "title_suffix": "",
+        "adt_intent": None,
+        "retrospective": False,
+        "source": None,
+    },
+    "metastatic_adt": {
+        "label_suffix": "_metastatic_adt",
+        "title_suffix": " / metastatic (ADT intent)",
+        "adt_intent": "METASTATIC",
+        "retrospective": True,
+        "source": "adt_intent",
+    },
+    "localized": {
+        "label_suffix": "_localized",
+        "title_suffix": " / localized-adjuvant",
+        "adt_intent": "LOCALIZED_ADJUVANT",
+        "retrospective": True,
+        "source": "adt_intent",
+    },
+    "metastatic_llm": {
+        "label_suffix": "_metastatic_llm",
+        "title_suffix": " / metastatic (LLM)",
+        "adt_intent": None,
+        "retrospective": True,
+        "source": "llm_met",
+        "llm_metastatic": True,
+    },
+    "nonmetastatic_llm": {
+        "label_suffix": "_nonmetastatic_llm",
+        "title_suffix": " / non-metastatic (LLM)",
+        "adt_intent": None,
+        "retrospective": True,
+        "source": "llm_met",
+        "llm_metastatic": False,
+    },
+}
+# The localized-adjuvant and LLM non-metastatic cohorts are deliberately absent
+# from DEFAULT_COHORTS: their specs stay in COHORT_SPECS (each label source
+# writes both of its strata in one pass, and the audit tables need them), but
+# neither is modelled. Add "localized" or "nonmetastatic_llm" back to a
+# notebook's COHORTS to reinstate those runs.
+DEFAULT_COHORTS = (
+    "all",
+    "metastatic_adt",
+    "metastatic_llm",
+)
+
+# The MRN-list-backed cohorts, as a derived view: this is what
+# build_adt_intent_mrn_lists() writes and what adt_intent_mrn_list_path()
+# resolves.  Keyed the same way it was before the cohort registry existed.
+ADT_INTENT_MODEL_STRATA = {
+    key: {
+        "intent": spec["adt_intent"],
+        "label": f"adt{spec['label_suffix']}",
+        "title": f"ADT{spec['title_suffix']}",
+    }
+    for key, spec in COHORT_SPECS.items()
+    if spec["source"] == "adt_intent"
+}
+ADT_INTENT_LABELS_FILENAME = "adt_intent_labels_model_cohort.csv"
+ADT_INTENT_COUNTS_FILENAME = "adt_intent_endpoint_counts.csv"
+
+# The LLM-metastatic counterpart of ADT_INTENT_MODEL_STRATA.
+LLM_MET_MODEL_STRATA = {
+    key: {
+        "metastatic": spec["llm_metastatic"],
+        "label": f"adt{spec['label_suffix']}",
+        "title": f"ADT{spec['title_suffix']}",
+    }
+    for key, spec in COHORT_SPECS.items()
+    if spec["source"] == "llm_met"
+}
+LLM_MET_LABELS_FILENAME = "llm_met_labels_model_cohort.csv"
+
+# The met_diagnosis pipeline's adjudicated output: ONE row per patient, with a
+# boolean has_metastatic_disease and the first documented metastasis date.
+#
+# This is a purpose-built prostate-metastatic task, not the generic cancer_stage
+# extraction. It is the better source for this cohort split because it (a) is
+# already prostate-specific, so no primary-site filtering is needed here, (b)
+# runs a deterministic veto gate that rejects negated and hedged mentions and
+# excludes regional pelvic nodal (N1) disease, which the stage extraction's
+# metastatic_sites would have counted as metastatic, and (c) materializes
+# patients with no qualifying evidence as explicit negatives, so the negative
+# stratum is a real label rather than an absence.
+LLM_MET_LABELS_PATH = Path(
+    os.environ.get(
+        "LLM_MET_LABELS_PATH",
+        "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_met_diagnosis/"
+        "met_dx_labels.parquet",
+    )
+)
+
+# ---------------------------------------------------------------------------
+# Pre-ADT castrate exclusion
+# ---------------------------------------------------------------------------
+#
+# An orthogonal axis, not a cohort: it composes onto ANY cohort, so the run
+# cross is cohort x endpoint x exclusion.  Patients with a castrate
+# testosterone (< 50 ng/dL) recorded strictly BEFORE the ADT anchor are
+# assumed to have been androgen-deprived elsewhere first, making their ADT
+# start date a transfer-of-care artifact rather than a treatment origin.
+CASTRATE_TESTOSTERONE_NG_DL = 50.0
+TESTOSTERONE_LAB_NAME = "Testosterone"
+
+EXCLUSION_SPECS = {
+    "none": {
+        "label_suffix": "",
+        "title_suffix": "",
+        "exclude_pre_adt_castrate": False,
+    },
+    "pre_adt_castrate": {
+        "label_suffix": "_noprecastrate",
+        "title_suffix": " / no pre-ADT castrate",
+        "exclude_pre_adt_castrate": True,
+    },
+}
+DEFAULT_EXCLUSIONS = ("none", "pre_adt_castrate")
+PRE_ADT_CASTRATE_MRNS_FILENAME = "pre_adt_castrate_mrns.csv"
+
+
+def _require_adt_index_run(run: dict) -> None:
+    anchor = str(run.get("anchor", run.get("label", ""))).lower()
+    if anchor != "adt":
+        raise ValueError(
+            "The sequencing/Gleason analyses require the ADT arm "
+            f"because observations are selected relative to ADT start; got {anchor!r}."
+        )
+
+
+def is_full_cohort_run(run: dict) -> bool:
+    """True for the arm's unrestricted cohort with no exclusion applied."""
+    return (
+        run.get("cohort", DEFAULT_COHORT) == "all"
+        and run.get("exclusion", "none") == "none"
+    )
+
+# COMPASS durations (t_lab, t_platinum, ...) are measured from each arm's
+# treatment anchor (time 0), so anchor_col is "none" for every arm: the
+# landmark is a pure offset from the anchor with no anchor column. Arms
+# differ in (a) which anchor's Stage 1 survival cohort CSV restricts them
+# (--restrict-to-mrns), (b) which anchor's Stage 2 output feeds them, and
+# (c) both arms use landmarks [0, 90, 180].
+_ARM_SPECS = {
+    "arpi": dict(anchor="arpi", landmarks=[0, 90, 180], title="ARPI"),
+    "adt": dict(anchor="adt", landmarks=[0, 90, 180], title="ADT"),
+}
+
+for v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(v, "1")
+
+
+def endpoint_suffix(endpoint: str) -> str:
+    """The directory suffix for one endpoint: "" for platinum, "_<endpoint>" else.
+
+    Platinum keeps the un-suffixed tree for historical continuity. The rule was
+    inlined in four places before this helper; keep it here so a new endpoint
+    cannot pick up a different convention in one of them.
+    """
+    return "" if str(endpoint).lower() == "platinum" else f"_{str(endpoint).lower()}"
+
+
+def run_key(run: dict) -> tuple[str, str, str]:
+    """Stable identity for one run, for keying summary dicts across notebooks."""
+    return (run.get("cohort", DEFAULT_COHORT), run["endpoint"], run["label"])
+
+
+def stage2_runs(runs: list[dict]) -> list[dict]:
+    """One run per treatment anchor -- Stage 2's unit of work.
+
+    Stage 2 (lab preprocessing) is endpoint- and cohort-independent: it runs
+    once per anchor and every endpoint/cohort run reads its output. Encoding
+    that here rather than as a `if run["endpoint"] != "platinum": continue`
+    guard in the notebook keeps it correct as the cross widens -- that guard
+    would have run Stage 2 once per cohort once cohorts were added.
+
+    The representative run per anchor must be a cohort=="all", exclusion=="none"
+    run: preprocess_labs() passes ``restrict_to_mrns`` as --survival-cohort-csv,
+    so picking a restricted run would silently build the anchor's shared lab
+    table from that cohort's MRNs alone.  Selecting on the run's own fields
+    rather than on list order keeps this correct when a caller requests a
+    subset of cohorts (e.g. cohorts=("metastatic_llm",)) whose first entry is
+    not the unrestricted one.
+    """
+    seen: set[str] = set()
+    unique = []
+    for run in runs:
+        if run["anchor"] in seen:
+            continue
+        if run.get("cohort", DEFAULT_COHORT) != "all":
+            continue
+        if run.get("exclusion", "none") != "none":
+            continue
+        seen.add(run["anchor"])
+        unique.append(run)
+    missing = {run["anchor"] for run in runs} - seen
+    if missing:
+        raise ValueError(
+            f"No cohort='all', exclusion='none' run for anchor(s) {sorted(missing)}; "
+            "Stage 2 builds the anchor's shared lab table and must not be driven "
+            "by a restricted cohort. Include the 'all' cohort when running Stage 2."
+        )
+    return unique
+
+
+def make_runs(
+    arms=("adt",),
+    *,
+    prediction_input_dirs: dict[str, str | Path] | None = None,
+    output_suffix: str = "",
+    endpoint: str | None = None,
+    cohort: str = "all",
+    exclusion: str = "none",
+    adjust_only_mode: str = DEFAULT_ADJUST_ONLY_MODE,
+) -> list[dict]:
+    """Build the merged-profile RUNS list, restricted to ``arms``.
+
+    ARPI is disabled by default: build_prediction_inputs.py
+    raised "No patients have both engineered features and valid outcomes" for
+    that arm on the merged-parquet root. Re-enable once that is root-caused.
+
+    ``prediction_input_dirs`` optionally overrides the prebuilt input directory
+    for individual arms. This is primarily used by notebook 03b when GPU jobs
+    run on a cluster whose prediction data are mounted somewhere else.
+
+    ``endpoint`` defaults to the legacy module-level ``ENDPOINT`` knob. New
+    callers should pass it explicitly so multiple endpoints can coexist in one
+    notebook process.
+
+    ``output_suffix`` appends to BOTH the prediction-inputs and the outputs
+    directory names, giving a second endpoint its own parallel tree. Both are
+    suffixed, not just outputs: the NEPC cohort is gated on ``t_nepc > 0``
+    (see ``--require-nepc``), so its prediction inputs are a different set of
+    patients and must not overwrite the platinum build. With
+    ``output_suffix="_nepc"`` a run reads/writes ``prediction_inputs_adt_nepc``
+    and ``local_runs_adt_nepc``, leaving the platinum tree untouched.
+
+    ``cohort`` selects a patient-subset restriction from ``COHORT_SPECS``,
+    applied at Stage 3 via ``--restrict-to-mrns``. It composes onto the arm
+    label, so ``cohort="metastatic_adt"`` on arm ``"adt"`` yields the label
+    ``adt_metastatic_adt`` and the trees ``prediction_inputs_adt_metastatic_adt`` /
+    ``local_runs_adt_metastatic_adt``. The default ``"all"`` restricts to the arm's
+    own Stage-1 survival cohort, i.e. no additional subsetting.
+
+    ``exclusion`` selects an orthogonal patient-exclusion rule from
+    ``EXCLUSION_SPECS`` and composes onto the cohort label in turn, so
+    ``cohort="metastatic_llm", exclusion="pre_adt_castrate"`` yields
+    ``adt_metastatic_llm_noprecastrate``. It is carried on the run as
+    ``exclude_mrns`` (a path, or None) rather than folded into
+    ``restrict_to_mrns``: the two lists are intersected at Stage 3, so a
+    cohort's own MRN list stays a pure cohort definition.
+
+    ``adjust_only_mode="drop"`` makes every multivariable fit treat the
+    n_observations / missing indicators / static covariates as adjust-only
+    (fit in training, dropped from coefficients, importances, checklist items
+    and scores). Only ``output_dir`` gets an ``_adjust_only`` suffix: the
+    prediction inputs are identical, so they are shared with the default tree.
+    """
+    adjust_only_mode = validate_adjust_only_mode(adjust_only_mode)
+    adjust_suffix = "" if adjust_only_mode == DEFAULT_ADJUST_ONLY_MODE else "_adjust_only"
+    selected_endpoint = ENDPOINT if endpoint is None else str(endpoint).lower()
+    selected_cohort = str(cohort).lower()
+    if selected_cohort not in COHORT_SPECS:
+        raise ValueError(
+            f"Unknown cohort: {cohort!r} (expected one of {sorted(COHORT_SPECS)})"
+        )
+    cohort_spec = COHORT_SPECS[selected_cohort]
+    selected_exclusion = str(exclusion).lower()
+    if selected_exclusion not in EXCLUSION_SPECS:
+        raise ValueError(
+            f"Unknown exclusion: {exclusion!r} "
+            f"(expected one of {sorted(EXCLUSION_SPECS)})"
+        )
+    exclusion_spec = EXCLUSION_SPECS[selected_exclusion]
+    valid_endpoints = set(_ca.ENDPOINTS)
+    if selected_endpoint not in valid_endpoints:
+        raise ValueError(
+            f"Unknown endpoint: {selected_endpoint!r} (expected one of {sorted(valid_endpoints)})"
+        )
+    data_root = _PROFILE_OUTPUT_ROOT
+    mrn_lists_dir = data_root / "mrn_lists"
+    data_arpi = data_root / "longitudinal_prediction_data.csv"
+    data_adt = data_root / "longitudinal_prediction_data_adt.csv"
+    survival_output_root = data_root / "survival_analysis"
+
+    runs = []
+    prediction_input_dirs = prediction_input_dirs or {}
+    unknown_overrides = set(prediction_input_dirs) - set(_ARM_SPECS)
+    if unknown_overrides:
+        raise ValueError(
+            "Unknown prediction-input override arms: "
+            f"{sorted(unknown_overrides)} (expected a subset of {sorted(_ARM_SPECS)})"
+        )
+    for label in arms:
+        if label not in _ARM_SPECS:
+            raise ValueError(f"Unknown arm: {label!r} (expected one of {sorted(_ARM_SPECS)})")
+        arm_spec = _ARM_SPECS[label]
+        # The cohort composes onto the arm to form the run label, which in turn
+        # names both directory trees. Overrides stay keyed by the ARM, not the
+        # composed label, so a caller overriding "adt" reaches every cohort.
+        run_label = (
+            f"{label}{cohort_spec['label_suffix']}{exclusion_spec['label_suffix']}"
+        )
+        # "all" restricts to the arm's own Stage-1 survival cohort (no extra
+        # subsetting); the retrospective cohorts restrict to their MRN list,
+        # resolved by the cohort's label source.
+        restrict_to_mrns = cohort_mrn_list_path(
+            selected_cohort, arm=label, data_root=data_root
+        )
+        # The exclusion is a separate list intersected at Stage 3, so the
+        # cohort list above stays a pure cohort definition.
+        exclude_mrns = (
+            pre_adt_castrate_mrn_list_path(data_root=data_root)
+            if exclusion_spec["exclude_pre_adt_castrate"]
+            else None
+        )
+        runs.append({
+            "label": run_label,
+            "title": (
+                f"{arm_spec['title']}{cohort_spec['title_suffix']}"
+                f"{exclusion_spec['title_suffix']}"
+            ),
+            "variant": "profile_data",
+            "anchor_col": "none",
+            "anchor": arm_spec["anchor"],
+            "landmarks": arm_spec["landmarks"],
+            "input_csv": data_arpi if arm_spec["anchor"] == "arpi" else data_adt,
+            "restrict_to_mrns": restrict_to_mrns,
+            "exclude_mrns": exclude_mrns,
+            "inputs_dir": Path(
+                prediction_input_dirs.get(
+                    label,
+                    survival_output_root / f"prediction_inputs_{run_label}{output_suffix}",
+                )
+            ).expanduser(),
+            "output_dir": survival_output_root / f"local_runs_{run_label}{output_suffix}{adjust_suffix}",
+            "adjust_only_mode": adjust_only_mode,
+            "endpoint": selected_endpoint,
+            "cohort": selected_cohort,
+            "intent_stratum": (
+                selected_cohort if cohort_spec["source"] == "adt_intent" else None
+            ),
+            "adt_intent": cohort_spec["adt_intent"],
+            "cohort_source": cohort_spec["source"],
+            "retrospective_stratification": cohort_spec["retrospective"],
+            "exclusion": selected_exclusion,
+            "exclude_pre_adt_castrate": exclusion_spec["exclude_pre_adt_castrate"],
+            "data_root": data_root,
+            "mrn_lists_dir": mrn_lists_dir,
+        })
+
+    os.chdir(PROJECT_ROOT)
+    mrn_lists_dir.mkdir(parents=True, exist_ok=True)
+    for run in runs:
+        run["inputs_dir"].mkdir(parents=True, exist_ok=True)
+        run["output_dir"].mkdir(parents=True, exist_ok=True)
+
+    print("python:            ", PYTHON)
+    print("cwd:               ", os.getcwd())
+    print("compass_dir:       ", COMPASS_DIR)
+    print("data_preprocessing:", DATA_PREPROCESSING_DIR)
+    print("data root:         ", data_root)
+    print("endpoint:          ", selected_endpoint)
+    for run in runs:
+        print(
+            f"{run['label']:30s}: anchor={run['anchor']:4s} landmarks={run['landmarks']} "
+            f"inputs={run['inputs_dir']} outputs={run['output_dir']}"
+        )
+    return runs
+
+
+def make_endpoint_runs(
+    arms=("adt",),
+    *,
+    endpoints=("platinum", "nepc"),
+    cohorts=DEFAULT_COHORTS,
+    exclusions=DEFAULT_EXCLUSIONS,
+    prediction_input_dirs_by_endpoint: dict[str, dict[str, str | Path]] | None = None,
+    adjust_only_mode: str = DEFAULT_ADJUST_ONLY_MODE,
+) -> list[dict]:
+    """Create independent trees across cohort x endpoint x exclusion x arm.
+
+    This is the single run factory. The ADT-intent strata used to have their
+    own parallel factory that could only reach three of the four endpoints and
+    never reached Stage 3b or the figure pipeline; they are now ordinary
+    cohorts in this cross. Directory names are unchanged, so existing trees
+    resolve exactly as before -- ``exclusions=("none",)`` reproduces the
+    pre-exclusion cross byte-for-byte, since "none" contributes an empty label
+    suffix.
+    """
+    overrides = prediction_input_dirs_by_endpoint or {}
+    unknown = set(overrides) - set(endpoints)
+    if unknown:
+        raise ValueError(f"Prediction-input overrides supplied for unrequested endpoints: {sorted(unknown)}")
+    unknown_cohorts = {str(c).lower() for c in cohorts} - set(COHORT_SPECS)
+    if unknown_cohorts:
+        raise ValueError(
+            f"Unknown cohorts: {sorted(unknown_cohorts)} "
+            f"(expected a subset of {sorted(COHORT_SPECS)})"
+        )
+    unknown_exclusions = {str(e).lower() for e in exclusions} - set(EXCLUSION_SPECS)
+    if unknown_exclusions:
+        raise ValueError(
+            f"Unknown exclusions: {sorted(unknown_exclusions)} "
+            f"(expected a subset of {sorted(EXCLUSION_SPECS)})"
+        )
+    runs: list[dict] = []
+    for raw_cohort in cohorts:
+        for raw_endpoint in endpoints:
+            endpoint = str(raw_endpoint).lower()
+            for raw_exclusion in exclusions:
+                runs.extend(
+                    make_runs(
+                        arms,
+                        endpoint=endpoint,
+                        output_suffix=endpoint_suffix(endpoint),
+                        cohort=str(raw_cohort).lower(),
+                        exclusion=str(raw_exclusion).lower(),
+                        prediction_input_dirs=overrides.get(endpoint),
+                        adjust_only_mode=adjust_only_mode,
+                    )
+                )
+    return runs
+
+
+def adt_intent_mrn_list_path(
+    stratum: str,
+    *,
+    data_root: str | Path | None = None,
+) -> Path:
+    """Return the Stage-3 MRN-list path for one medication-derived stratum."""
+    key = str(stratum).lower()
+    if key not in ADT_INTENT_MODEL_STRATA:
+        raise ValueError(
+            f"Unknown ADT-intent stratum: {stratum!r} "
+            f"(expected one of {sorted(ADT_INTENT_MODEL_STRATA)})"
+        )
+    root = _PROFILE_OUTPUT_ROOT if data_root is None else Path(data_root)
+    return root / "mrn_lists" / f"{ADT_INTENT_MODEL_STRATA[key]['label']}_mrns.csv"
+
+
+def llm_met_mrn_list_path(
+    stratum: str,
+    *,
+    data_root: str | Path | None = None,
+) -> Path:
+    """Return the Stage-3 MRN-list path for one LLM-metastatic stratum."""
+    key = str(stratum).lower()
+    if key not in LLM_MET_MODEL_STRATA:
+        raise ValueError(
+            f"Unknown LLM-metastatic stratum: {stratum!r} "
+            f"(expected one of {sorted(LLM_MET_MODEL_STRATA)})"
+        )
+    root = _PROFILE_OUTPUT_ROOT if data_root is None else Path(data_root)
+    return root / "mrn_lists" / f"{LLM_MET_MODEL_STRATA[key]['label']}_mrns.csv"
+
+
+def pre_adt_castrate_mrn_list_path(*, data_root: str | Path | None = None) -> Path:
+    """Return the MRN list of patients castrate BEFORE the ADT anchor.
+
+    This is an EXCLUSION list -- Stage 3 removes these MRNs -- not a cohort.
+    """
+    root = _PROFILE_OUTPUT_ROOT if data_root is None else Path(data_root)
+    return root / "mrn_lists" / PRE_ADT_CASTRATE_MRNS_FILENAME
+
+
+def cohort_mrn_list_path(
+    cohort: str,
+    *,
+    arm: str = "adt",
+    data_root: str | Path | None = None,
+) -> Path:
+    """Resolve one cohort's Stage-3 ``--restrict-to-mrns`` path.
+
+    Dispatches on the cohort's label ``source`` so make_runs() does not have to
+    know which family a cohort belongs to: "all" falls back to the arm's own
+    Stage-1 survival cohort CSV (i.e. no extra subsetting).
+    """
+    key = str(cohort).lower()
+    if key not in COHORT_SPECS:
+        raise ValueError(
+            f"Unknown cohort: {cohort!r} (expected one of {sorted(COHORT_SPECS)})"
+        )
+    root = _PROFILE_OUTPUT_ROOT if data_root is None else Path(data_root)
+    source = COHORT_SPECS[key]["source"]
+    if source is None:
+        return root / f"prostate_{arm}_survival_cohort_{arm}.csv"
+    if source == "adt_intent":
+        return adt_intent_mrn_list_path(key, data_root=root)
+    if source == "llm_met":
+        return llm_met_mrn_list_path(key, data_root=root)
+    raise ValueError(f"Cohort {cohort!r} has an unrecognized label source: {source!r}")
+
+
+def build_adt_intent_mrn_lists(
+    *,
+    medications_path: str | Path | None = None,
+    base_cohort_csv: str | Path | None = None,
+    data_root: str | Path | None = None,
+) -> dict[str, Path]:
+    """Classify the modelled ADT cohort and write localized/metastatic MRN lists.
+
+    The classifier uses medication history over the observed follow-up.  These
+    lists therefore define *retrospective strata* and must not be interpreted
+    as metastatic-status predictions available at the landmark.  Platinum is
+    intentionally absent from the classifier, but later treatment escalation
+    and the eventual duration/cessation of ADT contribute to the label.
+
+    The combined audit file retains all classifier fields.  Two narrow MRN
+    files feed ``build_prediction_inputs.py``; a preliminary endpoint-count
+    table makes a sparse localized endpoint visible before model fitting.
+    """
+    import polars as pl
+
+    from COMPASS.data_preprocessing.classify_adt_intent import classify_adt_intent
+    from COMPASS.data_preprocessing.compile_COMPASS_cohort_data import (
+        parse_mixed_datetime_expr,
+    )
+
+    root = _PROFILE_OUTPUT_ROOT if data_root is None else Path(data_root)
+    cohort_path = (
+        root / "prostate_adt_survival_cohort_adt.csv"
+        if base_cohort_csv is None
+        else Path(base_cohort_csv)
+    )
+    meds_path = (
+        PROFILE_SOURCES["MEDICATIONS"]
+        if medications_path is None
+        else Path(medications_path)
+    )
+    if not cohort_path.exists():
+        raise FileNotFoundError(
+            f"ADT survival cohort not found: {cohort_path}. Run Stage 1 first."
+        )
+    if not meds_path.exists():
+        raise FileNotFoundError(f"Medication source not found: {meds_path}")
+
+    cohort = pl.read_csv(cohort_path, infer_schema_length=0).with_columns(
+        pl.col("DFCI_MRN")
+        .cast(pl.Float64, strict=False)
+        .cast(pl.Int64, strict=False)
+        .alias("DFCI_MRN"),
+        parse_mixed_datetime_expr("FOLLOW_UP_END_DATE").alias("FOLLOW_UP_END_DATE"),
+    ).filter(pl.col("DFCI_MRN").is_not_null())
+    cohort_mrns = cohort["DFCI_MRN"].unique().to_list()
+    if not cohort_mrns:
+        raise ValueError(f"ADT survival cohort contains no usable MRNs: {cohort_path}")
+
+    meds = (
+        scan_source(meds_path)
+        .select("DFCI_MRN", "NCI_PREFERRED_MED_NM", "MED_START_DT")
+        .with_columns(
+            pl.col("DFCI_MRN")
+            .cast(pl.Float64, strict=False)
+            .cast(pl.Int64, strict=False)
+            .alias("DFCI_MRN")
+        )
+        .filter(pl.col("DFCI_MRN").is_in(cohort_mrns))
+        .collect()
+    )
+    follow_up = cohort.select("DFCI_MRN", "FOLLOW_UP_END_DATE").unique("DFCI_MRN")
+    labels = classify_adt_intent(meds, follow_up=follow_up).filter(
+        pl.col("DFCI_MRN").is_in(cohort_mrns)
+    )
+
+    missing_labels = set(cohort_mrns) - set(labels["DFCI_MRN"].to_list())
+    if missing_labels:
+        raise ValueError(
+            f"ADT-intent classification omitted {len(missing_labels)} model-cohort MRNs. "
+            "Confirm that every Stage-1 ADT patient has a recognized ADT medication row."
+        )
+
+    mrn_dir = root / "mrn_lists"
+    mrn_dir.mkdir(parents=True, exist_ok=True)
+    labels_path = mrn_dir / ADT_INTENT_LABELS_FILENAME
+    labels.sort("DFCI_MRN").write_csv(labels_path)
+
+    outputs: dict[str, Path] = {"labels": labels_path}
+    for key, spec in ADT_INTENT_MODEL_STRATA.items():
+        path = adt_intent_mrn_list_path(key, data_root=root)
+        subset = labels.filter(pl.col("ADT_INTENT") == spec["intent"]).select(
+            "DFCI_MRN", "ADT_INTENT", "HAS_POSITIVE_METASTATIC_EVIDENCE"
+        ).sort("DFCI_MRN")
+        if subset.height == 0:
+            raise ValueError(f"ADT-intent stratum {spec['intent']} is empty.")
+        subset.write_csv(path)
+        outputs[key] = path
+        print(f"  {spec['title']}: {subset.height:,} patients -> {path}")
+
+    # Preliminary counts precede the PSA/PARPi/landmark filters, but expose an
+    # endpoint with too few events before expensive Cox/XGBoost fitting starts.
+    joined = labels.select("DFCI_MRN", "ADT_INTENT").join(
+        cohort, on="DFCI_MRN", how="inner"
+    )
+    # Every modeled endpoint: these counts surface an event-starved cell before
+    # fitting rather than after.
+    count_rows = []
+    for key, spec in ADT_INTENT_MODEL_STRATA.items():
+        stratum = joined.filter(pl.col("ADT_INTENT") == spec["intent"])
+        for endpoint in _ca.ENDPOINTS:
+            event_col = _ca.ENDPOINTS[endpoint]["event_col"]
+            duration_col = "TT_" + endpoint.upper()
+            if event_col not in stratum.columns or duration_col not in stratum.columns:
+                count_rows.append(
+                    {
+                        "stratum": key,
+                        "adt_intent": spec["intent"],
+                        "endpoint": endpoint,
+                        "n_patients": stratum.height,
+                        "n_incident_eligible": None,
+                        "n_incident_events": None,
+                    }
+                )
+                continue
+            durations = stratum[duration_col].cast(pl.Float64, strict=False)
+            events = stratum[event_col].cast(pl.Int64, strict=False).fill_null(0)
+            eligible = durations.is_not_null() & durations.gt(0)
+            count_rows.append(
+                {
+                    "stratum": key,
+                    "adt_intent": spec["intent"],
+                    "endpoint": endpoint,
+                    "n_patients": stratum.height,
+                    "n_incident_eligible": int(eligible.sum()),
+                    "n_incident_events": int((eligible & events.eq(1)).sum()),
+                }
+            )
+    counts_path = mrn_dir / ADT_INTENT_COUNTS_FILENAME
+    pl.DataFrame(count_rows).write_csv(counts_path)
+    outputs["counts"] = counts_path
+    print(f"  preliminary endpoint counts -> {counts_path}")
+    print(
+        "  NOTE: ADT_INTENT uses full observed medication history; these are "
+        "retrospective strata, not landmark-available metastatic-status labels."
+    )
+    return outputs
+
+
+def build_llm_met_mrn_lists(
+    *,
+    met_labels_path: str | Path | None = None,
+    base_cohort_csv: str | Path | None = None,
+    data_root: str | Path | None = None,
+    require_full_cohort_coverage: bool = False,
+) -> dict[str, Path]:
+    """Split the modelled ADT cohort on the met_diagnosis LLM label.
+
+    Reads met_dx_labels.parquet -- one adjudicated row per patient, carrying a
+    boolean ``has_metastatic_disease`` and the first documented metastasis date.
+    No site or primary filtering happens here: the upstream task is already
+    prostate-specific, applies a deterministic veto gate for negation and
+    hedging, and excludes regional pelvic nodal (N1) disease by definition.
+
+    The upstream label is a whole-record adjudication, so like the ADT-intent
+    strata this is a *retrospective* stratum, not a landmark-available label --
+    ``first_metastasis_date`` is carried into the audit file so a future
+    baseline-only variant can be cut without re-running the LLM.
+
+    Patients absent from the labels file are treated as UNLABELLED, not as
+    negatives, and are dropped from both strata with a printed count -- the
+    upstream task materializes its own auto-negatives, so absence means the ADT
+    cohort and the labelled cohort disagree (a ``--mrns``-limited LLM run, or a
+    cohort rebuilt after the LLM run). Folding them into ``nonmetastatic_llm``
+    would assert a negative the LLM never made. Dropping them means the two LLM
+    strata together cover slightly fewer patients than the ADT-intent strata do,
+    so their Ns are not directly comparable; the coverage fraction is printed.
+    Pass ``require_full_cohort_coverage=True`` to make the gap fatal instead.
+    """
+    import polars as pl
+
+    root = _PROFILE_OUTPUT_ROOT if data_root is None else Path(data_root)
+    cohort_path = (
+        root / "prostate_adt_survival_cohort_adt.csv"
+        if base_cohort_csv is None
+        else Path(base_cohort_csv)
+    )
+    labels_path_in = (
+        LLM_MET_LABELS_PATH if met_labels_path is None else Path(met_labels_path)
+    )
+    if not cohort_path.exists():
+        raise FileNotFoundError(
+            f"ADT survival cohort not found: {cohort_path}. Run Stage 1 first."
+        )
+    if not labels_path_in.exists():
+        raise FileNotFoundError(
+            f"LLM metastatic labels not found: {labels_path_in}. Run the "
+            "met_diagnosis pipeline (build_met_dx_labels.py) first, or set "
+            "LLM_MET_LABELS_PATH."
+        )
+
+    cohort = pl.read_csv(cohort_path, infer_schema_length=0).with_columns(
+        pl.col("DFCI_MRN")
+        .cast(pl.Float64, strict=False)
+        .cast(pl.Int64, strict=False)
+        .alias("DFCI_MRN"),
+    ).filter(pl.col("DFCI_MRN").is_not_null())
+    cohort_mrns = cohort["DFCI_MRN"].unique().to_list()
+    if not cohort_mrns:
+        raise ValueError(f"ADT survival cohort contains no usable MRNs: {cohort_path}")
+
+    met = pl.read_parquet(labels_path_in)
+    required = {"DFCI_MRN", "has_metastatic_disease"}
+    missing_cols = required - set(met.columns)
+    if missing_cols:
+        raise ValueError(
+            f"{labels_path_in} is missing column(s) {sorted(missing_cols)}; expected "
+            "the met_diagnosis LABEL_COLUMNS schema."
+        )
+    carried = [
+        col
+        for col in ("first_metastasis_date", "date_source", "met_site", "label_source")
+        if col in met.columns
+    ]
+    met = (
+        met.with_columns(
+            pl.col("DFCI_MRN")
+            .cast(pl.Float64, strict=False)
+            .cast(pl.Int64, strict=False)
+            .alias("DFCI_MRN"),
+            # Written as a real boolean, but a CSV round-trip upstream would
+            # make it a string; normalize before it decides the split.
+            pl.col("has_metastatic_disease")
+            .cast(pl.Boolean, strict=False)
+            .alias("LLM_METASTATIC"),
+        )
+        .filter(pl.col("DFCI_MRN").is_not_null())
+        .select("DFCI_MRN", "LLM_METASTATIC", *carried)
+    )
+
+    # One row per patient upstream, but a resumed/appended run could duplicate a
+    # patient. Collapsing on the positive label keeps the split deterministic
+    # instead of letting row order decide it.
+    duplicated = met.height - met["DFCI_MRN"].n_unique()
+    if duplicated:
+        print(
+            f"  WARNING: {duplicated:,} duplicate MRN row(s) in {labels_path_in}; "
+            "collapsing to one row per patient (any positive wins)."
+        )
+        met = (
+            met.sort("LLM_METASTATIC", descending=True, nulls_last=True)
+            .unique(subset=["DFCI_MRN"], keep="first")
+        )
+
+    unlabelled = met.filter(pl.col("LLM_METASTATIC").is_null())
+    if unlabelled.height:
+        # A null verdict is not a negative: the upstream task writes False for
+        # patients it adjudicated negative and for its own auto-negatives.
+        print(
+            f"  WARNING: {unlabelled.height:,} patient(s) in {labels_path_in} have a "
+            "null has_metastatic_disease; dropping them from both strata."
+        )
+        met = met.filter(pl.col("LLM_METASTATIC").is_not_null())
+
+    labels = (
+        cohort.select("DFCI_MRN")
+        .unique()
+        .join(met, on="DFCI_MRN", how="left")
+        .sort("DFCI_MRN")
+    )
+    missing = labels.filter(pl.col("LLM_METASTATIC").is_null())
+    if missing.height:
+        if require_full_cohort_coverage:
+            raise ValueError(
+                f"{missing.height:,} of {labels.height:,} ADT-cohort patients have no "
+                f"metastatic label in {labels_path_in}. The met_diagnosis task "
+                "materializes explicit auto-negatives, so this usually means the LLM "
+                "run was --mrns-limited and does not cover this cohort. Re-run it "
+                "over the full ADT cohort, or pass require_full_cohort_coverage=False "
+                "to drop these patients from both strata."
+            )
+        print(
+            f"  WARNING: {missing.height:,} of {labels.height:,} ADT-cohort patients "
+            f"({missing.height / labels.height:.1%}) have no metastatic label in "
+            f"{labels_path_in}; dropping them -- they appear in NEITHER stratum, so "
+            "the LLM strata cover fewer patients than the ADT-intent strata do."
+        )
+        labels = labels.filter(pl.col("LLM_METASTATIC").is_not_null())
+
+    mrn_dir = root / "mrn_lists"
+    mrn_dir.mkdir(parents=True, exist_ok=True)
+    labels_path = mrn_dir / LLM_MET_LABELS_FILENAME
+    labels.write_csv(labels_path)
+    print(
+        f"  LLM metastatic labels: {labels.height:,} of {len(cohort_mrns):,} ADT "
+        f"patients labelled -> {labels_path}"
+    )
+    if "label_source" in labels.columns:
+        for source, count in (
+            labels.group_by("label_source").len().sort("label_source").iter_rows()
+        ):
+            print(f"    label_source={source}: {count:,}")
+
+    outputs: dict[str, Path] = {"labels": labels_path}
+    for key, spec in LLM_MET_MODEL_STRATA.items():
+        path = llm_met_mrn_list_path(key, data_root=root)
+        subset = labels.filter(pl.col("LLM_METASTATIC") == spec["metastatic"])
+        subset.write_csv(path)
+        outputs[key] = path
+        print(f"  {spec['title']}: {subset.height:,} patients -> {path}")
+        # The two strata partition the labelled cohort, so one side being empty
+        # is a legitimate (if notable) result rather than proof of a broken
+        # join. Write the file regardless and let Stage 3's --restrict-to-mrns
+        # raise: failing here would also withhold the non-empty stratum.
+        if subset.height == 0:
+            print(
+                f"  WARNING: LLM-metastatic stratum {key!r} is empty; its Stage-3 runs "
+                "will fail on an empty --restrict-to-mrns list. Confirm the met "
+                "labels cover this cohort."
+            )
+
+    print(
+        "  NOTE: has_metastatic_disease adjudicates the full observed record; this "
+        "is a retrospective stratum, not a landmark-available metastatic-status "
+        "label."
+    )
+    return outputs
+
+def build_pre_adt_castrate_mrn_list(
+    *,
+    longitudinal_csv: str | Path | None = None,
+    data_root: str | Path | None = None,
+    threshold_ng_dl: float = CASTRATE_TESTOSTERONE_NG_DL,
+) -> Path:
+    """Write the MRN list of patients castrate BEFORE their ADT anchor.
+
+    Patients with a testosterone below ``threshold_ng_dl`` recorded strictly
+    before the ADT anchor are assumed to have been androgen-deprived elsewhere
+    first, which makes their recorded ADT start a transfer-of-care artifact
+    rather than a treatment origin -- their "time zero" is already mid-course.
+
+    Reads longitudinal_prediction_data_adt.csv, whose LAB_VALUE is already
+    unit-standardized to ng/dL and whose t_lab is signed days from the
+    treatment anchor, so no separate lab load or date arithmetic is needed.
+    Below-detection results were imputed to 0 upstream and therefore count as
+    castrate, which is the intended reading of a "< 3 ng/dL" result.
+
+    The output is an EXCLUSION list: Stage 3 removes these MRNs via
+    --exclude-mrns. It is cohort-independent, so it is built once and reused by
+    every cohort's exclusion arm.
+    """
+    import polars as pl
+
+    root = _PROFILE_OUTPUT_ROOT if data_root is None else Path(data_root)
+    data_path = (
+        root / "longitudinal_prediction_data_adt.csv"
+        if longitudinal_csv is None
+        else Path(longitudinal_csv)
+    )
+    if not data_path.exists():
+        raise FileNotFoundError(
+            f"Longitudinal prediction data not found: {data_path}. Run Stage 2 first."
+        )
+
+    labs = (
+        pl.scan_csv(data_path, infer_schema_length=0)
+        .select("DFCI_MRN", "LAB_NAME", "LAB_VALUE", "t_lab")
+        .with_columns(
+            pl.col("DFCI_MRN")
+            .cast(pl.Float64, strict=False)
+            .cast(pl.Int64, strict=False)
+            .alias("DFCI_MRN"),
+            pl.col("LAB_VALUE").cast(pl.Float64, strict=False).alias("LAB_VALUE"),
+            pl.col("t_lab").cast(pl.Float64, strict=False).alias("t_lab"),
+        )
+        .filter(
+            pl.col("DFCI_MRN").is_not_null()
+            & pl.col("LAB_NAME").eq(TESTOSTERONE_LAB_NAME)
+            & pl.col("LAB_VALUE").is_not_null()
+            & pl.col("t_lab").is_not_null()
+        )
+        .collect()
+    )
+
+    n_patients_with_testosterone = labs.filter(pl.col("t_lab").lt(0))[
+        "DFCI_MRN"
+    ].n_unique()
+
+    # Strictly before the anchor: a same-day result (t_lab == 0) may already
+    # reflect the first ADT dose, so it is not evidence of PRIOR treatment.
+    castrate = (
+        labs.filter(
+            pl.col("t_lab").lt(0) & pl.col("LAB_VALUE").lt(threshold_ng_dl)
+        )
+        .group_by("DFCI_MRN")
+        .agg(
+            pl.col("LAB_VALUE").min().alias("MIN_PRE_ADT_TESTOSTERONE"),
+            pl.col("t_lab").max().alias("T_LAB_NEAREST_PRE_ADT"),
+            pl.len().alias("N_CASTRATE_RESULTS_PRE_ADT"),
+        )
+        .sort("DFCI_MRN")
+    )
+
+    mrn_dir = root / "mrn_lists"
+    mrn_dir.mkdir(parents=True, exist_ok=True)
+    path = pre_adt_castrate_mrn_list_path(data_root=root)
+    castrate.write_csv(path)
+
+    print(
+        f"  pre-ADT castrate (<{threshold_ng_dl:g} ng/dL): {castrate.height:,} of "
+        f"{n_patients_with_testosterone:,} patients with any pre-ADT testosterone "
+        f"result flagged for exclusion -> {path}"
+    )
+    if castrate.height == 0:
+        print(
+            "  WARNING: no patients flagged; --exclude-mrns will fail on an empty "
+            "list. Confirm testosterone results exist before the ADT anchor."
+        )
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Stage 1 -- compile COMPASS cohort data
+# ---------------------------------------------------------------------------
+
+def _run(cmd, dry_run=False):
+    print("[run ] " + " ".join(str(c) for c in cmd))
+    if dry_run:
+        return 0
+    return subprocess.call([str(c) for c in cmd])
+
+
+def compile_cohort(
+    arms=("adt",),
+    dry_run: bool = False,
+    *,
+    subtype_labels_path: str | Path | None = None,
+) -> None:
+    data_root = _PROFILE_OUTPUT_ROOT
+    cmd = [
+        PYTHON, DATA_PREPROCESSING_DIR / "compile_COMPASS_cohort_data.py",
+        "--icd-source", PROFILE_SOURCES["EHR_DIAGNOSES"],
+        "--medications-source", PROFILE_SOURCES["MEDICATIONS"],
+        "--patient-status-source", PROFILE_SOURCES["PT_INFO_STATUS_REGISTRATION"],
+        "--labs-csv", PROFILE_SOURCES["LABS"],
+        "--out-dir", data_root,
+        "--mrn-lists-dir", data_root / "mrn_lists",
+        "--survival-arms", *arms,
+    ]
+    if subtype_labels_path is not None:
+        cmd += ["--subtype-labels", subtype_labels_path]
+    rc = _run(cmd, dry_run=dry_run)
+    if not dry_run and rc != 0:
+        raise RuntimeError(f"compile_COMPASS_cohort_data.py failed with rc={rc}")
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 -- preprocess raw labs once per anchor (longitudinal_data_processing.py)
+# ---------------------------------------------------------------------------
+
+def preprocess_labs(run: dict, dry_run: bool = False) -> None:
+    """Full raw lab standardization for one arm's anchor. Expensive; the Parquet
+    cache makes reruns cheap, but the first pass may be slow.
+    """
+    data_root = _PROFILE_OUTPUT_ROOT
+    label = run["label"]
+    output_csv = run["input_csv"]
+    cache_parquet = data_root / f"consolidated_longitudinal_data_{label}.parquet"
+    icd_csv = data_root / "prostate_icd_data.csv"
+
+    cmd = [
+        PYTHON, DATA_PREPROCESSING_DIR / "longitudinal_data_processing.py",
+        "--health-csv", PROFILE_SOURCES["HEALTH_HISTORY"],
+        "--labs-csv", PROFILE_SOURCES["LABS"],
+        "--medications-csv", PROFILE_SOURCES["MEDICATIONS"],
+        "--icd-csv", icd_csv,
+        "--anchor-med-set", run["anchor"],
+        "--survival-cohort-csv", run["restrict_to_mrns"],
+        "--output-csv", output_csv,
+        "--consolidated-cache-parquet", cache_parquet,
+    ]
+    rc = _run(cmd, dry_run=dry_run)
+    if not dry_run and rc != 0:
+        raise RuntimeError(f"longitudinal_data_processing.py failed for {label} with rc={rc}")
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 -- build prediction inputs + cohort diagnostics
+# ---------------------------------------------------------------------------
+
+def clear_prediction_inputs(inputs_dir: Path) -> None:
+    for pattern in (
+        "aggregated_landmark*.csv",
+        "pre_treatment_lab_long_landmark*.csv",
+        "split_assignments_landmark*.csv",
+        "longitudinal_landmark*.csv",
+        "longitudinal_landmark*_manifest.json",
+    ):
+        for p in inputs_dir.glob(pattern):
+            p.unlink()
+            print(f"  removed {p.name}")
+    for fname in (
+        "canonical_labs_train_val.csv",
+        "build_manifest.json",
+        "split_assignments.csv",
+        "landmark_mrn_availability.csv",
+        "landmark_attrition.json",
+    ):
+        p = inputs_dir / fname
+        if p.exists():
+            p.unlink()
+            print(f"  removed {p.name}")
+
+
+def build_prediction_inputs(run: dict, dry_run: bool = False) -> None:
+    print(f"\n========== build inputs: {run['title']} ==========")
+    if not dry_run:
+        clear_prediction_inputs(run["inputs_dir"])
+    cmd = [
+        PYTHON, DATA_PREPROCESSING_DIR / "build_prediction_inputs.py",
+        "--data", run["input_csv"],
+        "--output-dir", run["inputs_dir"],
+        "--anchor-col", run["anchor_col"],
+        "--landmark-days", *[str(lm) for lm in run["landmarks"]],
+        "--time-unit-days", "7",
+        "--test-frac", "0.20",
+        "--val-frac", "0.20",
+        "--min-patient-coverage", "0.20",
+    ]
+    if run.get("restrict_to_mrns"):
+        cmd += ["--restrict-to-mrns", run["restrict_to_mrns"]]
+    if run.get("exclude_mrns"):
+        cmd += ["--exclude-mrns", run["exclude_mrns"]]
+    # The builder applies only this endpoint's validity gate. Thus pre-anchor
+    # platinum does not remove NEPC patients, and prevalent NEPC does not remove
+    # platinum patients.
+    cmd += ["--endpoint", run.get("endpoint", ENDPOINT)]
+    if BUILD_FULL_FOLLOWUP:
+        # Writes longitudinal_full_landmark{D}.csv ALONGSIDE the landmark
+        # files -- never instead of them. Needed by the dynamic
+        # (per-timepoint) DeepHit arm; harmless otherwise beyond the extra
+        # build time and disk. See RUN_DYNAMIC.
+        cmd.append("--longitudinal-full-followup")
+    rc = _run(cmd, dry_run=dry_run)
+    if not dry_run and rc != 0:
+        raise RuntimeError(f"build_prediction_inputs failed for {run['label']} with rc={rc}")
+
+
+def build_somatic_gleason_inputs(run: dict, dry_run: bool = False) -> None:
+    """Build separate Gleason- and sequencing-indexed cohorts."""
+    _require_adt_index_run(run)
+    output_dir = run["inputs_dir"] / "somatic_gleason"
+    print(f"\n========== build somatic + Gleason inputs: {run['title']} ==========")
+    cmd = [
+        PYTHON, DATA_PREPROCESSING_DIR / "build_somatic_gleason_inputs.py",
+        "--base-inputs-dir", run["inputs_dir"],
+        "--output-dir", output_dir,
+        "--endpoint", run.get("endpoint", ENDPOINT),
+        "--landmark-days", *[str(lm) for lm in SOMATIC_GLEASON_LANDMARKS],
+    ]
+    rc = _run(cmd, dry_run=dry_run)
+    if not dry_run and rc != 0:
+        raise RuntimeError(
+            f"build_somatic_gleason_inputs failed for {run['label']} with rc={rc}"
+        )
+
+
+def cohort_diagnostics(run: dict) -> None:
+    print(f"\n========== cohort diagnostics: {run['title']} ==========")
+    endpoint = run.get("endpoint", ENDPOINT)
+    event_col = _ca.ENDPOINTS[endpoint]["event_col"]
+    for lm in run["landmarks"]:
+        agg_path = run["inputs_dir"] / f"aggregated_landmark{lm}.csv"
+        if not agg_path.exists():
+            print(f"  landmark +{lm}d: aggregated CSV not found, skipping")
+            continue
+        agg = pd.read_csv(agg_path)
+
+        def find_col(substr, stat):
+            return next(
+                (c for c in agg.columns if substr.lower() in c.lower() and c.endswith(f"__{stat}")),
+                None,
+            )
+
+        if event_col not in agg.columns:
+            print(f"=== landmark +{lm}d | {event_col} absent, skipping ===")
+            continue
+        n_events = int(agg[event_col].sum())
+        print(
+            f"=== landmark +{lm}d | n_total={len(agg):,} "
+            f"n_{event_col}={n_events} ==="
+        )
+        for lab_substr in ("Testosterone", "PSA", "Prostate specific Ag"):
+            for stat in ("mean", "last", "max", "min"):
+                col = find_col(lab_substr, stat)
+                if col is None:
+                    continue
+                for ev in (0, 1):
+                    sub = agg.loc[agg[event_col] == ev, col].dropna()
+                    if sub.empty:
+                        continue
+                    print(
+                        f"  {lab_substr:>22s} {stat:5s} {event_col}={ev}: "
+                        f"median={sub.median():>10.2f} "
+                        f"max={sub.max():>12.2f} n={len(sub):>5}"
+                    )
+                break
+        print()
+
+
+# ---------------------------------------------------------------------------
+# Model task specs, split by stage (was one MODEL_TASK_SPECS list in the
+# monolithic notebooks; split so 02_univariate and 03_multivariate each drive
+# only their own subset).
+# ---------------------------------------------------------------------------
+
+UNIVARIATE_TASK_SPECS = [
+    ("univariate", "both", "cox_agg_univariate_nobs_adjusted.csv"),
+]
+
+MULTIVARIATE_TASK_SPECS = [
+    ("elastic-net", "both", "cox_agg_multivariable_metrics.csv"),
+    ("elastic-net", "baseline", "cox_agg_baseline_metrics.csv"),
+    ("xgboost", "both", "landmark_xgboost_metrics.csv"),
+    ("xgboost", "baseline", "landmark_xgboost_baseline_metrics.csv"),
+]
+
+# Per-endpoint config pair for the longitudinal arm. config_dir doubles as
+# --config for both models, reusing tasks_for_run's existing
+# (model, config_dir, metrics_filename) x landmarks cross with zero changes to
+# _run_tasks.
+_LONGITUDINAL_CONFIGS_BY_ENDPOINT = {
+    "platinum": ("platinum", "competing"),
+    "nepc": ("nepc", "nepc_competing"),
+    "avpc": ("avpc", "avpc_competing"),
+}
+
+# The true dynamic (per-timepoint) Dynamic-DeepHit arm. Off by default because
+# it needs inputs built with build_prediction_inputs.py
+# --longitudinal-full-followup; without those the runner refuses to start
+# rather than score a landmark-truncated frame as if it were full follow-up.
+# Turning this on ADDS an arm -- the landmark arm still runs and still produces
+# the number comparable to Cox/XGBoost.
+RUN_DYNAMIC = False
+
+# Fit each endpoint's competing-risk config (cause + death) alongside its
+# cause-only config. False keeps only the cause-only config -- the one
+# comparable to 03_multivariate.ipynb's Cox/XGBoost, which censor at death.
+LONGITUDINAL_INCLUDE_COMPETING = True
+
+
+def longitudinal_task_specs(
+    endpoint: str = None,
+    *,
+    include_dynamic: bool = None,
+):
+    """(model, config_dir, metrics_filename) triples for one endpoint.
+
+    The cause-only config is listed first so it leads the summary table; it is
+    the row comparable to that endpoint's Cox/XGBoost arms.
+    """
+    endpoint = ENDPOINT if endpoint is None else endpoint
+    if include_dynamic is None:
+        include_dynamic = RUN_DYNAMIC
+    if endpoint not in _LONGITUDINAL_CONFIGS_BY_ENDPOINT:
+        valid = ", ".join(sorted(_LONGITUDINAL_CONFIGS_BY_ENDPOINT))
+        raise ValueError(
+            f"No longitudinal configs registered for endpoint {endpoint!r}. "
+            f"Known: {valid}."
+        )
+    configs = _LONGITUDINAL_CONFIGS_BY_ENDPOINT[endpoint]
+    if not LONGITUDINAL_INCLUDE_COMPETING:
+        configs = configs[:1]
+    specs = [
+        ("dynamic-deephit", cfg, f"dynamic_deephit_metrics_{cfg}.csv") for cfg in configs
+    ]
+    if include_dynamic:
+        # Filename tracks the runner's `dynamic_deephit_dyn` output prefix, and
+        # the separate model name gives it its own output directory, so the two
+        # DeepHit arms can never overwrite each other's metrics.
+        specs.extend(
+            ("dynamic-deephit-dyn", cfg, f"dynamic_deephit_dyn_metrics_{cfg}.csv")
+            for cfg in configs
+        )
+    return specs
+
+
+# Backwards-compatible module-level view for the default endpoint. Prefer
+# longitudinal_task_specs(), which honors its explicit endpoint (or the legacy
+# ENDPOINT fallback) at call time rather than at import time.
+LONGITUDINAL_TASK_SPECS = longitudinal_task_specs("platinum")
+
+
+def longitudinal_metrics_filename(model: str, config_dir: str, landmark: int, metrics_filename) -> str:
+    if metrics_filename is not None:
+        return metrics_filename
+    raise ValueError(f"No metrics filename known for model={model!r}.")
+
+
+def tasks_for_run(run: dict, specs=MULTIVARIATE_TASK_SPECS):
+    """Cross a task-spec list with this run's own landmark list.
+
+    Both ARPI and ADT arms have landmarks=[0, 90, 180].
+    """
+    return [
+        (model, lm, config_dir, metrics_filename)
+        for model, config_dir, metrics_filename in specs
+        for lm in run["landmarks"]
+    ]
+
+
+def model_output_dir(model: str) -> str:
+    mapping = {
+        "univariate": "cox",
+        "elastic-net": "cox",
+        "xgboost": "xgboost",
+        "dynamic-deephit": "multivariate_longitudinal/dynamic_deephit",
+        "dynamic-deephit-dyn": "multivariate_longitudinal/dynamic_deephit_dynamic",
+    }
+    if model not in mapping:
+        raise ValueError(f"Unknown model: {model}")
+    return mapping[model]
+
+
+def _adjust_only_args(run: dict) -> list[str]:
+    """CLI flag for adjust-only runs; empty for default runs so their commands are unchanged."""
+    mode = run.get("adjust_only_mode", DEFAULT_ADJUST_ONLY_MODE)
+    return [] if mode == DEFAULT_ADJUST_ONLY_MODE else ["--adjust-only-mode", mode]
+
+
+def build_model_command(model, landmark, config_dir, row_output_dir, run):
+    overwrite_flag = "--overwrite" if FORCE_RERUN else "--no-overwrite"
+    # Stamped onto the canonical `cohort` metrics column so a metrics CSV names
+    # the patient subset it was fit on. The restriction itself happens upstream
+    # at Stage 3 via --restrict-to-mrns; this only records it. Runs predating
+    # the cohort key fall back to the unrestricted default.
+    cohort_args = ["--cohort", str(run.get("cohort") or DEFAULT_COHORT)]
+    if model == "univariate":
+        return [
+            PYTHON, LAB_ASSOCIATIONS_DIR / "univariate_analysis.py",
+            "--inputs-dir", run["inputs_dir"],
+            "--output-dir", row_output_dir,
+            "--landmark-days", str(landmark),
+            "--endpoints", run.get("endpoint", ENDPOINT),
+            overwrite_flag,
+        ]
+    if model == "elastic-net":
+        cmd = [
+            PYTHON, MULTIVARIABLE_DIR / "multivariate_analysis.py",
+            "--model", "elastic-net",
+            "--inputs-dir", run["inputs_dir"],
+            "--output-dir", row_output_dir,
+            "--landmark-days", str(landmark),
+            "--endpoints", run.get("endpoint", ENDPOINT),
+            "--n-folds", str(N_FOLDS),
+            *cohort_args,
+            overwrite_flag,
+        ]
+        if config_dir == "baseline":
+            cmd.append("--baseline")
+        if OUT_OF_FOLD_RISKS:
+            cmd.append("--out-of-fold-risks")
+        if SAVE_TEST_SURVIVAL:
+            cmd.append("--save-test-survival")
+        cmd += _adjust_only_args(run)
+        return cmd
+    if model in ("dynamic-deephit", "dynamic-deephit-dyn"):
+        cmd = [
+            PYTHON, LONGITUDINAL_DIR / "dynamic_deephit.py",
+            "--inputs-dir", run["inputs_dir"],
+            "--output-dir", row_output_dir,
+            "--landmark-day", str(landmark),
+            "--config", config_dir,
+            "--max-pred-window", str(MAX_PRED_WINDOW),
+            *cohort_args,
+            overwrite_flag,
+        ]
+        if model == "dynamic-deephit-dyn":
+            # Switches the runner to the longitudinal_full_* inputs and scores a
+            # CIF at every observation time. The runner cross-checks this against
+            # the manifest's include_post_landmark flag and refuses a mismatch in
+            # either direction, so a tree built without
+            # --longitudinal-full-followup fails loudly here instead of quietly
+            # scoring the landmark frame twice.
+            cmd.append("--dynamic")
+        return cmd
+    if model == "xgboost":
+        cmd = [
+            PYTHON, MULTIVARIABLE_DIR / "multivariate_analysis.py",
+            "--model", "xgboost",
+            "--inputs-dir", run["inputs_dir"],
+            "--output-dir", row_output_dir,
+            "--landmark-days", str(landmark),
+            "--endpoints", run.get("endpoint", ENDPOINT),
+            "--n-folds", str(N_FOLDS),
+            *cohort_args,
+            overwrite_flag,
+        ]
+        if config_dir == "baseline":
+            cmd.append("--baseline")
+        if OUT_OF_FOLD_RISKS:
+            cmd.append("--out-of-fold-risks")
+        if SAVE_TEST_SURVIVAL:
+            cmd.append("--save-test-survival")
+        cmd += _adjust_only_args(run)
+        return cmd
+    raise ValueError(f"Unknown model: {model}")
+
+
+def _run_tasks(run: dict, specs, dry_run: bool = False):
+    print(f"\n========== run models: {run['title']} ==========")
+    tasks = tasks_for_run(run, specs)
+    summary = []
+    for model, landmark, config_dir, metrics_filename in tasks:
+        row_output_dir = run["output_dir"] / model_output_dir(model) / f"landmark_{landmark}" / config_dir
+        metrics_path = row_output_dir / longitudinal_metrics_filename(model, config_dir, landmark, metrics_filename)
+        tag = f"{run['label']:28s} {model:11s} landmark_{landmark:<3} {config_dir}"
+        if metrics_path.exists() and not FORCE_RERUN:
+            print(f"[skip] {tag} -> {metrics_path.relative_to(run['output_dir'])} exists")
+            summary.append((tag, "skipped", 0.0))
+            continue
+        if not dry_run:
+            row_output_dir.mkdir(parents=True, exist_ok=True)
+        cmd = build_model_command(model, landmark, config_dir, row_output_dir, run)
+        print(f"[run ] {tag}")
+        t0 = time.time()
+        rc = _run(cmd, dry_run=dry_run)
+        elapsed = time.time() - t0
+        status = "ok" if rc == 0 else f"FAILED (rc={rc})"
+        print(f"[done] {tag} -> {status} ({elapsed/60:.1f} min)\n")
+        summary.append((tag, status, elapsed))
+    return summary
+
+
+def run_univariate(run: dict, dry_run: bool = False):
+    """Per-landmark univariate arm."""
+    summary = _run_tasks(run, UNIVARIATE_TASK_SPECS, dry_run=dry_run)
+    print("\n=== run summary ===")
+    for tag, status, elapsed in summary:
+        print(f"  {tag} {status:>20s} {elapsed/60:6.1f} min")
+    return summary
+
+
+def run_somatic_gleason_univariate(run: dict, dry_run: bool = False):
+    """Run the Gleason- and both sequencing-indexed (SNV, any-alteration) Cox analyses.
+
+    Full cohort only: any other cohort/exclusion run is skipped, so each
+    endpoint is tested exactly once.
+    """
+    _require_adt_index_run(run)
+    if not is_full_cohort_run(run):
+        print(f"[skip] {run['label']}: sequencing + Gleason univariate runs on the full cohort only")
+        return []
+    print(f"\n========== run sequencing + Gleason univariate: {run['title']} ==========")
+    summary = []
+    for analysis in SOMATIC_GLEASON_INDEX_ANALYSES:
+        landmark = 0
+        row_output_dir = (
+            run["output_dir"]
+            / "cox_somatic_gleason"
+            / f"landmark_{landmark}"
+            / analysis
+            / "both"
+        )
+        metrics_path = row_output_dir / "cox_agg_univariate_nobs_adjusted.csv"
+        tag = f"{run['label']:28s} {analysis:<14s} index-date"
+        if metrics_path.exists() and not FORCE_RERUN:
+            print(f"[skip] {tag} -> {metrics_path.relative_to(run['output_dir'])} exists")
+            summary.append((tag, "skipped", 0.0))
+            continue
+        if not dry_run:
+            row_output_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            PYTHON, LAB_ASSOCIATIONS_DIR / "univariate_analysis.py",
+            "--inputs-dir", run["inputs_dir"] / "somatic_gleason" / analysis,
+            "--output-dir", row_output_dir,
+            "--landmark-days", str(landmark),
+            "--endpoints", run.get("endpoint", ENDPOINT),
+            "--feature-set", "somatic-gleason",
+            "--overwrite" if FORCE_RERUN else "--no-overwrite",
+        ]
+        print(f"[run ] {tag}")
+        t0 = time.time()
+        rc = _run(cmd, dry_run=dry_run)
+        elapsed = time.time() - t0
+        status = "ok" if rc == 0 else f"FAILED (rc={rc})"
+        print(f"[done] {tag} -> {status} ({elapsed/60:.1f} min)\n")
+        summary.append((tag, status, elapsed))
+    return summary
+
+
+def run_multivariate(run: dict, dry_run: bool = False):
+    """Elastic-net (both/baseline) and XGBoost (both/baseline) arms."""
+    summary = _run_tasks(run, MULTIVARIATE_TASK_SPECS, dry_run=dry_run)
+    print("\n=== run summary ===")
+    for tag, status, elapsed in summary:
+        print(f"  {tag} {status:>20s} {elapsed/60:6.1f} min")
+    return summary
+
+
+def run_multivariate_available_case_sensitivity(run: dict, dry_run: bool = False):
+    """Run the matched Gleason-vs-labs sensitivity.
+
+    ``build_somatic_gleason_inputs`` writes this subset with the original
+    ADT-relative outcome clock and split labels.  Within the cohort the fits
+    therefore differ only in model family / feature set, not data
+    availability at each treatment landmark: labs, Gleason alone, and
+    Gleason + labs. Somatic calls are compared against labs only through the
+    gleason_somatic clinical combinations (CLINICAL_COMBINATION_SPECS).
+    """
+    _require_adt_index_run(run)
+    inputs_root = run["inputs_dir"] / "somatic_gleason"
+    specs = (
+        ("gleason", "gleason_available_case", "elastic-net", "labs", "cox", "cox_agg_multivariable_metrics.csv"),
+        ("gleason", "gleason_available_case", "elastic-net", "gleason", "cox", "cox_agg_multivariable_metrics.csv"),
+        ("gleason", "gleason_available_case", "elastic-net", "gleason-labs", "cox", "cox_agg_multivariable_metrics.csv"),
+        ("gleason", "gleason_available_case", "xgboost", "labs", "xgboost", "landmark_xgboost_metrics.csv"),
+        ("gleason", "gleason_available_case", "xgboost", "gleason", "xgboost", "landmark_xgboost_metrics.csv"),
+        ("gleason", "gleason_available_case", "xgboost", "gleason-labs", "xgboost", "landmark_xgboost_metrics.csv"),
+    )
+    summary = []
+    for landmark_day in run["landmarks"]:
+        for analysis, input_dirname, model, feature_set, model_dir, metrics_name in specs:
+            row_output_dir = run["output_dir"] / "sensitivity_available_case" / analysis / feature_set / model_dir / f"landmark_{landmark_day}" / "both"
+            metrics_path = row_output_dir / metrics_name
+            tag = f"{run['label']:28s} {model:11s} +{landmark_day}d {analysis}/{feature_set}"
+            if metrics_path.exists() and not FORCE_RERUN:
+                print(f"[skip] {tag} -> {metrics_path.relative_to(run['output_dir'])} exists")
+                summary.append((tag, "skipped", 0.0))
+                continue
+            if not dry_run:
+                row_output_dir.mkdir(parents=True, exist_ok=True)
+            cmd = [
+                PYTHON, MULTIVARIABLE_DIR / "multivariate_analysis.py",
+                "--model", model,
+                "--inputs-dir", inputs_root / input_dirname,
+                "--output-dir", row_output_dir,
+                "--landmark-days", str(landmark_day),
+                "--endpoints", run.get("endpoint", ENDPOINT),
+                "--n-folds", str(N_FOLDS),
+                "--feature-set", feature_set,
+                "--cohort", f"{run.get('cohort', DEFAULT_COHORT)}_available_case",
+                "--overwrite" if FORCE_RERUN else "--no-overwrite",
+                *_adjust_only_args(run),
+            ]
+            print(f"[run ] {tag}")
+            t0 = time.time()
+            rc = _run(cmd, dry_run=dry_run)
+            elapsed = time.time() - t0
+            status = "ok" if rc == 0 else f"FAILED (rc={rc})"
+            print(f"[done] {tag} -> {status} ({elapsed/60:.1f} min)\n")
+            summary.append((tag, status, elapsed))
+    return summary
+
+
+# --- 03d: Gleason / somatic / labs component combinations --------------------
+# Cohort -> arms, following FEATURE_SET_COMPONENTS's tokens (cox_aggregated.py).
+# Only the Gleason + somatic available-case cohort is fit, with all 7 non-empty
+# combinations; the Gleason-only cohort's labs/gleason/gleason-labs arms are
+# already the available-case sensitivity above. "labs" is the reference arm;
+# summarize_clinical_combinations bootstraps every other arm against it.
+CLINICAL_COMBINATION_SPECS = {
+    "gleason_somatic": (
+        "labs",
+        "gleason",
+        "somatic",
+        "gleason-labs",
+        "somatic-labs",
+        "gleason-somatic",
+        "gleason-somatic-labs",
+    ),
+}
+# cohort -> input subdirectory under inputs_dir/somatic_gleason, written by
+# build_somatic_gleason_inputs.py.
+CLINICAL_COMBINATION_INPUT_DIRNAMES = {
+    "gleason_somatic": "gleason_somatic_available_case",
+}
+CLINICAL_COMBINATIONS_METRICS_FILENAME = "clinical_combinations_metrics.csv"
+
+
+def run_multivariate_clinical_combinations(run: dict, dry_run: bool = False):
+    """Fit every Gleason/somatic/labs component combination, both model families.
+
+    Follows run_multivariate_available_case_sensitivity's pattern: each arm
+    gets its own output directory and resumes independently under
+    FORCE_RERUN=False. The arm list is per-cohort (CLINICAL_COMBINATION_SPECS):
+    the gleason_somatic cohort tests all 7 non-empty component combinations.
+    """
+    _require_adt_index_run(run)
+    inputs_root = run["inputs_dir"] / "somatic_gleason"
+    summary = []
+    for landmark_day in run["landmarks"]:
+        for cohort, arms in CLINICAL_COMBINATION_SPECS.items():
+            input_dirname = CLINICAL_COMBINATION_INPUT_DIRNAMES[cohort]
+            inputs_dir = inputs_root / input_dirname
+            for model, model_dir, metrics_name in (
+                ("elastic-net", "cox", "cox_agg_multivariable_metrics.csv"),
+                ("xgboost", "xgboost", "landmark_xgboost_metrics.csv"),
+            ):
+                for arm in arms:
+                    row_output_dir = (
+                        run["output_dir"] / "clinical_combinations" / cohort / arm
+                        / model_dir / f"landmark_{landmark_day}" / "both"
+                    )
+                    metrics_path = row_output_dir / metrics_name
+                    tag = f"{run['label']:28s} {model:11s} +{landmark_day}d {cohort}/{arm}"
+                    if metrics_path.exists() and not FORCE_RERUN:
+                        print(f"[skip] {tag} -> {metrics_path.relative_to(run['output_dir'])} exists")
+                        summary.append((tag, "skipped", 0.0))
+                        continue
+                    if not inputs_dir.exists():
+                        print(
+                            f"[warn] {tag} -> missing inputs {inputs_dir}.\n"
+                            "       Run build_somatic_gleason_inputs.py first."
+                        )
+                        summary.append((tag, "missing inputs", 0.0))
+                        continue
+                    if not dry_run:
+                        row_output_dir.mkdir(parents=True, exist_ok=True)
+                    cmd = [
+                        PYTHON, MULTIVARIABLE_DIR / "multivariate_analysis.py",
+                        "--model", model,
+                        "--inputs-dir", inputs_dir,
+                        "--output-dir", row_output_dir,
+                        "--landmark-days", str(landmark_day),
+                        "--endpoints", run.get("endpoint", ENDPOINT),
+                        "--n-folds", str(N_FOLDS),
+                        "--feature-set", arm,
+                        "--cohort", f"{run.get('cohort', DEFAULT_COHORT)}_{cohort}_available_case",
+                        "--overwrite" if FORCE_RERUN else "--no-overwrite",
+                    ]
+                    if OUT_OF_FOLD_RISKS:
+                        cmd.append("--out-of-fold-risks")
+                    cmd += _adjust_only_args(run)
+                    print(f"[run ] {tag}")
+                    t0 = time.time()
+                    rc = _run(cmd, dry_run=dry_run)
+                    elapsed = time.time() - t0
+                    status = "ok" if rc == 0 else f"FAILED (rc={rc})"
+                    print(f"[done] {tag} -> {status} ({elapsed/60:.1f} min)\n")
+                    summary.append((tag, status, elapsed))
+    return summary
+
+
+def _clinical_combination_dir(run: dict, cohort: str, arm: str, model_dir: str, landmark: int) -> Path:
+    return (
+        run["output_dir"] / "clinical_combinations" / cohort / arm
+        / model_dir / f"landmark_{landmark}" / "both"
+    )
+
+
+def _load_test_block_risks(path, endpoint: str) -> pd.DataFrame:
+    """Read one patient-risk file, restricted to `endpoint`'s test-block rows.
+
+    The XGBoost writer names the time column `duration` (and `landmark_day`)
+    where the elastic-net Cox writer uses `duration_days`; both are days from
+    the landmark, so normalize to the Cox names (as risk_score_stratified_figures
+    .load_patient_risks does) so the paired bootstrap reads either model.
+    """
+    risks = pd.read_csv(path).rename(
+        columns={"duration": "duration_days", "landmark_day": "landmark_days"}
+    )
+    risks = risks.loc[risks.get("endpoint", endpoint) == endpoint]
+    if "dataset" in risks.columns:
+        risks = risks.loc[risks["dataset"].astype(str) == "test"]
+    return risks
+
+
+def _paired_bootstrap_delta_c_index(
+    arm_risks: pd.DataFrame,
+    labs_risks: pd.DataFrame,
+    *,
+    id_col: str,
+    n_boot: int = 1000,
+    seed: int = 0,
+) -> tuple[float, float, float, int]:
+    """Bootstrap CI for (arm C-index - labs C-index) on their shared patients.
+
+    Both frames come from the SAME cohort's test-block patient-risk file, so
+    every patient in one is in the other; only their two models differ. Each
+    bootstrap draw resamples patient indices once and recomputes both arms'
+    C-index on that draw, keeping the pairing (same resampled patients score
+    both models), which is what makes the resulting interval a paired
+    comparison rather than two independent ones.
+
+    Returns (observed_delta, ci_low, ci_high, n_patients).
+    """
+    from lifelines.utils import concordance_index
+
+    merged = arm_risks[[id_col, "duration_days", "event", "risk_score"]].merge(
+        labs_risks[[id_col, "risk_score"]],
+        on=id_col,
+        suffixes=("_arm", "_labs"),
+    )
+    n = len(merged)
+    if n == 0:
+        return float("nan"), float("nan"), float("nan"), 0
+
+    duration = merged["duration_days"].to_numpy(dtype=float)
+    event = merged["event"].to_numpy(dtype=int)
+    risk_arm = merged["risk_score_arm"].to_numpy(dtype=float)
+    risk_labs = merged["risk_score_labs"].to_numpy(dtype=float)
+
+    def _delta(idx: np.ndarray) -> float:
+        d, e = duration[idx], event[idx]
+        if e.sum() == 0:
+            return float("nan")
+        # A small test block can resample into a draw with events but no
+        # admissible pairs (e.g. every event tied at the longest duration);
+        # lifelines raises there, so treat it like the no-event draw above.
+        try:
+            c_arm = concordance_index(d, -risk_arm[idx], e)
+            c_labs = concordance_index(d, -risk_labs[idx], e)
+        except ZeroDivisionError:
+            return float("nan")
+        return c_arm - c_labs
+
+    observed = _delta(np.arange(n))
+    rng = np.random.default_rng(seed)
+    draws = [
+        _delta(rng.integers(0, n, size=n)) for _ in range(n_boot)
+    ]
+    draws = [d for d in draws if np.isfinite(d)]
+    if not draws:
+        return observed, float("nan"), float("nan"), n
+    ci_low, ci_high = np.percentile(draws, [2.5, 97.5])
+    return observed, float(ci_low), float(ci_high), n
+
+
+def summarize_clinical_combinations(run: dict) -> pd.DataFrame:
+    """One row per (cohort, arm, model, landmark): metrics plus a delta vs labs.
+
+    `delta_c_index`/`delta_c_index_ci_low`/`delta_c_index_ci_high` come from a
+    paired bootstrap on the shared test-block patients (Plan §2c) -- the
+    patients are identical across arms within one cohort/landmark/model,
+    because every arm there is fit on the same available-case cohort, so the
+    pairing is exact rather than approximate. NaN for the labs row itself and
+    wherever either arm's patient-risk file is missing.
+    """
+    endpoint = run.get("endpoint", ENDPOINT)
+    rows = []
+    for landmark_day in run["landmarks"]:
+        for cohort, arms in CLINICAL_COMBINATION_SPECS.items():
+            for model, model_dir, metrics_name, risks_name in (
+                ("elastic-net", "cox", "cox_agg_multivariable_metrics.csv", "cox_agg_multivariable_patient_risks.csv"),
+                ("xgboost", "xgboost", "landmark_xgboost_metrics.csv", "landmark_xgboost_patient_risks.csv"),
+            ):
+                for arm in arms:
+                    row_dir = _clinical_combination_dir(run, cohort, arm, model_dir, landmark_day)
+                    base = {
+                        "run": run["label"], "cohort": cohort, "arm": arm,
+                        "model": model, "landmark": landmark_day, "endpoint": endpoint,
+                    }
+                    metrics_path = row_dir / metrics_name
+                    if not metrics_path.exists():
+                        rows.append({**base, **_missing_metric_fields("missing")})
+                        continue
+                    frame = pd.read_csv(metrics_path)
+                    matched = frame.loc[frame["endpoint"] == endpoint]
+                    if matched.empty:
+                        rows.append({**base, **_missing_metric_fields(f"no {endpoint} row")})
+                        continue
+                    rows.append({**base, **_canonical_metric_fields(matched.iloc[0]), "_risks_path": str(row_dir / risks_name)})
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    if "_risks_path" not in out.columns:
+        out["_risks_path"] = pd.NA
+
+    id_col = run.get("id_col", "DFCI_MRN")
+    delta = pd.Series(pd.NA, index=out.index, dtype="Float64")
+    ci_low = pd.Series(pd.NA, index=out.index, dtype="Float64")
+    ci_high = pd.Series(pd.NA, index=out.index, dtype="Float64")
+    n_paired = pd.Series(pd.NA, index=out.index, dtype="Int64")
+
+    for (cohort, model, landmark_day), group in out.groupby(["cohort", "model", "landmark"]):
+        labs_rows = group.loc[group["arm"] == "labs"]
+        labs_path = labs_rows["_risks_path"].iloc[0] if not labs_rows.empty else None
+        if labs_path is None or pd.isna(labs_path) or not Path(labs_path).exists():
+            continue
+        labs_risks = _load_test_block_risks(labs_path, endpoint)
+        for idx, arm_row in group.iterrows():
+            if arm_row["arm"] == "labs":
+                continue
+            arm_path = arm_row.get("_risks_path")
+            if pd.isna(arm_path) or not Path(arm_path).exists():
+                continue
+            arm_risks = _load_test_block_risks(arm_path, endpoint)
+            observed, lo, hi, n = _paired_bootstrap_delta_c_index(
+                arm_risks, labs_risks, id_col=id_col
+            )
+            delta.loc[idx] = observed
+            ci_low.loc[idx] = lo
+            ci_high.loc[idx] = hi
+            n_paired.loc[idx] = n
+
+    out["delta_c_index"] = delta
+    out["delta_c_index_ci_low"] = ci_low
+    out["delta_c_index_ci_high"] = ci_high
+    out["n_paired"] = n_paired
+    out = out.drop(columns="_risks_path")
+    return out.sort_values(["run", "cohort", "landmark", "model", "arm"]).reset_index(drop=True)
+
+
+# --- 03e: Stratification of the labs risk score by held-out clinical/genomic
+# features (Plan §4) -----------------------------------------------------------
+RISK_STRATIFICATION_DIRNAME = "risk_stratification"
+# Schemes are never pooled: each gets its own subdirectory (Plan hard
+# constraint carried over from run_multivariate's --out-of-fold-risks).
+RISK_STRATIFICATION_SCHEMES = ("test", "cv_oof")
+# cohort -> arms compared against "labs" within that available-case cohort,
+# reusing CLINICAL_COMBINATION_SPECS's arm lists (Plan §2c/§4c) so the same
+# clinical/somatic arms already fit there are what gets compared here.
+RISK_STRATIFICATION_MATCHED_COHORTS = {
+    cohort: tuple(arm for arm in arms if arm != "labs")
+    for cohort, arms in CLINICAL_COMBINATION_SPECS.items()
+}
+# Matched cohorts that use somatic data are anchored on the sequencing date, so
+# their stratifiers (Gleason, stage, TP53/PTEN/RB1 from the anchoring specimen)
+# and KM time axis are on that clock too.
+RISK_STRATIFICATION_SEQUENCING_COHORTS = ("gleason_somatic",)
+# The full ADT cohort is stratified by Gleason and stage only: the trio is
+# somatic, so it is stratified only within the sequencing-anchored cohort.
+RISK_STRATIFICATION_FULL_COHORT_STRATIFIERS = ("gleason", "stage")
+
+
+def run_risk_stratification(run: dict, dry_run: bool = False):
+    """Stratify the labs risk score by Gleason/stage/TP53-PTEN-RB1 (Plan §4c).
+
+    Two independent stages, run once per scoring scheme ("test": held-out test
+    block scored by the final model; "cv_oof": full cohort, each patient
+    scored by the outer fold that excluded them -- never pooled, hence the
+    separate `risk_stratification/<scheme>/...` subdirectories):
+
+    1. Full-cohort labs model vs. its own clinical stratifiers (Gleason and
+       stage at ADT + D, from build_somatic_gleason_inputs.py's §4a
+       clinical_stratifiers_landmark{D}.csv, left-joined so a patient missing
+       one stratifier still keeps the others and the risk-score panel).
+    2. Within each available-case cohort that has a matched clinical/somatic
+       arm (gleason_somatic -- see CLINICAL_COMBINATION_SPECS), the
+       labs arm's risk file against every other arm's risk file from that same
+       cohort via --comparison-risks, so the within-stratum comparison is
+       "how does the labs score split patients whose Gleason/somatic-informed
+       score also splits them" rather than just labs vs. raw clinical values.
+       The sequencing-anchored cohort is additionally stratified by Gleason,
+       stage and the TP53/PTEN/RB1 trio at sequencing + D
+       (clinical_stratifiers_sequencing_landmark{D}.csv), on a KM axis in
+       days from the sequencing date.
+
+    cv_oof requires the run to have been fit with OUT_OF_FOLD_RISKS=True;
+    scheme iterations with nothing to read are skipped with a printed warning
+    rather than raising, since a run may only have out-of-fold scores for some
+    task families.
+    """
+    _require_adt_index_run(run)
+    endpoint = run.get("endpoint", ENDPOINT)
+    id_col = run.get("id_col", "DFCI_MRN")
+    strat_root = run["output_dir"] / RISK_STRATIFICATION_DIRNAME
+    summary = []
+
+    for scheme in RISK_STRATIFICATION_SCHEMES:
+        for landmark_day in run["landmarks"]:
+            # --- Stage 1: full-cohort labs model vs. its own clinical strata.
+            labs_risks_path = patient_risk_path(run, "elastic-net", landmark_day, "both")
+            clinical_path = (
+                run["inputs_dir"] / "somatic_gleason" / "clinical_stratifiers"
+                / f"clinical_stratifiers_landmark{landmark_day}.csv"
+            )
+            row_output_dir = strat_root / scheme / "full_cohort" / f"landmark_{landmark_day}"
+            tag = f"{run['label']:28s} risk-strat  {scheme:6s} +{landmark_day}d full_cohort"
+            table_path = row_output_dir / f"risk_stratified_discrimination_{endpoint}_landmark{landmark_day}.csv"
+            # The per-patient strata file feeds the R KM figures; runs from
+            # before it existed are redone rather than skipped.
+            patients_path = row_output_dir / f"risk_stratified_patients_{endpoint}_landmark{landmark_day}.csv"
+            if table_path.exists() and patients_path.exists() and not FORCE_RERUN:
+                print(f"[skip] {tag} -> {table_path.relative_to(run['output_dir'])} exists")
+                summary.append((tag, "skipped", 0.0))
+            elif labs_risks_path is None or not labs_risks_path.exists():
+                print(f"[warn] {tag} -> missing labs risk file {labs_risks_path}.\n       Run run_multivariate(run) first.")
+                summary.append((tag, "missing labs risks", 0.0))
+            elif not clinical_path.exists():
+                print(f"[warn] {tag} -> missing {clinical_path}.\n       Run build_somatic_gleason_inputs.py's main() first.")
+                summary.append((tag, "missing clinical stratifiers", 0.0))
+            else:
+                if not dry_run:
+                    row_output_dir.mkdir(parents=True, exist_ok=True)
+                cmd = [
+                    PYTHON, MULTIVARIABLE_DIR / "risk_score_stratified_figures.py",
+                    "--patient-risks", labs_risks_path,
+                    "--clinical-features", clinical_path,
+                    "--output-dir", row_output_dir,
+                    "--endpoint", endpoint,
+                    "--landmark-days", str(landmark_day),
+                    "--id-col", id_col,
+                    "--dataset", scheme,
+                    "--stratifiers", *RISK_STRATIFICATION_FULL_COHORT_STRATIFIERS,
+                ]
+                print(f"[run ] {tag}")
+                t0 = time.time()
+                rc = _run(cmd, dry_run=dry_run)
+                elapsed = time.time() - t0
+                status = "ok" if rc == 0 else f"FAILED (rc={rc})"
+                print(f"[done] {tag} -> {status} ({elapsed/60:.1f} min)\n")
+                summary.append((tag, status, elapsed))
+
+            # --- Stage 2: matched-cohort labs-vs-clinical/somatic comparisons.
+            for cohort, arms in RISK_STRATIFICATION_MATCHED_COHORTS.items():
+                for model, model_dir in (("elastic-net", "cox"), ("xgboost", "xgboost")):
+                    labs_dir = _clinical_combination_dir(run, cohort, "labs", model_dir, landmark_day)
+                    labs_filename = PATIENT_RISK_FILENAMES.get((model, "both"))
+                    labs_path = labs_dir / labs_filename if labs_filename else None
+                    matched_output_dir = (
+                        strat_root / scheme / "matched" / cohort / model_dir
+                        / f"landmark_{landmark_day}"
+                    )
+                    matched_table_path = (
+                        matched_output_dir
+                        / f"risk_stratified_discrimination_{endpoint}_landmark{landmark_day}.csv"
+                    )
+                    matched_tag = (
+                        f"{run['label']:28s} risk-strat  {scheme:6s} +{landmark_day}d "
+                        f"matched/{cohort}/{model_dir}"
+                    )
+                    matched_patients_path = (
+                        matched_output_dir
+                        / f"risk_stratified_patients_{endpoint}_landmark{landmark_day}.csv"
+                    )
+                    if matched_table_path.exists() and matched_patients_path.exists() and not FORCE_RERUN:
+                        print(f"[skip] {matched_tag} -> {matched_table_path.relative_to(run['output_dir'])} exists")
+                        summary.append((matched_tag, "skipped", 0.0))
+                        continue
+                    if labs_path is None or not labs_path.exists():
+                        print(
+                            f"[warn] {matched_tag} -> missing {labs_path}.\n"
+                            "       Run run_multivariate_clinical_combinations(run) first."
+                        )
+                        summary.append((matched_tag, "missing labs risks", 0.0))
+                        continue
+
+                    comparison_args = []
+                    missing_arms = []
+                    for arm in arms:
+                        arm_dir = _clinical_combination_dir(run, cohort, arm, model_dir, landmark_day)
+                        arm_filename = PATIENT_RISK_FILENAMES.get((model, "both"))
+                        arm_path = arm_dir / arm_filename if arm_filename else None
+                        if arm_path is None or not arm_path.exists():
+                            missing_arms.append(arm)
+                            continue
+                        comparison_args.extend(["--comparison-risks", f"{arm}={arm_path}"])
+                    if missing_arms:
+                        print(
+                            f"[warn] {matched_tag} -> missing comparison risks for arms "
+                            f"{missing_arms}; continuing with the rest."
+                        )
+                    clinical_args = []
+                    if cohort in RISK_STRATIFICATION_SEQUENCING_COHORTS:
+                        sequencing_clinical_path = (
+                            run["inputs_dir"] / "somatic_gleason" / "clinical_stratifiers"
+                            / f"clinical_stratifiers_sequencing_landmark{landmark_day}.csv"
+                        )
+                        if sequencing_clinical_path.exists():
+                            clinical_args = ["--clinical-features", sequencing_clinical_path]
+                        else:
+                            print(
+                                f"[warn] {matched_tag} -> missing {sequencing_clinical_path}; "
+                                "comparing risk scores without clinical stratifiers."
+                            )
+                        clinical_args += ["--time-origin-label", "Days from sequencing date"]
+                    if not dry_run:
+                        matched_output_dir.mkdir(parents=True, exist_ok=True)
+                    cmd = [
+                        PYTHON, MULTIVARIABLE_DIR / "risk_score_stratified_figures.py",
+                        "--patient-risks", labs_path,
+                        "--output-dir", matched_output_dir,
+                        "--endpoint", endpoint,
+                        "--landmark-days", str(landmark_day),
+                        "--id-col", id_col,
+                        "--dataset", scheme,
+                        *clinical_args,
+                        *comparison_args,
+                    ]
+                    print(f"[run ] {matched_tag}")
+                    t0 = time.time()
+                    rc = _run(cmd, dry_run=dry_run)
+                    elapsed = time.time() - t0
+                    status = "ok" if rc == 0 else f"FAILED (rc={rc})"
+                    print(f"[done] {matched_tag} -> {status} ({elapsed/60:.1f} min)\n")
+                    summary.append((matched_tag, status, elapsed))
+
+    return summary
+
+
+def run_incremental_risk(run: dict, dry_run: bool = False):
+    """Phase 5 incremental-value analyses on the dynamic arm's predictions.
+
+    Post-processing, not a model: it reads the per-timepoint predictions the
+    dynamic arm already wrote and needs no refit. Because the GRU is causal,
+    the prediction at step ``t - delta`` already IS the model's estimate from
+    history truncated there, which is what makes the held-back-window ablation
+    a pure re-read of existing output.
+
+    Runs only when RUN_DYNAMIC is on, since it consumes that arm's
+    dynamic_deephit_dyn_predictions_*.csv. Torch-free by construction, so it
+    stays runnable in an env where the model arms cannot run.
+    """
+    if not RUN_DYNAMIC:
+        print("[incremental-risk] disabled (compass_pipeline.RUN_DYNAMIC = False)")
+        return []
+    endpoint = run.get("endpoint", ENDPOINT)
+    configs = [
+        cfg
+        for model, cfg, _ in longitudinal_task_specs(endpoint, include_dynamic=True)
+        if model == "dynamic-deephit-dyn"
+    ]
+    summary = []
+    for landmark in run["landmarks"]:
+        for config_dir in configs:
+            row_output_dir = (
+                run["output_dir"]
+                / model_output_dir("dynamic-deephit-dyn")
+                / f"landmark_{landmark}"
+                / config_dir
+            )
+            tag = f"{run['label']:28s} incremental +{landmark}d {config_dir}"
+            # The ablation table is the one to lead with, so it is what marks
+            # this step done.
+            done = row_output_dir / "incremental_risk_ablation.csv"
+            if done.exists() and not FORCE_RERUN:
+                print(f"[skip] {tag} -> {done.name} exists")
+                summary.append((tag, "skipped", 0.0))
+                continue
+            cmd = [
+                PYTHON,
+                LONGITUDINAL_DIR / "incremental_risk.py",
+                "--output-dir", row_output_dir,
+                "--endpoint", endpoint,
+                # Singular, matching incremental_risk.py's parser (the model
+                # runners take --landmark-day too; only the Cox/XGBoost arms
+                # use the plural --landmark-days).
+                "--landmark-day", str(landmark),
+                "--config", config_dir,
+                "--cohort", str(run.get("cohort") or DEFAULT_COHORT),
+                "--overwrite" if FORCE_RERUN else "--no-overwrite",
+            ]
+            print(f"[run ] {tag}")
+            t0 = time.time()
+            rc = _run(cmd, dry_run=dry_run)
+            elapsed = time.time() - t0
+            status = "ok" if rc == 0 else f"FAILED (rc={rc})"
+            print(f"[done] {tag} -> {status} ({elapsed/60:.1f} min)\n")
+            summary.append((tag, status, elapsed))
+    return summary
+
+
+def run_multivariate_longitudinal(run: dict, dry_run: bool = False):
+    """Dynamic-DeepHit in this run's configs.
+
+    Configs follow the run's endpoint: platinum/competing, or nepc/
+    nepc_competing.
+    When RUN_DYNAMIC is on, the incremental-value analyses run afterwards over
+    the dynamic arm's predictions.
+    """
+    specs = longitudinal_task_specs(run.get("endpoint", ENDPOINT))
+    summary = _run_tasks(run, specs, dry_run=dry_run)
+    # After the fits, not interleaved: it reads their predictions.
+    summary = summary + run_incremental_risk(run, dry_run=dry_run)
+    print("\n=== run summary ===")
+    for tag, status, elapsed in summary:
+        print(f"  {tag} {status:>20s} {elapsed/60:6.1f} min")
+    return summary
+
+
+# summarize_outputs and summarize_longitudinal_outputs emit a stable, narrower
+# shape than the on-disk metrics schema: the bare metric names below are this
+# summary frame's own columns, not the canonical CSV spellings they read from.
+_SUMMARY_METRIC_FIELDS = (
+    "n_test",
+    "n_test_events",
+    "c_index",
+    "mean_auc_t",
+    "integrated_brier",
+)
+
+
+def _missing_metric_fields(status: str) -> dict:
+    return {**{field: None for field in _SUMMARY_METRIC_FIELDS}, "status": status}
+
+
+def _canonical_metric_fields(row) -> dict:
+    """Map one canonical-schema metrics row onto the summary frame's columns."""
+    return {
+        "n_test": int(row["n_test"]),
+        "n_test_events": int(row["n_events_test"]),
+        "c_index": float(row["test_c_index"]),
+        "mean_auc_t": float(row["test_mean_auc_t"]),
+        "integrated_brier": float(row["test_integrated_brier"]),
+        "status": "ok",
+    }
+
+
+def summarize_outputs(run: dict) -> pd.DataFrame:
+    # Reads back whichever endpoint this run modeled; the "endpoint" column it
+    # emits is what lets platinum and NEPC summaries be concatenated and
+    # compared side by side (see 02a_cohort_comparison.ipynb).
+    endpoint = run.get("endpoint", ENDPOINT)
+    rows = []
+    for model, landmark, config_dir, metrics_filename in tasks_for_run(run, MULTIVARIATE_TASK_SPECS):
+        metrics_path = run["output_dir"] / model_output_dir(model) / f"landmark_{landmark}" / config_dir / metrics_filename
+        base = {"run": run["label"], "model": model, "landmark": landmark, "config": config_dir, "endpoint": endpoint}
+        if not metrics_path.exists():
+            rows.append({**base, **_missing_metric_fields("missing")})
+            continue
+        df = pd.read_csv(metrics_path)
+        platinum = df.loc[df["endpoint"] == endpoint]
+        if platinum.empty:
+            rows.append({**base, **_missing_metric_fields(f"no {endpoint} row")})
+            continue
+        # Elastic-net and XGBoost both write the canonical schema
+        # (survival_common/metrics_schema.py), so one read serves both.
+        rows.append({**base, **_canonical_metric_fields(platinum.iloc[0])})
+    return pd.DataFrame(rows).sort_values(["run", "landmark", "model", "config"]).reset_index(drop=True)
+
+
+# Per-patient held-out risk files, keyed by the same (model, config) pair as
+# MULTIVARIATE_TASK_SPECS. Every multivariable family writes one row per
+# held-out patient next to its metrics; these are the filenames.
+PATIENT_RISK_FILENAMES = {
+    ("elastic-net", "both"): "cox_agg_multivariable_patient_risks.csv",
+    ("elastic-net", "baseline"): "cox_agg_baseline_patient_risks.csv",
+    ("xgboost", "both"): "landmark_xgboost_patient_risks.csv",
+    ("xgboost", "baseline"): "landmark_xgboost_baseline_patient_risks.csv",
+}
+
+
+def patient_risk_path(run: dict, model: str, landmark: int, config_dir: str) -> Path | None:
+    """Where one task's held-out risk scores live, or None if unknown for it."""
+    filename = PATIENT_RISK_FILENAMES.get((model, config_dir))
+    if filename is None:
+        return None
+    return (
+        run["output_dir"] / model_output_dir(model)
+        / f"landmark_{landmark}" / config_dir / filename
+    )
+
+
+def summarize_patient_risks(run: dict) -> pd.DataFrame:
+    """Coverage of the per-patient held-out risk scores for one run.
+
+    Mirrors summarize_outputs, but reports whether each task actually wrote its
+    risk file and how many held-out patients it covers. A task whose metrics
+    predate the risk-score output reads as "missing" here while its metrics row
+    still reads fine -- that combination means the fit is stale for this purpose
+    and needs a refit (OVERWRITE = True) to emit scores.
+
+    n_patients/n_events describe the held-out test block (dataset == "test"),
+    which every completed task has. n_oof_patients/n_oof_scored describe the
+    full-cohort out-of-fold scores (dataset == "cv_oof"), which are present
+    only for runs passed --out-of-fold-risks; both read 0 otherwise. They are
+    reported separately because the two come from different models -- the
+    final refit versus each outer CV fold -- and are not interchangeable.
+    n_oof_scored can trail n_oof_patients if an outer fold failed to fit.
+    """
+    endpoint = run.get("endpoint", ENDPOINT)
+    rows = []
+    for model, landmark, config_dir, _metrics_filename in tasks_for_run(run, MULTIVARIATE_TASK_SPECS):
+        base = {
+            "run": run["label"], "model": model, "landmark": landmark,
+            "config": config_dir, "endpoint": endpoint,
+        }
+        path = patient_risk_path(run, model, landmark, config_dir)
+        if path is None:
+            rows.append({**base, "status": "not applicable", "n_patients": pd.NA,
+                         "n_events": pd.NA, "path": ""})
+            continue
+        if not path.exists():
+            rows.append({**base, "status": "missing", "n_patients": pd.NA,
+                         "n_events": pd.NA, "path": str(path)})
+            continue
+        df = pd.read_csv(path, low_memory=False)
+        endpoint_rows = df.loc[df["endpoint"] == endpoint] if "endpoint" in df.columns else df
+        # Two schemes can share the file and must be counted apart: "test" is
+        # the held-out block scored by the final model, "cv_oof" is every
+        # patient scored by the outer fold that excluded them. n_patients stays
+        # the test count so this column keeps its meaning; OOF coverage is
+        # reported alongside it rather than folded in.
+        if "dataset" in endpoint_rows.columns:
+            dataset_col = endpoint_rows["dataset"].astype(str)
+            scoped = endpoint_rows.loc[dataset_col == "test"]
+            oof = endpoint_rows.loc[dataset_col == "cv_oof"]
+        else:
+            scoped, oof = endpoint_rows, endpoint_rows.iloc[0:0]
+        n_oof_scored = (
+            int(pd.to_numeric(oof["risk_score"], errors="coerce").notna().sum())
+            if "risk_score" in oof.columns and not oof.empty
+            else 0
+        )
+        rows.append({
+            **base,
+            "status": "ok" if not scoped.empty else f"no {endpoint} row",
+            "n_patients": int(len(scoped)),
+            "n_events": int(pd.to_numeric(scoped["event"], errors="coerce").sum())
+            if "event" in scoped.columns and not scoped.empty else pd.NA,
+            "n_oof_patients": int(len(oof)),
+            "n_oof_scored": n_oof_scored,
+            "path": str(path),
+        })
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["run", "landmark", "model", "config"])
+        .reset_index(drop=True)
+    )
+
+
+# Summary column -> metrics-file column, as mapped in _canonical_metric_fields.
+_HELDOUT_METRIC_COLUMNS = {
+    "c_index": "test_c_index",
+    "mean_auc_t": "test_mean_auc_t",
+    "integrated_brier": "test_integrated_brier",
+}
+
+
+def _heldout_reference(run: dict, landmark: int) -> pd.DataFrame:
+    """The train/valid durations and events behind a fit's IPCW weights."""
+    endpoint = _ca.ENDPOINTS[run.get("endpoint", ENDPOINT)]
+    columns = {endpoint["duration_col"]: DURATION_COL, endpoint["event_col"]: EVENT_COL}
+    inputs = pd.read_csv(
+        run["inputs_dir"] / f"aggregated_landmark{landmark}.csv", usecols=["split", *columns]
+    )
+    return inputs.loc[inputs["split"].isin(["train", "valid"])].rename(columns=columns)
+
+
+def _stored_heldout_metrics(run: dict) -> dict:
+    """Each completed task's reported test metrics, under their metrics-file names."""
+    summary = summarize_outputs(run)
+    return {
+        (row["model"], int(row["landmark"]), row["config"]): {
+            test_name: row[name] for name, test_name in _HELDOUT_METRIC_COLUMNS.items()
+        }
+        for _, row in summary.loc[summary["status"] == "ok"].iterrows()
+    }
+
+
+def bootstrap_adjust_only_comparison(
+    default_run: dict,
+    adjust_only_run: dict,
+    *,
+    n_boot: int = 1000,
+    seed: int = 42,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Paired patient-bootstrap intervals for one default vs adjust-only comparison.
+
+    Each (model, landmark, config) scores both modes on the same resampled test
+    patients, so a delta interval (adjust-only minus default) comes from the
+    per-draw difference. Tasks at one landmark share `seed + landmark`.
+
+    Returns (intervals, draws). intervals has one row per task that has a risk
+    file in either mode, with <metric>_{default,adjust_only}_ci_* and
+    delta_<metric>_ci_* columns; a task with one mode gets that mode's intervals
+    and blank deltas. draws has one row per (task, mode, draw). Integrated Brier
+    intervals stay blank for fits without SAVE_TEST_SURVIVAL, and a delta needs
+    it in both modes. Stops if a recomputed metric differs from the stored one.
+    """
+    modes = {"default": default_run, "adjust_only": adjust_only_run}
+    endpoint = adjust_only_run.get("endpoint", ENDPOINT)
+    stored = {mode: _stored_heldout_metrics(run) for mode, run in modes.items()}
+    manifest = _ca._load_build_manifest(adjust_only_run["inputs_dir"])
+    score_settings = {
+        "time_unit_days": int(manifest["auc_time_unit_days"]),
+        "max_time_unit": resolve_auc_max_time_units(manifest, None),
+        "n_boot": n_boot,
+        "id_col": _ca.ID_COL,
+    }
+
+    metrics = list(_HELDOUT_METRIC_COLUMNS)
+    task_cols = ["model", "landmark", "config"]
+    references = {}
+    draw_frames = []
+    for model, landmark, config_dir, _ in tasks_for_run(adjust_only_run):
+        task = (model, landmark, config_dir)
+        paths = {mode: patient_risk_path(run, model, landmark, config_dir) for mode, run in modes.items()}
+        fits = {
+            mode: _load_test_block_risks(path, endpoint)
+            for mode, path in paths.items()
+            if task in stored[mode] and path.exists()
+        }
+        if not fits:
+            continue
+        if landmark not in references:
+            references[landmark] = _heldout_reference(adjust_only_run, landmark)
+        observed, task_draws = bootstrap_heldout(
+            fits,
+            reference=references[landmark],
+            horizons=np.asarray(manifest["auc_horizons_by_landmark"][str(landmark)][endpoint], dtype=float),
+            seed=seed + int(landmark),
+            **score_settings,
+        )
+        for _, row in observed.iterrows():
+            assert_reproduces_stored(
+                row, stored[row["fit"]][task],
+                context=f"{modes[row['fit']]['label']} {row['fit']} {model} +{landmark}d {config_dir}",
+            )
+        draw_frames.append(
+            task_draws.rename(columns={"fit": "mode", **{v: k for k, v in _HELDOUT_METRIC_COLUMNS.items()}})
+            .assign(model=model, landmark=landmark, config=config_dir, endpoint=endpoint)
+        )
+    draws = (
+        pd.concat(draw_frames, ignore_index=True)[[*task_cols, "endpoint", "mode", "draw", *metrics]]
+        if draw_frames
+        else pd.DataFrame(columns=[*task_cols, "endpoint", "mode", "draw", *metrics])
+    )
+
+    rows = []
+    for task, group in draws.groupby(task_cols, sort=False):
+        mode_draws = {mode: frame.set_index("draw") for mode, frame in group.groupby("mode")}
+        row = dict(zip(task_cols, task), endpoint=endpoint)
+        for metric in metrics:
+            for mode, frame in mode_draws.items():
+                row[f"{metric}_{mode}_ci_low"], row[f"{metric}_{mode}_ci_high"], \
+                    row[f"{metric}_{mode}_n_valid_draws"] = percentile_ci(frame[metric])
+            if len(mode_draws) == len(modes):
+                difference = mode_draws["adjust_only"][metric] - mode_draws["default"][metric]
+                row[f"delta_{metric}_ci_low"], row[f"delta_{metric}_ci_high"], \
+                    row[f"delta_{metric}_n_valid_draws"] = percentile_ci(difference)
+        rows.append(row)
+    interval_cols = [
+        f"{column}_{part}"
+        for metric in metrics
+        for column in (f"{metric}_default", f"{metric}_adjust_only", f"delta_{metric}")
+        for part in ("ci_low", "ci_high", "n_valid_draws")
+    ]
+    return pd.DataFrame(rows, columns=[*task_cols, "endpoint", *interval_cols]), draws
+
+
+def summarize_longitudinal_outputs(run: dict) -> pd.DataFrame:
+    """Same schema as summarize_outputs, for the longitudinal arms.
+
+    Dynamic-DeepHit writes the canonical schema and is read the same way as
+    Cox/XGBoost. Both arms report a row per cause -- the competing configs report death too, as a
+    secondary diagnostic -- so filtering to the run's cause of interest here
+    keeps the headline comparison against that endpoint's Cox/XGBoost row
+    valid. Frames from both functions share columns and concat cleanly.
+    """
+    endpoint = run.get("endpoint", ENDPOINT)
+    rows = []
+    for model, landmark, config_dir, metrics_filename in tasks_for_run(run, longitudinal_task_specs(endpoint)):
+        resolved_filename = longitudinal_metrics_filename(model, config_dir, landmark, metrics_filename)
+        metrics_path = run["output_dir"] / model_output_dir(model) / f"landmark_{landmark}" / config_dir / resolved_filename
+        base = {"run": run["label"], "model": model, "landmark": landmark, "config": config_dir, "endpoint": endpoint}
+        if not metrics_path.exists():
+            rows.append({**base, **_missing_metric_fields("missing")})
+            continue
+        df = pd.read_csv(metrics_path)
+        if model in ("dynamic-deephit", "dynamic-deephit-dyn"):
+            # The dynamic arm writes the same canonical block (invariant #9):
+            # its *_metrics.csv holds the single landmark-time row, and the
+            # per-prediction-time rows go to a separate by-time file. So it is
+            # read exactly like the landmark arm, and the two are directly
+            # comparable in the summary table.
+            cause = df.loc[df["endpoint"] == endpoint]
+            if cause.empty:
+                rows.append({**base, **_missing_metric_fields(f"no {endpoint} row")})
+                continue
+            rows.append({**base, **_canonical_metric_fields(cause.iloc[0])})
+    return pd.DataFrame(rows).sort_values(["run", "landmark", "model", "config"]).reset_index(drop=True)
+
+
+def load_incremental_risk_results(
+    run: dict, which: str = "ablation"
+) -> pd.DataFrame:
+    """Read back the Phase 5 incremental-value tables for this run.
+
+    ``which="ablation"`` is the held-back-window comparison (5b) and is the one
+    to lead with: it holds the risk set fixed at each prediction time and varies
+    only the input window, so a positive ``auc_gain`` is attributable to the
+    newest labs. ``which="by_landmark"`` is the sequential-landmark series (5a),
+    whose trend is confounded -- the risk set shrinks as the prediction time
+    grows and is increasingly selected for patients who have not yet had the
+    event, so a rising AUC there is not a clean "the model improves" claim.
+
+    Returns an empty frame when the dynamic arm has not been run, rather than
+    raising, so a notebook cell can display it unconditionally.
+    """
+    if which not in ("ablation", "by_landmark"):
+        raise ValueError(
+            f"which must be 'ablation' or 'by_landmark', got {which!r}."
+        )
+    endpoint = run.get("endpoint", ENDPOINT)
+    configs = [
+        cfg
+        for model, cfg, _ in longitudinal_task_specs(endpoint, include_dynamic=True)
+        if model == "dynamic-deephit-dyn"
+    ]
+    frames = []
+    for landmark in run["landmarks"]:
+        for config_dir in configs:
+            path = (
+                run["output_dir"]
+                / model_output_dir("dynamic-deephit-dyn")
+                / f"landmark_{landmark}"
+                / config_dir
+                / f"incremental_risk_{which}.csv"
+            )
+            if not path.exists():
+                continue
+            df = pd.read_csv(path)
+            # The CSVs already carry landmark_days/config/endpoint; `run` is
+            # what lets several arms' tables concat and stay distinguishable.
+            df.insert(0, "run", run["label"])
+            frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def filter_nominal(results: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
+    """Retain rows with nominal significance (p_value < alpha).
+
+    Exploratory filter; q_value remains in the table so multiplicity-adjusted
+    significance can be assessed separately. No stability or false-discovery-rate
+    filter is applied here.
+    """
+    preferred_columns = [
+        "cohort", "landmark_days", "endpoint", "feature", "lab_name",
+        "feature_stat", "coverage", "n_patients_used", "n_events_used",
+        "coef_feature", "hazard_ratio_per_sd", "ci_lower", "ci_upper",
+        "p_value", "q_value", "note", "model_type", "source_path",
+    ]
+    filtered = (
+        results.loc[results["p_value"].notna() & results["p_value"].lt(alpha)]
+        .sort_values(["endpoint", "landmark_days", "p_value", "feature"])
+        .reset_index(drop=True)
+    )
+    ordered = [c for c in preferred_columns if c in filtered.columns]
+    ordered += [c for c in filtered.columns if c not in ordered]
+    return filtered[ordered]
+
+
+def load_univariate_results(run: dict) -> pd.DataFrame:
+    """Load per-landmark univariate result CSVs for this run."""
+    import re
+
+    run_dir = run["output_dir"]
+    paths = sorted((run_dir / "cox").glob("landmark_*/both/cox_agg_univariate_nobs_adjusted.csv"))
+
+    if not paths:
+        raise FileNotFoundError(
+            f"No univariate result files found under {run_dir / 'cox'}. "
+            "Run the univariate models first."
+        )
+
+    frames = []
+    for path in paths:
+        frame = pd.read_csv(path)
+        if "landmark_days" not in frame.columns:
+            match = re.search(r"landmark_(-?\d+)", str(path.parent.parent))
+            if match is None:
+                raise ValueError(f"Could not infer landmark from {path}")
+            frame.insert(0, "landmark_days", int(match.group(1)))
+        frame["source_path"] = str(path)
+        frames.append(frame)
+
+    results = pd.concat(frames, ignore_index=True)
+    required = {"landmark_days", "endpoint", "feature", "p_value"}
+    missing = required - set(results.columns)
+    if missing:
+        raise ValueError(f"Univariate results are missing columns: {sorted(missing)}")
+
+    results["p_value"] = pd.to_numeric(results["p_value"], errors="coerce")
+    results.insert(0, "cohort", run["label"])
+    return results
+
+
+def load_somatic_gleason_univariate_results(run: dict) -> pd.DataFrame:
+    """Load outputs from the Gleason- and sequencing-indexed runs."""
+    import re
+
+    result_root = run["output_dir"] / "cox_somatic_gleason"
+    paths = sorted(
+        result_root.glob(
+            "landmark_*/*/both/cox_agg_univariate_nobs_adjusted.csv"
+        )
+    )
+    if not paths:
+        raise FileNotFoundError(
+            f"No somatic + Gleason univariate results found under {result_root}."
+        )
+    frames = []
+    for path in paths:
+        frame = pd.read_csv(path)
+        if "landmark_days" not in frame.columns:
+            match = re.search(r"landmark_(-?\d+)", str(path.parent.parent.parent))
+            if match is None:
+                raise ValueError(f"Could not infer landmark from {path}")
+            frame.insert(0, "landmark_days", int(match.group(1)))
+        frame.insert(0, "index_analysis", path.parent.parent.name)
+        frame["source_path"] = str(path)
+        frames.append(frame)
+    results = pd.concat(frames, ignore_index=True)
+    results["p_value"] = pd.to_numeric(results["p_value"], errors="coerce")
+    results.insert(0, "cohort", run["label"])
+    return results

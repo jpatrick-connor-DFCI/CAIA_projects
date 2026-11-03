@@ -1,5 +1,5 @@
-source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_pipeline/figure_supplements.R")
+source("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/figures/figure_supplements.R")
 cohorts <- c("adt", "adt_noprecastrate", "adt_metastatic_adt",
   "adt_metastatic_adt_noprecastrate", "adt_metastatic_llm", "adt_metastatic_llm_noprecastrate")
 counts <- tibble(cohort = rep(cohorts, each = 2), endpoint = rep(c("platinum", "nepc"), 6),

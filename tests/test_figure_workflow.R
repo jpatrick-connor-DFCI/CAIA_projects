@@ -1,7 +1,7 @@
 # End-to-end synthetic workflow: two endpoints, independent federation, resume,
 # format-only rendering, and missing optional inputs. No clinical data needed.
-source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
+source("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/figures/figure_workflow.R")
 local({
   root <- tempfile("figure-workflow-", tmpdir = Sys.getenv("COMPASS_TEST_OUTPUT_ROOT", tempdir())); dir.create(root)
   if (Sys.getenv("COMPASS_TEST_KEEP_OUTPUT") == "1") message("Synthetic outputs: ", root)
@@ -107,11 +107,11 @@ local({
       delta_lo=delta_c_vs_transferred-.05,delta_hi=delta_c_vs_transferred+.05,
       mean_auc=.66,mean_auc_lo=.6,mean_auc_hi=.72,delta_auc_vs_transferred=if_else(model=="transferred_labs",NA_real_,.03),
       delta_auc_lo=delta_auc_vs_transferred-.05,delta_auc_hi=delta_auc_vs_transferred+.05),no_dfci_clinical_path)
-  pipeline_path <- normalizePath("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
+  pipeline_path <- normalizePath("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
   cfg <- list(data_root = root, cache_root = file.path(root, "cache"), fig_root = file.path(root, "figures"),
-    cohorts = "adt", endpoints = c("platinum", "nepc"), scope = "all", labs = ANDROGEN,
-    classifier_path = file.path(root, "classifier"), gam = FALSE, adt_intent = FALSE,
-    metastatic = FALSE, metastatic_extra = FALSE, forest_cohorts = "adt", forest_landmark = 180L,
+    cohorts = "adt", endpoints = "platinum", scope = "all",
+    classifier_path = file.path(root, "classifier"),
+    metastatic = FALSE, forest_cohorts = "adt", forest_landmark = 180L,
     federated = TRUE, federated_path = fed_path)
   dir.create(cfg$classifier_path)
   classifier <- tibble(DFCI_MRN = ids, primary_label = if_else(patient$NEPC == 1, "nepc", "conventional"),
@@ -141,7 +141,7 @@ local({
   t1 <- system.time(first <- run_cached_figure_workflow(cfg, pipeline_path, "all", dpi = 60,
     prepare_workers = 1L, render_workers = 2L, forest_config = forest, federated_config = fc))[["elapsed"]]
   retained_exports <- figure_retained_exports(pipeline_path)
-  stopifnot(length(first$prepared) == 4L, length(first$rendered) > 20L,
+  stopifnot(length(first$prepared) == 3L, length(first$rendered) > 20L,
             all(vapply(first$rendered, function(x) x$rendered == 1L, logical(1))))
   manuscript_scenes <- Filter(function(s) isTRUE(s$manuscript) &&
       figure_retained_image(s$destination, cfg$fig_root, ".pdf", retained_exports),
@@ -153,7 +153,6 @@ local({
   overview_stems <- vapply(first$prepared$cohort_overview$scenes,`[[`,character(1),"stem")
   stopifnot("03_cohort_sensitivity_supplement" %in% overview_stems)
   platinum_stems <- vapply(first$prepared$adt__platinum$scenes, `[[`, character(1), "stem")
-  nepc_stems <- vapply(first$prepared$adt__nepc$scenes, `[[`, character(1), "stem")
   # Compiled pages whose panels all appear in a manuscript figure are dropped
   # as duplicates; their individual panels are still exported.
   stopifnot(all(c("figure1a_consort", "figure1b_km", "figure1c_span",
@@ -164,8 +163,7 @@ local({
       rep(names(FIGURE2_COHORTS), each = 3))) %in% platinum_stems),
     all(paste0("02_llm_nepc_avpc__", names(FIGURE2_COHORTS)) %in% platinum_stems),
     "01_cohort_overview" %in% platinum_stems,
-    !any(startsWith(platinum_stems,"dfci_labs_overview_")),
-    !any(startsWith(nepc_stems,"figure2v3")), !any(startsWith(nepc_stems,"dfci_labs_overview_")))
+    !any(startsWith(platinum_stems,"dfci_labs_overview_")))
   stopifnot(length(list.files(cfg$fig_root, pattern = "\\.rds$", recursive = TRUE)) == 0L,
             length(list.files(cfg$cache_root, pattern = "\\.receipt\\.rds$", recursive = TRUE)) > 20L)
   stopifnot(!any(basename(list.dirs(cfg$fig_root, recursive = TRUE)) %in% c("main", "supplements")))
@@ -177,7 +175,7 @@ local({
   stopifnot(all(vapply(second$rendered, function(x) x$rendered == 0L, logical(1))))
   prepared_only <- run_cached_figure_workflow(cfg, pipeline_path, "prepare", dpi = 60,
     forest_config = forest, federated_config = fc)
-  stopifnot(length(prepared_only$prepared) == 4L, length(prepared_only$rendered) == 0L)
+  stopifnot(length(prepared_only$prepared) == 3L, length(prepared_only$rendered) == 0L)
   # Render-only must not even start Python or read a raw input.
   python <- Sys.getenv("COMPASS_FIGURE_PYTHON", unset = NA)
   Sys.setenv(COMPASS_FIGURE_PYTHON = "/no/python/allowed")
@@ -188,11 +186,13 @@ local({
   stopifnot(all(vapply(third$rendered, function(x) x$rendered == 0L, logical(1))))
   stale <- tryCatch(figure_notebook_manifest(cfg), error = identity)
   stopifnot(inherits(stale, "error"), grepl("05_prep_figure_data.ipynb", conditionMessage(stale), fixed = TRUE))
-  # Run the actual COMPASS/figures/all.R with a federation-only scope and raw patient
-  # input hidden. This verifies configuration wiring as well as the helper API.
+  # Run the actual COMPASS/figures/run_figures.R with only federated groups
+  # enabled and raw patient input hidden. This verifies the toggle wiring as
+  # well as the helper API.
   variables <- c(CAIA_PROJECT_ROOT = normalizePath("."),
     COMPASS_DATA_ROOT = root, COMPASS_FIG_ROOT = cfg$fig_root,
-    COMPASS_FIGURE_DATA_ROOT = cfg$cache_root, COMPASS_FIGURE_SCOPE = "federated",
+    COMPASS_FIGURE_DATA_ROOT = cfg$cache_root,
+    COMPASS_FIGURE_GROUPS = "federated_univariable,federated_multivariable,transfer_survival,transfer_checklists",
     COMPASS_FEDERATED_RESULTS = fed_path)
   previous <- Sys.getenv(names(variables), unset = NA)
   on.exit(for (name in names(previous)) {
@@ -200,20 +200,21 @@ local({
     else do.call(Sys.setenv, setNames(list(previous[[name]]), name))
   }, add = TRUE)
   do.call(Sys.setenv, as.list(variables))
-  # Federated forests do not require a matching local result tree.
+  # Federated figures do not require a matching local result tree.
   stopifnot(file.rename(file.path(root, "survival_analysis", "local_runs_adt"),
                         file.path(root, "local_runs_hidden")))
   env <- new.env(parent = globalenv())
-  source(file.path(dirname(dirname(dirname(pipeline_path))), "figures", "all.R"), local = env)
-  stopifnot(identical(names(env$figure_run$prepared), "federated"))
-  stopifnot(identical(vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem"),
-                      c("psa_forest", "testosterone_forest", "site_incidence_lm000",
-                        "elasticnet_performance", "elasticnet_coefficients",
-                        "xgboost_performance", "xgboost_importance",
-                        paste0("federated_volcano_landmark", c(0, 90, 180)),
-                        "transfer_discrimination_no_dfci", "transfer_clinical_comparison_no_dfci",
-                        "08_federated_multivariable",
-                        "federated_05_transfer_no_dfci__no_d")))
+  source(file.path(dirname(pipeline_path), "run_figures.R"), local = env)
+  stopifnot(identical(names(env$figure_run$prepared), "federated"),
+            identical(env$figure_config$scope, "federated"))
+  federated_stems <- vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem")
+  stopifnot(all(c("elasticnet_performance", "elasticnet_coefficients",
+                  "xgboost_performance", "xgboost_importance",
+                  paste0("federated_volcano_landmark", c(0, 90, 180)),
+                  "transfer_discrimination_no_dfci", "transfer_clinical_comparison_no_dfci",
+                  "federated_05_transfer_no_dfci__no_d") %in% federated_stems),
+            !any(c("psa_forest", "testosterone_forest", "site_incidence_lm000",
+                   "08_federated_multivariable") %in% federated_stems))
   coefficient_export <- read_csv(file.path(cfg$fig_root, "ADT", "04_multivariate", "federated", "data",
     "elasticnet_coefficients__platinum.csv"), show_col_types = FALSE)
   stopifnot(nrow(coefficient_export) == 9L, sum(coefficient_export$displayed) == 6L,
@@ -225,20 +226,10 @@ local({
   # Nothing is rendered for the removed with-Dana-Farber arm.
   stopifnot(!any(file.exists(file.path(cfg$fig_root, "ADT", "05_transfer_survival", "data", c(
     "transfer_discrimination__platinum.csv", "transfer_dfci_ablation__platinum.csv")))))
-  # Both forest scenes keep widescreen slide dimensions through 07's cache;
-  # the day-zero incidence layout is unchanged.
-  for(scene in env$figure_run$prepared$federated$scenes[1:2]) {
-    stopifnot(scene$width == 16, scene$height == 9)
-  }
-  incidence_scene <- env$figure_run$prepared$federated$scenes[[3]]
-  stopifnot(incidence_scene$width == 14, incidence_scene$height == 5.5)
-  site_export <- read_csv(file.path(cfg$fig_root, "ADT", "01_cohort", "data",
-                                    "site_incidence_lm000__platinum.csv"), show_col_types = FALSE)
   stopifnot(file.exists(file.path(cfg$fig_root,"ADT","data","index.html")),
             file.exists(file.path(cfg$fig_root,"ADT","data","manifest.csv")),
             !dir.exists(file.path(cfg$fig_root,"ADT","by_figure")),
             !any(dir.exists(file.path(cfg$fig_root,"ADT",FIGURE_RETIRED_FOLDERS))))
-  stopifnot(nrow(site_export) == 2L, all(site_export$landmark_days == 0))
   federated_cfg <- cfg; federated_cfg$scope <- "federated"
   # Elastic-net, XGBoost and 04 transfer files require a refreshed 05 manifest after source changes.
   for(path in c(xgb_metrics_path,xgb_importance_path,cox_metrics_path,cox_coefficients_path,
@@ -249,10 +240,6 @@ local({
     stopifnot(inherits(changed,"error"),grepl(basename(path),conditionMessage(changed),fixed=TRUE))
     Sys.setFileTime(path,original_time)
   }
-  Sys.setFileTime(within_path, file.info(within_path)$mtime + 5)
-  changed_within <- tryCatch(figure_notebook_manifest(federated_cfg), error = identity)
-  stopifnot(inherits(changed_within, "error"),
-            grepl("cox_within_site_all_sites_results.csv", conditionMessage(changed_within), fixed = TRUE))
   # Site-count changes must invalidate federation-only runs as well as all runs.
   site_path <- file.path(site_dir, "cox_within_site_all_sites_cohort.csv")
   Sys.setFileTime(site_path, file.info(site_path)$mtime + 5)
@@ -291,34 +278,15 @@ local({
     key="federated_04_multivariable")
   stopifnot(main_fig4$spec$key=="federated_04_multivariable",
     !any(grepl("no DFCI",as.character(main_fig4$data$name),fixed=TRUE)))
-  # Checklist supplement: cards for a fitted landmark and an unfit one, no workflow cache needed.
-  source("COMPASS/survival_analysis/figure_pipeline/checklist_supplement.R")
-  checklist_dir <- file.path(root,"checklist_tables"); dir.create(checklist_dir)
-  cells <- expand_grid(feature_set=c("labs","labs_gleason_somatic"),endpoint=c("platinum","nepc"),
-      landmark_days=c(0,90)) %>%
-    mutate(horizon_days=1825,population="full",n_test=100,n_events_total=30,
-      status=if_else(landmark_days==0,"ok","unsupported"),
-      reason=if_else(landmark_days==0,NA_character_,"Too few events"),
-      threshold=if_else(landmark_days==0,2,NA_real_),n_items=if_else(landmark_days==0,3L,NA_integer_))
-  write_csv(cells,file.path(checklist_dir,"checklist_cells.csv"))
-  write_csv(filter(cells,status=="ok") %>% select(feature_set,endpoint,landmark_days,horizon_days,population) %>%
-    slice(rep(row_number(),each=3)) %>% group_by(feature_set,endpoint,landmark_days) %>%
-    mutate(item_order=row_number(),name=paste("PSA >= ",item_order,"ng/mL, last value before the landmark"),
-      feature="PSA",op=">=",threshold=item_order,group="PSA") %>% ungroup(),
-    file.path(checklist_dir,"checklist_items_long.csv"))
-  write_csv(filter(cells,status=="ok") %>% select(feature_set,endpoint,landmark_days,horizon_days,population) %>%
-    slice(rep(row_number(),each=4)) %>% group_by(feature_set,endpoint,landmark_days) %>%
-    mutate(model=c("checklist","age_cox","elastic_net","xgboost"),dataset="test",status="ok",
-      auc=.7,auc_lower=.6,auc_upper=.8,brier=.12,sensitivity=.6,specificity=.7,ppv=.3,npv=.9) %>% ungroup(),
-    file.path(checklist_dir,"checklist_metrics.csv"))
-  captured <- character()
-  render_checklist_supplement(checklist_dir,file.path(root,"checklist_figs"),60,TRUE,
-    function(plot,path,width,height,dpi,overwrite) {
-      stopifnot(inherits(plot,"ggplot")); captured <<- c(captured,basename(path))
-    }, figure_sidecar_path)
-  stopifnot(setequal(captured,c("figure4s_checklist_labs__platinum.pdf","figure4s_checklist_labs__nepc.pdf",
-      "figure4s_checklist_labs_gleason_somatic__platinum.pdf","figure4s_checklist_labs_gleason_somatic__nepc.pdf")),
-    file.exists(file.path(root,"checklist_figs","data","figure4s_checklist_items_long.csv")))
-  stopifnot(is.null(suppressWarnings(render_checklist_supplement(file.path(root,"absent"),root,60,TRUE,NULL))))
+  # Checklist cards (used by the federated transfer checklist figures).
+  source("COMPASS/figures/checklist_supplement.R")
+  card_cell <- tibble(landmark_days=0,horizon_days=1825,population="full",n_test=100,n_events_total=30,
+    n_events_test=5,status="ok",threshold=2,n_items=3L)
+  card_items <- tibble(item_order=1:3,name=paste("PSA >=",1:3,"ng/mL"),feature="PSA",op=">=",threshold=1:3,group="PSA")
+  card_metrics <- tibble(model=c("checklist","age_cox","elastic_net","xgboost"),dataset="test",status="ok",
+    auc=.7,auc_lower=.6,auc_upper=.8,brier=.12,sensitivity=.6,specificity=.7,ppv=.3,npv=.9)
+  card_lines <- checklist_card_lines(card_cell,card_items,card_metrics,5)
+  card_lines$landmark_label <- factor("+0 days")
+  stopifnot(nrow(card_lines)>0,inherits(plot_checklist_cards(card_lines,"Checklist"),"ggplot"))
   cat(sprintf("Synthetic workflow: first %.2fs; unchanged %.2fs; %d panels\n", t1, t2, length(first$rendered)))
 })

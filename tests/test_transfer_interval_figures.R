@@ -1,5 +1,5 @@
-source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
+source("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/figures/figure_workflow.R")
 
 metrics <- expand_grid(endpoint=c("platinum","avpc","nepc"),landmark_days=c(0,90,180),
   model_family=c("xgboost_cox","elastic_net_cox"),config=c("both","baseline")) %>%

@@ -1,7 +1,7 @@
 """The R figure pipeline's endpoint wiring: results-tree paths, output
 separation, and per-endpoint metric selection.
 
-Grounded in COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R
+Grounded in COMPASS/figures/COMPASS_generate_figures_pipeline.R
 (read_endpoint_performance + the ENDPOINT_SUFFIXES/FIG_ROOT plumbing in
 generate_figures) and compass_pipeline.make_runs, whose ``output_suffix`` these
 paths must mirror: "" for platinum, "_nepc" for NEPC.
@@ -28,7 +28,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_R = (
-    REPO_ROOT / "COMPASS" / "survival_analysis" / "figure_pipeline" / "COMPASS_generate_figures_pipeline.R"
+    REPO_ROOT / "COMPASS" / "figures" / "COMPASS_generate_figures_pipeline.R"
 )
 
 pytestmark = pytest.mark.skipif(
@@ -251,88 +251,18 @@ def test_pipeline_parses(tmp_path):
     assert _run_r(script, tmp_path).strip() == "OK"
 
 
-# ---- ADT-intent supplemental section -------------------------------------
+# ---- COMPASS/figures/run_figures.R render cross ---------------------------------
 #
-# The supplement reads CSVs written by adt_intent_comparison.py. Two things can
-# silently break it: a filename drifting apart between the Python writer and the
-# R reader, and the "adt_intent_" stem falling through figure_group() into a
-# numbered figure group. Both are checked here because neither shows up as an
-# error -- the first yields an empty section, the second files the supplement
-# under Figure 1.
+# run_figures.R names the cohort-sensitivity cohorts as a literal vector, so it
+# is the one place that can drift out of the Python run cross without any
+# import failing.
 
-
-def _comparison_module_source() -> str:
-    return (
-        REPO_ROOT / "COMPASS" / "survival_analysis" / "pipeline" / "adt_intent_comparison.py"
-    ).read_text()
-
-
-def test_supplement_reads_every_filename_the_module_writes():
-    r_source = _pipeline_source()
-    python_source = _comparison_module_source()
-
-    filenames = re.findall(r'"(adt_intent_[a-z_]+\.csv)"', python_source)
-    assert filenames, "the comparison module declares no output filenames"
-    for filename in filenames:
-        assert filename in r_source, (
-            f"{filename} is written by adt_intent_comparison.py but never read "
-            "by the R supplement"
-        )
-
-
-def test_supplement_stems_route_to_their_own_figure_group():
-    source = _pipeline_source()
-    assert 'if (startsWith(plot_stem, "adt_intent_")) return("supplement_adt_intent")' in source
-
-    # Must be tested before the numbered-prefix branches, or an "adt_intent_"
-    # stem would need only to also start with "figure1" to be misrouted. The
-    # ordering is the guarantee, so assert on position rather than presence.
-    supplement_at = source.index('startsWith(plot_stem, "adt_intent_")')
-    figure1_at = source.index('startsWith(plot_stem, "figure1s")')
-    assert supplement_at < figure1_at
-
-    # All groups retain the artifact level; no numbered-group cleanup remains.
-    assert 'file.path(FIG_ROOT, "by_figure", group, artifact_name_for_stem(plot_stem, group))' in source
-    assert "numbered_figure_groups" not in source
-
-
-def test_supplement_is_gated_to_the_adt_arm():
-    # The intent strata are defined by ADT medication history; running the
-    # section on the ARPI arm would read trees that are never built.
-    source = _pipeline_source()
-    supplement_at = source.index("Supplement -- localized-adjuvant vs metastatic")
-    section = source[supplement_at:]
-    assert "if (IS_CANONICAL_ADT && plot_adt_intent_supplement) {" in section
-
-
-def test_supplement_never_refits_anything():
-    section_source = _pipeline_source()
-    supplement_at = section_source.index("Supplement -- localized-adjuvant vs metastatic")
-    section = section_source[supplement_at:]
-    for forbidden in ("coxph(", "survfit(", "glmnet("):
-        assert forbidden not in section, (
-            f"the supplement calls {forbidden}; it must only read the "
-            "comparison CSVs"
-        )
-
-
-# ---- COMPASS/figures/all.R render cross -----------------------------------------
-#
-# COMPASS/figures/all.R names its COHORTS and ENDPOINTS as literal vectors, so it is the one
-# place that can drift out of the Python run cross without any import failing:
-# a retired endpoint left here dies in the ENDPOINT_SUFFIXES lookup, and a
-# missing cohort silently renders fewer figure sets than there are runs.
-
-FIGURES_SCRIPT = REPO_ROOT / "COMPASS" / "figures" / "_common.R"
+FIGURES_SCRIPT = REPO_ROOT / "COMPASS" / "figures" / "run_figures.R"
 
 
 def _figures_vector(name: str) -> list[str]:
     body = re.search(rf"^{name} <- c\((.*?)\)", FIGURES_SCRIPT.read_text(), re.S | re.M)
-    if body is None:
-        default = re.search(rf'^{name} <- env_values\("[^"]+", "([^"]+)"\)', FIGURES_SCRIPT.read_text(), re.M)
-        assert default, f"{name} not found in COMPASS/figures/all.R"
-        return default.group(1).split(",")
-    assert body, f"{name} not found in COMPASS/figures/all.R"
+    assert body, f"{name} not found in COMPASS/figures/run_figures.R"
     return re.findall(r'"([^"]*)"', body.group(1))
 
 
@@ -341,7 +271,7 @@ def _python_run_labels() -> set[str]:
     import io
     import tempfile
 
-    from COMPASS.survival_analysis.pipeline import compass_pipeline as cp
+    from COMPASS.pipeline import compass_pipeline as cp
 
     original = cp._PROFILE_OUTPUT_ROOT
     try:
@@ -359,23 +289,18 @@ def _python_run_labels() -> set[str]:
 
 
 def test_the_figures_script_keeps_every_modelled_run_selectable():
-    """The default is full ADT/included, with all other ADT runs selectable."""
+    """Figures draw the full ADT/platinum cohort; every ADT run feeds the cohort forest."""
     assert _python_run_labels() == set(_figures_vector("ADT_COHORT_OPTIONS"))
-    assert _figures_vector("COHORTS") == ["adt"]
+    assert 'cohorts = "adt", endpoints = "platinum"' in FIGURES_SCRIPT.read_text()
 
 
-def test_the_figures_script_names_no_retired_endpoint():
-    """A retired endpoint here fails at the ENDPOINT_SUFFIXES lookup in setup,
-    before a single figure is drawn."""
-    source = _pipeline_source()
-    block = re.search(r"SUPPORTED_ENDPOINTS <- c\((.*?)\)", source, re.S)
-    supported = set(re.findall(r'"([^"]*)"', block.group(1)))
-
-    endpoints = _figures_vector("ENDPOINTS")
-    assert set(endpoints) <= supported, (
-        f"COMPASS/figures/all.R requests endpoints the pipeline does not support: "
-        f"{sorted(set(endpoints) - supported)}"
-    )
+def test_the_figures_script_toggles_every_figure_group():
+    """Each FIGURE_GROUPS entry has a toggle in run_figures.R, and nothing else does."""
+    toggles = re.search(r"^FIGURES <- c\((.*?)\)\s*#", FIGURES_SCRIPT.read_text(), re.S | re.M)
+    names = re.findall(r"^\s*(\w+)\s*=\s*(?:TRUE|FALSE)", toggles.group(1), re.M)
+    helper = (PIPELINE_R.parent / "figure_workflow.R").read_text()
+    block = helper[helper.index("FIGURE_GROUPS <- list("):helper.index("run_cached_figure_workflow <- function(")]
+    assert names == re.findall(r"^\s+(\w+) = list\(jobs", block, re.M)
 
 
 def test_a_failed_cohort_does_not_abandon_the_rest():

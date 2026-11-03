@@ -1,0 +1,579 @@
+"""Prepare immutable Polars figure tables and source fingerprints for COMPASS/figures.
+
+Imported by 05_prep_figure_data.ipynb. Patient
+tables stay under the data root, never under the public figure output tree.
+The large longitudinal CSV is scanned once per changed treatment arm for the
+patient table. R keeps the survival/statistical estimators and caches their
+outputs separately. No analysis models are refit here.
+"""
+from __future__ import annotations
+
+import argparse
+from contextlib import contextmanager
+import hashlib
+import inspect
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+
+import polars as pl
+
+ID = "DFCI_MRN"
+PATIENT_COLUMNS = [
+    ID, "AGE_AT_TREATMENTSTART", "FIRST_RECORD_DATE", "DIAGNOSIS_DATE",
+    "TREATMENT_ANCHOR_DATE", "LAST_CONTACT_DATE", "DEATH", "PLATINUM_MEDICATION",
+    "PLATINUM_DATE", "PLATINUM", "t_diagnosis", "t_first_treatment", "t_platinum",
+    "t_last_contact", "t_death", "t_dx_to_anchor", "NEPC", "t_nepc",
+]
+DATES = ["FIRST_RECORD_DATE", "DIAGNOSIS_DATE", "TREATMENT_ANCHOR_DATE",
+         "LAST_CONTACT_DATE", "PLATINUM_DATE"]
+NUMERIC = set(PATIENT_COLUMNS) - {ID, "PLATINUM_MEDICATION", *DATES}
+ARM_TABLES = ["patients"]
+
+
+# ---- Metastatic-label preparation -------------------------------------------
+# Reuse the pipeline's medication-derived ADT intent labels, and compare them
+# with the metastatic-diagnosis LLM task and dated regex stages. Stage I-III is
+# local; stage IV is metastatic. Missing/invalid values remain unclassified.
+LOCAL = "Local"
+MET = "Metastatic"
+
+
+def normalize_id(frame: pl.DataFrame) -> pl.DataFrame:
+    return frame.with_columns(
+        pl.col(ID).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False)
+    ).drop_nulls(ID)
+
+
+def collapse_stage(column: str) -> pl.Expr:
+    stage = pl.col(column).cast(pl.String).str.strip_chars().str.to_uppercase()
+    return (
+        pl.when(stage.is_in(["1", "2", "3", "1.0", "2.0", "3.0", "I", "II", "III"]))
+        .then(pl.lit(LOCAL))
+        .when(stage.is_in(["4", "4.0", "IV"]))
+        .then(pl.lit(MET))
+        .otherwise(None)
+    )
+
+
+def parse_datetime(column: str) -> pl.Expr:
+    value = pl.col(column).cast(pl.String).str.strip_chars()
+    iso = value.str.to_datetime(format="%+", strict=False, time_unit="us", time_zone="UTC").dt.replace_time_zone(None)
+    return pl.coalesce(iso, *[value.str.to_datetime(format=fmt, strict=False, time_unit="us")
+        for fmt in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d",
+                    "%m/%d/%Y %H:%M:%S", "%m/%d/%Y"]])
+
+
+def build_labels(intent: pl.DataFrame, notes: pl.DataFrame,
+                 llm: pl.DataFrame, analysis_anchors: pl.DataFrame | None = None) -> pl.DataFrame:
+    intent = normalize_id(intent).with_columns(
+        parse_datetime("ADT_FIRST_DATE"),
+        pl.col("ADT_INTENT").replace_strict(
+            {"LOCALIZED_ADJUVANT": LOCAL, "METASTATIC": MET}, default=None
+        ).alias("ADT_LABEL"),
+    )
+    if intent[ID].n_unique() != intent.height:
+        raise ValueError("ADT intent input must contain exactly one row per patient")
+    if analysis_anchors is not None:
+        anchors = normalize_id(analysis_anchors).select(ID,
+            parse_datetime("TREATMENT_ANCHOR_DATE").alias("ANALYSIS_ANCHOR_DATE"))
+        if anchors[ID].n_unique() != anchors.height:
+            raise ValueError("Analysis anchors must contain exactly one row per patient")
+        intent = anchors.join(intent, on=ID, how="left")
+    else:
+        intent = intent.with_columns(pl.col("ADT_FIRST_DATE").alias("ANALYSIS_ANCHOR_DATE"))
+    intent = intent.with_columns((pl.col("ANALYSIS_ANCHOR_DATE").dt.date() -
+        pl.col("ADT_FIRST_DATE").dt.date()).dt.total_days().alias("ANCHOR_DELTA_DAYS"))
+
+    # The input is the metastatic-diagnosis task, not the NEPC subtype task.
+    verdict = pl.col("has_metastatic_disease").cast(pl.String).str.to_lowercase()
+    llm = normalize_id(llm).with_columns(
+        pl.when(verdict.is_in(["true", "1", "1.0"])).then(pl.lit(MET))
+        .when(verdict.is_in(["false", "0", "0.0"])).then(pl.lit(LOCAL))
+        .otherwise(None).alias("LLM_LABEL")
+    ).group_by(ID).agg(
+        # Match compass_pipeline: any positive wins, missing stays missing.
+        pl.when((pl.col("LLM_LABEL") == MET).any()).then(pl.lit(MET))
+        .when((pl.col("LLM_LABEL") == LOCAL).any()).then(pl.lit(LOCAL))
+        .otherwise(None).alias("LLM_LABEL")
+    )
+    stage_text = pl.col("DERIVED_STAGE_MERGED").cast(pl.String).str.strip_chars().str.to_uppercase()
+    notes = normalize_id(notes).select(
+        ID,
+        parse_datetime("EVENT_DATE").alias("stage_date"),
+        stage_text.replace_strict(
+            {"1": 1, "2": 2, "3": 3, "4": 4,
+             "I": 1, "II": 2, "III": 3, "IV": 4,
+             "1.0": 1, "2.0": 2, "3.0": 3, "4.0": 4}, default=None,
+        ).alias("stage"),
+    ).drop_nulls(["stage_date", "stage"])
+    joined = notes.join(intent.select(ID, "ANALYSIS_ANCHOR_DATE"), on=ID).with_columns(
+        (pl.col("stage_date") - pl.col("ANALYSIS_ANCHOR_DATE")).dt.total_days().alias("days")
+    )
+    before = joined.filter(pl.col("days") <= 0)
+    nearest = before.filter(pl.col("days") >= -365).sort(
+        ["days", "stage"], descending=[True, True]
+    ).group_by(ID).agg(pl.col("stage").first().alias("REGEX_STAGE"))
+    result = intent.join(llm, on=ID, how="left").join(nearest, on=ID, how="left")
+    for suffix, frame in [("BEFORE", before), ("AFTER", joined.filter(pl.col("days") > 0))]:
+        result = result.join(frame.group_by(ID).agg(
+            pl.col("stage").max().alias(f"REGEX_MAX_{suffix}_STAGE")
+        ), on=ID, how="left")
+    # Maximum across the entire record: pre- and post-ADT staging pooled, with
+    # no anchor window, so post-ADT progression counts toward the label. Mirrors
+    # max_any in figure_supplements.R; keep the two in step.
+    result = result.join(joined.group_by(ID).agg(
+        pl.col("stage").max().alias("REGEX_MAX_ANY_STAGE")
+    ), on=ID, how="left")
+    return result.with_columns(
+        collapse_stage("REGEX_STAGE").alias("REGEX_LABEL"),
+        collapse_stage("REGEX_MAX_BEFORE_STAGE").alias("REGEX_MAX_BEFORE"),
+        collapse_stage("REGEX_MAX_AFTER_STAGE").alias("REGEX_MAX_AFTER"),
+        collapse_stage("REGEX_MAX_ANY_STAGE").alias("REGEX_MAX_ANY"),
+    )
+
+
+def digest(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:24]
+
+
+def fingerprint(path: Path) -> dict:
+    path = path.resolve()
+    if not path.exists():
+        return {"path": str(path), "missing": True}
+    stat = path.stat()
+    return {"path": str(path), "bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+# Newest export name first; mirrors federated_within_site_file() in figure_workflow.R.
+FEDERATED_WITHIN_SITE_DIRS = ("within_site_cox_univariate", "nvflare_within_site_univariate_cox",
+                              "nvflare_within_site_cox_univariate")
+
+
+def federated_within_site_file(federated_path: Path, filename: str) -> Path:
+    candidates = [federated_path.parent / d / filename for d in FEDERATED_WITHIN_SITE_DIRS]
+    return next((p for p in candidates if p.exists()), candidates[0])
+
+
+# 04_federated_transfer.ipynb outputs (bundles refit without Dana-Farber): discrimination and
+# the Gleason / TP53-RB1-PTEN Cox comparison (federated Figure 5 b-c), and the frozen checklist's
+# patient flags and rule comparison (federated Figure 6); mirrors
+# federated_transfer_no_dfci_dir() in figure_workflow.R.
+FEDERATED_TRANSFER_NO_DFCI_FILES = (
+    "transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv",
+    "transfer_km_patients.csv", "transfer_checklist_patients.csv", "transfer_checklist_comparison.csv")
+# The same two tables at every landmark x horizon (federated checklist supplement), in a subdirectory.
+FEDERATED_CHECKLIST_GRID_DIR = "checklist_grid"
+FEDERATED_CHECKLIST_GRID_FILES = ("transfer_checklist_patients.csv", "transfer_checklist_comparison.csv")
+FEDERATED_TRANSFER_ALL_MODELS_FILES = ("transfer_metrics.csv", "transfer_auc_t.csv")
+# Federated multivariable exports beside the across-site results CSV
+# (mirrors FEDERATED_MULTIVARIABLE in figure_workflow.R). Each bundle also has
+# a refit without Dana-Farber in "<directory>_no_DFCI".
+FEDERATED_NO_DFCI_SUFFIX = "_no_DFCI"
+FEDERATED_MULTIVARIABLE_FILES = tuple(
+    (directory + suffix, name)
+    for suffix in ("", FEDERATED_NO_DFCI_SUFFIX)
+    for directory, name in (
+        ("federated_xgboost", "xgboost_federated_metrics_adt.csv"),
+        ("federated_xgboost", "xgboost_federated_importance_adt.csv"),
+        ("federated_cox_multivariate", "cox_federated_elasticnet_metrics_adt.csv"),
+        ("federated_cox_multivariate", "cox_federated_elasticnet_coefficients_adt.csv"),
+    )
+)
+# XGBoost exports absent from rhino_data_v2 fall back to the first delivery, as
+# in 04; mirrors federated_v1_multivariable_dir() in figure_workflow.R.
+FEDERATED_V1_FALLBACK_FILES = tuple(
+    (directory, name) for directory, name in FEDERATED_MULTIVARIABLE_FILES
+    if directory.startswith("federated_xgboost"))
+
+
+def federated_v1_multivariable_dir(federated_path: Path) -> Path:
+    return Path(os.environ.get("COMPASS_RHINO_V1_ROOT",
+                               federated_path.parent.parent / "rhino_results")) / "federated_model_results"
+
+
+FEDERATED_DEEPHIT_METRIC_FILES = tuple(
+    (directory + suffix, name)
+    for suffix in ("", FEDERATED_NO_DFCI_SUFFIX)
+    for directory in ("fast_federated_deephit", "federated_deephit")
+    for name in ("deephit_federated_metrics_adt.csv",
+                 "adt/deephit_federated_metrics_adt.csv")
+)
+# rhino_data_v2 per-landmark predictive checklists (no legacy location); mirrors
+# FEDERATED_CHECKLIST_FILES in figure_workflow.R.
+FEDERATED_CHECKLIST_FILES = ("predictive_checklist_checklists_adt.csv", "predictive_checklist_metrics_adt.csv")
+# rhino_data_v2 exports for either variant: a directory per variant
+# (federated_elastic_net_cox_w_DFCI/) or a Rhino package per landmark
+# (<model>/lm_<days>/w_DFCI/), each optionally under adt/. Mirrors
+# federated_v2_export_files() in figure_workflow.R, which reads a family's
+# per-landmark files together when its legacy export is absent.
+FEDERATED_V2_VARIANT_MARKERS = ("w_DFCI", "no_DFCI")
+
+
+def federated_v2_export_files(federated_path: Path, filename: str) -> list[Path]:
+    return sorted({path for marker in FEDERATED_V2_VARIANT_MARKERS
+                   for pattern in (f"*_{marker}/{filename}", f"*_{marker}/adt/{filename}",
+                                   f"*/lm_*/{marker}/{filename}", f"*/lm_*/{marker}/adt/{filename}")
+                   for path in federated_path.parent.glob(pattern)})
+# Adjust-only refits delivered beside the regular models, read by the federated
+# feature-set supplement (variant marker, model folder, file). The XGBoost path is
+# tracked before its delivery, so it reruns the job on arrival. Mirrors
+# federated_feature_set_inputs() in figure_workflow.R.
+FEDERATED_FEATURE_SET_ROOT = "feature_set_models"
+FEDERATED_FEATURE_SET_FILES = (
+    ("w_DFCI", "federated_cox", "cox_federated_elasticnet_metrics_adt.csv"),
+    ("w_DFCI", "federated_xgboost", "xgboost_federated_metrics_adt.csv"),
+    *((marker, "predictive_checklists", name)
+      for marker in FEDERATED_V2_VARIANT_MARKERS for name in FEDERATED_CHECKLIST_FILES))
+# 04_federated_transfer.ipynb outputs for the feature-set checklist's 5-year patients, and for the
+# regular checklist it is compared with (the feature-set metrics are in all_models/).
+FEDERATED_TRANSFER_FEATURE_SET_FILES = ("transfer_checklist_patients.csv",)
+FEDERATED_TRANSFER_REGULAR_FILES = ("transfer_metrics.csv",)
+
+
+def federated_feature_set_file(federated_path: Path, marker: str, part: str, filename: str) -> Path:
+    return federated_path.parent / FEDERATED_FEATURE_SET_ROOT / marker / part / filename
+
+
+# Aggregate KM/trajectory export (no patient rows); mirrors FEDERATED_FIGURE_DATA_FILES in figure_workflow.R.
+FEDERATED_FIGURE_DATA_FILES = ("manifest.json", "cohort_km.csv") + tuple(
+    prefix + name for prefix in ("", "within_site_") for name in (
+        "lab_extreme_km.csv", "lab_extreme_summary.csv", "lab_trajectories.csv", "lab_trajectory_cohort.csv"))
+
+
+def federated_rhino_root(config: dict) -> Path:
+    """Root of the federated delivery (rhino_data_v2) under the COMPASS data root."""
+    return Path(config.get("federated_rhino_root") or Path(config["data_root"]) / "rhino_data_v2")
+
+
+def federated_transfer_no_dfci_dir(config: dict) -> Path:
+    return Path(config.get("federated_transfer_no_dfci_path")
+                or federated_rhino_root(config) / "federated_transfer_adt_no_DFCI")
+
+
+def federated_figure_data_dir(config: dict) -> Path:
+    return Path(config.get("federated_figure_data_path")
+                or federated_rhino_root(config) / "figure_data")
+
+
+def code_version() -> str:
+    here = Path(__file__).parent
+    paths = sorted(here.glob("*.R")) + [Path(__file__)]
+    return digest({p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths})
+
+
+def atomic_json(path: Path, value) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        json.dump(value, stream, indent=2)
+    os.replace(temporary, path)
+
+
+@contextmanager
+def preparation_lock(root: Path):
+    # Cluster workers and simultaneous COMPASS/figures/run_figures.R runs must not publish partial caches.
+    import fcntl
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / ".prepare.lock").open("a") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        yield
+
+
+def date_expr(column: str) -> pl.Expr:
+    value = pl.col(column).cast(pl.String)
+    return pl.coalesce(value.str.slice(0, 10).str.strptime(pl.Date, "%Y-%m-%d", strict=False),
+                       value.str.strptime(pl.Date, "%m/%d/%Y", strict=False))
+
+
+def prepare_arm(source: Path) -> dict[str, pl.DataFrame]:
+    scan = pl.scan_csv(source, infer_schema_length=0, null_values=["", "NA", "NaN", "nan"])
+    names = scan.collect_schema().names()
+    required = [ID, "LAB_NAME", "LAB_VALUE", "LAB_DATE", "t_lab"]
+    missing = set(required) - set(names)
+    if missing:
+        raise ValueError(f"{source}: missing {sorted(missing)}")
+    columns = list(dict.fromkeys([*PATIENT_COLUMNS, *required]))
+    collect_options = {"engine": "streaming"} if "engine" in inspect.signature(pl.LazyFrame.collect).parameters else {"streaming": True}
+    data = scan.select([c for c in columns if c in names]).collect(**collect_options)
+    data = data.with_columns([
+        pl.col(c).cast(pl.Float64, strict=False).fill_nan(None)
+        for c in NUMERIC if c in data.columns
+    ])
+    patients = data.select([c for c in PATIENT_COLUMNS if c in data.columns]).unique(ID, keep="first", maintain_order=True)
+    patients = patients.with_columns([date_expr(c).alias(c) for c in DATES if c in patients.columns])
+    if {"DIAGNOSIS_DATE", "TREATMENT_ANCHOR_DATE"} <= set(patients.columns):
+        patients = patients.with_columns((pl.col("TREATMENT_ANCHOR_DATE") - pl.col("DIAGNOSIS_DATE")).dt.total_days().cast(pl.Float64).alias("t_dx_to_anchor"))
+    spans = (data.filter(pl.col("LAB_NAME").is_not_null())
+             .select(ID, date_expr("LAB_DATE").alias("date"))
+             .group_by(ID).agg(pl.len().cast(pl.Int32).alias("lab_rows"),
+                 (pl.col("date").max() - pl.col("date").min()).dt.total_days().cast(pl.Float64)
+                 .fill_null(float("-inf")).alias("record_span_days")))
+    join_options = {"nulls_equal": True} if "nulls_equal" in inspect.signature(pl.DataFrame.join).parameters else {"join_nulls": True}
+    patients = patients.with_row_index("_order").join(spans, on=ID, how="left", **join_options).sort("_order").drop("_order")
+    return dict(patients=patients)
+
+
+def valid_bundle(directory: Path, key: str, tables=ARM_TABLES, suffix: str = ".parquet") -> bool:
+    try:
+        manifest = json.loads((directory / "manifest.json").read_text())
+        return manifest["key"] == key and all(
+            fingerprint(directory / f"{table}{suffix}") == manifest["outputs"][table]
+            for table in tables)
+    except (OSError, ValueError, KeyError):
+        return False
+
+
+def source_files(root: Path) -> list[dict]:
+    if not root.exists():
+        return [fingerprint(root)]
+    return [fingerprint(p) for p in sorted(root.rglob("*"))
+            if p.is_file() and p.suffix in {".csv", ".json", ".tsv", ".parquet"}]
+
+
+def as_list(value):
+    return value if isinstance(value, list) else [value]
+
+
+def prepare_metastatic(config: dict, patients: pl.DataFrame) -> pl.DataFrame:
+    sources = config["metastatic_sources"]
+    labels = build_labels(
+        pl.read_csv(sources["intent"], infer_schema_length=0),
+        pl.read_parquet(sources["stage"], columns=[ID, "EVENT_DATE", "DERIVED_STAGE_MERGED"]),
+        pl.read_parquet(sources["llm"], columns=[ID, "has_metastatic_disease"]), patients)
+    return labels.with_columns(pl.col(ID).cast(pl.String), *[
+        pl.col(name).dt.replace_time_zone("UTC") for name, dtype in labels.schema.items()
+        if isinstance(dtype, pl.Datetime)])
+
+
+def prepare_cohort_overview(config: dict) -> dict:
+    """Figure 3 cohort-sensitivity incidence inputs."""
+    root, cache = Path(config["data_root"]), Path(config["cache_root"])
+    cohorts = as_list(config.get("forest_cohorts", ["adt", "adt_noprecastrate",
+        "adt_metastatic_adt", "adt_metastatic_adt_noprecastrate",
+        "adt_metastatic_llm", "adt_metastatic_llm_noprecastrate"]))
+    landmark = config.get("forest_landmark", 180)
+    paths = {(cohort, ep): root / "survival_analysis" /
+        f"prediction_inputs_{cohort}{'_nepc' if ep == 'nepc' else ''}" /
+        f"aggregated_landmark{landmark}.csv" for cohort in cohorts for ep in ["platinum", "nepc"]}
+    sources = [fingerprint(p) for p in paths.values()]
+    key = digest([sources, cohorts, landmark, pl.__version__,
+                  hashlib.sha256(Path(__file__).read_bytes()).hexdigest()])
+    directory = cache / "cohort_overview" / key
+    names = ["incidence"]
+    if config.get("force") or not valid_bundle(directory, key, names):
+        rows = []
+        for (cohort, ep), path in paths.items():
+            row = dict(cohort=cohort, endpoint=ep, landmark_days=landmark,
+                       n_patients=None, n_events=None, status="missing")
+            if path.exists():
+                scan = pl.scan_csv(path, infer_schema_length=0, null_values=["", "NA", "NaN"])
+                columns = set(scan.collect_schema().names())
+                if not {ID, ep.upper()} <= columns:
+                    row["status"] = f"missing {ID} or {ep.upper()} column"
+                else:
+                    counts = scan.select(pl.len().alias("n"), pl.col(ID).n_unique().alias("ids"),
+                        pl.col(ID).null_count().alias("missing_ids"),
+                        (pl.col(ep.upper()).cast(pl.Float64, strict=False) == 1).sum().alias("events")).collect().row(0, named=True)
+                    if counts["n"] != counts["ids"] or counts["missing_ids"]:
+                        raise ValueError(f"Non-unique/missing patient IDs in {path}")
+                    row.update(n_patients=counts["n"], n_events=counts["events"], status="ok")
+            rows.append(row)
+        incidence = pl.DataFrame(rows, schema_overrides={"n_patients": pl.Int64, "n_events": pl.Int64})
+        directory.mkdir(parents=True, exist_ok=True)
+        for name, table in [("incidence", incidence)]:
+            with tempfile.NamedTemporaryFile(dir=directory, suffix=".parquet", delete=False) as stream:
+                temporary = Path(stream.name)
+            table.write_parquet(temporary)
+            os.replace(temporary, directory / f"{name}.parquet")
+        if sources != [fingerprint(p) for p in paths.values()]:
+            raise RuntimeError("Cohort overview inputs changed during preparation; rerun notebook 05")
+        atomic_json(directory / "manifest.json", {"key": key, "outputs": {
+            name: fingerprint(directory / f"{name}.parquet") for name in names}})
+    outputs = list(json.loads((directory / "manifest.json").read_text())["outputs"].values())
+    return {"directory": str(directory.resolve()), "key": digest([key, outputs]),
+            "sources": sources, "outputs": outputs}
+
+
+def prepare(config: dict) -> dict:
+    root = Path(config["data_root"])
+    cache = Path(config["cache_root"])
+    cohorts, endpoints = map(as_list, (config["cohorts"], config["endpoints"]))
+    supported = {arm + subset + exclusion for arm in ["adt", "arpi"]
+                 for subset in ["", "_metastatic_adt", "_metastatic_llm"]
+                 for exclusion in ["", "_noprecastrate"]}
+    if not cohorts or set(cohorts) - supported or len(set(cohorts)) != len(cohorts):
+        raise ValueError(f"Invalid or duplicate figure cohorts: {cohorts}")
+    if not endpoints or set(endpoints) - {"platinum", "nepc"} or len(set(endpoints)) != len(endpoints):
+        raise ValueError(f"Invalid or duplicate figure endpoints: {endpoints}")
+    if config.get("scope", "all") not in {"all", "federated"}:
+        raise ValueError("scope must be all or federated")
+    version = code_version()
+    manifest = {"schema_version": 2,
+                "config": {k: v for k, v in config.items() if k not in {"force", "manifest_path"}},
+                "source_fingerprints": [],
+                "outputs": [], "version": version, "arms": {}, "cells": {}, "errors": {}}
+    arms = [] if config.get("scope") == "federated" else sorted({"arpi" if c.startswith("arpi") else "adt" for c in cohorts})
+    with preparation_lock(cache):
+        manifest_path = Path(config.get("manifest_path", cache / "manifest.json"))
+        try:
+            previous = json.loads(manifest_path.read_text())
+        except (OSError, ValueError):
+            previous = {}
+        # Explicit force survives the next ordinary invocation, so files that
+        # were replaced while preserving stat metadata cannot resurrect caches.
+        manifest["force_version"] = time.time_ns() if config.get("force") else previous.get("force_version", 0)
+        for arm in arms:
+            source = root / ("longitudinal_prediction_data_adt.csv" if arm == "adt" else "longitudinal_prediction_data.csv")
+            if not source.exists():
+                manifest["errors"][arm] = f"Missing longitudinal source: {source}"
+                continue
+            # Table cache ignores presentation code: changing an R title never
+            # rescans the large CSV. Each arm is prepared independently.
+            key = digest({"source": fingerprint(source),
+                          "python": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                          "polars": pl.__version__})
+            directory = cache / "tables" / arm / key
+            started = time.monotonic()
+            if config.get("force", False) or not valid_bundle(directory, key):
+                before = fingerprint(source)
+                try:
+                    tables = prepare_arm(source)
+                except Exception as exc:
+                    manifest["errors"][arm] = f"{source}: {exc}"
+                    continue
+                directory.mkdir(parents=True, exist_ok=True)
+                for name, table in tables.items():
+                    with tempfile.NamedTemporaryFile(dir=directory, suffix=".parquet", delete=False) as stream:
+                        temporary = Path(stream.name)
+                    table.write_parquet(temporary, compression="zstd")
+                    os.replace(temporary, directory / f"{name}.parquet")
+                if fingerprint(source) != before:
+                    raise RuntimeError(f"Source changed during preparation: {source}; rerun")
+                atomic_json(directory / "manifest.json", {"key": key, "outputs": {
+                    name: fingerprint(directory / f"{name}.parquet") for name in tables}})
+                print(f"Prepared {arm} in {time.monotonic()-started:.1f}s", flush=True)
+            else:
+                print(f"Reused {arm} Polars tables", flush=True)
+            output_version = json.loads((directory / "manifest.json").read_text())["outputs"]
+            manifest["outputs"].extend(output_version.values())
+            manifest["source_fingerprints"].append(fingerprint(source))
+            manifest["arms"][arm] = {"source": str(source.resolve()), "key": digest([key, output_version]),
+                                     "directory": str(directory.resolve())}
+
+        if "adt" in manifest["arms"] and "adt" in cohorts and "platinum" in endpoints and config.get("metastatic", False):
+            sources = config["metastatic_sources"]
+            if all(Path(sources[k]).exists() for k in ["intent", "stage", "llm"]):
+                key = digest({"code": [hashlib.sha256(Path(__file__).read_bytes()).hexdigest()],
+                    "arm": manifest["arms"]["adt"]["key"],
+                    "sources": [fingerprint(Path(p)) for p in sources.values()]})
+                path = cache / "labels" / key / "metastatic.parquet"
+                if config.get("force", False) or not valid_bundle(path.parent, key, ["metastatic"]):
+                    patients = pl.read_parquet(Path(manifest["arms"]["adt"]["directory"]) / "patients.parquet")
+                    try:
+                        labels = prepare_metastatic(config, patients)
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".parquet", delete=False) as stream:
+                            temporary = Path(stream.name)
+                        labels.write_parquet(temporary)
+                        os.replace(temporary, path)
+                        atomic_json(path.parent / "manifest.json", {"key": key, "outputs": {"metastatic": fingerprint(path)}})
+                    except Exception as exc:
+                        manifest["errors"]["adt__platinum"] = f"Metastatic label preparation failed: {exc}"
+                if "adt__platinum" not in manifest["errors"]:
+                    manifest["metastatic_labels"] = str(path.resolve())
+                    manifest["outputs"].append(fingerprint(path))
+
+        if "adt" in cohorts and "platinum" in endpoints and config.get("scope") != "federated":
+            try:
+                overview = prepare_cohort_overview(config)
+                manifest["cohort_overview"] = overview
+                manifest["outputs"].extend(overview["outputs"])
+                manifest["source_fingerprints"].extend(overview["sources"])
+            except Exception as exc:
+                manifest["errors"]["cohort_overview"] = str(exc)
+
+        shared_paths = [root / "LLM_NEPC_labels" / "full_manual_annotations.csv",
+                        root / "mrn_lists" / "platinum_MRN_list.csv",
+                        root / "mrn_lists" / "platinum_any_MRN_list.csv",
+                        root / "mrn_lists" / "icd_prostate_mrn_flags.csv",
+                        Path(config["classifier_path"]) / "primary_subtype_labels.parquet"]
+        shared = [fingerprint(p) for p in shared_paths]
+        if arms:
+            manifest["source_fingerprints"].extend(shared)
+        for cohort in (cohorts if arms else []):
+            arm = "arpi" if cohort.startswith("arpi") else "adt"
+            for endpoint in endpoints:
+                suffix = "" if endpoint == "platinum" else "_nepc"
+                inputs = root / "survival_analysis" / f"prediction_inputs_{cohort}{suffix}"
+                cell = f"{cohort}__{endpoint}"
+                if arm not in manifest["arms"] or not inputs.is_dir():
+                    manifest["errors"][cell] = manifest["errors"].get(arm, f"Missing prediction inputs: {inputs}")
+                    continue
+                sources = source_files(inputs) + source_files(root / "survival_analysis" / f"local_runs_{cohort}{suffix}")
+                if cohort == "adt" and endpoint == "platinum":
+                    # Figure 1 per-site event/patient counts.
+                    sources.append(fingerprint(federated_within_site_file(
+                        Path(config["federated_path"]), "cox_within_site_all_sites_cohort.csv")))
+                if cohort == "adt":
+                    for forest in as_list(config.get("forest_cohorts", cohorts)):
+                        sources.append(fingerprint(root / "survival_analysis" / f"local_runs_{forest}{suffix}" / "cox" /
+                            f"landmark_{config.get('forest_landmark', 180)}" / "both" / "cox_agg_univariate_nobs_adjusted.csv"))
+                    if endpoint == "platinum" and config.get("metastatic", False):
+                        sources += [fingerprint(Path(p)) for p in config["metastatic_sources"].values()]
+                cell = f"{cohort}__{endpoint}"
+                manifest["source_fingerprints"].extend(sources)
+                manifest["cells"][cell] = digest({"sources": sources, "shared": shared,
+                    "arm": manifest["arms"][arm]["key"], "code": version, "force": manifest["force_version"],
+                    "settings": {k: config.get(k) for k in ["metastatic", "forest_cohorts", "forest_landmark"]}})
+        federated_path = Path(config["federated_path"])
+        federated_sources = [fingerprint(federated_path), fingerprint(
+            federated_within_site_file(federated_path, "cox_within_site_all_sites_cohort.csv"))]
+        # Small fitted-result tables are read by R, like the Cox exports. Track
+        # absent paths too so later XGBoost/elastic-net deliveries invalidate preparation.
+        legacy = [federated_path.parent / directory / name
+                  for directory, name in FEDERATED_MULTIVARIABLE_FILES + FEDERATED_DEEPHIT_METRIC_FILES]
+        federated_sources += [fingerprint(path) for path in legacy]
+        # Present v2 copies; one delivered later is unregistered, so R asks for a rerun.
+        federated_sources += [fingerprint(path)
+            for name in dict.fromkeys([Path(name).name for _, name in
+                                       FEDERATED_MULTIVARIABLE_FILES + FEDERATED_DEEPHIT_METRIC_FILES]
+                                      + list(FEDERATED_CHECKLIST_FILES))
+            for path in federated_v2_export_files(federated_path, name) if path not in legacy]
+        # First-delivery XGBoost, read only when rhino_data_v2 has none (absent paths tracked too).
+        federated_sources += [fingerprint(federated_v1_multivariable_dir(federated_path) / directory / name)
+                              for directory, name in FEDERATED_V1_FALLBACK_FILES]
+        federated_sources += [fingerprint(federated_feature_set_file(federated_path, *item))
+            for item in FEDERATED_FEATURE_SET_FILES]
+        federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / "feature_set_checklists" / name)
+            for name in FEDERATED_TRANSFER_FEATURE_SET_FILES]
+        federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / "regular_checklists" / name)
+            for name in FEDERATED_TRANSFER_REGULAR_FILES]
+        federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / FEDERATED_CHECKLIST_GRID_DIR / name)
+            for name in FEDERATED_CHECKLIST_GRID_FILES]
+        federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / name)
+            for name in FEDERATED_TRANSFER_NO_DFCI_FILES]
+        federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / "all_models" / name)
+            for name in FEDERATED_TRANSFER_ALL_MODELS_FILES]
+        federated_sources += [fingerprint(federated_figure_data_dir(config) / name)
+            for name in FEDERATED_FIGURE_DATA_FILES]
+        manifest["federated"] = digest({"code": version, "force": manifest["force_version"],
+            "files": federated_sources})
+        if config.get("federated", False):
+            manifest["federated_sources"] = federated_sources
+            manifest["source_fingerprints"].extend(manifest["federated_sources"])
+        atomic_json(Path(config.get("manifest_path", cache / "manifest.json")), manifest)
+    return manifest
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", required=True, type=Path)
+    args = parser.parse_args()
+    prepare(json.loads(args.config.read_text()))
+
+
+if __name__ == "__main__":
+    main()

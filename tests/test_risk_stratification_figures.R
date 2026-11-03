@@ -1,8 +1,8 @@
 # Clinical-combination mean AUC(t), risk-stratification KM, and TP53/PTEN/RB1
 # co-mutation figures (Figure 4e-h). Run from the repo root:
 #   Rscript tests/test_risk_stratification_figures.R
-source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
+source("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/figures/figure_workflow.R")
 
 root <- tempfile("riskstrat-figures-"); dir.create(root)
 on.exit(unlink(root, recursive = TRUE), add = TRUE)
@@ -69,7 +69,7 @@ stopifnot(any(vapply(p_default$layers, function(l) inherits(l$geom, "GeomRibbon"
           p_default$labels$y == "Platinum-free probability")
 
 # ---- figure 4e-h block, evaluated with stubbed save/table writers ----------
-lines <- readLines("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
+lines <- readLines("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
 start <- grep("^  # Clinical combinations \\(compass_pipeline", lines)
 end <- grep("^  # Retired: supplemental all-model comparison\\.", lines)
 stopifnot(length(start) == 1, length(end) == 1, start < end)

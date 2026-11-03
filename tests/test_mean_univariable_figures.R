@@ -1,5 +1,5 @@
-source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
+source("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/figures/figure_workflow.R")
 
 # The correction includes hidden height/unstable estimates, excludes non-mean
 # statistics, and remains separate by endpoint and landmark.

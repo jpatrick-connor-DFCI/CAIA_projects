@@ -7,10 +7,10 @@ import subprocess
 import polars as pl
 import pytest
 
-from COMPASS.survival_analysis.figure_pipeline.prepare_figure_data import build_labels, collapse_stage
+from COMPASS.figures.prepare_figure_data import build_labels, collapse_stage
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "COMPASS/survival_analysis/figure_pipeline"
+SCRIPTS = ROOT / "COMPASS/figures"
 
 
 def fixture_inputs():

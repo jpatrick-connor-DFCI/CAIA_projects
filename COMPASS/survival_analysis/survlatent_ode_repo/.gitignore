@@ -1,6 +1,0 @@
-experiments/
-logs/
-model_performance/
-surv_curves/
-__pycache__/
-*.py[cod]

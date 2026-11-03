@@ -137,7 +137,7 @@ CASTRATE_STRICT_NG_DL = 20.0
 PSA_LOG_FLOOR = 0.01
 
 # Endpoint -> (duration column, event column, human title). Mirrors
-# COMPASS.survival_analysis.pipeline.cox_aggregated.ENDPOINTS, which is the authority
+# COMPASS.pipeline.cox_aggregated.ENDPOINTS, which is the authority
 # for these pairings; kept as a literal here so this module does not import
 # the modelling stack just to plot.
 KM_ENDPOINTS = {

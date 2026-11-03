@@ -1,8 +1,8 @@
-source("COMPASS/survival_analysis/figure_pipeline/figure_typography.R")
+source("COMPASS/figures/figure_typography.R")
 # Run from the repository root: Rscript tests/test_figure_resume.R
 # Exercise the real writer with tiny PDF files, without cluster inputs.
 suppressPackageStartupMessages(library(ggplot2))
-expressions <- parse("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
+expressions <- parse("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
 find_assignment <- function(expr, name) {
   if (missing(expr) || !is.call(expr)) return(NULL)
   if (identical(expr[[1]], as.name("<-")) && identical(expr[[2]], as.name(name)))
@@ -101,7 +101,7 @@ local({
       if (!is.null(assignment)) eval(assignment, env)
     }
   }
-  sys.source("COMPASS/survival_analysis/figure_pipeline/figure_supplements.R", env)
+  sys.source("COMPASS/figures/figure_supplements.R", env)
   env$FIG_ROOT <- tempdir()
   env$COHORT <- "adt"
   env$ENDPOINT <- "platinum"

@@ -1,5 +1,5 @@
-source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
+source("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/figures/figure_workflow.R")
 local({
   path <- tempfile(fileext = ".csv"); on.exit(unlink(path))
   d <- tibble(landmark_days = 0, endpoint = "platinum", feature = paste0("feature", 1:7),
@@ -15,16 +15,10 @@ local({
     !any(prepared$feature_stat %in% c("delta", "n_observations")),
     identical(prepared$q_value, d$q_value[1:4]),
     identical(prepared$significance, c("Nominal p < 0.05 only", "FDR q < 0.05", "Not significant", "Significance unavailable")))
-  for (lm in c(0, 90, 180)) {
-    p <- plot_federated_forest(prepared, lm)
-    stopifnot(nrow(p$data) == 8L)
-    withCallingHandlers(invisible(ggplotGrob(p)), warning = function(w) stop(w))
-  }
-  # Invalid estimates/intervals stay visible as labelled unavailable rows.
+  # Invalid estimates/intervals are flagged, not dropped.
   broken <- prepared; broken$hazard_ratio_per_sd[1] <- Inf; broken$ci_upper[2] <- NA_real_
   write_csv(broken, path); broken <- load_federated_forest(path)
   stopifnot(!broken$valid_estimate[1], !broken$valid_ci[2])
-  withCallingHandlers(invisible(ggplotGrob(plot_federated_forest(broken, 0))), warning = function(w) stop(w))
   write_csv(bind_rows(d, d[1, ]), path)
   duplicate <- tryCatch(load_federated_forest(path), error = identity)
   stopifnot(inherits(duplicate, "error"))
@@ -33,21 +27,12 @@ local({
   write_csv(within, path)
   prepared <- load_federated_forest(path, within_site = TRUE)
   stopifnot(nrow(prepared) == 8L, identical(prepared$q_value, rep(d$q_value[1:4], 2)))
-  for (site in unique(prepared$site_name)) {
-    p <- plot_federated_forest(prepared, 0, site_name = site)
-    stopifnot(all(na.omit(p$data$site_name) == site), nrow(p$data) == 8L,
-              grepl(federated_site_label(site), p$labels$title, fixed = TRUE))
-    withCallingHandlers(invisible(ggplotGrob(p)), warning = function(w) stop(w))
-  }
-  stopifnot(inherits(tryCatch(plot_federated_forest(prepared, 0), error = identity), "error"))
   write_csv(bind_rows(within, within[1, ]), path)
   stopifnot(inherits(tryCatch(load_federated_forest(path, within_site = TRUE), error = identity), "error"))
   # MSK is a participating site: it must load and carry its display label.
   write_csv(mutate(within, site_name = "msk_caia_prod_1"), path)
   msk <- load_federated_forest(path, within_site = TRUE)
   stopifnot(nrow(msk) == 8L, all(msk$site == "MSK"))
-  withCallingHandlers(invisible(ggplotGrob(plot_federated_forest(msk, 0, site_name = "msk_caia_prod_1"))),
-                      warning = function(w) stop(w))
 })
 local({
   root <- tempfile("federated-sites-"); dir.create(root)
@@ -73,12 +58,10 @@ local({
   expected <- wilson_ci(4, 100)
   row <- filter(incidence, site == "Dana-Farber")
   stopifnot(isTRUE(all.equal(c(row$ci_lower_pct, row$ci_upper_pct), unname(expected[2:3])*100)))
-  withCallingHandlers(stopifnot(inherits(plot_federated_sites(all_counts), "gtable")),
+  withCallingHandlers(stopifnot(inherits(figure1_site_counts_plot(all_counts), "ggplot")),
                       warning = function(w) stop(w))
   no_day0 <- prepare_federated_site_incidence(filter(all_counts, landmark_days == 90))
   stopifnot(all(!no_day0$available), all(is.na(no_day0$n_events)))
-  withCallingHandlers(invisible(plot_federated_sites(filter(all_counts, landmark_days == 90))),
-                      warning = function(w) stop(w))
   for (bad in list(bind_rows(d, d[1, ]), mutate(d, n_events = 101),
                    mutate(d, n_patients = -1), mutate(d, n_events = NA_real_))) {
     write_csv(bad, path)
@@ -91,4 +74,4 @@ local({
   stopifnot(nrow(four) == 4L, "MSK" %in% four$site,
             isTRUE(all.equal(four$event_incidence_pct[four$site == "MSK"], 100*308/9939)))
 })
-cat("Federated forests and site counts: significance, incidence, missing data and invalid input checks passed.\n")
+cat("Federated univariable loading and site counts: significance, incidence, missing data and invalid input checks passed.\n")

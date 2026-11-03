@@ -1,6 +1,6 @@
-source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
-source("COMPASS/survival_analysis/figure_pipeline/figure_supplements.R")
+source("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/figures/figure_workflow.R")
+source("COMPASS/figures/figure_supplements.R")
 local({
   root <- tempfile("matrix-layout-",tmpdir="/private/tmp"); dir.create(root)
   on.exit(unlink(root,recursive=TRUE))

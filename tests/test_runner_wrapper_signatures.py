@@ -23,8 +23,12 @@ RUNNER_PATH = REPO_ROOT / "survival_common" / "cox_runners.py"
 
 # The project modules the shared runner is invoked with, as `cox`.
 WRAPPER_PATHS = {
-    "COMPASS": REPO_ROOT / "COMPASS" / "survival_analysis" / "pipeline" / "cox_aggregated.py",
+    "COMPASS": REPO_ROOT / "COMPASS" / "pipeline" / "cox_aggregated.py",
     "IPIO": REPO_ROOT / "IPIO" / "survival_analysis" / "cox_aggregated.py",
+}
+MULTIVARIATE_PATHS = {
+    "COMPASS": REPO_ROOT / "COMPASS" / "multivariable_models" / "multivariate_analysis.py",
+    "IPIO": REPO_ROOT / "IPIO" / "survival_analysis" / "multivariate_analysis.py",
 }
 
 # Functions the runner calls on the `cox` module that each project wraps.
@@ -132,7 +136,7 @@ def test_multivariate_cli_registers_the_out_of_fold_flags(project):
     raise AttributeError, or -- worse, given the getattr default -- silently
     skip OOF scoring while appearing to succeed.
     """
-    path = WRAPPER_PATHS[project].with_name("multivariate_analysis.py")
+    path = MULTIVARIATE_PATHS[project]
     tree = ast.parse(path.read_text())
     called = {
         node.func.id

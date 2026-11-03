@@ -135,8 +135,7 @@ class TestPatientTargets:
         assert row["uncensored_duration"] == 500.0
 
     def test_event_exactly_at_window_is_retained(self):
-        # Deliberately contrasts with SurvLatent's strict-< at-horizon
-        # censoring: here the window boundary is inclusive (duration >
+        # The window boundary is inclusive (duration >
         # max_pred_window triggers censoring, so == is retained).
         rows = [
             _person_period_row(5, -30, PLATINUM=1, t_platinum=260, DEATH=0, t_death=np.nan),

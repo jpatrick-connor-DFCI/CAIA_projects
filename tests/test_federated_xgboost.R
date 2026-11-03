@@ -1,6 +1,6 @@
-source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
-source("COMPASS/survival_analysis/figure_pipeline/checklist_supplement.R")
+source("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/figures/figure_workflow.R")
+source("COMPASS/figures/checklist_supplement.R")
 fails <- function(expr,pattern) {
   e <- tryCatch(force(expr),error=identity)
   stopifnot(inherits(e,"error"),grepl(pattern,conditionMessage(e)))

@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from COMPASS.survival_analysis.pipeline import cox_aggregated as ca
+from COMPASS.pipeline import cox_aggregated as ca
 from survival_common.projects.compass_profile import CONFIG
 from survival_common.xgboost_engine import fit_preprocessor
 

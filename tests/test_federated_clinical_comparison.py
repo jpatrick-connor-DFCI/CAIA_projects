@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from COMPASS.survival_analysis.federated import federated_clinical_comparison as fcc  # noqa: E402
+from COMPASS.federated_models import federated_clinical_comparison as fcc  # noqa: E402
 
 ANCHOR = pd.Timestamp("2018-06-01")
 FEATURES = ["TP53_ANY", "RB1_ANY", "PTEN_ANY", "AR_ANY"]

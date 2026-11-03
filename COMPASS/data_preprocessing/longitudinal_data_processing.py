@@ -13,9 +13,9 @@ import polars as pl
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
-SURVIVAL_DIR = PROJECT_DIR / "survival_analysis" / "pipeline"
+PIPELINE_DIR = PROJECT_DIR / "pipeline"
 REPO_ROOT = PROJECT_DIR.parent
-for _p in (str(REPO_ROOT), str(PROJECT_DIR), str(SURVIVAL_DIR), str(SCRIPT_DIR)):
+for _p in (str(REPO_ROOT), str(PROJECT_DIR), str(PIPELINE_DIR), str(SCRIPT_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

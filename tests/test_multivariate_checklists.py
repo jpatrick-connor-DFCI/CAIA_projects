@@ -47,7 +47,7 @@ def test_default_validates_both_inputs_without_training(tmp_path, monkeypatch):
     assert [Path(_option(c, "--output-dir")).name for c in commands] == [
         "preflight", "preflight_gleason_trio"]
     for command in commands:
-        assert command[:3] == [sys.executable, "-m", "COMPASS.survival_analysis.predictive_checklists"]
+        assert command[:3] == [sys.executable, "-m", "COMPASS.multivariable_models.predictive_checklists"]
         # Preflight writes run_manifest.json, so a rerun without --overwrite exits with an error.
         assert {"--preflight-only", "--overwrite"} <= set(command)
     assert _option(commands[0], "--inputs-root") == str(tmp_path)
@@ -66,15 +66,15 @@ def test_training_resumes_unless_overwriting(tmp_path, monkeypatch, overwrite, f
         assert flag in command and other not in command
 
 
-def test_results_render_only_finished_runs(tmp_path, monkeypatch):
+def test_results_cell_renders_no_standalone_figures(tmp_path, monkeypatch):
+    # Checklist figures come from COMPASS/figures (the federated checklist
+    # supplement); the results cell only displays metrics and checklists.
     finished = tmp_path / "predictive_checklists" / "full_adt"
     finished.mkdir(parents=True)
     pd.DataFrame({"endpoint": ["platinum"], "model": ["checklist"], "status": ["ok"]}).to_csv(
         finished / "metrics.csv", index=False)
     commands, _ = _run_notebook_03(tmp_path, monkeypatch)
-    rendered = [c for c in commands if c[0] == "Rscript"]
-    assert [c[-1] for c in rendered] == [str(finished)]
-    assert Path(rendered[0][1]).is_file()
+    assert not [c for c in commands if c[0] == "Rscript"]
 
 
 def test_run_definitions_match_configs_and_adjust_only_notebook(tmp_path, monkeypatch):

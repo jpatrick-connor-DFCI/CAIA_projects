@@ -1,6 +1,6 @@
 # Rendering normalization must preserve plot data, blank axes and source layers.
-source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
+source("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/figures/figure_workflow.R")
 
 stopifnot(figure_resolve_font(c("DejaVu Sans","Arial","Liberation Sans"))=="Arial",
   figure_resolve_font(c("DejaVu Sans","Liberation Sans"))=="Liberation Sans",
@@ -51,7 +51,7 @@ local({
 
 # A missing preferred font reports the chosen replacement once and still exports.
 local({
-  source("COMPASS/survival_analysis/figure_pipeline/figure_typography.R",local=TRUE)
+  source("COMPASS/figures/figure_typography.R",local=TRUE)
   FIGURE_FONT <- "sans"
   notices <- capture.output({figure_require_font();figure_require_font()},type="message")
   stopifnot(length(notices)==1L,grepl("using sans",notices,fixed=TRUE))

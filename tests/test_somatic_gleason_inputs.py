@@ -18,8 +18,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_PREP_DIR = REPO_ROOT / "COMPASS" / "data_preprocessing"
-SURVIVAL_DIR = REPO_ROOT / "COMPASS" / "survival_analysis" / "pipeline"
-for _p in (str(REPO_ROOT), str(DATA_PREP_DIR), str(SURVIVAL_DIR)):
+PIPELINE_DIR = REPO_ROOT / "COMPASS" / "pipeline"
+for _p in (str(REPO_ROOT), str(DATA_PREP_DIR), str(PIPELINE_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

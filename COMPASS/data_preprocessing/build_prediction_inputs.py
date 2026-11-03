@@ -40,9 +40,9 @@ from sklearn.model_selection import train_test_split
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
-SURVIVAL_DIR = PROJECT_DIR / "survival_analysis" / "pipeline"
+PIPELINE_DIR = PROJECT_DIR / "pipeline"
 REPO_ROOT = PROJECT_DIR.parent
-for _p in (str(REPO_ROOT), str(PROJECT_DIR), str(SURVIVAL_DIR), str(SCRIPT_DIR)):
+for _p in (str(REPO_ROOT), str(PROJECT_DIR), str(PIPELINE_DIR), str(SCRIPT_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -1245,7 +1245,7 @@ if __name__ == "__main__":
         default=True,
         help=(
             "Build the person-period (wide, binned-time) longitudinal_landmark{D}.csv "
-            "consumed by Dynamic-DeepHit/SurvLatent ODE, alongside the aggregated "
+            "consumed by Dynamic-DeepHit, alongside the aggregated "
             "outputs (default; on)."
         ),
     )

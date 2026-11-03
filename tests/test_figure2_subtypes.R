@@ -1,4 +1,4 @@
-source("COMPASS/survival_analysis/figure_pipeline/figure_typography.R")
+source("COMPASS/figures/figure_typography.R")
 # Run from the repository root: Rscript tests/test_figure2_subtypes.R
 suppressPackageStartupMessages({
   library(dplyr)
@@ -21,7 +21,7 @@ collect <- function(expr) {
     for (child in as.list(expr)[-1]) collect(child)
   }
 }
-for (expr in parse("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R"))
+for (expr in parse("COMPASS/figures/COMPASS_generate_figures_pipeline.R"))
   collect(expr)
 
 # 3-class validation: y axis is manual truth, x axis is LLM prediction.

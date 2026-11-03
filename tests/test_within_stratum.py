@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from COMPASS.survival_analysis.figure_pipeline import risk_score_stratified_figures as rsf  # noqa: E402
+from COMPASS.multivariable_models import risk_score_stratified_figures as rsf  # noqa: E402
 
 ID = "DFCI_MRN"
 TRUE_LOG_HR = 0.7  # ~ HR = 2.0 per SD

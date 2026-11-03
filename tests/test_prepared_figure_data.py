@@ -6,8 +6,8 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from COMPASS.survival_analysis.figure_pipeline import prepare_figure_data as prep
-from COMPASS.survival_analysis.figure_pipeline.prepare_figure_data import build_labels
+from COMPASS.figures import prepare_figure_data as prep
+from COMPASS.figures.prepare_figure_data import build_labels
 
 
 def input_frame():
@@ -26,34 +26,17 @@ def input_frame():
     })
 
 
-def test_patient_spans_bins_and_log_before_averaging(tmp_path):
+def test_patient_spans(tmp_path):
     path = tmp_path / "source.csv"
     input_frame().write_csv(path)
-    tables = prep.prepare_arm(path, ["PSA", "Testosterone"])
+    tables = prep.prepare_arm(path)
+    assert list(tables) == prep.ARM_TABLES == ["patients"]
     patients = tables["patients"]
     assert patients["DFCI_MRN"].to_list() == ["001", "002", "003", "004", "005"]
     assert patients["record_span_days"].to_list() == [20., 0., None, -math.inf, 0.]
     assert patients["lab_rows"].to_list() == [6, 1, None, 1, 1]
     assert patients["t_dx_to_anchor"].to_list() == [365.] * 5
     assert "UNUSED_FEATURE" not in patients.columns
-    bins = tables["patient_bins"].filter(pl.col("DFCI_MRN") == "001").sort("t_mid")
-    assert bins["value_raw"].to_list() == [1., 6., -1., 7.]
-    assert bins["value_log"].to_list() == pytest.approx([math.log(2), (math.log(10)+math.log(4))/2, None, math.log(8)])
-    assert bins["n_raw"].to_list() == [1, 2, 1, 1]
-    assert bins["n_log"].to_list() == [1, 2, 0, 1]
-    assert bins["t_mid"][0] < 0 < bins["t_mid"][1]
-    assert tables["canonical"].height == 8
-    counts = tables["coverage_patient"].sort("DFCI_MRN")
-    assert counts["DFCI_MRN"].to_list() == ["001", "002", "004", "005"]
-    assert counts["n_pre_180"].to_list() == [1, 1, 0, 0]
-    assert tables["coverage_bins"].height == 4
-
-
-def test_all_boundary_times_match_left_closed_bins():
-    edges = prep.bin_edges()
-    values = [-400., -365.25, -360., -180., -0.01, 0., 180., 1826.25, 1826.26]
-    result = pl.DataFrame({"t_rel": values}).select(prep.bin_expr(edges))["bin_id"].to_list()
-    assert result == [None, 0, 1, 2, 2, 3, 4, len(edges)-2, None]
 
 
 def make_config(tmp_path, scope="all"):
@@ -64,7 +47,7 @@ def make_config(tmp_path, scope="all"):
         (root / "survival_analysis" / f"prediction_inputs_adt{endpoint}").mkdir(parents=True)
     return dict(data_root=str(root), cache_root=str(tmp_path / "cache"),
                 cohorts=["adt"], endpoints=["platinum", "nepc"], scope=scope,
-                labs=["PSA", "Testosterone"], classifier_path=str(root / "classifier"),
+                classifier_path=str(root / "classifier"),
                 federated_path=str(root / "fed.csv"))
 
 
@@ -88,7 +71,7 @@ def test_cache_reuse_invalidation_and_force(tmp_path, monkeypatch):
     assert forced["cells"] != changed["cells"]
     assert prep.prepare(config) == forced
     # Truncated cache output is not a valid hit.
-    output = Path(forced["arms"]["adt"]["directory"]) / "patient_bins.parquet"
+    output = Path(forced["arms"]["adt"]["directory"]) / "patients.parquet"
     output.write_bytes(b"PAR1")
     repaired = prep.prepare(config)
     assert pl.read_parquet(output).height > 0
@@ -103,7 +86,6 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     assert result["arms"] == {} and result["cells"] == {}
     assert result["federated"]
     site_path = Path(config["federated_path"]).parent / "within_site_cox_univariate" / "cox_within_site_all_sites_cohort.csv"
-    within_path = site_path.with_name("cox_within_site_all_sites_results.csv")
     xgb_dir = site_path.parent.parent / "federated_xgboost"
     xgb_paths = [xgb_dir / f"xgboost_federated_{kind}_adt.csv" for kind in ("metrics", "importance")]
     cox_dir = site_path.parent.parent / "federated_cox_multivariate"
@@ -147,7 +129,7 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
         figure_data_dir / (prefix + name) for prefix in ("", "within_site_") for name in (
             "lab_extreme_km.csv", "lab_extreme_summary.csv", "lab_trajectories.csv", "lab_trajectory_cohort.csv")]
     assert [item["path"] for item in result["federated_sources"]] == [
-        config["federated_path"], str(site_path), str(within_path), *map(str, xgb_paths),
+        config["federated_path"], str(site_path), *map(str, xgb_paths),
         *map(str, cox_paths), *map(str, no_dfci_model_paths),
         *map(str, deephit_paths), *map(str, v1_paths), *map(str, feature_set_paths), *map(str, no_dfci_paths),
         *map(str, all_model_paths), *map(str, figure_data_paths)]
@@ -157,15 +139,10 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     updated = prep.prepare(config)
     assert updated["federated"] != result["federated"]
     assert "missing" not in updated["federated_sources"][1]
-    assert updated["federated_sources"][2]["missing"]
-    pl.DataFrame({"site_name": ["site_a"], "hazard_ratio_per_sd": [1.2]}).write_csv(within_path)
-    with_forests = prep.prepare(config)
-    assert with_forests["federated"] != updated["federated"]
-    assert "missing" not in with_forests["federated_sources"][2]
-    previous = with_forests
+    previous = updated
     for path in [*xgb_paths, *cox_paths, *no_dfci_model_paths]:
         path.parent.mkdir(parents=True, exist_ok=True)
-    for index, path in enumerate([*xgb_paths, *cox_paths, *no_dfci_model_paths], start=3):
+    for index, path in enumerate([*xgb_paths, *cox_paths, *no_dfci_model_paths], start=2):
         assert previous["federated_sources"][index]["missing"]
         pl.DataFrame({"endpoint": ["platinum"]}).write_csv(path)
         delivered = prep.prepare(config)
@@ -180,7 +157,7 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     for directory in (no_dfci_dir, no_dfci_dir / "all_models", figure_data_dir):
         directory.mkdir(parents=True)
     for index, path in enumerate([*deephit_paths, *v1_paths, *feature_set_paths, *no_dfci_paths,
-                                  *all_model_paths, *figure_data_paths], start=11):
+                                  *all_model_paths, *figure_data_paths], start=10):
         path.parent.mkdir(parents=True, exist_ok=True)
         assert previous["federated_sources"][index]["missing"]
         pl.DataFrame({"endpoint": ["nepc"]}).write_csv(path)
@@ -192,7 +169,7 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
 
 def test_transfer_notebook_skips_feature_set_bundles(tmp_path):
     """The feature-set refits share the regular file names, so 04 must not merge them."""
-    notebook = json.loads((Path(prep.__file__).parents[2] / "notebooks" / "04_federated_transfer.ipynb").read_text())
+    notebook = json.loads((Path(prep.__file__).parents[1] / "notebooks" / "04_federated_transfer.ipynb").read_text())
     source = "".join(next(c["source"] for c in notebook["cells"] if "def find_bundles" in "".join(c["source"])))
     helpers = source[source.index("def is_no_dfci"):source.index("BUNDLE_PATHS, DELIVERY")]
     namespace = {"re": __import__("re"), "OUTPUT_DIR": tmp_path / "federated_transfer_adt_no_DFCI",
@@ -237,11 +214,10 @@ def test_federated_within_site_accepts_legacy_folder(tmp_path):
     config["federated"] = True
     legacy = Path(config["federated_path"]).parent / "nvflare_within_site_cox_univariate"
     legacy.mkdir()
-    for name in ("cohort", "results"):
-        pl.DataFrame({"site_name": ["site_a"]}).write_csv(legacy / f"cox_within_site_all_sites_{name}.csv")
+    pl.DataFrame({"site_name": ["site_a"]}).write_csv(legacy / "cox_within_site_all_sites_cohort.csv")
     sources = prep.prepare(config)["federated_sources"]
-    assert [Path(s["path"]).parent.name for s in sources[1:3]] == [legacy.name] * 2
-    assert not any(s.get("missing") for s in sources[1:3])
+    assert Path(sources[1]["path"]).parent.name == legacy.name
+    assert not sources[1].get("missing")
 
 
 def test_federated_v2_exports_are_fingerprinted_once(tmp_path):
@@ -282,7 +258,7 @@ def test_arpi_preparation_does_not_require_adt(tmp_path):
     result = prep.prepare(dict(config, cohorts="arpi", endpoints="nepc"))
     assert set(result["arms"]) == {"arpi"}
     assert set(result["cells"]) == {"arpi__nepc"}
-    assert pl.read_parquet(Path(result["arms"]["arpi"]["directory"]) / "canonical.parquet").is_empty()
+    assert (Path(result["arms"]["arpi"]["directory"]) / "patients.parquet").exists()
 
 
 def test_bad_arm_does_not_discard_other_arms_or_federation(tmp_path):
@@ -315,7 +291,6 @@ def test_preparation_notebook_runs_all_python_cells(tmp_path, monkeypatch):
     assert {row["table"] for row in state["rows"] if row["arm"] == "Figure 3 cohort sensitivity"} == {
         "incidence"}
     assert Path(config["cache_root"], "preparation_config.json").exists()
-    assert "PSA" in state["figure_data"].canonical_lab_names()
     assert state["rows"] and all(row["rows"] >= 0 for row in state["rows"])
 
 

@@ -7,19 +7,19 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from COMPASS.survival_analysis.pipeline import cox_aggregated as ca
-from COMPASS.survival_analysis.predictive_checklists import features
-from COMPASS.survival_analysis.predictive_checklists.__main__ import main
-from COMPASS.survival_analysis.predictive_checklists.config import RunConfig
-from COMPASS.survival_analysis.predictive_checklists.data import load_landmark
-from COMPASS.survival_analysis.predictive_checklists.demo import build_demo_inputs
-from COMPASS.survival_analysis.predictive_checklists.evaluation import evaluate_horizon, paired_bootstrap
-from COMPASS.survival_analysis.predictive_checklists.features import (
+from COMPASS.pipeline import cox_aggregated as ca
+from COMPASS.multivariable_models.predictive_checklists import features
+from COMPASS.multivariable_models.predictive_checklists.__main__ import main
+from COMPASS.multivariable_models.predictive_checklists.config import RunConfig
+from COMPASS.multivariable_models.predictive_checklists.data import load_landmark
+from COMPASS.multivariable_models.predictive_checklists.demo import build_demo_inputs
+from COMPASS.multivariable_models.predictive_checklists.evaluation import evaluate_horizon, paired_bootstrap
+from COMPASS.multivariable_models.predictive_checklists.features import (
     AdjusterDesign, FeatureBinarizer, schema_feature_columns,
 )
-from COMPASS.survival_analysis.predictive_checklists.inference import predict_bundle
-from COMPASS.survival_analysis.predictive_checklists.runner import run
-from COMPASS.survival_analysis.predictive_checklists.survival import CensoringDistribution
+from COMPASS.multivariable_models.predictive_checklists.inference import predict_bundle
+from COMPASS.multivariable_models.predictive_checklists.runner import run
+from COMPASS.multivariable_models.predictive_checklists.survival import CensoringDistribution
 
 AGE = "AGE_AT_TREATMENTSTART"
 RESTRICTED = dict(exclude_vitals=True, feature_stats="mean-n-obs")

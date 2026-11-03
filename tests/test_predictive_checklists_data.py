@@ -10,8 +10,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from COMPASS.survival_analysis.predictive_checklists.data import load_landmark, resolved_nepc_mask
-from COMPASS.survival_analysis.predictive_checklists.features import FeatureBinarizer, schema_feature_columns
+from COMPASS.multivariable_models.predictive_checklists.data import load_landmark, resolved_nepc_mask
+from COMPASS.multivariable_models.predictive_checklists.features import FeatureBinarizer, schema_feature_columns
 
 
 def _write_inputs(tmp_path: Path, *, endpoint="platinum", landmark=0, manifest_changes=None, frame=None):

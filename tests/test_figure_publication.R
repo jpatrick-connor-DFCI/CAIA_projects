@@ -1,5 +1,5 @@
-source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
+source("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/figures/figure_workflow.R")
 local({
   variable <- "COMPASS_COMBINED_KM_LANDMARK"
   previous <- Sys.getenv(variable,unset=NA_character_)
@@ -127,33 +127,6 @@ local({
     tags <- vapply(panels,function(g) g$grobs[[which(g$layout$name=="tag")]]$children[[1]]$label,character(1))
     stopifnot(identical(unname(tags),letters[1:5]))
   }
-  # Every federated estimate survives composition with its original p/q values.
-  estimates <- tidyr::expand_grid(source=c("Dana-Farber","Fred Hutch","Johns Hopkins","Federated*"),
-    landmark_days=c(0,90,180),lab_name=c("PSA","Testosterone"),feature_stat=c("mean","min","max","last")) %>%
-    mutate(hazard_ratio_per_sd=1.2,ci_lower=.9,ci_upper=1.5,p_value=.04,q_value=.2,
-      source_kind=if_else(source=="Federated*","across_sites","within_site"),
-      valid_estimate=TRUE,valid_ci=TRUE,significance="Nominal p < 0.05 only")
-  for(lab in c("PSA","Testosterone")) {
-    p <- plot_federated_comparison(estimates,lab,"Unverified population")
-    stopifnot(nrow(p$data)==48,all(p$data$p_value==.04),all(p$data$q_value==.2))
-    b <- ggplot_build(p)
-    stopifnot(nrow(b$data[[4]])==48,length(b$layout$panel_params)==12,
-      max(b$layout$layout$ROW)==3,max(b$layout$layout$COL)==4,
-      identical(as.character(b$layout$layout$feature_stat[1:4]),c("Mean","Minimum","Maximum","Last")))
-  }
-  stopifnot(isTRUE(all.equal(unname(FEDERATED_FOREST_SLIDE_SIZE[["width"]] /
-    FEDERATED_FOREST_SLIDE_SIZE[["height"]]),16/9)))
-  counts <- tibble(site_name=rep(c("fred_hutch_caia_1_1","jhu_caia_1_1","dana_farber_caia_1_1"),each=3),
-    landmark_days=rep(c(0,90,180),3),n_patients=rep(c(100,50,200),each=3),n_events=rep(c(10,5,30),each=3))
-  across <- tibble(landmark_days=c(0,90,180),n_patients_used=150,n_events_used=15)
-  note <- federated_population_note(across,counts)
-  stopifnot(grepl("Fred Hutch + Johns Hopkins",note,fixed=TRUE),grepl("not verified",note,fixed=TRUE),
-    grepl("unverified",federated_population_note(mutate(across,n_events_used=16),counts)))
-  pooled_only <- federated_population_note(tibble(landmark_days=c(0,90,180),
-    n_patients_used=c(10350,360,351),n_events_used=c(345,48,45)),counts)
-  stopifnot(grepl("exceed Dana-Farber + Fred Hutch + Johns Hopkins by 10,000/300 (0d), 10/3 (90d), 1/0 (180d)",
-    pooled_only,fixed=TRUE),grepl("not verified",pooled_only,fixed=TRUE),
-    grepl("unverified",federated_population_note(mutate(across,n_patients_used=351),counts)))
 })
 local({
   # 04 transfer outputs: optional CI/ΔAUC(t)/C columns become gaps, bad inputs fail loudly.

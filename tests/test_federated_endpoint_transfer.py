@@ -202,10 +202,10 @@ def test_missing_endpoint_columns_fail_loudly(tmp_path):
 
 
 def test_checklist_transfer_selects_frozen_model_at_each_horizon(tmp_path):
-    from COMPASS.survival_analysis.predictive_checklists.evaluation import ProbabilityCalibrator
-    from COMPASS.survival_analysis.predictive_checklists.features import FeatureBinarizer
-    from COMPASS.survival_analysis.predictive_checklists.optimizer import ChecklistModel
-    from COMPASS.survival_analysis.predictive_checklists.inference import predict_bundle
+    from COMPASS.multivariable_models.predictive_checklists.evaluation import ProbabilityCalibrator
+    from COMPASS.multivariable_models.predictive_checklists.features import FeatureBinarizer
+    from COMPASS.multivariable_models.predictive_checklists.optimizer import ChecklistModel
+    from COMPASS.multivariable_models.predictive_checklists.inference import predict_bundle
     from survival_common.federated_inference import predict_checklist, select_model
 
     local = _local(n=24)

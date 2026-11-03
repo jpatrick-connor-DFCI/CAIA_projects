@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "COMPASS" / "survival_analysis" / "pipeline"))
+sys.path.insert(0, str(REPO / "COMPASS" / "pipeline"))
 
 import compass_pipeline as cp  # noqa: E402
 
@@ -48,7 +48,7 @@ def dynamic_on(monkeypatch):
 
 
 def _specs(**kw):
-    return cp.longitudinal_task_specs(ENDPOINT, include_survlatent=False, **kw)
+    return cp.longitudinal_task_specs(ENDPOINT, **kw)
 
 
 def _cmd_strings(model, run, cfg=ENDPOINT):
@@ -143,6 +143,6 @@ class TestSummaryReadsBothArms:
         """Both write the canonical block, so summarize_longitudinal_outputs
         must not fall through its elif chain and drop the dynamic rows."""
         src = (
-            REPO / "COMPASS" / "survival_analysis" / "pipeline" / "compass_pipeline.py"
+            REPO / "COMPASS" / "pipeline" / "compass_pipeline.py"
         ).read_text()
         assert 'if model in ("dynamic-deephit", "dynamic-deephit-dyn"):' in src

@@ -530,9 +530,9 @@ def _deephit_state(model: dict) -> dict[str, np.ndarray]:
 
 def _checklist_components(model: dict):
     """Restore the frozen PROFILE binarizer, item weights and calibrator."""
-    from COMPASS.survival_analysis.predictive_checklists.evaluation import ProbabilityCalibrator
-    from COMPASS.survival_analysis.predictive_checklists.features import FeatureBinarizer
-    from COMPASS.survival_analysis.predictive_checklists.optimizer import ChecklistModel
+    from COMPASS.multivariable_models.predictive_checklists.evaluation import ProbabilityCalibrator
+    from COMPASS.multivariable_models.predictive_checklists.features import FeatureBinarizer
+    from COMPASS.multivariable_models.predictive_checklists.optimizer import ChecklistModel
 
     payload = model.get("checklist") or {}
     if payload.get("schema_version") != 1:

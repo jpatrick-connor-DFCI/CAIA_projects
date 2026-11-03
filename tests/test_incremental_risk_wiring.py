@@ -17,9 +17,8 @@ from unittest import mock
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-SURV = REPO / "COMPASS" / "survival_analysis"
-sys.path.insert(0, str(SURV))
-sys.path.insert(0, str(SURV / "multivariate_longitudinal"))
+sys.path.insert(0, str(REPO / "COMPASS" / "pipeline"))
+sys.path.insert(0, str(REPO / "COMPASS" / "multivariable_models" / "longitudinal"))
 
 pytest.importorskip("pandas")
 

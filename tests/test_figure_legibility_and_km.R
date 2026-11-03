@@ -1,7 +1,7 @@
-source("COMPASS/survival_analysis/figure_pipeline/figure_typography.R")
+source("COMPASS/figures/figure_typography.R")
 # Run with COMPASS_REVIEW_DIR=/tmp/compass-revised Rscript tests/test_figure_legibility_and_km.R
 suppressPackageStartupMessages({library(ggplot2); library(dplyr); library(tidyr); library(stringr); library(survival); library(readr)})
-source_exprs <- parse("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
+source_exprs <- parse("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
 find_assignment <- function(expr, name) {
   if (missing(expr) || !is.call(expr)) return(NULL)
   if (identical(expr[[1]], as.name("<-")) && identical(expr[[2]], as.name(name))) return(expr)
@@ -23,7 +23,7 @@ for (name in c("theme_fig", "figure_tertiles", "figure_extreme_quintiles", "figu
     if (!is.null(assignment)) eval(assignment)
   }
 }
-source("COMPASS/survival_analysis/figure_pipeline/figure_supplements.R")
+source("COMPASS/figures/figure_supplements.R")
 
 # Ties are preserved; degenerate distributions cannot be claimed to have tertiles.
 groups <- figure_tertiles(c(1,1,2,3,4,5,6,7,8,NA,Inf))

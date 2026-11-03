@@ -62,7 +62,7 @@ def test_preference_and_one_substitution_notice(monkeypatch, available, expected
 
 
 def test_clinical_comparison_renders_without_arial(monkeypatch, tmp_path):
-    from COMPASS.survival_analysis.federated import federated_clinical_comparison as fcc
+    from COMPASS.federated_models import federated_clinical_comparison as fcc
 
     original_findfont = font_manager.findfont
 

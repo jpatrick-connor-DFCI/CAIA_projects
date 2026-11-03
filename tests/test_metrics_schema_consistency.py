@@ -32,18 +32,16 @@ from survival_common.metrics_schema import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Every module that constructs a `*_metrics*.csv` row. survlatent_ode.py is
-# deliberately absent: its metrics frame comes from the external repo's
-# eval_model, whose schema is not ours to pin.
+# Every module that constructs a `*_metrics*.csv` row.
 WRITER_MODULES = {
     "elastic_net_cox": REPO_ROOT / "survival_common" / "cox_runners.py",
-    "xgboost_compass": REPO_ROOT / "COMPASS" / "survival_analysis" / "pipeline" / "multivariate_analysis.py",
+    "xgboost_compass": REPO_ROOT / "COMPASS" / "multivariable_models" / "multivariate_analysis.py",
     "xgboost_ipio": REPO_ROOT / "IPIO" / "survival_analysis" / "multivariate_analysis.py",
     "dynamic_deephit": REPO_ROOT / "survival_common" / "longitudinal_runners.py",
 }
 
 FIGURE_PIPELINE_R = (
-    REPO_ROOT / "COMPASS" / "survival_analysis" / "figure_pipeline" / "COMPASS_generate_figures_pipeline.R"
+    REPO_ROOT / "COMPASS" / "figures" / "COMPASS_generate_figures_pipeline.R"
 )
 
 # Spellings the cutover retired from the metrics block. A writer reintroducing
@@ -165,12 +163,11 @@ class TestFigurePipelineReadsCanonicalNamesOnly:
             "DeepHit now writes `endpoint`; the dual-spelling union is retired"
         )
 
-    def test_reader_uses_canonical_count_columns(self):
+    def test_reader_does_not_reconcile_retired_count_spellings(self):
         source = FIGURE_PIPELINE_R.read_text()
         assert 'c("n_events_train_val", "n_train_val_events")' not in source
         assert 'c("n_events_test", "n_test_events")' not in source
-        assert 'pick("n_events_train_val")' in source
-        assert 'pick("n_events_test")' in source
+        assert "n_train_val_events" not in source and "n_test_events" not in source
 
     def test_reader_reads_the_canonical_performance_columns(self):
         source = FIGURE_PIPELINE_R.read_text()
@@ -188,7 +185,7 @@ class TestEveryWriterExposesACohortFlag:
         "path",
         [
             REPO_ROOT / "survival_common" / "cox_runners.py",
-            REPO_ROOT / "COMPASS" / "survival_analysis" / "pipeline" / "multivariate_analysis.py",
+            REPO_ROOT / "COMPASS" / "multivariable_models" / "multivariate_analysis.py",
             REPO_ROOT / "IPIO" / "survival_analysis" / "multivariate_analysis.py",
             REPO_ROOT / "survival_common" / "longitudinal_runners.py",
         ],
@@ -199,8 +196,8 @@ class TestEveryWriterExposesACohortFlag:
 
     def test_pipeline_passes_cohort_to_every_canonical_writer(self):
         source = (
-            REPO_ROOT / "COMPASS" / "survival_analysis" / "pipeline" / "compass_pipeline.py"
+            REPO_ROOT / "COMPASS" / "pipeline" / "compass_pipeline.py"
         ).read_text()
         assert 'cohort_args = ["--cohort"' in source
-        # elastic-net, xgboost, dynamic-deephit -- survlatent-ode excluded.
+        # elastic-net, xgboost, dynamic-deephit.
         assert len(re.findall(r"\*cohort_args", source)) == 3

@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from COMPASS.survival_analysis.pipeline import compass_pipeline as cp
+from COMPASS.pipeline import compass_pipeline as cp
 from survival_common.longitudinal_targets import (
     CONFIG_ENDPOINTS,
     LONGITUDINAL_CONFIGS,
@@ -235,11 +235,11 @@ class TestPlatinumConfigsUnchanged:
 
 
 class TestTaskSpecWiring:
-    """compass_pipeline's endpoint -> config routing and the survlatent gate."""
+    """compass_pipeline's endpoint -> config routing."""
 
     def test_specs_follow_endpoint(self):
-        platinum = [c for _, c, _ in cp.longitudinal_task_specs("platinum", include_survlatent=False)]
-        nepc = [c for _, c, _ in cp.longitudinal_task_specs("nepc", include_survlatent=False)]
+        platinum = [c for _, c, _ in cp.longitudinal_task_specs("platinum")]
+        nepc = [c for _, c, _ in cp.longitudinal_task_specs("nepc")]
         assert platinum == ["platinum", "competing"]
         assert nepc == ["nepc", "nepc_competing"]
 
@@ -249,25 +249,15 @@ class TestTaskSpecWiring:
         for endpoint, cause_only in (("platinum", "platinum"), ("nepc", "nepc")):
             configs = [
                 c for _, c, _ in cp.longitudinal_task_specs(
-                    endpoint, include_survlatent=True, include_dynamic=True
+                    endpoint, include_dynamic=True
                 )
             ]
             assert set(configs) == {cause_only}
 
-    def test_survlatent_off_by_default(self):
-        """RUN_SURVLATENT gates it; 03b ships with it off."""
-        assert cp.RUN_SURVLATENT is False
-        models = {m for m, _, _ in cp.longitudinal_task_specs("platinum")}
-        assert models == {"dynamic-deephit"}
-
-    def test_survlatent_included_when_enabled(self):
-        models = {m for m, _, _ in cp.longitudinal_task_specs("platinum", include_survlatent=True)}
-        assert models == {"dynamic-deephit", "survlatent-ode"}
-
     def test_metrics_filenames_match_config(self):
         specs = {
             cfg: fname
-            for _, cfg, fname in cp.longitudinal_task_specs("nepc", include_survlatent=False)
+            for _, cfg, fname in cp.longitudinal_task_specs("nepc")
         }
         assert specs["nepc"] == "dynamic_deephit_metrics_nepc.csv"
         assert specs["nepc_competing"] == "dynamic_deephit_metrics_nepc_competing.csv"
@@ -275,7 +265,7 @@ class TestTaskSpecWiring:
     def test_every_pipeline_config_is_a_registered_config(self):
         """A spec naming a config the runner would reject is a wiring bug."""
         for endpoint in ("platinum", "nepc"):
-            for _, cfg, _ in cp.longitudinal_task_specs(endpoint, include_survlatent=True):
+            for _, cfg, _ in cp.longitudinal_task_specs(endpoint):
                 assert cfg in LONGITUDINAL_CONFIGS
 
     def test_unknown_endpoint_raises(self):

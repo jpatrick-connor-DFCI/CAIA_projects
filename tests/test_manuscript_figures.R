@@ -1,6 +1,6 @@
-source("COMPASS/survival_analysis/figure_pipeline/COMPASS_generate_figures_pipeline.R")
-source("COMPASS/survival_analysis/figure_pipeline/figure_workflow.R")
-source("COMPASS/survival_analysis/figure_pipeline/checklist_supplement.R")
+source("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
+source("COMPASS/figures/figure_workflow.R")
+source("COMPASS/figures/checklist_supplement.R")
 
 # Styling a manuscript copy must not mutate a layer shared by the standalone.
 p <- ggplot(tibble(x=1,y=2,label="Unchanged"),aes(x,y,label=label)) +
@@ -24,46 +24,33 @@ stopifnot(length(cohort_specs)==2,all(vapply(cohort_specs,`[[`,numeric(1),"heigh
   max(cohort_specs[[1]]$layout)==7,max(cohort_specs[[2]]$layout)==6,
   all(cohort_specs[[2]]$layout[4,]==6),
   length(cohort_specs[[1]]$titles)==7)
-# Figure 2: one spec per cohort, keyed with a variant suffix.
+# Figure 2: one spec per cohort (the ADT day-0 cohort), keyed with a variant suffix.
 stopifnot(identical(spec_keys[startsWith(spec_keys,"02_")],paste0("02_llm_nepc_avpc__",names(FIGURE2_COHORTS))),
-  identical(spec_by_key("02_llm_nepc_avpc__adt")$members,figure2v3_stems("adt")),
+  identical(names(FIGURE2_COHORTS),"lm0"),
+  identical(spec_by_key("02_llm_nepc_avpc__lm0")$members,figure2v3_stems("lm0")),
   all(vapply(specs[startsWith(spec_keys,"02_")], `[[`, numeric(1), "width")==10),
   identical(figure2v3_variant(c("figure2v3_icd_metric_bar","figure2v3_lm0_enrichment","figure2v3_metric_bar",
-    "figure2v3_xyz_enrichment")),c("icd","lm0",NA,NA)),
+    "figure2v3_xyz_enrichment")),c(NA,"lm0",NA,NA)),
   identical(figure2v3_panel("figure2v3_lm0_subtype_landscape"),"subtype_landscape"),
-  manuscript_base_key("02_llm_nepc_avpc__icd")=="02_llm_nepc_avpc",
-  identical(manuscript_figure2_header("adt","ADT-exposed (N=4,000; 1,234 with an LLM label)"),
-    "Cohort: ADT-exposed with LLM label (n = 1,234)"),
-  identical(manuscript_figure2_header("icd",NULL),"Cohort: ICD-10 prostate cancer with LLM label"))
-dfci_spec <- spec_by_key("03_dfci_univariable")
-stopifnot(dfci_spec$height==8.9,dfci_spec$width==10,
-  spec_by_key("federated_03_univariable")$width==10,identical(dfci_spec$row_heights,c(1.5,.32,1,1)),
-  identical(dfci_spec$shared_legend_panels,1:3),all(dfci_spec$layout[2,]==8),
+  manuscript_base_key("02_llm_nepc_avpc__lm0")=="02_llm_nepc_avpc",
+  identical(manuscript_figure2_header("lm0","ADT day-0 (N=4,000; 1,234 with an LLM label)"),
+    "Cohort: ADT day-0 prediction cohort with LLM label (n = 1,234)"),
+  identical(manuscript_figure2_header("lm0",NULL),"Cohort: ADT day-0 prediction cohort with LLM label"))
+fed3_spec <- spec_by_key("federated_03_univariable")
+stopifnot(fed3_spec$height==8.9,fed3_spec$width==10,identical(fed3_spec$row_heights,c(1.5,.32,1,1)),
+  identical(fed3_spec$shared_legend_panels,1:3),all(fed3_spec$layout[2,]==8),
   identical(manuscript_dfci_volcano_ylim,c(-.2,36)),
   manuscript_dfci_km_landmark==180,
-  grepl("landmark180",dfci_spec$members[5],fixed=TRUE),
-  grepl("landmark180",dfci_spec$members[7],fixed=TRUE),
+  grepl("landmark180",fed3_spec$members[5],fixed=TRUE),
+  grepl("landmark180",fed3_spec$members[7],fixed=TRUE),
   identical(manuscript_dfci_landmark_headers,c("+0 days","+90 days","+180 days")),
   identical(manuscript_km_y_label,"Platinum-free\nprobability"),
-  identical(ALBUMIN_DAY180_NUDGE,c(x=-.8,y=1.7)))
-multivariable_spec <- spec_by_key("04_multivariable_labs")
-stopifnot(length(multivariable_spec$members)==7,
-  multivariable_spec$members[1]=="figure4a_discrimination_auc_platinum",
-  !any(grepl("cindex",multivariable_spec$members,fixed=TRUE)),
-  multivariable_spec$width==8.5,multivariable_spec$height==9,
-  identical(multivariable_spec$row_heights,c(.9,1,1)),
-  manuscript_multivariable_legend_height==.14)
+  !any(c("03_dfci_univariable","04_multivariable_labs") %in% spec_keys))
 # The HR direction guide sits under the shared volcano legend.
 direction <- hr_direction_grob()
 direction_text <- unname(unlist(lapply(direction$children,function(x) if(inherits(x,"text")) x$label)))
 stopifnot(inherits(direction,"gTree"),identical(direction_text,c("1","Larger association with platinum hazard in the labeled direction")),
-  identical(MANUSCRIPT_UNIVARIABLE_KEYS,c("03_dfci_univariable","federated_03_univariable")))
-# The supplementary DFCI labs: trajectory beside KM, one row per lab.
-supplement <- figure_dfci_supplement_labs_spec(180)
-stopifnot(supplement$key=="dfci_supplement_labs_lm180",length(supplement$members)==8,
-  identical(supplement$members[1:2],c("longitudinal_platinum_ldh_log","km_quintile_ldh_landmark180")),
-  supplement$members[3]=="longitudinal_platinum_hemoglobin",
-  identical(dim(supplement$layout_matrix),c(4L,2L)))
+  identical(MANUSCRIPT_UNIVARIABLE_KEYS,"federated_03_univariable"))
 landmark_header <- manuscript_center_landmark_header(ggplot()+labs(subtitle="+90 days"))
 stopifnot(landmark_header$theme$plot.subtitle$face=="bold",
   landmark_header$theme$plot.subtitle$hjust==.5,
@@ -72,19 +59,15 @@ stopifnot(landmark_header$theme$plot.subtitle$face=="bold",
 # Captions mirror the paired Markdown/text layout used by the clinical text
 # embedding project and retain figure-specific audit language.
 captions <- manuscript_captions()
+grid_keys <- paste0("federated_06_checklist_no_dfci__lm",rep(c(0,90,180),each=2),"_h",c(365,1825))
 federated_keys <- c("federated_03_univariable","federated_04_multivariable","federated_04_multivariable__full_features",
-  "federated_05_transfer_no_dfci__no_d",
-  "federated_06_checklist_no_dfci",
-  paste0("federated_06_checklist_no_dfci__lm",rep(c(0,90,180),each=2),"_h",c(365,1825)))
-figure2_keys <- paste0("02_llm_nepc_avpc__",c("icd","adt","lm0"))
-local_keys <- c("01_cohort_overview",figure2_keys,"03_dfci_univariable","04_multivariable_labs",
-  "03_cohort_sensitivity_supplement","07_federated_incidence_associations","08_federated_multivariable")
-# Figure 5 (internal Gleason sensitivity) was removed; Gleason is compared in transfer.
-stopifnot(length(captions)==20,identical(names(captions),c(local_keys,federated_keys)),
-  all(startsWith(unname(captions[local_keys]),paste0("Figure ",c(1,2,2,2,3,4,3,7,8),". "))),
-  all(grepl("^Federated Figure ([3-6])[. ]",unname(captions[federated_keys[1:5]]))),
+  "federated_05_transfer_no_dfci__top_bottom_20_all_endpoints","federated_05_transfer_no_dfci__no_d",
+  "federated_06_checklist_no_dfci",grid_keys)
+local_keys <- c("01_cohort_overview","02_llm_nepc_avpc__lm0","03_cohort_sensitivity_supplement")
+stopifnot(length(captions)==15,setequal(names(captions),c(local_keys,federated_keys)),
+  all(startsWith(unname(captions[local_keys]),paste0("Figure ",c(1,2,3),". "))),
+  all(grepl("^Federated Figure ([3-6])[. ]",unname(captions[federated_keys[c(1,2,5,6)]]))),
   setequal(unique(manuscript_base_key(names(captions))),names(MANUSCRIPT_SECTIONS)),
-  grepl("ICD-10 prostate cancer cohort",captions[["02_llm_nepc_avpc__icd"]],fixed=TRUE),
   grepl("any dated platinum",captions[["02_llm_nepc_avpc__lm0"]],fixed=TRUE),
   grepl("(g) Observed platinum events",captions[["01_cohort_overview"]],fixed=TRUE),
   grepl("bottom and top 10%",captions[["federated_03_univariable"]],fixed=TRUE),
@@ -95,44 +78,35 @@ stopifnot(length(captions)==20,identical(names(captions),c(local_keys,federated_
   grepl("(c-e) Kaplan-Meier",captions[["federated_06_checklist_no_dfci"]],fixed=TRUE),
   grepl("same sequenced patients with a Gleason score",captions[["federated_06_checklist_no_dfci"]],fixed=TRUE),
   !any(grepl("C-index",unname(captions),fixed=TRUE)),
-  grepl("180-day landmark",captions[["03_dfci_univariable"]],fixed=TRUE),
-  grepl("≤0.2453",captions[["03_dfci_univariable"]],fixed=TRUE),
-  !grepl("day-0 landmark",captions[["03_dfci_univariable"]],fixed=TRUE),
-  grepl("4,429/133",captions[["08_federated_multivariable"]],fixed=TRUE),
-  grepl("Elastic-Net",captions[["08_federated_multivariable"]],fixed=TRUE),
-  !grepl("person_id",captions[["08_federated_multivariable"]],fixed=TRUE),
-  grepl("9,939/308",captions[["07_federated_incidence_associations"]],fixed=TRUE))
+  grepl("4,429/133",captions[["federated_04_multivariable"]],fixed=TRUE))
 caption_root <- tempfile("manuscript-caption-test-")
 caption_paths <- manuscript_write_captions(caption_root)
-stopifnot(length(caption_paths)==26,all(file.exists(caption_paths)))
-# The federated set is numbered on its own and never overwrites local figure3-5;
-# each caption sits in the manuscript folder of its figure's section.
+stopifnot(length(caption_paths)==30,all(file.exists(caption_paths)))
+# The federated set is numbered on its own; each caption sits in the
+# manuscript folder of its figure's section.
 caption_md <- caption_paths[endsWith(caption_paths,".md")]
-stopifnot(setequal(basename(caption_md),paste0(c(paste0("figure",c(1,3,4,7,8)),"figure3_supplement",paste0("figure2_",c("icd","adt","lm0")),
-  paste0("federated_figure",c(3,4,6)),"federated_figure4_full_features","federated_figure5_no_d","federated_figure5_top_bottom_20_all_endpoints"),".md")))
+stopifnot(setequal(basename(caption_md),paste0(c("figure1","figure2_lm0","figure3_supplement",
+  paste0("federated_figure",c(3,4,6)),"federated_figure4_full_features","federated_figure5_no_d",
+  "federated_figure5_top_bottom_20_all_endpoints",
+  paste0("federated_figure6_lm",rep(c(0,90,180),each=2),"_h",c(365,1825))),".md")))
 for(path in caption_md) stopifnot(identical(readLines(path,warn=FALSE),
   readLines(sub("[.]md$",".txt",path),warn=FALSE)))
 caption_file <- function(section,name) file.path(caption_root,section,
   "manuscript","captions",paste0(name,".md"))
-stopifnot(startsWith(readLines(caption_file("03_univariate/internal","figure3"),n=1,warn=FALSE),"Figure 3. "),
-  startsWith(readLines(caption_file("03_univariate/federated","federated_figure3"),n=1,warn=FALSE),"Federated Figure 3. "),
+stopifnot(startsWith(readLines(caption_file("03_univariate/federated","federated_figure3"),n=1,warn=FALSE),"Federated Figure 3. "),
   file.exists(caption_file("01_cohort","figure1")),!file.exists(caption_file("02_llm","figure2")),
-  all(file.exists(caption_file("02_llm",paste0("figure2_",c("icd","adt","lm0"))))),
+  file.exists(caption_file("02_llm","figure2_lm0")),
   file.exists(caption_file("05_transfer_survival","federated_figure5_no_d")),
   startsWith(readLines(caption_file("06_transfer_checklists","federated_figure6"),n=1,warn=FALSE),"Federated Figure 6. "),
-  !file.exists(caption_file("04_multivariate/internal","figure5")),file.exists(caption_file("04_multivariate/internal","figure4")),file.exists(caption_file("03_univariate/cohort_sensitivity","figure3_supplement")),
-  file.exists(caption_file("04_multivariate/federated","figure8")),
+  file.exists(caption_file("03_univariate/cohort_sensitivity","figure3_supplement")),
+  file.exists(caption_file("04_multivariate/federated","federated_figure4")),
+  !dir.exists(file.path(caption_root,"03_univariate","internal")),
+  !dir.exists(file.path(caption_root,"04_multivariate","internal")),
   setequal(names(MANUSCRIPT_SECTIONS),manuscript_base_key(names(captions))))
 unlink(caption_root,recursive=TRUE)
 
 site_incidence <- tibble(site_name=c("dana_farber_caia_1_1","fred_hutch_caia_1_1","jhu_caia_1_1"),
-  site=c("Dana-Farber","Fred Hutch","Johns Hopkins"),landmark_days=0L,endpoint="platinum",
-  n_patients=c(200,100,50),n_events=c(20,8,2),available=TRUE)
-federated_incidence <- manuscript_federated_incidence(site_incidence)
-stopifnot(nrow(federated_incidence$data)==3,
-  identical(federated_incidence$data$n_patients,c(200,100,50)),
-  identical(federated_incidence$data$n_events,c(20,8,2)),
-  !grepl("compiled",federated_incidence$legend,fixed=TRUE))
+  site=c("Dana-Farber","Fred Hutch","Johns Hopkins"))
 # Figure 1 site panel: every site with a day-0 result, events/patients labels,
 # a dagger under 25 events; sites without a day-0 row are dropped.
 fig1_sites <- tibble(site_name=c(site_incidence$site_name,"msk_caia_1_1"),
@@ -202,7 +176,7 @@ stopifnot(dfci_combined$spec$key=="03_cohort_sensitivity_supplement",
   setequal(unique(dfci_combined$data$figure_section),
     c("incidence_and_counts","laboratory_associations")))
 
-# Figure 7 labels the transformed horizontal coordinate directly as ln(HR),
+# The cohort-sensitivity forest labels the transformed horizontal coordinate directly as ln(HR),
 # retaining the same estimates and null position as the HR-scale source plot.
 log_axis_source <- ggplot(tibble(hazard_ratio_per_sd=c(.7,1.2),ci_lower=c(.6,1.0),
   ci_upper=c(.9,1.4),cohort=c("a","b")),aes(hazard_ratio_per_sd,cohort)) + geom_point()
@@ -211,29 +185,7 @@ log_axis_scale <- log_axis_plot$scales$get_scales("x")
 stopifnot(log_axis_plot$labels$x=="Log hazard ratio per SD (95% CI)",
   any(abs(log(log_axis_scale$breaks))<sqrt(.Machine$double.eps)))
 
-# Preserve every supplied lab estimate and q-value across two analytes, four
-# statistics, three landmarks and sites; q-values are not recomputed here.
-labs <- tidyr::expand_grid(lab_name=c("PSA","Testosterone"),feature_stat=c("mean","min","max","last"),
-  landmark_days=c(0,90,180),source=c("Dana-Farber","Federated*")) %>%
-  mutate(hazard_ratio_per_sd=seq(.6,1.3,length.out=n()),ci_lower=hazard_ratio_per_sd-.1,
-    ci_upper=hazard_ratio_per_sd+.1,valid_estimate=TRUE,valid_ci=TRUE,p_value=.02,q_value=.09,
-    source_kind=if_else(source=="Federated*","across_sites","within_site"),
-    significance="Nominal p < 0.05 only",population_note="Membership inferred; verify source.")
-forest <- manuscript_federated_labs(labs)
-for(column in c("hazard_ratio_per_sd","ci_lower","ci_upper","p_value","q_value"))
-  stopifnot(identical(forest$data[[column]],labs[[column]]))
-psa_axis <- forest$panels[[1]]$scales$get_scales("x")
-stopifnot(nrow(forest$data)==48,grepl("Membership inferred",forest$legend,fixed=TRUE),
-  length(psa_axis$breaks)==3,any(abs(log(psa_axis$breaks))<sqrt(.Machine$double.eps)))
-federated_combined <- manuscript_federated_incidence_associations(federated_incidence,forest)
-stopifnot(federated_combined$spec$key=="07_federated_incidence_associations",
-  identical(federated_combined$spec$layout,rbind(c(1,2),c(3,3),c(4,4))),
-  setequal(unique(federated_combined$data$figure_section),
-    c("incidence_and_counts","laboratory_associations")))
-duplicate <- tryCatch(manuscript_federated_labs(bind_rows(labs,labs[1,])),error=identity)
-stopifnot(inherits(duplicate,"error"))
-
-# Figure 8 mirrors local Figure 4 from the captured federated CSVs. A flagged
+# Federated Figure 4 from the captured federated CSVs. A flagged
 # identifier remains in the supplied importance input and audit note.
 performance <- bind_rows(lapply(c("elastic_net","xgboost"),function(family)
   expand_grid(landmark_days=c(0,90,180),config=c("both","baseline")) %>%
@@ -250,7 +202,7 @@ importance <- expand_grid(landmark_days=c(0,90,180),feature=c("PSA__max","person
     input_audit_note=performance$input_audit_note[7])
 federated_models <- manuscript_federated_multivariable(performance,coefficients,importance)
 stopifnot(grepl("person_id",federated_models$legend,fixed=TRUE),
-  federated_models$spec$key=="08_federated_multivariable",
+  federated_models$spec$key=="federated_04_multivariable",
   federated_models$spec$width==8.5,federated_models$spec$height==9,
   length(federated_models$spec$titles)==3,
   inherits(federated_models$plot,"gtable"),nrow(federated_models$data)==12,
@@ -279,9 +231,6 @@ stopifnot(!"XGBoost baseline (age)" %in% as.character(focused$data$name),
 unknown_series <- tryCatch(manuscript_federated_multivariable(
   mutate(performance,name=if_else(row_number()==1,"Other",name)),coefficients,importance),error=identity)
 stopifnot(inherits(unknown_series,"error"))
-original <- plot_federated_comparison(labs,"PSA","Test")
-stopifnot(identical(original$scales$get_scales("colour")$palette(2),
-  c(`Dana-Farber`="#0072B2",`Federated*`="#222222")))
 clinical_fixture <- function() tidyr::expand_grid(endpoint=c("NEPC","avpc","platinum"),landmark_days=c(0,180),
     subpopulation=c("gleason","trio","trio_gleason","other"),
     bundle=c("xgboost_federated_model_adt","cox_federated_elasticnet_model_adt"),

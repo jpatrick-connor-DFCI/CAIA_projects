@@ -31,7 +31,7 @@ import pandas as pd
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "COMPASS" / "survival_analysis" / "multivariate_longitudinal"))
+sys.path.insert(0, str(REPO / "COMPASS" / "multivariable_models" / "longitudinal"))
 
 pytest.importorskip("sklearn")
 pytest.importorskip("lifelines")

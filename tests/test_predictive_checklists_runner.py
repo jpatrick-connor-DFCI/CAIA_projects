@@ -7,11 +7,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from COMPASS.survival_analysis.predictive_checklists.config import RunConfig
-from COMPASS.survival_analysis.predictive_checklists.data import load_landmark
-from COMPASS.survival_analysis.predictive_checklists.demo import build_demo_inputs
-from COMPASS.survival_analysis.predictive_checklists.inference import predict_bundle
-from COMPASS.survival_analysis.predictive_checklists.runner import fit_horizon, run
+from COMPASS.multivariable_models.predictive_checklists.config import RunConfig
+from COMPASS.multivariable_models.predictive_checklists.data import load_landmark
+from COMPASS.multivariable_models.predictive_checklists.demo import build_demo_inputs
+from COMPASS.multivariable_models.predictive_checklists.inference import predict_bundle
+from COMPASS.multivariable_models.predictive_checklists.runner import fit_horizon, run
 
 
 def small_config(**kwargs):
@@ -90,7 +90,7 @@ def test_invalid_later_landmark_prevents_all_fits(tmp_path):
 
 
 def test_failure_keeps_cv_diagnostics_and_overwrite_archives(tmp_path, monkeypatch):
-    import COMPASS.survival_analysis.predictive_checklists.runner as runner
+    import COMPASS.multivariable_models.predictive_checklists.runner as runner
 
     inputs = build_demo_inputs(tmp_path / "inputs", landmarks=(0,), n=160)
     dirs = {"platinum": inputs / "prediction_inputs_adt"}
@@ -113,7 +113,7 @@ def test_failure_keeps_cv_diagnostics_and_overwrite_archives(tmp_path, monkeypat
 
 
 def test_demo_refusal_does_not_modify_existing_inputs(tmp_path):
-    from COMPASS.survival_analysis.predictive_checklists.__main__ import main
+    from COMPASS.multivariable_models.predictive_checklists.__main__ import main
     out = tmp_path / "existing"
     out.mkdir()
     (out / "run_manifest.json").write_text("{}")
@@ -124,7 +124,7 @@ def test_demo_refusal_does_not_modify_existing_inputs(tmp_path):
 
 
 def test_resume_reuses_completed_horizons_and_refits_partial_ones(tmp_path, monkeypatch):
-    import COMPASS.survival_analysis.predictive_checklists.runner as runner
+    import COMPASS.multivariable_models.predictive_checklists.runner as runner
 
     inputs = build_demo_inputs(tmp_path / "inputs", landmarks=(0, 90), n=160)
     dirs = {"platinum": inputs / "prediction_inputs_adt"}

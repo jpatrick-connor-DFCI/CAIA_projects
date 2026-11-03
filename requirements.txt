@@ -36,23 +36,17 @@ scikit-survival==0.22.2  # unverified
 lifelines==0.27.8        # unverified
 
 # --- Optional: torch-based longitudinal survival models ---
-# COMPASS/survival_analysis/multivariate_longitudinal/ is the *only* consumer
-# of torch in this repo (Dynamic-DeepHit: survival_common/deephit_engine.py,
-# survival_common/longitudinal_runners.py; SurvLatent ODE:
-# multivariate_longitudinal/survlatent_ode.py). Everything else -- data
+# COMPASS/multivariable_models/longitudinal/ is the *only* consumer of torch
+# in this repo (Dynamic-DeepHit: survival_common/deephit_engine.py,
+# survival_common/longitudinal_runners.py). Everything else -- data
 # compilation, Cox, XGBoost -- is torch-free by construction (see README
 # invariant #7's three-layer torch-gating pattern), so leave this commented
 # out unless you are running that one arm.
 # torch==2.1.1
 # torchvision==0.16.1
-#
-# torchdiffeq is NOT this repo's dependency -- it belongs to the external
-# itmoon7/survlatent_ode repo that survlatent_ode.py shells into (see
-# multivariate_longitudinal/README.md). Install it inside that repo's own
-# conda env (survlatent_ode_conda.yml), not here.
 
 # --- Optional: alternate predictive-checklist solvers ---
-# COMPASS/survival_analysis/predictive_checklists/ needs nothing beyond the pins
+# COMPASS/multivariable_models/predictive_checklists/ needs nothing beyond the pins
 # above: SciPy >=1.9 supplies the default HiGHS solver (milp), and the matched
 # comparators lazily import scikit-survival and xgboost. Uncomment only the
 # backend needed, in an isolated environment.

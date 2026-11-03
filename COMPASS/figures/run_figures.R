@@ -1,0 +1,124 @@
+#!/usr/bin/env Rscript
+# COMPASS manuscript figures (ADT cohort, platinum endpoint).
+#
+# Run 05_prep_figure_data.ipynb first; this script only consumes its prepared
+# cache. Flip the toggles below to render a subset of figure groups. Only PDFs
+# listed in retained_exports.txt are rendered. A run with every group enabled
+# also archives retired exports and flattens the export tree.
+#
+#   Rscript COMPASS/figures/run_figures.R
+#
+# Paths and render settings can be overridden with the environment variables
+# read in the configuration section. COMPASS_FIGURE_GROUPS (comma-separated
+# group names) overrides the toggles, e.g. for cluster jobs:
+#
+#   COMPASS_FIGURE_GROUPS=transfer_survival,transfer_checklists Rscript COMPASS/figures/run_figures.R
+
+# ---- Figure groups ----------------------------------------------------------
+# Each group maps to one export folder under <COMPASS_FIG_ROOT>/ADT/.
+FIGURES <- c(
+  cohort                  = TRUE,  # 01_cohort: Fig 1 (consort, KM, spans, DFCI data, site counts)
+  llm                     = TRUE,  # 02_llm: Fig 2 LLM subtype validation, day-0 cohort
+  cohort_sensitivity      = TRUE,  # 03_univariate/cohort_sensitivity: Fig 3 supplement, metastatic labels
+  federated_univariable   = TRUE,  # 03_univariate/federated: federated Fig 3, forests, KMs, trajectories
+  federated_multivariable = TRUE,  # 04_multivariate/federated: federated Fig 4, performance, checklist cards
+  transfer_survival       = TRUE,  # 05_transfer_survival: federated Fig 5 (no-DFCI transfer)
+  transfer_checklists     = TRUE)  # 06_transfer_checklists: federated Fig 6 (transfer checklists)
+
+# ---- Configuration ----------------------------------------------------------
+options(readr.num_threads = 1L, readr.read_lazy = FALSE)
+
+script_dir <- local({
+  frames <- Filter(function(path) is.character(path) && length(path) == 1L && nzchar(path),
+    lapply(sys.frames(), function(frame) frame$ofile))
+  path <- if (length(frames)) tail(frames, 1L)[[1L]] else
+    sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)[1L])
+  if (is.na(path)) file.path(Sys.getenv("CAIA_PROJECT_ROOT", "/data/gusev/USERS/jpconnor/code/CAIA"),
+    "COMPASS", "figures") else dirname(normalizePath(path, mustWork = TRUE))
+})
+pipeline_path <- normalizePath(file.path(script_dir, "COMPASS_generate_figures_pipeline.R"), mustWork = TRUE)
+source(pipeline_path)
+source(file.path(script_dir, "figure_workflow.R"))
+source(file.path(script_dir, "figure_supplements.R"))
+source(file.path(script_dir, "checklist_supplement.R"))
+
+env_flag <- function(name, default = FALSE) {
+  value <- tolower(Sys.getenv(name, if (default) "true" else "false"))
+  if (!value %in% c("true", "false", "1", "0", "yes", "no")) stop(name, " must be true or false")
+  value %in% c("true", "1", "yes")
+}
+env_workers <- function(name, default) {
+  value <- suppressWarnings(as.integer(Sys.getenv(name, as.character(default))))
+  if (is.na(value) || value < 1L) stop(name, " must be a positive integer")
+  value
+}
+
+NEPC_PROJ_PATH <- Sys.getenv("COMPASS_DATA_ROOT", "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS")
+FIG_ROOT <- Sys.getenv("COMPASS_FIG_ROOT", "/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS")
+FIGURE_DATA_ROOT <- Sys.getenv("COMPASS_FIGURE_DATA_ROOT", file.path(NEPC_PROJ_PATH, "figure_data"))
+FIGURE_STAGE <- match.arg(Sys.getenv("COMPASS_FIGURE_STAGE", "all"), c("all", "prepare", "render"))
+
+# Cohorts compared in the Figure 3 cohort-sensitivity forest. Must match the 05 notebook.
+ADT_COHORT_OPTIONS <- c("adt", "adt_noprecastrate", "adt_metastatic_adt",
+  "adt_metastatic_adt_noprecastrate", "adt_metastatic_llm", "adt_metastatic_llm_noprecastrate")
+COHORT_FOREST_CONFIG <- list(script = file.path(script_dir, "figure_supplements.R"),
+                             cohorts = ADT_COHORT_OPTIONS, landmark = 180L)
+METASTATIC_SUPPLEMENT <- list(
+  prepare_script = file.path(script_dir, "figure_supplements.R"),
+  r_script = file.path(script_dir, "figure_supplements.R"),
+  intent = file.path(NEPC_PROJ_PATH, "mrn_lists", "adt_intent_labels_model_cohort.csv"),
+  stage = Sys.getenv("COMPASS_REGEX_STAGE_PATH", file.path(
+    Sys.getenv("PROFILE_DATA_PATH", "/data/gusev/USERS/jpconnor/data/PROFILE_DATA"),
+    "CANCER_ANNOTATIONS", "CANCER_STAGE_NOTE_LEVEL.parquet")),
+  llm = Sys.getenv("LLM_MET_LABELS_PATH", "/data/gusev/USERS/jpconnor/data/LLM_annotations/LLM_met_diagnosis/met_dx_labels.parquet"),
+  icd = file.path(NEPC_PROJ_PATH, "prostate_icd_data.csv"))
+RHINO_ROOT <- Sys.getenv("COMPASS_RHINO_ROOT", file.path(NEPC_PROJ_PATH, "rhino_data_v2"))
+FEDERATED_SUPPLEMENT <- list(
+  results = Sys.getenv("COMPASS_FEDERATED_RESULTS", file.path(RHINO_ROOT, "cox_federated_univariate_adt.csv")),
+  transfer_no_dfci = Sys.getenv("COMPASS_FEDERATED_TRANSFER_NO_DFCI",
+    file.path(RHINO_ROOT, "federated_transfer_adt_no_DFCI")),
+  figure_data = Sys.getenv("COMPASS_FEDERATED_FIGURE_DATA", file.path(RHINO_ROOT, "figure_data")))
+
+RENDER_PROFILE <- match.arg(tolower(Sys.getenv("COMPASS_RENDER_PROFILE", "fast")), c("fast", "publication"))
+RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 200
+RENDER_OVERWRITE <- env_flag("COMPASS_RENDER_OVERWRITE")
+PREPARE_OVERWRITE <- env_flag("COMPASS_PREPARE_OVERWRITE")
+RENDER_WORKERS <- env_workers("COMPASS_RENDER_WORKERS", 2L)
+PREPARE_WORKERS <- env_workers("COMPASS_PREPARE_WORKERS", 1L)
+
+# ---- Run --------------------------------------------------------------------
+stopifnot(setequal(names(FIGURES), names(FIGURE_GROUPS)))
+env_groups <- trimws(strsplit(Sys.getenv("COMPASS_FIGURE_GROUPS", ""), ",", fixed = TRUE)[[1]])
+env_groups <- env_groups[nzchar(env_groups)]
+if (length(env_groups)) {
+  unknown <- setdiff(env_groups, names(FIGURES))
+  if (length(unknown)) stop("Unknown COMPASS_FIGURE_GROUPS: ", paste(unknown, collapse = ", "))
+  FIGURES[] <- names(FIGURES) %in% env_groups
+}
+groups <- names(FIGURES)[FIGURES]
+if (!length(groups)) stop("Enable at least one figure group in FIGURES.")
+# Groups drawn only from federated exports skip the DFCI patient-level checks.
+federated_only <- all(vapply(FIGURE_GROUPS[groups], function(g) identical(g$jobs, "federated"), logical(1)))
+
+figure_config <- list(
+  data_root = NEPC_PROJ_PATH, cache_root = FIGURE_DATA_ROOT, fig_root = FIG_ROOT,
+  cohorts = "adt", endpoints = "platinum", scope = if (federated_only) "federated" else "all",
+  classifier_path = DEFAULT_LLM_ANNOTATIONS_PATH,
+  forest_cohorts = COHORT_FOREST_CONFIG$cohorts, forest_landmark = COHORT_FOREST_CONFIG$landmark,
+  metastatic = TRUE,
+  metastatic_sources = METASTATIC_SUPPLEMENT[c("intent", "stage", "llm", "icd")],
+  federated = TRUE,
+  federated_path = FEDERATED_SUPPLEMENT$results,
+  federated_transfer_no_dfci_path = FEDERATED_SUPPLEMENT$transfer_no_dfci,
+  federated_figure_data_path = FEDERATED_SUPPLEMENT$figure_data)
+
+message("Figure groups: ", paste(groups, collapse = ", "))
+figure_run <- run_cached_figure_workflow(
+  figure_config, pipeline_path, FIGURE_STAGE,
+  prepare_workers = PREPARE_WORKERS, render_workers = RENDER_WORKERS,
+  dpi = RENDER_DPI, pdf = FALSE,
+  prepare_overwrite = PREPARE_OVERWRITE, render_overwrite = RENDER_OVERWRITE,
+  metastatic_config = METASTATIC_SUPPLEMENT,
+  forest_config = COHORT_FOREST_CONFIG,
+  federated_config = FEDERATED_SUPPLEMENT,
+  groups = groups)

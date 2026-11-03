@@ -16,8 +16,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from COMPASS.survival_analysis.pipeline import compass_pipeline as cp
-from COMPASS.survival_analysis.pipeline import cox_aggregated as ca
+from COMPASS.pipeline import compass_pipeline as cp
+from COMPASS.pipeline import cox_aggregated as ca
 from survival_common.cox_engine import adjust_only_columns, predictive_columns
 
 FEATURES = ["LAB_A__mean", "LAB_A__n_observations"]
@@ -162,7 +162,7 @@ def test_xgboost_drop_uses_offset_and_predictive_trees(frames):
 # -------------------------------------------------------------- checklists
 
 def _checklist_config(**kwargs):
-    from COMPASS.survival_analysis.predictive_checklists.config import RunConfig
+    from COMPASS.multivariable_models.predictive_checklists.config import RunConfig
 
     values = dict(landmarks=(0,), horizons=(365,), max_items=(2,), n_folds=2,
                   quantiles=(.25, .5, .75), min_events=2, min_controls=2,
@@ -174,8 +174,8 @@ def _checklist_config(**kwargs):
 
 @pytest.fixture(scope="module")
 def checklist_train(tmp_path_factory):
-    from COMPASS.survival_analysis.predictive_checklists.data import load_landmark
-    from COMPASS.survival_analysis.predictive_checklists.demo import build_demo_inputs
+    from COMPASS.multivariable_models.predictive_checklists.data import load_landmark
+    from COMPASS.multivariable_models.predictive_checklists.demo import build_demo_inputs
 
     inputs = build_demo_inputs(tmp_path_factory.mktemp("checklist") / "inputs", landmarks=(0,), n=160)
     data = load_landmark(inputs / "prediction_inputs_adt", "platinum", 0)
@@ -183,7 +183,7 @@ def checklist_train(tmp_path_factory):
 
 
 def test_checklist_drop_excludes_adjuster_items(checklist_train):
-    from COMPASS.survival_analysis.predictive_checklists.features import FeatureBinarizer
+    from COMPASS.multivariable_models.predictive_checklists.features import FeatureBinarizer
 
     def items(exclude):
         fitted = FeatureBinarizer(exclude_adjusters=exclude).fit(checklist_train).items
@@ -200,7 +200,7 @@ def test_checklist_drop_excludes_adjuster_items(checklist_train):
 
 
 def test_checklist_calibrator_records_gamma_and_ignores_z():
-    from COMPASS.survival_analysis.predictive_checklists.evaluation import fit_calibrator
+    from COMPASS.multivariable_models.predictive_checklists.evaluation import fit_calibrator
 
     rng = np.random.default_rng(1)
     n = 400
@@ -222,10 +222,10 @@ def test_checklist_calibrator_records_gamma_and_ignores_z():
 
 
 def test_checklist_drop_bundle_round_trips(tmp_path):
-    from COMPASS.survival_analysis.predictive_checklists.data import load_landmark
-    from COMPASS.survival_analysis.predictive_checklists.demo import build_demo_inputs
-    from COMPASS.survival_analysis.predictive_checklists.inference import predict_bundle
-    from COMPASS.survival_analysis.predictive_checklists.runner import run
+    from COMPASS.multivariable_models.predictive_checklists.data import load_landmark
+    from COMPASS.multivariable_models.predictive_checklists.demo import build_demo_inputs
+    from COMPASS.multivariable_models.predictive_checklists.inference import predict_bundle
+    from COMPASS.multivariable_models.predictive_checklists.runner import run
 
     inputs = build_demo_inputs(tmp_path / "inputs", landmarks=(0,), n=160)
     dirs = {"platinum": inputs / "prediction_inputs_adt"}

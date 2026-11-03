@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from COMPASS.survival_analysis.pipeline import compass_pipeline as cp
+from COMPASS.pipeline import compass_pipeline as cp
 
 
 def test_cohort_endpoint_runs_cross_every_cohort(monkeypatch, tmp_path):
