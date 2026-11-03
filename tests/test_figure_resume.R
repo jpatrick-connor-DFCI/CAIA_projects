@@ -111,7 +111,7 @@ local({
   paths <- vapply(stems, env$output_dir_for_stem, character(1))
   stopifnot(!anyDuplicated(paths), all(grepl("/metastatic_labels/", paths)),
     setequal(stems, paste0("adt_labels_", c("llm_vs_regex_max_any",
-      "adt_vs_regex_max_any", "adt_vs_llm"))))
+      "adt_vs_llm"))))
   # The retained panels still route correctly when re-enabled; PSA and
   # testosterone share the group, so their lab tokens must survive in the name.
   old <- Sys.getenv("COMPASS_METASTATIC_EXTRA_PANELS", unset = NA_character_)

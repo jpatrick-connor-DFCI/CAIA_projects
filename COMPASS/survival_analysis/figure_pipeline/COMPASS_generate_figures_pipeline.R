@@ -82,6 +82,7 @@ figure_extreme_quintiles <- function(values, fraction = 0.2) {
 }
 
 figure_extreme_labels <- function(fraction) {
+  if (isTRUE(all.equal(fraction, 1 / 3))) return(c("Bottom tertile", "Top tertile"))
   pct <- round(100 * fraction)
   c(sprintf("Bottom %d%%", pct), sprintf("Top %d%%", pct))
 }

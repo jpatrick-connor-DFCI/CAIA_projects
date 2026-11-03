@@ -146,40 +146,6 @@ overview_cohort_labels <- function(cohorts) {
   sub("_noprecastrate$", " +noprecastrate", labels)
 }
 
-# Event-free survival for every ADT cohort definition, one panel per endpoint.
-# The cohorts are nested, so curves are descriptive and no log-rank is drawn.
-plot_cohort_km_cascade <- function(d, cohorts, landmark = 180L) {
-  labels <- setNames(overview_cohort_labels(cohorts), cohorts)
-  panel <- function(endpoint) {
-    z <- d[d$endpoint == endpoint & d$cohort %in% cohorts, , drop = FALSE]
-    if (!nrow(z)) return(NULL)
-    present <- cohorts[cohorts %in% z$cohort]
-    curves <- bind_rows(lapply(present, function(cohort) {
-      fit <- survival::survfit(survival::Surv(time, event) ~ 1, data = z[z$cohort == cohort, ])
-      tibble(stratum = labels[[cohort]], time = c(0, fit$time), survival = c(1, fit$surv),
-             lower = c(1, fit$lower), upper = c(1, fit$upper))
-    }))
-    counts <- z %>% group_by(cohort) %>% summarise(n = n(), events = sum(event), .groups = "drop") %>%
-      mutate(stratum = unname(labels[cohort]))
-    plot_km_curves(curves, counts, NA_real_, sprintf("%s-free survival", toupper(endpoint)),
-                   "ADT start", unname(labels[present]), ci = FALSE,
-                   ylab = "Event-free probability", legend_ncol = 2) +
-      labs(subtitle = sprintf("Landmark +%dd; nested cohorts, no log-rank test", landmark))
-  }
-  plots <- Filter(Negate(is.null), lapply(c("platinum", "nepc"), panel))
-  if (!length(plots)) return(NULL)
-  if (length(plots) == 1L) return(plots[[1]])
-  overview_combine(plots[[1]], plots[[2]],
-    sprintf("Event-free survival down the cohort cascade | landmark +%dd", landmark),
-    "Cohorts overlap (metastatic and +noprecastrate are subsets of all); curves are descriptive.")
-}
-
-# Per-cohort counts: the publishable companion of the patient-level KM table.
-cohort_km_counts <- function(d) {
-  d %>% group_by(cohort, endpoint) %>%
-    summarise(n_patients = n(), n_events = sum(event), .groups = "drop")
-}
-
 plot_cohort_event_overview <- function(d, cohorts, landmark = 180L) {
   d <- d %>% mutate(cohort = as.character(cohort), endpoint = as.character(endpoint))
   good <- d %>% filter(status == "ok", n_patients > 0)
@@ -231,69 +197,17 @@ plot_cohort_event_overview <- function(d, cohorts, landmark = 180L) {
             sum(good$thin), nrow(good), unavailable, landmark))
 }
 
-plot_stage1_label_overview <- function(d) {
-  if (!nrow(d)) return(NULL)
-  adt_order <- c("Metastatic", "Local", if (any(d$adt_label == "Unlabelled")) "Unlabelled")
-  llm_order <- c("Metastatic", "Local", "Unlabelled")
-  d <- d %>% complete(adt_label = adt_order, llm_label = llm_order, fill = list(n = 0L)) %>%
-    mutate(adt_label = factor(adt_label, levels = adt_order),
-           llm_label = factor(llm_label, levels = llm_order)) %>%
-    arrange(adt_label, llm_label) %>% group_by(adt_label) %>%
-    mutate(right = cumsum(n), left = right - n) %>% ungroup() %>%
-    mutate(y = length(adt_order) + 1 - as.integer(adt_label), midpoint = (left+right)/2,
-           small = n <= .07 * max(right), label_y = y + .40 + .08*as.integer(llm_label))
-  joint <- d %>% filter(adt_label != "Unlabelled", llm_label != "Unlabelled")
-  joint <- joint %>% mutate(cell = case_when(
-    adt_label == "Metastatic" & llm_label == "Metastatic" ~ "both metastatic",
-    adt_label == "Metastatic" ~ "ADT only", llm_label == "Metastatic" ~ "LLM only",
-    TRUE ~ "both non-metastatic"),
-    cell = factor(cell, levels = c("both metastatic", "ADT only", "LLM only", "both non-metastatic")),
-    agreement = if_else(as.character(adt_label) == as.character(llm_label), "labels agree", "labels disagree"))
-  palette <- c(Metastatic = "#1f5fa8", Local = "#7aa6d4", Unlabelled = "#c6c5c0")
-  a <- ggplot(d, aes(fill = llm_label)) +
-    geom_rect(aes(xmin = left, xmax = right, ymin = y-.30, ymax = y+.30), color = "white", linewidth = .8) +
-    geom_text(data = filter(d, n > 0, !small), aes(x = midpoint, y = y, label = scales::comma(n)),
-              color = "white", size = 3.5) +
-    geom_segment(data = filter(d, n > 0, small), aes(x = midpoint, xend = midpoint, y = y+.3, yend = label_y-.05),
-                 color = "grey55", linewidth = .3) +
-    geom_text(data = filter(d, n > 0, small), aes(x = midpoint, y = label_y, label = scales::comma(n)), size = 3) +
-    scale_fill_manual(values = palette, breaks = llm_order,
-      labels = c("LLM: metastatic", "LLM: non-metastatic", "(no LLM label)"), drop = FALSE) +
-    scale_y_continuous(breaks = rev(seq_along(adt_order)),
-      labels = c("ADT: metastatic", "ADT: localized", if (length(adt_order) == 3) "(no ADT label)"),
-      limits = c(.4, length(adt_order)+.8)) +
-    scale_x_continuous(labels = scales::comma, expand = expansion(mult = c(0,.06))) +
-    labs(x = "Patients", y = NULL, title = "(a) label overlap") + overview_theme()
-  b <- ggplot(joint, aes(cell, n, fill = agreement)) + geom_col(width = .68) +
-    geom_text(aes(label = scales::comma(n)), vjust = -.4, size = 3.5) +
-    scale_fill_manual(values = c("labels agree" = "#52514e", "labels disagree" = "#eb6834")) +
-    scale_x_discrete(labels = c("both\nmetastatic", "ADT\nonly", "LLM\nonly", "both\nnon-metastatic")) +
-    scale_y_continuous(expand = expansion(mult = c(0,.16)), labels = scales::comma) +
-    labs(x = NULL, y = "Patients", title = "(b) agreement cell size") + overview_theme()
-  n <- sum(d$n); paired <- sum(joint$n)
-  overview_combine(a, b, "ADT-intent vs LLM metastatic labels",
-    sprintf("%s Stage 1 patients; %s (%s) jointly labelled",
-      scales::comma(n), scales::comma(paired), if (n) scales::percent(paired/n, accuracy = 1) else "NA"))
-}
-
 render_cohort_overview <- function(manifest, config, forest_config=NULL) {
   prepared <- manifest$cohort_overview
   if (is.null(prepared)) stop("Run 05_prep_figure_data.ipynb to prepare the new cohort overview tables.")
   incidence <- figure_read_parquet(file.path(prepared$directory, "incidence.parquet"))
-  overlap <- figure_read_parquet(file.path(prepared$directory, "label_overlap.parquet"))
-  km_path <- file.path(prepared$directory, "cohort_km.parquet")
-  if (!file.exists(km_path)) stop("Run 05_prep_figure_data.ipynb to prepare the cohort KM table.")
-  km <- figure_read_parquet(km_path)
   landmark <- config$forest_landmark
-  plots <- list(event_incidence = plot_cohort_event_overview(incidence, config$forest_cohorts, landmark),
-                metastatic_label_overlap = plot_stage1_label_overview(overlap),
-                cohort_km_cascade = plot_cohort_km_cascade(km, config$forest_cohorts, landmark))
-  tables <- list(event_incidence = incidence, metastatic_label_overlap = overlap,
-                 cohort_km_cascade = cohort_km_counts(km))
+  plots <- list(event_incidence = plot_cohort_event_overview(incidence, config$forest_cohorts, landmark))
+  tables <- list(event_incidence = incidence)
   base <- file.path(config$fig_root, "ADT", "by_figure", "cohort_comparison")
   for (name in names(plots)) {
     if (is.null(plots[[name]])) { message("Cohort overview skipped: ", name, " (no available inputs)"); next }
-    leaf <- if (name == "metastatic_label_overlap") name else paste0(name, "_landmark", landmark)
+    leaf <- paste0(name, "_landmark", landmark)
     destination <- file.path(base, leaf, "platinum__all__incl")
     getOption("compass.figure_capture")(plots[[name]], destination, 16, 7.5, leaf)
     if(exists("figure_public_path",mode="function")) destination <- figure_public_path(destination)
@@ -481,7 +395,6 @@ prepare_metastatic_figure_labels <- function(config, analysis_anchors = NULL) {
 # labels against the regex maximum stage across the record, plus ADT vs LLM.
 metastatic_label_pairs <- function() {
   list(llm_vs_regex_max_any = c("LLM_LABEL", "REGEX_MAX_ANY"),
-       adt_vs_regex_max_any = c("ADT_LABEL", "REGEX_MAX_ANY"),
        adt_vs_llm = c("ADT_LABEL", "LLM_LABEL"))
 }
 

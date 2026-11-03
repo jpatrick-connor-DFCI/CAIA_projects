@@ -72,35 +72,28 @@ stopifnot(landmark_header$theme$plot.subtitle$face=="bold",
 # Captions mirror the paired Markdown/text layout used by the clinical text
 # embedding project and retain figure-specific audit language.
 captions <- manuscript_captions()
-federated_keys <- c("federated_03_univariable","federated_04_multivariable","federated_04_multivariable__full_features","federated_05_transfer_no_dfci",
+federated_keys <- c("federated_03_univariable","federated_04_multivariable","federated_04_multivariable__full_features",
   "federated_05_transfer_no_dfci__no_d",
-  "federated_05_transfer_no_dfci__mean_landmarks_set1","federated_05_transfer_no_dfci__mean_landmarks_set2",
-  "federated_06_checklist_no_dfci","federated_s1_feature_set")
+  "federated_06_checklist_no_dfci",
+  paste0("federated_06_checklist_no_dfci__lm",rep(c(0,90,180),each=2),"_h",c(365,1825)))
 figure2_keys <- paste0("02_llm_nepc_avpc__",c("icd","adt","lm0"))
 local_keys <- c("01_cohort_overview",figure2_keys,"03_dfci_univariable","04_multivariable_labs",
   "03_cohort_sensitivity_supplement","07_federated_incidence_associations","08_federated_multivariable")
 # Figure 5 (internal Gleason sensitivity) was removed; Gleason is compared in transfer.
-stopifnot(length(captions)==18,identical(names(captions),c(local_keys,federated_keys)),
+stopifnot(length(captions)==20,identical(names(captions),c(local_keys,federated_keys)),
   all(startsWith(unname(captions[local_keys]),paste0("Figure ",c(1,2,2,2,3,4,3,7,8),". "))),
-  all(grepl("^Federated Figure (S1|[3-6])[. ]",unname(captions[federated_keys]))),
+  all(grepl("^Federated Figure ([3-6])[. ]",unname(captions[federated_keys[1:5]]))),
   setequal(unique(manuscript_base_key(names(captions))),names(MANUSCRIPT_SECTIONS)),
   grepl("ICD-10 prostate cancer cohort",captions[["02_llm_nepc_avpc__icd"]],fixed=TRUE),
   grepl("any dated platinum",captions[["02_llm_nepc_avpc__lm0"]],fixed=TRUE),
   grepl("(g) Observed platinum events",captions[["01_cohort_overview"]],fixed=TRUE),
   grepl("bottom and top 10%",captions[["federated_03_univariable"]],fixed=TRUE),
-  grepl("(b-d) Kaplan-Meier",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
-  grepl("(d-f) Kaplan-Meier",captions[["federated_05_transfer_no_dfci__no_d"]],fixed=TRUE),
-  grepl("(e) Probability of platinum treatment within 5 years",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
-  !grepl("Elastic-Net Cox and XGBoost survival models",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
+  !grepl("Kaplan-Meier",captions[["federated_05_transfer_no_dfci__no_d"]],fixed=TRUE),
   !grepl("Gleason score (d)",captions[["federated_05_transfer_no_dfci__no_d"]],fixed=TRUE),
-  !grepl("hazard ratio",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
   grepl("22,138 patients (664 platinum events)",captions[["federated_03_univariable"]],fixed=TRUE),
-  grepl("without Dana-Farber",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
   grepl("Gleason score and age (b)",captions[["federated_05_transfer_no_dfci__no_d"]],fixed=TRUE),
   grepl("(c-e) Kaplan-Meier",captions[["federated_06_checklist_no_dfci"]],fixed=TRUE),
   grepl("same sequenced patients with a Gleason score",captions[["federated_06_checklist_no_dfci"]],fixed=TRUE),
-  grepl("(f-h) Kaplan-Meier",captions[["federated_s1_feature_set"]],fixed=TRUE),
-  grepl("AUC(t)",captions[["federated_05_transfer_no_dfci"]],fixed=TRUE),
   !any(grepl("C-index",unname(captions),fixed=TRUE)),
   grepl("180-day landmark",captions[["03_dfci_univariable"]],fixed=TRUE),
   grepl("≤0.2453",captions[["03_dfci_univariable"]],fixed=TRUE),
@@ -111,12 +104,12 @@ stopifnot(length(captions)==18,identical(names(captions),c(local_keys,federated_
   grepl("9,939/308",captions[["07_federated_incidence_associations"]],fixed=TRUE))
 caption_root <- tempfile("manuscript-caption-test-")
 caption_paths <- manuscript_write_captions(caption_root)
-stopifnot(length(caption_paths)==36,all(file.exists(caption_paths)))
+stopifnot(length(caption_paths)==26,all(file.exists(caption_paths)))
 # The federated set is numbered on its own and never overwrites local figure3-5;
 # each caption sits in the manuscript folder of its figure's section.
 caption_md <- caption_paths[endsWith(caption_paths,".md")]
 stopifnot(setequal(basename(caption_md),paste0(c(paste0("figure",c(1,3,4,7,8)),"figure3_supplement",paste0("figure2_",c("icd","adt","lm0")),
-  paste0("federated_figure",3:6),"federated_figure_s1","federated_figure4_full_features","federated_figure5_no_d","federated_figure5_top_bottom_20","federated_figure5_top_bottom_20_all_endpoints","federated_figure5_mean_landmarks_set1","federated_figure5_mean_landmarks_set2"),".md")))
+  paste0("federated_figure",c(3,4,6)),"federated_figure4_full_features","federated_figure5_no_d","federated_figure5_top_bottom_20_all_endpoints"),".md")))
 for(path in caption_md) stopifnot(identical(readLines(path,warn=FALSE),
   readLines(sub("[.]md$",".txt",path),warn=FALSE)))
 caption_file <- function(section,name) file.path(caption_root,section,
@@ -126,10 +119,9 @@ stopifnot(startsWith(readLines(caption_file("03_univariate/internal","figure3"),
   file.exists(caption_file("01_cohort","figure1")),!file.exists(caption_file("02_llm","figure2")),
   all(file.exists(caption_file("02_llm",paste0("figure2_",c("icd","adt","lm0"))))),
   file.exists(caption_file("05_transfer_survival","federated_figure5_no_d")),
-  startsWith(readLines(caption_file("05_transfer_survival","federated_figure_s1"),n=1,warn=FALSE),"Federated Figure S1. "),
   startsWith(readLines(caption_file("06_transfer_checklists","federated_figure6"),n=1,warn=FALSE),"Federated Figure 6. "),
   !file.exists(caption_file("04_multivariate/internal","figure5")),file.exists(caption_file("04_multivariate/internal","figure4")),file.exists(caption_file("03_univariate/cohort_sensitivity","figure3_supplement")),
-  file.exists(caption_file("04_multivariate/federated","figure8")),file.exists(caption_file("05_transfer_survival","federated_figure5")),
+  file.exists(caption_file("04_multivariate/federated","figure8")),
   setequal(names(MANUSCRIPT_SECTIONS),manuscript_base_key(names(captions))))
 unlink(caption_root,recursive=TRUE)
 
@@ -570,6 +562,52 @@ stopifnot(fig6$spec$key=="federated_06_checklist_no_dfci",inherits(fig6$plot,"gt
   !grepl("Checklist positive 120, 0.60 (0.52-0.68),",fig6$legend,fixed=TRUE),
   grepl("c: Kaplan-Meier platinum-free survival",fig6$legend,fixed=TRUE),
   grepl("e: Kaplan-Meier NEPC-free survival",fig6$legend,fixed=TRUE))
+# Checklist transfer supplement: one figure per landmark x horizon, cut from the checklist_grid/ tables.
+grid_dir <- file.path(checklist_dir,FEDERATED_CHECKLIST_GRID_DIR); dir.create(grid_dir)
+readr::write_csv(bind_rows(checklist_patients,mutate(checklist_patients,landmark_days=90,flag=as.integer(risk_score>=3))),
+  file.path(grid_dir,FEDERATED_CHECKLIST_PATIENTS_FILE))
+grid_comparison <- readr::read_csv(file.path(checklist_dir,FEDERATED_CHECKLIST_COMPARISON_FILE),show_col_types=FALSE)
+readr::write_csv(bind_rows(grid_comparison,mutate(grid_comparison,landmark_days=90)),
+  file.path(grid_dir,FEDERATED_CHECKLIST_COMPARISON_FILE))
+grid_root <- tempfile("transfer-checklist-grid-")
+suppressWarnings(write_federated_checklist_grid_tables(grid_root,"unused",checklist_dir))
+grid_cell <- federated_checklist_cell(90L,365L)
+grid_tables <- lapply(setNames(file.path(grid_root,FIGURE_SECTIONS[["transfer_checklists"]],"data",
+  paste0(FEDERATED_CHECKLIST_TABLES,federated_checklist_cell_suffix(grid_cell),"__platinum.csv")),
+  names(FEDERATED_CHECKLIST_TABLES)),readr::read_csv,show_col_types=FALSE)
+grid_figure <- manuscript_federated_checklist(grid_tables,federated_checklist_grid_key(grid_cell),grid_cell)
+stopifnot(length(list.files(file.path(grid_root,FIGURE_SECTIONS[["transfer_checklists"]],"data"),
+    pattern="_lm[0-9]+_h[0-9]+__platinum[.]csv$"))==length(FEDERATED_CHECKLIST_TABLES)*2L,
+  nrow(FEDERATED_CHECKLIST_GRID)==6L,
+  grid_figure$spec$key=="federated_06_checklist_no_dfci__lm90_h365",
+  all(grid_tables$summary$landmark_days==90),
+  any(grepl("Flag when at least 3 of 5 items",federated_checklist_card_lines(grid_tables$items,grid_tables$metrics,grid_cell)$text,fixed=TRUE)),
+  grepl("from the 90-day ADT landmark",grid_figure$legend,fixed=TRUE),
+  identical(manuscript_checklist_caption(),manuscript_checklist_caption_text()),
+  grepl("5-year platinum checklist from 0 days after ADT initiation",
+    captions[["federated_06_checklist_no_dfci__lm0_h1825"]],fixed=TRUE),
+  grepl("within 5 years",captions[["federated_06_checklist_no_dfci__lm0_h1825"]],fixed=TRUE),
+  !grepl("180|1-year|1 year",captions[["federated_06_checklist_no_dfci__lm0_h1825"]]),
+  identical(manuscript_folder("root","federated_06_checklist_no_dfci__lm0_h365"),
+    manuscript_folder("root","federated_06_checklist_no_dfci")))
+# manuscript_renders/: main, supplement, and one checklist figure per landmark x horizon.
+renders_plan <- manuscript_renders_plan()
+stopifnot(nrow(renders_plan)==5L+1L+2L+6L,!anyDuplicated(renders_plan$target),
+  setequal(dirname(renders_plan$target),c("main","supplement",file.path("supplement","federated_checklist_transfer"))),
+  sum(dirname(renders_plan$target)=="main")==5L,
+  sum(dirname(renders_plan$target)==file.path("supplement","federated_checklist_transfer"))==6L,
+  "main/federated_05_transfer_no_dfci__top_bottom_20_all_endpoints.pdf" %in% renders_plan$target,
+  "supplement/federated_checklist_transfer/federated_06_checklist_no_dfci__lm0_h1825.pdf" %in% renders_plan$target,
+  all(renders_plan$source %in% readLines("COMPASS/figures/retained_exports.txt")))
+renders_root <- tempfile("renders-")
+for(source in renders_plan$source[-1L]) {
+  dir.create(dirname(file.path(renders_root,"ADT",source)),recursive=TRUE,showWarnings=FALSE)
+  writeLines(source,file.path(renders_root,"ADT",source))
+}
+suppressMessages(figure_publish_manuscript_renders(renders_root))
+published <- file.path(renders_root,"ADT",MANUSCRIPT_RENDERS_DIR,renders_plan$target)
+stopifnot(identical(file.exists(published),c(FALSE,rep(TRUE,nrow(renders_plan)-1L))),
+  identical(readLines(published[2L]),renders_plan$source[2L]))
 # The drawn items must be the rule that assigned the patient groups.
 readr::write_csv(mutate(checklist_patients,flag=1L-flag),file.path(checklist_dir,FEDERATED_CHECKLIST_PATIENTS_FILE))
 flag_error <- tryCatch(write_federated_checklist_tables(checklist_root,"unused",checklist_dir),error=conditionMessage)
@@ -587,65 +625,6 @@ fs_put <- function(d,...) {
 fs_survival <- function(model,auc,n_test=1000) tidyr::expand_grid(landmark_days=c(0,90,180),config=c("both","baseline")) %>%
   mutate(analysis_label="adt",endpoint="platinum",model=model,cohort="all",test_mean_auc_t=auc,test_c_index=auc,
     n_test=n_test,n_events_test=40)
-fs_items <- tidyr::expand_grid(landmark_days=c(0,90,180),horizon_days=c(365,1825),position=1:5) %>%
-  mutate(config="both",feature="age_at_anchor",op="<=",threshold_value=60+position,M=2L,N=5L)
-fs_metrics <- tidyr::expand_grid(landmark_days=c(0,90,180),horizon_days=c(365,1825),config=c("both","baseline")) %>%
-  mutate(dataset="test",status="ok",n=1000,n_cases=40,auc=.7,auc_lower=.65,auc_upper=.75,brier=.07,
-    sensitivity=.6,specificity=.7,ppv=.15,npv=.95)
-fs_cox <- FEDERATED_MULTIVARIABLE$elastic_net$files[["metrics"]]
-fs_xgb <- FEDERATED_MULTIVARIABLE$xgboost$files[["metrics"]]
-fs_put(fs_survival("elastic_net_cox",.8),"federated_cox_multivariate",fs_cox)
-fs_put(fs_survival("xgboost_cox",.82),"federated_xgboost",fs_xgb)
-fs_put(fs_survival("elastic_net_cox",.78),"feature_set_models","w_DFCI","federated_cox",fs_cox)
-for(directory in list("federated_checklists_w_DFCI","federated_checklists_no_DFCI",
-    c("feature_set_models","w_DFCI","predictive_checklists"),c("feature_set_models","no_DFCI","predictive_checklists"))) {
-  do.call(fs_put,c(list(fs_items),as.list(directory),FEDERATED_CHECKLIST_FILES[["items"]]))
-  do.call(fs_put,c(list(fs_metrics),as.list(directory),FEDERATED_CHECKLIST_FILES[["metrics"]]))
-}
-fs_transfer <- tidyr::expand_grid(endpoint=c("PLATINUM","AVPC","NEPC"),landmark_days=c(0,90,180),
-    model_horizon_days=c(365,1825),config=c("both","baseline")) %>%
-  mutate(model_family="predictive_checklist",evaluation_horizon_days=model_horizon_days,mean_auc=.64,
-    mean_auc_lo=.59,mean_auc_hi=.69,n_patients=400,n_events=30)
-fs_dir <- tempfile("feature-set-transfer-")
-for(directory in c("all_models",FEDERATED_FEATURE_SET_TRANSFER_DIR)) {
-  dir.create(file.path(fs_dir,directory),recursive=TRUE)
-  readr::write_csv(fs_transfer,file.path(fs_dir,directory,"transfer_metrics.csv"))
-}
-readr::write_csv(mutate(checklist_patients,bundle="predictive_checklist_feature_set",model_horizon_days=1825),
-  file.path(fs_dir,FEDERATED_FEATURE_SET_TRANSFER_DIR,FEDERATED_CHECKLIST_PATIENTS_FILE))
-fs_figure <- function(out) {
-  write_federated_feature_set_tables(out,fs_fed,fs_dir)
-  paths <- setNames(file.path(out,FIGURE_SECTIONS[["transfer"]],"data",
-    paste0(FEDERATED_FEATURE_SET_TABLES,"__platinum.csv")),names(FEDERATED_FEATURE_SET_TABLES))
-  stopifnot(all(file.exists(paths)),!any(grepl("person_id",unlist(lapply(paths,readLines,n=1L)),fixed=TRUE)))
-  manuscript_federated_feature_set(lapply(paths,readr::read_csv,show_col_types=FALSE))
-}
-fs_last_label <- function(p) p$layers[[length(p$layers)]]$data$label
-# Before 04 has run only the performance table exists, and the figure is skipped.
-fs_early <- tempfile("feature-set-out-")
-stopifnot(is.null(suppressWarnings(write_federated_feature_set_tables(fs_early,fs_fed,tempfile()))),
-  file.exists(file.path(fs_early,FIGURE_SECTIONS[["transfer"]],"data",
-    paste0(FEDERATED_FEATURE_SET_TABLES[["performance"]],"__platinum.csv"))))
-fs_supplement <- fs_figure(tempfile("feature-set-out-"))
-fs_performance <- load_federated_feature_set_performance(fs_fed)
-fs_empty <- plot_federated_feature_set_performance(fs_performance)
-stopifnot(fs_supplement$spec$key=="federated_s1_feature_set",inherits(fs_supplement$plot,"gtable"),
-  length(fs_supplement$spec$titles)==8,
-  identical(fs_supplement$spec$layout[2,],rep(2:4,each=2L)),identical(fs_supplement$spec$layout[3,],rep(5L,6L)),
-  identical(fs_supplement$spec$layout[4,],rep(6:8,each=2L)),
-  length(fs_supplement$spec$row_heights)==4,
-  !any(fs_performance$panel=="xgboost" & fs_performance$model_set=="Feature set"),
-  any(fs_performance$panel=="xgboost" & fs_performance$model_set=="Regular"),
-  identical(fs_last_label(fs_empty),"Feature-set XGBoost\nnot yet available"),
-  grepl("f: Kaplan-Meier platinum-free survival",fs_supplement$legend,fixed=TRUE),
-  grepl("h: Kaplan-Meier NEPC-free survival",fs_supplement$legend,fixed=TRUE))
-# The XGBoost slot fills itself when the file arrives; test sets must match.
-fs_put(fs_survival("xgboost_cox",.81),"feature_set_models","w_DFCI","federated_xgboost",fs_xgb)
-fs_filled <- plot_federated_feature_set_performance(load_federated_feature_set_performance(fs_fed))
-stopifnot(length(fs_filled$layers)==3,length(fs_empty$layers)==4)
-fs_put(fs_survival("xgboost_cox",.81,900),"feature_set_models","w_DFCI","federated_xgboost",fs_xgb)
-fs_warning <- tryCatch(load_federated_feature_set_performance(fs_fed),warning=conditionMessage)
-stopifnot(identical(fs_warning,"Regular and feature-set models have different test sets in: xgboost"))
 # Standalone pages land in 05_transfer_survival/km/ with aggregate (not patient-level) sidecars.
 km_root <- tempfile("transfer-km-out-")
 render_federated_transfer_km(km_root,km_dir,dpi=40,overwrite=TRUE)

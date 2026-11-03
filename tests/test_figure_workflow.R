@@ -213,7 +213,6 @@ local({
                         paste0("federated_volcano_landmark", c(0, 90, 180)),
                         "transfer_discrimination_no_dfci", "transfer_clinical_comparison_no_dfci",
                         "08_federated_multivariable",
-                        "federated_05_transfer_no_dfci",
                         "federated_05_transfer_no_dfci__no_d")))
   coefficient_export <- read_csv(file.path(cfg$fig_root, "ADT", "04_multivariate", "federated", "data",
     "elasticnet_coefficients__platinum.csv"), show_col_types = FALSE)
@@ -292,38 +291,6 @@ local({
     key="federated_04_multivariable")
   stopifnot(main_fig4$spec$key=="federated_04_multivariable",
     !any(grepl("no DFCI",as.character(main_fig4$data$name),fixed=TRUE)))
-  all_models_dir <- file.path(no_dfci_dir,"all_models"); dir.create(all_models_dir)
-  write_csv(expand_grid(endpoint=c("platinum","nepc"),landmark_days=c(0,90,180),
-      model_horizon_days=c(365,1825),config=c("both","baseline")) %>%
-    mutate(bundle="predictive_checklist_federated_model_adt",
-      model_family="predictive_checklist",evaluation_horizon_days=model_horizon_days,
-      mean_auc=if_else(config=="both",.72,.61),mean_auc_lo=mean_auc-.04,
-      mean_auc_hi=mean_auc+.04,brier=.13),
-    file.path(all_models_dir,"transfer_metrics.csv"))
-  all_model_metrics <- read_csv(file.path(all_models_dir,"transfer_metrics.csv"),show_col_types=FALSE)
-  write_csv(bind_rows(all_model_metrics,
-    tibble(bundle=c("cox_bundle","deephit_bundle"),
-      model_family=c("elastic_net_cox","dynamic_deephit"))),
-    file.path(all_models_dir,"transfer_metrics.csv"))
-  auc_grid <- expand_grid(endpoint=c("platinum","nepc"),landmark_days=c(0,90,180),
-      horizon_days=c(365,1825),
-      bundle=c("cox_bundle","deephit_bundle","predictive_checklist_federated_model_adt")) %>%
-    mutate(config="both",auc=.68,n_cases=5,
-      model_horizon_days=if_else(bundle=="predictive_checklist_federated_model_adt",horizon_days,NA_real_),
-      evaluation_horizon_days=if_else(bundle=="cox_bundle",NA_real_,horizon_days),
-      training_arm=if_else(bundle=="deephit_bundle","landmark",NA_character_))
-  write_csv(bind_rows(auc_grid,
-    filter(auc_grid,bundle=="deephit_bundle") %>% mutate(training_arm="dynamic",auc=.72)),
-    file.path(all_models_dir,"transfer_auc_t.csv"))
-  render_federated_checklist_supplement(file.path(cfg$fig_root,"ADT"),all_models_dir,60,TRUE)
-  stopifnot(file.exists(federated_output_path(file.path(cfg$fig_root,"ADT"),
-    "transfer_predictive_checklist_supplement",".pdf")))
-  all_model_plot <- render_federated_all_model_transfer_supplement(
-    file.path(cfg$fig_root,"ADT"),all_models_dir,60,TRUE)
-  stopifnot(all(c("DeepHit landmark","DeepHit dynamic","Predictive checklist") %in%
-    unique(all_model_plot$series)),
-    file.exists(federated_output_path(file.path(cfg$fig_root,"ADT"),
-      "transfer_all_models_supplement",".pdf")))
   # Checklist supplement: cards for a fitted landmark and an unfit one, no workflow cache needed.
   source("COMPASS/survival_analysis/figure_pipeline/checklist_supplement.R")
   checklist_dir <- file.path(root,"checklist_tables"); dir.create(checklist_dir)

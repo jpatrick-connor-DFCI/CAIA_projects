@@ -242,7 +242,8 @@ local({
   stopifnot(identical(federated_multivariable_files(fed,"xgboost","no_dfci")$metrics,v2))
 })
 local({
-  # rhino_data_v2 predictive checklists: federated_predictive_checklists/lm_<days>/{w,no}_DFCI/.
+  # rhino_data_v2 predictive checklists: the regular federated_predictive_checklists/lm_<days>/{w,no}_DFCI/ and
+  # the default feature-set refit, feature_set_models/{w,no}_DFCI/predictive_checklists/ (every landmark in one file).
   root <- tempfile("federated-checklist-",tmpdir="/private/tmp"); dir.create(root)
   on.exit(unlink(root,recursive=TRUE))
   fed <- file.path(root,"cox_federated_univariate_adt.csv")
@@ -269,7 +270,25 @@ local({
     do.call(put,c(list(metrics(lm,if(variant=="w_DFCI") .7 else .6)),paste0("lm_",lm),variant,as.list(sub),
       "predictive_checklist_metrics_adt.csv"))
   }
-  stopifnot(all(lengths(federated_checklist_files(fed))==3L),all(lengths(federated_checklist_files(fed,"no_dfci"))==3L))
+  regular <- function(variant="pooled") federated_regular_checklist_files(fed,variant)
+  put_default <- function(d,file,variant="w_DFCI") {
+    path <- file.path(root,"feature_set_models",variant,"predictive_checklists",file)
+    dir.create(dirname(path),recursive=TRUE,showWarnings=FALSE)
+    write_csv(d,path,na="")
+  }
+  default_items <- function(...) bind_rows(lapply(c(0,90,180),items))
+  default_metrics <- function(auc) bind_rows(lapply(c(0,90,180),metrics,auc=auc))
+  stopifnot(all(lengths(regular())==3L),all(lengths(regular("no_dfci"))==3L),
+    all(lengths(federated_checklist_files(fed))==0L))
+  # The default is the feature-set refit; before it is delivered the checklists are unavailable.
+  stopifnot(is.null(suppressWarnings(load_federated_checklists(fed))))
+  for(variant in c("w_DFCI","no_DFCI")) {
+    put_default(default_items(),"predictive_checklist_checklists_adt.csv",variant)
+    put_default(default_metrics(if(variant=="w_DFCI") .7 else .6),"predictive_checklist_metrics_adt.csv",variant)
+  }
+  stopifnot(all(lengths(federated_checklist_files(fed))==1L),all(lengths(federated_checklist_files(fed,"no_dfci"))==1L),
+    identical(load_federated_checklists(fed)$metrics,
+      load_federated_checklists(fed,"pooled",regular())$metrics))
   loaded <- load_federated_checklists(fed)
   stopifnot(nrow(loaded$metrics)==12L,all(loaded$metrics$dataset=="test"),all(loaded$metrics$n==250),
     all(loaded$metrics$auc[loaded$metrics$config=="both"]==.7),
@@ -287,16 +306,23 @@ local({
   stopifnot(nrow(sidecar)==12L,nrow(read_csv(file.path(out,"data","checklist_supplement_items__platinum.csv"),
     show_col_types=FALSE))==18L)
   # Fewer items than N, a duplicated landmark, out-of-range AUC and a missing export.
-  put(filter(items(90),!(horizon_days==365 & config=="both" & position==2)),
-    "lm_90","w_DFCI","predictive_checklist_checklists_adt.csv")
+  put_default(bind_rows(filter(items(90),!(horizon_days==365 & config=="both" & position==2)),items(0),items(180)),
+    "predictive_checklist_checklists_adt.csv")
   fails(render_federated_checklist_cards(output,fed,60,TRUE),"landmark 90, 1-year lists 1 items but N = 2")
-  put(items(90),"lm_90","w_DFCI","predictive_checklist_checklists_adt.csv")
-  put(metrics(0,.7),"lm_0","w_DFCI","predictive_checklist_metrics_adt.csv")
+  put_default(default_items(),"predictive_checklist_checklists_adt.csv")
+  put_default(bind_rows(default_metrics(.7),metrics(0,.7)),"predictive_checklist_metrics_adt.csv")
   fails(load_federated_checklists(fed),"Duplicate federated checklist")
+  put_default(default_metrics(1.2),"predictive_checklist_metrics_adt.csv")
+  fails(load_federated_checklists(fed),"Invalid federated checklist auc")
+  # The regular package files keep the same checks when loaded explicitly.
+  put(metrics(0,.7),"lm_0","w_DFCI","predictive_checklist_metrics_adt.csv")
+  fails(load_federated_checklists(fed,"pooled",regular()),"Duplicate federated checklist")
   put(metrics(0,1.2),"lm_0","w_DFCI","predictive_checklist_metrics_adt.csv")
   unlink(file.path(root,"federated_predictive_checklists","lm_0","w_DFCI","adt"),recursive=TRUE)
-  fails(load_federated_checklists(fed),"Invalid federated checklist auc")
+  fails(load_federated_checklists(fed,"pooled",regular()),"Invalid federated checklist auc")
   unlink(Sys.glob(file.path(root,"federated_predictive_checklists","lm_*","w_DFCI","predictive_checklist_metrics_adt.csv")))
+  stopifnot(is.null(suppressWarnings(load_federated_checklists(fed,"pooled",regular()))))
+  unlink(file.path(root,"feature_set_models","w_DFCI","predictive_checklists","predictive_checklist_metrics_adt.csv"))
   stopifnot(is.null(suppressWarnings(load_federated_checklists(fed))))
 })
 cat("Federated elastic-net/XGBoost: test-only metrics, isolation, feature parsing, shared styling, audit, missing inputs, rhino_data_v2 layout, predictive checklists and validation passed.\n")

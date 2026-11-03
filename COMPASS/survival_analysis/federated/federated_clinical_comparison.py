@@ -624,6 +624,10 @@ CHECKLIST_FAMILY = "predictive_checklist"
 CHECKLIST_LANDMARK_DAYS = 180
 CHECKLIST_HORIZON_DAYS = 365
 CHECKLIST_RULE = "checklist"
+# Supplement: the same figure at every landmark × horizon, in its own subdirectory.
+CHECKLIST_GRID_DIR = "checklist_grid"
+CHECKLIST_GRID_LANDMARKS = (0, 90, 180)
+CHECKLIST_GRID_HORIZONS = (365, 1825)
 GLEASON_HIGH_MIN = 8
 CHECKLIST_PATIENT_COLUMNS = ["endpoint", "bundle", "landmark_days", "model_horizon_days", ID_COL,
                              "risk_score", "flag", DURATION_COL, EVENT_COL]
@@ -682,6 +686,37 @@ def checklist_rule_comparison(scores, clinical, n_bootstrap=200, seed=0, landmar
                          "delta_auc_vs_checklist": auc[rule] - auc[CHECKLIST_RULE],
                          "delta_auc_lo": delta_lo, "delta_auc_hi": delta_hi})
     return pd.DataFrame(rows, columns=CHECKLIST_COMPARISON_COLUMNS)
+
+
+def checklist_grid(scores, scores_seq, clinical_seq, n_bootstrap=200, seed=0, landmarks=CHECKLIST_GRID_LANDMARKS,
+                   horizons=CHECKLIST_GRID_HORIZONS):
+    """Checklist patients (ADT clock) and rule comparison (sequencing clock) for every landmark × horizon.
+
+    One table each, with the cell in `landmark_days` / `model_horizon_days` (patients) and
+    `landmark_days` / `horizon_days` (comparison). A cell with no checklist scores is skipped.
+    """
+    patients, comparison = [], []
+    for landmark in landmarks:
+        for horizon in horizons:
+            try:
+                cell = (checklist_patients(scores, landmark, horizon),
+                        checklist_rule_comparison(scores_seq, clinical_seq, n_bootstrap, seed, landmark, horizon))
+            except ValueError as error:
+                print(f"checklist grid: skipping landmark {landmark}, horizon {horizon}: {error}")
+                continue
+            patients.append(cell[0])
+            comparison.append(cell[1])
+    if not patients:
+        raise ValueError("no checklist scores at any landmark and horizon")
+    return (pd.concat(patients, ignore_index=True), pd.concat(comparison, ignore_index=True))
+
+
+def write_checklist_grid(patients, comparison, out_dir) -> None:
+    out_dir = Path(out_dir) / CHECKLIST_GRID_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    patients.to_csv(out_dir / CHECKLIST_PATIENTS_FILE, index=False)
+    comparison.to_csv(out_dir / CHECKLIST_COMPARISON_FILE, index=False)
+    print(f"wrote checklist grid -> {out_dir}")
 
 
 def write_outputs(comparison, coefs, summary, out_dir, km=None, checklist=None, checklist_comparison=None) -> None:

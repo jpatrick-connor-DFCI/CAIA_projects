@@ -480,9 +480,8 @@ on the merged `profile_data` run:
   counted within the day-0 cohort from `somatic_gleason/build_manifest.json`) and
   `figure1e_site_counts` (day-0 platinum events/patients per federated site, from the
   within-site cohort CSV; skipped when absent). Both join manuscript Figure 1 as panels f
-  and g. The three metastatic-label
-  confusion matrices also receive a combined `03_univariate/cohort_sensitivity/metastatic_label_agreement__<identity>`
-  export. Filenames use `<identity> = <endpoint>__<subset>__<exclusion>` under each arm;
+  and g. The two metastatic-label
+  confusion matrices (LLM vs regex stage, ADT intent vs LLM) are exported individually. Filenames use `<identity> = <endpoint>__<subset>__<exclusion>` under each arm;
   Figure 2v3 is emitted only for canonical ADT/platinum. Run the default figure stage
   (`all`) to prepare and render these additions.
   Compiled exports sit in a `compiled/` subfolder of their section, without an overall supertitle.
@@ -1172,7 +1171,8 @@ data root (override with `COMPASS_RHINO_ROOT`):
 | `cox_federated_univariate_adt.csv` | pooled univariate Cox across the four sites |
 | `within_site_cox_univariate/` | the same fits within each site |
 | `federated_elastic_net_cox_{w,no}_DFCI/` | elastic-net Cox trained with and without DFCI; one bundle holds landmarks 0/90/180 × full/age-only |
-| `federated_predictive_checklists/lm_{0,90,180}/{w,no}_DFCI/` | one checklist bundle and its metrics per landmark |
+| `feature_set_models/{w,no}_DFCI/predictive_checklists/` | the default checklist: adjust-only (feature-set) refit, one bundle and metrics file for all landmarks |
+| `federated_predictive_checklists/lm_{0,90,180}/{w,no}_DFCI/` | the regular checklist, one bundle and its metrics per landmark; read only by Figure S1 |
 | `federated_xgboost*/lm_<days>/{w,no}_DFCI/`, `federated_*deephit*/lm_<days>/{w,no}_DFCI/` | landmark XGBoost and DeepHit, delivered like the checklists (optionally under `adt/`) |
 | `federated_transfer_adt_no_DFCI/` | 04's output |
 | `figure_data/` | aggregate KM curves and trajectories; see below |
@@ -1258,12 +1258,7 @@ After rerunning `05_prep_figure_data.ipynb` and `COMPASS/figures/all.R`, the dyn
 held-out federated metrics appear in the multivariate main figures when the
 corresponding DeepHit metrics CSV is available. The figures still render with
 Cox and XGBoost alone when it is absent. Transferred predictive checklist
-results appear separately as
-`06_transfer_checklists/transfer_predictive_checklist_supplement__platinum` with a metrics
-CSV beside the plot; they are not added to the main figures. The companion
-`06_transfer_checklists/transfer_all_models_supplement__platinum` compares Cox, XGBoost,
-the landmark and dynamic DeepHit arms, and checklists on the same DFCI patients
-at the checklist horizons.
+results are not added to the main figures.
 
 The same federated run also renders the pooled federated models themselves,
 from the exports trained with DFCI next to the univariate CSV. Elastic-net Cox
@@ -1275,8 +1270,8 @@ Manuscript Figure 8 (`08_federated_multivariable`) puts them in the local
 Figure 4 layout. The `no_DFCI` exports render as `*_no_dfci__platinum`.
 XGBoost exports no age-only model, so its baseline series is left empty.
 
-The predictive checklists trained with DFCI
-(`federated_predictive_checklists/lm_<days>/w_DFCI/`) render as
+The default predictive checklists trained with DFCI
+(the feature-set refits in `feature_set_models/w_DFCI/predictive_checklists/`) render as
 `figures/ADT/04_multivariate/federated/checklist_supplement__platinum`. It has
 one column per landmark (0/90/180 days) and three rows:
 
@@ -1321,9 +1316,8 @@ subfolder of its section (`03_univariate/federated/`, `04_multivariate/federated
 | `federated_03_univariable` | Figure 3 layout: pooled univariable Cox volcanoes at days 0/90/180 (with a log-HR direction arrow under the key), pooled PSA/testosterone trajectories and day-180 extreme-decile KM curves (site `extreme_fraction`, 10% by default) |
 | `federated_04_multivariable` | Pooled four-site models; excludes the XGBoost age baseline and ranks measured features after excluding observation counts and missingness indicators |
 | `federated_04_multivariable__full_features` | Complete model comparison and all supplied coefficients and gains, including observation counts and missingness indicators |
-| `federated_05_transfer_no_dfci` | Models trained without DFCI scored on DFCI platinum/AVPC/NEPC: (a) mean AUC(t) of the full and age-only models; (b–d) mean AUC(t) of the transferred full models, local out-of-fold Cox models of Gleason + age (b), TP53/RB1/PTEN + age (c) and Gleason + TP53/RB1/PTEN + age (d), and combined Cox models of each transferred score + those covariates without age, in patients with a Gleason score (b), sequenced patients (c) and sequenced patients with a Gleason score (d); c and d on the sequencing-date clock; strips give day-0 patients/events. (e–g) Platinum, AVPC and NEPC KM curves, top vs bottom 10% of the day-180 XGBoost score. (h) 5-year event-free probability from sequencing date +180 days in sequenced patients using the transferred federated XGBoost score, Gleason score and six mutually exclusive mutation groups (WT, TP53, PTEN, RB1, 2 MT, 3 MT); every group on the sequencing clock |
-| `federated_05_transfer_no_dfci__no_d` | The same without panel d (KM curves d–f, gradient g); caption `federated_figure5_no_d` |
-| `federated_s1_feature_set` | Feature-set refits (`feature_set_models/`; missingness and observation-count columns adjust but cannot enter a score) vs regular models: (a) with-DFCI held-out platinum AUC, with a labelled empty slot until feature-set XGBoost is delivered; (b–d) no-DFCI 5-year checklists; (e) their DFCI AUC vs the regular checklists; (f–h) KM by checklist status from +180; caption `federated_figure_s1` |
+| `federated_05_transfer_no_dfci__no_d` | Panels a–c only (no KM curves or probability panel); caption `federated_figure5_no_d` |
+| `federated_06_checklist_no_dfci__lm{0,90,180}_h{365,1825}` | Figure 6 for each landmark × horizon, from `checklist_grid/` (notebook 04); copied with the main and supplement figures to `ADT/manuscript_renders/` |
 
 The local Figure 3 (`03_dfci_univariable`) still uses DFCI patient-level data.
 

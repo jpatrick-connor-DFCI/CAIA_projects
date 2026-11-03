@@ -299,6 +299,21 @@ def test_checklist_patients_keep_one_row_per_patient_of_the_figure_model(tmp_pat
     assert len(pd.read_csv(tmp_path / fcc.CHECKLIST_COMPARISON_FILE)) == 3
 
 
+def test_checklist_grid_stacks_each_landmark_horizon_cell_and_skips_missing_ones(tmp_path):
+    scores, clinical = _checklist_tables()
+    patients, comparison = fcc.checklist_grid(scores, scores, clinical, n_bootstrap=20,
+                                              landmarks=(0, 180), horizons=(365, 1825))
+    cells = patients.groupby(["landmark_days", "model_horizon_days"]).size()
+    assert cells.to_dict() == {(180, 365): 230, (180, 1825): 230}
+    assert set(zip(comparison["landmark_days"], comparison["horizon_days"])) == {(180, 365), (180, 1825)}
+    fcc.write_checklist_grid(patients, comparison, tmp_path)
+    grid = tmp_path / fcc.CHECKLIST_GRID_DIR
+    assert len(pd.read_csv(grid / fcc.CHECKLIST_PATIENTS_FILE)) == 460
+    assert len(pd.read_csv(grid / fcc.CHECKLIST_COMPARISON_FILE)) == 6
+    with pytest.raises(ValueError, match="no checklist scores"):
+        fcc.checklist_grid(scores, scores, clinical, landmarks=(0,), horizons=(365,))
+
+
 def test_checklist_patients_require_the_figure_model():
     scores, _ = _checklist_tables()
     with pytest.raises(ValueError, match="no predictive_checklist scores"):

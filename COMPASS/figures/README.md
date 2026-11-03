@@ -136,8 +136,7 @@ The label figure uses `mrn_lists/adt_intent_labels_model_cohort.csv` and
 `llm_met_labels_model_cohort.csv`, preserving missing labels explicitly.
 Run notebook `05` once after this update to prepare these small summary tables.
 Combined outputs are under `03_univariate/cohort_sensitivity/` (count tables in `03_univariate/cohort_sensitivity/data/`):
-`event_incidence_lm180__platinum__all__incl`, `metastatic_label_overlap__platinum__all__incl`
-and `cohort_km_cascade_lm180__platinum__all__incl`.
+`event_incidence_lm180__platinum__all__incl`.
 
 Figure 1 also exports `01_cohort/figure1_cohort__<endpoint>__<subset>__<exclusion>`:
 a five-panel figure with the cohort-selection flow spanning the left column,
@@ -155,8 +154,8 @@ prediction cohort). Platinum status is any dated platinum ever
 Each exports `02_llm/figure2v3_llm_<cohort>__platinum__all__incl`, with agreement,
 classification metrics, subtype composition, and platinum enrichment in a 2-by-2
 layout, plus `classifier_validation_<cohort>` and `subtype_platinum_<cohort>` paired
-exports. The three metastatic-label
-confusion matrices also form `03_univariate/cohort_sensitivity/metastatic_label_agreement__<endpoint>__<subset>__<exclusion>`.
+exports. The two metastatic-label
+confusion matrices (LLM vs regex stage, ADT intent vs LLM) are exported individually.
 These combined figures have lettered panels and retain each panel's counts,
 captions, and legends. All individual panels are exported alongside them.
 Compilation stays within each arm/cohort/endpoint; Figure 2v3 remains exclusive
@@ -252,10 +251,17 @@ The mean-only Figure 3, transfer Figure 5 and checklist Figure 6 designs export 
 
 - `ADT/03_univariate/internal/manuscript/03_dfci_univariable.pdf`
 - `ADT/03_univariate/federated/manuscript/federated_03_univariable.pdf`
-- `ADT/05_transfer_survival/manuscript/federated_05_transfer_no_dfci.pdf`
 - `ADT/05_transfer_survival/manuscript/federated_05_transfer_no_dfci__no_d.pdf`
 - `ADT/06_transfer_checklists/manuscript/federated_06_checklist_no_dfci.pdf`
-- `ADT/05_transfer_survival/manuscript/federated_s1_feature_set.pdf`
+
+`ADT/manuscript_renders/` collects copies of the submission PDFs (written at the end of every
+non-prepare run from whatever is already rendered; missing sources are skipped with a message):
+
+- `main/`: `02_llm_nepc_avpc__lm0`, `federated_03_univariable`, `federated_04_multivariable`,
+  `federated_05_transfer_no_dfci__top_bottom_20_all_endpoints`, `federated_06_checklist_no_dfci`
+- `supplement/`: `federated_04_multivariable__full_features` (at most 20 highlighted features per
+  landmark and model), `checklist_supplement__platinum`, `federated_05_transfer_no_dfci__no_d`
+- `supplement/federated_checklist_transfer/`: `federated_06_checklist_no_dfci__lm{L}_h{H}` for the six cells
 
 Their tables/legends and captions use `manuscript/data/` and
 `manuscript/captions/`. Run stage `all` once after this path change to rebuild the cached destinations and replace the previous manuscript exports.
@@ -280,58 +286,35 @@ its feature panels rank up to 15 nonzero coefficients or positive gains after ex
 height, identifiers, observation counts and missingness indicators). The companion
 `federated_04_multivariable__full_features` includes both age baselines and every supplied
 feature, including zero-valued features and any identifiers, for audit; and
-`federated_05_transfer_no_dfci` (the XGBoost model trained without Dana-Farber scored on
-Dana-Farber platinum/AVPC/NEPC, in that order: a, mean AUC(t) of the full model at each
-landmark on a vertical AUC axis, with facet strips giving day-0 patients and events; b-d, platinum/AVPC/NEPC KM
-curves for the top vs bottom 10% of the day-180 score on the ADT clock; e, 5-year platinum
-probability (1 - KM) from sequencing date +180 days in sequenced patients, by top vs bottom
-10% of the score, Gleason ≤7 vs ≥8, and 0 vs ≥1 of TP53/RB1/PTEN altered. The deciles in e
-are recomputed within sequenced patients; groups lacking an estimable probability or
-patients remain visible and are labeled) and
-`federated_06_checklist_no_dfci` (the unit-weight 1-year platinum checklist from +180 days,
+`federated_06_checklist_no_dfci` (the unit-weight 1-year feature-set platinum checklist from +180 days,
 trained without Dana-Farber: a, checklist items and held-out metrics at the training sites;
 b, 1-year IPCW AUC at Dana-Farber, which equals balanced accuracy for a yes/no rule, of the
 checklist, Gleason ≥8 and any TP53/RB1/PTEN alteration, in the same sequenced patients with
 a Gleason score on the sequencing clock; c-e, platinum/AVPC/NEPC KM curves by checklist
 status from the 180-day landmark on the ADT clock).
 
-`federated_05_transfer_no_dfci__top_bottom_20` is a parallel Figure 5 using the
-bottom and top 20% of the transferred score for both the three KM curves and
-the 5-year platinum probability panel. Cutpoints are calculated separately for
-each endpoint on the ADT clock and for sequenced patients on the sequencing
-clock; the existing 10% version remains available.
 `federated_05_transfer_no_dfci__top_bottom_20_all_endpoints` adds a bottom row
-of 5-year platinum, AVPC, and NEPC probability panels, each comparing the 20%
-score extremes, Gleason groups, and TP53/RB1/PTEN alteration groups.
+of 5-year platinum, AVPC, and NEPC probability panels, each comparing the top and
+bottom tertile of the score (the KM curves above stay at 20%), Gleason groups, and
+TP53/RB1/PTEN alteration groups.
 
-`federated_s1_feature_set` (caption `federated_figure_s1`) compares the regular models with
-the feature-set refits in `rhino_data_v2/feature_set_models/`, where missingness flags and
-observation counts adjust the fit but cannot enter a score or checklist: a, held-out platinum
-AUC of models trained with Dana-Farber (elastic-net Cox, XGBoost, 1-year and 5-year
-checklists); b-d, the 5-year feature-set checklists trained without Dana-Farber at +0, +90
-and +180; e, horizon-matched AUC of the frozen no-DFCI checklists at Dana-Farber, feature set
-vs regular; f-h, platinum/AVPC/NEPC KM curves by feature-set checklist status from +180 on
-the ADT clock. Panel a labels the feature-set XGBoost slot "not yet available" until
-`feature_set_models/w_DFCI/federated_xgboost/xgboost_federated_metrics_adt.csv` exists; the
-points then appear after rerunning 05, with no code change.
-
-`federated_05_transfer_no_dfci__no_d` (caption `federated_figure5_no_d`) keeps the fuller
-layout for both model families: a, mean AUC(t) of the full models; b-c, the full models,
+`federated_05_transfer_no_dfci__no_d` (caption `federated_figure5_no_d`) keeps panels a-c
+for both model families: a, mean AUC(t) of the full models; b-c, the full models,
 local out-of-fold Cox models of Gleason + age (b) or TP53/RB1/PTEN + age (c), and combined
 Cox models of each transferred score + the same covariates without age (the full models
 include age), in patients with a Gleason score before the ADT landmark (b) and sequenced
-patients (c, on a sequencing-date clock); d-f, the KM curves; g, 5-year event-free
-probability by score quartile, Gleason score and six mutually exclusive mutation groups
-(WT, TP53, PTEN, RB1, 2 MT, 3 MT).
+patients (c, on a sequencing-date clock). The KM curves and the 5-year probability panel
+are not drawn.
+
+`federated_06_checklist_no_dfci__lm{0,90,180}_h{365,1825}` repeat Figure 6 for every
+landmark x horizon (six figures, captions `federated_figure6_lm{L}_h{H}`) from the
+`checklist_grid/` tables of 04; the +180/1-year cell equals Figure 6.
 
 Figure 5 reads existing 04 exports: rerun `05_prep_figure_data.ipynb`, which registers the
 checklist tables in the manifest, then `COMPASS/figures/federated_05_transfer_no_dfci.R`. Figure 6
 needs the checklist cells of `04_federated_transfer.ipynb` first, then
 `05_prep_figure_data.ipynb`, then `COMPASS/figures/federated_06_checklist_no_dfci.R`. Without the
-checklist tables it is skipped with a message. Figure S1 needs the last section of
-`04_federated_transfer.ipynb` (output `federated_transfer_adt_no_DFCI/feature_set_checklists/`),
-then `05_prep_figure_data.ipynb`, then `COMPASS/figures/federated_s1_feature_set.R`, and is
-skipped the same way without those tables.
+checklist tables it is skipped with a message.
 
 Figure 5 discrimination panels now default to horizontal confidence intervals,
 with directly labeled model rows and one color key for the landmarks. All three
@@ -340,26 +323,6 @@ restores the original point/shape layout; `COMPASS_TRANSFER_LANDMARKS=180` focus
 the discrimination and clinical-comparison panels on day 180, including its actual
 patient/event counts. These settings enter the graphics-cache signature and the
 captions. KM/gradient panels remain at day 180 with their original time origins.
-
-Two additional Figure 5 alternatives are exported automatically to
-`05_transfer_survival/manuscript/`:
-
-- `federated_05_transfer_no_dfci__mean_landmarks_set1`: three panels showing
-  federated scores in the full cohort, Gleason comparisons, and somatic comparisons.
-- `federated_05_transfer_no_dfci__mean_landmarks_set2`: two panels showing
-  federated scores in the full cohort and comparisons in the combined Gleason +
-  somatic cohort (clinical only, score only, and score + clinical covariates).
-
-Each labeled point is `(mean_auc_day0 + mean_auc_day90 + mean_auc_day180) / 3`,
-computed separately for each endpoint, cohort and model category. These variants
-always use all three landmarks, independently of `COMPASS_TRANSFER_LANDMARKS`.
-Missing or nonfinite landmark estimates make the average unavailable. Clinical-only
-rows repeated across bundles are counted once per landmark. No confidence interval
-is drawn: the overlapping landmark cohorts require joint bootstrap information to
-estimate uncertainty for their average. Source AUCs and patient/event counts at each
-landmark are saved beside each figure in `data/`; patient counts are not summed.
-These compact variants omit the KM and gradient rows. The aggregate preview script
-writes the same designs as `figure5_mean_landmarks_set1` and `figure5_mean_landmarks_set2`.
 
 The local Figure 3 stays on Dana-Farber patient-level data. The cohort
 sensitivity components are assembled into one continuous multipanel figure for
@@ -540,10 +503,6 @@ gradient (score quartile, Gleason, six TP53/PTEN/RB1 alteration groups) per bund
 forests and score × Gleason curves are no longer drawn. Only aggregate tables are exported
 (`transfer_km_{curves,summary,gradient}_no_dfci`); they feed Federated Figure 5 e-h
 (XGBoost, 180 days). Missing transfer outputs are reported and skipped.
-`all_models/transfer_metrics.csv`, when present, adds the horizon-specific
-predictive checklist supplement at `06_transfer_checklists/transfer_predictive_checklist_supplement__platinum`.
-With `all_models/transfer_auc_t.csv`, a second supplement compares the frozen
-Cox, XGBoost, landmark/dynamic DeepHit and checklist AUC(t) on common DFCI horizons.
 Missing optional XGBoost files are reported and skipped independently. Run `05`
 again after this update to register both files (including absent paths), then
 run `COMPASS/figures/all.R` with stage `all`. All Python remains in `05`; graphics caches stay in data.

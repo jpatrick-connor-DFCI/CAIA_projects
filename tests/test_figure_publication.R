@@ -24,7 +24,7 @@ local({
   plot <- plot + guides(fill=guide_legend(ncol=1))
   stems <- c(figure2v3_stems("lm0"),
     "figure1a_consort","figure1b_km","figure1c_span","figure1c_dx_to_tx","figure1c_time_to_platinum",
-    "adt_labels_llm_vs_regex_max_any","adt_labels_adt_vs_regex_max_any","adt_labels_adt_vs_llm",
+    "adt_labels_llm_vs_regex_max_any","adt_labels_adt_vs_llm",
     paste0(c("figure4a_discrimination","figure4c_sensitivity_gleason","figure4d_sensitivity_somatic"),"_auc_platinum"),
     as.vector(outer(c("figure4b_importance_platinum_cox","figure4b_importance_platinum_xgb"),
       c("landmark0","landmark90","landmark180"),paste,sep="_")),
@@ -42,18 +42,18 @@ local({
     getOption("compass.figure_capture")(p,destination,8,6,stem)
   }
   m <- prepare_figure_scenes(file.path(cache,"scenes"),"test",build)
-  stopifnot(length(stems)==34, length(m$scenes)==32,
+  stopifnot(length(stems)==33, length(m$scenes)==31,
     !anyDuplicated(vapply(m$scenes,`[[`,character(1),"destination")),
     !any(grepl("/by_figure/",vapply(m$scenes,`[[`,character(1),"destination"))))
   stopifnot(sum(grepl("somatic_snv_carrier_km_page",vapply(m$scenes,`[[`,character(1),"stem")))==2)
-  for(key in c("figure1_cohort","figure2v3_llm_lm0","metastatic_label_agreement")) {
+  for(key in c("figure1_cohort","figure2v3_llm_lm0")) {
     scene <- Filter(function(s) s$stem==key,m$scenes)[[1]]
     grob <- readRDS(scene$path)
     stopifnot(!grepl("/compiled/",scene$destination,fixed=TRUE),
       !any(vapply(grob$grobs,inherits,logical(1),"text")))
     panels <- Filter(function(g) inherits(g,"gtable"),grob$grobs)
     members <- if(key=="figure2v3_llm_lm0") stems[1:4] else
-      figure_compilation_spec(if(key=="figure1_cohort") stems[5] else stems[10])$members
+      figure_compilation_spec(stems[5])$members
     stopifnot(length(panels)==length(members),
       all(members %in% vapply(m$scenes,`[[`,character(1),"stem")))
     for(i in seq_along(panels)) {
@@ -67,7 +67,7 @@ local({
   config <- list(fig_root=output,cache_root=cache)
   figure_write_catalog(config,prepared)
   registry <- read_csv(file.path(output,"ADT","data","manifest.csv"),show_col_types=FALSE)
-  stopifnot(nrow(registry)==32,all(file.exists(file.path(output,"ADT",registry$path))),
+  stopifnot(nrow(registry)==31,all(file.exists(file.path(output,"ADT",registry$path))),
     !any(grepl(root,registry$path,fixed=TRUE)),file.exists(file.path(output,"ADT","data","index.html")))
   html <- paste(readLines(file.path(output,"ADT","data","index.html")),collapse="\n")
   urls <- regmatches(html,gregexpr('(?:href|src)="[^"]+"',html,perl=TRUE))[[1]]

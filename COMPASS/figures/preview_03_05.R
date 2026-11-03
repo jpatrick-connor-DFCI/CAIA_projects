@@ -81,15 +81,6 @@ for(landmarks in list(c(0,90,180),180)) {
   }
 }
 
-for(set in 1:2) {
-  result <- manuscript_federated_transfer_means(metrics,clinical,set)
-  if(is.null(result)) next
-  stem <- paste0("figure5_mean_landmarks_set",set)
-  save_review(result$plot,stem,result$spec$width,result$spec$height,figure5_output)
-  readr::write_csv(result$data,file.path(figure5_output,"data",paste0(stem,".csv")))
-  writeLines(result$legend,file.path(figure5_output,"data",paste0(stem,".txt")))
-}
-
 # Use the supplied paired bootstrap differences, never differences of marginal CIs.
 combined <- clinical %>% filter(model=="combined_cox",landmark_days==180,
   subpopulation %in% c("gleason","trio"))

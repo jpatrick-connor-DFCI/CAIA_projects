@@ -132,6 +132,10 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
     no_dfci_dir = rhino / "federated_transfer_adt_no_DFCI"
     feature_set_paths += [no_dfci_dir / "feature_set_checklists" / name
                           for name in prep.FEDERATED_TRANSFER_FEATURE_SET_FILES]
+    feature_set_paths += [no_dfci_dir / "regular_checklists" / name
+                          for name in prep.FEDERATED_TRANSFER_REGULAR_FILES]
+    feature_set_paths += [no_dfci_dir / prep.FEDERATED_CHECKLIST_GRID_DIR / name
+                          for name in prep.FEDERATED_CHECKLIST_GRID_FILES]
     no_dfci_paths = [no_dfci_dir / name for name in
                      ("transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv",
                       "transfer_km_patients.csv", "transfer_checklist_patients.csv",
@@ -309,13 +313,13 @@ def test_preparation_notebook_runs_all_python_cells(tmp_path, monkeypatch):
     assert set(state["manifest"]["cells"]) == {"adt__platinum"}
     assert state["manifest"]["cohort_overview"]
     assert {row["table"] for row in state["rows"] if row["arm"] == "Figure 3 cohort sensitivity"} == {
-        "incidence", "label_overlap", "cohort_km"}
+        "incidence"}
     assert Path(config["cache_root"], "preparation_config.json").exists()
     assert "PSA" in state["figure_data"].canonical_lab_names()
     assert state["rows"] and all(row["rows"] >= 0 for row in state["rows"])
 
 
-def test_overview_counts_use_endpoint_inputs_and_keep_missing_labels(tmp_path):
+def test_overview_counts_use_endpoint_inputs(tmp_path):
     config = make_config(tmp_path)
     config["forest_cohorts"] = ["adt", "adt_noprecastrate"]
     root = Path(config["data_root"])
@@ -324,28 +328,11 @@ def test_overview_counts_use_endpoint_inputs_and_keep_missing_labels(tmp_path):
         pl.DataFrame({"DFCI_MRN": [str(i) for i in range(len(values))], event: values,
                       f"t_{event.lower()}": durations}).write_csv(
             root / "survival_analysis" / f"prediction_inputs_adt{suffix}" / "aggregated_landmark180.csv")
-    mrns = root / "mrn_lists"
-    mrns.mkdir()
-    pl.DataFrame({"DFCI_MRN": ["001", "2.0", "3"], "ADT_INTENT": ["METASTATIC", "LOCALIZED_ADJUVANT", "UNKNOWN"]}).write_csv(
-        mrns / "adt_intent_labels_model_cohort.csv")
-    pl.DataFrame({"DFCI_MRN": ["1", "002.0"], "LLM_METASTATIC": ["true", "false"]}).write_csv(
-        mrns / "llm_met_labels_model_cohort.csv")
     result = prep.prepare_cohort_overview(config)
     d = pl.read_parquet(Path(result["directory"]) / "incidence.parquet")
     assert d["n_patients"].to_list() == [3, 2, None, None]
     assert d["n_events"].to_list() == [2, 1, None, None]
-    km = pl.read_parquet(Path(result["directory"]) / "cohort_km.parquet")
-    # Non-positive durations are dropped, as in the landmark KM; missing cohorts add no rows.
-    assert km.sort("endpoint", "time").rows() == [
-        ("adt", "nepc", 10.0, 0), ("adt", "platinum", 10.0, 0), ("adt", "platinum", 20.0, 1)]
-    labels = pl.read_parquet(Path(result["directory"]) / "label_overlap.parquet")
-    assert labels["n"].sum() == 3
-    assert labels.filter(pl.col("adt_label") == "Unlabelled")["llm_label"].to_list() == ["Unlabelled"]
     assert prep.prepare_cohort_overview(config) == result
-    pl.DataFrame({"DFCI_MRN": ["1", "1"], "LLM_METASTATIC": ["true", "false"]}).write_csv(
-        mrns / "llm_met_labels_model_cohort.csv")
-    with pytest.raises(ValueError, match="conflicting"):
-        prep.prepare_cohort_overview(config)
 
 
 def test_labels_use_analysis_anchor_and_retain_unlabelled_patients():

@@ -185,6 +185,9 @@ def federated_within_site_file(federated_path: Path, filename: str) -> Path:
 FEDERATED_TRANSFER_NO_DFCI_FILES = (
     "transfer_metrics.csv", "transfer_auc_t.csv", "transfer_clinical_comparison.csv",
     "transfer_km_patients.csv", "transfer_checklist_patients.csv", "transfer_checklist_comparison.csv")
+# The same two tables at every landmark x horizon (federated checklist supplement), in a subdirectory.
+FEDERATED_CHECKLIST_GRID_DIR = "checklist_grid"
+FEDERATED_CHECKLIST_GRID_FILES = ("transfer_checklist_patients.csv", "transfer_checklist_comparison.csv")
 FEDERATED_TRANSFER_ALL_MODELS_FILES = ("transfer_metrics.csv", "transfer_auc_t.csv")
 # Federated multivariable exports beside the across-site results CSV
 # (mirrors FEDERATED_MULTIVARIABLE in figure_workflow.R). Each bundle also has
@@ -245,8 +248,10 @@ FEDERATED_FEATURE_SET_FILES = (
     ("w_DFCI", "federated_xgboost", "xgboost_federated_metrics_adt.csv"),
     *((marker, "predictive_checklists", name)
       for marker in FEDERATED_V2_VARIANT_MARKERS for name in FEDERATED_CHECKLIST_FILES))
-# 04_federated_transfer.ipynb outputs for the no-DFCI feature-set checklists.
-FEDERATED_TRANSFER_FEATURE_SET_FILES = ("transfer_metrics.csv", "transfer_checklist_patients.csv")
+# 04_federated_transfer.ipynb outputs for the feature-set checklist's 5-year patients, and for the
+# regular checklist it is compared with (the feature-set metrics are in all_models/).
+FEDERATED_TRANSFER_FEATURE_SET_FILES = ("transfer_checklist_patients.csv",)
+FEDERATED_TRANSFER_REGULAR_FILES = ("transfer_metrics.csv",)
 
 
 def federated_feature_set_file(federated_path: Path, marker: str, part: str, filename: str) -> Path:
@@ -426,11 +431,7 @@ def prepare_metastatic(config: dict, patients: pl.DataFrame) -> pl.DataFrame:
 
 
 def prepare_cohort_overview(config: dict) -> dict:
-    """Figure 3 cohort-sensitivity incidence, KM, and label-summary inputs.
-
-    ``cohort_km`` is patient-level (cohort, endpoint, time, event), so it stays in
-    the data cache; 07 publishes only its per-cohort counts.
-    """
+    """Figure 3 cohort-sensitivity incidence inputs."""
     root, cache = Path(config["data_root"]), Path(config["cache_root"])
     cohorts = as_list(config.get("forest_cohorts", ["adt", "adt_noprecastrate",
         "adt_metastatic_adt", "adt_metastatic_adt_noprecastrate",
@@ -439,15 +440,13 @@ def prepare_cohort_overview(config: dict) -> dict:
     paths = {(cohort, ep): root / "survival_analysis" /
         f"prediction_inputs_{cohort}{'_nepc' if ep == 'nepc' else ''}" /
         f"aggregated_landmark{landmark}.csv" for cohort in cohorts for ep in ["platinum", "nepc"]}
-    intent = root / "mrn_lists" / "adt_intent_labels_model_cohort.csv"
-    llm = root / "mrn_lists" / "llm_met_labels_model_cohort.csv"
-    sources = [fingerprint(p) for p in [*paths.values(), intent, llm]]
+    sources = [fingerprint(p) for p in paths.values()]
     key = digest([sources, cohorts, landmark, pl.__version__,
                   hashlib.sha256(Path(__file__).read_bytes()).hexdigest()])
     directory = cache / "cohort_overview" / key
-    names = ["incidence", "label_overlap", "cohort_km"]
+    names = ["incidence"]
     if config.get("force") or not valid_bundle(directory, key, names):
-        rows, km = [], []
+        rows = []
         for (cohort, ep), path in paths.items():
             row = dict(cohort=cohort, endpoint=ep, landmark_days=landmark,
                        n_patients=None, n_events=None, status="missing")
@@ -463,42 +462,15 @@ def prepare_cohort_overview(config: dict) -> dict:
                     if counts["n"] != counts["ids"] or counts["missing_ids"]:
                         raise ValueError(f"Non-unique/missing patient IDs in {path}")
                     row.update(n_patients=counts["n"], n_events=counts["events"], status="ok")
-                    # KM down the cascade: durations from the ADT anchor, positive only.
-                    if f"t_{ep}" in columns:
-                        km.append(scan.select(
-                            pl.lit(cohort).alias("cohort"), pl.lit(ep).alias("endpoint"),
-                            pl.col(f"t_{ep}").cast(pl.Float64, strict=False).alias("time"),
-                            (pl.col(ep.upper()).cast(pl.Float64, strict=False) == 1)
-                            .fill_null(False).cast(pl.Int64).alias("event"),
-                        ).filter(pl.col("time") > 0).collect())
             rows.append(row)
         incidence = pl.DataFrame(rows, schema_overrides={"n_patients": pl.Int64, "n_events": pl.Int64})
-        cohort_km = pl.concat(km) if km else pl.DataFrame(schema={
-            "cohort": pl.String, "endpoint": pl.String, "time": pl.Float64, "event": pl.Int64})
-        overlap = pl.DataFrame(schema={"adt_label": pl.String, "llm_label": pl.String, "n": pl.Int64})
-        if intent.exists() and llm.exists():
-            def labels(path, column):
-                d = pl.read_csv(path, infer_schema_length=0).select(
-                    pl.col(ID).cast(pl.Float64, strict=False).cast(pl.Int64, strict=False).cast(pl.String),
-                    pl.col(column)).unique()
-                if d[ID].null_count() or d[ID].n_unique() != d.height:
-                    raise ValueError(f"Missing IDs or conflicting {column} labels in {path}")
-                return d
-            a = labels(intent, "ADT_INTENT").with_columns(pl.col("ADT_INTENT").str.to_uppercase().replace_strict(
-                {"METASTATIC": "Metastatic", "LOCALIZED_ADJUVANT": "Local"}, default="Unlabelled").alias("adt_label"))
-            b = labels(llm, "LLM_METASTATIC").with_columns(pl.col("LLM_METASTATIC").str.strip_chars().str.to_lowercase().replace_strict(
-                {"true": "Metastatic", "1": "Metastatic", "yes": "Metastatic",
-                 "false": "Local", "0": "Local", "no": "Local"}, default="Unlabelled").alias("llm_label"))
-            overlap = a.join(b, on=ID, how="left").with_columns(pl.col("llm_label").fill_null("Unlabelled")) \
-                .group_by("adt_label", "llm_label").len(name="n").with_columns(pl.col("n").cast(pl.Int64))
         directory.mkdir(parents=True, exist_ok=True)
-        for name, table in [("incidence", incidence), ("label_overlap", overlap),
-                            ("cohort_km", cohort_km)]:
+        for name, table in [("incidence", incidence)]:
             with tempfile.NamedTemporaryFile(dir=directory, suffix=".parquet", delete=False) as stream:
                 temporary = Path(stream.name)
             table.write_parquet(temporary)
             os.replace(temporary, directory / f"{name}.parquet")
-        if sources != [fingerprint(p) for p in [*paths.values(), intent, llm]]:
+        if sources != [fingerprint(p) for p in paths.values()]:
             raise RuntimeError("Cohort overview inputs changed during preparation; rerun notebook 05")
         atomic_json(directory / "manifest.json", {"key": key, "outputs": {
             name: fingerprint(directory / f"{name}.parquet") for name in names}})
@@ -716,6 +688,10 @@ def prepare(config: dict) -> dict:
             for item in FEDERATED_FEATURE_SET_FILES]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / "feature_set_checklists" / name)
             for name in FEDERATED_TRANSFER_FEATURE_SET_FILES]
+        federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / "regular_checklists" / name)
+            for name in FEDERATED_TRANSFER_REGULAR_FILES]
+        federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / FEDERATED_CHECKLIST_GRID_DIR / name)
+            for name in FEDERATED_CHECKLIST_GRID_FILES]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / name)
             for name in FEDERATED_TRANSFER_NO_DFCI_FILES]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / "all_models" / name)
