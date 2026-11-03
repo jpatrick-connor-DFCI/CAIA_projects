@@ -1669,7 +1669,7 @@ plot_federated_transfer <- function(d, caption, title=FEDERATED_TRANSFER_SPEC$ti
   references <- tibble(metric=factor(levels(d$metric),levels=levels(d$metric)),reference=.5)
   dodge <- position_dodge(width=.7)
   ggplot(d,aes(landmark,value,color=model,shape=features,group=interaction(model,features))) +
-    geom_hline(data=references,aes(yintercept=reference),inherit.aes=FALSE,color="grey55",linetype="dotted",linewidth=.8) +
+    geom_hline(data=references,aes(yintercept=reference),color="grey55",linetype="dotted",linewidth=.8) +
     geom_linerange(aes(ymin=lo,ymax=hi),position=dodge,linewidth=.8,na.rm=TRUE) +
     geom_point(position=dodge,size=2.8,stroke=1.1,fill="white",na.rm=TRUE) +
     scale_color_manual(values=federated_transfer_colors(levels(d$model)),name=NULL,drop=FALSE) +
@@ -1689,7 +1689,7 @@ plot_federated_transfer_clinical <- function(d, caption, title=NULL, subtitle=NU
   rows <- if(length(unique(d$subpopulation_label))>1) vars(subpopulation_label,metric) else vars(metric)
   dodge <- position_dodge(width=.75)
   ggplot(d,aes(landmark,value,color=series,shape=score_type,group=interaction(series,score_type))) +
-    geom_hline(data=references,aes(yintercept=reference),inherit.aes=FALSE,color="grey55",linetype="dotted",linewidth=.8) +
+    geom_hline(data=references,aes(yintercept=reference),color="grey55",linetype="dotted",linewidth=.8) +
     geom_linerange(aes(ymin=lo,ymax=hi),position=dodge,linewidth=.8,na.rm=TRUE) +
     geom_point(position=dodge,size=3,stroke=1.1,na.rm=TRUE) +
     scale_color_manual(values=colors,name=NULL,drop=FALSE,guide=guide_legend(override.aes=list(shape=15))) +
