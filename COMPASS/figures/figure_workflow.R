@@ -2164,6 +2164,20 @@ plot_federated_checklist_comparison <- function(comparison, f=FEDERATED_CHECKLIS
     theme(panel.grid.major.y=element_line(color="#eeeeee",linewidth=.3))
 }
 
+# Simple bar plot of the checklist's mean AUC(t) at the horizon: one bar per event.
+plot_federated_checklist_full_bars <- function(full, f=FEDERATED_CHECKLIST_FIGURE) {
+  order <- names(FEDERATED_TRANSFER_ENDPOINTS)
+  d <- full %>% arrange(match(endpoint,order)) %>%
+    mutate(label=factor(FEDERATED_TRANSFER_ENDPOINTS_SHORT[endpoint],levels=FEDERATED_TRANSFER_ENDPOINTS_SHORT[order]))
+  ggplot(d,aes(label,auc)) +
+    geom_col(fill=FEDERATED_CHECKLIST_COLORS[["Checklist"]],width=.6) +
+    geom_hline(yintercept=.5,color="grey40",linetype="dotted",linewidth=.5) +
+    geom_text(aes(label=sprintf("%.2f",auc)),vjust=-.4,size=2.8) +
+    scale_y_continuous(limits=c(0,1),breaks=seq(0,1,.25),expand=expansion(mult=c(0,.02))) +
+    labs(x=NULL,y=paste0("Mean AUC(t), ",federated_transfer_horizon_label(f$horizon_days))) +
+    federated_transfer_theme()
+}
+
 # Aggregate KM curves and binned trajectories exported by the federated run
 # (rhino_data_v2/figure_data): pooled across sites and within each site,
 # no patient-level rows. Drawn with the local plotters so the panels match.
@@ -3104,9 +3118,14 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
     rows <- c(rows,list(n+rep(seq_len(k),each=6L%/%k)))
     row_heights <- c(row_heights,MANUSCRIPT_TRANSFER_ROW_HEIGHTS["km"])
   }
+  # Probability panels (e-g) are shorter and the discrimination/KM rows (a-d) taller, so the rows are similar in height.
+  if(length(extra$probability_panels) && probability_endpoints) {
+    row_heights[1L] <- 4.0
+    if(k) row_heights[length(row_heights)] <- 3.9
+  }
   if(length(extra$probability_panels)) {
     rows <- c(rows,list(n+k+rep(seq_along(extra$probability_panels),each=2L)))
-    row_heights <- c(row_heights,7.0)
+    row_heights <- c(row_heights,if(probability_endpoints) 5.0 else 7.0)
   } else if(!is.null(extra$gradient)) {
     rows <- c(rows,list(rep(n+k+1L,6L)))
     row_heights <- c(row_heights,MANUSCRIPT_TRANSFER_ROW_HEIGHTS["gradient"])
@@ -3224,7 +3243,7 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
   card <- plot_checklist_cards(lines,NULL,caption=NULL) + ggplot2::facet_null() +
     ggplot2::labs(x=NULL,y=NULL) + ggplot2::theme(axis.text=ggplot2::element_blank())
   has_full <- !is.null(tables$full) && nrow(tables$full)
-  plots <- c(list(card),if(has_full) list(plot_federated_checklist_comparison(tables$full,f)),
+  plots <- c(list(card),if(has_full) list(plot_federated_checklist_full_bars(tables$full,f)),
     list(plot_federated_checklist_comparison(tables$comparison,f)))
   titles <- c("Checklist",if(has_full) "Accuracy: all patients","Accuracy")
   rows <- tables$comparison %>% arrange(match(endpoint,names(FEDERATED_TRANSFER_ENDPOINTS)),
@@ -3233,7 +3252,7 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
     sprintf("a: unit-weight federated checklist for %s platinum from the %d-day ADT landmark, trained without Dana-Farber; positive at %s.%s",federated_transfer_horizon_label(f$horizon_days),landmark,rule,
       if(guideline) " Item thresholds are rounded to guideline values; item selection and the rule are unchanged." else ""),
     if(has_full) paste0("b: ",federated_transfer_horizon_label(f$horizon_days),
-      " IPCW AUC (equal to balanced accuracy for a yes/no rule) of the checklist at Dana-Farber in all patients of the ADT cohort (ADT clock), by endpoint. n positive, AUC (95% CI): ",
+      " mean IPCW AUC(t) (equal to balanced accuracy for a yes/no rule) of the checklist at Dana-Farber in all patients of the ADT cohort (ADT clock), one bar per event. n positive, AUC (95% CI): ",
       paste(sprintf("%s %s, %.2f (%.2f-%.2f)",FEDERATED_TRANSFER_ENDPOINTS_SHORT[tables$full$endpoint],
         scales::comma(tables$full$n_positive),tables$full$auc,tables$full$auc_lo,tables$full$auc_hi),collapse="; "),"."),
     paste0(if(has_full) "c: " else "b: ",federated_transfer_horizon_label(f$horizon_days)," IPCW AUC (equal to balanced accuracy for a yes/no rule) at Dana-Farber in the same sequenced patients with a Gleason score, on the sequencing clock. Rule, n positive, AUC (95% CI), and difference from the checklist (95% CI): ",
@@ -3255,10 +3274,9 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
   }
   n_top <- 2L+has_full
   k <- length(plots)-n_top
-  # With the all-patient panel, the card and b share the top row and c spans the next one.
-  top <- if(has_full) rbind(rep(1:2,each=3L),rep(3L,6L)) else rbind(rep(1:2,each=3L))
-  row_heights <- c(max(2.7,card_in+.35),if(has_full) MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["clinical"]],
-    if(k) MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["km"]])
+  # With the all-patient panel, a/b/c share the top row and the KM panels fill the next one.
+  top <- if(has_full) rbind(rep(1:3,each=2L)) else rbind(rep(1:2,each=3L))
+  row_heights <- c(max(2.7,card_in+.35),if(k) MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["km"]])
   spec <- list(key=key,width=10,height=sum(row_heights),
     layout=rbind(top,if(k) n_top+rep(seq_len(k),each=6L%/%k)),titles=titles,
     row_heights=row_heights,shared_legend_panels=integer())
