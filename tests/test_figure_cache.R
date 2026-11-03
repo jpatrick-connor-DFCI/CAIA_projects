@@ -111,6 +111,13 @@ local({
   options(compass.figure_data_manifest = NULL)
   first <- render_figure_scene(m$scenes[[1]], m$signature, 72, TRUE)
   stopifnot(first$rendered == 1L, figure_file_complete(paste0(destination, ".pdf")))
+  tall_scene <- m$scenes[[1]]
+  tall_scene$path <- file.path(root, "tall-scene.rds")
+  stopifnot(file.copy(m$scenes[[1]]$path, tall_scene$path))
+  tall_scene$destination <- file.path(root, "figures", "tall-panel")
+  tall_scene$height <- 51
+  stopifnot(render_figure_scene(tall_scene, m$signature, 72, TRUE, overwrite = TRUE)$rendered == 1L,
+            figure_file_complete(paste0(tall_scene$destination, ".pdf")))
   receipt <- figure_receipt_path(m$scenes[[1]], "pdf")
   stopifnot(file.exists(receipt), startsWith(receipt, directory),
             length(list.files(file.path(root, "figures"), pattern = "\\.rds$", recursive = TRUE)) == 0L)

@@ -116,7 +116,7 @@ stopifnot(length(caption_paths)==36,all(file.exists(caption_paths)))
 # each caption sits in the manuscript folder of its figure's section.
 caption_md <- caption_paths[endsWith(caption_paths,".md")]
 stopifnot(setequal(basename(caption_md),paste0(c(paste0("figure",c(1,3,4,7,8)),"figure3_supplement",paste0("figure2_",c("icd","adt","lm0")),
-  paste0("federated_figure",3:6),"federated_figure_s1","federated_figure4_full_features","federated_figure5_no_d","federated_figure5_mean_landmarks_set1","federated_figure5_mean_landmarks_set2"),".md")))
+  paste0("federated_figure",3:6),"federated_figure_s1","federated_figure4_full_features","federated_figure5_no_d","federated_figure5_top_bottom_20","federated_figure5_top_bottom_20_all_endpoints","federated_figure5_mean_landmarks_set1","federated_figure5_mean_landmarks_set2"),".md")))
 for(path in caption_md) stopifnot(identical(readLines(path,warn=FALSE),
   readLines(sub("[.]md$",".txt",path),warn=FALSE)))
 caption_file <- function(section,name) file.path(caption_root,section,
@@ -490,6 +490,25 @@ stopifnot(inherits(fig5_main$plot,"gtable"),length(fig5_main$spec$titles)==5,
   all(abs(risk$data$probability_lo-(1-risk$data$hi))<1e-12,na.rm=TRUE),
   all(abs(risk$data$probability_hi-(1-risk$data$lo))<1e-12,na.rm=TRUE),
   all(risk$data$probability_lo<=risk$data$probability & risk$data$probability<=risk$data$probability_hi,na.rm=TRUE))
+fig5_twenty <- manuscript_federated_transfer_no_dfci(transfer_metrics,NULL,km_tables,include=character(),
+  model_families="xgboost_cox",probability=TRUE,extreme_percent=20L)
+twenty <- manuscript_federated_transfer_km(km_tables,probability=TRUE,extreme_percent=20L)
+score_twenty <- filter(twenty$gradient$data,stratifier=="score_extreme")
+stopifnot(length(twenty$km)==3L,
+  all(vapply(twenty$km,function(p) setequal(as.character(p$data$stratum),c("Bottom 20%","Top 20%")),logical(1))),
+  setequal(as.character(score_twenty$group),c("Bottom 20%","Top 20%")),
+  all(score_twenty$clock=="sequencing"),
+  grepl("top vs bottom 20%",fig5_twenty$legend,fixed=TRUE),
+  grepl("middle 60%",manuscript_transfer_xgboost_caption(20L),fixed=TRUE))
+fig5_endpoints <- manuscript_federated_transfer_no_dfci(transfer_metrics,NULL,km_tables,include=character(),
+  model_families="xgboost_cox",probability=TRUE,extreme_percent=20L,probability_endpoints=TRUE)
+stopifnot(length(fig5_endpoints$panels)==7L,
+  identical(fig5_endpoints$spec$layout[3,],rep(5:7,each=2)),
+  identical(vapply(fig5_endpoints$panels[5:7],function(p) unique(p$data$endpoint),character(1)),
+    names(FEDERATED_TRANSFER_ENDPOINTS)),
+  all(vapply(fig5_endpoints$panels[5:7],function(p)
+    setequal(unique(p$data$stratifier),c("score_extreme","gleason_group","trio_group")),logical(1))),
+  grepl("(e-g)",manuscript_captions()$federated_05_transfer_no_dfci__top_bottom_20_all_endpoints,fixed=TRUE))
 wrong_clock <- km_tables; wrong_clock$gradient$clock <- "adt"
 clock_error <- tryCatch(plot_federated_transfer_horizon_risk(wrong_clock,"xgboost_cox",180L),error=conditionMessage)
 stopifnot(grepl("sequencing-landmark",clock_error,fixed=TRUE))

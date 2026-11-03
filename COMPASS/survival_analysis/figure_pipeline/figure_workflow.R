@@ -872,7 +872,7 @@ save_federated_panel <- function(plot, path, width, height, dpi, overwrite) {
   temp <- tempfile(".federated-", tmpdir = dirname(path), fileext = ".pdf")
   on.exit(unlink(temp), add = TRUE)
   ggplot2::ggsave(temp, plot, width = width, height = height, bg = "white",
-                  device = figure_pdf_device)
+                  device = figure_pdf_device, limitsize = FALSE)
   if (!file.rename(temp, path)) stop("Could not publish federated supplement panel: ", path)
   message("Wrote ", path)
   TRUE
@@ -1973,6 +1973,7 @@ FEDERATED_TRANSFER_KM_VIEWS <- list(
 FEDERATED_TRANSFER_GRADIENT <- list(
   score_quartile=list(clock="sequencing",levels=paste0("Q",1:4),label="Federated score quartile"),
   score_decile=list(clock="sequencing",levels=c("Bottom 10%","Top 10%"),label="Federated score"),
+  score_extreme=list(clock="sequencing",levels=c("Bottom 20%","Top 20%"),label="Federated score"),
   gleason_group=list(clock="sequencing",levels=FEDERATED_TRANSFER_GLEASON,label="Gleason"),
   trio_group=list(clock="sequencing",levels=FEDERATED_TRANSFER_TRIO,label="TP53/RB1/PTEN"),
   trio_pattern=list(clock="sequencing",
@@ -2189,13 +2190,16 @@ plot_federated_transfer_gradient <- function(tables, model_family, landmark, tit
 
 # Probability of the endpoint by the horizon, 1 - KM event-free, so the interval
 # bounds swap. Low vs high group per stratifier, all on the sequencing clock.
-plot_federated_transfer_horizon_risk <- function(tables, model_family, landmark, endpoint="platinum") {
+plot_federated_transfer_horizon_risk <- function(tables, model_family, landmark, endpoint="platinum",
+                                                  score_stratifier="score_decile") {
+  stopifnot(score_stratifier %in% c("score_decile", "score_extreme"))
+  stratifiers <- c(score_stratifier, "gleason_group", "trio_group")
   d <- federated_transfer_km_pick(tables$gradient,endpoint,model_family,landmark)
-  d <- d[d$stratifier %in% FEDERATED_TRANSFER_RISK_STRATIFIERS,,drop=FALSE]
+  d <- d[d$stratifier %in% stratifiers,,drop=FALSE]
   if(any(d$clock!="sequencing"))
     stop("Transfer horizon probabilities must use sequencing-landmark outcomes for every group.")
   if(!nrow(d)) return(NULL)
-  shown <- FEDERATED_TRANSFER_GRADIENT[FEDERATED_TRANSFER_RISK_STRATIFIERS]
+  shown <- FEDERATED_TRANSFER_GRADIENT[stratifiers]
   expected <- bind_rows(lapply(names(shown),function(stratifier)
     tibble(stratifier=stratifier,group=shown[[stratifier]]$levels)))
   if(anyDuplicated(d[c("stratifier","group")]))
@@ -2208,7 +2212,7 @@ plot_federated_transfer_horizon_risk <- function(tables, model_family, landmark,
   groups <- unlist(lapply(shown,`[[`,"levels"),use.names=FALSE)
   display <- replace(groups,match(FEDERATED_TRANSFER_TRIO,groups),FEDERATED_TRANSFER_TRIO_COUNTS)
   labels <- vapply(shown,`[[`,character(1),"label")
-  labels[["score_decile"]] <- paste(sub("^Federated ","",federated_transfer_model_label(model_family)),"score")
+  labels[[score_stratifier]] <- paste(sub("^Federated ","",federated_transfer_model_label(model_family)),"score")
   d <- mutate(d,tier=if_else(group %in% groups[c(FALSE,TRUE)],"high","low"),
     group=factor(group,levels=groups,labels=display),
     stratifier_label=factor(labels[stratifier],levels=labels),
@@ -2960,9 +2964,9 @@ manuscript_transfer_caption <- function(no_d=FALSE) {
 }
 
 # Federated Figure 5 as drawn: XGBoost only, with the 5-year platinum panel.
-manuscript_transfer_xgboost_caption <- function() {
+manuscript_transfer_xgboost_caption <- function(extreme_percent=10L) {
   settings <- manuscript_transfer_settings()
-  paste(c(
+  caption <- paste(c(
     "Federated Figure 5. External validation at Dana-Farber of a federated XGBoost platinum model trained without Dana-Farber, with time-to-event risk separation and 5-year platinum probability by the transferred score, Gleason score, and tumor suppressor gene status.",
     paste0("An XGBoost survival model trained for platinum treatment on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data was applied unchanged to the Dana-Farber ADT cohort and evaluated against three local endpoints: platinum treatment (the training endpoint), aggressive-variant prostate cancer (AVPC), and neuroendocrine prostate cancer (NEPC). (a) Mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), of the full laboratory model at ",paste(settings$landmarks,collapse=", ")," days after ADT initiation. The horizontal position identifies the landmark; vertical bars denote 95% bootstrap confidence intervals over patients, dotted lines mark 0.5, and column strips give the day-",min(settings$landmarks)," patients and events for each endpoint. ",
       "(b-d) Kaplan-Meier platinum-free (b), AVPC-free (c), and NEPC-free (d) survival from the 180-day landmark after ADT initiation comparing the top and bottom 10% of the transferred XGBoost score; the middle 80% is omitted, shading denotes pointwise 95% confidence intervals, P values are from log-rank tests, and the vertical axes are truncated below 1. ",
@@ -2973,6 +2977,9 @@ manuscript_transfer_xgboost_caption <- function() {
       "Elastic-Net versions, the 0- and 90-day landmarks, score × TP53/RB1/PTEN Kaplan-Meier curves, and head-to-head Kaplan-Meier grids are provided as supplementary figures. ",
       "Patients/events in panel a were 2,267/182 at day 0, 2,233/166 at day 90, and 2,197/158 at day 180 for platinum; 2,237/197, 2,208/181, and 2,165/171 for AVPC; and 2,231/50, 2,212/46, and 2,172/41 for NEPC. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve.")),
     collapse="\n\n")
+  if (extreme_percent == 20L) caption <- gsub("middle 80%", "middle 60%",
+    gsub("10%", "20%", caption, fixed=TRUE), fixed=TRUE)
+  caption
 }
 
 manuscript_checklist_caption <- function() paste(c(
@@ -3056,6 +3063,14 @@ manuscript_captions <- function() {
       "(a) Held-out mean AUC(t) for the full models and both age-only baselines at each landmark. (b) All supplied Elastic-Net coefficients. (c) All supplied XGBoost split gains. Panels b and c include age, body height, observation counts, missingness indicators and zero-valued features when present. Colors identify feature categories.",
       "Models pool four sites. Coefficients are signed log hazard ratios; gains measure split improvement and do not encode direction. Identifier features, if present, are retained for audit; consult the accompanying data legend."),
     federated_05_transfer_no_dfci=manuscript_transfer_xgboost_caption(),
+    federated_05_transfer_no_dfci__top_bottom_20=manuscript_transfer_xgboost_caption(20L),
+    federated_05_transfer_no_dfci__top_bottom_20_all_endpoints=gsub(
+      "\\(e\\) Probability of platinum treatment within 5 years",
+      "(e-g) Probability of platinum treatment, AVPC, and NEPC, respectively, within 5 years",
+      gsub("platinum-free probability", "endpoint-free probability",
+        gsub("among sequenced patients in e;", "among sequenced patients in e-g;",
+          gsub("all groups in e use", "all groups in e-g use",
+            gsub("For e,", "For e-g,", manuscript_transfer_xgboost_caption(20L), fixed=TRUE), fixed=TRUE), fixed=TRUE), fixed=TRUE)),
     federated_05_transfer_no_dfci__no_d=manuscript_transfer_caption(no_d=TRUE),
     federated_05_transfer_no_dfci__mean_landmarks_set1=manuscript_transfer_mean_caption(1L),
     federated_05_transfer_no_dfci__mean_landmarks_set2=manuscript_transfer_mean_caption(2L),
@@ -3524,7 +3539,8 @@ manuscript_federated_multivariable <- function(performance,coefficients,importan
 MANUSCRIPT_TRANSFER_ROW_HEIGHTS <- c(first=2.6,single=3.2,clinical=2.6,km=2.7,gradient=2.6)
 manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
     include=names(FEDERATED_TRANSFER_CLINICAL),key="federated_05_transfer_no_dfci",
-    settings=manuscript_transfer_settings(),model_families=NULL,probability=FALSE) {
+    settings=manuscript_transfer_settings(),model_families=NULL,probability=FALSE, extreme_percent=10L,
+    probability_endpoints=FALSE) {
   metrics <- filter(metrics,landmark_days %in% settings$landmarks)
   if (!is.null(model_families)) metrics <- filter(metrics,model_family %in% model_families)
   if (!is.null(clinical)) clinical <- filter(clinical,landmark_days %in% settings$landmarks)
@@ -3585,21 +3601,25 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
   rows <- lapply(seq_len(n),function(i) rep(i,6L))
   row_heights <- MANUSCRIPT_TRANSFER_ROW_HEIGHTS[c(if(length(model_families)==1L) "single" else "first",
     rep("clinical",n-1L))]
-  extra <- if(is.null(km)) NULL else manuscript_federated_transfer_km(km,first=n+1L,probability=probability)
+  extra <- if(is.null(km)) NULL else manuscript_federated_transfer_km(km,first=n+1L,
+    probability=probability,extreme_percent=extreme_percent,probability_endpoints=probability_endpoints)
   if(!is.null(km) && !length(extra$plots)) message("Federated Figure 5: no KM panels estimable; omitting them")
   k <- length(extra$km)
   if(k) {
     rows <- c(rows,list(n+rep(seq_len(k),each=6L%/%k)))
     row_heights <- c(row_heights,MANUSCRIPT_TRANSFER_ROW_HEIGHTS["km"])
   }
-  if(!is.null(extra$gradient)) {
+  if(length(extra$probability_panels)) {
+    rows <- c(rows,list(n+k+rep(seq_along(extra$probability_panels),each=2L)))
+    row_heights <- c(row_heights,4.0)
+  } else if(!is.null(extra$gradient)) {
     rows <- c(rows,list(rep(n+k+1L,6L)))
     row_heights <- c(row_heights,MANUSCRIPT_TRANSFER_ROW_HEIGHTS["gradient"])
   }
   plots <- c(plots,extra$plots); titles <- c(titles,extra$titles); legend <- c(legend,extra$legend)
   row_heights <- unname(row_heights)
   # 10 in (not the usual 7.2) keeps the one-row b-d legends unclipped; d's is ~8.5 in.
-  spec <- list(key=key,width=10,height=sum(row_heights),layout=do.call(rbind,rows),titles=titles,
+  spec <- list(key=key,width=if(probability_endpoints) 15 else 10,height=sum(row_heights),layout=do.call(rbind,rows),titles=titles,
     row_heights=row_heights,shared_legend_panels=integer())
   list(plot=manuscript_combine(plots,spec),spec=spec,data=metrics,panels=plots,legend=paste(
     c(legend,FEDERATED_TRANSFER_SPEC$source),collapse="\n"))
@@ -3623,7 +3643,11 @@ manuscript_transfer_km_panel <- function(p, endpoint, landmark) {
 # sequenced patients; `gradient`). With probability=TRUE the last panel is instead
 # the platinum probability by score decile, Gleason and any TP53/RB1/PTEN
 # alteration. Panels that are not estimable are dropped.
-manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRANSFER_KM_FIGURE, probability=FALSE) {
+manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRANSFER_KM_FIGURE,
+                                              probability=FALSE, extreme_percent=10L, probability_endpoints=FALSE) {
+  stopifnot(extreme_percent %in% c(10L, 20L))
+  view <- if(extreme_percent == 20L) "score" else "score_decile"
+  stratifier <- if(extreme_percent == 20L) "score_extreme" else "score_decile"
   family <- figure$model_family; landmark <- figure$landmark_days
   model <- c(elastic_net_cox="Elastic-Net",xgboost_cox="XGBoost")[family]
   if(is.na(model)) model <- federated_transfer_model_label(family)
@@ -3636,28 +3660,43 @@ manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRAN
     TRUE
   }
   counts <- function(endpoint) {
-    d <- federated_transfer_km_pick(km$summary,endpoint,family,landmark,"score_decile")
+    d <- federated_transfer_km_pick(km$summary,endpoint,family,landmark,view)
     paste0(paste(sprintf("%s %s/%s",d$stratum,scales::comma(d$n),scales::comma(d$events)),collapse="; "),
       sprintf("; log-rank P = %.2g",d$logrank_p[[1]]))
   }
   short <- FEDERATED_TRANSFER_ENDPOINTS_SHORT
   for(endpoint in names(FEDERATED_TRANSFER_ENDPOINTS)) {
-    p <- manuscript_transfer_km_panel(plot_federated_transfer_km(km,"score_decile",endpoint,family,landmark,title=NULL),
+    p <- manuscript_transfer_km_panel(plot_federated_transfer_km(km,view,endpoint,family,landmark,title=NULL),
       endpoint,landmark)
     add(p,paste0(short[[endpoint]],": score extremes"),paste0(
       sprintf("Kaplan-Meier %s-free survival from the %d-day landmark after ADT initiation, ",
         if(endpoint=="platinum") "platinum" else short[[endpoint]],as.integer(landmark)),
-      sprintf("top vs bottom 10%% of the transferred %s score. Patients/events: ",model),
+      sprintf("top vs bottom %d%% of the transferred %s score. Patients/events: ",extreme_percent,model),
       if(is.null(p)) "" else counts(endpoint),"."))
   }
   n_km <- length(plots)
-  gradient <- if(probability) plot_federated_transfer_horizon_risk(km,family,landmark) else
+  if(probability_endpoints) {
+    for(endpoint in names(FEDERATED_TRANSFER_ENDPOINTS)) {
+      p <- plot_federated_transfer_horizon_risk(km,family,landmark,endpoint,score_stratifier=stratifier)
+      if(is.null(p)) p <- ggplot2::ggplot() + ggplot2::annotate("text",x=0,y=0,label="No data") + ggplot2::theme_void()
+      p <- p + ggplot2::labs(y=paste0(horizon," ",short[[endpoint]],"\nprobability")) +
+        ggplot2::theme(axis.text.x=ggplot2::element_text(angle=45,hjust=1,size=6),
+          strip.text=ggplot2::element_text(size=7))
+      add(p,paste(horizon,short[[endpoint]],"probability"),sprintf(
+        "Kaplan-Meier %s %s probability (1 - event-free; 95%% CI) from %d days after sequencing, by top and bottom %d%% of the transferred %s score, Gleason group, and TP53/RB1/PTEN alteration status; sequenced patients.",
+        horizon,short[[endpoint]],as.integer(landmark),extreme_percent,model))
+    }
+    legend <- c(legend,"Score cutpoints were computed in the Dana-Farber patients at risk for each endpoint at each landmark.")
+    return(list(plots=plots,titles=titles,legend=legend,km=plots[seq_len(n_km)],
+      gradient=NULL,probability_panels=tail(plots,3L)))
+  }
+  gradient <- if(probability) plot_federated_transfer_horizon_risk(km,family,landmark,score_stratifier=stratifier) else
     plot_federated_transfer_gradient(km,family,landmark)
   if(!is.null(gradient)) gradient <- gradient + ggplot2::labs(y=paste0(horizon,
     if(probability) " platinum\nprobability" else " event-free\nprobability"))
   has_gradient <- if(probability) add(gradient,paste(horizon,"platinum probability"),paste0(
     sprintf("Kaplan-Meier %s platinum probability (1 - event-free; 95%% CI) from %d days after the sequencing date, ",horizon,as.integer(landmark)),
-    sprintf("by top vs bottom 10%% of the transferred %s score, Gleason group, and number of TP53/RB1/PTEN genes altered. ",model),
+    sprintf("by top vs bottom %d%% of the transferred %s score, Gleason group, and number of TP53/RB1/PTEN genes altered. ",extreme_percent,model),
     "All use the sequencing clock in sequenced patients. Patients/events: ",
     paste(ifelse(is.na(gradient$data$n),paste(as.character(gradient$data$group),"no patients"),
       sprintf("%s %s/%s",as.character(gradient$data$group),scales::comma(gradient$data$n),
@@ -3669,7 +3708,7 @@ manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRAN
   if(length(plots)) legend <- c(legend,
     "Score cutpoints were computed in the Dana-Farber patients at risk for each endpoint at each landmark.")
   list(plots=plots,titles=titles,legend=legend,km=plots[seq_len(n_km)],
-    gradient=if(has_gradient) plots[[length(plots)]] else NULL)
+    gradient=if(has_gradient) plots[[length(plots)]] else NULL,probability_panels=list())
 }
 
 # Federated Figure 6: the checklist and its accuracy against Gleason and TSG
@@ -3925,6 +3964,12 @@ manuscript_build <- function(items,tables,root) {
     # sequenced-with-Gleason panel (d).
     result[["federated_05"]] <- manuscript_federated_transfer_no_dfci(transfer,NULL,km,include=character(),
       model_families="xgboost_cox",probability=TRUE)
+    if (!is.null(km)) result[["federated_05__top_bottom_20"]] <- manuscript_federated_transfer_no_dfci(
+      transfer,NULL,km,include=character(),key="federated_05_transfer_no_dfci__top_bottom_20",
+      model_families="xgboost_cox",probability=TRUE,extreme_percent=20L)
+    if (!is.null(km)) result[["federated_05__top_bottom_20_all_endpoints"]] <- manuscript_federated_transfer_no_dfci(
+      transfer,NULL,km,include=character(),key="federated_05_transfer_no_dfci__top_bottom_20_all_endpoints",
+      model_families="xgboost_cox",probability=TRUE,extreme_percent=20L,probability_endpoints=TRUE)
     result[["federated_05__no_d"]] <- manuscript_federated_transfer_no_dfci(transfer,clinical,km,
       include=c("gleason","trio"),key="federated_05_transfer_no_dfci__no_d")
     for(set in 1:2) {
@@ -4271,7 +4316,7 @@ render_figure_scene <- function(scene, signature, dpi, pdf = FALSE, overwrite = 
   temporary <- tempfile(".figure-render-", tmpdir = dirname(path), fileext = ".pdf")
   tryCatch({
     ggplot2::ggsave(temporary, grob, width = scene$width, height = scene$height,
-                    bg = "white", device = figure_pdf_device)
+                    bg = "white", device = figure_pdf_device, limitsize = FALSE)
     if (!figure_file_complete(temporary) || !file.rename(temporary, path)) stop("Cannot publish ", path)
     figure_atomic_rds(list(identity = identity, file = figure_file_identity(path)), receipt)
   }, finally = unlink(temporary))
@@ -4615,7 +4660,9 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     render_results <- lapply(tasks, function(task) list(stem = task$scene$stem, rendered = 0L))
     message(sum(completed), " panels already current; ", sum(!completed), " need rendering.")
     render_results[!completed] <- figure_parallel(tasks[!completed], function(task) {
-      result <- render_figure_scene(task$scene, task$signature, dpi, task$pdf, render_overwrite)
+      result <- tryCatch(render_figure_scene(task$scene, task$signature, dpi, task$pdf, render_overwrite),
+        error = function(e) stop(task$scene$stem, " (", task$scene$width, " x ",
+          task$scene$height, " in): ", conditionMessage(e), call. = FALSE))
       message(if (result$rendered) "Saved " else "Reused ", result$stem)
       result
     }, render_workers)

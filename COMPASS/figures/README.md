@@ -295,6 +295,15 @@ checklist, Gleason ≥8 and any TP53/RB1/PTEN alteration, in the same sequenced 
 a Gleason score on the sequencing clock; c-e, platinum/AVPC/NEPC KM curves by checklist
 status from the 180-day landmark on the ADT clock).
 
+`federated_05_transfer_no_dfci__top_bottom_20` is a parallel Figure 5 using the
+bottom and top 20% of the transferred score for both the three KM curves and
+the 5-year platinum probability panel. Cutpoints are calculated separately for
+each endpoint on the ADT clock and for sequenced patients on the sequencing
+clock; the existing 10% version remains available.
+`federated_05_transfer_no_dfci__top_bottom_20_all_endpoints` adds a bottom row
+of 5-year platinum, AVPC, and NEPC probability panels, each comparing the 20%
+score extremes, Gleason groups, and TP53/RB1/PTEN alteration groups.
+
 `federated_s1_feature_set` (caption `federated_figure_s1`) compares the regular models with
 the feature-set refits in `rhino_data_v2/feature_set_models/`, where missingness flags and
 observation counts adjust the fit but cannot enter a score or checklist: a, held-out platinum
