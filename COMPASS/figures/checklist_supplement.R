@@ -79,7 +79,8 @@ plot_checklist_cards <- function(cards, title,
   # Arial is proportional: position table cells explicitly instead of relying
   # on spaces to align numeric columns. Keep the original text in sidecars.
   cards$x <- .03
-  if("metric_model" %in% names(cards)) {
+  # Cards without a metrics table (the guideline checklist) keep their text rows as they are.
+  if("metric_model" %in% names(cards) && any(!is.na(cards$metric_model))) {
     metric_rows <- !is.na(cards$metric_model)
     table <- cards[metric_rows,,drop=FALSE]
     columns <- c(metric_model=.03,metric_auc=.43,metric_brier=.82)
