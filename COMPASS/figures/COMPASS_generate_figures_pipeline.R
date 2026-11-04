@@ -1981,7 +1981,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
         mutate(truth = factor(CLASS_LABELS[as.character(truth)], levels = rev(CLASS_LABELS[CLASS_ORDER])),
                pred  = factor(CLASS_LABELS[as.character(pred)],  levels = CLASS_LABELS[CLASS_ORDER]))
       # Tile color is row-normalized (fraction of each manual-annotation class); labels stay counts.
-      cm <- cm %>% group_by(truth) %>% mutate(row_fraction = if_else(sum(n) > 0, n / sum(n), 0)) %>% ungroup()
+      cm <- cm %>% group_by(truth) %>% mutate(row_fraction = if (sum(n) > 0) n / sum(n) else rep(0, length(n))) %>% ungroup()
       ggplot(cm, aes(pred, truth, fill = row_fraction)) +
         geom_tile(color = "white", linewidth = 1) +
         geom_text(aes(label = format(n, big.mark = ","),
