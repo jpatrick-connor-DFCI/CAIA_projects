@@ -838,7 +838,7 @@ patient subsets with `COHORTS`, and the event(s) with `ENDPOINTS`
    on the local endpoints; needs the `rhino_data_v2/` delivery)
 7. `COMPASS/notebooks/05_prep_figure_data.ipynb` (Polars figure tables; reads step 6's
    transfer outputs)
-8. `Rscript COMPASS/notebooks/run_figure_render.R` (toggle figure groups at the top of the script)
+8. `Rscript COMPASS/notebooks/run_figure_render.R` (figure-group and manuscript-only toggles are in `COMPASS/figures/figure_run.R`; manuscript-only defaults to on for both R preparation and rendering)
 
 The notebooks pass `PROFILE_DATA/*.parquet` paths explicitly to the lower-level scripts. Existing
 hand-curated `LLM_NEPC_labels/` inputs remain under the shared `COMPASS` data root.
@@ -1147,6 +1147,7 @@ subfolder of its section (`03_univariate/federated/`, `04_multivariate/federated
 | `federated_05_transfer_no_dfci__no_d` | Panels a–c only (no KM curves or probability panel); caption `federated_figure5_no_d` |
 | `federated_06_checklist_no_dfci__lm{0,90,180}_h{365,1825}` | Figure 6 for each landmark × horizon, from `checklist_grid/` (notebook 04); copied with the main and supplement figures to `ADT_figures/manuscript_renders/` |
 | `federated_06_checklist_guideline_no_dfci__lm{0,90,180}_h{365,1825}` | Generalized (guideline) version of the grid: same checklists with item thresholds rounded (<1 → nearest 0.25; single digits → whole number; tens → multiple of 5; hundreds → 10; thousands → 100, and so on), from `checklist_grid_guidelines/` (notebook 04); copied to `ADT_figures/manuscript_renders/supplement/generalized_federated_checklist_transfer/` |
+| `S7_full_checklist_transfer` | Paired generalized and direct-transfer checklist bars for full Dana-Farber ADT-cohort horizon-specific IPCW AUC (balanced accuracy for the binary rule), with bootstrap confidence intervals, by endpoint, landmark and horizon. Requires full-cohort accuracy exports for both grids from notebook 04. |
 | `03_cohort_sensitivity_supplement`, `adt_vs_llm__platinum__all__incl` | Copied unchanged to `ADT_figures/manuscript_renders/supplement/`. Figure 1 (`01_cohort_overview`) has panels a-e only. Checklist transfer figures gain a full-DFCI-cohort accuracy panel (b) from `transfer_checklist_full_accuracy*.csv` (rerun notebook 04); older exports fall back to the three-panel layout |
 
 The local Figure 3 (`03_dfci_univariable`) still uses DFCI patient-level data.

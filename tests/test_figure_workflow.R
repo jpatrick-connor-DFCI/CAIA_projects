@@ -139,7 +139,7 @@ local({
   mismatch <- tryCatch(figure_notebook_manifest(modifyList(cfg, list(cohorts = "arpi"))), error = identity)
   stopifnot(inherits(mismatch, "error"), grepl("05_prep_figure_data.ipynb", conditionMessage(mismatch), fixed = TRUE))
   t1 <- system.time(first <- run_cached_figure_workflow(cfg, pipeline_path, "all", dpi = 60,
-    prepare_workers = 1L, render_workers = 2L, forest_config = forest, federated_config = fc))[["elapsed"]]
+    prepare_workers = 1L, render_workers = 2L, forest_config = forest, federated_config = fc, manuscript_only = FALSE))[["elapsed"]]
   retained_exports <- figure_retained_exports(pipeline_path)
   stopifnot(length(first$prepared) == 3L, length(first$rendered) > 20L,
             all(vapply(first$rendered, function(x) x$rendered == 1L, logical(1))))
@@ -171,10 +171,10 @@ local({
     pipeline_path), error = identity)
   stopifnot(inherits(nested_cache, "error"), grepl("non-nested", conditionMessage(nested_cache)))
   t2 <- system.time(second <- run_cached_figure_workflow(cfg, pipeline_path, "all", dpi = 60,
-    forest_config = forest, federated_config = fc))[["elapsed"]]
+    forest_config = forest, federated_config = fc, manuscript_only = FALSE))[["elapsed"]]
   stopifnot(all(vapply(second$rendered, function(x) x$rendered == 0L, logical(1))))
   prepared_only <- run_cached_figure_workflow(cfg, pipeline_path, "prepare", dpi = 60,
-    forest_config = forest, federated_config = fc)
+    forest_config = forest, federated_config = fc, manuscript_only = FALSE)
   stopifnot(length(prepared_only$prepared) == 3L, length(prepared_only$rendered) == 0L)
   # Render-only must not even start Python or read a raw input.
   python <- Sys.getenv("COMPASS_FIGURE_PYTHON", unset = NA)
@@ -182,7 +182,7 @@ local({
   on.exit(if (is.na(python)) Sys.unsetenv("COMPASS_FIGURE_PYTHON") else Sys.setenv(COMPASS_FIGURE_PYTHON = python), add = TRUE)
   file.rename(file.path(root, "longitudinal_prediction_data_adt.csv"), file.path(root, "raw_hidden.csv"))
   third <- run_cached_figure_workflow(cfg, pipeline_path, "render", dpi = 60,
-    forest_config = forest, federated_config = fc)
+    forest_config = forest, federated_config = fc, manuscript_only = FALSE)
   stopifnot(all(vapply(third$rendered, function(x) x$rendered == 0L, logical(1))))
   stale <- tryCatch(figure_notebook_manifest(cfg), error = identity)
   stopifnot(inherits(stale, "error"), grepl("05_prep_figure_data.ipynb", conditionMessage(stale), fixed = TRUE))
@@ -192,6 +192,7 @@ local({
   variables <- c(CAIA_PROJECT_ROOT = normalizePath("."),
     COMPASS_DATA_ROOT = root, COMPASS_FIG_ROOT = cfg$fig_root,
     COMPASS_FIGURE_DATA_ROOT = cfg$cache_root,
+    COMPASS_MANUSCRIPT_ONLY = "false",
     COMPASS_FIGURE_GROUPS = "federated_univariable,federated_multivariable,transfer_survival,transfer_checklists",
     COMPASS_FEDERATED_RESULTS = fed_path)
   previous <- Sys.getenv(names(variables), unset = NA)

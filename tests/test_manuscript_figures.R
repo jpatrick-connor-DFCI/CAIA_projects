@@ -56,11 +56,12 @@ stopifnot(landmark_header$theme$plot.subtitle$face=="bold",
 # embedding project and retain figure-specific audit language.
 captions <- manuscript_captions()
 grid_keys <- paste0("federated_06_checklist_no_dfci__lm",rep(c(0,90,180),each=2),"_h",c(365,1825))
+guideline_keys <- paste0("federated_06_checklist_guideline_no_dfci__lm",rep(c(0,90,180),each=2),"_h",c(365,1825))
 federated_keys <- c("federated_03_univariable","federated_04_multivariable","federated_04_multivariable__full_features",
   "federated_05_transfer_no_dfci__top_bottom_20_all_endpoints","federated_05_transfer_no_dfci__no_d",
-  "federated_06_checklist_no_dfci",grid_keys)
+  "federated_06_checklist_no_dfci","federated_06_checklist_no_dfci__full_transfer",grid_keys,guideline_keys)
 local_keys <- c("01_cohort_overview","02_llm_nepc_avpc__lm0","03_cohort_sensitivity_supplement")
-stopifnot(length(captions)==15,setequal(names(captions),c(local_keys,federated_keys)),
+stopifnot(length(captions)==22,setequal(names(captions),c(local_keys,federated_keys)),
   all(startsWith(unname(captions[local_keys]),paste0("Figure ",c(1,2,3),". "))),
   all(grepl("^Federated Figure ([3-6])[. ]",unname(captions[federated_keys[c(1,2,5,6)]]))),
   setequal(unique(manuscript_base_key(names(captions))),names(MANUSCRIPT_SECTIONS)),
@@ -77,14 +78,16 @@ stopifnot(length(captions)==15,setequal(names(captions),c(local_keys,federated_k
   grepl("4,429/133",captions[["federated_04_multivariable"]],fixed=TRUE))
 caption_root <- tempfile("manuscript-caption-test-")
 caption_paths <- manuscript_write_captions(caption_root)
-stopifnot(length(caption_paths)==30,all(file.exists(caption_paths)))
+stopifnot(length(caption_paths)==44,all(file.exists(caption_paths)))
 # The federated set is numbered on its own; each caption sits in the
 # manuscript folder of its figure's section.
 caption_md <- caption_paths[endsWith(caption_paths,".md")]
 stopifnot(setequal(basename(caption_md),paste0(c("figure1","figure2_lm0","figure3_supplement",
   paste0("federated_figure",c(3,4,6)),"federated_figure4_full_features","federated_figure5_no_d",
   "federated_figure5_top_bottom_20_all_endpoints",
-  paste0("federated_figure6_lm",rep(c(0,90,180),each=2),"_h",c(365,1825))),".md")))
+  "federated_figure6_full_transfer",
+  paste0("federated_figure6_lm",rep(c(0,90,180),each=2),"_h",c(365,1825)),
+  paste0("federated_figure6_guideline_lm",rep(c(0,90,180),each=2),"_h",c(365,1825))),".md")))
 for(path in caption_md) stopifnot(identical(readLines(path,warn=FALSE),
   readLines(sub("[.]md$",".txt",path),warn=FALSE)))
 caption_file <- function(section,name) file.path(caption_root,section,
@@ -535,7 +538,12 @@ stopifnot(length(list.files(file.path(grid_root,FIGURE_SECTIONS[["transfer_check
     manuscript_folder("root","federated_06_checklist_no_dfci")))
 # manuscript_renders/: main, supplement, and one checklist figure per landmark x horizon.
 renders_plan <- manuscript_renders_plan()
-stopifnot(nrow(renders_plan)==5L+1L+2L+2L+6L+6L,!anyDuplicated(renders_plan$target),
+selection_root <- file.path(tempdir(),"ADT_figures")
+stopifnot(figure_selected_export(file.path(selection_root,sub("[.]pdf$","",renders_plan$source[1])),
+    selection_root,renders_plan$source),
+  !figure_selected_export(file.path(selection_root,"01_cohort","unrelated"),selection_root,renders_plan$source),
+  figure_selected_export(file.path(selection_root,"01_cohort","unrelated"),selection_root,NULL))
+stopifnot(nrow(renders_plan)==5L+1L+2L+1L+2L+6L+6L,!anyDuplicated(renders_plan$target),
   setequal(dirname(renders_plan$target),c("main","supplement",file.path("supplement","federated_checklist_transfer"),
     file.path("supplement","generalized_federated_checklist_transfer"))),
   sum(dirname(renders_plan$target)=="main")==5L,
@@ -547,6 +555,7 @@ stopifnot(nrow(renders_plan)==5L+1L+2L+2L+6L+6L,!anyDuplicated(renders_plan$targ
   identical(manuscript_folder("root","federated_06_checklist_guideline_no_dfci__lm0_h365"),
     manuscript_folder("root","federated_06_checklist_no_dfci")),
   "main/federated_05_transfer_no_dfci__top_bottom_20_all_endpoints.pdf" %in% renders_plan$target,
+  "supplement/S7_full_checklist_transfer.pdf" %in% renders_plan$target,
   "supplement/federated_checklist_transfer/federated_06_checklist_no_dfci__lm0_h1825.pdf" %in% renders_plan$target,
   all(renders_plan$source %in% readLines("COMPASS/figures/retained_exports.txt")))
 renders_root <- tempfile("renders-")
@@ -558,6 +567,14 @@ suppressMessages(figure_publish_manuscript_renders(renders_root))
 published <- file.path(renders_root,"ADT_figures",MANUSCRIPT_RENDERS_DIR,renders_plan$target)
 stopifnot(identical(file.exists(published),c(FALSE,rep(TRUE,nrow(renders_plan)-1L))),
   identical(readLines(published[2L]),renders_plan$source[2L]))
+full_grid <- tidyr::expand_grid(endpoint=names(FEDERATED_TRANSFER_ENDPOINTS),
+  landmark_days=c(0L,90L,180L),horizon_days=c(365L,1825L)) %>%
+  mutate(auc=.7,auc_lo=.6,auc_hi=.8)
+full_figure <- manuscript_full_checklist_transfer(full_grid,mutate(full_grid,auc=.65))
+stopifnot(nrow(full_figure$data)==36L,
+  identical(levels(full_figure$data$checklist),c("Generalized","Direct transfer")),
+  nrow(ggplot2::ggplot_build(full_figure$plot)$layout$layout)==6L,
+  is.null(manuscript_full_checklist_transfer(full_grid[-1,],full_grid)))
 # The drawn items must be the rule that assigned the patient groups.
 readr::write_csv(mutate(checklist_patients,flag=1L-flag),file.path(checklist_dir,FEDERATED_CHECKLIST_PATIENTS_FILE))
 flag_error <- tryCatch(write_federated_checklist_tables(checklist_root,"unused",checklist_dir),error=conditionMessage)

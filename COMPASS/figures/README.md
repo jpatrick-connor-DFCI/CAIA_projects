@@ -1,8 +1,8 @@
 # COMPASS figures
 
-Manuscript figures for the ADT cohort, platinum endpoint. Only the PDFs listed in
-`retained_exports.txt` (the curated `Desktop/ADT` export) are rendered; everything
-else in the export tree is archived by a full run.
+Manuscript figures for the ADT cohort, platinum endpoint. By default the R stages
+prepare and render the sources listed in the `manuscript_renders/` publishing plan.
+The full curated set in `retained_exports.txt` is available by disabling the toggle.
 
 ## Running
 
@@ -24,6 +24,19 @@ else in the export tree is archived by a full run.
    COMPASS_FIGURE_GROUPS=transfer_survival,transfer_checklists Rscript COMPASS/notebooks/run_figure_render.R
    ```
 
+   `MANUSCRIPT_ONLY` at the top of `figure_run.R` defaults to `TRUE` for both R
+   scripts. To prepare and render the full curated set, set the same override on
+   both commands:
+
+   ```sh
+   COMPASS_MANUSCRIPT_ONLY=false Rscript COMPASS/notebooks/final_figure_data_prep.R
+   COMPASS_MANUSCRIPT_ONLY=false Rscript COMPASS/notebooks/run_figure_render.R
+   ```
+
+   The two modes use separate R scene caches; prepare the selected mode before
+   rendering it. Manuscript-only prep still computes the source panels and tables
+   needed by composites, but saves and renders only their selected PDF sources.
+
 The R code never calls Python. Missing or changed prepared inputs stop with a
 message to rerun notebook 05.
 
@@ -43,7 +56,7 @@ message to rerun notebook 05.
 (`adt__platinum`, `cohort_overview`, `federated`) and export prefix; only the jobs
 an enabled group needs are prepared. When every enabled group is federated-only,
 the run needs no patient-level data. Archiving retired exports and flattening the
-tree happen only when all groups are enabled.
+tree happen only when all groups are enabled and manuscript-only mode is off.
 
 ## Stages
 
@@ -69,6 +82,7 @@ stay under `COMPASS_FIGURE_DATA_ROOT`. Outputs are PDF only.
 | `COMPASS_FEDERATED_RESULTS`, `COMPASS_FEDERATED_TRANSFER_NO_DFCI`, `COMPASS_FEDERATED_FIGURE_DATA` | paths under `COMPASS_RHINO_ROOT`; set the same values for notebook 05 |
 | `COMPASS_RENDER_PROFILE` | `fast` (200 dpi rasters); `publication` uses 600 dpi |
 | `COMPASS_RENDER_OVERWRITE`, `COMPASS_PREPARE_OVERWRITE` | `false` |
+| `COMPASS_MANUSCRIPT_ONLY` | `true`; set `false` for the full curated set |
 | `COMPASS_RENDER_WORKERS`, `COMPASS_PREPARE_WORKERS` | `2`, `4` |
 | `CAIA_PROJECT_ROOT` | used to locate the code when the script path cannot be inferred |
 

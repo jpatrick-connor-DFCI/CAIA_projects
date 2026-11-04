@@ -433,6 +433,8 @@ manuscript_renders_plan <- function() {
       target=file.path("supplement","checklist_supplement__platinum.pdf")),
     data.frame(source=vapply(keys$supplement,manuscript,character(1)),
       target=file.path("supplement",paste0(keys$supplement,".pdf"))),
+    data.frame(source=manuscript("federated_06_checklist_no_dfci__full_transfer"),
+      target=file.path("supplement","S7_full_checklist_transfer.pdf")),
     data.frame(source=vapply(grid,manuscript,character(1)),
       target=file.path("supplement","federated_checklist_transfer",paste0(grid,".pdf"))),
     # Cohort sensitivity: the compiled supplement page and the ADT-vs-LLM comparison.
@@ -2651,6 +2653,10 @@ manuscript_captions <- function() {
     federated_05_transfer_no_dfci__no_d=manuscript_transfer_caption(no_d=TRUE,km_panels=FALSE),
     federated_06_checklist_no_dfci=sub("^Generalized federated checklist transfer supplement\\.","Federated Figure 6.",
       manuscript_guideline_caption(federated_checklist_cell(90L,1825L))),
+    federated_06_checklist_no_dfci__full_transfer=caption(
+      "Supplementary Figure 7. Full-cohort checklist transfer accuracy.",
+      "Paired bars compare generalized checklists with rounded thresholds and direct-transfer checklists with original thresholds in the full Dana-Farber ADT cohort, without a sequencing or Gleason-score restriction. Rows show platinum treatment, AVPC and NEPC; columns show the 1-year and 5-year prediction horizons. Landmarks are measured from ADT initiation.",
+      "Bars show horizon-specific inverse-probability-of-censoring-weighted AUC, equal to balanced accuracy for a binary rule; error bars denote 95% patient-bootstrap confidence intervals. The dotted line marks 0.5."),
     grid_captions,
     guideline_captions
   )
@@ -2669,6 +2675,8 @@ manuscript_write_captions <- function(root,keys=names(manuscript_captions()),cap
     # The cohort sensitivity supplement shares Figure 3's number in its own folder.
     # Other variants keep their existing numbered captions.
     name <- if(key=="03_cohort_sensitivity_supplement") "figure3_supplement" else
+      if(startsWith(key,"federated_06_checklist_guideline_no_dfci__"))
+        paste0("federated_figure6_guideline_",sub("^.*__","",key)) else
       paste0(if(startsWith(key,"federated_")) "federated_figure" else "figure",
         as.integer(sub("^(federated_)?0*([0-9]+)_.*$","\\2",key)),
         if(grepl("__",key,fixed=TRUE)) paste0("_",sub("^.*?__","",key,perl=TRUE)))
@@ -3259,6 +3267,47 @@ manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRAN
 
 # Federated Figure 6: the checklist and its accuracy against Gleason and TSG
 # status above KM curves by checklist status for platinum, AVPC and NEPC.
+manuscript_full_checklist_transfer <- function(direct, generalized) {
+  required <- c("endpoint","landmark_days","horizon_days","auc","auc_lo","auc_hi")
+  prepare <- function(d, label) {
+    if(!all(required %in% names(d))) stop("Full checklist accuracy is missing required columns")
+    d <- dplyr::filter(d,endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS),
+      landmark_days %in% FEDERATED_CHECKLIST_GRID$landmark_days,
+      horizon_days %in% FEDERATED_CHECKLIST_GRID$horizon_days)
+    if(anyDuplicated(d[c("endpoint","landmark_days","horizon_days")]))
+      stop("Duplicate full checklist accuracy estimates for ",label)
+    d$checklist <- label
+    d
+  }
+  d <- dplyr::bind_rows(prepare(direct,"Direct transfer"),prepare(generalized,"Generalized"))
+  expected <- nrow(FEDERATED_CHECKLIST_GRID)*length(FEDERATED_TRANSFER_ENDPOINTS)*2L
+  if(nrow(d)!=expected) {
+    message("Skipping S7 full checklist transfer: incomplete full-cohort accuracy grid")
+    return(NULL)
+  }
+  d$endpoint <- factor(d$endpoint,levels=names(FEDERATED_TRANSFER_ENDPOINTS),labels=unname(FEDERATED_TRANSFER_ENDPOINTS))
+  d$horizon <- factor(d$horizon_days,levels=c(365,1825),labels=c("1-year checklist","5-year checklist"))
+  d$landmark <- factor(d$landmark_days,levels=c(0,90,180),labels=c("+0 days","+90 days","+180 days"))
+  d$checklist <- factor(d$checklist,levels=c("Generalized","Direct transfer"))
+  dodge <- ggplot2::position_dodge(width=.8)
+  p <- ggplot2::ggplot(d,ggplot2::aes(x=landmark,y=auc,fill=checklist)) +
+    ggplot2::geom_hline(yintercept=.5,linetype="dotted",color="grey65") +
+    ggplot2::geom_col(position=dodge,width=.72,na.rm=TRUE) +
+    ggplot2::geom_errorbar(ggplot2::aes(ymin=auc_lo,ymax=auc_hi),position=dodge,width=.18,na.rm=TRUE) +
+    ggplot2::facet_grid(endpoint~horizon) +
+    ggplot2::scale_fill_manual(values=c("Generalized"="#7852A1","Direct transfer"="#B6A2CC"),drop=FALSE) +
+    ggplot2::scale_y_continuous(limits=c(0,1),breaks=seq(0,1,.25),expand=ggplot2::expansion(mult=c(0,.02))) +
+    ggplot2::labs(x="Landmark after ADT start",y="Horizon-specific AUC(t)",fill="Checklist") +
+    ggplot2::theme_classic(base_size=10) +
+    ggplot2::theme(legend.position="top",strip.background=ggplot2::element_blank(),
+      strip.text=ggplot2::element_text(face="bold"),panel.spacing=grid::unit(.8,"lines"))
+  list(plot=p,spec=list(key="federated_06_checklist_no_dfci__full_transfer",width=10,height=7),data=d,
+    legend=paste("Full Dana-Farber ADT cohort, without a sequencing or Gleason-score restriction.",
+      "Bars show horizon-specific inverse-probability-of-censoring-weighted AUC (balanced accuracy for a binary checklist);",
+      "error bars show 95% patient-bootstrap confidence intervals. Generalized checklists use rounded thresholds;",
+      "direct-transfer checklists use the original thresholds. Landmarks are measured from ADT initiation."))
+}
+
 manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no_dfci",f=FEDERATED_CHECKLIST_FIGURE,
                                            guideline=FALSE) {
   landmark <- as.integer(f$landmark_days)
@@ -3474,8 +3523,11 @@ manuscript_build <- function(items,tables,root) {
       result[["federated_06"]] <- manuscript_federated_checklist(checklist)
     }
     else message("Skipping federated manuscript Figure 6: missing checklist tables")
+    full_direct <- list(); full_generalized <- list()
     for(i in seq_len(nrow(FEDERATED_CHECKLIST_GRID))) {
       f <- federated_checklist_cell(FEDERATED_CHECKLIST_GRID$landmark_days[i],FEDERATED_CHECKLIST_GRID$horizon_days[i])
+      full_direct[i] <- list(read(paste0("^",FEDERATED_CHECKLIST_FULL_STEM,federated_checklist_cell_suffix(f),"__platinum[.]csv$")))
+      full_generalized[i] <- list(read(paste0("^",FEDERATED_GUIDELINE_FULL_STEM,federated_checklist_cell_suffix(f),"__platinum[.]csv$")))
       grid <- lapply(FEDERATED_CHECKLIST_TABLES,function(stem)
         read(paste0("^",stem,federated_checklist_cell_suffix(f),"__platinum[.]csv$")))
       if(all(!vapply(grid,is.null,logical(1)))) {
@@ -3498,6 +3550,10 @@ manuscript_build <- function(items,tables,root) {
       } else message("Skipping generalized federated checklist transfer landmark ",f$landmark_days,", horizon ",
         f$horizon_days,": missing tables")
     }
+    if(all(!vapply(full_direct,is.null,logical(1))) && all(!vapply(full_generalized,is.null,logical(1))))
+      result[["federated_06__full_transfer"]] <- manuscript_full_checklist_transfer(
+        dplyr::bind_rows(full_direct),dplyr::bind_rows(full_generalized))
+    else message("Skipping S7 full checklist transfer: missing full-cohort accuracy tables")
   }
   result
 }
@@ -3553,16 +3609,25 @@ figure_scene_manifest <- function(directory, signature) {
   }, error = function(e) NULL)
 }
 
+figure_selected_export <- function(destination, manuscript_root, selected_exports) {
+  if (is.null(selected_exports)) return(TRUE)
+  destination <- figure_public_path(destination)
+  !is.null(manuscript_root) && startsWith(destination,paste0(manuscript_root,"/")) &&
+    paste0(substring(destination,nchar(manuscript_root)+2L),".pdf") %in% selected_exports
+}
+
 prepare_figure_scenes <- function(directory, signature, build, force = FALSE, manuscript_root = NULL,
-                                  include_internal = TRUE) {
+                                  include_internal = TRUE, selected_exports = NULL) {
   m <- if (!force) figure_scene_manifest(directory, signature) else NULL
   if (!is.null(m)) { message("Reused prepared figures: ", basename(dirname(directory))); return(m) }
   dir.create(directory, recursive = TRUE, showWarnings = FALSE)
   generation <- tempfile("generation-", tmpdir = directory)
   dir.create(generation)
   scenes <- list(); tables <- character(); bundles <- list(); manuscript_items <- list()
+  figure_selected <- function(destination) figure_selected_export(destination,manuscript_root,selected_exports)
   publish <- function(plot, destination, width, height, stem, title = NULL, landmarks = "", manuscript = FALSE) {
     if (!include_internal && figure_internal_path(figure_public_path(destination))) return(invisible(NULL))
+    if (!figure_selected(destination)) return(invisible(NULL))
     path <- file.path(generation, sprintf("panel-%04d.rds", length(scenes) + 1L))
     if(is.null(title)) title <- if(inherits(plot,"ggplot") && length(plot$labels$title))
       paste(plot$labels$title,collapse=" ") else gsub("_"," ",stem)
@@ -3654,7 +3719,6 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
          all(vapply(selected,`[[`,character(1),"stem") %in% manuscript_members)) next
       # Variable-length bundles size their height to the rows actually used.
       if(!is.null(spec[["page_row_height"]])) spec$height <- spec[["page_row_height"]]*ceiling(length(selected)/spec$cols)
-      compiled <- figure_combine(selected,spec,generation)
       destination <- figure_public_path(selected[[1]]$destination)
       identity <- basename(selected[[1]]$destination)
       key <- paste0(spec$key,if(length(pages)>1) paste0("_page",page))
@@ -3664,6 +3728,8 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
       # Multi-lab pages sit beside, not inside, the per-lab km/ and trajectories/ folders.
       if(isTRUE(spec$multi_lab)) folder <- sub("/(km|trajectories)/[^/]+$","",folder)
       destination <- file.path(folder,paste0(key,"__",identity))
+      if (!figure_selected(destination)) next
+      compiled <- figure_combine(selected,spec,generation)
       landmarks <- unique(unlist(lapply(selected,function(x) if(grepl("landmark[0-9]+",x$stem))
         sub("^.*landmark([0-9]+).*$","\\1",x$stem) else character())))
       if(!length(landmarks)) landmarks <- unique(unlist(lapply(selected,function(x) {
@@ -3680,6 +3746,8 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
     manuscripts <- manuscript_build(manuscript_items,tables,manuscript_root)
     if (!include_internal) manuscripts <- Filter(function(item)
       !figure_internal_path(manuscript_folder(manuscript_root,item$spec$key)), manuscripts)
+    manuscripts <- Filter(function(item) figure_selected(file.path(manuscript_folder(manuscript_root,item$spec$key),
+      item$spec$key)), manuscripts)
     for(item in manuscripts) {
       destination <- file.path(manuscript_folder(manuscript_root,item$spec$key),item$spec$key)
       dir.create(dirname(destination),recursive=TRUE,showWarnings=FALSE)
@@ -3958,7 +4026,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     prepare_workers = 1L, render_workers = 2L, dpi = 200, pdf = FALSE,
     prepare_overwrite = FALSE, render_overwrite = FALSE,
     metastatic_config = NULL, forest_config = NULL, federated_config = NULL,
-    groups = names(FIGURE_GROUPS)) {
+    groups = names(FIGURE_GROUPS), manuscript_only = TRUE) {
   stage <- match.arg(stage, c("all", "prepare", "render"))
   unknown <- setdiff(groups, names(FIGURE_GROUPS))
   if (length(unknown)) stop("Unknown figure group(s): ", paste(unknown, collapse = ", "))
@@ -3969,13 +4037,14 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
   for (name in c("data_root", "cache_root", "fig_root"))
     config[[name]] <- figure_absolute_path(config[[name]])
   retained_exports <- figure_retained_exports(pipeline_path)
+  selected_exports <- if (isTRUE(manuscript_only)) manuscript_renders_plan()$source else retained_exports
   if (identical(config$cache_root, config$fig_root) ||
       startsWith(config$cache_root, paste0(config$fig_root, "/")) ||
       startsWith(config$fig_root, paste0(config$cache_root, "/")))
     stop("COMPASS_FIGURE_DATA_ROOT and COMPASS_FIG_ROOT must be separate, non-nested directories; keep caches in data.")
   dir.create(config$cache_root, recursive = TRUE, showWarnings = FALSE)
   manifest <- figure_notebook_manifest(config, check_sources = stage != "render")
-  if (all_groups) {
+  if (all_groups && !isTRUE(manuscript_only)) {
     figure_archive_legacy_receipts(config$fig_root, config$cache_root)
     figure_flatten_export_layout(config$fig_root)
   }
@@ -3985,7 +4054,8 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     c("ggplot2", "survival", "survminer", "mgcv", "dplyr", "tidyr", "readr", "ggrepel", "scales", "stringr"),
     function(x) as.character(utils::packageVersion(x)), character(1)),
     code = unname(tools::md5sum(list.files(dirname(pipeline_path), pattern = "\\.R$", full.names = TRUE))),
-    fig_root = config$fig_root, combined_km_landmark = figure_overview_km_landmark(),
+    fig_root = config$fig_root, manuscript_only = manuscript_only, selected_exports = selected_exports,
+    combined_km_landmark = figure_overview_km_landmark(),
     transfer_display = manuscript_transfer_settings(), typography = FIGURE_TYPOGRAPHY,
     resolved_font = FIGURE_FONT)
   jobs <- list()
@@ -4054,7 +4124,8 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     }
     prepare_figure_scenes(job$directory, job$signature, build, force = prepare_overwrite,
       manuscript_root=if(job$name %in% c("adt__platinum","cohort_overview","federated"))
-        figure_arm_root(config$fig_root,"ADT") else NULL, include_internal=FALSE)
+        figure_arm_root(config$fig_root,"ADT") else NULL, include_internal=FALSE,
+      selected_exports=if (isTRUE(manuscript_only)) selected_exports else NULL)
   }
   # Only pending jobs warm tables. A resumed all-mode run reads no patient
   # Parquet at all when every scene snapshot is current.
@@ -4085,7 +4156,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     adt_root <- paste0(figure_arm_root(config$fig_root, "ADT"), "/")
     tasks <- Filter(function(task) {
       destination <- task$scene$destination
-      figure_retained_image(destination, config$fig_root, ".pdf", retained_exports) &&
+      figure_retained_image(destination, config$fig_root, ".pdf", selected_exports) &&
         any(startsWith(substring(destination, nchar(adt_root) + 1L), prefixes))
     }, tasks)
     tasks <- lapply(tasks, function(task) { task$pdf <- FALSE; task })
@@ -4106,8 +4177,8 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
   message(sprintf("Figure workflow finished in %.1fs (%s).", proc.time()[["elapsed"]] - started, stage))
   if (length(failures)) stop("Figure workflow failures:\n", paste(failures, collapse = "\n"))
   if(stage != "prepare") {
-    figure_archive_retired_transfer_checklists(config,prepared)
-    if (all_groups) figure_archive_old_exports(config,prepared)
+    if (!isTRUE(manuscript_only)) figure_archive_retired_transfer_checklists(config,prepared)
+    if (all_groups && !isTRUE(manuscript_only)) figure_archive_old_exports(config,prepared)
     figure_write_catalog(config,prepared)
     figure_publish_manuscript_renders(config$fig_root)
   }
