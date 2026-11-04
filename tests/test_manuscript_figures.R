@@ -171,14 +171,13 @@ stopifnot(dfci_combined$spec$key=="03_cohort_sensitivity_supplement",
   setequal(unique(dfci_combined$data$figure_section),
     c("incidence_and_counts","laboratory_associations")))
 
-# The cohort-sensitivity forest labels the transformed horizontal coordinate directly as ln(HR),
-# retaining the same estimates and null position as the HR-scale source plot.
+# The cohort-sensitivity forest shows hazard ratios on a log10 axis (null at 1), labeled with the ratios.
 log_axis_source <- ggplot(tibble(hazard_ratio_per_sd=c(.7,1.2),ci_lower=c(.6,1.0),
   ci_upper=c(.9,1.4),cohort=c("a","b")),aes(hazard_ratio_per_sd,cohort)) + geom_point()
 log_axis_plot <- manuscript_log_hazard_axis(log_axis_source)
 log_axis_scale <- log_axis_plot$scales$get_scales("x")
-stopifnot(log_axis_plot$labels$x=="Log hazard ratio per SD (95% CI)",
-  any(abs(log(log_axis_scale$breaks))<sqrt(.Machine$double.eps)))
+stopifnot(log_axis_plot$labels$x=="Hazard ratio per SD (95% CI; log scale)",
+  any(abs(log_axis_scale$breaks-1)<sqrt(.Machine$double.eps)))
 
 # Federated Figure 4 from the captured federated CSVs. A flagged
 # identifier remains in the supplied importance input and audit note.
@@ -496,7 +495,7 @@ fig6 <- manuscript_federated_checklist(lapply(checklist_data,readr::read_csv,sho
 fig6_card <- federated_checklist_card_lines(checklist_tables$items,checklist_tables$metrics)
 stopifnot(fig6$spec$key=="federated_06_checklist_no_dfci",inherits(fig6$plot,"gtable"),
   length(fig6$spec$titles)==5,
-  identical(fig6$spec$layout[1,],rep(1:2,each=3L)),identical(fig6$spec$layout[2,],rep(3:5,each=2L)),
+  identical(fig6$spec$layout[1,],c(1,1,2,2,2,2)),identical(fig6$spec$layout[2,],rep(3:5,each=2L)),
   length(fig6$spec$row_heights)==2,fig6$spec$row_heights[2]==MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["km"]],
   grepl("1-year platinum",fig6$legend,fixed=TRUE),grepl("1-year IPCW AUC",fig6$legend,fixed=TRUE),
   any(grepl("Flag when at least 2 of 5 items",fig6_card$text,fixed=TRUE)),

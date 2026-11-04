@@ -1503,6 +1503,20 @@ plot_federated_transfer <- function(d, caption, title=FEDERATED_TRANSFER_SPEC$ti
     federated_transfer_theme()
 }
 
+# One model's discrimination as bars with 95% bootstrap CIs: landmarks on x, one facet per endpoint.
+plot_federated_transfer_bars <- function(d, ymax=1) {
+  d <- droplevels(d)
+  fill <- unname(federated_transfer_colors(levels(d$model))[as.character(d$model[1L])])
+  ggplot(d,aes(landmark,value)) +
+    geom_col(fill=fill,width=.65,na.rm=TRUE) +
+    geom_errorbar(aes(ymin=lo,ymax=hi),width=.22,linewidth=.5,na.rm=TRUE) +
+    geom_hline(yintercept=.5,color="grey40",linetype="dotted",linewidth=.5) +
+    scale_y_continuous(limits=c(0,ymax),breaks=seq(0,1,.25),expand=expansion(mult=c(0,0))) +
+    facet_grid(.~endpoint_label) +
+    labs(x="Landmark after ADT initiation",y="Mean AUC(t)") +
+    federated_transfer_theme() + theme(legend.position="none")
+}
+
 plot_federated_transfer_clinical <- function(d, caption, title=NULL, subtitle=NULL) {
   references <- tibble(metric=factor(levels(d$metric),levels=levels(d$metric)),reference=.5)
   series <- levels(d$series)
@@ -2160,39 +2174,24 @@ federated_checklist_card_lines <- function(items, metrics, f=FEDERATED_CHECKLIST
   lines
 }
 
-# Each yes/no rule's horizon AUC (its IPCW balanced accuracy) per endpoint.
+# Each yes/no rule's horizon AUC (its IPCW balanced accuracy) as bars with 95% CIs: rule on x, one group per endpoint.
 plot_federated_checklist_comparison <- function(comparison, f=FEDERATED_CHECKLIST_FIGURE) {
   order <- names(FEDERATED_TRANSFER_ENDPOINTS)
   strips <- comparison %>% distinct(endpoint,n_patients,n_events) %>% arrange(match(endpoint,order))
-  labels <- setNames(sprintf("%s\nn = %s\n%s events",FEDERATED_TRANSFER_ENDPOINTS_SHORT[strips$endpoint],
+  labels <- setNames(sprintf("%s\nn = %s, %s events",FEDERATED_TRANSFER_ENDPOINTS_SHORT[strips$endpoint],
     scales::comma(strips$n_patients),scales::comma(strips$n_events)),strips$endpoint)
-  limits <- range(c(.5,comparison$auc_lo,comparison$auc_hi),na.rm=TRUE)
-  limits <- c(max(0,floor(limits[1]*20)/20),min(1,ceiling(limits[2]*20)/20))
   d <- mutate(comparison,endpoint_label=factor(labels[endpoint],levels=labels),
-    rule_label=factor(FEDERATED_CHECKLIST_RULES[rule],levels=rev(FEDERATED_CHECKLIST_RULES)))
-  ggplot(d,aes(rule_label,auc,color=rule==FEDERATED_CHECKLIST_RULE)) +
-    geom_hline(yintercept=.5,color="grey65",linetype="dotted",linewidth=.5) +
-    geom_linerange(aes(ymin=auc_lo,ymax=auc_hi),linewidth=.5,na.rm=TRUE) +
-    geom_point(size=2,na.rm=TRUE) +
-    scale_color_manual(values=c(`TRUE`=FEDERATED_CHECKLIST_COLORS[["Checklist"]],`FALSE`="#52514e"),guide="none") +
-    facet_grid(.~endpoint_label) + coord_flip(ylim=limits) +
+    rule_label=factor(FEDERATED_CHECKLIST_RULES[rule],levels=FEDERATED_CHECKLIST_RULES))
+  ggplot(d,aes(rule_label,auc,fill=rule==FEDERATED_CHECKLIST_RULE)) +
+    geom_col(width=.65,na.rm=TRUE) +
+    geom_errorbar(aes(ymin=auc_lo,ymax=auc_hi),width=.22,linewidth=.5,na.rm=TRUE) +
+    geom_hline(yintercept=.5,color="grey40",linetype="dotted",linewidth=.5) +
+    scale_fill_manual(values=c(`TRUE`=FEDERATED_CHECKLIST_COLORS[["Checklist"]],`FALSE`="#9a9a96"),guide="none") +
+    scale_y_continuous(limits=c(0,1),breaks=seq(0,1,.25),expand=expansion(mult=c(0,.02))) +
+    facet_grid(.~endpoint_label) +
     labs(x=NULL,y=paste(federated_transfer_horizon_label(f$horizon_days),"AUC")) +
     federated_transfer_theme() +
-    theme(panel.grid.major.y=element_line(color="#eeeeee",linewidth=.3))
-}
-
-# Simple bar plot of the checklist's mean AUC(t) at the horizon: one bar per event.
-plot_federated_checklist_full_bars <- function(full, f=FEDERATED_CHECKLIST_FIGURE) {
-  order <- names(FEDERATED_TRANSFER_ENDPOINTS)
-  d <- full %>% arrange(match(endpoint,order)) %>%
-    mutate(label=factor(FEDERATED_TRANSFER_ENDPOINTS_SHORT[endpoint],levels=FEDERATED_TRANSFER_ENDPOINTS_SHORT[order]))
-  ggplot(d,aes(label,auc)) +
-    geom_col(fill=FEDERATED_CHECKLIST_COLORS[["Checklist"]],width=.6) +
-    geom_hline(yintercept=.5,color="grey40",linetype="dotted",linewidth=.5) +
-    geom_text(aes(label=sprintf("%.2f",auc)),vjust=-.4,size=2.8) +
-    scale_y_continuous(limits=c(0,1),breaks=seq(0,1,.25),expand=expansion(mult=c(0,.02))) +
-    labs(x=NULL,y=paste0("Mean AUC(t), ",federated_transfer_horizon_label(f$horizon_days))) +
-    federated_transfer_theme()
+    theme(axis.text.x=element_text(angle=30,hjust=1))
 }
 
 # Aggregate KM curves and binned trajectories exported by the federated run
@@ -2492,11 +2491,11 @@ manuscript_specs <- function() {
     # Federated Figure 3: the local Figure 3 layout drawn from pooled federated results.
     spec("federated_03_univariable", c(paste0("fed3_volcano_landmark",c(0,90,180)),
       "fed3_trajectory_psa",paste0("fed3_km_quintile_psa_landmark",manuscript_dfci_km_landmark),
-      "fed3_trajectory_testosterone",paste0("fed3_km_quintile_testosterone_landmark",manuscript_dfci_km_landmark)), 9.7,
+      "fed3_trajectory_testosterone",paste0("fed3_km_quintile_testosterone_landmark",manuscript_dfci_km_landmark)), 11.5,
       rbind(c(1,1,2,2,3,3),rep(8,6),c(4,4,4,5,5,5),c(6,6,6,7,7,7)),
       c("Day 0","Day 90","Day 180","PSA trajectory","PSA: extreme deciles",
         "Testosterone trajectory","Testosterone: extreme deciles"),
-      row_heights=c(1.5,.32,1.4,1.4), shared_legend_panels=1:3, width=10)))
+      row_heights=c(1.5,.32,1.9,1.9), shared_legend_panels=1:3, width=10)))
 }
 
 # Keys sharing the Figure 3 layout and restyling (manuscript_univariable_restyle).
@@ -2552,7 +2551,7 @@ manuscript_transfer_xgboost_caption <- function(extreme_percent=10L) {
   settings <- manuscript_transfer_settings()
   caption <- paste(c(
     "Federated Figure 5. External validation at Dana-Farber of a federated XGBoost platinum model trained without Dana-Farber, with time-to-event risk separation and 5-year platinum probability by the transferred score, Gleason score, and tumor suppressor gene status.",
-    paste0("An XGBoost survival model trained for platinum treatment on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data was applied unchanged to the Dana-Farber ADT cohort and evaluated against three local endpoints: platinum treatment (the training endpoint), aggressive-variant prostate cancer (AVPC), and neuroendocrine prostate cancer (NEPC). (a) Mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), of the full laboratory model at ",paste(settings$landmarks,collapse=", ")," days after ADT initiation. The horizontal position identifies the landmark; vertical bars denote 95% bootstrap confidence intervals over patients, dotted lines mark 0.5, and column strips give the day-",min(settings$landmarks)," patients and events for each endpoint. ",
+    paste0("An XGBoost survival model trained for platinum treatment on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data was applied unchanged to the Dana-Farber ADT cohort and evaluated against three local endpoints: platinum treatment (the training endpoint), aggressive-variant prostate cancer (AVPC), and neuroendocrine prostate cancer (NEPC). (a) Mean time-dependent area under the receiver-operating-characteristic curve, AUC(t), of the full laboratory model at ",paste(settings$landmarks,collapse=", ")," days after ADT initiation. Bars show AUC(t) at each landmark; error bars denote 95% bootstrap confidence intervals over patients, dotted lines mark 0.5, and column strips give the day-",min(settings$landmarks)," patients and events for each endpoint. ",
       "(b-d) Kaplan-Meier platinum-free (b), AVPC-free (c), and NEPC-free (d) survival from the 180-day landmark after ADT initiation comparing the top and bottom 10% of the transferred XGBoost score; the middle 80% is omitted, shading denotes pointwise 95% confidence intervals, P values are from log-rank tests, and the vertical axes are truncated below 1. ",
       "(e) Probability of platinum treatment within 5 years (1 minus the Kaplan-Meier platinum-free probability, with 95% confidence intervals) from 180 days after the sequencing date in sequenced patients, by the top and bottom 10% of the transferred XGBoost score, Gleason group (≤7 vs. ≥8), and tumor suppressor gene status (no alteration vs. any mutation, deletion, amplification, or structural variant in TP53, RB1, or PTEN). Groups without an estimable probability or patients are labeled accordingly."),
     paste0("No Dana-Farber patient contributed to federated model training, so every endpoint, including platinum, is out of sample. Mean AUC(t) is the inverse-probability-of-censoring-weighted cumulative/dynamic AUC averaged over 1, 2, 3, and 5 years after the landmark, with censoring estimated in the evaluated Dana-Farber patients; horizons without an observed event or later follow-up were omitted. ",
@@ -2595,11 +2594,10 @@ manuscript_guideline_caption <- function(f=FEDERATED_CHECKLIST_FIGURE) {
 manuscript_checklist_caption_text <- function() paste(c(
   "Federated Figure 6. A federated 1-year platinum checklist from 180 days after ADT initiation, trained without Dana-Farber and validated at Dana-Farber.",
   paste0("(a) Items and threshold of a unit-weight M-of-N predictive checklist (feature-set refit: missingness indicators and observation counts adjusted the fit but cannot be items) trained for 1-year platinum treatment from the 180-day landmark on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data; patients are checklist positive when at least M of the N items are checked. ",
-    "(b) Accuracy of the checklist at Dana-Farber for platinum treatment, aggressive-variant prostate cancer (AVPC), and neuroendocrine prostate cancer (NEPC) within 1 year in all patients of the ADT cohort with the checklist's laboratory data, scored from 180 days after ADT initiation; the inverse-probability-of-censoring-weighted AUC at 1 year equals balanced accuracy for a yes/no rule, and bars denote 95% bootstrap confidence intervals over patients. ",
-    "(c) Accuracy at Dana-Farber of three yes/no rules for platinum treatment, aggressive-variant prostate cancer (AVPC), and neuroendocrine prostate cancer (NEPC) within 1 year: checklist positive, Gleason ≥8, and any alteration in a tumor suppressor gene (TSG; mutation, deletion, amplification, or structural variant in TP53, RB1, or PTEN). Accuracy is the inverse-probability-of-censoring-weighted AUC at 1 year, which for a yes/no rule equals balanced accuracy. All three rules are evaluated on the same sequenced patients with a Gleason score, from 180 days after the sequencing date; bars denote 95% bootstrap confidence intervals over patients, dotted lines mark 0.5, and column strips give patients and events. ",
-    "(d-f) Kaplan-Meier platinum-free (d), AVPC-free (e), and NEPC-free (f) survival at Dana-Farber from the 180-day landmark after ADT initiation by checklist status; shading denotes pointwise 95% confidence intervals, P values are from log-rank tests, and the vertical axes are truncated below 1."),
-  paste0("No Dana-Farber patient contributed to checklist training, so every endpoint, including platinum, is out of sample. The checklist and its threshold were applied unchanged. Panels b and d-f use the ADT-initiation clock. ",
-    "For c, the checklist was rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation, and Gleason scores were used only if available before the landmark. ",
+    "(b) Accuracy at Dana-Farber of three yes/no rules for platinum treatment, aggressive-variant prostate cancer (AVPC), and neuroendocrine prostate cancer (NEPC) within 1 year: checklist positive, Gleason ≥8, and any alteration in a tumor suppressor gene (TSG; mutation, deletion, amplification, or structural variant in TP53, RB1, or PTEN). Accuracy is the inverse-probability-of-censoring-weighted AUC at 1 year, which for a yes/no rule equals balanced accuracy. All three rules are evaluated on the same sequenced patients with a Gleason score, from 180 days after the sequencing date. Bars show accuracy grouped by predicted event, with the rule on the x axis; error bars denote 95% bootstrap confidence intervals over patients, dotted lines mark 0.5, and group labels give patients and events. ",
+    "(c-e) Kaplan-Meier platinum-free (c), AVPC-free (d), and NEPC-free (e) survival at Dana-Farber from the 180-day landmark after ADT initiation by checklist status; shading denotes pointwise 95% confidence intervals, P values are from log-rank tests, and the vertical axes are truncated below 1."),
+  paste0("No Dana-Farber patient contributed to checklist training, so every endpoint, including platinum, is out of sample. The checklist and its threshold were applied unchanged. Panels c-e use the ADT-initiation clock. ",
+    "For b, the checklist was rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation, and Gleason scores were used only if available before the landmark. ",
     "ADT, androgen-deprivation therapy; AUC, area under the receiver-operating-characteristic curve.")),
   collapse="\n\n")
 
@@ -2633,7 +2631,7 @@ manuscript_captions <- function() {
     `02_llm_nepc_avpc__lm0`=manuscript_figure2_caption("lm0"),
     `03_cohort_sensitivity_supplement`=caption(
       "Figure 3. Supplementary cohort-size, endpoint-incidence, and laboratory-association sensitivity analyses within Dana-Farber.",
-      "Patients eligible at the 180-day androgen-deprivation therapy (ADT) landmark are shown across the full ADT cohort, cohorts excluding prior castration, metastatic cohorts defined from ADT treatment intent, and metastatic cohorts defined by the large language model (LLM). (a) Observed platinum and neuroendocrine prostate cancer (NEPC) event fractions during follow-up with 95% Wilson confidence intervals. (b) Pale bars show eligible patients and solid bars show observed events; labels give events/patients. Blue denotes platinum and orange denotes NEPC in a and b; an asterisk denotes fewer than 25 events. (c) Natural-log hazard ratios per standard-deviation increase and 95% confidence intervals for the mean, minimum, maximum, and last PSA or testosterone value through the landmark. The dashed line at 0 marks the null; filled points indicate Benjamini-Hochberg q < 0.05.",
+      "Patients eligible at the 180-day androgen-deprivation therapy (ADT) landmark are shown across the full ADT cohort, cohorts excluding prior castration, metastatic cohorts defined from ADT treatment intent, and metastatic cohorts defined by the large language model (LLM). (a) Observed platinum and neuroendocrine prostate cancer (NEPC) event fractions during follow-up with 95% Wilson confidence intervals. (b) Pale bars show eligible patients and solid bars show observed events; labels give events/patients. Blue denotes platinum and orange denotes NEPC in a and b; an asterisk denotes fewer than 25 events. (c) Hazard ratios per standard-deviation change, on a log scale, with 95% confidence intervals for the mean, minimum, maximum, and last value through the landmark of PSA (higher) and testosterone (lower, so that hazard ratios above 1 indicate greater platinum hazard with lower testosterone). The dashed line at 1 marks the null; filled points indicate Benjamini-Hochberg q < 0.05.",
       "Cohort definitions overlap. Event fractions are observed proportions rather than censoring-adjusted cumulative incidence estimates. Change-from-baseline and observation-count features are excluded from c. 'No prior castrate' denotes the source no-previous-castration restriction. CI, confidence interval; PSA, prostate-specific antigen; SD, standard deviation."),
     # The federated manuscript set is numbered separately (federated_figure<N>).
     federated_03_univariable=caption(
@@ -2656,7 +2654,8 @@ manuscript_captions <- function() {
             gsub("For e,", "For e-g,", manuscript_transfer_xgboost_caption(20L), fixed=TRUE), fixed=TRUE), fixed=TRUE), fixed=TRUE),
       fixed=TRUE),
     federated_05_transfer_no_dfci__no_d=manuscript_transfer_caption(no_d=TRUE,km_panels=FALSE),
-    federated_06_checklist_no_dfci=manuscript_checklist_caption(),
+    federated_06_checklist_no_dfci=sub("^Generalized federated checklist transfer supplement\\.","Federated Figure 6.",
+      manuscript_guideline_caption()),
     grid_captions,
     guideline_captions
   )
@@ -2811,11 +2810,15 @@ manuscript_multivariable_labs <- function(plots,spec) {
     p <- manuscript_style(panel,NULL,NULL) +
       ggplot2::guides(color="none",fill=ggplot2::guide_legend(nrow=1,byrow=TRUE,
         override.aes=list(alpha=1)))
-    # Androgen-axis features are bold; manuscript_style fixes one face, so set it per label afterward.
+    # Androgen-axis features are bold. A vector-valued theme face is unreliable, so draw the y labels as
+    # plotmath: bold for androgen-axis features, plain otherwise.
     if(inherits(panel,"ggplot") && all(c("label","category") %in% names(panel$data)) && nrow(panel$data)) {
-      shown <- levels(panel$data$label)
-      p <- p + ggplot2::theme(axis.text.y=ggplot2::element_text(face=ifelse(
-        panel$data$category[match(shown,panel$data$label)] %in% "Androgen axis","bold","plain")))
+      androgen <- unique(as.character(panel$data$label[panel$data$category %in% "Androgen axis"]))
+      p <- p + ggplot2::scale_y_discrete(labels=function(x) {
+        text <- manuscript_federated_feature_label(x)
+        as.expression(lapply(seq_along(x),function(j) if(x[j] %in% androgen)
+          bquote(bold(.(text[j]))) else bquote(plain(.(text[j])))))
+      })
     }
     p <- manuscript_center_landmark_header(p)
     if(is.null(category_legend)) category_legend <- manuscript_legend(p,spec$width,spec$height)
@@ -2916,6 +2919,7 @@ manuscript_incidence <- function(d) {
       "'No prior castrate' denotes the source noprecastrate cohort restriction."))
 }
 
+# Hazard ratios on a log10 scale (null at 1), labeled with the ratios themselves rather than their logarithms.
 manuscript_log_hazard_axis <- function(p,outer_breaks=FALSE) {
   stopifnot(inherits(p,"ggplot"),all(c("hazard_ratio_per_sd","ci_lower","ci_upper") %in% names(p$data)))
   values <- unlist(p$data[c("hazard_ratio_per_sd","ci_lower","ci_upper")],use.names=FALSE)
@@ -2923,17 +2927,32 @@ manuscript_log_hazard_axis <- function(p,outer_breaks=FALSE) {
   stopifnot(length(values)>0)
   log_limits <- range(c(0,log(values)))
   log_limits <- log_limits+c(-1,1)*max(.04,diff(log_limits)*.04)
-  ticks <- pretty(log_limits,n=5)
-  ticks <- ticks[ticks>=log_limits[1] & ticks<=log_limits[2]]
-  if(!any(abs(ticks)<sqrt(.Machine$double.eps))) ticks <- sort(unique(c(ticks,0)))
-  if(isTRUE(outer_breaks)) ticks <- sort(unique(c(range(ticks),0)))
-  p + ggplot2::scale_x_log10(limits=exp(log_limits),breaks=exp(ticks),
-    labels=function(x) scales::label_number(accuracy=.1)(log(x))) +
-    ggplot2::labs(x="Log hazard ratio per SD (95% CI)")
+  limits <- exp(log_limits)
+  candidates <- c(.1,.2,.25,.33,.5,.67,.8,1,1.25,1.5,2,3,4,6,8,10)
+  ticks <- candidates[candidates>=limits[1] & candidates<=limits[2]]
+  if(length(ticks)<3) ticks <- sort(unique(c(1,signif(exp(pretty(log_limits,n=4)),2))))
+  if(isTRUE(outer_breaks)) ticks <- sort(unique(c(range(ticks),1)))
+  p + ggplot2::scale_x_log10(limits=limits,breaks=ticks,
+    labels=function(x) format(signif(x,2),trim=TRUE,drop0trailing=TRUE)) +
+    ggplot2::labs(x="Hazard ratio per SD (95% CI; log scale)")
 }
 
 manuscript_dfci_cohort_sensitivity <- function(incidence,association) {
   stopifnot(is.list(incidence),inherits(association,"ggplot"))
+  # Label and orient the features like the univariable volcano panels: higher PSA and lower testosterone,
+  # so a hazard ratio above 1 always means greater platinum hazard in the labeled direction.
+  if("analyte" %in% names(association$data)) {
+    d <- association$data
+    low <- as.character(d$analyte) %in% "Testosterone"
+    lower <- 1/d$ci_upper[low]; upper <- 1/d$ci_lower[low]
+    d$hazard_ratio_per_sd[low] <- 1/d$hazard_ratio_per_sd[low]
+    d$ci_lower[low] <- lower; d$ci_upper[low] <- upper
+    d$analyte <- factor(as.character(d$analyte),levels=c("PSA","Testosterone"),
+      labels=c("Higher PSA","Lower Testosterone"))
+    association$data <- d
+    association <- association + ggplot2::scale_color_manual(
+      values=c(`Higher PSA`="#0072B2",`Lower Testosterone`="#D55E00"),guide="none")
+  }
   association <- manuscript_log_hazard_axis(association) +
     ggplot2::scale_y_discrete(labels=function(x) unname(manuscript_cohort_labels[x]))
   association_grob <- manuscript_grob(manuscript_style(association,NULL,"c"),7.2,5)
@@ -2946,7 +2965,7 @@ manuscript_dfci_cohort_sensitivity <- function(incidence,association) {
   association_data <- association$data;association_data$figure_section <- "laboratory_associations"
   list(plot=combined,spec=spec,data=dplyr::bind_rows(incidence_data,association_data),
     legend=paste(incidence$legend,
-      "c: natural-log hazard ratios per SD and 95% CIs for PSA and testosterone at day 180; dashed lines at 0 mark the null. Filled points: q < 0.05; open points: q >= 0.05 or unavailable.",
+      "c: hazard ratios per SD (log scale) and 95% CIs for higher PSA and lower testosterone at day 180 (testosterone estimates inverted so that ratios above 1 mean greater platinum hazard with lower values); dashed lines at 1 mark the null. Filled points: q < 0.05; open points: q >= 0.05 or unavailable.",
       sep="\n"))
 }
 
@@ -3080,19 +3099,16 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
   limits <- range(c(.5,metrics$mean_auc_lo,metrics$mean_auc_hi,
     shown_clinical$mean_auc_lo,shown_clinical$mean_auc_hi),na.rm=TRUE)
   limits <- c(max(0,floor(limits[1]*20)/20),min(1,ceiling(limits[2]*20)/20))
-  discrimination <- if(length(model_families)==1L) plot_federated_transfer(d,NULL,NULL,NULL) +
-    ggplot2::guides(color="none",shape="none") +
-    ggplot2::labs(x="Landmark after ADT initiation",y="Mean AUC(t)") +
-    ggplot2::theme(strip.text.y=ggplot2::element_blank()) +
-    ggplot2::coord_cartesian(ylim=limits) else if(settings$layout=="interval") plot_federated_transfer_intervals(d,limits=limits) +
+  discrimination <- if(length(model_families)==1L) plot_federated_transfer_bars(d,
+      ymax=min(1,max(limits[2],ceiling(max(d$hi,na.rm=TRUE)*20)/20))) else if(settings$layout=="interval") plot_federated_transfer_intervals(d,limits=limits) +
     labs(subtitle="Landmarks after ADT initiation") else
     plot_federated_transfer(d,NULL,NULL,NULL) +
       ggplot2::guides(shape="none") + ggplot2::labs(x="Landmark after ADT initiation")
   plots <- list(discrimination); titles <- "Discrimination"
   legend <- c(
-    sprintf("a: mean AUC(t) of the full %s by endpoint and landmark; bars are 95%% bootstrap CIs over patients. Strips give day-%d patients/events.",
+    sprintf("a: mean AUC(t) of the full %s by endpoint and landmark; error bars are 95%% bootstrap CIs over patients. Strips give day-%d patients/events.",
       if(is.null(model_families)) "models" else paste(federated_transfer_model_label(model_families),"model"),count_landmark),
-    paste0("Display: ",if(length(model_families)==1L) "vertical landmark intervals" else settings$layout,
+    paste0("Display: ",if(length(model_families)==1L) "bars with 95% bootstrap CIs by landmark" else settings$layout,
       "; landmarks: ",paste(settings$landmarks,collapse=", ")," days."),
     paste0("Patients/events by landmark — ",federated_transfer_count_note(metrics),"."))
   panel_titles <- c(gleason="Patients with Gleason score",trio="Sequenced patients",
@@ -3260,20 +3276,14 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
   # One card, so no facet; manuscript_style would restore its strip and axis text.
   card <- plot_checklist_cards(lines,NULL,caption=NULL) + ggplot2::facet_null() +
     ggplot2::labs(x=NULL,y=NULL) + ggplot2::theme(axis.text=ggplot2::element_blank())
-  has_full <- !is.null(tables$full) && nrow(tables$full)
-  plots <- c(list(card),if(has_full) list(plot_federated_checklist_full_bars(tables$full,f)),
-    list(plot_federated_checklist_comparison(tables$comparison,f)))
-  titles <- c("Checklist",if(has_full) "Accuracy: all patients","Accuracy")
+  plots <- list(card,plot_federated_checklist_comparison(tables$comparison,f))
+  titles <- c("Checklist","Accuracy")
   rows <- tables$comparison %>% arrange(match(endpoint,names(FEDERATED_TRANSFER_ENDPOINTS)),
     match(rule,names(FEDERATED_CHECKLIST_RULES)))
   legend <- c(
     sprintf("a: unit-weight federated checklist for %s platinum from the %d-day ADT landmark, trained without Dana-Farber; positive at %s.%s",federated_transfer_horizon_label(f$horizon_days),landmark,rule,
       if(guideline) " Item thresholds are rounded to guideline values; item selection and the rule are unchanged." else ""),
-    if(has_full) paste0("b: ",federated_transfer_horizon_label(f$horizon_days),
-      " mean IPCW AUC(t) (equal to balanced accuracy for a yes/no rule) of the checklist at Dana-Farber in all patients of the ADT cohort (ADT clock), one bar per event. n positive, AUC (95% CI): ",
-      paste(sprintf("%s %s, %.2f (%.2f-%.2f)",FEDERATED_TRANSFER_ENDPOINTS_SHORT[tables$full$endpoint],
-        scales::comma(tables$full$n_positive),tables$full$auc,tables$full$auc_lo,tables$full$auc_hi),collapse="; "),"."),
-    paste0(if(has_full) "c: " else "b: ",federated_transfer_horizon_label(f$horizon_days)," IPCW AUC (equal to balanced accuracy for a yes/no rule) at Dana-Farber in the same sequenced patients with a Gleason score, on the sequencing clock. Rule, n positive, AUC (95% CI), and difference from the checklist (95% CI): ",
+    paste0("b: ",federated_transfer_horizon_label(f$horizon_days)," IPCW AUC (equal to balanced accuracy for a yes/no rule) at Dana-Farber in the same sequenced patients with a Gleason score, on the sequencing clock. Rule, n positive, AUC (95% CI), and difference from the checklist (95% CI): ",
       paste0(sprintf("%s %s %s, %.2f (%.2f-%.2f)",FEDERATED_TRANSFER_ENDPOINTS_SHORT[rows$endpoint],
         FEDERATED_CHECKLIST_RULES[rows$rule],scales::comma(rows$n_positive),rows$auc,rows$auc_lo,rows$auc_hi),
         if_else(rows$rule==FEDERATED_CHECKLIST_RULE,"",sprintf(", %+.2f (%.2f to %.2f)",
@@ -3290,10 +3300,10 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
       paste(sprintf("%s %s/%s",counts$stratum,scales::comma(counts$n),scales::comma(counts$events)),collapse="; "),
       counts$logrank_p[[1]]))
   }
-  n_top <- 2L+has_full
+  n_top <- 2L
   k <- length(plots)-n_top
-  # With the all-patient panel, a/b/c share the top row and the KM panels fill the next one.
-  top <- if(has_full) rbind(rep(1:3,each=2L)) else rbind(rep(1:2,each=3L))
+  # The card and the wide accuracy barplot share the top row; the KM panels fill the next one.
+  top <- rbind(c(1,1,2,2,2,2))
   row_heights <- c(max(2.7,card_in+.35),if(k) MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["km"]])
   spec <- list(key=key,width=10,height=sum(row_heights),
     layout=rbind(top,if(k) n_top+rep(seq_len(k),each=6L%/%k)),titles=titles,
@@ -3319,8 +3329,11 @@ manuscript_univariable_restyle <- function(plots, federated=FALSE) {
       if(inherits(layer$geom,"GeomTextRepel")) {
         copy$aes_params$size <- 2.2
         copy$aes_params$point.size <- 1
-        copy$geom_params$box.padding <- grid::unit(.18,"lines")
-        copy$geom_params$point.padding <- grid::unit(.12,"lines")
+        copy$geom_params$box.padding <- grid::unit(.55,"lines")
+        copy$geom_params$point.padding <- grid::unit(.3,"lines")
+        copy$geom_params$force <- 3
+        copy$geom_params$force_pull <- .6
+        copy$geom_params$max.iter <- 30000
       }
       if(inherits(layer$geom,"GeomPoint")) copy$aes_params$stroke <- .3
       copy
@@ -3473,6 +3486,10 @@ manuscript_build <- function(items,tables,root) {
         result[[paste0("federated_06_guideline",sub("^_","__",
           federated_checklist_cell_suffix(f)))]] <- manuscript_federated_checklist(guideline,federated_guideline_grid_key(f),f,
           guideline=TRUE)
+        # Main Figure 6 is the generalized (rounded-threshold) checklist at the 180-day landmark, 1-year horizon.
+        if(identical(as.integer(c(f$landmark_days,f$horizon_days)),as.integer(c(180,365))))
+          result[["federated_06"]] <- manuscript_federated_checklist(guideline,"federated_06_checklist_no_dfci",f,
+            guideline=TRUE)
       } else message("Skipping generalized federated checklist transfer landmark ",f$landmark_days,", horizon ",
         f$horizon_days,": missing tables")
     }
