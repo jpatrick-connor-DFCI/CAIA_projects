@@ -1259,7 +1259,7 @@ render_federated_checklist_cards <- function(root,federated_path,dpi,overwrite,v
   p <- gridExtra::arrangeGrob(grobs=grobs,ncol=1,heights=grid::unit(heights,"in"),
     top=grid::textGrob(paste0("Federated predictive checklists",version$label,": ADT, platinum endpoint"),
       x=grid::unit(10,"pt"),hjust=0,gp=figure_text_gpar("title", fontface="bold")))
-  save_federated_panel(p,federated_output_path(root,stem,".pdf"),15.6,sum(heights)+.6,dpi,overwrite)
+  save_federated_panel(p,federated_output_path(root,stem,".pdf"),13,sum(heights)+.6,dpi,overwrite)
   invisible(loaded)
 }
 
@@ -2515,9 +2515,9 @@ manuscript_specs <- function() {
     row_heights=row_heights, shared_legend_panels=shared_legend_panels)
   c(list(
     # Panels a-e only: the data-availability and federated site-count panels are not part of the figure.
-    spec("01_cohort_overview", MANUSCRIPT_COHORT_MEMBERS, 7.1,
+    spec("01_cohort_overview", MANUSCRIPT_COHORT_MEMBERS, 9,
       rbind(c(1,1,2,2),c(1,1,3,3),c(4,4,5,5)),
-      MANUSCRIPT_COHORT_TITLES)),
+      MANUSCRIPT_COHORT_TITLES, width=10)),
     # Figure 2 per cohort; manuscript_build adds the cohort header.
     lapply(names(FIGURE2_COHORTS),function(variant) spec(paste0("02_llm_nepc_avpc__",variant),
       figure2v3_stems(variant), 8, rbind(1:2,3:4),
@@ -3107,7 +3107,7 @@ manuscript_federated_multivariable <- function(performance,coefficients,importan
       ggplot2::scale_y_discrete(labels=manuscript_federated_feature_label)
   }
   rows <- if(full) c(2.5,pmax(3,counts_by_kind*.2)) else c(.9,1,1)
-  spec <- list(key=key,width=if(full) 14 else 8.5,height=if(full) min(190,sum(rows)+1.5) else 9.5,
+  spec <- list(key=key,width=if(full) 12 else 10,height=if(full) min(190,sum(rows)+1.5) else 11,
     layout=matrix(1:3,3),row_heights=rows,
     titles=c("Test mean AUC(t)","Elastic-Net coefficients","XGBoost feature importance"))
   p <- manuscript_multivariable_labs(plots,spec)
@@ -3211,12 +3211,12 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
   }
   # Probability panels (e-g) are shorter and the discrimination/KM rows (a-d) taller, so the rows are similar in height.
   if(length(extra$probability_panels) && probability_endpoints) {
-    row_heights[1L] <- 4.0
-    if(k) row_heights[length(row_heights)] <- 3.9
+    row_heights[1L] <- 3.4
+    if(k) row_heights[length(row_heights)] <- 3.3
   }
   if(length(extra$probability_panels)) {
     rows <- c(rows,list(n+k+rep(seq_along(extra$probability_panels),each=2L)))
-    row_heights <- c(row_heights,if(probability_endpoints) 5.0 else 7.0)
+    row_heights <- c(row_heights,if(probability_endpoints) 4.2 else 7.0)
   } else if(!is.null(extra$gradient)) {
     rows <- c(rows,list(rep(n+k+1L,6L)))
     row_heights <- c(row_heights,MANUSCRIPT_TRANSFER_ROW_HEIGHTS["gradient"])
@@ -3224,7 +3224,8 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
   plots <- c(plots,extra$plots); titles <- c(titles,extra$titles); legend <- c(legend,extra$legend)
   row_heights <- unname(row_heights)
   # 10 in (not the usual 7.2) keeps the one-row b-d legends unclipped; d's is ~8.5 in.
-  spec <- list(key=key,width=if(probability_endpoints) 15 else 10,height=sum(row_heights),layout=do.call(rbind,rows),titles=titles,
+  # The e-g probability layout needs 12.5 in for its three faceted panels; heights scale with it.
+  spec <- list(key=key,width=if(probability_endpoints) 12.5 else 10,height=sum(row_heights),layout=do.call(rbind,rows),titles=titles,
     row_heights=row_heights,shared_legend_panels=integer())
   list(plot=manuscript_combine(plots,spec),spec=spec,data=metrics,panels=plots,legend=paste(
     c(legend,FEDERATED_TRANSFER_SPEC$source),collapse="\n"))

@@ -450,7 +450,9 @@ render_metastatic_supplements <- function(config, patient_df, save_panel,
                    "Regex I–III = local; IV = metastatic. ADT/LLM labels use full observed history.",
                    "Stage/ICD windows use the longitudinal analysis ADT date.",
                    "Agreement is descriptive; definitions and observation windows differ.", sep = "\n")
+  # The untitled ADT-vs-LLM heatmap (S2) is one fixed-aspect panel, so it gets a single-panel size.
   emit <- function(plot, name, width = 8, height = 5.5) {
+    if (identical(name, "adt_vs_llm")) { width <- 5.5; height <- 4.5 }
     save_panel(plot, paste0("adt_labels_", name), width, height)
     if (show) print(plot)
   }

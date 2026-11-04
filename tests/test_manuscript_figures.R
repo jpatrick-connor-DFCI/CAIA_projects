@@ -17,7 +17,7 @@ spec_keys <- vapply(specs,`[[`,character(1),"key")
 spec_by_key <- function(key) specs[[match(key,spec_keys)]]
 # Figure 1 has panels a-e only (no data-availability or federated site-count panels).
 cohort_specs <- specs[spec_keys=="01_cohort_overview"]
-stopifnot(length(cohort_specs)==1,cohort_specs[[1]]$height==7.1,
+stopifnot(length(cohort_specs)==1,cohort_specs[[1]]$height==9,cohort_specs[[1]]$width==10,
   identical(cohort_specs[[1]]$members,MANUSCRIPT_COHORT_MEMBERS),
   max(cohort_specs[[1]]$layout)==5,length(cohort_specs[[1]]$titles)==5)
 # Figure 2: one spec per cohort (the ADT day-0 cohort), keyed with a variant suffix.
@@ -203,7 +203,7 @@ importance <- expand_grid(landmark_days=c(0,90,180),feature=c("PSA__max","person
 federated_models <- manuscript_federated_multivariable(performance,coefficients,importance)
 stopifnot(grepl("person_id",federated_models$legend,fixed=TRUE),
   federated_models$spec$key=="federated_04_multivariable",
-  federated_models$spec$width==8.5,federated_models$spec$height==9,
+  federated_models$spec$width==10,federated_models$spec$height==11,
   length(federated_models$spec$titles)==3,
   inherits(federated_models$plot,"gtable"),nrow(federated_models$data)==12,
   identical(levels(federated_models$data$name),names(FEDERATED_MODEL_COLORS)),
