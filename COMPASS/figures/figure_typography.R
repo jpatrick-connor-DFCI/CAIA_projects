@@ -78,7 +78,10 @@ figure_style_plot <- function(p) {
       function(geom) inherits(layer$geom,geom),logical(1)))) return(layer)
     copy <- ggplot2::ggproto(NULL,layer)
     copy$aes_params$family <- FIGURE_FONT
-    copy$aes_params$size <- FIGURE_FONT_SIZES[["body"]] / ggplot2::.pt
+    # Checklist cards explicitly size their text and spacing together.
+    font_size <- layer$figure_font_size
+    if(is.null(font_size)) font_size <- FIGURE_FONT_SIZES[["body"]]
+    copy$aes_params$size <- font_size / ggplot2::.pt
     if(!is.null(copy$geom_params$size.unit)) copy$geom_params$size.unit <- "mm"
     copy
   })

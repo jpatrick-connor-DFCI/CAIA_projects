@@ -78,7 +78,7 @@ RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 200
 RENDER_OVERWRITE <- env_flag("COMPASS_RENDER_OVERWRITE")
 PREPARE_OVERWRITE <- env_flag("COMPASS_PREPARE_OVERWRITE")
 RENDER_WORKERS <- env_workers("COMPASS_RENDER_WORKERS", 2L)
-PREPARE_WORKERS <- env_workers("COMPASS_PREPARE_WORKERS", 1L)
+PREPARE_WORKERS <- env_workers("COMPASS_PREPARE_WORKERS", 4L)
 
 # ---- Run --------------------------------------------------------------------
 stopifnot(setequal(names(FIGURES), names(FIGURE_GROUPS)))

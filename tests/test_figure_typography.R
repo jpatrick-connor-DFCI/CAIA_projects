@@ -1,6 +1,7 @@
 # Rendering normalization must preserve plot data, blank axes and source layers.
 source("COMPASS/figures/COMPASS_generate_figures_pipeline.R")
 source("COMPASS/figures/figure_workflow.R")
+source("COMPASS/figures/checklist_supplement.R")
 
 stopifnot(figure_resolve_font(c("DejaVu Sans","Arial","Liberation Sans"))=="Arial",
   figure_resolve_font(c("DejaVu Sans","Liberation Sans"))=="Liberation Sans",
@@ -25,6 +26,16 @@ stopifnot(identical(p$data,q$data),p$layers[[2]]$aes_params$size==6,
   q$theme$plot.subtitle$size==9,q$theme$plot.tag$size==12,q$theme$plot.title$size==11)
 
 # Both composed ggplot text and manually placed grid labels use the same font.
+# Explicit checklist type survives both styling passes in manuscript export.
+card_lines <- data.frame(text=c("Header"," ","[ ] Example"," "),face="plain",
+  landmark_label="Day 0")
+card_layout <- checklist_card_layout(card_lines,12)
+card <- plot_checklist_cards(card_layout$lines,NULL,font_size=12)
+styled_card <- figure_style_plot(manuscript_style(card,"Checklist","a"))
+stopifnot(nrow(card_layout$lines)==3,
+  styled_card$layers[[1]]$aes_params$size==12/ggplot2::.pt,
+  (card_layout$lines$y[2]-card_layout$lines$y[3]) <
+    (card_layout$lines$y[1]-card_layout$lines$y[2]))
 g <- grid::grobTree(figure_plot_grob(q),
   grid::textGrob("Footer",gp=figure_text_gpar("caption")))
 text_grobs <- function(g) c(if(inherits(g,"text")) list(g) else list(),

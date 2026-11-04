@@ -69,7 +69,7 @@ stay under `COMPASS_FIGURE_DATA_ROOT`. Outputs are PDF only.
 | `COMPASS_FEDERATED_RESULTS`, `COMPASS_FEDERATED_TRANSFER_NO_DFCI`, `COMPASS_FEDERATED_FIGURE_DATA` | paths under `COMPASS_RHINO_ROOT`; set the same values for notebook 05 |
 | `COMPASS_RENDER_PROFILE` | `fast` (200 dpi rasters); `publication` uses 600 dpi |
 | `COMPASS_RENDER_OVERWRITE`, `COMPASS_PREPARE_OVERWRITE` | `false` |
-| `COMPASS_RENDER_WORKERS`, `COMPASS_PREPARE_WORKERS` | `2`, `1` |
+| `COMPASS_RENDER_WORKERS`, `COMPASS_PREPARE_WORKERS` | `2`, `4` |
 | `CAIA_PROJECT_ROOT` | used to locate the code when the script path cannot be inferred |
 
 ## Federated inputs

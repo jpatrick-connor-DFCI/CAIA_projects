@@ -75,6 +75,18 @@ checklist_card_lines <- function(cell, items, metrics, horizon_years, model_labe
   out
 }
 
+# Blank separator rows use only a third of a text line; omit trailing blanks.
+checklist_card_layout <- function(lines, font_size=12, panel_in=NULL) {
+  last <- max(which(nzchar(trimws(lines$text))))
+  lines <- lines[seq_len(last),,drop=FALSE]
+  advance <- ifelse(nzchar(trimws(lines$text)),1,.35)
+  line_in <- font_size*1.35/72
+  content_in <- sum(advance)*line_in + .16
+  if(is.null(panel_in)) panel_in <- content_in
+  lines$y <- 1-(.08+c(0,head(cumsum(advance),-1))*line_in)/panel_in
+  list(lines=lines,height=content_in)
+}
+
 plot_checklist_cards <- function(cards, title,
     caption = "Unit-weight M-of-N checklists with IPCW-calibrated horizon risk; baselines are fit on the same development patients.",
     font_size = FIGURE_FONT_SIZES[["body"]], brier = TRUE) {
@@ -91,8 +103,10 @@ plot_checklist_cards <- function(cards, title,
     })
     cards <- dplyr::bind_rows(c(list(cards[!metric_rows,,drop=FALSE]),cells))
   }
+  text_layer <- geom_text(hjust = 0, vjust = 1, family = FIGURE_FONT, size = font_size / ggplot2::.pt)
+  text_layer$figure_font_size <- font_size
   ggplot(cards, aes(x = x, y = y, label = text, fontface = face)) +
-    geom_text(hjust = 0, vjust = 1, family = FIGURE_FONT, size = font_size / ggplot2::.pt) +
+    text_layer +
     facet_wrap(~ landmark_label, nrow = 1) +
     scale_x_continuous(limits = c(0, 1), expand = c(0, 0)) +
     scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +

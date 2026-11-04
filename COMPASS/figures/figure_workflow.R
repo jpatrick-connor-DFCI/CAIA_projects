@@ -1234,17 +1234,16 @@ render_federated_checklist_cards <- function(root,federated_path,dpi,overwrite,v
     lines$landmark_label <- factor(sprintf("Landmark ADT +%d days",lm),levels=landmark_levels)
     cards[[h]][[length(cards[[h]])+1L]] <- lines
   }
-  # Every card row gets the same height, spaced for the longest card.
-  card_scale <- 1.9
-  line_in <- .17*card_scale
-  panel_in <- line_in*(max(vapply(unlist(cards,recursive=FALSE),nrow,integer(1)))+1.5)
+  # Size each horizon row for its longest card, with compact section gaps.
+  card_font <- 12
+  panel_in <- vapply(cards,function(row) max(vapply(row,function(lines)
+    checklist_card_layout(lines,card_font)$height,numeric(1))),numeric(1))
   rows <- lapply(seq_along(cards),function(i) {
     d <- dplyr::bind_rows(lapply(cards[[i]],function(l) {
-      l$y <- 1-.02-(seq_len(nrow(l))-1L)*line_in/panel_in
-      l
+      checklist_card_layout(l,card_font,panel_in[i])$lines
     }))
     plot_checklist_cards(d,sprintf("%s  %s checklists",letters[i+1L],names(cards)[i]),caption=NULL,
-      font_size=FIGURE_FONT_SIZES[["body"]]*card_scale,brier=FALSE)
+      font_size=card_font,brier=FALSE)
   })
   # Matching gtable widths line the AUC facets up with the card columns.
   grobs <- lapply(c(list(auc),rows),figure_plot_grob)
@@ -1252,7 +1251,7 @@ render_federated_checklist_cards <- function(root,federated_path,dpi,overwrite,v
     widths <- do.call(grid::unit.pmax,lapply(grobs,function(g) g$widths))
     for(i in seq_along(grobs)) grobs[[i]]$widths <- widths
   }
-  heights <- c(3.2,rep(panel_in+.6,length(rows)))
+  heights <- c(2.7,panel_in+.4)
   p <- gridExtra::arrangeGrob(grobs=grobs,ncol=1,heights=grid::unit(heights,"in"),
     top=grid::textGrob(paste0("Federated predictive checklists",version$label,": ADT, platinum endpoint"),
       x=grid::unit(10,"pt"),hjust=0,gp=figure_text_gpar("title", fontface="bold")))
@@ -3265,14 +3264,22 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
   landmark <- as.integer(f$landmark_days)
   if(guideline && is.null(tables$metrics)) tables$metrics <- tibble::tibble(model=character())
   lines <- federated_checklist_card_lines(tables$items,tables$metrics,f)
-  # The checklist list is set larger than body text so it stays legible beside the plots.
-  card_scale <- 2.1
-  line_in <- .17*card_scale
-  card_in <- line_in*(nrow(lines)+1.5)
-  lines$y <- 1-.02-(seq_len(nrow(lines))-1L)*line_in/card_in
+  # Keep the larger checklist type through manuscript styling and size its
+  # row from the text, rather than leaving full-height blank separator lines.
+  card_font <- 12
+  rule_row <- grep("^Flag when",lines$text)
+  if(length(rule_row)) {
+    wrapped <- lapply(seq_len(nrow(lines)),function(i) {
+      pieces <- if(i %in% rule_row) strwrap(lines$text[i],width=36) else lines$text[i]
+      row <- lines[rep(i,length(pieces)),,drop=FALSE]; row$text <- pieces; row
+    })
+    lines <- dplyr::bind_rows(wrapped)
+  }
+  card_in <- max(2.05,checklist_card_layout(lines,card_font)$height)
+  lines <- checklist_card_layout(lines,card_font,card_in)$lines
   rule <- sprintf("%d of %d items",tables$items$M[1L],tables$items$N[1L])
   # One card, so no facet; manuscript_style would restore its strip and axis text.
-  card <- plot_checklist_cards(lines,NULL,caption=NULL,font_size=FIGURE_FONT_SIZES[["body"]]*card_scale) + ggplot2::facet_null() +
+  card <- plot_checklist_cards(lines,NULL,caption=NULL,font_size=card_font) + ggplot2::facet_null() +
     ggplot2::labs(x=NULL,y=NULL) + ggplot2::theme(axis.text=ggplot2::element_blank())
   plots <- list(card,plot_federated_checklist_comparison(tables$comparison,f))
   titles <- c("Checklist","Accuracy")
@@ -3302,7 +3309,7 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
   k <- length(plots)-n_top
   # The card and the wide accuracy barplot share the top row; the KM panels fill the next one.
   top <- rbind(c(1,1,2,2,2,2))
-  row_heights <- c(max(2.7,card_in+.35),if(k) MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["km"]])
+  row_heights <- c(card_in+.35,if(k) MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["km"]])
   spec <- list(key=key,width=10,height=sum(row_heights),
     layout=rbind(top,if(k) n_top+rep(seq_len(k),each=6L%/%k)),titles=titles,
     row_heights=row_heights,shared_legend_panels=integer())
