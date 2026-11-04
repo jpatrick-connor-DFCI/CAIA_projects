@@ -543,18 +543,28 @@ stopifnot(figure_selected_export(file.path(selection_root,sub("[.]pdf$","",rende
     selection_root,renders_plan$source),
   !figure_selected_export(file.path(selection_root,"01_cohort","unrelated"),selection_root,renders_plan$source),
   figure_selected_export(file.path(selection_root,"01_cohort","unrelated"),selection_root,NULL))
-stopifnot(nrow(renders_plan)==5L+1L+2L+1L+2L+6L+6L,!anyDuplicated(renders_plan$target),
+expected_names <- c(
+  "main/02_llm_phenotyping.pdf"="02_llm/manuscript/02_llm_nepc_avpc__lm0.pdf",
+  "main/03_federated_lab_associations.pdf"="03_univariate/federated/manuscript/federated_03_univariable.pdf",
+  "main/04_federated_predictions.pdf"="04_multivariate/federated/manuscript/federated_04_multivariable.pdf",
+  "main/05_federated_transfer_to_DFCI.pdf"="05_transfer_survival/manuscript/federated_05_transfer_no_dfci__top_bottom_20_all_endpoints.pdf",
+  "main/06_federated_checklist_transfer_to_DFCI.pdf"="06_transfer_checklists/manuscript/federated_06_checklist_no_dfci.pdf",
+  "supplement/S1_cohort_overview.pdf"="01_cohort/manuscript/01_cohort_overview.pdf",
+  "supplement/S2_llm_metastatic_vs_adt_intent.pdf"="03_univariate/cohort_sensitivity/adt_vs_llm__platinum__all__incl.pdf",
+  "supplement/S3_cohort_sensitivity.pdf"="03_univariate/cohort_sensitivity/manuscript/03_cohort_sensitivity_supplement.pdf",
+  "supplement/S4_checklist_supplement_platinum.pdf"="04_multivariate/federated/checklist_supplement__platinum.pdf",
+  "supplement/S5_multivariable_full_features.pdf"="04_multivariate/federated/manuscript/federated_04_multivariable__full_features.pdf",
+  "supplement/S6_full_transfer_to_dfci.pdf"="05_transfer_survival/manuscript/federated_05_transfer_no_dfci__no_d.pdf")
+stopifnot(nrow(renders_plan)==5L+1L+4L+1L+1L+6L+6L,!anyDuplicated(renders_plan$target),
+  identical(unname(renders_plan$source[match(names(expected_names),renders_plan$target)]),unname(expected_names)),
   setequal(dirname(renders_plan$target),c("main","supplement",file.path("supplement","federated_checklist_transfer"),
     file.path("supplement","generalized_federated_checklist_transfer"))),
   sum(dirname(renders_plan$target)=="main")==5L,
-  all(c("supplement/03_cohort_sensitivity_supplement.pdf","supplement/adt_vs_llm__platinum__all__incl.pdf") %in%
-    renders_plan$target),
   sum(dirname(renders_plan$target)==file.path("supplement","federated_checklist_transfer"))==6L,
   sum(dirname(renders_plan$target)==file.path("supplement","generalized_federated_checklist_transfer"))==6L,
   "supplement/generalized_federated_checklist_transfer/federated_06_checklist_guideline_no_dfci__lm0_h1825.pdf" %in% renders_plan$target,
   identical(manuscript_folder("root","federated_06_checklist_guideline_no_dfci__lm0_h365"),
     manuscript_folder("root","federated_06_checklist_no_dfci")),
-  "main/federated_05_transfer_no_dfci__top_bottom_20_all_endpoints.pdf" %in% renders_plan$target,
   "supplement/S7_full_checklist_transfer.pdf" %in% renders_plan$target,
   "supplement/federated_checklist_transfer/federated_06_checklist_no_dfci__lm0_h1825.pdf" %in% renders_plan$target,
   all(renders_plan$source %in% readLines("COMPASS/figures/retained_exports.txt")))

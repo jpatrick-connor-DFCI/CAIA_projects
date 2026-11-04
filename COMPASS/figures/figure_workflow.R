@@ -421,26 +421,28 @@ manuscript_renders_plan <- function() {
   keys <- list(
     main=c("02_llm_nepc_avpc__lm0","federated_03_univariable","federated_04_multivariable",
       "federated_05_transfer_no_dfci__top_bottom_20_all_endpoints","federated_06_checklist_no_dfci"),
-    supplement=c("federated_04_multivariable__full_features","federated_05_transfer_no_dfci__no_d"))
+    supplement=c("01_cohort_overview","03_cohort_sensitivity_supplement",
+      "federated_04_multivariable__full_features","federated_05_transfer_no_dfci__no_d"))
   grid <- vapply(seq_len(nrow(FEDERATED_CHECKLIST_GRID)),function(i) federated_checklist_grid_key(
     federated_checklist_cell(FEDERATED_CHECKLIST_GRID$landmark_days[i],FEDERATED_CHECKLIST_GRID$horizon_days[i])),character(1))
   guideline <- vapply(seq_len(nrow(FEDERATED_CHECKLIST_GRID)),function(i) federated_guideline_grid_key(
     federated_checklist_cell(FEDERATED_CHECKLIST_GRID$landmark_days[i],FEDERATED_CHECKLIST_GRID$horizon_days[i])),character(1))
   plan <- rbind(
     data.frame(source=vapply(keys$main,manuscript,character(1)),
-      target=file.path("main",paste0(keys$main,".pdf"))),
+      target=file.path("main",paste0(c("02_llm_phenotyping","03_federated_lab_associations",
+        "04_federated_predictions","05_federated_transfer_to_DFCI",
+        "06_federated_checklist_transfer_to_DFCI"),".pdf"))),
     data.frame(source=file.path(FIGURE_SECTIONS[["multivariate_federated"]],"checklist_supplement__platinum.pdf"),
-      target=file.path("supplement","checklist_supplement__platinum.pdf")),
+      target=file.path("supplement","S4_checklist_supplement_platinum.pdf")),
     data.frame(source=vapply(keys$supplement,manuscript,character(1)),
-      target=file.path("supplement",paste0(keys$supplement,".pdf"))),
+      target=file.path("supplement",paste0(c("S1_cohort_overview","S3_cohort_sensitivity",
+        "S5_multivariable_full_features","S6_full_transfer_to_dfci"),".pdf"))),
     data.frame(source=manuscript("federated_06_checklist_no_dfci__full_transfer"),
       target=file.path("supplement","S7_full_checklist_transfer.pdf")),
     data.frame(source=vapply(grid,manuscript,character(1)),
       target=file.path("supplement","federated_checklist_transfer",paste0(grid,".pdf"))),
-    # Cohort sensitivity: the compiled supplement page and the ADT-vs-LLM comparison.
-    data.frame(source=c(manuscript("03_cohort_sensitivity_supplement"),
-        file.path(FIGURE_SECTIONS[["cohort_sensitivity"]],"adt_vs_llm__platinum__all__incl.pdf")),
-      target=file.path("supplement",c("03_cohort_sensitivity_supplement.pdf","adt_vs_llm__platinum__all__incl.pdf"))),
+    data.frame(source=file.path(FIGURE_SECTIONS[["cohort_sensitivity"]],"adt_vs_llm__platinum__all__incl.pdf"),
+      target=file.path("supplement","S2_llm_metastatic_vs_adt_intent.pdf")),
     data.frame(source=vapply(guideline,manuscript,character(1)),
       target=file.path("supplement",FEDERATED_GUIDELINE_SUPPLEMENT_DIR,paste0(guideline,".pdf"))))
   rownames(plan) <- NULL
