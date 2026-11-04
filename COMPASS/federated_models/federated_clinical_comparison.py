@@ -622,6 +622,8 @@ def km_patients(clocks: dict, config: str = "both") -> pd.DataFrame:
 # Federated Figure 6: the frozen 1-year checklist from the +180-day landmark.
 CHECKLIST_PATIENTS_FILE = "transfer_checklist_patients.csv"
 CHECKLIST_COMPARISON_FILE = "transfer_checklist_comparison.csv"
+# Figure 6 v2: the panel b population (sequenced, Gleason available) with sequencing-clock flags, for its KM panels.
+CHECKLIST_COMPARISON_PATIENTS_FILE = "transfer_checklist_comparison_patients.csv"
 CHECKLIST_FULL_ACCURACY_FILE = "transfer_checklist_full_accuracy.csv"
 CHECKLIST_FAMILY = "predictive_checklist"
 CHECKLIST_LANDMARK_DAYS = 180
@@ -656,6 +658,35 @@ def checklist_patients(scores, landmark=CHECKLIST_LANDMARK_DAYS,
     return _checklist_scores(scores, landmark, horizon)[CHECKLIST_PATIENT_COLUMNS]
 
 
+def _checklist_comparison_frame(scores, clinical, landmark, horizon) -> pd.DataFrame:
+    """Checklist rows on the sequencing clock for sequenced patients with a Gleason score (the rule-comparison set)."""
+    sc = _checklist_scores(scores, landmark, horizon)
+    clin = _normalize_ids(clinical)[[ID_COL, "landmark_days", GLEASON_FEATURE, HAS_SEQUENCING, *TRIO_FEATURES]]
+    d = sc.merge(clin, on=[ID_COL, "landmark_days"], how="left")
+    return d[d[HAS_SEQUENCING].notna() & d[GLEASON_FEATURE].notna()]
+
+
+def checklist_comparison_patients(scores, clinical, landmark=CHECKLIST_LANDMARK_DAYS,
+                                  horizon=CHECKLIST_HORIZON_DAYS) -> pd.DataFrame:
+    """Patient-level checklist flags in the rule-comparison population (sequencing clock), for the R KM figures."""
+    return _checklist_comparison_frame(scores, clinical, landmark, horizon)[CHECKLIST_PATIENT_COLUMNS]
+
+
+def checklist_comparison_patients_grid(scores, clinical, landmarks=CHECKLIST_GRID_LANDMARKS,
+                                       horizons=CHECKLIST_GRID_HORIZONS) -> pd.DataFrame:
+    """checklist_comparison_patients for every landmark × horizon that has checklist scores."""
+    frames = []
+    for landmark in landmarks:
+        for horizon in horizons:
+            try:
+                frames.append(checklist_comparison_patients(scores, clinical, landmark, horizon))
+            except ValueError as error:
+                print(f"checklist comparison patients: skipping landmark {landmark}, horizon {horizon}: {error}")
+    if not frames:
+        raise ValueError("no checklist scores at any landmark and horizon")
+    return pd.concat(frames, ignore_index=True)
+
+
 def checklist_rule_comparison(scores, clinical, n_bootstrap=200, seed=0, landmark=CHECKLIST_LANDMARK_DAYS,
                               horizon=CHECKLIST_HORIZON_DAYS) -> pd.DataFrame:
     """Horizon AUC of the checklist flag vs Gleason ≥8 and any TP53/RB1/PTEN alteration.
@@ -666,10 +697,7 @@ def checklist_rule_comparison(scores, clinical, n_bootstrap=200, seed=0, landmar
     and clinical features are on the sequencing clock (no somatic data on the
     ADT clock).
     """
-    sc = _checklist_scores(scores, landmark, horizon)
-    clin = _normalize_ids(clinical)[[ID_COL, "landmark_days", GLEASON_FEATURE, HAS_SEQUENCING, *TRIO_FEATURES]]
-    d = sc.merge(clin, on=[ID_COL, "landmark_days"], how="left")
-    d = d[d[HAS_SEQUENCING].notna() & d[GLEASON_FEATURE].notna()]
+    d = _checklist_comparison_frame(scores, clinical, landmark, horizon)
     rows = []
     for (endpoint, bundle), z in d.groupby(["endpoint", "bundle"], sort=False):
         rules = {CHECKLIST_RULE: z["flag"].to_numpy(dtype=float),
@@ -820,7 +848,7 @@ def guideline_items(bundle: dict, original: dict | None = None) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=GUIDELINE_ITEM_COLUMNS)
 
 
-def write_guideline_grid(patients, comparison, items, out_dir, full_accuracy=None) -> None:
+def write_guideline_grid(patients, comparison, items, out_dir, full_accuracy=None, comparison_patients=None) -> None:
     """The guideline Figure 6 tables (every landmark × horizon) plus the rounded item thresholds."""
     out_dir = Path(out_dir) / GUIDELINE_GRID_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -829,16 +857,20 @@ def write_guideline_grid(patients, comparison, items, out_dir, full_accuracy=Non
     items.to_csv(out_dir / GUIDELINE_ITEMS_FILE, index=False)
     if full_accuracy is not None:
         full_accuracy.to_csv(out_dir / CHECKLIST_FULL_ACCURACY_FILE, index=False)
+    if comparison_patients is not None:
+        comparison_patients.to_csv(out_dir / CHECKLIST_COMPARISON_PATIENTS_FILE, index=False)
     print(f"wrote guideline checklist grid -> {out_dir}")
 
 
-def write_checklist_grid(patients, comparison, out_dir, full_accuracy=None) -> None:
+def write_checklist_grid(patients, comparison, out_dir, full_accuracy=None, comparison_patients=None) -> None:
     out_dir = Path(out_dir) / CHECKLIST_GRID_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     patients.to_csv(out_dir / CHECKLIST_PATIENTS_FILE, index=False)
     comparison.to_csv(out_dir / CHECKLIST_COMPARISON_FILE, index=False)
     if full_accuracy is not None:
         full_accuracy.to_csv(out_dir / CHECKLIST_FULL_ACCURACY_FILE, index=False)
+    if comparison_patients is not None:
+        comparison_patients.to_csv(out_dir / CHECKLIST_COMPARISON_PATIENTS_FILE, index=False)
     print(f"wrote checklist grid -> {out_dir}")
 
 

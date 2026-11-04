@@ -169,7 +169,9 @@ FEDERATED_CHECKLIST_GRID_DIR = "checklist_grid"
 # Checklist accuracy per endpoint in the full within-DFCI cohort (Figure 6 panel b); also written at the top level.
 FEDERATED_CHECKLIST_FULL_ACCURACY_FILE = "transfer_checklist_full_accuracy.csv"
 FEDERATED_CHECKLIST_GRID_FILES = ("transfer_checklist_patients.csv", "transfer_checklist_comparison.csv",
-                                  FEDERATED_CHECKLIST_FULL_ACCURACY_FILE)
+                                  FEDERATED_CHECKLIST_FULL_ACCURACY_FILE,
+                                  # Figure 6 v2 KM panels: the panel b population on the sequencing clock.
+                                  "transfer_checklist_comparison_patients.csv")
 # Guideline (rounded-threshold) version of the grid; the rounded items travel with the same two tables.
 FEDERATED_GUIDELINE_GRID_DIR = "checklist_grid_guidelines"
 FEDERATED_GUIDELINE_GRID_FILES = FEDERATED_CHECKLIST_GRID_FILES + ("transfer_checklist_guideline_items.csv",)

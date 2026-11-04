@@ -1280,6 +1280,8 @@ FEDERATED_TRANSFER_KM_FILE <- "transfer_km_patients.csv"
 # clock), and its flag vs Gleason and TP53/RB1/PTEN rules (sequencing clock).
 FEDERATED_CHECKLIST_PATIENTS_FILE <- "transfer_checklist_patients.csv"
 FEDERATED_CHECKLIST_COMPARISON_FILE <- "transfer_checklist_comparison.csv"
+# Figure 6 v2: the rule-comparison (panel b) patients with sequencing-clock flags; grid directories only.
+FEDERATED_CHECKLIST_COMPARISON_PATIENTS_FILE <- "transfer_checklist_comparison_patients.csv"
 FEDERATED_TRANSFER_NO_DFCI_FILES <- c(FEDERATED_TRANSFER_FILES,FEDERATED_TRANSFER_CLINICAL_FILE,
   FEDERATED_TRANSFER_KM_FILE,FEDERATED_CHECKLIST_PATIENTS_FILE,FEDERATED_CHECKLIST_COMPARISON_FILE)
 FEDERATED_TRANSFER_CLINICAL <- c(gleason="Gleason + age",trio="TP53/RB1/PTEN + age",
@@ -1658,7 +1660,9 @@ FEDERATED_TRANSFER_KM_VIEWS <- list(
   score_trio=list(clock="sequencing",column="score_trio",levels=federated_transfer_cross(FEDERATED_TRANSFER_TRIO),
     label="Federated score × TP53/RB1/PTEN"),
   # Figure 6 only; fitted from 04's checklist patients, not the score table.
-  checklist=list(clock="adt",column="checklist",levels=FEDERATED_CHECKLIST_GROUPS,label="Checklist"))
+  checklist=list(clock="adt",column="checklist",levels=FEDERATED_CHECKLIST_GROUPS,label="Checklist"),
+  # Figure 6 v2: the same groups in the panel b population (sequenced, Gleason available).
+  checklist_seq=list(clock="sequencing",column="checklist",levels=FEDERATED_CHECKLIST_GROUPS,label="Checklist"))
 FEDERATED_TRANSFER_GRADIENT <- list(
   score_quartile=list(clock="sequencing",levels=paste0("Q",1:4),label="Federated score quartile"),
   score_decile=list(clock="sequencing",levels=c("Bottom 10%","Top 10%"),label="Federated score"),
@@ -1901,9 +1905,19 @@ plot_federated_transfer_horizon_risk <- function(tables, model_family, landmark,
     endpoint=coalesce(endpoint,.env$endpoint),model_family=coalesce(model_family,.env$model_family),
     landmark_days=coalesce(landmark_days,as.integer(.env$landmark)),clock=coalesce(clock,"sequencing"))
   groups <- unlist(lapply(shown,`[[`,"levels"),use.names=FALSE)
-  display <- replace(groups,match(FEDERATED_TRANSFER_TRIO,groups),FEDERATED_TRANSFER_TRIO_COUNTS)
+  # Facet strips name the stratifier, so the x-axis keeps only the level.
+  display <- replace(groups,match(FEDERATED_TRANSFER_TRIO,groups),c("WT","≥1 MT"))
+  display <- replace(display,match(FEDERATED_TRANSFER_GLEASON,groups),sub("^Gleason ","",FEDERATED_TRANSFER_GLEASON))
   labels <- vapply(shown,`[[`,character(1),"label")
-  labels[[score_stratifier]] <- paste(sub("^Federated ","",federated_transfer_model_label(model_family)),"score")
+  labels[["gleason_group"]] <- "Gleason Score"
+  labels[["trio_group"]] <- "TSG Status"
+  model_name <- sub("^Federated ","",federated_transfer_model_label(model_family))
+  labels[[score_stratifier]] <- paste(model_name,"score")
+  if(score_stratifier=="score_extreme") {
+    # Bottom/top 20% of the score are its first and fifth quintiles.
+    display <- replace(display,match(shown$score_extreme$levels,groups),c("Q1","Q5"))
+    labels[["score_extreme"]] <- paste(model_name,"Quintiles")
+  }
   d <- mutate(d,tier=if_else(group %in% groups[c(FALSE,TRUE)],"high","low"),
     group=factor(group,levels=groups,labels=display),
     stratifier_label=factor(labels[stratifier],levels=labels),
@@ -1980,6 +1994,11 @@ FEDERATED_CHECKLIST_TABLES <- c(items="transfer_checklist_items_no_dfci",
   metrics="transfer_checklist_metrics_no_dfci",comparison="transfer_checklist_comparison_no_dfci",
   curves="transfer_checklist_km_curves_no_dfci",summary="transfer_checklist_km_summary_no_dfci")
 FEDERATED_CHECKLIST_RULE <- "checklist"
+# Figure 6 v2 KM tables (panel b population, sequencing clock).
+FEDERATED_CHECKLIST_SEQ_KM_TABLES <- c(curves="transfer_checklist_km_curves_seq_no_dfci",
+  summary="transfer_checklist_km_summary_seq_no_dfci")
+FEDERATED_GUIDELINE_SEQ_KM_TABLES <- c(curves="transfer_checklist_km_curves_seq_guideline_no_dfci",
+  summary="transfer_checklist_km_summary_seq_guideline_no_dfci")
 # Supplement: the same figure at every landmark x horizon (04 writes both tables to checklist_grid/).
 FEDERATED_CHECKLIST_GRID_DIR <- "checklist_grid"
 FEDERATED_CHECKLIST_GRID <- tidyr::expand_grid(landmark_days=c(0L,90L,180L),horizon_days=c(365L,1825L))
@@ -2006,10 +2025,11 @@ FEDERATED_GUIDELINE_SUPPLEMENT_DIR <- "generalized_federated_checklist_transfer"
 federated_guideline_grid_key <- function(f)
   paste0("federated_06_checklist_guideline_no_dfci",sub("^_","__",federated_checklist_cell_suffix(f)))
 
-load_federated_checklist_patients <- function(directory) {
-  path <- file.path(directory,FEDERATED_CHECKLIST_PATIENTS_FILE)
+load_federated_checklist_patients <- function(directory, file=FEDERATED_CHECKLIST_PATIENTS_FILE, optional=FALSE) {
+  path <- file.path(directory,file)
   if(!file.exists(path)) {
-    warning("Federated checklist patients unavailable; missing: ",path)
+    if(optional) message("Federated checklist patients unavailable; missing: ",path)
+    else warning("Federated checklist patients unavailable; missing: ",path)
     return(NULL)
   }
   d <- readr::read_csv(path,show_col_types=FALSE)
@@ -2070,13 +2090,13 @@ load_federated_guideline_items <- function(directory) {
 
 # KM curves and counts by checklist status for each endpoint, shaped like
 # federated_transfer_km_tables so plot_federated_transfer_km can draw them.
-federated_checklist_km_tables <- function(patients, f=FEDERATED_CHECKLIST_FIGURE) {
-  v <- FEDERATED_TRANSFER_KM_VIEWS$checklist
+federated_checklist_km_tables <- function(patients, f=FEDERATED_CHECKLIST_FIGURE, view="checklist") {
+  v <- FEDERATED_TRANSFER_KM_VIEWS[[view]]
   d <- mutate(patients,checklist=v$levels[1L+flag])
   fits <- lapply(names(FEDERATED_TRANSFER_ENDPOINTS),function(endpoint) {
     fit <- federated_transfer_km_fit(d[d$endpoint==endpoint,,drop=FALSE],v$column,v$levels)
     tag <- function(x) bind_cols(tibble(endpoint=endpoint,model_family=f$model_family,
-      landmark_days=f$landmark_days,view="checklist",clock=v$clock,.rows=nrow(x)),x)
+      landmark_days=f$landmark_days,view=view,clock=v$clock,.rows=nrow(x)),x)
     if(is.null(fit)) NULL else lapply(fit,tag)
   })
   list(curves=bind_rows(lapply(fits,`[[`,"curves")),summary=bind_rows(lapply(fits,`[[`,"counts")))
@@ -2127,6 +2147,22 @@ write_federated_checklist_tables <- function(root, federated_path, directory, f=
   stems <- if(guideline) FEDERATED_GUIDELINE_TABLES else FEDERATED_CHECKLIST_TABLES
   for(name in names(stems)) if(nrow(tables[[name]]))
     write_federated_transfer_table(root,tables[[name]],paste0(stems[[name]],suffix))
+  # Figure 6 v2: KM by checklist status in the panel b population (sequencing clock).
+  seq_patients <- if(grid) load_federated_checklist_patients(directory,FEDERATED_CHECKLIST_COMPARISON_PATIENTS_FILE,
+    optional=TRUE) else NULL
+  if(!is.null(seq_patients)) {
+    seq_patients <- dplyr::filter(seq_patients,landmark_days==f$landmark_days,model_horizon_days==f$horizon_days)
+    if(nrow(seq_patients)) {
+      if(any(seq_patients$flag!=(seq_patients$risk_score>=items$M[1L])))
+        stop("Patients in ",FEDERATED_CHECKLIST_COMPARISON_PATIENTS_FILE," were not flagged by the exported ",
+          items$M[1L],"-of-",items$N[1L]," checklist")
+      seq_km <- federated_checklist_km_tables(seq_patients,f,"checklist_seq")
+      seq_stems <- if(guideline) FEDERATED_GUIDELINE_SEQ_KM_TABLES else FEDERATED_CHECKLIST_SEQ_KM_TABLES
+      for(name in names(seq_stems)) if(nrow(seq_km[[name]]))
+        write_federated_transfer_table(root,seq_km[[name]],paste0(seq_stems[[name]],suffix))
+      tables$seq <- seq_km
+    }
+  }
   full <- load_federated_checklist_full_accuracy(directory)
   if(!is.null(full)) {
     full <- dplyr::filter(full,landmark_days==f$landmark_days,horizon_days==f$horizon_days)
@@ -2559,8 +2595,13 @@ manuscript_transfer_xgboost_caption <- function(extreme_percent=10L) {
       "Elastic-Net versions, the 0- and 90-day landmarks, score × TP53/RB1/PTEN Kaplan-Meier curves, and head-to-head Kaplan-Meier grids are provided as supplementary figures. ",
       "Patients/events in panel a were 2,267/182 at day 0, 2,233/166 at day 90, and 2,197/158 at day 180 for platinum; 2,237/197, 2,208/181, and 2,165/171 for AVPC; and 2,231/50, 2,212/46, and 2,172/41 for NEPC. ADT, androgen-deprivation therapy; AUC(t), time-dependent area under the receiver-operating-characteristic curve.")),
     collapse="\n\n")
-  if (extreme_percent == 20L) caption <- gsub("middle 80%", "middle 60%",
-    gsub("10%", "20%", caption, fixed=TRUE), fixed=TRUE)
+  if (extreme_percent == 20L) {
+    caption <- gsub("middle 80%", "middle 60%", gsub("10%", "20%", caption, fixed=TRUE), fixed=TRUE)
+    # The probability panels label the score extremes as quintiles and TSG status as WT vs >=1 MT.
+    caption <- sub("by the top and bottom 20% of the transferred XGBoost score, Gleason group (≤7 vs. ≥8), and tumor suppressor gene status (no alteration vs. any",
+      "by the first (Q1) and fifth (Q5) quintiles of the transferred XGBoost score, Gleason score (≤7 vs. ≥8), and tumor suppressor gene (TSG) status (WT, no alteration, vs. ≥1 MT, any",
+      caption, fixed=TRUE)
+  }
   caption
 }
 
@@ -2588,6 +2629,15 @@ manuscript_guideline_caption <- function(f=FEDERATED_CHECKLIST_FIGURE) {
     paste0("items are checked, with item thresholds rounded for use in practice (below 1 to the nearest quarter, single digits to the nearest ",
       "whole number, tens to the nearest 5, hundreds to the nearest 10, thousands to the nearest 100, and so on); item selection ",
       "and the M-of-N rule are those of the exact checklist. "),caption,fixed=TRUE)
+}
+
+# Figure 6 v2: panels c-e drawn in panel b's population on the sequencing clock.
+manuscript_checklist_seq_km_caption <- function(caption) {
+  caption <- sub("survival at Dana-Farber from the (\\d+)-day landmark after ADT initiation by checklist status;",
+    "survival at Dana-Farber from the \\1-day landmark after the sequencing date by checklist status, in the same sequenced patients with a Gleason score as panel b;",
+    caption)
+  caption <- sub("Panels c-e use the ADT-initiation clock. ","",caption,fixed=TRUE)
+  sub("For b, the checklist was rescored","For b-e, the checklist was rescored",caption,fixed=TRUE)
 }
 
 manuscript_checklist_caption_text <- function() paste(c(
@@ -2655,6 +2705,9 @@ manuscript_captions <- function() {
     federated_05_transfer_no_dfci__no_d=manuscript_transfer_caption(no_d=TRUE,km_panels=FALSE),
     federated_06_checklist_no_dfci=sub("^Generalized federated checklist transfer supplement\\.","Federated Figure 6.",
       manuscript_guideline_caption(federated_checklist_cell(90L,1825L))),
+    federated_06_checklist_no_dfci__v2=manuscript_checklist_seq_km_caption(
+      sub("^Generalized federated checklist transfer supplement\\.","Federated Figure 6 (v2).",
+        manuscript_guideline_caption(federated_checklist_cell(90L,1825L)))),
     federated_06_checklist_no_dfci__full_transfer=caption(
       "Supplementary Figure 7. Full-cohort checklist transfer accuracy.",
       "Paired bars compare generalized checklists with rounded thresholds and direct-transfer checklists with original thresholds in the full Dana-Farber ADT cohort, without a sequencing or Gleason-score restriction. Rows show platinum treatment, AVPC and NEPC; columns show the 1-year and 5-year prediction horizons. Landmarks are measured from ADT initiation.",
@@ -2842,14 +2895,13 @@ manuscript_multivariable_labs <- function(plots,spec) {
     grobs <- c(grobs,list(model_legend))
     heights <- c(heights,manuscript_multivariable_legend_height)
   }
-  grobs <- c(grobs,list(coefficient_row))
-  heights <- c(heights,spec$row_heights[n_perf+1])
+  grobs <- c(grobs,list(coefficient_row,xgboost_row))
+  heights <- c(heights,spec$row_heights[n_perf+1:2])
+  # The lab-category legend sits under the XGBoost row, at the bottom of the figure.
   if(!is.null(category_legend)) {
     grobs <- c(grobs,list(category_legend))
     heights <- c(heights,manuscript_multivariable_legend_height)
   }
-  grobs <- c(grobs,list(xgboost_row))
-  heights <- c(heights,spec$row_heights[n_perf+2])
   gridExtra::arrangeGrob(grobs=grobs,ncol=1,heights=heights,
     padding=grid::unit(3,"pt"))
 }
@@ -3238,9 +3290,10 @@ manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRAN
         ggplot2::theme(axis.text.x=ggplot2::element_text(angle=45,hjust=1,size=6),
           strip.text=ggplot2::element_text(size=7))
       add(p,paste(horizon,short[[endpoint]],"probability"),sprintf(
-        "Kaplan-Meier %s %s probability (1 - event-free; 95%% CI) from %d days after sequencing, by top and bottom %s of the transferred %s score, Gleason group, and TP53/RB1/PTEN alteration status; sequenced patients.",
+        "Kaplan-Meier %s %s probability (1 - event-free; 95%% CI) from %d days after sequencing, by %s of the transferred %s score, Gleason score, and TSG status (WT vs ≥1 MT in TP53/RB1/PTEN); sequenced patients.",
         horizon,short[[endpoint]],as.integer(landmark),
-        if(probability_tertile) "tertile" else sprintf("%d%%",extreme_percent),model))
+        if(probability_tertile) "top and bottom tertile" else if(extreme_percent==20L) "the first (Q1) and fifth (Q5) quintiles" else
+          sprintf("top and bottom %d%%",extreme_percent),model))
     }
     legend <- c(legend,"Score cutpoints were computed in the Dana-Farber patients at risk for each endpoint at each landmark.")
     return(list(plots=plots,titles=titles,legend=legend,km=plots[seq_len(n_km)],
@@ -3311,7 +3364,8 @@ manuscript_full_checklist_transfer <- function(direct, generalized) {
 }
 
 manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no_dfci",f=FEDERATED_CHECKLIST_FIGURE,
-                                           guideline=FALSE) {
+                                           guideline=FALSE,km_view="checklist") {
+  seq_clock <- identical(FEDERATED_TRANSFER_KM_VIEWS[[km_view]]$clock,"sequencing")
   landmark <- as.integer(f$landmark_days)
   if(guideline && is.null(tables$metrics)) tables$metrics <- tibble::tibble(model=character())
   lines <- federated_checklist_card_lines(tables$items,tables$metrics,f)
@@ -3345,14 +3399,15 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
         if_else(rows$rule==FEDERATED_CHECKLIST_RULE,"",sprintf(", %+.2f (%.2f to %.2f)",
           rows$delta_auc_vs_checklist,rows$delta_auc_lo,rows$delta_auc_hi)),collapse="; "),"."))
   for(endpoint in names(FEDERATED_TRANSFER_ENDPOINTS)) {
-    p <- manuscript_transfer_km_panel(plot_federated_transfer_km(tables,"checklist",endpoint,f$model_family,landmark,title=NULL),
+    p <- manuscript_transfer_km_panel(plot_federated_transfer_km(tables,km_view,endpoint,f$model_family,landmark,title=NULL),
       endpoint,landmark)
     if(is.null(p)) next
     plots[[length(plots)+1L]] <- p
     titles <- c(titles,paste0(FEDERATED_TRANSFER_ENDPOINTS_SHORT[[endpoint]],": checklist status"))
-    counts <- federated_transfer_km_pick(tables$summary,endpoint,f$model_family,landmark,"checklist")
-    legend <- c(legend,sprintf("%s: Kaplan-Meier %s-free survival at Dana-Farber from the %d-day landmark after ADT initiation by checklist status. Patients/events: %s; log-rank P = %.2g.",
+    counts <- federated_transfer_km_pick(tables$summary,endpoint,f$model_family,landmark,km_view)
+    legend <- c(legend,sprintf("%s: Kaplan-Meier %s-free survival at Dana-Farber from the %d-day landmark after %s by checklist status. Patients/events: %s; log-rank P = %.2g.",
       letters[length(plots)],if(endpoint=="platinum") "platinum" else FEDERATED_TRANSFER_ENDPOINTS_SHORT[[endpoint]],landmark,
+      if(seq_clock) "the sequencing date, in the panel b patients (sequenced, with a Gleason score)" else "ADT initiation",
       paste(sprintf("%s %s/%s",counts$stratum,scales::comma(counts$n),scales::comma(counts$events)),collapse="; "),
       counts$logrank_p[[1]]))
   }
@@ -3546,9 +3601,19 @@ manuscript_build <- function(items,tables,root) {
           federated_checklist_cell_suffix(f)))]] <- manuscript_federated_checklist(guideline,federated_guideline_grid_key(f),f,
           guideline=TRUE)
         # Main Figure 6 is the generalized (rounded-threshold) checklist at the 90-day landmark, 5-year horizon.
-        if(identical(as.integer(c(f$landmark_days,f$horizon_days)),as.integer(c(90,1825))))
+        if(identical(as.integer(c(f$landmark_days,f$horizon_days)),as.integer(c(90,1825)))) {
           result[["federated_06"]] <- manuscript_federated_checklist(guideline,"federated_06_checklist_no_dfci",f,
             guideline=TRUE)
+          # v2: panels c-e on the panel b population (sequenced with Gleason, sequencing clock).
+          seq_km <- lapply(FEDERATED_GUIDELINE_SEQ_KM_TABLES,function(stem)
+            read(paste0("^",stem,federated_checklist_cell_suffix(f),"__platinum[.]csv$")))
+          if(all(!vapply(seq_km,is.null,logical(1)))) {
+            v2 <- guideline; v2$curves <- seq_km$curves; v2$summary <- seq_km$summary
+            result[["federated_06__v2"]] <- manuscript_federated_checklist(v2,
+              "federated_06_checklist_no_dfci__v2",f,guideline=TRUE,km_view="checklist_seq")
+          }
+          else message("Skipping federated Figure 6 v2: missing sequencing-clock checklist KM tables")
+        }
       } else message("Skipping generalized federated checklist transfer landmark ",f$landmark_days,", horizon ",
         f$horizon_days,": missing tables")
     }

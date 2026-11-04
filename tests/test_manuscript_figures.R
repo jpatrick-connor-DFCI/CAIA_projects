@@ -59,9 +59,10 @@ grid_keys <- paste0("federated_06_checklist_no_dfci__lm",rep(c(0,90,180),each=2)
 guideline_keys <- paste0("federated_06_checklist_guideline_no_dfci__lm",rep(c(0,90,180),each=2),"_h",c(365,1825))
 federated_keys <- c("federated_03_univariable","federated_04_multivariable","federated_04_multivariable__full_features",
   "federated_05_transfer_no_dfci__top_bottom_20_all_endpoints","federated_05_transfer_no_dfci__no_d",
-  "federated_06_checklist_no_dfci","federated_06_checklist_no_dfci__full_transfer",grid_keys,guideline_keys)
+  "federated_06_checklist_no_dfci","federated_06_checklist_no_dfci__v2","federated_06_checklist_no_dfci__full_transfer",
+  grid_keys,guideline_keys)
 local_keys <- c("01_cohort_overview","02_llm_nepc_avpc__lm0","03_cohort_sensitivity_supplement")
-stopifnot(length(captions)==22,setequal(names(captions),c(local_keys,federated_keys)),
+stopifnot(length(captions)==23,setequal(names(captions),c(local_keys,federated_keys)),
   all(startsWith(unname(captions[local_keys]),paste0("Figure ",c(1,2,3),". "))),
   all(grepl("^Federated Figure ([3-6])[. ]",unname(captions[federated_keys[c(1,2,5,6)]]))),
   setequal(unique(manuscript_base_key(names(captions))),names(MANUSCRIPT_SECTIONS)),
@@ -74,18 +75,20 @@ stopifnot(length(captions)==22,setequal(names(captions),c(local_keys,federated_k
   grepl("Gleason score and age (b)",captions[["federated_05_transfer_no_dfci__no_d"]],fixed=TRUE),
   grepl("(c-e) Kaplan-Meier",captions[["federated_06_checklist_no_dfci"]],fixed=TRUE),
   grepl("same sequenced patients with a Gleason score",captions[["federated_06_checklist_no_dfci"]],fixed=TRUE),
+  grepl("landmark after the sequencing date by checklist status",captions[["federated_06_checklist_no_dfci__v2"]],fixed=TRUE),
+  !grepl("ADT-initiation clock",captions[["federated_06_checklist_no_dfci__v2"]],fixed=TRUE),
   !any(grepl("C-index",unname(captions),fixed=TRUE)),
   grepl("4,429/133",captions[["federated_04_multivariable"]],fixed=TRUE))
 caption_root <- tempfile("manuscript-caption-test-")
 caption_paths <- manuscript_write_captions(caption_root)
-stopifnot(length(caption_paths)==44,all(file.exists(caption_paths)))
+stopifnot(length(caption_paths)==46,all(file.exists(caption_paths)))
 # The federated set is numbered on its own; each caption sits in the
 # manuscript folder of its figure's section.
 caption_md <- caption_paths[endsWith(caption_paths,".md")]
 stopifnot(setequal(basename(caption_md),paste0(c("figure1","figure2_lm0","figure3_supplement",
   paste0("federated_figure",c(3,4,6)),"federated_figure4_full_features","federated_figure5_no_d",
   "federated_figure5_top_bottom_20_all_endpoints",
-  "federated_figure6_full_transfer",
+  "federated_figure6_full_transfer","federated_figure6_v2",
   paste0("federated_figure6_lm",rep(c(0,90,180),each=2),"_h",c(365,1825)),
   paste0("federated_figure6_guideline_lm",rep(c(0,90,180),each=2),"_h",c(365,1825))),".md")))
 for(path in caption_md) stopifnot(identical(readLines(path,warn=FALSE),
@@ -349,7 +352,7 @@ stopifnot(all(is.na(federated_transfer_score_quantile(c(rep(0,8),1,2)))),
 km_tables <- federated_transfer_km_tables(km_input)
 stopifnot(identical(names(km_tables),names(FEDERATED_TRANSFER_KM_TABLES)),
   identical(names(FEDERATED_TRANSFER_KM_TABLES),c("curves","summary","gradient")),
-  setequal(unique(km_tables$summary$view),setdiff(names(FEDERATED_TRANSFER_KM_VIEWS),"checklist")),
+  setequal(unique(km_tables$summary$view),setdiff(names(FEDERATED_TRANSFER_KM_VIEWS),c("checklist","checklist_seq"))),
   !any(c("score_gleason","hr") %in% names(FEDERATED_TRANSFER_KM_VIEWS)),
   all(km_tables$summary$clock[km_tables$summary$view %in% c("trio","score_trio")]=="sequencing"),
   setequal(unique(km_tables$gradient$stratifier),names(FEDERATED_TRANSFER_GRADIENT)),
@@ -412,6 +415,9 @@ stopifnot(length(fig5_km_a$spec$titles)==5,grepl("b: Kaplan-Meier",fig5_km_a$leg
 fig5_main <- manuscript_federated_transfer_no_dfci(transfer_metrics,NULL,km_tables,include=character(),
   model_families="xgboost_cox",probability=TRUE)
 risk <- plot_federated_transfer_horizon_risk(km_tables,"xgboost_cox",180L)
+risk_q <- plot_federated_transfer_horizon_risk(km_tables,"xgboost_cox",180L,score_stratifier="score_extreme")
+stopifnot(identical(levels(risk_q$data$group)[1:2],c("Q1","Q5")),
+  identical(levels(risk_q$data$stratifier_label)[1],"XGBoost Quintiles"))
 stopifnot(inherits(fig5_main$plot,"gtable"),length(fig5_main$spec$titles)==5,
   tail(fig5_main$spec$titles,1)=="5-year platinum probability",
   all(fig5_main$data$model_family=="xgboost_cox"),
@@ -421,7 +427,8 @@ stopifnot(inherits(fig5_main$plot,"gtable"),length(fig5_main$spec$titles)==5,
   inherits(risk,"ggplot"),all(risk$data$endpoint=="platinum"),all(risk$data$clock=="sequencing"),
   setequal(unique(risk$data$stratifier),FEDERATED_TRANSFER_RISK_STRATIFIERS),
   setequal(as.character(risk$data$group),c(FEDERATED_TRANSFER_GRADIENT$score_decile$levels,
-    FEDERATED_TRANSFER_GLEASON,FEDERATED_TRANSFER_TRIO_COUNTS)),
+    "≤7","≥8","WT","≥1 MT")),
+  identical(levels(risk$data$stratifier_label),c("XGBoost score","Gleason Score","TSG Status")),
   identical(risk$labels$y,"5-year platinum probability"),
   # 1 - KM swaps the interval: the event-free upper bound gives the lower probability bound.
   all(abs(risk$data$probability-(1-risk$data$event_free))<1e-12,na.rm=TRUE),

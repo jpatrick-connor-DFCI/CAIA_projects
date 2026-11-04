@@ -314,6 +314,26 @@ def test_checklist_grid_stacks_each_landmark_horizon_cell_and_skips_missing_ones
         fcc.checklist_grid(scores, scores, clinical, landmarks=(0,), horizons=(365,))
 
 
+def test_checklist_comparison_patients_are_the_rule_comparison_population(tmp_path):
+    scores, clinical = _checklist_tables()
+    patients = fcc.checklist_comparison_patients(scores, clinical)
+    assert list(patients.columns) == fcc.CHECKLIST_PATIENT_COLUMNS
+    comparison = fcc.checklist_rule_comparison(scores, clinical, n_bootstrap=20)
+    # Same sequenced patients with a Gleason score as panel b.
+    assert len(patients) == patients["person_id"].nunique() == comparison["n_patients"].iloc[0] == 200
+    assert patients["flag"].sum() == comparison.set_index("rule").loc["checklist", "n_positive"]
+    grid = fcc.checklist_comparison_patients_grid(scores, clinical, landmarks=(0, 180), horizons=(365, 1825))
+    assert grid.groupby(["landmark_days", "model_horizon_days"]).size().to_dict() == {(180, 365): 200, (180, 1825): 200}
+    grid_patients, grid_comparison = fcc.checklist_grid(scores, scores, clinical, n_bootstrap=20,
+                                                        landmarks=(180,), horizons=(365,))
+    fcc.write_checklist_grid(grid_patients, grid_comparison, tmp_path, comparison_patients=grid)
+    assert len(pd.read_csv(tmp_path / fcc.CHECKLIST_GRID_DIR / fcc.CHECKLIST_COMPARISON_PATIENTS_FILE)) == 400
+    fcc.write_guideline_grid(grid_patients, grid_comparison, pd.DataFrame(), tmp_path, comparison_patients=grid)
+    assert (tmp_path / fcc.GUIDELINE_GRID_DIR / fcc.CHECKLIST_COMPARISON_PATIENTS_FILE).exists()
+    with pytest.raises(ValueError, match="no checklist scores"):
+        fcc.checklist_comparison_patients_grid(scores, clinical, landmarks=(0,), horizons=(365,))
+
+
 def test_checklist_patients_require_the_figure_model():
     scores, _ = _checklist_tables()
     with pytest.raises(ValueError, match="no predictive_checklist scores"):
