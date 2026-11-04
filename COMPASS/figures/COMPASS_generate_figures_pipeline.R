@@ -1980,12 +1980,13 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       cm <- metrics$cm %>%
         mutate(truth = factor(CLASS_LABELS[as.character(truth)], levels = rev(CLASS_LABELS[CLASS_ORDER])),
                pred  = factor(CLASS_LABELS[as.character(pred)],  levels = CLASS_LABELS[CLASS_ORDER]))
-      thresh <- max(cm$n) / 2
-      ggplot(cm, aes(pred, truth, fill = n)) +
+      # Tile color is row-normalized (fraction of each manual-annotation class); labels stay counts.
+      cm <- cm %>% group_by(truth) %>% mutate(row_fraction = if_else(sum(n) > 0, n / sum(n), 0)) %>% ungroup()
+      ggplot(cm, aes(pred, truth, fill = row_fraction)) +
         geom_tile(color = "white", linewidth = 1) +
         geom_text(aes(label = format(n, big.mark = ","),
-                      color = n > thresh), size = 5, fontface = "bold") +
-        scale_fill_gradient(low = "#eaf1fb", high = COLOR_PLATINUM_POS, guide = "none") +
+                      color = row_fraction > .5), size = 5, fontface = "bold") +
+        scale_fill_gradient(low = "#eaf1fb", high = COLOR_PLATINUM_POS, limits = c(0, 1), guide = "none") +
         scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "#0b0b0b"), guide = "none") +
         labs(x = "LLM label (prediction)", y = "Manual annotation (truth)", title = title) +
         theme_fig() +

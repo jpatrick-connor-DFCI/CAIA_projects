@@ -26,7 +26,8 @@ checklist_interval <- function(row, metric) {
 
 # One card's text as a data frame of lines (text, fontface), top to bottom.
 # `cell$n_events_test`, when present, adds the held-out event count.
-checklist_card_lines <- function(cell, items, metrics, horizon_years, model_labels = CHECKLIST_MODEL_LABELS) {
+checklist_card_lines <- function(cell, items, metrics, horizon_years, model_labels = CHECKLIST_MODEL_LABELS,
+                                 brier = TRUE, operating_point = TRUE) {
   lines <- list()
   add <- function(text, face = "plain") for (piece in strsplit(text, "\n", fixed = TRUE)[[1L]])
     lines[[length(lines) + 1L]] <<- data.frame(text = piece, face = face,
@@ -55,15 +56,15 @@ checklist_card_lines <- function(cell, items, metrics, horizon_years, model_labe
     add(sprintf("%-*s %-18s %s",width,model,auc,brier),face)
     lines[[length(lines)]][c("metric_model","metric_auc","metric_brier")] <<- list(model,auc,brier)
   }
-  add_metrics("Model", "AUC (95% CI)", "Brier", "bold")
+  add_metrics("Model", "AUC (95% CI)", if (brier) "Brier" else "", "bold")
   for (model in names(model_labels)) {
     row <- metrics[metrics$model == model, , drop = FALSE]
     if (nrow(row) == 0L) next
     add_metrics(model_labels[[model]],checklist_interval(row[1L, ], "auc"),
-                checklist_number(row$brier[1L], 3))
+                if (brier) checklist_number(row$brier[1L], 3) else "")
   }
   checklist <- metrics[metrics$model == "checklist", , drop = FALSE]
-  if (cell$status == "ok" && nrow(checklist) > 0L) {
+  if (operating_point && cell$status == "ok" && nrow(checklist) > 0L) {
     gap()
     add(sprintf("Checklist at flag: sens %s, spec %s\n                   PPV %s, NPV %s",
       checklist_number(checklist$sensitivity[1L]), checklist_number(checklist$specificity[1L]),
@@ -75,7 +76,8 @@ checklist_card_lines <- function(cell, items, metrics, horizon_years, model_labe
 }
 
 plot_checklist_cards <- function(cards, title,
-    caption = "Unit-weight M-of-N checklists with IPCW-calibrated horizon risk; baselines are fit on the same development patients.") {
+    caption = "Unit-weight M-of-N checklists with IPCW-calibrated horizon risk; baselines are fit on the same development patients.",
+    font_size = FIGURE_FONT_SIZES[["body"]], brier = TRUE) {
   # Arial is proportional: position table cells explicitly instead of relying
   # on spaces to align numeric columns. Keep the original text in sidecars.
   cards$x <- .03
@@ -83,19 +85,19 @@ plot_checklist_cards <- function(cards, title,
   if("metric_model" %in% names(cards) && any(!is.na(cards$metric_model))) {
     metric_rows <- !is.na(cards$metric_model)
     table <- cards[metric_rows,,drop=FALSE]
-    columns <- c(metric_model=.03,metric_auc=.43,metric_brier=.82)
+    columns <- if (brier) c(metric_model=.03,metric_auc=.43,metric_brier=.82) else c(metric_model=.03,metric_auc=.55)
     cells <- lapply(names(columns),function(column) {
       cell <- table; cell$x <- columns[[column]]; cell$text <- cell[[column]]; cell
     })
     cards <- dplyr::bind_rows(c(list(cards[!metric_rows,,drop=FALSE]),cells))
   }
   ggplot(cards, aes(x = x, y = y, label = text, fontface = face)) +
-    geom_text(hjust = 0, vjust = 1, family = FIGURE_FONT, size = FIGURE_FONT_SIZES[["body"]] / ggplot2::.pt) +
+    geom_text(hjust = 0, vjust = 1, family = FIGURE_FONT, size = font_size / ggplot2::.pt) +
     facet_wrap(~ landmark_label, nrow = 1) +
     scale_x_continuous(limits = c(0, 1), expand = c(0, 0)) +
     scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +
     labs(title = title, caption = caption) +
-    theme_void(base_family=FIGURE_FONT, base_size=FIGURE_FONT_SIZES[["body"]]) +
+    theme_void(base_family=FIGURE_FONT, base_size=font_size) +
     theme(panel.border = element_rect(colour = "grey40", fill = NA, linewidth = .5),
           strip.text = element_blank(), panel.spacing = grid::unit(.8, "lines"),
           plot.title = element_text(face = "bold", size = 12, margin = margin(b = 6)),

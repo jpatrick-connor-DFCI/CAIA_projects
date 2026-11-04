@@ -462,6 +462,8 @@ render_metastatic_supplements <- function(config, patient_df, save_panel,
     subtitle <- sprintf("Both labelled: %s of %s; missing either: %s; agreement: %s",
       result$paired, nrow(labels), result$missing,
       if (result$paired) sprintf("%.1f%%", 100 * result$agreement) else "NA")
+    # The ADT-vs-LLM panel is shown without title, subtitle or caption.
+    plain <- identical(name, "adt_vs_llm")
     emit(ggplot(d, aes(second, first, fill = fraction)) + geom_tile(color = "white") +
            geom_text(aes(label = text), size = 4) +
            scale_fill_gradient(low = "white", high = "#56B4E9", limits = c(0, 1), na.value = "grey90") +
@@ -469,8 +471,10 @@ render_metastatic_supplements <- function(config, patient_df, save_panel,
            scale_y_discrete(limits = c("Metastatic", "Local")) +
            coord_fixed(ratio = 1) +
            labs(x = names_pretty[[pair[2]]], y = names_pretty[[pair[1]]],
-                title = "Local versus metastatic label agreement", subtitle = subtitle,
-                fill = "Row fraction", caption = caption) + theme_bw(), name, 7, 6)
+                title = if (plain) NULL else "Local versus metastatic label agreement",
+                subtitle = if (plain) NULL else subtitle,
+                fill = "Row fraction", caption = if (plain) NULL else caption) + theme_bw() +
+           theme(legend.title = element_text(margin = margin(b = 10))), name, 7, 6)
   }
 
   invisible(labels)

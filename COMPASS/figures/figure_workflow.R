@@ -1203,16 +1203,15 @@ render_federated_checklist_cards <- function(root,federated_path,dpi,overwrite,v
     readr::write_csv(loaded[[part]],path)
     if(is.function(capture)) capture(path)
   }
-  dodge <- ggplot2::position_dodge(width=.45)
-  auc <- ggplot2::ggplot(metrics,ggplot2::aes(horizon,auc,color=series,shape=series)) +
-    ggplot2::geom_hline(yintercept=.5,color="grey65",linetype="dotted") +
-    ggplot2::geom_linerange(ggplot2::aes(ymin=auc_lower,ymax=auc_upper),position=dodge,
-      linewidth=.65,na.rm=TRUE) +
-    ggplot2::geom_point(position=dodge,size=2.6,na.rm=TRUE) +
+  dodge <- ggplot2::position_dodge(width=.7)
+  auc <- ggplot2::ggplot(metrics,ggplot2::aes(horizon,auc,fill=series)) +
+    ggplot2::geom_col(position=dodge,width=.65,na.rm=TRUE) +
+    ggplot2::geom_errorbar(ggplot2::aes(ymin=auc_lower,ymax=auc_upper),position=dodge,
+      width=.22,linewidth=.5,na.rm=TRUE) +
+    ggplot2::geom_hline(yintercept=.5,color="grey40",linetype="dotted") +
     ggplot2::facet_wrap(~landmark_label,nrow=1,drop=FALSE) +
     ggplot2::scale_x_discrete(drop=FALSE) +
-    ggplot2::scale_color_manual(values=FEDERATED_CHECKLIST_COLORS,name=NULL,drop=FALSE) +
-    ggplot2::scale_shape_manual(values=c(Checklist=16,`Age-only checklist`=1),name=NULL,drop=FALSE) +
+    ggplot2::scale_fill_manual(values=FEDERATED_CHECKLIST_COLORS,name=NULL,drop=FALSE) +
     ggplot2::coord_cartesian(ylim=c(0,1)) +
     ggplot2::labs(title="a  Held-out test AUC(t)",x="Checklist horizon",y="AUC(t)") +
     federated_transfer_theme()
@@ -1231,19 +1230,21 @@ render_federated_checklist_cards <- function(root,federated_path,dpi,overwrite,v
       threshold=if(nrow(items)) items$M[1L] else NA,n_items=nrow(items),
       n_test=if(nrow(m)) m$n[1L] else NA,n_events_test=if(nrow(m)) m$n_cases[1L] else NA)
     lines <- checklist_card_lines(cell,dplyr::transmute(items,item_order=position,name=display_item),
-      m,round(days/365),FEDERATED_CHECKLIST_MODELS)
+      m,round(days/365),FEDERATED_CHECKLIST_MODELS,brier=FALSE,operating_point=FALSE)
     lines$landmark_label <- factor(sprintf("Landmark ADT +%d days",lm),levels=landmark_levels)
     cards[[h]][[length(cards[[h]])+1L]] <- lines
   }
   # Every card row gets the same height, spaced for the longest card.
-  line_in <- .17
+  card_scale <- 1.35
+  line_in <- .17*card_scale
   panel_in <- line_in*(max(vapply(unlist(cards,recursive=FALSE),nrow,integer(1)))+1.5)
   rows <- lapply(seq_along(cards),function(i) {
     d <- dplyr::bind_rows(lapply(cards[[i]],function(l) {
       l$y <- 1-.02-(seq_len(nrow(l))-1L)*line_in/panel_in
       l
     }))
-    plot_checklist_cards(d,sprintf("%s  %s checklists",letters[i+1L],names(cards)[i]),caption=NULL)
+    plot_checklist_cards(d,sprintf("%s  %s checklists",letters[i+1L],names(cards)[i]),caption=NULL,
+      font_size=FIGURE_FONT_SIZES[["body"]]*card_scale,brier=FALSE)
   })
   # Matching gtable widths line the AUC facets up with the card columns.
   grobs <- lapply(c(list(auc),rows),figure_plot_grob)
@@ -1252,15 +1253,10 @@ render_federated_checklist_cards <- function(root,federated_path,dpi,overwrite,v
     for(i in seq_along(grobs)) grobs[[i]]$widths <- widths
   }
   heights <- c(3.2,rep(panel_in+.6,length(rows)))
-  caption <- paste(version$note,
-    "Unit-weight M-of-N checklists; the age-only checklist is a single age item fit on the same development patients.",
-    "IPCW-weighted AUC(t), Brier and flag operating points on held-out test patients at each horizon; bars and parentheses are 95% intervals.",
-    sep="\n")
   p <- gridExtra::arrangeGrob(grobs=grobs,ncol=1,heights=grid::unit(heights,"in"),
     top=grid::textGrob(paste0("Federated predictive checklists",version$label,": ADT, platinum endpoint"),
-      x=grid::unit(10,"pt"),hjust=0,gp=figure_text_gpar("title", fontface="bold")),
-    bottom=grid::textGrob(caption,x=grid::unit(10,"pt"),hjust=0,gp=figure_text_gpar("body", col="grey30")))
-  save_federated_panel(p,federated_output_path(root,stem,".pdf"),15.6,sum(heights)+1.2,dpi,overwrite)
+      x=grid::unit(10,"pt"),hjust=0,gp=figure_text_gpar("title", fontface="bold")))
+  save_federated_panel(p,federated_output_path(root,stem,".pdf"),15.6,sum(heights)+.6,dpi,overwrite)
   invisible(loaded)
 }
 
@@ -2655,7 +2651,7 @@ manuscript_captions <- function() {
       fixed=TRUE),
     federated_05_transfer_no_dfci__no_d=manuscript_transfer_caption(no_d=TRUE,km_panels=FALSE),
     federated_06_checklist_no_dfci=sub("^Generalized federated checklist transfer supplement\\.","Federated Figure 6.",
-      manuscript_guideline_caption()),
+      manuscript_guideline_caption(federated_checklist_cell(90L,1825L))),
     grid_captions,
     guideline_captions
   )
@@ -3269,12 +3265,14 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
   landmark <- as.integer(f$landmark_days)
   if(guideline && is.null(tables$metrics)) tables$metrics <- tibble::tibble(model=character())
   lines <- federated_checklist_card_lines(tables$items,tables$metrics,f)
-  line_in <- .17
+  # The checklist list is set larger than body text so it stays legible beside the plots.
+  card_scale <- 1.5
+  line_in <- .17*card_scale
   card_in <- line_in*(nrow(lines)+1.5)
   lines$y <- 1-.02-(seq_len(nrow(lines))-1L)*line_in/card_in
   rule <- sprintf("%d of %d items",tables$items$M[1L],tables$items$N[1L])
   # One card, so no facet; manuscript_style would restore its strip and axis text.
-  card <- plot_checklist_cards(lines,NULL,caption=NULL) + ggplot2::facet_null() +
+  card <- plot_checklist_cards(lines,NULL,caption=NULL,font_size=FIGURE_FONT_SIZES[["body"]]*card_scale) + ggplot2::facet_null() +
     ggplot2::labs(x=NULL,y=NULL) + ggplot2::theme(axis.text=ggplot2::element_blank())
   plots <- list(card,plot_federated_checklist_comparison(tables$comparison,f))
   titles <- c("Checklist","Accuracy")
@@ -3486,8 +3484,8 @@ manuscript_build <- function(items,tables,root) {
         result[[paste0("federated_06_guideline",sub("^_","__",
           federated_checklist_cell_suffix(f)))]] <- manuscript_federated_checklist(guideline,federated_guideline_grid_key(f),f,
           guideline=TRUE)
-        # Main Figure 6 is the generalized (rounded-threshold) checklist at the 180-day landmark, 1-year horizon.
-        if(identical(as.integer(c(f$landmark_days,f$horizon_days)),as.integer(c(180,365))))
+        # Main Figure 6 is the generalized (rounded-threshold) checklist at the 90-day landmark, 5-year horizon.
+        if(identical(as.integer(c(f$landmark_days,f$horizon_days)),as.integer(c(90,1825))))
           result[["federated_06"]] <- manuscript_federated_checklist(guideline,"federated_06_checklist_no_dfci",f,
             guideline=TRUE)
       } else message("Skipping generalized federated checklist transfer landmark ",f$landmark_days,", horizon ",
