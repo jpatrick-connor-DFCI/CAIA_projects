@@ -427,6 +427,8 @@ manuscript_renders_plan <- function() {
     federated_checklist_cell(FEDERATED_CHECKLIST_GRID$landmark_days[i],FEDERATED_CHECKLIST_GRID$horizon_days[i])),character(1))
   guideline <- vapply(seq_len(nrow(FEDERATED_CHECKLIST_GRID)),function(i) federated_guideline_grid_key(
     federated_checklist_cell(FEDERATED_CHECKLIST_GRID$landmark_days[i],FEDERATED_CHECKLIST_GRID$horizon_days[i])),character(1))
+  v2 <- vapply(seq_len(nrow(FEDERATED_GUIDELINE_V2_GRID)),function(i) federated_guideline_v2_key(
+    federated_checklist_cell(FEDERATED_GUIDELINE_V2_GRID$landmark_days[i],FEDERATED_GUIDELINE_V2_GRID$horizon_days[i])),character(1))
   plan <- rbind(
     data.frame(source=vapply(keys$main,manuscript,character(1)),
       target=file.path("main",paste0(c("02_llm_phenotyping","03_federated_lab_associations",
@@ -437,6 +439,9 @@ manuscript_renders_plan <- function() {
     data.frame(source=vapply(keys$supplement,manuscript,character(1)),
       target=file.path("supplement",paste0(c("S1_cohort_overview","S3_cohort_sensitivity",
         "S5_multivariable_full_features","S6_full_transfer_to_dfci"),".pdf"))),
+    # Figure 6 v2: panels c-e on the panel b population (sequencing clock), alongside the original.
+    data.frame(source=manuscript("federated_06_checklist_no_dfci__v2"),
+      target=file.path("main","06_federated_checklist_transfer_to_DFCI_v2.pdf")),
     data.frame(source=manuscript("federated_06_checklist_no_dfci__full_transfer"),
       target=file.path("supplement","S7_full_checklist_transfer.pdf")),
     data.frame(source=vapply(grid,manuscript,character(1)),
@@ -444,7 +449,9 @@ manuscript_renders_plan <- function() {
     data.frame(source=file.path(FIGURE_SECTIONS[["cohort_sensitivity"]],"adt_vs_llm__platinum__all__incl.pdf"),
       target=file.path("supplement","S2_llm_metastatic_vs_adt_intent.pdf")),
     data.frame(source=vapply(guideline,manuscript,character(1)),
-      target=file.path("supplement",FEDERATED_GUIDELINE_SUPPLEMENT_DIR,paste0(guideline,".pdf"))))
+      target=file.path("supplement",FEDERATED_GUIDELINE_SUPPLEMENT_DIR,paste0(guideline,".pdf"))),
+    data.frame(source=vapply(v2,manuscript,character(1)),
+      target=file.path("supplement",FEDERATED_GUIDELINE_V2_SUPPLEMENT_DIR,paste0(v2,".pdf"))))
   rownames(plan) <- NULL
   plan
 }
@@ -2024,6 +2031,10 @@ FEDERATED_GUIDELINE_TABLES <- c(items="transfer_checklist_items_guideline_no_dfc
 FEDERATED_GUIDELINE_SUPPLEMENT_DIR <- "generalized_federated_checklist_transfer"
 federated_guideline_grid_key <- function(f)
   paste0("federated_06_checklist_guideline_no_dfci",sub("^_","__",federated_checklist_cell_suffix(f)))
+# Figure 6 v2 (panels c-e on the panel b population, sequencing clock) at the later landmarks, both horizons.
+FEDERATED_GUIDELINE_V2_GRID <- dplyr::filter(FEDERATED_CHECKLIST_GRID,landmark_days %in% c(90L,180L))
+FEDERATED_GUIDELINE_V2_SUPPLEMENT_DIR <- "generalized_federated_checklist_transfer_v2"
+federated_guideline_v2_key <- function(f) paste0(federated_guideline_grid_key(f),"__v2")
 
 load_federated_checklist_patients <- function(directory, file=FEDERATED_CHECKLIST_PATIENTS_FILE, optional=FALSE) {
   path <- file.path(directory,file)
@@ -2672,6 +2683,12 @@ manuscript_captions <- function() {
     vapply(cells,federated_checklist_grid_key,character(1)))
   guideline_captions <- setNames(vapply(cells,manuscript_guideline_caption,character(1)),
     vapply(cells,federated_guideline_grid_key,character(1)))
+  v2_cells <- lapply(seq_len(nrow(FEDERATED_GUIDELINE_V2_GRID)),function(i) federated_checklist_cell(
+    FEDERATED_GUIDELINE_V2_GRID$landmark_days[i],FEDERATED_GUIDELINE_V2_GRID$horizon_days[i]))
+  v2_captions <- setNames(vapply(v2_cells,function(f) manuscript_checklist_seq_km_caption(
+      sub("^Generalized federated checklist transfer supplement\\.","Generalized federated checklist transfer supplement (v2).",
+        manuscript_guideline_caption(f))),character(1)),
+    vapply(v2_cells,federated_guideline_v2_key,character(1)))
   c(
     `01_cohort_overview`=caption(
       "Figure 1. Cohort assembly, follow-up, and platinum treatment after androgen-deprivation therapy.",
@@ -2713,7 +2730,8 @@ manuscript_captions <- function() {
       "Paired bars compare generalized checklists with rounded thresholds and direct-transfer checklists with original thresholds in the full Dana-Farber ADT cohort, without a sequencing or Gleason-score restriction. Rows show platinum treatment, AVPC and NEPC; columns show the 1-year and 5-year prediction horizons. Landmarks are measured from ADT initiation.",
       "Bars show horizon-specific inverse-probability-of-censoring-weighted AUC, equal to balanced accuracy for a binary rule; error bars denote 95% patient-bootstrap confidence intervals. The dotted line marks 0.5."),
     grid_captions,
-    guideline_captions
+    guideline_captions,
+    v2_captions
   )
 }
 
@@ -2731,7 +2749,7 @@ manuscript_write_captions <- function(root,keys=names(manuscript_captions()),cap
     # Other variants keep their existing numbered captions.
     name <- if(key=="03_cohort_sensitivity_supplement") "figure3_supplement" else
       if(startsWith(key,"federated_06_checklist_guideline_no_dfci__"))
-        paste0("federated_figure6_guideline_",sub("^.*__","",key)) else
+        paste0("federated_figure6_guideline_",sub("^.*?__","",key,perl=TRUE)) else
       paste0(if(startsWith(key,"federated_")) "federated_figure" else "figure",
         as.integer(sub("^(federated_)?0*([0-9]+)_.*$","\\2",key)),
         if(grepl("__",key,fixed=TRUE)) paste0("_",sub("^.*?__","",key,perl=TRUE)))
@@ -3601,19 +3619,33 @@ manuscript_build <- function(items,tables,root) {
         result[[paste0("federated_06_guideline",sub("^_","__",
           federated_checklist_cell_suffix(f)))]] <- manuscript_federated_checklist(guideline,federated_guideline_grid_key(f),f,
           guideline=TRUE)
-        # Main Figure 6 is the generalized (rounded-threshold) checklist at the 90-day landmark, 5-year horizon.
-        if(identical(as.integer(c(f$landmark_days,f$horizon_days)),as.integer(c(90,1825)))) {
-          result[["federated_06"]] <- manuscript_federated_checklist(guideline,"federated_06_checklist_no_dfci",f,
-            guideline=TRUE)
-          # v2: panels c-e on the panel b population (sequenced with Gleason, sequencing clock).
+        main_cell <- identical(as.integer(c(f$landmark_days,f$horizon_days)),as.integer(c(90,1825)))
+        v2_cell <- any(FEDERATED_GUIDELINE_V2_GRID$landmark_days==f$landmark_days &
+          FEDERATED_GUIDELINE_V2_GRID$horizon_days==f$horizon_days)
+        # v2: panels c-e on the panel b population (sequenced with Gleason, sequencing clock).
+        v2 <- NULL
+        if(main_cell || v2_cell) {
           seq_km <- lapply(FEDERATED_GUIDELINE_SEQ_KM_TABLES,function(stem)
             read(paste0("^",stem,federated_checklist_cell_suffix(f),"__platinum[.]csv$")))
           if(all(!vapply(seq_km,is.null,logical(1)))) {
             v2 <- guideline; v2$curves <- seq_km$curves; v2$summary <- seq_km$summary
-            result[["federated_06__v2"]] <- manuscript_federated_checklist(v2,
-              "federated_06_checklist_no_dfci__v2",f,guideline=TRUE,km_view="checklist_seq")
           }
-          else message("Skipping federated Figure 6 v2: missing sequencing-clock checklist KM tables")
+        }
+        if(v2_cell) {
+          if(!is.null(v2)) result[[paste0("federated_06_guideline",sub("^_","__",federated_checklist_cell_suffix(f)),"__v2")]] <-
+            manuscript_federated_checklist(v2,federated_guideline_v2_key(f),f,guideline=TRUE,km_view="checklist_seq")
+          else message("Skipping generalized federated checklist v2 landmark ",f$landmark_days,", horizon ",
+            f$horizon_days,": missing sequencing-clock checklist KM tables")
+        }
+        # Main Figure 6 is the generalized (rounded-threshold) checklist at the 90-day landmark, 5-year horizon.
+        if(main_cell) {
+          result[["federated_06"]] <- manuscript_federated_checklist(guideline,"federated_06_checklist_no_dfci",f,
+            guideline=TRUE)
+          if(!is.null(v2)) result[["federated_06__v2"]] <- manuscript_federated_checklist(v2,
+              "federated_06_checklist_no_dfci__v2",f,guideline=TRUE,km_view="checklist_seq")
+          else message("Skipping federated Figure 6 v2: missing sequencing-clock checklist KM tables (needs ",
+            FEDERATED_GUIDELINE_GRID_DIR,"/",FEDERATED_CHECKLIST_COMPARISON_PATIENTS_FILE,
+            " from 04_federated_transfer.ipynb; rerun 04, then 05_prep_figure_data.ipynb, then the figures)")
         }
       } else message("Skipping generalized federated checklist transfer landmark ",f$landmark_days,", horizon ",
         f$horizon_days,": missing tables")

@@ -57,12 +57,13 @@ stopifnot(landmark_header$theme$plot.subtitle$face=="bold",
 captions <- manuscript_captions()
 grid_keys <- paste0("federated_06_checklist_no_dfci__lm",rep(c(0,90,180),each=2),"_h",c(365,1825))
 guideline_keys <- paste0("federated_06_checklist_guideline_no_dfci__lm",rep(c(0,90,180),each=2),"_h",c(365,1825))
+v2_keys <- paste0("federated_06_checklist_guideline_no_dfci__lm",rep(c(90,180),each=2),"_h",c(365,1825),"__v2")
 federated_keys <- c("federated_03_univariable","federated_04_multivariable","federated_04_multivariable__full_features",
   "federated_05_transfer_no_dfci__top_bottom_20_all_endpoints","federated_05_transfer_no_dfci__no_d",
   "federated_06_checklist_no_dfci","federated_06_checklist_no_dfci__v2","federated_06_checklist_no_dfci__full_transfer",
-  grid_keys,guideline_keys)
+  grid_keys,guideline_keys,v2_keys)
 local_keys <- c("01_cohort_overview","02_llm_nepc_avpc__lm0","03_cohort_sensitivity_supplement")
-stopifnot(length(captions)==23,setequal(names(captions),c(local_keys,federated_keys)),
+stopifnot(length(captions)==27,setequal(names(captions),c(local_keys,federated_keys)),
   all(startsWith(unname(captions[local_keys]),paste0("Figure ",c(1,2,3),". "))),
   all(grepl("^Federated Figure ([3-6])[. ]",unname(captions[federated_keys[c(1,2,5,6)]]))),
   setequal(unique(manuscript_base_key(names(captions))),names(MANUSCRIPT_SECTIONS)),
@@ -77,11 +78,14 @@ stopifnot(length(captions)==23,setequal(names(captions),c(local_keys,federated_k
   grepl("same sequenced patients with a Gleason score",captions[["federated_06_checklist_no_dfci"]],fixed=TRUE),
   grepl("landmark after the sequencing date by checklist status",captions[["federated_06_checklist_no_dfci__v2"]],fixed=TRUE),
   !grepl("ADT-initiation clock",captions[["federated_06_checklist_no_dfci__v2"]],fixed=TRUE),
+  all(startsWith(unname(captions[v2_keys]),"Generalized federated checklist transfer supplement (v2). ")),
+  all(grepl("landmark after the sequencing date by checklist status",unname(captions[v2_keys]),fixed=TRUE)),
+  grepl("from 180 days after ADT initiation",captions[["federated_06_checklist_guideline_no_dfci__lm180_h365__v2"]],fixed=TRUE),
   !any(grepl("C-index",unname(captions),fixed=TRUE)),
   grepl("4,429/133",captions[["federated_04_multivariable"]],fixed=TRUE))
 caption_root <- tempfile("manuscript-caption-test-")
 caption_paths <- manuscript_write_captions(caption_root)
-stopifnot(length(caption_paths)==46,all(file.exists(caption_paths)))
+stopifnot(length(caption_paths)==54,all(file.exists(caption_paths)))
 # The federated set is numbered on its own; each caption sits in the
 # manuscript folder of its figure's section.
 caption_md <- caption_paths[endsWith(caption_paths,".md")]
@@ -90,7 +94,8 @@ stopifnot(setequal(basename(caption_md),paste0(c("figure1","figure2_lm0","figure
   "federated_figure5_top_bottom_20_all_endpoints",
   "federated_figure6_full_transfer","federated_figure6_v2",
   paste0("federated_figure6_lm",rep(c(0,90,180),each=2),"_h",c(365,1825)),
-  paste0("federated_figure6_guideline_lm",rep(c(0,90,180),each=2),"_h",c(365,1825))),".md")))
+  paste0("federated_figure6_guideline_lm",rep(c(0,90,180),each=2),"_h",c(365,1825)),
+  paste0("federated_figure6_guideline_lm",rep(c(90,180),each=2),"_h",c(365,1825),"__v2")),".md")))
 for(path in caption_md) stopifnot(identical(readLines(path,warn=FALSE),
   readLines(sub("[.]md$",".txt",path),warn=FALSE)))
 caption_file <- function(section,name) file.path(caption_root,section,
@@ -556,17 +561,21 @@ expected_names <- c(
   "main/04_federated_predictions.pdf"="04_multivariate/federated/manuscript/federated_04_multivariable.pdf",
   "main/05_federated_transfer_to_DFCI.pdf"="05_transfer_survival/manuscript/federated_05_transfer_no_dfci__top_bottom_20_all_endpoints.pdf",
   "main/06_federated_checklist_transfer_to_DFCI.pdf"="06_transfer_checklists/manuscript/federated_06_checklist_no_dfci.pdf",
+  "main/06_federated_checklist_transfer_to_DFCI_v2.pdf"="06_transfer_checklists/manuscript/federated_06_checklist_no_dfci__v2.pdf",
   "supplement/S1_cohort_overview.pdf"="01_cohort/manuscript/01_cohort_overview.pdf",
   "supplement/S2_llm_metastatic_vs_adt_intent.pdf"="03_univariate/cohort_sensitivity/adt_vs_llm__platinum__all__incl.pdf",
   "supplement/S3_cohort_sensitivity.pdf"="03_univariate/cohort_sensitivity/manuscript/03_cohort_sensitivity_supplement.pdf",
   "supplement/S4_checklist_supplement_platinum.pdf"="04_multivariate/federated/checklist_supplement__platinum.pdf",
   "supplement/S5_multivariable_full_features.pdf"="04_multivariate/federated/manuscript/federated_04_multivariable__full_features.pdf",
   "supplement/S6_full_transfer_to_dfci.pdf"="05_transfer_survival/manuscript/federated_05_transfer_no_dfci__no_d.pdf")
-stopifnot(nrow(renders_plan)==5L+1L+4L+1L+1L+6L+6L,!anyDuplicated(renders_plan$target),
+stopifnot(nrow(renders_plan)==6L+1L+4L+1L+1L+6L+6L+4L,!anyDuplicated(renders_plan$target),
   identical(unname(renders_plan$source[match(names(expected_names),renders_plan$target)]),unname(expected_names)),
   setequal(dirname(renders_plan$target),c("main","supplement",file.path("supplement","federated_checklist_transfer"),
-    file.path("supplement","generalized_federated_checklist_transfer"))),
-  sum(dirname(renders_plan$target)=="main")==5L,
+    file.path("supplement","generalized_federated_checklist_transfer"),
+    file.path("supplement","generalized_federated_checklist_transfer_v2"))),
+  sum(dirname(renders_plan$target)==file.path("supplement","generalized_federated_checklist_transfer_v2"))==4L,
+  "supplement/generalized_federated_checklist_transfer_v2/federated_06_checklist_guideline_no_dfci__lm180_h1825__v2.pdf" %in% renders_plan$target,
+  sum(dirname(renders_plan$target)=="main")==6L,
   sum(dirname(renders_plan$target)==file.path("supplement","federated_checklist_transfer"))==6L,
   sum(dirname(renders_plan$target)==file.path("supplement","generalized_federated_checklist_transfer"))==6L,
   "supplement/generalized_federated_checklist_transfer/federated_06_checklist_guideline_no_dfci__lm0_h1825.pdf" %in% renders_plan$target,
