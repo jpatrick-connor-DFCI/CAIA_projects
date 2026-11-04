@@ -1235,7 +1235,7 @@ render_federated_checklist_cards <- function(root,federated_path,dpi,overwrite,v
     cards[[h]][[length(cards[[h]])+1L]] <- lines
   }
   # Every card row gets the same height, spaced for the longest card.
-  card_scale <- 1.35
+  card_scale <- 1.9
   line_in <- .17*card_scale
   panel_in <- line_in*(max(vapply(unlist(cards,recursive=FALSE),nrow,integer(1)))+1.5)
   rows <- lapply(seq_along(cards),function(i) {
@@ -3266,7 +3266,7 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
   if(guideline && is.null(tables$metrics)) tables$metrics <- tibble::tibble(model=character())
   lines <- federated_checklist_card_lines(tables$items,tables$metrics,f)
   # The checklist list is set larger than body text so it stays legible beside the plots.
-  card_scale <- 1.5
+  card_scale <- 2.1
   line_in <- .17*card_scale
   card_in <- line_in*(nrow(lines)+1.5)
   lines$y <- 1-.02-(seq_len(nrow(lines))-1L)*line_in/card_in
