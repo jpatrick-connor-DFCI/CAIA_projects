@@ -175,6 +175,11 @@ FEDERATED_CHECKLIST_GRID_FILES = ("transfer_checklist_patients.csv", "transfer_c
 # Guideline (rounded-threshold) version of the grid; the rounded items travel with the same two tables.
 FEDERATED_GUIDELINE_GRID_DIR = "checklist_grid_guidelines"
 FEDERATED_GUIDELINE_GRID_FILES = FEDERATED_CHECKLIST_GRID_FILES + ("transfer_checklist_guideline_items.csv",)
+# Guideline checklist + Gleason / TP53-RB1-PTEN post-trained on DFCI platinum (reviewer supplement); mirrors
+# checklist_extension.py. The out-of-fold patient flags beside them are not read by the figures.
+FEDERATED_CHECKLIST_EXTENSION_DIR = "checklist_extension"
+FEDERATED_CHECKLIST_EXTENSION_FILES = ("transfer_checklist_extension_comparison.csv",
+                                       "transfer_checklist_extension_rules.csv")
 # Federated multivariable exports beside the across-site results CSV
 # (mirrors FEDERATED_MULTIVARIABLE in figure_workflow.R). Each bundle also has
 # a refit without Dana-Farber in "<directory>_no_DFCI".
@@ -554,6 +559,8 @@ def prepare(config: dict) -> dict:
             for name in FEDERATED_CHECKLIST_GRID_FILES]
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / FEDERATED_GUIDELINE_GRID_DIR / name)
             for name in FEDERATED_GUIDELINE_GRID_FILES]
+        federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / FEDERATED_CHECKLIST_EXTENSION_DIR / name)
+            for name in FEDERATED_CHECKLIST_EXTENSION_FILES]
         federated_sources.append(fingerprint(federated_transfer_no_dfci_dir(config)
                                              / FEDERATED_CHECKLIST_FULL_ACCURACY_FILE))
         federated_sources += [fingerprint(federated_transfer_no_dfci_dir(config) / name)

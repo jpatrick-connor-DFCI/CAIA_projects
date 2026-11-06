@@ -429,6 +429,7 @@ manuscript_renders_plan <- function() {
     federated_checklist_cell(FEDERATED_CHECKLIST_GRID$landmark_days[i],FEDERATED_CHECKLIST_GRID$horizon_days[i])),character(1))
   v2 <- vapply(seq_len(nrow(FEDERATED_GUIDELINE_V2_GRID)),function(i) federated_guideline_v2_key(
     federated_checklist_cell(FEDERATED_GUIDELINE_V2_GRID$landmark_days[i],FEDERATED_GUIDELINE_V2_GRID$horizon_days[i])),character(1))
+  extension <- vapply(FEDERATED_CHECKLIST_EXTENSION_LANDMARKS,federated_checklist_extension_key,character(1))
   plan <- rbind(
     data.frame(source=vapply(keys$main,manuscript,character(1)),
       target=file.path("main",paste0(c("02_llm_phenotyping","03_federated_lab_associations",
@@ -451,7 +452,9 @@ manuscript_renders_plan <- function() {
     data.frame(source=vapply(guideline,manuscript,character(1)),
       target=file.path("supplement",FEDERATED_GUIDELINE_SUPPLEMENT_DIR,paste0(guideline,".pdf"))),
     data.frame(source=vapply(v2,manuscript,character(1)),
-      target=file.path("supplement",FEDERATED_GUIDELINE_V2_SUPPLEMENT_DIR,paste0(v2,".pdf"))))
+      target=file.path("supplement",FEDERATED_GUIDELINE_V2_SUPPLEMENT_DIR,paste0(v2,".pdf"))),
+    data.frame(source=vapply(extension,manuscript,character(1)),
+      target=file.path("supplement",FEDERATED_CHECKLIST_EXTENSION_SUPPLEMENT_DIR,paste0(extension,".pdf"))))
   rownames(plan) <- NULL
   plan
 }
@@ -2035,6 +2038,24 @@ federated_guideline_grid_key <- function(f)
 FEDERATED_GUIDELINE_V2_GRID <- dplyr::filter(FEDERATED_CHECKLIST_GRID,landmark_days %in% c(90L,180L))
 FEDERATED_GUIDELINE_V2_SUPPLEMENT_DIR <- "generalized_federated_checklist_transfer_v2"
 federated_guideline_v2_key <- function(f) paste0(federated_guideline_grid_key(f),"__v2")
+# Reviewer extension (Supplementary Figure 8): the generalized checklist plus Gleason and/or TP53/RB1/PTEN items,
+# post-trained on Dana-Farber platinum with 5-fold cross-fitting and scored out of fold (04 writes
+# checklist_extension/ through federated_models/checklist_extension.py). One page per landmark, both horizons.
+FEDERATED_CHECKLIST_EXTENSION_DIR <- "checklist_extension"
+FEDERATED_CHECKLIST_EXTENSION_FILES <- c(comparison="transfer_checklist_extension_comparison.csv",
+  rules="transfer_checklist_extension_rules.csv")
+FEDERATED_CHECKLIST_EXTENSION_TABLES <- c(comparison="transfer_checklist_extension_no_dfci",
+  rules="transfer_checklist_extension_rules_no_dfci")
+FEDERATED_CHECKLIST_EXTENSION_SUPPLEMENT_DIR <- "S8_checklist_extension"
+FEDERATED_CHECKLIST_EXTENSION_LANDMARKS <- c(0L,90L,180L)
+FEDERATED_CHECKLIST_EXTENSION_RULES <- c(checklist="Checklist (frozen)",checklist_retuned="Checklist, M relearned",
+  gleason_ge8="Gleason ≥8",gleason="Gleason ≥ g",tsg_any="≥1 TSG altered",tsg="TSG item",
+  gleason_tsg="Gleason + TSG",checklist_gleason="Checklist + Gleason",checklist_tsg="Checklist + TSG",
+  checklist_gleason_tsg="Checklist + Gleason + TSG")
+FEDERATED_CHECKLIST_EXTENSION_COHORTS <- c(gleason="Gleason available\n(ADT clock)",
+  somatic="Sequenced\n(sequencing clock)",combined="Sequenced with Gleason\n(sequencing clock)")
+federated_checklist_extension_key <- function(landmark)
+  paste0("federated_06_checklist_no_dfci__extension_lm",as.integer(landmark))
 
 load_federated_checklist_patients <- function(directory, file=FEDERATED_CHECKLIST_PATIENTS_FILE, optional=FALSE) {
   path <- file.path(directory,file)
@@ -2200,6 +2221,28 @@ write_federated_checklist_guideline_tables <- function(root, federated_path, dir
     write_federated_checklist_tables(root,federated_path,grid_directory,
       federated_checklist_cell(FEDERATED_CHECKLIST_GRID$landmark_days[i],FEDERATED_CHECKLIST_GRID$horizon_days[i]),
       grid=TRUE,guideline=TRUE)
+}
+
+# Copies the extension comparison and rules tables into the figure tables; absent in exports before the reviewer cell.
+write_federated_checklist_extension_tables <- function(root, directory) {
+  extension <- file.path(directory,FEDERATED_CHECKLIST_EXTENSION_DIR)
+  paths <- file.path(extension,FEDERATED_CHECKLIST_EXTENSION_FILES)
+  if(!all(file.exists(paths))) {
+    message("Skipping checklist extension tables: missing ",paste(paths[!file.exists(paths)],collapse=", "),
+      " (run the last cell of 04_federated_transfer.ipynb)")
+    return(invisible(NULL))
+  }
+  tables <- setNames(lapply(paths,readr::read_csv,show_col_types=FALSE),names(FEDERATED_CHECKLIST_EXTENSION_FILES))
+  required <- c("endpoint","cohort","landmark_days","horizon_days","rule","n_patients","n_events_horizon",
+    "auc","auc_lo","auc_hi","delta_auc_vs_checklist","delta_auc_lo","delta_auc_hi","note")
+  missing <- setdiff(required,names(tables$comparison))
+  if(length(missing)) stop(FEDERATED_CHECKLIST_EXTENSION_FILES[["comparison"]]," is missing ",paste(missing,collapse=", "))
+  unknown <- setdiff(c(tables$comparison$rule,tables$rules$rule),names(FEDERATED_CHECKLIST_EXTENSION_RULES))
+  if(length(unknown)) stop("Unknown checklist extension rule(s): ",paste(unique(unknown),collapse=", "))
+  unknown <- setdiff(tables$comparison$cohort,names(FEDERATED_CHECKLIST_EXTENSION_COHORTS))
+  if(length(unknown)) stop("Unknown checklist extension cohort(s): ",paste(unique(unknown),collapse=", "))
+  for(name in names(tables)) write_federated_transfer_table(root,tables[[name]],FEDERATED_CHECKLIST_EXTENSION_TABLES[[name]])
+  invisible(tables)
 }
 
 # Text lines of the Figure 6a card; `y` needs the panel height, so it is left to the caller.
@@ -2499,6 +2542,7 @@ render_federated_supplement <- function(data_root, fig_root, federated_path,
       write_federated_checklist_tables(root, federated_path, transfer_no_dfci_dir)
       write_federated_checklist_grid_tables(root, federated_path, transfer_no_dfci_dir)
       write_federated_checklist_guideline_tables(root, federated_path, transfer_no_dfci_dir)
+      write_federated_checklist_extension_tables(root, transfer_no_dfci_dir)
     }
   }
   invisible(d)
@@ -2689,6 +2733,8 @@ manuscript_captions <- function() {
       sub("^Generalized federated checklist transfer supplement\\.","Generalized federated checklist transfer supplement (v2).",
         manuscript_guideline_caption(f))),character(1)),
     vapply(v2_cells,federated_guideline_v2_key,character(1)))
+  extension_captions <- setNames(vapply(FEDERATED_CHECKLIST_EXTENSION_LANDMARKS,manuscript_checklist_extension_caption,
+    character(1)),vapply(FEDERATED_CHECKLIST_EXTENSION_LANDMARKS,federated_checklist_extension_key,character(1)))
   c(
     `01_cohort_overview`=caption(
       "Figure 1. Cohort assembly, follow-up, and platinum treatment after androgen-deprivation therapy.",
@@ -2731,9 +2777,32 @@ manuscript_captions <- function() {
       "Bars show horizon-specific inverse-probability-of-censoring-weighted AUC, equal to balanced accuracy for a binary rule; error bars denote 95% patient-bootstrap confidence intervals. The dotted line marks 0.5."),
     grid_captions,
     guideline_captions,
-    v2_captions
+    v2_captions,
+    extension_captions
   )
 }
+
+manuscript_checklist_extension_caption <- function(landmark) paste(c(
+  sprintf("Supplementary Figure 8 (landmark +%d days). Generalized federated checklist with Gleason score and tumor-suppressor status added.",
+    as.integer(landmark)),
+  paste("The generalized checklist trained without Dana-Farber (rounded thresholds, frozen items) was extended with a",
+    "unit-weight Gleason item (Gleason score ≥ 7, 8 or 9), a tumor-suppressor (TSG) item (TP53, RB1, PTEN, or any of",
+    "the three altered), or both, and its M-of-N threshold was relearned. The added items and threshold were chosen on",
+    "Dana-Farber platinum treatment by minimizing class-balanced inverse-probability-of-censoring-weighted error at the",
+    "checklist's own landmark and horizon, using 5-fold patient-level cross-fitting: each patient was scored by a rule",
+    "learned without them. Columns show the cohorts: patients with a Gleason score before the landmark (ADT clock; Gleason",
+    "rules), sequenced patients (sequencing-report clock; TSG rules) and sequenced patients with a Gleason score",
+    "(sequencing-report clock; all rules, the Figure 6b population). Rows show platinum treatment (the tuning endpoint,",
+    "still scored out of fold), AVPC and NEPC. 'Checklist (frozen)' is the transferred rule of Figure 6; 'Checklist, M",
+    "relearned' changes only its threshold; 'Gleason ≥8' and '≥1 TSG altered' are the fixed Figure 6b comparators."),
+  paste("Points show horizon-specific inverse-probability-of-censoring-weighted AUC, equal to balanced accuracy for a",
+    "binary rule, for the 1-year and 5-year checklists; bars denote 95% patient-bootstrap confidence intervals. Filled",
+    "points mark rules whose paired bootstrap 95% interval for the difference from the frozen checklist excludes 0.",
+    "Intervals condition on the out-of-fold rules and do not include the variability of re-tuning. All rules within a",
+    "cohort, endpoint and horizon are compared in the same patients; estimates with fewer than 5 events by the horizon",
+    "are not shown. Per-fold and full-cohort rules are reported in transfer_checklist_extension_rules_no_dfci.csv.",
+    "The dotted line marks 0.5. ADT, androgen-deprivation therapy; AVPC, aggressive-variant prostate cancer; NEPC,",
+    "neuroendocrine prostate cancer.")),collapse="\n\n")
 
 # Captions go to captions/ inside each figure's manuscript folder under the arm root.
 manuscript_write_captions <- function(root,keys=names(manuscript_captions()),capture=NULL) {
@@ -3382,6 +3451,57 @@ manuscript_full_checklist_transfer <- function(direct, generalized) {
       "direct-transfer checklists use the original thresholds. Landmarks are measured from ADT initiation."))
 }
 
+# Supplementary Figure 8: out-of-fold AUC of the frozen checklist, the Gleason / TSG rules and the extended checklists
+# at one landmark. Rows are endpoints, columns are cohorts (each with only the rules its items allow), points are
+# horizons; filled points mark a paired 95% CI for the gain over the frozen checklist that excludes 0.
+manuscript_checklist_extension <- function(comparison, landmark) {
+  required <- c("endpoint","cohort","landmark_days","horizon_days","rule","auc","auc_lo","auc_hi",
+    "delta_auc_lo","delta_auc_hi")
+  if(!all(required %in% names(comparison))) stop("Checklist extension comparison is missing required columns")
+  d <- dplyr::filter(comparison,landmark_days==landmark,endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS),
+    cohort %in% names(FEDERATED_CHECKLIST_EXTENSION_COHORTS),horizon_days %in% c(365,1825))
+  if(!nrow(d)) {
+    message("Skipping checklist extension landmark ",landmark,": no rows")
+    return(NULL)
+  }
+  if(anyDuplicated(d[c("endpoint","cohort","horizon_days","rule")]))
+    stop("Duplicate checklist extension estimates at landmark ",landmark)
+  dropped <- sum(!is.finite(d$auc))
+  if(dropped) message("Checklist extension landmark ",landmark,": ",dropped,
+    " underpowered or inestimable rule estimates not drawn")
+  d <- dplyr::filter(d,is.finite(auc))
+  if(!nrow(d)) return(NULL)
+  d$endpoint <- factor(d$endpoint,levels=names(FEDERATED_TRANSFER_ENDPOINTS),labels=unname(FEDERATED_TRANSFER_ENDPOINTS))
+  d$cohort <- factor(d$cohort,levels=names(FEDERATED_CHECKLIST_EXTENSION_COHORTS),
+    labels=unname(FEDERATED_CHECKLIST_EXTENSION_COHORTS))
+  d$rule_label <- factor(FEDERATED_CHECKLIST_EXTENSION_RULES[d$rule],levels=unname(FEDERATED_CHECKLIST_EXTENSION_RULES))
+  d$horizon <- factor(d$horizon_days,levels=c(365,1825),labels=c("1-year","5-year"))
+  d$gain <- factor(ifelse(d$rule!="checklist" & is.finite(d$delta_auc_lo) &
+      (d$delta_auc_lo>0 | d$delta_auc_hi<0),"CI excludes 0","CI includes 0"),levels=c("CI excludes 0","CI includes 0"))
+  dodge <- ggplot2::position_dodge(width=.6)
+  p <- ggplot2::ggplot(d,ggplot2::aes(x=rule_label,y=auc,color=horizon,shape=gain)) +
+    ggplot2::geom_hline(yintercept=.5,linetype="dotted",color="grey65") +
+    ggplot2::geom_linerange(ggplot2::aes(ymin=auc_lo,ymax=auc_hi),position=dodge,linewidth=.5,na.rm=TRUE) +
+    ggplot2::geom_point(position=dodge,size=1.9,fill="white",stroke=.7) +
+    ggplot2::facet_grid(endpoint~cohort,scales="free_x",space="free_x") +
+    ggplot2::scale_color_manual(values=c("1-year"="#B6A2CC","5-year"="#7852A1"),drop=FALSE) +
+    ggplot2::scale_shape_manual(values=c("CI excludes 0"=16,"CI includes 0"=21),drop=FALSE) +
+    ggplot2::scale_y_continuous(breaks=seq(0,1,.25)) +
+    ggplot2::coord_cartesian(ylim=c(.25,1)) +
+    ggplot2::labs(x=NULL,y="Horizon-specific AUC (out of fold)",color="Horizon",
+      shape="ΔAUC vs frozen checklist",subtitle=paste0("Landmark +",landmark," days after ADT initiation")) +
+    ggplot2::theme_classic(base_size=10) +
+    ggplot2::theme(legend.position="top",strip.background=ggplot2::element_blank(),
+      strip.text=ggplot2::element_text(face="bold"),panel.spacing=grid::unit(.8,"lines"),
+      axis.text.x=ggplot2::element_text(angle=40,hjust=1))
+  list(plot=p,spec=list(key=federated_checklist_extension_key(landmark),width=11,height=8),data=d,
+    legend=paste("Generalized no-Dana-Farber checklist with Gleason and/or TP53/RB1/PTEN items post-trained on",
+      "Dana-Farber platinum (5-fold cross-fitting) and scored out of fold. Points show horizon-specific",
+      "inverse-probability-of-censoring-weighted AUC (balanced accuracy for a yes/no rule) with 95% patient-bootstrap",
+      "intervals that condition on the out-of-fold rules; filled points mark a paired ΔAUC versus the frozen",
+      "checklist whose interval excludes 0. Estimates with fewer than 5 events by the horizon are not drawn."))
+}
+
 manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no_dfci",f=FEDERATED_CHECKLIST_FIGURE,
                                            guideline=FALSE,km_view="checklist") {
   seq_clock <- identical(FEDERATED_TRANSFER_KM_VIEWS[[km_view]]$clock,"sequencing")
@@ -3654,6 +3774,12 @@ manuscript_build <- function(items,tables,root) {
       result[["federated_06__full_transfer"]] <- manuscript_full_checklist_transfer(
         dplyr::bind_rows(full_direct),dplyr::bind_rows(full_generalized))
     else message("Skipping S7 full checklist transfer: missing full-cohort accuracy tables")
+    extension <- read(paste0("^",FEDERATED_CHECKLIST_EXTENSION_TABLES[["comparison"]],"__platinum[.]csv$"))
+    if(!is.null(extension)) for(landmark in FEDERATED_CHECKLIST_EXTENSION_LANDMARKS) {
+      page <- manuscript_checklist_extension(extension,landmark)
+      if(!is.null(page)) result[[paste0("federated_06__extension_lm",landmark)]] <- page
+    } else message("Skipping S8 checklist extension: missing ",FEDERATED_CHECKLIST_EXTENSION_TABLES[["comparison"]],
+      " (run the last cell of 04_federated_transfer.ipynb, then 05_prep_figure_data.ipynb)")
   }
   result
 }

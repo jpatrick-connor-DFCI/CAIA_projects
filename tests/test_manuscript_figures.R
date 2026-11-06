@@ -58,12 +58,13 @@ captions <- manuscript_captions()
 grid_keys <- paste0("federated_06_checklist_no_dfci__lm",rep(c(0,90,180),each=2),"_h",c(365,1825))
 guideline_keys <- paste0("federated_06_checklist_guideline_no_dfci__lm",rep(c(0,90,180),each=2),"_h",c(365,1825))
 v2_keys <- paste0("federated_06_checklist_guideline_no_dfci__lm",rep(c(90,180),each=2),"_h",c(365,1825),"__v2")
+extension_keys <- paste0("federated_06_checklist_no_dfci__extension_lm",c(0,90,180))
 federated_keys <- c("federated_03_univariable","federated_04_multivariable","federated_04_multivariable__full_features",
   "federated_05_transfer_no_dfci__top_bottom_20_all_endpoints","federated_05_transfer_no_dfci__no_d",
   "federated_06_checklist_no_dfci","federated_06_checklist_no_dfci__v2","federated_06_checklist_no_dfci__full_transfer",
-  grid_keys,guideline_keys,v2_keys)
+  grid_keys,guideline_keys,v2_keys,extension_keys)
 local_keys <- c("01_cohort_overview","02_llm_nepc_avpc__lm0","03_cohort_sensitivity_supplement")
-stopifnot(length(captions)==27,setequal(names(captions),c(local_keys,federated_keys)),
+stopifnot(length(captions)==30,setequal(names(captions),c(local_keys,federated_keys)),
   all(startsWith(unname(captions[local_keys]),paste0("Figure ",c(1,2,3),". "))),
   all(grepl("^Federated Figure ([3-6])[. ]",unname(captions[federated_keys[c(1,2,5,6)]]))),
   setequal(unique(manuscript_base_key(names(captions))),names(MANUSCRIPT_SECTIONS)),
@@ -82,10 +83,13 @@ stopifnot(length(captions)==27,setequal(names(captions),c(local_keys,federated_k
   all(grepl("landmark after the sequencing date by checklist status",unname(captions[v2_keys]),fixed=TRUE)),
   grepl("from 180 days after ADT initiation",captions[["federated_06_checklist_guideline_no_dfci__lm180_h365__v2"]],fixed=TRUE),
   !any(grepl("C-index",unname(captions),fixed=TRUE)),
-  grepl("4,429/133",captions[["federated_04_multivariable"]],fixed=TRUE))
+  grepl("4,429/133",captions[["federated_04_multivariable"]],fixed=TRUE),
+  all(startsWith(unname(captions[extension_keys]),paste0("Supplementary Figure 8 (landmark +",c(0,90,180)," days)."))),
+  all(grepl("do not include the variability of re-tuning",unname(captions[extension_keys]),fixed=TRUE)),
+  all(grepl("tuning endpoint",unname(captions[extension_keys]),fixed=TRUE)))
 caption_root <- tempfile("manuscript-caption-test-")
 caption_paths <- manuscript_write_captions(caption_root)
-stopifnot(length(caption_paths)==54,all(file.exists(caption_paths)))
+stopifnot(length(caption_paths)==60,all(file.exists(caption_paths)))
 # The federated set is numbered on its own; each caption sits in the
 # manuscript folder of its figure's section.
 caption_md <- caption_paths[endsWith(caption_paths,".md")]
@@ -95,7 +99,8 @@ stopifnot(setequal(basename(caption_md),paste0(c("figure1","figure2_lm0","figure
   "federated_figure6_full_transfer","federated_figure6_v2",
   paste0("federated_figure6_lm",rep(c(0,90,180),each=2),"_h",c(365,1825)),
   paste0("federated_figure6_guideline_lm",rep(c(0,90,180),each=2),"_h",c(365,1825)),
-  paste0("federated_figure6_guideline_lm",rep(c(90,180),each=2),"_h",c(365,1825),"__v2")),".md")))
+  paste0("federated_figure6_guideline_lm",rep(c(90,180),each=2),"_h",c(365,1825),"__v2"),
+  paste0("federated_figure6_extension_lm",c(0,90,180))),".md")))
 for(path in caption_md) stopifnot(identical(readLines(path,warn=FALSE),
   readLines(sub("[.]md$",".txt",path),warn=FALSE)))
 caption_file <- function(section,name) file.path(caption_root,section,
@@ -568,11 +573,12 @@ expected_names <- c(
   "supplement/S4_checklist_supplement_platinum.pdf"="04_multivariate/federated/checklist_supplement__platinum.pdf",
   "supplement/S5_multivariable_full_features.pdf"="04_multivariate/federated/manuscript/federated_04_multivariable__full_features.pdf",
   "supplement/S6_full_transfer_to_dfci.pdf"="05_transfer_survival/manuscript/federated_05_transfer_no_dfci__no_d.pdf")
-stopifnot(nrow(renders_plan)==6L+1L+4L+1L+1L+6L+6L+4L,!anyDuplicated(renders_plan$target),
+stopifnot(nrow(renders_plan)==6L+1L+4L+1L+1L+6L+6L+4L+3L,!anyDuplicated(renders_plan$target),
   identical(unname(renders_plan$source[match(names(expected_names),renders_plan$target)]),unname(expected_names)),
   setequal(dirname(renders_plan$target),c("main","supplement",file.path("supplement","federated_checklist_transfer"),
     file.path("supplement","generalized_federated_checklist_transfer"),
-    file.path("supplement","generalized_federated_checklist_transfer_v2"))),
+    file.path("supplement","generalized_federated_checklist_transfer_v2"),file.path("supplement","S8_checklist_extension"))),
+  "supplement/S8_checklist_extension/federated_06_checklist_no_dfci__extension_lm90.pdf" %in% renders_plan$target,
   sum(dirname(renders_plan$target)==file.path("supplement","generalized_federated_checklist_transfer_v2"))==4L,
   "supplement/generalized_federated_checklist_transfer_v2/federated_06_checklist_guideline_no_dfci__lm180_h1825__v2.pdf" %in% renders_plan$target,
   sum(dirname(renders_plan$target)=="main")==6L,
@@ -601,6 +607,24 @@ stopifnot(nrow(full_figure$data)==36L,
   identical(levels(full_figure$data$checklist),c("Generalized","Direct transfer")),
   nrow(ggplot2::ggplot_build(full_figure$plot)$layout$layout)==6L,
   is.null(manuscript_full_checklist_transfer(full_grid[-1,],full_grid)))
+# Supplementary Figure 8: one page per landmark, cohorts as columns with only their own rules.
+extension_rules <- list(gleason=c("checklist","checklist_retuned","gleason_ge8","gleason","checklist_gleason"),
+  somatic=c("checklist","checklist_retuned","tsg_any","tsg","checklist_tsg"),
+  combined=names(FEDERATED_CHECKLIST_EXTENSION_RULES))
+extension_grid <- dplyr::bind_rows(lapply(names(extension_rules),function(cohort) tidyr::expand_grid(
+    endpoint=names(FEDERATED_TRANSFER_ENDPOINTS),cohort=cohort,landmark_days=c(0L,90L,180L),
+    horizon_days=c(365L,1825L),rule=extension_rules[[cohort]]))) %>%
+  mutate(auc=.7,auc_lo=.6,auc_hi=.8,delta_auc_vs_checklist=ifelse(rule=="checklist",0,.05),
+    delta_auc_lo=ifelse(rule=="checklist",0,.01),delta_auc_hi=.1,n_patients=100L,n_events_horizon=20L,note=NA)
+extension_grid$auc[extension_grid$endpoint=="nepc" & extension_grid$horizon_days==365L] <- NA
+extension_figure <- suppressMessages(manuscript_checklist_extension(extension_grid,90L))
+extension_build <- ggplot2::ggplot_build(extension_figure$plot)
+stopifnot(identical(extension_figure$spec$key,"federated_06_checklist_no_dfci__extension_lm90"),
+  nrow(extension_figure$data)==(3L*2L-1L)*20L,all(extension_figure$data$landmark_days==90L),
+  nrow(extension_build$layout$layout)==9L,
+  all(extension_figure$data$gain[extension_figure$data$rule!="checklist"]=="CI excludes 0"),
+  all(extension_figure$data$gain[extension_figure$data$rule=="checklist"]=="CI includes 0"),
+  is.null(suppressMessages(manuscript_checklist_extension(extension_grid,30L))))
 # The drawn items must be the rule that assigned the patient groups.
 readr::write_csv(mutate(checklist_patients,flag=1L-flag),file.path(checklist_dir,FEDERATED_CHECKLIST_PATIENTS_FILE))
 flag_error <- tryCatch(write_federated_checklist_tables(checklist_root,"unused",checklist_dir),error=conditionMessage)
