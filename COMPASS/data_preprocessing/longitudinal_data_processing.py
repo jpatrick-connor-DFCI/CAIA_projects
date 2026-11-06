@@ -646,9 +646,13 @@ def build_longitudinal_prediction_data(
             nepc_days,
             pred_df["t_last_contact"],
         ).astype(float)
-        # A positive with no usable date would yield NaN here; Stage 1 already
-        # demotes undated positives to censored, so this is belt-and-braces.
-        pred_df["t_nepc"] = pred_df["t_nepc"].fillna(pred_df["t_last_contact"])
+        # A positive with no usable date (still undated after Stage 1's
+        # stated-dx fallback) keeps a NaN duration so make_outcome_df's
+        # "t_nepc notna" gate excludes it from this endpoint only. Only
+        # non-events fall back to last contact.
+        pred_df["t_nepc"] = pred_df["t_nepc"].where(
+            pred_df["NEPC"].eq(1), pred_df["t_nepc"].fillna(pred_df["t_last_contact"])
+        )
 
     # AVPC endpoint, built the same way: days from the treatment anchor to
     # first meeting AVPC (is_avpc from the AVPC runner, independent of any
@@ -666,9 +670,13 @@ def build_longitudinal_prediction_data(
             avpc_days,
             pred_df["t_last_contact"],
         ).astype(float)
-        # A positive with no usable date would yield NaN here; Stage 1 already
-        # demotes undated positives to censored, so this is belt-and-braces.
-        pred_df["t_avpc"] = pred_df["t_avpc"].fillna(pred_df["t_last_contact"])
+        # A positive with no usable date (still undated after Stage 1's
+        # stated-dx fallback) keeps a NaN duration so make_outcome_df's
+        # "t_avpc notna" gate excludes it from this endpoint only. Only
+        # non-events fall back to last contact.
+        pred_df["t_avpc"] = pred_df["t_avpc"].where(
+            pred_df["AVPC"].eq(1), pred_df["t_avpc"].fillna(pred_df["t_last_contact"])
+        )
 
     # Patients who never received a highlighted drug have no anchor date, so every
     # anchor-relative duration is NaN and they are dropped by the outcome builder's

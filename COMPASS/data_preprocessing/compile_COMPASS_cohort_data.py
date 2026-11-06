@@ -123,6 +123,10 @@ ONCDRS_PATH = os.path.join(PROFILE_PATH, 'OncDRS/ALL_2025_03/')
 #                                        AVPC runner; no criteria-count gate here)
 #   union of the two                  -> AVPC_NEPC joint audit fields
 LLM_ANNOTATIONS_PATH = os.path.join(DATA_PATH, 'LLM_annotations/')
+# *_DATE_SOURCE value for an event date taken from stated_nepc_dx_date because
+# the runner's own date was missing or unparseable.
+STATED_DX_FALLBACK_SOURCE = 'stated_dx_fallback'
+
 SUBTYPE_LABELS_PATH = os.path.join(
     LLM_ANNOTATIONS_PATH, 'LLM_primary_subtype/primary_subtype_labels.parquet'
 )
@@ -698,9 +702,10 @@ def load_subtype_labels(path) -> pl.DataFrame:
       nepc_date_precision   -> NEPC_DATE_PRECISION
       nepc_review_status    -> NEPC_LABEL_SOURCE
       has_stated_nepc_dx    -> NEPC_STATED_DX       (strict tier, audit only)
-      stated_nepc_dx_date   -> NEPC_STATED_DX_DATE  (audit only)
+      stated_nepc_dx_date   -> NEPC_STATED_DX_DATE  (also the date fallback)
       is_avpc               -> AVPC                 (the AVPC runner's diagnosis)
       avpc_date             -> AVPC_DATE
+      (derived)             -> AVPC_DATE_SOURCE     ("avpc_runner" / fallback)
       avpc_review_status    -> AVPC_LABEL_SOURCE
       n_avpc_criteria       -> AVPC_N_CRITERIA      (audit only)
       avpc_criteria         -> AVPC_CRITERIA        (comma-joined, audit only)
@@ -714,8 +719,15 @@ def load_subtype_labels(path) -> pl.DataFrame:
     A null label means that pipeline never read the patient's notes
     (review_status "failed" / "not_run"). Like a patient missing from the file,
     it is censored as 0 rather than dropped; the review status is kept in
-    ``*_LABEL_SOURCE`` so a sensitivity analysis can exclude them. A positive
-    with no parseable date carries no event time and is censored the same way.
+    ``*_LABEL_SOURCE`` so a sensitivity analysis can exclude them.
+
+    A positive whose own date is missing or unparseable falls back to
+    ``stated_nepc_dx_date`` (the only stated-diagnosis date upstream; the AVPC
+    runner records none of its own), with ``*_DATE_SOURCE`` set to
+    ``STATED_DX_FALLBACK_SOURCE``. A positive still undated after the fallback
+    keeps its label (event = 1) and a null date, so its TT_* is null and it is
+    excluded from that endpoint's analysis -- not censored as event-free, and
+    still present for every other endpoint.
 
     Dates arrive as ISO ``YYYY-MM-DD`` *strings*, not a date type, so they are
     parsed here with the same permissive parser used for the OncDRS date columns.
@@ -735,6 +747,7 @@ def load_subtype_labels(path) -> pl.DataFrame:
             "NEPC_STATED_DX_DATE": pl.Datetime,
             "AVPC_DATE": pl.Datetime,
             "AVPC": pl.Int64,
+            "AVPC_DATE_SOURCE": pl.Utf8,
             "AVPC_LABEL_SOURCE": pl.Utf8,
             "AVPC_N_CRITERIA": pl.Int64,
             "AVPC_CRITERIA": pl.Utf8,
@@ -825,20 +838,47 @@ def load_subtype_labels(path) -> pl.DataFrame:
         pl.col("n_avpc_criteria").cast(pl.Int64, strict=False).alias("AVPC_N_CRITERIA"),
     )
 
-    # A positive with an unparseable date carries no event time. Demote it to
-    # censored rather than dropping the patient: they remain in the cohort with
-    # follow-up, they just cannot contribute an event.
-    for event, date_col, name in (("NEPC", "NEPC_DATE", "nepc"), ("AVPC", "AVPC_DATE", "avpc")):
-        undated = labels.filter(pl.col(event).eq(1) & pl.col(date_col).is_null())
-        if len(undated):
+    # Positives whose own date is missing/unparseable fall back to the stated
+    # NEPC diagnosis date (the only stated-diagnosis date upstream, used for
+    # both arms). Anything still undated keeps event = 1 with a null date: the
+    # null TT_* then excludes the patient from that endpoint's analysis rather
+    # than counting them as event-free through follow-up.
+    stated_dx_date = pl.col("NEPC_STATED_DX_DATE")
+    labels = labels.with_columns(
+        pl.when(pl.col("AVPC").eq(1) & pl.col("AVPC_DATE").is_not_null())
+        .then(pl.lit("avpc_runner"))
+        .otherwise(pl.lit(None, dtype=pl.Utf8))
+        .alias("avpc_date_source"),
+    )
+    for event, date_col, source_col, precision_col, name in (
+        ("NEPC", "NEPC_DATE", "nepc_date_source", "nepc_date_precision", "nepc"),
+        ("AVPC", "AVPC_DATE", "avpc_date_source", None, "avpc"),
+    ):
+        needs_fallback = pl.col(event).eq(1) & pl.col(date_col).is_null()
+        fillable = needs_fallback & stated_dx_date.is_not_null()
+        n_undated = labels.filter(needs_fallback).height
+        n_filled = labels.filter(fillable).height
+        if n_undated:
             print(
-                f"[{name}] {len(undated)} positive label(s) have no parseable "
-                f"{name}_date; censoring them."
+                f"[{name}] {n_undated} positive label(s) have no parseable "
+                f"{name}_date: {n_filled} dated from stated_nepc_dx_date; "
+                f"{n_undated - n_filled} still undated and excluded from the "
+                f"{name} endpoint."
             )
-            labels = labels.with_columns(
-                pl.when(pl.col(date_col).is_null()).then(0)
-                .otherwise(pl.col(event)).alias(event)
+        updates = [
+            pl.when(fillable).then(stated_dx_date)
+            .otherwise(pl.col(date_col)).alias(date_col),
+            pl.when(fillable).then(pl.lit(STATED_DX_FALLBACK_SOURCE))
+            .otherwise(pl.col(source_col).cast(pl.Utf8)).alias(source_col),
+        ]
+        if precision_col is not None:
+            # Upstream precision described the (absent) nepc_date, not the
+            # stated diagnosis date, so it no longer applies.
+            updates.append(
+                pl.when(fillable).then(pl.lit(None, dtype=pl.Utf8))
+                .otherwise(pl.col(precision_col).cast(pl.Utf8)).alias(precision_col)
             )
+        labels = labels.with_columns(updates)
 
     return labels.select(
         [
@@ -852,6 +892,7 @@ def load_subtype_labels(path) -> pl.DataFrame:
             "NEPC_STATED_DX_DATE",
             "AVPC_DATE",
             "AVPC",
+            pl.col("avpc_date_source").alias("AVPC_DATE_SOURCE"),
             pl.col("avpc_review_status").cast(pl.Utf8).alias("AVPC_LABEL_SOURCE"),
             "AVPC_N_CRITERIA",
             pl.col("avpc_criteria").cast(pl.Utf8).alias("AVPC_CRITERIA"),
@@ -995,8 +1036,9 @@ def build_survival_cohort(
     # AVPC_NEPC is the union of the two modeled endpoints (audit only, not a
     # model endpoint). Timing uses NEPC precedence: when NEPC fires, the event
     # is dated at NEPC_DATE regardless of whether AVPC was met earlier;
-    # otherwise it is dated at AVPC_DATE. Both arms are already undated-demoted
-    # by load_subtype_labels, so every union positive has an event time.
+    # otherwise it is dated at AVPC_DATE. An arm still undated after the
+    # stated-dx fallback leaves AVPC_NEPC_DATE (and so TT_AVPC_NEPC) null when
+    # it is the dating arm, excluding the patient from the union as well.
     has_nepc_event = pl.col('NEPC').eq(1)
     has_avpc_event = pl.col('AVPC').eq(1)
     cohort = cohort.with_columns(
@@ -1005,9 +1047,10 @@ def build_survival_cohort(
         .when(has_avpc_event).then(pl.col('AVPC_DATE'))
         .otherwise(None)
         .alias('AVPC_NEPC_DATE'),
-        # Only the NEPC arm carries date provenance: the AVPC runner records no
-        # date source/precision for avpc_date.
+        # Only the NEPC arm carries date precision; the AVPC arm's source is
+        # derived in load_subtype_labels (runner date vs stated-dx fallback).
         pl.when(has_nepc_event).then(pl.col('NEPC_DATE_SOURCE'))
+        .when(has_avpc_event).then(pl.col('AVPC_DATE_SOURCE'))
         .otherwise(None)
         .alias('AVPC_NEPC_DATE_SOURCE'),
         pl.when(has_nepc_event).then(pl.col('NEPC_DATE_PRECISION'))
@@ -1114,6 +1157,7 @@ def build_survival_cohort(
             'AVPC_DATE',
             'TT_AVPC',
             'AVPC',
+            'AVPC_DATE_SOURCE',
             'AVPC_LABEL_SOURCE',
             'AVPC_N_CRITERIA',
             'AVPC_CRITERIA',
@@ -1256,6 +1300,22 @@ def summarize_survival_cohort(cohort: pl.DataFrame, label="cohort"):
                 f"  NOTE: {len(prevalent_avpc)} AVPC events fall at or before "
                 "the anchor (prevalent, not incident); the t_avpc > 0 "
                 "landmark filter will exclude them."
+            )
+    # Positives still undated after the stated-dx fallback have a null TT_*
+    # and are excluded from that endpoint's analysis (not censored).
+    for event_col, date_col in (
+        ('NEPC', 'NEPC_DATE'), ('AVPC', 'AVPC_DATE'), ('AVPC_NEPC', 'AVPC_NEPC_DATE'),
+    ):
+        if event_col not in cohort.columns or date_col not in cohort.columns:
+            continue
+        n_excluded = cohort.filter(
+            pl.col(event_col).eq(1) & pl.col(date_col).is_null()
+        ).height
+        if n_excluded:
+            print(
+                f"  NOTE: {n_excluded} {event_col} positive(s) have no event date "
+                f"(even after the stated-dx fallback); excluded from the "
+                f"{event_col} endpoint."
             )
     neg = cohort.filter(pl.col('TT_DEATH') < 0)
     if len(neg):

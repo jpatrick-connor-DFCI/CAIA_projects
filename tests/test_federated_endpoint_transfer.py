@@ -85,6 +85,16 @@ def test_endpoint_date_fills_the_event_slot_and_backfill_is_masked():
     assert stats["n_patients_event"] == 0
 
 
+def test_undated_events_are_excluded_from_that_endpoint_only():
+    local = _local()
+    local.loc[local["DFCI_MRN"] == 1000, "NEPC_DATE"] = pd.NaT
+    nepc, stats = fet.to_federated_long(local, "nepc", MAPPING)
+    plat, _ = fet.to_federated_long(local, "platinum", MAPPING)
+    assert stats["n_patients_event_undated"] == 1
+    assert 1000 not in set(nepc[fs.ID_COL])
+    assert 1000 in set(plat[fs.ID_COL])
+
+
 def test_lab_names_are_mapped_and_unmapped_rows_blanked():
     long_df, stats = fet.to_federated_long(_local(), "nepc", MAPPING)
     assert HGB_OMOP in set(long_df[fs.LAB_NAME_COL].dropna())

@@ -174,6 +174,11 @@ def to_federated_long(
             df.loc[(event & event_date.isna()).to_numpy(), fs.ID_COL].nunique()
         ),
     }
+    # A positive with no event date (still undated after Stage 1's stated-dx
+    # fallback) has no event time: exclude the patient from this endpoint
+    # rather than letting the null date read as censored.
+    undated = (event & event_date.isna()).to_numpy()
+    df, mapped = df.loc[~undated], mapped.loc[~undated]
     df[fs.LAB_NAME_COL] = mapped
     # Unmapped lab rows are blanked, not dropped: dropping could remove a
     # patient whose only rows are unmapped, which would change the cohort.
@@ -621,7 +626,7 @@ def evaluate_transfer(
             print(
                 f"\n[transfer] endpoint={endpoint}: {stats['n_patients']:,} patients, "
                 f"{stats['n_patients_event']:,} with an event "
-                f"({stats['n_patients_event_undated']:,} undated -> censored); "
+                f"({stats['n_patients_event_undated']:,} undated -> excluded); "
                 f"exclusion={exclusion} kept {excl['n_patients_after']:,}"
             )
 

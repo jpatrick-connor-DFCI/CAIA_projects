@@ -4,8 +4,10 @@ join/censoring/TT_* derivation in build_survival_cohort.
 ``load_subtype_labels`` reads primary_subtype_labels.parquet (the full join of
 the LLM_clinical_annotations per-note NEPC and AVPC pipelines). Covers what
 would silently corrupt the join: MRN normalization (labels arrive as strings,
-sometimes with a trailing ".0" from a float round-trip), unresolved and
-undated positives being censored rather than dropped, AVPC taken as-is from
+sometimes with a trailing ".0" from a float round-trip), unresolved labels
+being censored rather than dropped, undated positives falling back to the
+stated NEPC diagnosis date and otherwise being excluded from that endpoint
+(null TT_*) rather than censored, AVPC taken as-is from
 the runner (no criteria-count gate), and the non-fatal missing-file path that
 keeps the platinum pipeline working when the LLM annotations are not mounted.
 """
@@ -33,6 +35,7 @@ EXPECTED_COLUMNS = [
     "NEPC_STATED_DX_DATE",
     "AVPC_DATE",
     "AVPC",
+    "AVPC_DATE_SOURCE",
     "AVPC_LABEL_SOURCE",
     "AVPC_N_CRITERIA",
     "AVPC_CRITERIA",
@@ -186,20 +189,62 @@ class TestLoadSubtypeLabels:
         row = load_subtype_labels(path).row(0, named=True)
         assert row["AVPC_CRITERIA"] == "C1,C3,C5"
 
-    def test_undated_positives_are_demoted_to_censored(self, tmp_path):
-        """A positive with no usable date has no event time, so it becomes a
-        censored observation rather than a silently-NaT event."""
+    def test_undated_positives_fall_back_to_stated_dx_date(self, tmp_path):
+        """A positive with no usable date of its own is dated from
+        stated_nepc_dx_date (both arms), with the fallback recorded."""
         rows = {k: v * 2 for k, v in _label_rows().items()}
         rows.update(
             DFCI_MRN=["1001", "1002"],
             nepc_status=["nepc", "nepc"],
-            nepc_date=["2021-06-15", None],
+            nepc_date=["2021-06-15", "not a date"],
+            nepc_date_source=["stated", "note_date"],
+            nepc_date_precision=["day", "month"],
+            has_stated_nepc_dx=[True, True],
+            stated_nepc_dx_date=["2021-07-01", "2021-08-01"],
             is_avpc=[True, True],
             avpc_date=[None, "2020-01-01"],
         )
         out = load_subtype_labels(_write_labels(tmp_path, rows)).sort("DFCI_MRN")
-        assert out["NEPC"].to_list() == [1, 0]
-        assert out["AVPC"].to_list() == [0, 1]
+        by_mrn = {r["DFCI_MRN"]: r for r in out.iter_rows(named=True)}
+        # Own dates win when present.
+        assert by_mrn[1001]["NEPC_DATE"] == dt.datetime(2021, 6, 15)
+        assert by_mrn[1001]["NEPC_DATE_SOURCE"] == "stated"
+        assert by_mrn[1002]["AVPC_DATE"] == dt.datetime(2020, 1, 1)
+        assert by_mrn[1002]["AVPC_DATE_SOURCE"] == "avpc_runner"
+        # Missing/unparseable dates fall back to the stated diagnosis date.
+        assert by_mrn[1002]["NEPC"] == 1
+        assert by_mrn[1002]["NEPC_DATE"] == dt.datetime(2021, 8, 1)
+        assert by_mrn[1002]["NEPC_DATE_SOURCE"] == "stated_dx_fallback"
+        assert by_mrn[1002]["NEPC_DATE_PRECISION"] is None
+        assert by_mrn[1001]["AVPC"] == 1
+        assert by_mrn[1001]["AVPC_DATE"] == dt.datetime(2021, 7, 1)
+        assert by_mrn[1001]["AVPC_DATE_SOURCE"] == "stated_dx_fallback"
+
+    def test_still_undated_positives_keep_label_with_null_date(self, tmp_path):
+        """No own date and no stated dx date: the label stays positive with a
+        null date (excluded downstream), not demoted to a censored 0."""
+        path = _write_labels(
+            tmp_path,
+            _label_rows(
+                nepc_status=["nepc"],
+                nepc_date=[None],
+                is_avpc=[True],
+                avpc_date=[None],
+            ),
+        )
+        row = load_subtype_labels(path).row(0, named=True)
+        assert row["NEPC"] == 1 and row["NEPC_DATE"] is None
+        assert row["AVPC"] == 1 and row["AVPC_DATE"] is None
+        assert row["AVPC_DATE_SOURCE"] is None
+
+    def test_negatives_ignore_stated_dx_date(self, tmp_path):
+        path = _write_labels(
+            tmp_path,
+            _label_rows(has_stated_nepc_dx=[True], stated_nepc_dx_date=["2021-07-01"]),
+        )
+        row = load_subtype_labels(path).row(0, named=True)
+        assert row["NEPC"] == 0 and row["NEPC_DATE"] is None
+        assert row["AVPC"] == 0 and row["AVPC_DATE"] is None
 
     def test_optional_columns_may_be_absent(self, tmp_path):
         path = tmp_path / "minimal.parquet"
@@ -302,6 +347,47 @@ class TestBuildSurvivalCohortLabels:
         assert row["AVPC"] == 1
         assert row["TT_AVPC"] == 100
 
+    def test_undated_positive_is_excluded_from_its_endpoint_only(self, tmp_path):
+        """Still undated after the fallback -> null TT for that endpoint (and the
+        union it dates), while the other endpoints keep normal timing."""
+        rows = {k: v * 2 for k, v in _label_rows().items()}
+        rows.update(
+            DFCI_MRN=["2301", "2302"],
+            nepc_status=["nepc", "non_nepc"],
+            nepc_date=[None, None],
+            is_avpc=[True, True],
+            avpc_date=["2020-04-10", None],
+        )
+        by_mrn = self._cohort(tmp_path, [2301, 2302], rows)
+        nepc_undated = by_mrn[2301]
+        assert nepc_undated["NEPC"] == 1 and nepc_undated["TT_NEPC"] is None
+        # NEPC dates the union, so the union is excluded too.
+        assert nepc_undated["AVPC_NEPC"] == 1 and nepc_undated["TT_AVPC_NEPC"] is None
+        assert nepc_undated["AVPC"] == 1 and nepc_undated["TT_AVPC"] == 100
+        assert nepc_undated["TT_PLATINUM"] == 731
+        avpc_undated = by_mrn[2302]
+        assert avpc_undated["AVPC"] == 1 and avpc_undated["TT_AVPC"] is None
+        assert avpc_undated["TT_AVPC_NEPC"] is None
+        assert avpc_undated["NEPC"] == 0 and avpc_undated["TT_NEPC"] == 731
+
+    def test_stated_dx_fallback_dates_the_event(self, tmp_path):
+        by_mrn = self._cohort(
+            tmp_path,
+            [2401],
+            _label_rows(
+                DFCI_MRN=["2401"],
+                nepc_status=["nepc"],
+                nepc_date=[None],
+                has_stated_nepc_dx=[True],
+                stated_nepc_dx_date=["2020-04-10"],
+            ),
+        )
+        row = by_mrn[2401]
+        assert row["NEPC"] == 1 and row["TT_NEPC"] == 100
+        assert row["NEPC_DATE_SOURCE"] == "stated_dx_fallback"
+        assert row["TT_AVPC_NEPC"] == 100
+        assert row["AVPC_NEPC_DATE_SOURCE"] == "stated_dx_fallback"
+
     def test_cohort_builds_with_no_labels_mounted(self):
         """subtype_df=None (the default) must not break the platinum-only path."""
         mrns = [3001]
@@ -321,6 +407,7 @@ class TestBuildSurvivalCohortLabels:
             "NEPC_STATED_DX_DATE", "AVPC_NEPC_DATE", "TT_AVPC_NEPC", "AVPC_NEPC",
             "AVPC_NEPC_DATE_SOURCE", "AVPC_NEPC_DATE_PRECISION",
             "AVPC_NEPC_LABEL_SOURCE", "AVPC_DATE", "TT_AVPC", "AVPC",
+            "AVPC_DATE_SOURCE",
             "AVPC_LABEL_SOURCE", "AVPC_N_CRITERIA", "AVPC_CRITERIA",
             "PRIMARY_LABEL",
         }
