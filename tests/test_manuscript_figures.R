@@ -617,7 +617,11 @@ extension_grid$auc[extension_grid$endpoint=="nepc" & extension_grid$horizon_days
 extension_figure <- suppressMessages(manuscript_checklist_extension(extension_grid,90L))
 extension_build <- ggplot2::ggplot_build(extension_figure$plot)
 stopifnot(identical(extension_figure$spec$key,"federated_06_checklist_no_dfci__extension_lm90"),
-  nrow(extension_figure$data)==(3L*2L-1L)*17L,all(extension_figure$data$landmark_days==90L),
+  nrow(extension_figure$data)==3L*13L,all(extension_figure$data$landmark_days==90L),
+  all(extension_figure$data$horizon_days==1825L),
+  !any(extension_figure$data$rule %in% c("gleason_ge8", "tsg_any")),
+  all(c("checklist", "gleason", "tsg", "gleason_tsg", "checklist_gleason",
+        "checklist_tsg", "checklist_gleason_tsg") %in% extension_figure$data$rule),
   length(FEDERATED_CHECKLIST_EXTENSION_RULES)==9L,
   grepl("applied exactly as transferred",manuscript_checklist_extension_caption(90L),fixed=TRUE),
   nrow(extension_build$layout$layout)==9L,
