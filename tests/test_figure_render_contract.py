@@ -38,13 +38,16 @@ def test_removed_figure_families_stay_removed():
         assert retired not in source
 
 
-def test_pdf_is_the_only_export_format():
+def test_manuscript_renders_pdf_and_svg():
     pipeline = PIPELINE_R.read_text()
     script = FIGURES_SCRIPT.read_text()
     assert "ggsave(temporary, plot = plot" in pipeline
     assert "device = figure_pdf_device" in pipeline
     assert "agg_png" not in pipeline
-    assert "figure_svg_device" not in pipeline
+    workflow = (REPO_ROOT / "COMPASS" / "figures" / "figure_workflow.R").read_text()
+    assert 'formats <- c("pdf", "svg")' in workflow
+    assert "figure_manuscript_destination(task$scene$destination, config$fig_root)" in workflow
+    assert "figure_publish_manuscript_renders(config$fig_root)" not in workflow
     assert "kept existing" not in pipeline
     assert 'RENDER_DPI <- if (RENDER_PROFILE == "publication") 600 else 200' in script
 

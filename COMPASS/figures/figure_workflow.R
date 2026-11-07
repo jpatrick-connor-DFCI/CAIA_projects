@@ -412,9 +412,7 @@ figure_relocate_sidecars <- function(root) {
   invisible(paths[stray])
 }
 
-# manuscript_renders/ holds copies of the PDFs a manuscript submission needs: main figures, supplement
-# figures, and one checklist transfer figure per landmark x horizon. Sources are the retained exports.
-MANUSCRIPT_RENDERS_DIR <- "manuscript_renders"
+# Map selected figure sources to manuscript filenames.
 manuscript_renders_plan <- function() {
   manuscript <- function(key) file.path(FIGURE_SECTIONS[[MANUSCRIPT_SECTIONS[[manuscript_base_key(key)]]]],
     "manuscript",paste0(key,".pdf"))
@@ -459,27 +457,19 @@ manuscript_renders_plan <- function() {
   plan
 }
 
-figure_publish_manuscript_renders <- function(fig_root) {
-  adt_root <- figure_arm_root(fig_root,"ADT")
+# Resolve the selected source to its final manuscript filename. Supplement
+# families share one folder; their filenames retain the distinguishing keys.
+figure_manuscript_destination <- function(destination, fig_root) {
+  root <- figure_arm_root(fig_root, "ADT")
+  relative <- paste0(substring(destination, nchar(root) + 2L), ".pdf")
   plan <- manuscript_renders_plan()
-  copied <- 0L
-  for(i in seq_len(nrow(plan))) {
-    source <- file.path(adt_root,plan$source[i])
-    target <- file.path(adt_root,MANUSCRIPT_RENDERS_DIR,plan$target[i])
-    if(!file.exists(source)) {
-      message("manuscript_renders: not yet rendered, skipped: ",plan$source[i])
-      next
-    }
-    if(file.exists(target) && identical(unname(tools::md5sum(source)),unname(tools::md5sum(target)))) next
-    dir.create(dirname(target),recursive=TRUE,showWarnings=FALSE)
-    if(!file.copy(source,target,overwrite=TRUE,copy.date=TRUE) ||
-       !identical(unname(tools::md5sum(source)),unname(tools::md5sum(target))))
-      stop("Cannot copy manuscript render: ",plan$source[i])
-    copied <- copied+1L
-  }
-  if(copied) message("manuscript_renders: copied ",copied," of ",nrow(plan)," PDFs")
-  invisible(plan)
+  index <- match(relative, plan$source)
+  if (is.na(index)) stop("No manuscript destination for ", destination)
+  target <- plan$target[index]
+  file.path(root, strsplit(target, "/", fixed = TRUE)[[1]][1],
+            tools::file_path_sans_ext(basename(target)))
 }
+
 
 figure_write_catalog <- function(config, prepared) {
   scenes <- unlist(lapply(prepared,function(m) m$scenes),recursive=FALSE)
@@ -3981,7 +3971,6 @@ prepare_figure_scenes <- function(directory, signature, build, force = FALSE, ma
       item$spec$key)), manuscripts)
     for(item in manuscripts) {
       destination <- file.path(manuscript_folder(manuscript_root,item$spec$key),item$spec$key)
-      dir.create(dirname(destination),recursive=TRUE,showWarnings=FALSE)
       legend_path <- figure_sidecar_path(paste0(destination,".md"))
       dir.create(dirname(legend_path),recursive=TRUE,showWarnings=FALSE)
       writeLines(c(paste0("# ",gsub("_"," ",item$spec$key)),"",
@@ -4086,38 +4075,54 @@ figure_archive_legacy_receipts <- function(fig_root, cache_root) {
   invisible(moved)
 }
 
-render_figure_scene <- function(scene, signature, dpi, pdf = FALSE, overwrite = FALSE) {
-  path <- paste0(scene$destination, ".pdf")
-  receipt <- figure_receipt_path(scene, "pdf")
-  identity <- list(signature = signature, width = scene$width, height = scene$height)
-  fresh <- if (file.exists(receipt)) tryCatch({
-    r <- readRDS(receipt)
-    identical(r$identity, identity) && identical(r$file, figure_file_identity(path))
-  }, error = function(e) FALSE) else FALSE
-  if (!overwrite && fresh && figure_file_complete(path))
-    return(list(stem = scene$stem, rendered = 0L))
-  figure_require_font()
-  grob <- figure_style_grob(readRDS(scene$path))
-  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
-  temporary <- tempfile(".figure-render-", tmpdir = dirname(path), fileext = ".pdf")
+figure_render_complete <- function(path) {
+  if (endsWith(path, ".pdf")) return(figure_file_complete(path))
+  if (!endsWith(path, ".svg") || !file.exists(path) || is.na(file.info(path)$size) ||
+      file.info(path)$size < 12) return(FALSE)
   tryCatch({
-    ggplot2::ggsave(temporary, grob, width = scene$width, height = scene$height,
-                    bg = "white", device = figure_pdf_device, limitsize = FALSE)
-    if (!figure_file_complete(temporary) || !file.rename(temporary, path)) stop("Cannot publish ", path)
-    figure_atomic_rds(list(identity = identity, file = figure_file_identity(path)), receipt)
-  }, finally = unlink(temporary))
-  list(stem = scene$stem, rendered = 1L)
+    lines <- readLines(path, warn = FALSE)
+    any(grepl("<svg[[:space:]>]", lines)) && any(grepl("</svg>", lines, fixed = TRUE))
+  }, error = function(e) FALSE)
 }
 
-figure_scene_complete <- function(scene, signature, dpi, pdf = FALSE) {
-  path <- paste0(scene$destination, ".pdf")
-  receipt <- figure_receipt_path(scene, "pdf")
-  if (!file.exists(receipt) || !figure_file_complete(path)) return(FALSE)
-  identity <- list(signature = signature, width = scene$width, height = scene$height)
+figure_scene_format_complete <- function(scene, signature, format) {
+  path <- paste0(scene$destination, ".", format)
+  receipt <- figure_receipt_path(scene, format)
+  if (!file.exists(receipt) || !figure_render_complete(path)) return(FALSE)
+  identity <- list(signature = signature, destination = path, width = scene$width, height = scene$height)
   tryCatch({
     r <- readRDS(receipt)
     identical(r$identity, identity) && identical(r$file, figure_file_identity(path))
   }, error = function(e) FALSE)
+}
+
+render_figure_scene <- function(scene, signature, dpi, pdf = FALSE, overwrite = FALSE) {
+  formats <- c("pdf", "svg")
+  pending <- formats[overwrite | !vapply(formats, function(format)
+    figure_scene_format_complete(scene, signature, format), logical(1))]
+  if (!length(pending)) return(list(stem = scene$stem, rendered = 0L))
+  figure_require_font()
+  grob <- figure_style_grob(readRDS(scene$path))
+  for (format in pending) {
+    path <- paste0(scene$destination, ".", format)
+    receipt <- figure_receipt_path(scene, format)
+    identity <- list(signature = signature, destination = path, width = scene$width, height = scene$height)
+    dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+    temporary <- tempfile(".figure-render-", tmpdir = dirname(path), fileext = paste0(".", format))
+    tryCatch({
+      device <- if (format == "pdf") figure_pdf_device else figure_svg_device
+      ggplot2::ggsave(temporary, grob, width = scene$width, height = scene$height,
+                      dpi = dpi, bg = "white", device = device, limitsize = FALSE)
+      if (!figure_render_complete(temporary) || !file.rename(temporary, path)) stop("Cannot publish ", path)
+      figure_atomic_rds(list(identity = identity, file = figure_file_identity(path)), receipt)
+    }, finally = unlink(temporary))
+  }
+  list(stem = scene$stem, rendered = 1L)
+}
+
+figure_scene_complete <- function(scene, signature, dpi, pdf = FALSE) {
+  all(vapply(c("pdf", "svg"), function(format)
+    figure_scene_format_complete(scene, signature, format), logical(1)))
 }
 
 figure_object_hash <- function(value) {
@@ -4390,6 +4395,14 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
       figure_retained_image(destination, config$fig_root, ".pdf", selected_exports) &&
         any(startsWith(substring(destination, nchar(adt_root) + 1L), prefixes))
     }, tasks)
+    if (isTRUE(manuscript_only)) {
+      tasks <- lapply(tasks, function(task) {
+        task$scene$destination <- figure_manuscript_destination(task$scene$destination, config$fig_root)
+        task
+      })
+      destinations <- vapply(tasks, function(task) task$scene$destination, character(1))
+      if (anyDuplicated(destinations)) stop("Duplicate manuscript output destination: ", destinations[anyDuplicated(destinations)])
+    }
     tasks <- lapply(tasks, function(task) { task$pdf <- FALSE; task })
     message("Rendering/checking ", length(tasks), " panels with ", render_workers, " workers ...")
     completed <- if (render_overwrite) rep(FALSE, length(tasks)) else
@@ -4410,8 +4423,7 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
   if(stage != "prepare") {
     if (!isTRUE(manuscript_only)) figure_archive_retired_transfer_checklists(config,prepared)
     if (all_groups && !isTRUE(manuscript_only)) figure_archive_old_exports(config,prepared)
-    figure_write_catalog(config,prepared)
-    figure_publish_manuscript_renders(config$fig_root)
+    if (!isTRUE(manuscript_only)) figure_write_catalog(config,prepared)
   }
   invisible(list(prepared = prepared, rendered = render_results))
 }

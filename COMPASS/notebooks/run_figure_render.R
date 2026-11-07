@@ -1,5 +1,5 @@
 #!/usr/bin/env Rscript
-# Figure render: draws the PDFs from the prepared cache and writes the figure data tables.
+# Figure render: draws the PDF and SVG figures from the prepared cache and writes the figure data tables.
 #
 #   Rscript COMPASS/notebooks/run_figure_render.R
 #

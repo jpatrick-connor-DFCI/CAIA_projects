@@ -34,6 +34,12 @@ figure_pdf_device <- function(filename, width=7, height=7, ...) {
     symbolfamily=grDevices::cairoSymbolFont(FIGURE_FONT,usePUA=FALSE), ...)
 }
 
+figure_svg_device <- function(filename, width=7, height=7, ...) {
+  figure_require_font()
+  grDevices::svg(filename, width=width, height=height, family=FIGURE_FONT,
+    symbolfamily=grDevices::cairoSymbolFont(FIGURE_FONT,usePUA=FALSE), ...)
+}
+
 figure_text_gpar <- function(role="body", ...) do.call(grid::gpar,
   utils::modifyList(list(fontfamily=FIGURE_FONT,fontsize=unname(FIGURE_FONT_SIZES[[role]]),
     fontface=figure_font_face(role),lineheight=1),list(...)))

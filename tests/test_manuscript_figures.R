@@ -591,14 +591,11 @@ stopifnot(nrow(renders_plan)==6L+1L+4L+1L+1L+6L+6L+4L+3L,!anyDuplicated(renders_
   "supplement/federated_checklist_transfer/federated_06_checklist_no_dfci__lm0_h1825.pdf" %in% renders_plan$target,
   all(renders_plan$source %in% readLines("COMPASS/figures/retained_exports.txt")))
 renders_root <- tempfile("renders-")
-for(source in renders_plan$source[-1L]) {
-  dir.create(dirname(file.path(renders_root,"ADT_figures",source)),recursive=TRUE,showWarnings=FALSE)
-  writeLines(source,file.path(renders_root,"ADT_figures",source))
-}
-suppressMessages(figure_publish_manuscript_renders(renders_root))
-published <- file.path(renders_root,"ADT_figures",MANUSCRIPT_RENDERS_DIR,renders_plan$target)
-stopifnot(identical(file.exists(published),c(FALSE,rep(TRUE,nrow(renders_plan)-1L))),
-  identical(readLines(published[2L]),renders_plan$source[2L]))
+resolved <- vapply(renders_plan$source, function(source)
+  figure_manuscript_destination(file.path(renders_root, "ADT_figures", sub("[.]pdf$", "", source)), renders_root), character(1))
+expected <- file.path(renders_root, "ADT_figures", vapply(strsplit(renders_plan$target, "/", fixed=TRUE), `[`, character(1), 1),
+  tools::file_path_sans_ext(basename(renders_plan$target)))
+stopifnot(identical(unname(resolved), unname(expected)), !anyDuplicated(resolved))
 full_grid <- tidyr::expand_grid(endpoint=names(FEDERATED_TRANSFER_ENDPOINTS),
   landmark_days=c(0L,90L,180L),horizon_days=c(365L,1825L)) %>%
   mutate(auc=.7,auc_lo=.6,auc_hi=.8)

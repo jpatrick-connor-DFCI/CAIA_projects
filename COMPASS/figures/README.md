@@ -1,8 +1,7 @@
 # COMPASS figures
 
-Manuscript figures for the ADT cohort, platinum endpoint. By default the R stages
-prepare and render the sources listed in the `manuscript_renders/` publishing plan.
-The full curated set in `retained_exports.txt` is available by disabling the toggle.
+Manuscript figures for the ADT cohort, platinum endpoint. The R stages prepare and render the manuscript figures as PDF and SVG under
+`<COMPASS_FIG_ROOT>/ADT_figures/main/` and `supplement/`.
 
 ## Running
 
@@ -14,7 +13,7 @@ The full curated set in `retained_exports.txt` is available by disabling the tog
 
    ```sh
    Rscript COMPASS/notebooks/final_figure_data_prep.R   # R-side data prep / cache
-   Rscript COMPASS/notebooks/run_figure_render.R        # draw PDFs, write figure data
+   Rscript COMPASS/notebooks/run_figure_render.R        # draw PDF and SVG figures, write figure data
    ```
 
    Flip the `FIGURES` toggles at the top of `figure_run.R` to run a subset, or
@@ -24,18 +23,9 @@ The full curated set in `retained_exports.txt` is available by disabling the tog
    COMPASS_FIGURE_GROUPS=transfer_survival,transfer_checklists Rscript COMPASS/notebooks/run_figure_render.R
    ```
 
-   `MANUSCRIPT_ONLY` at the top of `figure_run.R` defaults to `TRUE` for both R
-   scripts. To prepare and render the full curated set, set the same override on
-   both commands:
-
-   ```sh
-   COMPASS_MANUSCRIPT_ONLY=false Rscript COMPASS/notebooks/final_figure_data_prep.R
-   COMPASS_MANUSCRIPT_ONLY=false Rscript COMPASS/notebooks/run_figure_render.R
-   ```
-
-   The two modes use separate R scene caches; prepare the selected mode before
-   rendering it. Manuscript-only prep still computes the source panels and tables
-   needed by composites, but saves and renders only their selected PDF sources.
+   Preparation computes the source panels and tables needed by composites, but
+   saves and renders only manuscript scenes. After changing the figure code, rerun
+   the preparation stage before rendering so the scene cache is current.
 
 The R code never calls Python. Missing or changed prepared inputs stop with a
 message to rerun notebook 05.
@@ -55,21 +45,20 @@ message to rerun notebook 05.
 `FIGURE_GROUPS` in `figure_workflow.R` maps each toggle to its prepared jobs
 (`adt__platinum`, `cohort_overview`, `federated`) and export prefix; only the jobs
 an enabled group needs are prepared. When every enabled group is federated-only,
-the run needs no patient-level data. Archiving retired exports and flattening the
-tree happen only when all groups are enabled and manuscript-only mode is off.
+the run needs no patient-level data. The group paths describe source selection; rendered figures go to `main/` or `supplement/`.
 
 ## Stages
 
 `COMPASS_FIGURE_STAGE`:
 
 - `all` (default) checks the notebook manifest, prepares changed figure sets, then
-  renders missing or stale PDFs.
+  renders missing or stale PDF and SVG figures.
 - `prepare` builds the R graphics caches only.
-- `render` re-exports PDFs from the last prepared snapshot without checking
+- `render` re-exports figures from the last prepared snapshot without checking
   sources.
 
 Figure tables (CSV/Markdown) go into each export folder's `data/`; graphics caches
-stay under `COMPASS_FIGURE_DATA_ROOT`. Outputs are PDF only.
+stay under `COMPASS_FIGURE_DATA_ROOT`. Manuscript figures are written in both PDF and SVG formats.
 
 ## Settings
 
@@ -82,7 +71,6 @@ stay under `COMPASS_FIGURE_DATA_ROOT`. Outputs are PDF only.
 | `COMPASS_FEDERATED_RESULTS`, `COMPASS_FEDERATED_TRANSFER_NO_DFCI`, `COMPASS_FEDERATED_FIGURE_DATA` | paths under `COMPASS_RHINO_ROOT`; set the same values for notebook 05 |
 | `COMPASS_RENDER_PROFILE` | `fast` (200 dpi rasters); `publication` uses 600 dpi |
 | `COMPASS_RENDER_OVERWRITE`, `COMPASS_PREPARE_OVERWRITE` | `false` |
-| `COMPASS_MANUSCRIPT_ONLY` | `true`; set `false` for the full curated set |
 | `COMPASS_RENDER_WORKERS`, `COMPASS_PREPARE_WORKERS` | `2`, `4` |
 | `CAIA_PROJECT_ROOT` | used to locate the code when the script path cannot be inferred |
 
@@ -114,4 +102,4 @@ still resolve.
 | `checklist_supplement.R` | Predictive-checklist cards |
 | `figure_typography.R` | Shared fonts and sizes (also read by the Python plots) |
 | `prepare_figure_data.py` | Python preparation called from notebook 05 |
-| `retained_exports.txt` | The rendered PDF set; add a path to restore a figure |
+| `retained_exports.txt` | Legacy curated export list |

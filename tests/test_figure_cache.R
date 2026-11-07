@@ -81,7 +81,8 @@ local({
   clear_read_cache()
   options(compass.figure_data_manifest = NULL)
   first <- render_figure_scene(m$scenes[[1]], m$signature, 72, TRUE)
-  stopifnot(first$rendered == 1L, figure_file_complete(paste0(destination, ".pdf")))
+  stopifnot(first$rendered == 1L, figure_file_complete(paste0(destination, ".pdf")),
+            figure_render_complete(paste0(destination, ".svg")))
   tall_scene <- m$scenes[[1]]
   tall_scene$path <- file.path(root, "tall-scene.rds")
   stopifnot(file.copy(m$scenes[[1]]$path, tall_scene$path))
@@ -107,6 +108,11 @@ local({
   stopifnot(second$rendered == 0L, identical(unchanged, figure_file_identity(unchanged$path)))
   # A vector PDF does not depend on the requested DPI.
   stopifnot(render_figure_scene(m$scenes[[1]], m$signature, 90, TRUE)$rendered == 0L,
+            identical(unchanged, figure_file_identity(unchanged$path)))
+  unlink(paste0(destination, ".svg"))
+  stopifnot(!figure_scene_complete(m$scenes[[1]], m$signature, 72),
+            render_figure_scene(m$scenes[[1]], m$signature, 72)$rendered == 1L,
+            figure_render_complete(paste0(destination, ".svg")),
             identical(unchanged, figure_file_identity(unchanged$path)))
   con <- file(paste0(destination, ".pdf"), "wb"); writeBin(charToRaw("bad"), con); close(con)
   stopifnot(render_figure_scene(m$scenes[[1]], m$signature, 90, TRUE)$rendered == 1L)

@@ -192,7 +192,6 @@ local({
   variables <- c(CAIA_PROJECT_ROOT = normalizePath("."),
     COMPASS_DATA_ROOT = root, COMPASS_FIG_ROOT = cfg$fig_root,
     COMPASS_FIGURE_DATA_ROOT = cfg$cache_root,
-    COMPASS_MANUSCRIPT_ONLY = "false",
     COMPASS_FIGURE_GROUPS = "federated_univariable,federated_multivariable,transfer_survival,transfer_checklists",
     COMPASS_FEDERATED_RESULTS = fed_path)
   previous <- Sys.getenv(names(variables), unset = NA)
@@ -210,13 +209,8 @@ local({
   stopifnot(identical(names(env$figure_run$prepared), "federated"),
             identical(env$figure_config$scope, "federated"))
   federated_stems <- vapply(env$figure_run$prepared$federated$scenes, `[[`, character(1), "stem")
-  stopifnot(all(c("elasticnet_performance", "elasticnet_coefficients",
-                  "xgboost_performance", "xgboost_importance",
-                  paste0("federated_volcano_landmark", c(0, 90, 180)),
-                  "transfer_discrimination_no_dfci", "transfer_clinical_comparison_no_dfci",
-                  "federated_05_transfer_no_dfci__no_d") %in% federated_stems),
-            !any(c("psa_forest", "testosterone_forest", "site_incidence_lm000",
-                   "08_federated_multivariable") %in% federated_stems))
+  stopifnot("federated_05_transfer_no_dfci__no_d" %in% federated_stems,
+            !any(c("elasticnet_performance", "psa_forest", "testosterone_forest") %in% federated_stems))
   coefficient_export <- read_csv(file.path(cfg$fig_root, "ADT_figure_data", "04_multivariate", "federated",
     "elasticnet_coefficients__platinum.csv"), show_col_types = FALSE)
   stopifnot(nrow(coefficient_export) == 9L, sum(coefficient_export$displayed) == 6L,
@@ -232,7 +226,7 @@ local({
             file.exists(file.path(cfg$fig_root,"ADT_figure_data","manifest.csv")),
             !dir.exists(file.path(cfg$fig_root,"ADT_figures","by_figure")),
             !any(dir.exists(file.path(cfg$fig_root,"ADT_figures",FIGURE_RETIRED_FOLDERS))),
-            # The figures folder holds PDFs only; tables, captions and the index live in the data folder.
+            # Tables, captions and the index live in the data folder.
             !length(list.files(file.path(cfg$fig_root,"ADT_figures"),recursive=TRUE,pattern="\\.(csv|md|txt|html)$")))
   federated_cfg <- cfg; federated_cfg$scope <- "federated"
   # Elastic-net, XGBoost and 04 transfer files require a refreshed 05 manifest after source changes.

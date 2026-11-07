@@ -4,8 +4,7 @@
 #   run_figure_render.R       stage "render":  draws PDFs and writes figure data tables
 # Both expect `script_dir` (this folder) and `FIGURE_STAGE` to be set before sourcing.
 # Run 05_prep_figure_data.ipynb first. Flip the toggles below to run a subset of
-# figure groups. The default mode renders manuscript_renders sources only; the
-# full mode renders retained_exports.txt and a full run archives retired exports.
+# figure groups. Only manuscript figures are rendered.
 #
 # Paths and render settings can be overridden with the environment variables
 # read in the configuration section. COMPASS_FIGURE_GROUPS (comma-separated
@@ -14,10 +13,9 @@
 #   COMPASS_FIGURE_GROUPS=transfer_survival,transfer_checklists Rscript COMPASS/notebooks/run_figure_render.R
 
 # ---- Figure groups ----------------------------------------------------------
-# TRUE prepares and renders only the PDFs copied to manuscript_renders/.
-# Set FALSE (or COMPASS_MANUSCRIPT_ONLY=false) for the full curated figure set.
+# Prepare and render only the manuscript figures.
 MANUSCRIPT_ONLY <- TRUE
-# Each group maps to one export folder under <COMPASS_FIG_ROOT>/ADT_figures/ (PDFs only);
+# Groups select manuscript figures under <COMPASS_FIG_ROOT>/ADT_figures/main or supplement;
 # tables, legends, captions, manifest and index go to <COMPASS_FIG_ROOT>/ADT_figure_data/.
 FIGURES <- c(
   cohort                  = TRUE,  # 01_cohort: Fig 1 (consort, KM, spans, DFCI data, site counts)
@@ -82,7 +80,7 @@ RENDER_OVERWRITE <- env_flag("COMPASS_RENDER_OVERWRITE")
 PREPARE_OVERWRITE <- env_flag("COMPASS_PREPARE_OVERWRITE")
 RENDER_WORKERS <- env_workers("COMPASS_RENDER_WORKERS", 2L)
 PREPARE_WORKERS <- env_workers("COMPASS_PREPARE_WORKERS", 4L)
-MANUSCRIPT_ONLY <- env_flag("COMPASS_MANUSCRIPT_ONLY", MANUSCRIPT_ONLY)
+MANUSCRIPT_ONLY <- TRUE
 
 # ---- Run --------------------------------------------------------------------
 stopifnot(setequal(names(FIGURES), names(FIGURE_GROUPS)))
