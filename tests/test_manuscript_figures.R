@@ -33,7 +33,7 @@ stopifnot(identical(spec_keys[startsWith(spec_keys,"02_")],paste0("02_llm_nepc_a
     "Cohort: ADT day-0 prediction cohort with LLM label (n = 1,234)"),
   identical(manuscript_figure2_header("lm0",NULL),"Cohort: ADT day-0 prediction cohort with LLM label"))
 fed3_spec <- spec_by_key("federated_03_univariable")
-stopifnot(fed3_spec$height==8.9,fed3_spec$width==10,identical(fed3_spec$row_heights,c(1.5,.32,1,1)),
+stopifnot(fed3_spec$height==10.7,fed3_spec$width==10,identical(fed3_spec$row_heights,c(1.5,.32,1.5,1.5)),
   identical(fed3_spec$shared_legend_panels,1:3),all(fed3_spec$layout[2,]==8),
   identical(manuscript_dfci_volcano_ylim,c(-.2,36)),
   manuscript_dfci_km_landmark==180,
@@ -459,6 +459,8 @@ fig5_endpoints <- manuscript_federated_transfer_no_dfci(transfer_metrics,NULL,km
   model_families="xgboost_cox",probability=TRUE,extreme_percent=20L,probability_endpoints=TRUE)
 stopifnot(length(fig5_endpoints$panels)==7L,
   identical(fig5_endpoints$spec$layout[3,],rep(5:7,each=2)),
+  all(vapply(fig5_endpoints$panels[5:7],function(p)
+    p$theme$axis.text.x$angle==0 && p$theme$axis.text.y$angle==0,logical(1))),
   identical(vapply(fig5_endpoints$panels[5:7],function(p) unique(p$data$endpoint),character(1)),
     names(FEDERATED_TRANSFER_ENDPOINTS)),
   all(vapply(fig5_endpoints$panels[5:7],function(p)

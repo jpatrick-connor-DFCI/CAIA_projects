@@ -1,14 +1,17 @@
 {
   "family": "Arial",
-  "fallback_families": ["Liberation Sans", "DejaVu Sans"],
+  "fallback_families": [
+    "Liberation Sans",
+    "DejaVu Sans"
+  ],
   "sizes": {
-    "body": 8,
-    "axis_title": 9,
-    "strip": 9,
-    "subtitle": 9,
-    "title": 11,
-    "tag": 12,
-    "caption": 8,
-    "legend": 8
+    "body": 10,
+    "axis_title": 11,
+    "strip": 11,
+    "subtitle": 11,
+    "title": 13,
+    "tag": 14,
+    "caption": 10,
+    "legend": 10
   }
 }

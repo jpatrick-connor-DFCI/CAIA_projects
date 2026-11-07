@@ -1232,7 +1232,7 @@ render_federated_checklist_cards <- function(root,federated_path,dpi,overwrite,v
     cards[[h]][[length(cards[[h]])+1L]] <- lines
   }
   # Size each horizon row for its longest card, with compact section gaps.
-  card_font <- 12
+  card_font <- FIGURE_FONT_SIZES[["tag"]]
   panel_in <- vapply(cards,function(row) max(vapply(row,function(lines)
     checklist_card_layout(lines,card_font)$height,numeric(1))),numeric(1))
   rows <- lapply(seq_along(cards),function(i) {
@@ -2565,11 +2565,11 @@ manuscript_specs <- function() {
     # Federated Figure 3: the local Figure 3 layout drawn from pooled federated results.
     spec("federated_03_univariable", c(paste0("fed3_volcano_landmark",c(0,90,180)),
       "fed3_trajectory_psa",paste0("fed3_km_quintile_psa_landmark",manuscript_dfci_km_landmark),
-      "fed3_trajectory_testosterone",paste0("fed3_km_quintile_testosterone_landmark",manuscript_dfci_km_landmark)), 11.5,
+      "fed3_trajectory_testosterone",paste0("fed3_km_quintile_testosterone_landmark",manuscript_dfci_km_landmark)), 10.7,
       rbind(c(1,1,2,2,3,3),rep(8,6),c(4,4,4,5,5,5),c(6,6,6,7,7,7)),
       c("Day 0","Day 90","Day 180","PSA trajectory","PSA: extreme deciles",
         "Testosterone trajectory","Testosterone: extreme deciles"),
-      row_heights=c(1.5,.32,1.9,1.9), shared_legend_panels=1:3, width=10)))
+      row_heights=c(1.5,.32,1.5,1.5), shared_legend_panels=1:3, width=10)))
 }
 
 # Keys sharing the Figure 3 layout and restyling (manuscript_univariable_restyle).
@@ -3361,7 +3361,8 @@ manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRAN
         score_stratifier=if(probability_tertile) "score_tertile" else stratifier)
       if(is.null(p)) p <- ggplot2::ggplot() + ggplot2::annotate("text",x=0,y=0,label="No data") + ggplot2::theme_void()
       p <- p + ggplot2::labs(y=paste0(horizon," ",short[[endpoint]],"\nprobability")) +
-        ggplot2::theme(axis.text.x=ggplot2::element_text(angle=45,hjust=1,size=6),
+        ggplot2::theme(axis.text.x=ggplot2::element_text(angle=0,hjust=.5,size=6),
+          axis.text.y=ggplot2::element_text(angle=0),
           strip.text=ggplot2::element_text(size=7))
       add(p,paste(horizon,short[[endpoint]],"probability"),sprintf(
         "Kaplan-Meier %s %s probability (1 - event-free; 95%% CI) from %d days after sequencing, by %s of the transferred %s score, Gleason score, and TSG status (WT vs ≥1 MT in TP53/RB1/PTEN); sequenced patients.",
@@ -3495,7 +3496,7 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
   lines <- federated_checklist_card_lines(tables$items,tables$metrics,f)
   # Keep the larger checklist type through manuscript styling and size its
   # row from the text, rather than leaving full-height blank separator lines.
-  card_font <- 12
+  card_font <- FIGURE_FONT_SIZES[["tag"]]
   rule_row <- grep("^Flag when",lines$text)
   if(length(rule_row)) {
     wrapped <- lapply(seq_len(nrow(lines)),function(i) {
@@ -3585,7 +3586,7 @@ manuscript_univariable_restyle <- function(plots, federated=FALSE) {
       axis.text.y=ggplot2::element_blank(),axis.ticks.y=ggplot2::element_blank())
   }
   for(i in c(4,6)) plots[[i]] <- plots[[i]] + ggplot2::labs(subtitle=NULL,
-    x="Years from ADT initiation",y=paste0("Mean log1p(",if(i==4) "PSA" else "testosterone", ")\n(95% CI)"))
+    x="Years from ADT initiation",y=paste0("Mean log(",if(i==4) "PSA" else "Testosterone", " + 1)\n(95% CI)"))
   for(i in c(5,7)) {
     logrank <- plots[[i]]$labels$subtitle
     # The panel title is not drawn, so name the laboratory in a subtitle.

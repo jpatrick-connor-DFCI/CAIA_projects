@@ -18,12 +18,12 @@ q <- figure_style_plot(p)
 stopifnot(identical(p$data,q$data),p$layers[[2]]$aes_params$size==6,
   p$layers[[3]]$aes_params$size==5,q$layers[[1]]$aes_params$size==3,
   q$layers[[2]]$aes_params$fontface=="bold",
-  all(vapply(q$layers[2:3],function(x) x$aes_params$size==8/ggplot2::.pt,logical(1))),
+  all(vapply(q$layers[2:3],function(x) x$aes_params$size==10/ggplot2::.pt,logical(1))),
   all(vapply(q$layers[2:3],function(x) x$aes_params$family==FIGURE_FONT,logical(1))),
   inherits(q$theme$axis.text.x,"element_blank"),inherits(q$theme$axis.text.y,"element_blank"),
-  q$theme$axis.title.y$angle==90,q$theme$axis.title.y$size==9,
-  q$theme$axis.title.x.top$size==9,q$theme$plot.subtitle$face=="bold",
-  q$theme$plot.subtitle$size==9,q$theme$plot.tag$size==12,q$theme$plot.title$size==11)
+  q$theme$axis.title.y$angle==90,q$theme$axis.title.y$size==11,
+  q$theme$axis.title.x.top$size==11,q$theme$plot.subtitle$face=="bold",
+  q$theme$plot.subtitle$size==11,q$theme$plot.tag$size==14,q$theme$plot.title$size==13)
 
 # Both composed ggplot text and manually placed grid labels use the same font.
 # Explicit checklist type survives both styling passes in manuscript export.
