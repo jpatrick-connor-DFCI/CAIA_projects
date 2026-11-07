@@ -44,6 +44,11 @@ local({
     jsonlite::write_json(list(cohort_sizes = list(gleason = 30L, sequencing_snv = 12L, sequencing_any = 15L),
       available_case_sensitivities = list(gleason = list(n_patients_by_landmark = list(`0` = 30L, `90` = 31L)))),
       file.path(inputs, "somatic_gleason", "build_manifest.json"), auto_unbox = TRUE)
+    for (subset in c("gleason_available_case", "sequencing_any")) {
+      dir.create(file.path(inputs, "somatic_gleason", subset))
+      write_csv(tibble(DFCI_MRN = head(ids, if (subset == "sequencing_any") 15L else 30L)),
+        file.path(inputs, "somatic_gleason", subset, "aggregated_landmark0.csv"))
+    }
     for (lm in c(0L, 90L, 180L)) {
       results <- file.path(root, "survival_analysis", paste0("local_runs_adt", suffix), "cox", paste0("landmark_", lm), "both")
       dir.create(results, recursive = TRUE)

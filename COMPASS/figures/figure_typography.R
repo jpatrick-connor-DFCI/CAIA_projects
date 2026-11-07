@@ -58,7 +58,7 @@ figure_font_theme <- function() ggplot2::theme(
 
 # Normalize before layout measurement, including plot-specific overrides. Keep
 # blank axes, label colors, rotations, margins and deliberate bold annotations.
-figure_style_plot <- function(p) {
+figure_style_plot <- function(p, legend_size=NULL) {
   if(!inherits(p,"ggplot")) return(figure_style_grob(p))
   complete <- ggplot2::theme_get() + p$theme
   roles <- c(text="body",plot.title="title",plot.subtitle="subtitle",plot.caption="caption",plot.tag="tag",
@@ -73,7 +73,8 @@ figure_style_plot <- function(p) {
     if(!inherits(element,"element_text")) return(element)
     role <- roles[[field]]
     element$family <- FIGURE_FONT
-    element$size <- unname(FIGURE_FONT_SIZES[[role]])
+    element$size <- if(role == "legend" && !is.null(legend_size)) legend_size else
+      unname(FIGURE_FONT_SIZES[[role]])
     if(field!="plot.subtitle") element$face <- figure_font_face(role)
     element$lineheight <- 1
     element
@@ -108,7 +109,7 @@ figure_style_grob <- function(g) {
   g
 }
 
-figure_plot_grob <- function(p) {
+figure_plot_grob <- function(p, legend_size=NULL) {
   figure_require_font()
   # grid measures labels while building the gtable. Base PDF/PostScript devices
   # cannot resolve system fonts, and R otherwise opens one from a null device.
@@ -118,7 +119,7 @@ figure_plot_grob <- function(p) {
     figure_pdf_device(path,width=size[1],height=size[2])
     on.exit({grDevices::dev.off();unlink(path)},add=TRUE)
   }
-  figure_style_grob(ggplot2::ggplotGrob(figure_style_plot(p)))
+  figure_style_grob(ggplot2::ggplotGrob(figure_style_plot(p, legend_size=legend_size)))
 }
 
 # The standalone checklist metrics use base graphics instead of ggplot.

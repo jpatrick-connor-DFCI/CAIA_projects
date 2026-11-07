@@ -1521,22 +1521,13 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
   LLM_LABEL_PATH <- file.path(NEPC_PROJ_PATH, "LLM_NEPC_labels")
   # Cohort- and endpoint-invariant: read once per session, not once per pass.
   manual_annotations <- load_manual_annotations(file.path(LLM_LABEL_PATH, MANUAL_ANNOTATIONS_FILE))
-  platinum_mrns <- cached_read_csv(file.path(NEPC_PROJ_PATH, "mrn_lists/platinum_MRN_list.csv"),
-                                   show_col_types = FALSE)
-  platinum_set <- unique(platinum_mrns$DFCI_MRN)
-
   # Classifier-derived labels (primary_label/has_nepc/has_avpc). The sole label
   # source: it drives Figure 2 v3 and the all-lab longitudinal/KM
   # stratification in Sections 4-5. NULL if absent.
   llm_classifier_labels <- load_llm_strata(llm_annotations_path)
-  if (!is.null(llm_classifier_labels)) {
-    llm_classifier_labels <- llm_classifier_labels %>%
-      mutate(is_platinum = DFCI_MRN %in% platinum_set)
-    cat(sprintf("llm_classifier_labels: %s rows (%s platinum+, %s platinum-)\n",
-                format(nrow(llm_classifier_labels), big.mark = ","),
-                format(sum(llm_classifier_labels$is_platinum), big.mark = ","),
-                format(sum(!llm_classifier_labels$is_platinum), big.mark = ",")))
-  }
+  if (!is.null(llm_classifier_labels))
+    cat(sprintf("llm_classifier_labels: %s rows\n",
+                format(nrow(llm_classifier_labels), big.mark = ",")))
 
   # Reuse the same artifact/cohort/endpoint from the preceding figure-major
   # layout, then render the PDF if it is missing. Overwrite always regenerates.
@@ -1652,7 +1643,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
     flags
   }
 
-  render_consort_panel <- function(mrn_flags) {
+  render_consort_panel <- function(mrn_flags, landmark_n = NULL, landmark_day = 0L) {
     keep <- rep(TRUE, nrow(mrn_flags))
     steps <- list(
       c("ICD-defined prostate cancer", sum(keep))
@@ -1680,6 +1671,18 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       keep <- keep & mrn_flags$ARPI_DOCETAXEL_EXPOSED == 1
       steps[[length(steps) + 1]] <- c("ARPI/docetaxel exposure", sum(keep))
     }
+    # Final box: the landmark risk set the models actually use. It drops eligible
+    # patients with platinum, death, or last contact at/before the landmark, or
+    # missing age (survival_common.cohort.make_outcome_df/build_landmark_merged).
+    if (!is.null(landmark_n)) {
+      landmark_n <- as.integer(landmark_n)
+      if (length(landmark_n) != 1L || is.na(landmark_n) || landmark_n > sum(keep))
+        stop("Landmark cohort size must be a count no larger than the CONSORT cohort")
+      steps[[length(steps) + 1]] <- c(
+        sprintf("Event-free with follow-up past day %d,\nage recorded (prediction cohort)", landmark_day),
+        landmark_n
+      )
+    }
     n_steps <- length(steps)
     df <- tibble(i = seq_len(n_steps) - 1,
                  label = vapply(steps, `[`, character(1), 1),
@@ -1701,30 +1704,52 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       theme_void() + theme(plot.title = element_text(face = "bold", size = 12.5, hjust = 0.5))
   }
 
-  # Patient counts for the DFCI data-availability panel. The Gleason and
-  # sequencing counts are the available-case subsets of the ADT day-0 cohort
-  # written by build_somatic_gleason_inputs.py.
-  dfci_data_availability <- function(mrn_flags, attrition, inputs_dir) {
-    manifest_path <- file.path(inputs_dir, "somatic_gleason", "build_manifest.json")
-    if (!file.exists(manifest_path)) {
-      message("Skipping figure1d_dfci_data: missing ", manifest_path)
+  # Patient counts for the DFCI data-availability panel. Every bar is a subset
+  # of the ADT day-0 prediction cohort (the exact MRNs in patient_df): the
+  # Gleason and sequencing bars are counted by MRN from the cohort files that
+  # build_somatic_gleason_inputs.py derives from aggregated_landmark0.csv, and
+  # any MRN outside the day-0 cohort is an error rather than a silent overcount.
+  # Pre-cohort counts (ICD-10, ADT-exposed) live in the CONSORT panel instead.
+  dfci_data_availability <- function(patient_df, attrition, inputs_dir) {
+    somatic_dir <- file.path(inputs_dir, "somatic_gleason")
+    manifest_path <- file.path(somatic_dir, "build_manifest.json")
+    subset_paths <- c(
+      gleason = file.path(somatic_dir, "gleason_available_case", "aggregated_landmark0.csv"),
+      sequencing = file.path(somatic_dir, "sequencing_any", "aggregated_landmark0.csv"))
+    missing <- c(manifest_path, subset_paths)[!file.exists(c(manifest_path, subset_paths))]
+    if (length(missing)) {
+      message("Skipping figure1d_dfci_data: missing ", paste(missing, collapse = ", "))
       return(NULL)
     }
     manifest <- fromJSON(manifest_path, simplifyVector = FALSE)
-    count <- function(x, what) {
+    as_ids <- function(x) {
       x <- suppressWarnings(as.numeric(x))
-      if (length(x) != 1L || !is.finite(x) || x < 0)
-        stop("Data-availability count missing or invalid: ", what)
-      x
+      unique(x[is.finite(x)])
+    }
+    cohort_ids <- as_ids(patient_df[[ID_COL]])
+    n_cohort <- as.integer(attrition[["eligible_by_landmark"]][["0"]])
+    if (length(n_cohort) != 1L || is.na(n_cohort) || length(cohort_ids) != n_cohort ||
+        length(cohort_ids) != nrow(patient_df))
+      stop("Data-availability panel: patient_df does not match the ADT day-0 cohort size")
+    subset_count <- function(path, what, expected) {
+      ids <- as_ids(read_csv(path, col_select = all_of(ID_COL), show_col_types = FALSE)[[ID_COL]])
+      outside <- setdiff(ids, cohort_ids)
+      if (length(outside))
+        stop(sprintf("Data-availability panel: %d %s MRN(s) are not in the ADT day-0 cohort (%s)",
+                     length(outside), what, path))
+      expected <- suppressWarnings(as.numeric(expected))
+      if (length(expected) != 1L || !is.finite(expected) || expected != length(ids))
+        stop(sprintf("Data-availability panel: %s file has %d patients but build_manifest.json reports %s",
+                     what, length(ids), paste(expected, collapse = ",")))
+      length(ids)
     }
     tibble(
-      label = c("ICD-10 prostate cancer", "ADT-exposed", "Gleason before ADT day 0",
-                "Tumor sequencing", "ADT day-0 prediction cohort"),
-      n = c(nrow(mrn_flags), sum(mrn_flags$ADT_EXPOSED == 1),
-            count(manifest$available_case_sensitivities$gleason$n_patients_by_landmark[["0"]],
-                  "Gleason day 0"),
-            count(manifest$cohort_sizes$sequencing_any, "sequencing_any"),
-            count(attrition[["eligible_by_landmark"]][["0"]], "eligible day 0")))
+      label = c("ADT day-0 prediction cohort", "Gleason before ADT day 0", "Tumor sequencing"),
+      n = c(length(cohort_ids),
+            subset_count(subset_paths[["gleason"]], "Gleason",
+                         manifest$available_case_sensitivities$gleason$n_patients_by_landmark[["0"]]),
+            subset_count(subset_paths[["sequencing"]], "sequencing",
+                         manifest$cohort_sizes$sequencing_any)))
   }
 
   render_data_availability_panel <- function(counts) {
@@ -1738,7 +1763,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       scale_x_continuous(limits = c(0, max(counts$n) * 1.18), labels = scales::comma,
                          expand = expansion(mult = c(0, 0.01))) +
       labs(title = "DFCI data availability", x = "Patients", y = NULL,
-           subtitle = "Gleason and sequencing counts are within the ADT day-0 cohort") +
+           subtitle = "All counts are patients in the ADT day-0 prediction cohort") +
       theme_classic(base_size = 11) +
       theme(panel.grid.major.x = element_line(color = "grey92", linewidth = 0.3),
             axis.ticks.y = element_blank(), axis.line.y = element_blank(),
@@ -1885,14 +1910,15 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
                   format(nrow(patient_df), big.mark = ","),
                   format(sum(patient_df$lab_rows, na.rm = TRUE), big.mark = ",")))
 
-  pA <- render_consort_panel(icd_prostate_mrn_flags)
+  pA <- render_consort_panel(icd_prostate_mrn_flags, landmark_n = expected_n,
+                             landmark_day = base_landmark)
   save_fig(pA, OUT_DIR, "figure1a_consort", 7.5, 8.0)
   if (show) print(pA)
   pB <- render_km_panel(patient_df)
   save_fig(pB, OUT_DIR, "figure1b_km", 6.5, 4.8)
   if (show) print(pB)
   if (IS_CANONICAL_ADT && EMIT_ENDPOINT_INDEPENDENT) {
-    availability <- dfci_data_availability(icd_prostate_mrn_flags, attrition, INPUTS_DIR)
+    availability <- dfci_data_availability(patient_df, attrition, INPUTS_DIR)
     if (!is.null(availability)) {
       pD <- render_data_availability_panel(availability)
       save_fig(pD, OUT_DIR, "figure1d_dfci_data", 6.0, 3.4)
@@ -2116,18 +2142,14 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
            p_conv = w_conv[1], lo_conv = w_conv[2], hi_conv = w_conv[3])
     }
 
-    # Figure 2 is drawn on three nested cohorts, each intersected with the
-    # classifier labels: every ICD-10 C61 patient, the ADT-exposed subset, and
-    # the ADT day-0 prediction cohort. Platinum status is any dated platinum
-    # ever (platinum_any_MRN_list.csv), so it is defined for all three.
-    platinum_any_path <- file.path(NEPC_PROJ_PATH, "mrn_lists", "platinum_any_MRN_list.csv")
-    if (!file.exists(platinum_any_path))
-      stop(platinum_any_path, " not found -- re-run compile_COMPASS_cohort_data.py")
-    platinum_any_set <- unique(as.character(
-      cached_read_csv(platinum_any_path, show_col_types = FALSE)[[ID_COL]]))
+    # Figure 2 is drawn on the ADT day-0 prediction cohort, intersected with the
+    # classifier labels. Platinum status is that cohort's own modelled outcome
+    # (PLATINUM == 1 after ADT day 0), so platinum+/- counts match Figure 1's KM
+    # and Table 1 rather than an any-time platinum list from the wider EHR.
+    cohort_platinum_set <- unique(as.character(patient_df[[ID_COL]][
+      coalesce(suppressWarnings(as.numeric(patient_df$PLATINUM)), 0) == 1]))
     cohort_mrns <- unique(as.character(patient_df[[ID_COL]]))
     stopifnot(base_landmark == 0L, length(cohort_mrns) == nrow(patient_df))
-    icd_mrns <- unique(as.character(icd_prostate_mrn_flags[[ID_COL]]))
     adt_exposed_mrns <- unique(as.character(
       icd_prostate_mrn_flags[[ID_COL]][icd_prostate_mrn_flags$ADT_EXPOSED == 1]))
     n_pred_outside_adt <- sum(!cohort_mrns %in% adt_exposed_mrns)
@@ -2140,7 +2162,7 @@ generate_figures <- function(cohort, nepc_proj_path, fig_root,
       stem <- function(panel) sprintf("figure2v3_%s_%s", variant, panel)
       labels_all <- llm_classifier_labels %>%
         filter(as.character(DFCI_MRN) %in% mrns) %>%
-        mutate(is_platinum = as.character(DFCI_MRN) %in% platinum_any_set)
+        mutate(is_platinum = as.character(DFCI_MRN) %in% cohort_platinum_set)
       message(sprintf(
         "Figure 2 v3 [%s] %s: %s total patients; %s labeled/evaluable (%s source labels total)",
         variant, cohort_label, format(length(mrns), big.mark = ","),

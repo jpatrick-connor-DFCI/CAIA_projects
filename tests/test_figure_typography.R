@@ -25,6 +25,14 @@ stopifnot(identical(p$data,q$data),p$layers[[2]]$aes_params$size==6,
   q$theme$axis.title.x.top$size==11,q$theme$plot.subtitle$face=="bold",
   q$theme$plot.subtitle$size==11,q$theme$plot.tag$size==14,q$theme$plot.title$size==13)
 
+# Figure-specific legend sizing survives the final styling pass without
+# changing axis or other figure typography.
+large_legend <- figure_style_plot(q, legend_size=12)
+stopifnot(large_legend$theme$legend.text$size==12,
+  large_legend$theme$legend.title$size==12,
+  large_legend$theme$axis.title.y$size==11,
+  figure_style_plot(q)$theme$legend.text$size==10)
+
 # Both composed ggplot text and manually placed grid labels use the same font.
 # Explicit checklist type survives both styling passes in manuscript export.
 card_lines <- data.frame(text=c("Header"," ","[ ] Example"," "),face="plain",

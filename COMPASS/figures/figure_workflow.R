@@ -1143,12 +1143,45 @@ federated_checklist_files <- function(federated_path,variant="pooled")
 federated_regular_checklist_files <- function(federated_path,variant="pooled")
   lapply(FEDERATED_CHECKLIST_FILES,function(file) federated_v2_export_files(federated_path,file,variant))
 
-# "RDW (mean) >= 13.2"; thresholds shown to 3 significant digits (exact in the CSV).
-federated_checklist_item_label <- function(feature,op,threshold) {
+# Canonical units used by data_preprocessing_common/dfci_labs.py. Federated
+# exports can supply a unit column to override these local canonical units.
+FEDERATED_CHECKLIST_UNITS <- c(
+  WBC="10³/µL", Hemoglobin="g/dL", CEA="ng/mL", `Lymphocytes absolute`="10³/µL",
+  Glucose="mg/dL", Calcium="mg/dL", ALT="IU/L", `Creatine kinase`="IU/L",
+  `Free T4`="ng/dL", Testosterone="ng/dL", TSH="mIU/L", AFP="ng/mL",
+  MCHC="g/dL", MCH="pg", `Basophils absolute`="10³/µL", aPTT="s", PSA="ng/mL",
+  `Neutrophils absolute`="10³/µL", BUN="mg/dL", ESR="mm/h", AST="IU/L",
+  Chloride="mEq/L", CO2="mEq/L", Fibrinogen="mg/dL", LDH="IU/L", Creatinine="mg/dL",
+  Sodium="mEq/L", RDW="%", RBC="10⁶/µL", CRP="mg/dL", `Total protein`="g/dL",
+  `CA19-9`="U/mL", Potassium="mEq/L", Hematocrit="%", MCV="fL",
+  `Total bilirubin`="mg/dL", `Respiratory rate`="breaths/min", Albumin="g/dL",
+  Platelets="10³/µL", `Heart rate`="beats/min", `Direct bilirubin`="mg/dL",
+  Globulin="g/dL", `Eosinophils absolute`="10³/µL", `Monocytes absolute`="10³/µL",
+  PT="s", `Alkaline phosphatase`="IU/L", CA125="U/mL",
+  `Systolic blood pressure`="mmHg", `Diastolic blood pressure`="mmHg",
+  `Body temperature`="°C", `Body weight`="kg", `Body height`="cm")
+
+# Thresholds are shown to three significant digits (exact values stay in CSV).
+federated_checklist_item_label <- function(feature,op,threshold,unit=NULL) {
+  lab <- federated_lab_label(feature)
+  stat <- federated_feature_stat(feature)
   name <- manuscript_federated_feature_label(if_else(feature=="age_at_anchor","Age",
-    format_label(federated_lab_label(feature),federated_feature_stat(feature))))
+    format_label(lab,stat)))
+  canonical <- unname(FEDERATED_CHECKLIST_UNITS[lab])
+  canonical[feature=="age_at_anchor"] <- "years"
+  canonical[!feature %in% "age_at_anchor" & !stat %in% c("mean","min","max","last","delta")] <- NA_character_
+  if (is.null(unit)) unit <- rep(NA_character_,length(feature))
+  unit <- as.character(unit)
+  unit[is.na(unit) | !nzchar(trimws(unit))] <- canonical[is.na(unit) | !nzchar(trimws(unit))]
+  suffix <- ifelse(!is.na(unit) & nzchar(trimws(unit)),paste0(" ",unit),"")
   if_else(op=="is_missing",paste(name,"is missing"),
-    paste(name,op,trimws(formatC(signif(threshold,3),format="fg",digits=3))))
+    paste0(name," ",op," ",trimws(formatC(signif(threshold,3),format="fg",digits=3)),suffix))
+}
+
+federated_checklist_units <- function(items) {
+  for (column in c("unit", "units", "canonical_unit"))
+    if (column %in% names(items)) return(items[[column]])
+  NULL
 }
 
 load_federated_checklists <- function(federated_path,variant="pooled",
@@ -1176,7 +1209,8 @@ load_federated_checklists <- function(federated_path,variant="pooled",
     if((!is.numeric(metrics[[column]]) && !all(is.na(metrics[[column]]))) ||
        any(!is.na(metrics[[column]]) & (metrics[[column]]<0 | metrics[[column]]>1)))
       stop("Invalid federated checklist ",column)
-  list(items=dplyr::mutate(items,display_item=federated_checklist_item_label(feature,op,threshold_value)),
+  list(items=dplyr::mutate(items,display_item=federated_checklist_item_label(feature,op,threshold_value,
+    federated_checklist_units(items))),
     metrics=dplyr::mutate(metrics,model=if_else(config=="both","checklist","age_checklist")))
 }
 
@@ -2101,7 +2135,8 @@ load_federated_guideline_items <- function(directory) {
   d <- dplyr::filter(d,config=="both")
   if(anyDuplicated(d[c("landmark_days","horizon_days","position")]))
     stop("Duplicate landmark/horizon/position rows in ",path)
-  dplyr::mutate(d,display_item=federated_checklist_item_label(feature,op,threshold_value))
+  dplyr::mutate(d,display_item=federated_checklist_item_label(feature,op,threshold_value,
+    federated_checklist_units(d)))
 }
 
 # KM curves and counts by checklist status for each endpoint, shaped like
@@ -2576,7 +2611,7 @@ manuscript_specs <- function() {
 MANUSCRIPT_UNIVARIABLE_KEYS <- "federated_03_univariable"
 
 # Reading guide for the mean-only, risk-oriented association panels.
-hr_direction_grob <- function(fontsize=FIGURE_FONT_SIZES[["body"]], col="#52514e") {
+hr_direction_grob <- function(fontsize=FIGURE_FONT_SIZES[["axis_title"]], col="#52514e") {
   gp <- figure_text_gpar("body", fontsize=fontsize,col=col)
   line <- grid::gpar(col=col,fill=col,lwd=.8)
   y <- grid::unit(.68,"npc"); tick <- grid::unit(3,"pt")
@@ -2732,7 +2767,7 @@ manuscript_captions <- function() {
     # The federated manuscript set is numbered separately (federated_figure<N>).
     federated_03_univariable=caption(
       "Federated Figure 3. Pooled univariable laboratory associations with platinum treatment and longitudinal PSA and testosterone patterns across four sites.",
-      "Results pool the Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering (MSK) ADT cohorts. (a-c) Federated univariable Cox associations at ADT initiation (a), 90 days (b), and 180 days (c). Only pre-landmark mean laboratory features are shown. The horizontal axis gives the hazard ratio per standard deviation on a logarithmic scale in the observed risk-associated direction; labels specify higher or lower values. The solid vertical line marks HR = 1 and the dashed vertical line marks HR = 2. For negative coefficients, hazard ratios and confidence limits are reciprocated (with limits reversed), corresponding to a one-SD decrease in the modeled feature, not a reciprocal transformation of the laboratory value. The vertical axis gives -log10(q), capped at 30 with triangles for larger values. The dotted line marks q = 0.05. Benjamini-Hochberg adjustment is recalculated separately at each landmark across all available valid mean-feature tests before height, effect-size or CI display exclusions. Original two-sided P values are unchanged, and original q values are retained in the data table. Colors identify laboratory categories. Direction is chosen from the observed coefficient and does not establish causality or a clinical cutpoint. Counts of displayed significant means and the testing-family size accompany each panel in the data legend. (d,f) Pooled mean log1p-transformed PSA (d) and testosterone (f) trajectories by subsequent platinum status; points and shading denote the mean and 95% confidence interval, and only bins containing at least 10 patients per stratum are shown. The dotted vertical line denotes ADT initiation. (e,g) Pooled Kaplan-Meier platinum-free survival from the 180-day landmark comparing the bottom and top 10% of the pre-landmark mean PSA (e) or testosterone (g) distribution, with cutoffs computed across all four sites. The middle 80% is omitted, equal values remain together, shading denotes pointwise 95% confidence intervals, and P values are from log-rank tests. Because platinum treatment is rare, the vertical axis is truncated below 1 to show separation between curves.",
+      "Results pool the Dana-Farber, Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering (MSK) ADT cohorts. (a-c) Federated univariable Cox associations at ADT initiation (a), 90 days (b), and 180 days (c). Only pre-landmark mean laboratory features are shown. The horizontal axis gives the hazard ratio per standard deviation on a logarithmic scale in the observed risk-associated direction; labels specify higher or lower values. The solid vertical line marks HR = 1. For negative coefficients, hazard ratios and confidence limits are reciprocated (with limits reversed), corresponding to a one-SD decrease in the modeled feature, not a reciprocal transformation of the laboratory value. The vertical axis gives -log10(q), capped at 30 with triangles for larger values. The dotted line marks q = 0.05. Benjamini-Hochberg adjustment is recalculated separately at each landmark across all available valid mean-feature tests before height, effect-size or CI display exclusions. Original two-sided P values are unchanged, and original q values are retained in the data table. Colors identify laboratory categories. Direction is chosen from the observed coefficient and does not establish causality or a clinical cutpoint. Counts of displayed significant means and the testing-family size accompany each panel in the data legend. (d,f) Pooled mean log1p-transformed PSA (d) and testosterone (f) trajectories by subsequent platinum status; points and shading denote the mean and 95% confidence interval, and only bins containing at least 10 patients per stratum are shown. The dotted vertical line denotes ADT initiation. (e,g) Pooled Kaplan-Meier platinum-free survival from the 180-day landmark comparing the bottom and top 10% of the pre-landmark mean PSA (e) or testosterone (g) distribution, with cutoffs computed across all four sites. The middle 80% is omitted, equal values remain together, shading denotes pointwise 95% confidence intervals, and P values are from log-rank tests. Because platinum treatment is rare, the vertical axis is truncated below 1 to show separation between curves.",
       "Panels a-c display features with finite estimates, absolute log hazard ratios of at most 4, and confidence-interval upper-to-lower ratios below 100; mean-feature q values were calculated before these display exclusions. Panels d-g were drawn from aggregate site exports (binned means and Kaplan-Meier curves) without patient-level data. Cohorts included 22,138 patients (664 platinum events) at day 0, 21,791 (608) at day 90, and 21,216 (564) at day 180; by site at day 0, Dana-Farber contributed 5,853 (231 events), Fred Hutch 3,277 (90), Johns Hopkins 3,069 (35), and MSK 9,939 (308). The trajectory analyses include 22,035 patients for PSA and 17,937 for testosterone. Cutoffs, group sizes, events, and log-rank P values for e and g are reported in federated_km_quintile_summary.csv. Within-site versions are provided as supplementary figures. ADT, androgen-deprivation therapy; CBC, complete blood count; CMP, comprehensive metabolic panel; LFT, liver-function test; PSA, prostate-specific antigen; SD, standard deviation."),
     federated_04_multivariable=caption(
       "Federated Figure 4. Federated multivariable laboratory models for prediction of platinum treatment.",
@@ -2837,7 +2872,8 @@ manuscript_style <- function(p, title=NULL, tag=NULL) {
   # Clone layers: ggproto layers are references also held by the individual plot.
   p$layers <- lapply(p$layers,function(layer) {
     copy <- ggplot2::ggproto(NULL,layer)
-    if(inherits(layer$geom,"GeomPoint") && !is.null(layer$aes_params$size))
+    if(inherits(layer$geom,"GeomPoint") && !is.null(layer$aes_params$size) &&
+       !isTRUE(layer$figure_preserve_point_size))
       copy$aes_params$size <- min(1.8,layer$aes_params$size)
     copy
   })
@@ -2850,11 +2886,11 @@ manuscript_style <- function(p, title=NULL, tag=NULL) {
   figure_style_plot(result)
 }
 
-manuscript_grob <- function(p,width,height) {
+manuscript_grob <- function(p,width,height,legend_size=NULL) {
   path <- tempfile(fileext=".png")
   figure_measure_device(path,width,height)
   on.exit({grDevices::dev.off();unlink(path)})
-  if(inherits(p,"ggplot")) figure_plot_grob(p) else figure_style_grob(p)
+  if(inherits(p,"ggplot")) figure_plot_grob(p,legend_size=legend_size) else figure_style_grob(p)
 }
 
 manuscript_combine <- function(plots,spec,shared_legend=FALSE,tag_offset=0L) {
@@ -2900,8 +2936,8 @@ manuscript_combine <- function(plots,spec,shared_legend=FALSE,tag_offset=0L) {
     top=header,padding=grid::unit(3,"pt"))
 }
 
-manuscript_legend <- function(p,width,height) {
-  g <- manuscript_grob(p,width,height)
+manuscript_legend <- function(p,width,height,legend_size=NULL) {
+  g <- manuscript_grob(p,width,height,legend_size=legend_size)
   boxes <- Filter(function(x) inherits(x,"gtable"),g$grobs[grepl("^guide-box",g$layout$name)])
   if(length(boxes)) boxes[[1]] else NULL
 }
@@ -2917,10 +2953,13 @@ manuscript_multivariable_labs <- function(plots,spec) {
   stopifnot(n_perf>=1)
   performance <- vector("list",n_perf)
   model_legend <- NULL
+  legend_size <- if (startsWith(spec$key,"federated_04_multivariable"))
+    FIGURE_FONT_SIZES[["legend"]] + 2 else NULL
+  legend_height <- if (is.null(legend_size)) manuscript_multivariable_legend_height else .20
   for(i in seq_len(n_perf)) {
     p <- manuscript_style(plots[[i]] + ggplot2::labs(subtitle=NULL),spec$titles[i],letters[i]) +
       ggplot2::guides(fill=ggplot2::guide_legend(nrow=1,byrow=TRUE))
-    if(is.null(model_legend)) model_legend <- manuscript_legend(p,spec$width,spec$height)
+    if(is.null(model_legend)) model_legend <- manuscript_legend(p,spec$width,spec$height,legend_size=legend_size)
     performance[[i]] <- manuscript_grob(p + ggplot2::theme(legend.position="none"),
       spec$width,spec$height*.18)
   }
@@ -2952,7 +2991,7 @@ manuscript_multivariable_labs <- function(plots,spec) {
       })
     }
     p <- manuscript_center_landmark_header(p)
-    if(is.null(category_legend)) category_legend <- manuscript_legend(p,spec$width,spec$height)
+    if(is.null(category_legend)) category_legend <- manuscript_legend(p,spec$width,spec$height,legend_size=legend_size)
     importance[[i]] <- manuscript_grob(p + ggplot2::theme(legend.position="none"),
       spec$width/3,spec$height*.24)
   }
@@ -2966,14 +3005,14 @@ manuscript_multivariable_labs <- function(plots,spec) {
   heights <- spec$row_heights[seq_len(n_perf)]
   if(!is.null(model_legend)) {
     grobs <- c(grobs,list(model_legend))
-    heights <- c(heights,manuscript_multivariable_legend_height)
+    heights <- c(heights,legend_height)
   }
   grobs <- c(grobs,list(coefficient_row,xgboost_row))
   heights <- c(heights,spec$row_heights[n_perf+1:2])
   # The lab-category legend sits under the XGBoost row, at the bottom of the figure.
   if(!is.null(category_legend)) {
     grobs <- c(grobs,list(category_legend))
-    heights <- c(heights,manuscript_multivariable_legend_height)
+    heights <- c(heights,legend_height)
   }
   gridExtra::arrangeGrob(grobs=grobs,ncol=1,heights=heights,
     padding=grid::unit(3,"pt"))
@@ -3360,6 +3399,7 @@ manuscript_federated_transfer_km <- function(km, first=1L, figure=FEDERATED_TRAN
       p <- plot_federated_transfer_horizon_risk(km,family,landmark,endpoint,
         score_stratifier=if(probability_tertile) "score_tertile" else stratifier)
       if(is.null(p)) p <- ggplot2::ggplot() + ggplot2::annotate("text",x=0,y=0,label="No data") + ggplot2::theme_void()
+      else levels(p$data$stratifier_label) <- c(model, "Gleason", "TSG")
       p <- p + ggplot2::labs(y=paste0(horizon," ",short[[endpoint]],"\nprobability")) +
         ggplot2::theme(axis.text.x=ggplot2::element_text(angle=0,hjust=.5,size=6),
           axis.text.y=ggplot2::element_text(angle=0),
@@ -3500,7 +3540,7 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
   rule_row <- grep("^Flag when",lines$text)
   if(length(rule_row)) {
     wrapped <- lapply(seq_len(nrow(lines)),function(i) {
-      pieces <- if(i %in% rule_row) strwrap(lines$text[i],width=36) else lines$text[i]
+      pieces <- if(i %in% rule_row) strwrap(lines$text[i],width=45) else lines$text[i]
       row <- lines[rep(i,length(pieces)),,drop=FALSE]; row$text <- pieces; row
     })
     lines <- dplyr::bind_rows(wrapped)
@@ -3538,10 +3578,10 @@ manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no
   }
   n_top <- 2L
   k <- length(plots)-n_top
-  # The card and the wide accuracy barplot share the top row; the KM panels fill the next one.
-  top <- rbind(c(1,1,2,2,2,2))
+  # Give the checklist and accuracy panels half the width each; the KM panels fill the next row.
+  top <- rbind(c(1,1,1,2,2,2))
   row_heights <- c(card_in+.35,if(k) MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["km"]])
-  spec <- list(key=key,width=10,height=sum(row_heights),
+  spec <- list(key=key,width=12.5,height=sum(row_heights),
     layout=rbind(top,if(k) n_top+rep(seq_len(k),each=6L%/%k)),titles=titles,
     row_heights=row_heights,shared_legend_panels=integer())
   list(plot=manuscript_combine(plots,spec),spec=spec,data=tables$comparison,legend=paste(legend,collapse="\n"))
@@ -3560,6 +3600,9 @@ manuscript_univariable_restyle <- function(plots, federated=FALSE) {
       xlim=range(unlist(lapply(axes,`[[`,"x"))),ylim=ylim)
   }
   for(i in 1:3) {
+    # Drop the HR=2 reference while retaining the solid HR=1 line.
+    plots[[i]]$layers <- Filter(function(layer) !(inherits(layer$geom,"GeomVline") &&
+      identical(layer$aes_params$linetype,"dashed")), plots[[i]]$layers)
     plots[[i]]$layers <- lapply(plots[[i]]$layers,function(layer) {
       copy <- ggplot2::ggproto(NULL,layer)
       if(inherits(layer$geom,"GeomTextRepel")) {
@@ -3571,11 +3614,19 @@ manuscript_univariable_restyle <- function(plots, federated=FALSE) {
         copy$geom_params$force_pull <- .6
         copy$geom_params$max.iter <- 30000
       }
-      if(inherits(layer$geom,"GeomPoint")) copy$aes_params$stroke <- .3
+      if(inherits(layer$geom,"GeomPoint")) {
+        copy$aes_params$stroke <- .3
+        # Capped significant results use fixed-size triangles; preserve their
+        # larger size through manuscript_style's general point-size cap.
+        if(identical(layer$aes_params$shape,24)) {
+          copy$aes_params$size <- 2.8
+          copy$figure_preserve_point_size <- TRUE
+        }
+      }
       copy
     })
     plots[[i]] <- plots[[i]] + ggplot2::scale_size_manual(
-      values=c(`TRUE`=1.8,`FALSE`=1.2),guide="none")
+      values=c(`TRUE`=2.7,`FALSE`=2.2),guide="none")
   }
   for(i in 1:3) {
     plots[[i]] <- plots[[i]] + ggplot2::labs(

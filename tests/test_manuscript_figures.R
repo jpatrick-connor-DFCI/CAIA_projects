@@ -46,6 +46,7 @@ stopifnot(fed3_spec$height==10.7,fed3_spec$width==10,identical(fed3_spec$row_hei
 direction <- hr_direction_grob()
 direction_text <- unname(unlist(lapply(direction$children,function(x) if(inherits(x,"text")) x$label)))
 stopifnot(inherits(direction,"gTree"),identical(direction_text,c("1","Larger association with platinum hazard in the labeled direction")),
+  direction$children[[4]]$gp$fontsize==FIGURE_FONT_SIZES[["axis_title"]],
   identical(MANUSCRIPT_UNIVARIABLE_KEYS,"federated_03_univariable"))
 landmark_header <- manuscript_center_landmark_header(ggplot()+labs(subtitle="+90 days"))
 stopifnot(landmark_header$theme$plot.subtitle$face=="bold",
@@ -461,6 +462,8 @@ stopifnot(length(fig5_endpoints$panels)==7L,
   identical(fig5_endpoints$spec$layout[3,],rep(5:7,each=2)),
   all(vapply(fig5_endpoints$panels[5:7],function(p)
     p$theme$axis.text.x$angle==0 && p$theme$axis.text.y$angle==0,logical(1))),
+  all(vapply(fig5_endpoints$panels[5:7],function(p)
+    identical(levels(p$data$stratifier_label),c("XGBoost","Gleason","TSG")),logical(1))),
   identical(vapply(fig5_endpoints$panels[5:7],function(p) unique(p$data$endpoint),character(1)),
     names(FEDERATED_TRANSFER_ENDPOINTS)),
   all(vapply(fig5_endpoints$panels[5:7],function(p)
@@ -469,6 +472,13 @@ stopifnot(length(fig5_endpoints$panels)==7L,
 wrong_clock <- km_tables; wrong_clock$gradient$clock <- "adt"
 clock_error <- tryCatch(plot_federated_transfer_horizon_risk(wrong_clock,"xgboost_cox",180L),error=conditionMessage)
 stopifnot(grepl("sequencing-landmark",clock_error,fixed=TRUE))
+# Checklist thresholds use supplied units or known canonical lab units.
+checklist_labels <- federated_checklist_item_label(
+  c("Prostate_specific_Ag__mean","Testosterone__last","age_at_anchor","Unknown__mean","RDW__mean"),
+  rep(">=",5),c(2,50,70,1,15),c(NA,NA,NA,NA,"custom"))
+stopifnot(endsWith(checklist_labels[1],"2 ng/mL"), endsWith(checklist_labels[2],"50 ng/dL"),
+  endsWith(checklist_labels[3],"70 years"), endsWith(checklist_labels[4],"1"),
+  endsWith(checklist_labels[5],"15 custom"))
 # Figure 6: checklist card and rule accuracy above KM curves by checklist status.
 checklist_dir <- tempfile("transfer-checklist-"); dir.create(checklist_dir)
 set.seed(66)
@@ -516,8 +526,8 @@ stopifnot(grepl("expected landmark 180 and horizon 365",stale_patient,fixed=TRUE
 fig6 <- manuscript_federated_checklist(lapply(checklist_data,readr::read_csv,show_col_types=FALSE))
 fig6_card <- federated_checklist_card_lines(checklist_tables$items,checklist_tables$metrics)
 stopifnot(fig6$spec$key=="federated_06_checklist_no_dfci",inherits(fig6$plot,"gtable"),
-  length(fig6$spec$titles)==5,
-  identical(fig6$spec$layout[1,],c(1,1,2,2,2,2)),identical(fig6$spec$layout[2,],rep(3:5,each=2L)),
+  length(fig6$spec$titles)==5,fig6$spec$width==12.5,
+  identical(fig6$spec$layout[1,],c(1,1,1,2,2,2)),identical(fig6$spec$layout[2,],rep(3:5,each=2L)),
   length(fig6$spec$row_heights)==2,fig6$spec$row_heights[2]==MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["km"]],
   grepl("1-year platinum",fig6$legend,fixed=TRUE),grepl("1-year IPCW AUC",fig6$legend,fixed=TRUE),
   any(grepl("Flag when at least 2 of 5 items",fig6_card$text,fixed=TRUE)),

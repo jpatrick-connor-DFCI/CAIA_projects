@@ -504,8 +504,6 @@ def prepare(config: dict) -> dict:
                 manifest["errors"]["cohort_overview"] = str(exc)
 
         shared_paths = [root / "LLM_NEPC_labels" / "full_manual_annotations.csv",
-                        root / "mrn_lists" / "platinum_MRN_list.csv",
-                        root / "mrn_lists" / "platinum_any_MRN_list.csv",
                         root / "mrn_lists" / "icd_prostate_mrn_flags.csv",
                         Path(config["classifier_path"]) / "primary_subtype_labels.parquet"]
         shared = [fingerprint(p) for p in shared_paths]
