@@ -1,4 +1,4 @@
-"""Checklist + Gleason / TSG post-training on DFCI platinum, evaluated out of fold (reviewer, Figure 6)."""
+"""Frozen labs checklist flag as an item of internal Gleason / TSG checklists, out of fold (reviewer, Figure 6)."""
 from __future__ import annotations
 
 from itertools import product
@@ -121,36 +121,70 @@ def test_folds_are_patient_level_and_shared_by_every_cohort():
     assert sizes.max() - sizes.min() <= 3
 
 
-def test_fit_rule_finds_the_brute_force_optimum():
-    rng = np.random.default_rng(5)
-    n = 300
-    count = rng.integers(0, 5, n).astype(float)
+def _training(n=300, seed=5):
+    rng = np.random.default_rng(seed)
+    labs = rng.integers(0, 2, n).astype(float)
     frame = pd.DataFrame({"GLEASON_SCORE": rng.choice([6, 7, 8, 9, 10], n).astype(float),
                           "TP53_ANY": rng.integers(0, 2, n), "RB1_ANY": rng.integers(0, 2, n),
                           "PTEN_ANY": np.nan})
     gleason, tsg = ce.candidate_items(frame)
     labels = rng.choice([-1, 0, 1], n, p=[0.1, 0.6, 0.3])
     weights = ce.balanced_weights(labels, np.where(labels >= 0, rng.uniform(1, 2, n), 0))
+    return labs, gleason, tsg, labels, weights
+
+
+def test_fit_rule_finds_the_brute_force_optimum_over_item_sets():
+    labs, gleason, tsg, labels, weights = _training()
     assert weights[labels == 1].sum() == pytest.approx(0.5) and weights[labels == 0].sum() == pytest.approx(0.5)
-    fit = ce.fit_rule("checklist_gleason_tsg", count, gleason, tsg, labels, weights, FROZEN_M, FROZEN_N)
-    brute = min(ce.balanced_error(count + gleason[g] + tsg[t] >= m, labels, weights)
-                for g in ce.GLEASON_CUTOFFS for t in ce.TSG_ITEMS for m in range(1, FROZEN_N + 3))
-    assert fit["train_balanced_error"] == pytest.approx(brute)
-    assert fit["N"] == FROZEN_N + 2
-    fixed = ce.fit_rule("checklist", count, gleason, tsg, labels, weights, FROZEN_M, FROZEN_N)
-    assert (fixed["M"], fixed["N"], fixed["gleason_cutoff"], fixed["tsg_item"]) == (FROZEN_M, FROZEN_N, None, None)
+    assert len(ce.TSG_OPTIONS) == 9 and ce.TSG_OPTIONS[:2] == ((), ("any",))
+    for rule in ("checklist_gleason_tsg", "gleason_tsg", "checklist_tsg", "gleason"):
+        spec = ce.RULES[rule]
+        brute = np.inf
+        for g in ((None, *ce.GLEASON_CUTOFFS) if spec.gleason else (None,)):
+            for items in (ce.TSG_OPTIONS if spec.tsg else ((),)):
+                parts = ([labs] if spec.labs else []) + ([gleason[g]] if g is not None else []) \
+                    + [tsg[t] for t in items]
+                for m in range(1, len(parts) + 1):
+                    brute = min(brute, ce.balanced_error(np.sum(parts, axis=0) >= m, labels, weights))
+        fit = ce.fit_rule(rule, labs, gleason, tsg, labels, weights)
+        assert fit["train_balanced_error"] == pytest.approx(brute), rule
+        assert fit["labs_item"] == spec.labs and fit["N"] >= 1
+        assert fit["N"] == int(fit["labs_item"]) + (fit["gleason_cutoff"] is not None) \
+            + len(ce.tsg_items(fit["tsg_items"]))
+    fixed = ce.fit_rule("checklist", labs, gleason, tsg, labels, weights)
+    assert (fixed["labs_item"], fixed["gleason_cutoff"], fixed["tsg_items"], fixed["M"], fixed["N"]) == \
+        (True, None, "", 1, 1)
+    assert ce.apply_rule(fixed, labs, gleason, tsg).tolist() == labs.tolist()
 
 
-def test_ties_prefer_the_figure_defaults():
+def test_labs_is_forced_in_and_an_empty_addition_reproduces_the_labs_flag():
+    # the labs flag classifies perfectly, so nothing added can help and fewer items wins
+    labels = np.array([1, 1, 0, 0, 0, 0])
+    labs = labels.astype(float)
+    frame = pd.DataFrame({"GLEASON_SCORE": [9.0, 6, 9, 6, 9, 6], "TP53_ANY": [1, 0, 1, 0, 1, 0],
+                          "RB1_ANY": 0, "PTEN_ANY": 0})
+    gleason, tsg = ce.candidate_items(frame)
+    weights = ce.balanced_weights(labels, np.ones(6))
+    fit = ce.fit_rule("checklist_gleason_tsg", labs, gleason, tsg, labels, weights)
+    assert fit["train_balanced_error"] == 0
+    assert (fit["labs_item"], fit["gleason_cutoff"], fit["tsg_items"], fit["M"], fit["N"]) == (True, None, "", 1, 1)
+    # without the labs flag the internal checklist must keep at least one item
+    internal = ce.fit_rule("gleason_tsg", labs, gleason, tsg, labels, weights)
+    assert internal["labs_item"] is False and internal["N"] >= 1
+
+
+def test_ties_prefer_fewer_items_then_the_figure_defaults():
     frame = pd.DataFrame({"GLEASON_SCORE": [9.0, 9.0, 6.0, 6.0], "TP53_ANY": [1, 1, 0, 0],
                           "RB1_ANY": [1, 1, 0, 0], "PTEN_ANY": [1, 1, 0, 0]})
     gleason, tsg = ce.candidate_items(frame)
     labels = np.array([1, 1, 0, 0])
     weights = ce.balanced_weights(labels, np.ones(4))
-    fit = ce.fit_rule("gleason_tsg", np.zeros(4), gleason, tsg, labels, weights, FROZEN_M, FROZEN_N)
+    zeros = np.zeros(4)
+    fit = ce.fit_rule("gleason_tsg", zeros, gleason, tsg, labels, weights)
     assert fit["train_balanced_error"] == 0
-    assert (fit["gleason_cutoff"], fit["tsg_item"]) == (8, "any")
-    assert fit["M"] == 1   # M/N = 1/2 matches the frozen 2/4, and the smaller M wins any further tie
+    assert (fit["gleason_cutoff"], fit["tsg_items"], fit["N"], fit["M"]) == (8, "", 1, 1)
+    fit = ce.fit_rule("tsg", zeros, gleason, tsg, labels, weights)
+    assert (fit["tsg_items"], fit["N"]) == ("any", 1)
 
 
 def test_out_of_fold_flags_ignore_the_patients_own_outcomes():
@@ -176,18 +210,22 @@ def test_checklist_rows_reproduce_the_frozen_flag_and_cohorts_have_their_rules()
     assert list(patients.columns) == ce.PATIENT_COLUMNS
     assert list(rules.columns) == ce.RULE_COLUMNS
     assert patients["flag_checklist"].eq(patients["risk_score"].ge(FROZEN_M).astype(float)).all()
+    assert patients["flag_checklist"].eq(patients["flag"]).all()
     for cohort in ce.COHORTS:
         z = patients[patients["cohort"].eq(cohort)]
         for rule in ce.RULES:
             has = np.isfinite(z[f"flag_{rule}"]).all()
             assert has == (rule in ce.cohort_rules(cohort)), (cohort, rule)
-    assert ce.cohort_rules("gleason") == ["checklist", "checklist_retuned", "gleason_ge8", "gleason",
-                                          "checklist_gleason"]
-    assert len(ce.cohort_rules("combined")) == len(ce.RULES)
+    assert ce.cohort_rules("gleason") == ["checklist", "gleason_ge8", "gleason", "checklist_gleason"]
+    assert ce.cohort_rules("somatic") == ["checklist", "tsg_any", "tsg", "checklist_tsg"]
+    assert len(ce.cohort_rules("combined")) == len(ce.RULES) == 9
     ok = rules[rules["status"].eq("ok")]
     assert set(ok["fold"]) == {"0", "1", "2", "3", "4", "all"}
     g8 = ok[ok["rule"].eq("gleason_ge8")]
     assert g8["gleason_cutoff"].eq(8).all() and g8["M"].eq(1).all()
+    labs_rules = ok[ok["rule"].str.startswith("checklist")]
+    assert labs_rules["labs_item"].astype(bool).all()
+    assert not ok[~ok["rule"].str.startswith("checklist")]["labs_item"].astype(bool).any()
 
 
 def test_gate_failure_leaves_tuned_flags_missing():
@@ -210,9 +248,9 @@ def test_comparison_end_to_end(tmp_path):
     assert base["delta_auc_vs_checklist"].eq(0).all()
     assert base["auc"].between(0.5, 1).all()
     tuned = comparison[comparison["rule"].eq("checklist_gleason_tsg")]
-    assert tuned["refit_N"].eq(FROZEN_N + 2).all() and tuned["refit_tsg_item"].isin(ce.TSG_ITEMS).all()
+    assert tuned["refit_labs_item"].astype(bool).all() and tuned["refit_N"].between(1, 5).all()
     assert comparison["n_excluded"].eq(0).all() and comparison["n_failed_folds"].eq(0).all()
-    # the synthetic hazard rises with Gleason and TP53, so adding them should help the frozen checklist
+    # the synthetic hazard rises with Gleason and TP53, so adding them should help the labs checklist flag
     plat = comparison[comparison["endpoint"].eq("platinum") & comparison["cohort"].eq("combined")]
     assert plat.set_index(["landmark_days", "rule"])["auc"].unstack().eval(
         "checklist_gleason_tsg > checklist").all()

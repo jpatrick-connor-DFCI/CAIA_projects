@@ -1,44 +1,50 @@
-"""Federated checklist + Gleason / TP53-RB1-PTEN, post-trained on DFCI platinum (reviewer request, Figure 6).
+"""Frozen federated checklist as one item of an internal DFCI Gleason / TP53-RB1-PTEN checklist (reviewer, Fig 6).
 
-A reviewer asked whether adding Gleason, tumor-suppressor (TSG) status, or both to the federated
-checklist changes its performance. This module starts from the frozen no-DFCI generalized (rounded-threshold)
-checklist that Figure 6 applies to DFCI. It keeps every federated item and adds unit-weight Gleason and/or TSG
-items. It then relearns the M-of-N threshold within DFCI. Every rule is evaluated out of fold in three cohorts:
+A reviewer asked whether adding Gleason, tumor-suppressor (TSG) status, or both to the federated checklist changes
+its performance. The federated no-DFCI generalized (rounded-threshold) checklist is applied to DFCI exactly as
+transferred: frozen items, frozen M. Its yes/no output is the **labs checklist flag**. Nothing about the federated
+model is fine-tuned on DFCI. A new internal checklist is then learned on DFCI, whose candidate items are that labs flag
+(one unit-weight item) plus Gleason and TSG indicators. Every rule is evaluated out of fold in three cohorts:
 
-* ``gleason``: Gleason score available before ADT + landmark (ADT clock); adds ``GLEASON_SCORE >= g``.
-* ``somatic``: sequenced patients on the sequencing clock (anchored on REPORT_DT); adds one TSG item.
-* ``combined``: sequenced patients with a Gleason score (sequencing clock, the Figure 6 b population); adds both.
+* ``gleason``: Gleason score available before ADT + landmark (ADT clock); Gleason items only.
+* ``somatic``: sequenced patients on the sequencing clock (anchored on REPORT_DT); TSG items only.
+* ``combined``: sequenced patients with a Gleason score (sequencing clock, the Figure 6 b population); both.
 
 No somatic data is used on the ADT clock.
 
-**Post-training** uses the platinum endpoint only, at the same landmark and horizon as the frozen checklist.
-On the training rows it fits the reverse Kaplan-Meier censoring curve and the fixed-horizon case/control labels
-(predictive_checklists.survival). The objective is the class-balanced IPCW misclassification error that the
-checklist MILP minimizes (runner._balanced_weights, reimplemented here). The frozen items are fixed, so a rule is
-just the frozen item count plus 0-2 new indicators against a threshold M. An exhaustive search over the new items
-(the Gleason cutoff g in {7, 8, 9}; TP53, RB1, PTEN or any of the three) and M therefore finds the exact optimum
-without a solver.
+**Candidate items** (all 0/1): the labs flag; at most one Gleason cutoff ``GLEASON_SCORE >= g``, g in {7, 8, 9};
+and either any non-empty subset of TP53, RB1, PTEN as separate items or the single item "any of the three" (an
+uncalled gene counts as unaltered). In the ``checklist_*`` rules the labs flag is forced in and the added Gleason/TSG
+set may be empty (the rule is then the labs flag itself, 1 of 1). The ``gleason`` / ``tsg`` / ``gleason_tsg`` rules are
+internal checklists without the labs flag, as comparators.
 
-**Tie-breaks**, in order: lower error; the Figure 6 b defaults (Gleason >= 8, any TSG); M closest, as a fraction of
-the items, to the frozen M/N; then the smaller M.
+**Training** uses the platinum endpoint only, at the cell's landmark and horizon. On the training rows it fits the
+reverse Kaplan-Meier censoring curve and the fixed-horizon case/control labels (predictive_checklists.survival). The
+objective is the class-balanced IPCW misclassification error that the checklist MILP minimizes
+(runner._balanced_weights, reimplemented here). There are at most 4 Gleason x 9 TSG item sets, so an exhaustive
+search over item set and M finds the exact optimum without a solver.
+
+**Tie-breaks**, in order: lower error; fewer items; the Figure 6 b defaults (Gleason >= 8, any TSG); the smaller M.
 
 **Cross-fitting.** A single patient-level K-fold split is shared by every cohort, clock, landmark and horizon, so
 the cohorts nest fold by fold. Each fold's rule is learned on the other folds' platinum rows, then applied to that
 fold for platinum, AVPC and NEPC. A training fold with fewer than ``MIN_CASES`` cases or ``MIN_CONTROLS`` controls
-at the horizon, or a horizon its censoring curve cannot support, fails the gate. Its patients then get no tuned
+at the horizon, or a horizon its censoring curve cannot support, fails the gate. Its patients then get no trained
 flag, so they leave the paired comparison; no other fold's rule is borrowed for them. A refit on the whole cohort
 (``fold == "all"``) gives the rule one would report. It is descriptive only.
 
 **Evaluation** is the Figure 6 b metric: horizon AUC of a yes/no rule (the IPCW balanced accuracy,
-fet.fixed_horizon_mean_auc). Intervals come from a joint patient bootstrap, so the deltas against the frozen
-checklist are paired. The bootstrap conditions on the out-of-fold flags, so the intervals leave out the uncertainty
-of re-tuning the rules. Platinum is the tuning endpoint (still held out); AVPC and NEPC are transfer endpoints.
+fet.fixed_horizon_mean_auc). Intervals come from a joint patient bootstrap, so the deltas against the labs checklist
+are paired. The bootstrap conditions on the out-of-fold flags, so the intervals leave out the uncertainty of
+re-learning the internal checklists. Platinum is the training endpoint (still held out); AVPC and NEPC are transfer
+endpoints.
 """
 
 from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -70,7 +76,10 @@ TIE_TOLERANCE = 1e-12
 GLEASON_CUTOFFS = (7, 8, 9)
 DEFAULT_GLEASON_CUTOFF = fcc.GLEASON_HIGH_MIN
 TSG_ANY = "any"
-TSG_ITEMS = (TSG_ANY, *TRIO_FEATURES)   # the default (any) first
+# TSG item sets in preference order: none, the single "any" item (the default), then gene subsets by size.
+TSG_OPTIONS = ((), (TSG_ANY,), *[c for r in range(1, len(TRIO_FEATURES) + 1)
+                                 for c in combinations(TRIO_FEATURES, r)])
+ITEM_SEP = ";"
 
 COHORTS = {
     "gleason": {"label": "Gleason available", "clock": "adt",
@@ -84,25 +93,24 @@ COHORTS = {
 
 @dataclass(frozen=True)
 class RuleSpec:
-    base: bool       # counts the frozen federated items
-    gleason: bool    # adds a Gleason item
-    tsg: bool        # adds a TSG item
-    tuned: bool      # selected on the training folds (else fixed)
+    labs: bool       # includes the frozen labs checklist flag as one item (forced in)
+    gleason: bool    # may add a Gleason item
+    tsg: bool        # may add TSG items
+    tuned: bool      # learned on the training folds (else fixed)
     label: str
 
 
 # Display order. The fixed Gleason >= 8 / any-TSG rules are Figure 6 b's comparators.
 RULES = {
-    fcc.CHECKLIST_RULE: RuleSpec(True, False, False, False, "Checklist (frozen)"),
-    "checklist_retuned": RuleSpec(True, False, False, True, "Checklist, M relearned"),
+    fcc.CHECKLIST_RULE: RuleSpec(True, False, False, False, "Labs checklist (transferred)"),
     "gleason_ge8": RuleSpec(False, True, False, False, "Gleason ≥ 8"),
-    "gleason": RuleSpec(False, True, False, True, "Gleason ≥ g"),
+    "gleason": RuleSpec(False, True, False, True, "Internal: Gleason"),
     "tsg_any": RuleSpec(False, False, True, False, "Any TP53/RB1/PTEN"),
-    "tsg": RuleSpec(False, False, True, True, "TSG item"),
-    "gleason_tsg": RuleSpec(False, True, True, True, "Gleason + TSG"),
-    "checklist_gleason": RuleSpec(True, True, False, True, "Checklist + Gleason"),
-    "checklist_tsg": RuleSpec(True, False, True, True, "Checklist + TSG"),
-    "checklist_gleason_tsg": RuleSpec(True, True, True, True, "Checklist + Gleason + TSG"),
+    "tsg": RuleSpec(False, False, True, True, "Internal: TSG"),
+    "gleason_tsg": RuleSpec(False, True, True, True, "Internal: Gleason + TSG"),
+    "checklist_gleason": RuleSpec(True, True, False, True, "Labs + Gleason"),
+    "checklist_tsg": RuleSpec(True, False, True, True, "Labs + TSG"),
+    "checklist_gleason_tsg": RuleSpec(True, True, True, True, "Labs + Gleason + TSG"),
 }
 
 EXTENSION_DIR = "checklist_extension"
@@ -114,13 +122,14 @@ CELL_KEYS = ["bundle", "landmark_days", "horizon_days"]
 COMPARISON_COLUMNS = ["endpoint", "cohort", "cohort_label", "clock", "bundle", "landmark_days", "horizon_days",
                       "rule", "rule_label", "n_patients", "n_excluded", "n_events", "n_events_horizon",
                       "n_positive", "auc", "auc_lo", "auc_hi", "delta_auc_vs_checklist", "delta_auc_lo",
-                      "delta_auc_hi", "refit_gleason_cutoff", "refit_tsg_item", "refit_M", "refit_N",
+                      "delta_auc_hi", "refit_labs_item", "refit_gleason_cutoff", "refit_tsg_items", "refit_M",
+                      "refit_N",
                       "n_folds", "n_failed_folds", "note"]
 RULE_COLUMNS = ["cohort", "clock", "bundle", "landmark_days", "horizon_days", "rule", "fold", "status",
-                "gleason_cutoff", "tsg_item", "M", "N", "frozen_M", "frozen_N", "train_balanced_error",
+                "labs_item", "gleason_cutoff", "tsg_items", "M", "N", "frozen_M", "frozen_N", "train_balanced_error",
                 "n_train", "n_train_cases", "n_train_controls"]
 PATIENT_COLUMNS = ["cohort", "clock", "bundle", "endpoint", "landmark_days", "horizon_days", ID_COL, "fold",
-                   DURATION_COL, EVENT_COL, "risk_score", GLEASON_FEATURE, *TRIO_FEATURES,
+                   DURATION_COL, EVENT_COL, "risk_score", "flag", GLEASON_FEATURE, *TRIO_FEATURES,
                    *[f"flag_{rule}" for rule in RULES]]
 
 
@@ -213,7 +222,7 @@ def assign_folds(frames: dict[str, pd.DataFrame], n_folds=5, seed=0) -> pd.Serie
 
 
 # --------------------------------------------------------------------------- #
-# Post-training
+# Internal checklist
 # --------------------------------------------------------------------------- #
 def candidate_items(frame: pd.DataFrame) -> tuple[dict, dict]:
     """0/1 indicators of every candidate Gleason cutoff and TSG item (an uncalled gene counts as unaltered)."""
@@ -257,24 +266,38 @@ def training_targets(duration, event, horizon, *, min_cases=MIN_CASES, min_contr
     return labels, balanced_weights(labels, weights), info
 
 
-def _total(rule, count, gleason, tsg, cutoff, item):
-    spec = RULES[rule]
-    total = np.asarray(count, dtype=float) if spec.base else np.zeros(len(count))
-    if cutoff is not None:
-        total = total + gleason[cutoff]
-    if item is not None:
+def tsg_items(value) -> tuple[str, ...]:
+    """A selection's TSG items, from a tuple or its ``;``-joined string ("" / NaN = none)."""
+    if isinstance(value, tuple):
+        return value
+    if value is None or (isinstance(value, float) and np.isnan(value)) or value == "":
+        return ()
+    return tuple(str(value).split(ITEM_SEP))
+
+
+def _selection(labs_item, cutoff, items, m) -> dict:
+    n = int(labs_item) + (cutoff is not None) + len(items)
+    return {"labs_item": bool(labs_item), "gleason_cutoff": cutoff, "tsg_items": ITEM_SEP.join(items),
+            "M": int(m), "N": n}
+
+
+def _total(selection, labs, gleason, tsg) -> np.ndarray:
+    total = np.asarray(labs, dtype=float) if selection["labs_item"] else np.zeros(len(labs))
+    if selection["gleason_cutoff"] is not None:
+        total = total + gleason[selection["gleason_cutoff"]]
+    for item in tsg_items(selection["tsg_items"]):
         total = total + tsg[item]
     return total
 
 
-def _fixed_selection(rule, frozen_m, frozen_n) -> dict:
+def _fixed_selection(rule) -> dict:
     if rule == fcc.CHECKLIST_RULE:
-        return {"gleason_cutoff": None, "tsg_item": None, "M": int(frozen_m), "N": int(frozen_n)}
+        return _selection(True, None, (), 1)
     if rule == "gleason_ge8":
-        return {"gleason_cutoff": DEFAULT_GLEASON_CUTOFF, "tsg_item": None, "M": 1, "N": 1}
+        return _selection(False, DEFAULT_GLEASON_CUTOFF, (), 1)
     if rule == "tsg_any":
-        return {"gleason_cutoff": None, "tsg_item": TSG_ANY, "M": 1, "N": 1}
-    raise ValueError(f"{rule} is tuned, not fixed")
+        return _selection(False, None, (TSG_ANY,), 1)
+    raise ValueError(f"{rule} is trained, not fixed")
 
 
 def balanced_error(flag, labels, weights) -> float:
@@ -282,39 +305,40 @@ def balanced_error(flag, labels, weights) -> float:
     return float(weights[known][np.asarray(flag)[known].astype(bool) != (labels[known] == 1)].sum())
 
 
-def fit_rule(rule, count, gleason, tsg, labels, weights, frozen_m, frozen_n) -> dict:
-    """The rule's selection (Gleason cutoff, TSG item, M, N) minimizing balanced error on the training rows.
+def _gleason_preference(cutoff) -> tuple:
+    return (0, 0) if cutoff in (None, DEFAULT_GLEASON_CUTOFF) else (abs(cutoff - DEFAULT_GLEASON_CUTOFF), cutoff)
 
-    ``count`` is the frozen item count, and ``gleason`` / ``tsg`` come from candidate_items, all on the training
-    rows. A fixed rule returns its fixed selection.
+
+def fit_rule(rule, labs, gleason, tsg, labels, weights) -> dict:
+    """The rule's selection (labs item, Gleason cutoff, TSG items, M, N) minimizing balanced error on training rows.
+
+    ``labs`` is the frozen labs checklist flag, and ``gleason`` / ``tsg`` come from candidate_items, all on the
+    training rows. A fixed rule returns its fixed selection.
     """
     spec = RULES[rule]
     if not spec.tuned:
-        selection = _fixed_selection(rule, frozen_m, frozen_n)
+        selection = _fixed_selection(rule)
     else:
-        target = frozen_m / frozen_n
         candidates = []
-        for cutoff in (GLEASON_CUTOFFS if spec.gleason else (None,)):
-            for item in (TSG_ITEMS if spec.tsg else (None,)):
-                total = _total(rule, count, gleason, tsg, cutoff, item)
-                n = (frozen_n if spec.base else 0) + (cutoff is not None) + (item is not None)
+        for cutoff in ((None, *GLEASON_CUTOFFS) if spec.gleason else (None,)):
+            for t, items in enumerate(TSG_OPTIONS if spec.tsg else ((),)):
+                n = int(spec.labs) + (cutoff is not None) + len(items)
+                if n == 0:
+                    continue
+                total = _total(_selection(spec.labs, cutoff, items, 1), labs, gleason, tsg)
                 for m in range(1, n + 1):
-                    preference = (0 if cutoff in (None, DEFAULT_GLEASON_CUTOFF) else 1,
-                                  abs(cutoff - DEFAULT_GLEASON_CUTOFF) if cutoff is not None else 0,
-                                  cutoff if cutoff is not None else 0,
-                                  TSG_ITEMS.index(item) if item is not None else 0,
-                                  abs(m / n - target), m)
+                    preference = (n, _gleason_preference(cutoff), t, m)
                     candidates.append((balanced_error(total >= m, labels, weights), preference,
-                                       {"gleason_cutoff": cutoff, "tsg_item": item, "M": m, "N": n}))
+                                       _selection(spec.labs, cutoff, items, m)))
         best = min(c[0] for c in candidates)
         selection = min((c for c in candidates if c[0] <= best + TIE_TOLERANCE), key=lambda c: c[1])[2]
-    flag = apply_rule(rule, selection, count, gleason, tsg)
+    flag = apply_rule(selection, labs, gleason, tsg)
     return {**selection, "train_balanced_error": balanced_error(flag, labels, weights)}
 
 
-def apply_rule(rule, selection, count, gleason, tsg) -> np.ndarray:
-    """0/1 flag of a selection (NaN where an added item is missing)."""
-    total = _total(rule, count, gleason, tsg, selection["gleason_cutoff"], selection["tsg_item"])
+def apply_rule(selection, labs, gleason, tsg) -> np.ndarray:
+    """0/1 flag of a selection (NaN where an item is missing)."""
+    total = _total(selection, labs, gleason, tsg)
     return np.where(np.isnan(total), np.nan, (total >= selection["M"]).astype(float))
 
 
@@ -345,7 +369,7 @@ def cross_fit(frames: dict[str, pd.DataFrame], folds: pd.Series, frozen: pd.Data
             cell["fold"] = cell[ID_COL].map(folds)
             if cell["fold"].isna().any():
                 raise ValueError(f"{cohort} {key}: patients without a fold")
-            count = cell["risk_score"].to_numpy(dtype=float)
+            labs = cell["flag"].to_numpy(dtype=float)
             gleason, tsg = candidate_items(cell)
             platinum = cell["endpoint"].eq(TRAINING_ENDPOINT).to_numpy()
             fold = cell["fold"].to_numpy(dtype=int)
@@ -365,13 +389,13 @@ def cross_fit(frames: dict[str, pd.DataFrame], folds: pd.Series, frozen: pd.Data
                         rules.append(row)
                         continue
                     if labels is None:
-                        selection = {**_fixed_selection(rule, frozen_m, frozen_n), "train_balanced_error": np.nan}
+                        selection = {**_fixed_selection(rule), "train_balanced_error": np.nan}
                     else:
-                        selection = fit_rule(rule, count[train], _subset(gleason, train), _subset(tsg, train),
-                                             labels, weights, frozen_m, frozen_n)
+                        selection = fit_rule(rule, labs[train], _subset(gleason, train), _subset(tsg, train),
+                                             labels, weights)
                     rules.append({**row, **selection})
                     if test is not None:
-                        flags[rule][test] = apply_rule(rule, selection, count[test], _subset(gleason, test),
+                        flags[rule][test] = apply_rule(selection, labs[test], _subset(gleason, test),
                                                        _subset(tsg, test))
             out = cell.assign(**{f"flag_{rule}": flags.get(rule, np.nan) for rule in RULES})
             patients.append(out.reindex(columns=PATIENT_COLUMNS))
@@ -384,7 +408,7 @@ def cross_fit(frames: dict[str, pd.DataFrame], folds: pd.Series, frozen: pd.Data
 # --------------------------------------------------------------------------- #
 def extension_comparison(patients: pd.DataFrame, rules: pd.DataFrame | None = None, *, n_bootstrap=200, seed=0,
                          min_events=5, n_folds=5) -> pd.DataFrame:
-    """Horizon AUC of each rule's out-of-fold flag, with paired bootstrap deltas against the frozen checklist.
+    """Horizon AUC of each rule's out-of-fold flag, with paired bootstrap deltas against the labs checklist.
 
     Every rule in a cohort × cell × endpoint is scored on the same patients (those with a flag for every rule).
     Fewer than ``min_events`` events by the horizon leaves the AUCs NaN (note ``underpowered``).
@@ -394,7 +418,7 @@ def extension_comparison(patients: pd.DataFrame, rules: pd.DataFrame | None = No
         r = rules.assign(landmark_days=rules["landmark_days"].astype(int),
                          horizon_days=rules["horizon_days"].astype(int))
         refit = (r[r["fold"].astype(str).eq("all")]
-                 .set_index(["cohort", *CELL_KEYS, "rule"])[["gleason_cutoff", "tsg_item", "M", "N"]])
+                 .set_index(["cohort", *CELL_KEYS, "rule"])[["labs_item", "gleason_cutoff", "tsg_items", "M", "N"]])
         tuned = r[r["fold"].astype(str).ne("all") & r["rule"].map(lambda x: RULES[x].tuned)]
         failed = (tuned.assign(fail=tuned["status"].ne("ok"))
                   .groupby(["cohort", *CELL_KEYS, "fold"])["fail"].any()
@@ -430,7 +454,8 @@ def extension_comparison(patients: pd.DataFrame, rules: pd.DataFrame | None = No
             lo, hi = fet._ci(boot[rule])
             delta_lo, delta_hi = fet._ci(boot[rule] - boot[fcc.CHECKLIST_RULE])
             sel = (refit.loc[(*cell, rule)] if refit is not None and (*cell, rule) in refit.index
-                   else pd.Series({"gleason_cutoff": np.nan, "tsg_item": None, "M": np.nan, "N": np.nan}))
+                   else pd.Series({"labs_item": None, "gleason_cutoff": np.nan, "tsg_items": None,
+                                    "M": np.nan, "N": np.nan}))
             rows.append({"endpoint": endpoint, "cohort": cohort, "cohort_label": COHORTS[cohort]["label"],
                          "clock": clock, "bundle": bundle, "landmark_days": int(landmark),
                          "horizon_days": int(horizon), "rule": rule, "rule_label": RULES[rule].label,
@@ -439,7 +464,8 @@ def extension_comparison(patients: pd.DataFrame, rules: pd.DataFrame | None = No
                          "auc": auc[rule], "auc_lo": lo, "auc_hi": hi,
                          "delta_auc_vs_checklist": auc[rule] - auc[fcc.CHECKLIST_RULE],
                          "delta_auc_lo": delta_lo, "delta_auc_hi": delta_hi,
-                         "refit_gleason_cutoff": sel["gleason_cutoff"], "refit_tsg_item": sel["tsg_item"],
+                         "refit_labs_item": sel["labs_item"], "refit_gleason_cutoff": sel["gleason_cutoff"],
+                         "refit_tsg_items": sel["tsg_items"],
                          "refit_M": sel["M"], "refit_N": sel["N"], "n_folds": n_folds,
                          "n_failed_folds": int(failed.get(cell, 0)) if failed is not None else np.nan,
                          "note": note})
@@ -494,6 +520,7 @@ def plot_extension(comparison: pd.DataFrame, landmark: int, endpoints=("platinum
             if j == 0:
                 ax.set_ylabel(f"{endpoint.upper()} AUC")
     axes[0][0].legend(fontsize=7, frameon=False)
-    fig.suptitle(f"Checklist + Gleason / TSG, landmark +{landmark} days (out-of-fold, tuned on platinum)", fontsize=10)
+    fig.suptitle(f"Labs checklist flag + Gleason / TSG, landmark +{landmark} days "
+                 "(internal checklists out of fold, trained on platinum)", fontsize=10)
     fig.tight_layout()
     return fig

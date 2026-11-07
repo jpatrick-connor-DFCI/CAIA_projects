@@ -608,8 +608,8 @@ stopifnot(nrow(full_figure$data)==36L,
   nrow(ggplot2::ggplot_build(full_figure$plot)$layout$layout)==6L,
   is.null(manuscript_full_checklist_transfer(full_grid[-1,],full_grid)))
 # Supplementary Figure 8: one page per landmark, cohorts as columns with only their own rules.
-extension_rules <- list(gleason=c("checklist","checklist_retuned","gleason_ge8","gleason","checklist_gleason"),
-  somatic=c("checklist","checklist_retuned","tsg_any","tsg","checklist_tsg"),
+extension_rules <- list(gleason=c("checklist","gleason_ge8","gleason","checklist_gleason"),
+  somatic=c("checklist","tsg_any","tsg","checklist_tsg"),
   combined=names(FEDERATED_CHECKLIST_EXTENSION_RULES))
 extension_grid <- dplyr::bind_rows(lapply(names(extension_rules),function(cohort) tidyr::expand_grid(
     endpoint=names(FEDERATED_TRANSFER_ENDPOINTS),cohort=cohort,landmark_days=c(0L,90L,180L),
@@ -620,7 +620,9 @@ extension_grid$auc[extension_grid$endpoint=="nepc" & extension_grid$horizon_days
 extension_figure <- suppressMessages(manuscript_checklist_extension(extension_grid,90L))
 extension_build <- ggplot2::ggplot_build(extension_figure$plot)
 stopifnot(identical(extension_figure$spec$key,"federated_06_checklist_no_dfci__extension_lm90"),
-  nrow(extension_figure$data)==(3L*2L-1L)*20L,all(extension_figure$data$landmark_days==90L),
+  nrow(extension_figure$data)==(3L*2L-1L)*17L,all(extension_figure$data$landmark_days==90L),
+  length(FEDERATED_CHECKLIST_EXTENSION_RULES)==9L,
+  grepl("applied exactly as transferred",manuscript_checklist_extension_caption(90L),fixed=TRUE),
   nrow(extension_build$layout$layout)==9L,
   all(extension_figure$data$gain[extension_figure$data$rule!="checklist"]=="CI excludes 0"),
   all(extension_figure$data$gain[extension_figure$data$rule=="checklist"]=="CI includes 0"),

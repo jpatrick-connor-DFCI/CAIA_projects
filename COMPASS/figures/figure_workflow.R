@@ -2038,8 +2038,9 @@ federated_guideline_grid_key <- function(f)
 FEDERATED_GUIDELINE_V2_GRID <- dplyr::filter(FEDERATED_CHECKLIST_GRID,landmark_days %in% c(90L,180L))
 FEDERATED_GUIDELINE_V2_SUPPLEMENT_DIR <- "generalized_federated_checklist_transfer_v2"
 federated_guideline_v2_key <- function(f) paste0(federated_guideline_grid_key(f),"__v2")
-# Reviewer extension (Supplementary Figure 8): the generalized checklist plus Gleason and/or TP53/RB1/PTEN items,
-# post-trained on Dana-Farber platinum with 5-fold cross-fitting and scored out of fold (04 writes
+# Reviewer extension (Supplementary Figure 8): the transferred generalized checklist's flag as one item of internal
+# checklists with Gleason and/or TP53/RB1/PTEN items, learned on Dana-Farber platinum with 5-fold cross-fitting and
+# scored out of fold (04 writes
 # checklist_extension/ through federated_models/checklist_extension.py). One page per landmark, both horizons.
 FEDERATED_CHECKLIST_EXTENSION_DIR <- "checklist_extension"
 FEDERATED_CHECKLIST_EXTENSION_FILES <- c(comparison="transfer_checklist_extension_comparison.csv",
@@ -2048,10 +2049,10 @@ FEDERATED_CHECKLIST_EXTENSION_TABLES <- c(comparison="transfer_checklist_extensi
   rules="transfer_checklist_extension_rules_no_dfci")
 FEDERATED_CHECKLIST_EXTENSION_SUPPLEMENT_DIR <- "S8_checklist_extension"
 FEDERATED_CHECKLIST_EXTENSION_LANDMARKS <- c(0L,90L,180L)
-FEDERATED_CHECKLIST_EXTENSION_RULES <- c(checklist="Checklist (frozen)",checklist_retuned="Checklist, M relearned",
-  gleason_ge8="Gleason ≥8",gleason="Gleason ≥ g",tsg_any="≥1 TSG altered",tsg="TSG item",
-  gleason_tsg="Gleason + TSG",checklist_gleason="Checklist + Gleason",checklist_tsg="Checklist + TSG",
-  checklist_gleason_tsg="Checklist + Gleason + TSG")
+FEDERATED_CHECKLIST_EXTENSION_RULES <- c(checklist="Labs checklist (transferred)",
+  gleason_ge8="Gleason ≥8",gleason="Internal: Gleason",tsg_any="≥1 TSG altered",tsg="Internal: TSG",
+  gleason_tsg="Internal: Gleason + TSG",checklist_gleason="Labs + Gleason",checklist_tsg="Labs + TSG",
+  checklist_gleason_tsg="Labs + Gleason + TSG")
 FEDERATED_CHECKLIST_EXTENSION_COHORTS <- c(gleason="Gleason available\n(ADT clock)",
   somatic="Sequenced\n(sequencing clock)",combined="Sequenced with Gleason\n(sequencing clock)")
 federated_checklist_extension_key <- function(landmark)
@@ -2783,26 +2784,29 @@ manuscript_captions <- function() {
 }
 
 manuscript_checklist_extension_caption <- function(landmark) paste(c(
-  sprintf("Supplementary Figure 8 (landmark +%d days). Generalized federated checklist with Gleason score and tumor-suppressor status added.",
+  sprintf("Supplementary Figure 8 (landmark +%d days). Transferred lab checklist combined with Gleason score and tumor-suppressor status.",
     as.integer(landmark)),
-  paste("The generalized checklist trained without Dana-Farber (rounded thresholds, frozen items) was extended with a",
-    "unit-weight Gleason item (Gleason score ≥ 7, 8 or 9), a tumor-suppressor (TSG) item (TP53, RB1, PTEN, or any of",
-    "the three altered), or both, and its M-of-N threshold was relearned. The added items and threshold were chosen on",
-    "Dana-Farber platinum treatment by minimizing class-balanced inverse-probability-of-censoring-weighted error at the",
-    "checklist's own landmark and horizon, using 5-fold patient-level cross-fitting: each patient was scored by a rule",
-    "learned without them. Columns show the cohorts: patients with a Gleason score before the landmark (ADT clock; Gleason",
-    "rules), sequenced patients (sequencing-report clock; TSG rules) and sequenced patients with a Gleason score",
-    "(sequencing-report clock; all rules, the Figure 6b population). Rows show platinum treatment (the tuning endpoint,",
-    "still scored out of fold), AVPC and NEPC. 'Checklist (frozen)' is the transferred rule of Figure 6; 'Checklist, M",
-    "relearned' changes only its threshold; 'Gleason ≥8' and '≥1 TSG altered' are the fixed Figure 6b comparators."),
+  paste("The generalized checklist trained without Dana-Farber (rounded thresholds) was applied exactly as transferred,",
+    "with its items and threshold frozen, giving a yes/no lab checklist result; it was not re-tuned on Dana-Farber data.",
+    "New internal checklists were then learned on Dana-Farber platinum treatment. Their candidate unit-weight items were",
+    "the lab checklist result (always included in the 'Labs + …' checklists), one Gleason item (Gleason score ≥ 7, 8 or",
+    "9) and tumor-suppressor (TSG) items (TP53, RB1 and PTEN altered as separate items, or any of the three as one",
+    "item). The items and M-of-N threshold minimized class-balanced inverse-probability-of-censoring-weighted error at",
+    "the landmark and horizon, using 5-fold patient-level cross-fitting: each patient was scored by a checklist learned",
+    "without them. Columns show the cohorts: patients with a Gleason score before the landmark (ADT clock; Gleason",
+    "items), sequenced patients (sequencing-report clock; TSG items) and sequenced patients with a Gleason score",
+    "(sequencing-report clock; both, the Figure 6b population). Rows show platinum treatment (the training endpoint,",
+    "still scored out of fold), AVPC and NEPC. 'Labs checklist (transferred)' is the rule of Figure 6; 'Internal'",
+    "checklists use Gleason and/or TSG items without the lab checklist; 'Gleason ≥8' and '≥1 TSG altered' are the",
+    "fixed Figure 6b comparators."),
   paste("Points show horizon-specific inverse-probability-of-censoring-weighted AUC, equal to balanced accuracy for a",
     "binary rule, for the 1-year and 5-year checklists; bars denote 95% patient-bootstrap confidence intervals. Filled",
-    "points mark rules whose paired bootstrap 95% interval for the difference from the frozen checklist excludes 0.",
-    "Intervals condition on the out-of-fold rules and do not include the variability of re-tuning. All rules within a",
-    "cohort, endpoint and horizon are compared in the same patients; estimates with fewer than 5 events by the horizon",
-    "are not shown. Per-fold and full-cohort rules are reported in transfer_checklist_extension_rules_no_dfci.csv.",
-    "The dotted line marks 0.5. ADT, androgen-deprivation therapy; AVPC, aggressive-variant prostate cancer; NEPC,",
-    "neuroendocrine prostate cancer.")),collapse="\n\n")
+    "points mark rules whose paired bootstrap 95% interval for the difference from the transferred lab checklist",
+    "excludes 0. Intervals condition on the out-of-fold checklists and do not include the variability of re-learning",
+    "them. All rules within a cohort, endpoint and horizon are compared in the same patients; estimates with fewer than",
+    "5 events by the horizon are not shown. Per-fold and full-cohort checklists (items and threshold) are reported in",
+    "transfer_checklist_extension_rules_no_dfci.csv. The dotted line marks 0.5. ADT, androgen-deprivation therapy;",
+    "AVPC, aggressive-variant prostate cancer; NEPC, neuroendocrine prostate cancer.")),collapse="\n\n")
 
 # Captions go to captions/ inside each figure's manuscript folder under the arm root.
 manuscript_write_captions <- function(root,keys=names(manuscript_captions()),capture=NULL) {
@@ -3451,9 +3455,9 @@ manuscript_full_checklist_transfer <- function(direct, generalized) {
       "direct-transfer checklists use the original thresholds. Landmarks are measured from ADT initiation."))
 }
 
-# Supplementary Figure 8: out-of-fold AUC of the frozen checklist, the Gleason / TSG rules and the extended checklists
-# at one landmark. Rows are endpoints, columns are cohorts (each with only the rules its items allow), points are
-# horizons; filled points mark a paired 95% CI for the gain over the frozen checklist that excludes 0.
+# Supplementary Figure 8: out-of-fold AUC of the transferred labs checklist, the Gleason / TSG rules and the internal
+# checklists at one landmark. Rows are endpoints, columns are cohorts (each with only the rules its items allow), points
+# are horizons; filled points mark a paired 95% CI for the gain over the labs checklist that excludes 0.
 manuscript_checklist_extension <- function(comparison, landmark) {
   required <- c("endpoint","cohort","landmark_days","horizon_days","rule","auc","auc_lo","auc_hi",
     "delta_auc_lo","delta_auc_hi")
@@ -3489,17 +3493,18 @@ manuscript_checklist_extension <- function(comparison, landmark) {
     ggplot2::scale_y_continuous(breaks=seq(0,1,.25)) +
     ggplot2::coord_cartesian(ylim=c(.25,1)) +
     ggplot2::labs(x=NULL,y="Horizon-specific AUC (out of fold)",color="Horizon",
-      shape="ΔAUC vs frozen checklist",subtitle=paste0("Landmark +",landmark," days after ADT initiation")) +
+      shape="ΔAUC vs labs checklist",subtitle=paste0("Landmark +",landmark," days after ADT initiation")) +
     ggplot2::theme_classic(base_size=10) +
     ggplot2::theme(legend.position="top",strip.background=ggplot2::element_blank(),
       strip.text=ggplot2::element_text(face="bold"),panel.spacing=grid::unit(.8,"lines"),
       axis.text.x=ggplot2::element_text(angle=40,hjust=1))
   list(plot=p,spec=list(key=federated_checklist_extension_key(landmark),width=11,height=8),data=d,
-    legend=paste("Generalized no-Dana-Farber checklist with Gleason and/or TP53/RB1/PTEN items post-trained on",
-      "Dana-Farber platinum (5-fold cross-fitting) and scored out of fold. Points show horizon-specific",
-      "inverse-probability-of-censoring-weighted AUC (balanced accuracy for a yes/no rule) with 95% patient-bootstrap",
-      "intervals that condition on the out-of-fold rules; filled points mark a paired ΔAUC versus the frozen",
-      "checklist whose interval excludes 0. Estimates with fewer than 5 events by the horizon are not drawn."))
+    legend=paste("Transferred no-Dana-Farber generalized checklist result (frozen, not re-tuned) used as one item of",
+      "internal checklists with Gleason and/or TP53/RB1/PTEN items, learned on Dana-Farber platinum (5-fold",
+      "cross-fitting) and scored out of fold. Points show horizon-specific inverse-probability-of-censoring-weighted",
+      "AUC (balanced accuracy for a yes/no rule) with 95% patient-bootstrap intervals that condition on the",
+      "out-of-fold checklists; filled points mark a paired ΔAUC versus the transferred lab checklist whose interval",
+      "excludes 0. Estimates with fewer than 5 events by the horizon are not drawn."))
 }
 
 manuscript_federated_checklist <- function(tables,key="federated_06_checklist_no_dfci",f=FEDERATED_CHECKLIST_FIGURE,
