@@ -450,8 +450,8 @@ manuscript_renders_plan <- function() {
   plan
 }
 
-# Resolve the selected source to its final manuscript filename. Supplement
-# families share one folder; their filenames retain the distinguishing keys.
+# Resolve the selected source to its final manuscript filename, preserving
+# the checklist family subfolders specified by the export plan.
 figure_manuscript_destination <- function(destination, fig_root) {
   root <- figure_arm_root(fig_root, "ADT")
   relative <- paste0(substring(destination, nchar(root) + 2L), ".pdf")
@@ -459,8 +459,7 @@ figure_manuscript_destination <- function(destination, fig_root) {
   index <- match(relative, plan$source)
   if (is.na(index)) stop("No manuscript destination for ", destination)
   target <- plan$target[index]
-  file.path(root, strsplit(target, "/", fixed = TRUE)[[1]][1],
-            tools::file_path_sans_ext(basename(target)))
+  file.path(root, tools::file_path_sans_ext(target))
 }
 
 
@@ -4277,19 +4276,30 @@ FIGURE_GROUPS <- list(
   federated_univariable = list(jobs = "federated", prefix = "03_univariate/federated/"),
   federated_multivariable = list(jobs = "federated", prefix = "04_multivariate/federated/"),
   transfer_survival = list(jobs = "federated", prefix = "05_transfer_survival/"),
-  transfer_checklists = list(jobs = "federated", prefix = "06_transfer_checklists/"))
+  transfer_checklists = list(jobs = "federated", prefix = "06_transfer_checklists/"),
+  checklist_augmentation = list(jobs = "checklist_augmentation", prefix = "main/alternative_06/"))
 
 run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     prepare_workers = 1L, render_workers = 2L, dpi = 200, pdf = FALSE,
     prepare_overwrite = FALSE, render_overwrite = FALSE,
     metastatic_config = NULL, forest_config = NULL, federated_config = NULL,
-    groups = names(FIGURE_GROUPS), manuscript_only = TRUE) {
+    groups = setdiff(names(FIGURE_GROUPS), "checklist_augmentation"), manuscript_only = TRUE) {
   stage <- match.arg(stage, c("all", "prepare", "render"))
   unknown <- setdiff(groups, names(FIGURE_GROUPS))
   if (length(unknown)) stop("Unknown figure group(s): ", paste(unknown, collapse = ", "))
   if (!length(groups)) stop("No figure groups are enabled.")
+  # Notebook 07 is independently prepared and has its own aggregate-only receipt.
+  # Its dedicated R snapshot needs neither notebook 05 nor unrelated federated inputs.
+  augmentation <- NULL
+  if("checklist_augmentation" %in% groups) {
+    source(file.path(dirname(pipeline_path),"checklist_augmentation.R"),local=TRUE)
+    augmentation <- run_checklist_augmentation_workflow(config,stage,dirname(pipeline_path),
+      prepare_overwrite=prepare_overwrite,render_overwrite=render_overwrite,dpi=dpi)
+    groups <- setdiff(groups,"checklist_augmentation")
+    if(!length(groups)) return(invisible(list(augmentation=augmentation)))
+  }
   # Archiving/flattening sweeps the whole export tree, so only a full run does it.
-  all_groups <- setequal(groups, names(FIGURE_GROUPS))
+  all_groups <- setequal(groups, setdiff(names(FIGURE_GROUPS),"checklist_augmentation"))
   started <- proc.time()[["elapsed"]]
   for (name in c("data_root", "cache_root", "fig_root"))
     config[[name]] <- figure_absolute_path(config[[name]])
@@ -4446,5 +4456,5 @@ run_cached_figure_workflow <- function(config, pipeline_path, stage = "all",
     if (all_groups && !isTRUE(manuscript_only)) figure_archive_old_exports(config,prepared)
     if (!isTRUE(manuscript_only)) figure_write_catalog(config,prepared)
   }
-  invisible(list(prepared = prepared, rendered = render_results))
+  invisible(list(prepared = prepared, rendered = render_results, augmentation=augmentation))
 }

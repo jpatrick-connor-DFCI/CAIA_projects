@@ -3,7 +3,8 @@
 #   final_figure_data_prep.R  stage "prepare": builds the cached figure data R needs
 #   run_figure_render.R       stage "render":  draws PDFs and writes figure data tables
 # Both expect `script_dir` (this folder) and `FIGURE_STAGE` to be set before sourcing.
-# Run 05_prep_figure_data.ipynb first. Flip the toggles below to run a subset of
+# Run 05_prep_figure_data.ipynb first for standard groups; checklist_augmentation
+# independently consumes 07_checklist_test.ipynb. Flip the toggles below to run a subset of
 # figure groups. Only manuscript figures are rendered.
 #
 # Paths and render settings can be overridden with the environment variables
@@ -24,7 +25,8 @@ FIGURES <- c(
   federated_univariable   = TRUE,  # 03_univariate/federated: federated Fig 3, forests, KMs, trajectories
   federated_multivariable = TRUE,  # 04_multivariate/federated: federated Fig 4, performance, checklist cards
   transfer_survival       = TRUE,  # 05_transfer_survival: federated Fig 5 (no-DFCI transfer)
-  transfer_checklists     = TRUE)  # 06_transfer_checklists: federated Fig 6 (transfer checklists)
+  transfer_checklists     = TRUE,  # 06_transfer_checklists: federated Fig 6 (transfer checklists)
+  checklist_augmentation  = FALSE) # notebook 07: main/alternative_06 (enable after its reproduction audit)
 
 # ---- Configuration ----------------------------------------------------------
 options(readr.num_threads = 1L, readr.read_lazy = FALSE)
@@ -94,7 +96,8 @@ if (length(env_groups)) {
 groups <- names(FIGURES)[FIGURES]
 if (!length(groups)) stop("Enable at least one figure group in FIGURES.")
 # Groups drawn only from federated exports skip the DFCI patient-level checks.
-federated_only <- all(vapply(FIGURE_GROUPS[groups], function(g) identical(g$jobs, "federated"), logical(1)))
+federated_only <- all(vapply(FIGURE_GROUPS[setdiff(groups,"checklist_augmentation")],
+  function(g) identical(g$jobs, "federated"), logical(1)))
 
 figure_config <- list(
   data_root = NEPC_PROJ_PATH, cache_root = FIGURE_DATA_ROOT, fig_root = FIG_ROOT,
@@ -106,7 +109,10 @@ figure_config <- list(
   federated = TRUE,
   federated_path = FEDERATED_SUPPLEMENT$results,
   federated_transfer_no_dfci_path = FEDERATED_SUPPLEMENT$transfer_no_dfci,
-  federated_figure_data_path = FEDERATED_SUPPLEMENT$figure_data)
+  federated_figure_data_path = FEDERATED_SUPPLEMENT$figure_data,
+  checklist_augmentation_path = Sys.getenv("COMPASS_CHECKLIST_AUGMENTATION_ROOT",
+    file.path(NEPC_PROJ_PATH,"checklist_augmentation")),
+  manuscript_fig_root = Sys.getenv("COMPASS_MANUSCRIPT_FIG_ROOT",file.path(FIG_ROOT,"ADT_figures")))
 
 message("Figure groups: ", paste(groups, collapse = ", "))
 message("Manuscript-only figures: ", MANUSCRIPT_ONLY)

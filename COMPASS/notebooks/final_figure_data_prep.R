@@ -2,6 +2,8 @@
 # Figure data prep: builds the cached tables and scene objects the R figures consume (no rendering).
 #
 #   Rscript COMPASS/notebooks/final_figure_data_prep.R
+#   COMPASS_FIGURE_GROUPS=checklist_augmentation Rscript COMPASS/notebooks/final_figure_data_prep.R
+# The augmentation group consumes notebook 07's aggregate receipt independently of notebook 05.
 #
 # Toggles, paths and environment overrides live in COMPASS/figures/figure_run.R;
 # the plotting and workflow code it sources stays in COMPASS/figures/.

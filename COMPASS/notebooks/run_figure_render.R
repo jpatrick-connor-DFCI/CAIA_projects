@@ -2,6 +2,8 @@
 # Figure render: draws the PDF and SVG figures from the prepared cache and writes the figure data tables.
 #
 #   Rscript COMPASS/notebooks/run_figure_render.R
+#   COMPASS_FIGURE_GROUPS=checklist_augmentation Rscript COMPASS/notebooks/run_figure_render.R
+# Notebook 07's alternative Figure 6 goes to main/alternative_06 in COMPASS_MANUSCRIPT_FIG_ROOT.
 #
 # Toggles, paths and environment overrides live in COMPASS/figures/figure_run.R;
 # the plotting and workflow code it sources stays in COMPASS/figures/.

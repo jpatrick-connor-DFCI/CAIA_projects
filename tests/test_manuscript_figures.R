@@ -603,8 +603,7 @@ stopifnot(nrow(renders_plan)==5L+1L+4L+1L+1L+6L+6L+3L,!anyDuplicated(renders_pla
 renders_root <- tempfile("renders-")
 resolved <- vapply(renders_plan$source, function(source)
   figure_manuscript_destination(file.path(renders_root, "ADT_figures", sub("[.]pdf$", "", source)), renders_root), character(1))
-expected <- file.path(renders_root, "ADT_figures", vapply(strsplit(renders_plan$target, "/", fixed=TRUE), `[`, character(1), 1),
-  tools::file_path_sans_ext(basename(renders_plan$target)))
+expected <- file.path(renders_root, "ADT_figures", tools::file_path_sans_ext(renders_plan$target))
 stopifnot(identical(unname(resolved), unname(expected)), !anyDuplicated(resolved))
 full_grid <- tidyr::expand_grid(endpoint=names(FEDERATED_TRANSFER_ENDPOINTS),
   landmark_days=c(0L,90L,180L),horizon_days=c(365L,1825L)) %>%
