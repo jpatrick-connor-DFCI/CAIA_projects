@@ -90,7 +90,8 @@ esmo_result1 <- function(d) {
     scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "#0b0b0b"), guide = "none") +
     labs(x = "LLM label (prediction)", y = "Manual annotation (truth)",
       title = sprintf("Manual review (n = %d)", d$audit$n_reviewed),
-      subtitle = sprintf("Agreement: %.1f%%", 100 * d$audit$agreement)) + theme_fig()
+      subtitle = sprintf("Agreement: %.1f%%", 100 * d$audit$agreement)) + theme_fig() +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1))
   landscape <- d$landscape %>% mutate(primary_label = factor(primary_label, levels = classes, labels = class_labels),
     platinum = factor(PLATINUM, levels = c(1, 0), labels = c("Platinum+", "Platinum−")))
   counts <- vapply(c(1, 0), function(x) sum(landscape$n[landscape$PLATINUM == x]), numeric(1))
@@ -110,11 +111,14 @@ esmo_result1 <- function(d) {
     scale_fill_manual(values = c(COLOR_PLATINUM_POS, "#9a9890"), guide = "none") +
     scale_y_continuous(labels = scales::label_percent(), expand = expansion(mult = c(0, .12))) +
     labs(x = NULL, y = "Platinum-positive fraction", title = "Platinum enrichment",
-      subtitle = sprintf("OR = %.1f; one-sided Fisher p = %.1e",
+      subtitle = sprintf("OR = %.1f\none-sided Fisher p = %.1e",
         enrichment$odds_ratio[1], enrichment$fisher_p[1])) + theme_fig()
   list(plots = list(confusion_matrix = p1, subtype_fractions = p2, platinum_enrichment = p3),
     # Narrow confusion matrix and enrichment panels; export aligns the x axes.
-    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(3, 4.6, 2.8), width = 10.4, height = 4.1,
+    # The subtype legend sits in b's empty upper right, so no panel carries a
+    # bottom legend and the three x axes align without dead space.
+    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(3.4, 4, 3.2), width = 10.6, height = 3.9,
+    legend_inside = list(subtype_fractions = c(.98, .98)),
     caption = paste("Results 1. Day-0 ADT prediction cohort intersected with LLM subtype labels.",
       "Manual truth is on the y axis; tile color is row-normalized and labels are counts.",
       "Subtype fractions are conditional on platinum status. Enrichment compares AVPC/NEPC with conventional labels;",
@@ -176,14 +180,17 @@ esmo_result3 <- function(performance, importance) {
   p2 <- plot_model_importance(selected, "xgb", "Day 180: top laboratory features", top_n = 15)
   # Bold androgen-axis feature names (plotmath, so no vectorized theme faces).
   androgen <- as.character(p2$data$label[p2$data$category == "Androgen axis"])
-  p2 <- p2 + scale_y_discrete(labels = function(x) as.expression(lapply(x, function(s) {
+  p2 <- suppressMessages(p2 + scale_y_discrete(labels = function(x) as.expression(lapply(x, function(s) {
       label <- manuscript_federated_feature_label(s)
       if (s %in% androgen) bquote(bold(.(label))) else label
     }))) +
-    guides(fill = guide_legend(nrow = 1))
+    # List only categories present in the top features so the legend fits.
+    scale_fill_manual(values = CATEGORY_COLORS, name = NULL,
+      breaks = intersect(LEGEND_ORDER, as.character(p2$data$category))) +
+    guides(fill = guide_legend(nrow = 1)))
   list(plots = list(heldout_performance = p1, xgboost_features_day180 = p2),
     tables = list(performance = d, top_features = selected), layout = matrix(1:2, nrow = 1),
-    width = 12, height = 5.4,
+    col_widths = c(1, 1.1), width = 12, height = 5.4,
     caption = paste("Results 3. Four-center held-out test mean time-dependent AUC(t) at ADT days 0, 90 and 180.",
       "Age-only Cox, elastic-net Cox and XGBoost are shown; no uncertainty intervals are supplied by these exports.",
       "The feature panel ranks up to 15 eligible positive-gain laboratory features at day 180, excluding age,",
@@ -233,7 +240,8 @@ esmo_result4 <- function(metrics, gradient) {
   p1 <- suppressMessages(plot_federated_transfer_bars(prepare_federated_transfer(d, federated_transfer_strip_counts(d, 0)), ymax = 1) +
     scale_y_continuous(breaks = seq(.25, 1, .25), expand = expansion(mult = c(0, 0))) +
     coord_cartesian(ylim = c(.25, 1))) +
-    labs(title = "Three-site XGBoost → DFCI without refitting", subtitle = "Landmarks after ADT initiation; 95% bootstrap CI")
+    labs(title = "Three-site XGBoost → DFCI without refitting", subtitle = "Landmarks after ADT initiation; 95% bootstrap CI") +
+    theme(plot.title.position = "panel")
   probabilities <- lapply(names(FEDERATED_TRANSFER_ENDPOINTS), function(ep) {
     p <- plot_federated_transfer_horizon_risk(list(gradient = gradient), "xgboost_cox", 180,
       endpoint = ep, score_stratifier = "score_extreme")
@@ -247,7 +255,8 @@ esmo_result4 <- function(metrics, gradient) {
     coord_cartesian(ylim = c(0, ymax)) +
     labs(title = FEDERATED_TRANSFER_ENDPOINTS_SHORT[[i]], y = "Five-year event probability",
       subtitle = "Sequencing report +180 days") +
-    theme(axis.text.x = element_text(angle = 0, hjust = .5), strip.text = element_text(size = 8)))
+    theme(axis.text.x = element_text(angle = 0, hjust = .5), strip.text = element_text(size = 8),
+      plot.title.position = "panel"))
   list(plots = c(list(transfer_auc = p1), setNames(probabilities, paste0(names(FEDERATED_TRANSFER_ENDPOINTS), "_five_year"))),
     tables = list(transfer_performance = d, stratification = gradient,
       event_probabilities = bind_rows(lapply(probabilities, function(p) p$data))),
@@ -262,7 +271,13 @@ esmo_result4 <- function(metrics, gradient) {
       "This descriptive comparison does not test incremental clinical utility or superiority."))
 }
 
-esmo_export <- function(result, section, output, formats, dpi) {
+esmo_inside_legend <- function(position) {
+  if (utils::packageVersion("ggplot2") >= "3.5.0")
+    theme(legend.position = "inside", legend.position.inside = position, legend.justification = position)
+  else theme(legend.position = position, legend.justification = position)
+}
+
+esmo_export <- function(result, section, output) {
   # Measure text on an explicit Unicode-capable device. ggplotGrob() otherwise
   # opens Rplots.pdf in a batch run and can substitute glyphs in the composite.
   measurement <- tempfile(".esmo-measure-", fileext = ".png")
@@ -276,23 +291,23 @@ esmo_export <- function(result, section, output, formats, dpi) {
   dir.create(file.path(folder, "data"), recursive = TRUE, showWarnings = FALSE)
   writeLines(result$caption, file.path(folder, "caption.txt"), useBytes = TRUE)
   for (name in names(result$tables)) readr::write_csv(result$tables[[name]], file.path(folder, "data", paste0(name, ".csv")))
+  # Figures are exported as PDF only.
   save <- function(p, stem, width, height) {
-    for (format in formats) {
-      destination <- file.path(folder, paste0(stem, ".", format))
-      temporary <- tempfile(".esmo-", tmpdir = folder, fileext = paste0(".", format))
-      device <- switch(format, pdf = figure_pdf_device, svg = figure_svg_device, png = "png")
-      tryCatch({
-        ggplot2::ggsave(temporary, plot = p, device = device, width = width, height = height,
-          dpi = dpi, bg = "white", limitsize = FALSE)
-        if (is.na(file.info(temporary)$size) || file.info(temporary)$size == 0 || !file.rename(temporary, destination))
-          stop("Cannot publish ", destination)
-      }, finally = unlink(temporary))
-    }
+    destination <- file.path(folder, paste0(stem, ".pdf"))
+    temporary <- tempfile(".esmo-", tmpdir = folder, fileext = ".pdf")
+    tryCatch({
+      ggplot2::ggsave(temporary, plot = p, device = figure_pdf_device, width = width, height = height,
+        bg = "white", limitsize = FALSE)
+      if (is.na(file.info(temporary)$size) || file.info(temporary)$size == 0 || !file.rename(temporary, destination))
+        stop("Cannot publish ", destination)
+    }, finally = unlink(temporary))
   }
   # Captions live beside the graphics; keep the individual panels easy to place.
   plots <- lapply(result$plots, function(p) p + labs(caption = NULL) +
     theme(plot.title = element_text(size = 11, face = "bold"),
       plot.subtitle = element_text(size = 9), legend.position = "bottom"))
+  for (name in names(result$legend_inside))
+    plots[[name]] <- plots[[name]] + esmo_inside_legend(result$legend_inside[[name]])
   row_weights <- if (is.null(result$row_heights)) rep(1, nrow(result$layout)) else result$row_heights
   col_weights <- if (is.null(result$col_widths)) rep(1, ncol(result$layout)) else result$col_widths
   for (i in seq_along(plots)) {
@@ -344,20 +359,14 @@ esmo_main <- function(args = commandArgs(TRUE)) {
       "COMPASS_FEDERATED_FIGURE_DATA    <RHINO_ROOT>/figure_data (pooled KM exports)",
       "COMPASS_FEDERATED_TRANSFER_NO_DFCI <RHINO_ROOT>/federated_transfer_adt_no_DFCI",
       "COMPASS_ESMO_OUTPUT_ROOT        <COMPASS_FIG_ROOT>/ESMO_AI",
-      "COMPASS_ESMO_FORMATS            pdf,svg,png",
-      "COMPASS_ESMO_DPI                300 (PNG resolution)",
       "Run preprocessing/univariate/multivariate/transfer notebooks 01-04 first.",
       "Results 1 reads day-0 prediction inputs + manual/LLM labels; 2 uses federated Cox/KM exports;",
       "3 uses federated held-out metrics/gains; 4 uses notebook-04 transfer metrics/patients.",
-      "Writes four composites, individual panels, aggregate CSVs, captions and sessionInfo.txt."), collapse = "\n"), "\n")
+      "Writes four PDF composites, individual PDF panels, aggregate CSVs, captions and sessionInfo.txt."), collapse = "\n"), "\n")
     return(invisible(NULL))
   }
   sections <- trimws(strsplit(Sys.getenv("COMPASS_ESMO_SECTIONS", "1,2,3,4"), ",", fixed = TRUE)[[1]])
-  formats <- trimws(strsplit(Sys.getenv("COMPASS_ESMO_FORMATS", "pdf,svg,png"), ",", fixed = TRUE)[[1]])
-  dpi <- suppressWarnings(as.integer(Sys.getenv("COMPASS_ESMO_DPI", "300")))
   if (!length(sections) || any(!sections %in% as.character(1:4)) || anyDuplicated(sections)) stop("Invalid COMPASS_ESMO_SECTIONS")
-  if (!length(formats) || any(!formats %in% c("pdf", "svg", "png")) || anyDuplicated(formats)) stop("Invalid COMPASS_ESMO_FORMATS")
-  if (is.na(dpi) || dpi < 72) stop("COMPASS_ESMO_DPI must be an integer >=72")
   data <- Sys.getenv("COMPASS_DATA_ROOT", "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS")
   rhino <- Sys.getenv("COMPASS_RHINO_ROOT", file.path(data, "rhino_data_v2"))
   federated <- Sys.getenv("COMPASS_FEDERATED_RESULTS", file.path(rhino, "cox_federated_univariate_adt.csv"))
@@ -404,8 +413,8 @@ esmo_main <- function(args = commandArgs(TRUE)) {
     results[["4"]] <- esmo_result4(metrics, esmo_transfer_gradient(patients))
   }
   dir.create(output, recursive = TRUE, showWarnings = FALSE)
-  message("Rendering ", length(results), " figure sets (", paste(formats, collapse = ", "), ")")
-  for (section in sections) esmo_export(results[[section]], section, output, formats, dpi)
+  message("Rendering ", length(results), " figure sets (PDF)")
+  for (section in sections) esmo_export(results[[section]], section, output)
   writeLines(capture.output(utils::sessionInfo()), file.path(output, "sessionInfo.txt"))
   message("Finished ESMO AI figures in ", normalizePath(output, mustWork = TRUE))
   invisible(results)

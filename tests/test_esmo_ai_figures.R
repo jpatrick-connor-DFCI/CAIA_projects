@@ -82,15 +82,10 @@ root <- tempfile("esmo-figures-")
 dir.create(root)
 tryCatch({
   results <- list(esmo_result1(d), r2, r3, r4)
-  for (i in seq_along(results)) esmo_export(results[[i]], as.character(i), root, c("pdf", "svg", "png"), 100)
+  for (i in seq_along(results)) esmo_export(results[[i]], as.character(i), root)
   pdfs <- list.files(root, pattern = "[.]pdf$", full.names = TRUE, recursive = TRUE)
-  stopifnot(length(pdfs) == 17, all(vapply(pdfs, figure_file_complete, logical(1))))
-  svgs <- list.files(root, pattern = "[.]svg$", full.names = TRUE, recursive = TRUE)
-  pngs <- list.files(root, pattern = "[.]png$", full.names = TRUE, recursive = TRUE)
-  stopifnot(length(svgs) == 17, length(pngs) == 17,
-    all(vapply(svgs, function(path) any(grepl("<svg", readLines(path, warn = FALSE), fixed = TRUE)), logical(1))),
-    all(vapply(pngs, function(path) identical(readBin(path, "raw", 8),
-      as.raw(c(137, 80, 78, 71, 13, 10, 26, 10))), logical(1))))
+  stopifnot(length(pdfs) == 17, all(vapply(pdfs, figure_file_complete, logical(1))),
+    !length(list.files(root, pattern = "[.](svg|png)$", recursive = TRUE)))
   for (path in list.files(root, pattern = "[.]csv$", full.names = TRUE, recursive = TRUE)) {
     table <- readr::read_csv(path, show_col_types = FALSE)
     stopifnot(!any(c("person_id", "DFCI_MRN", "risk_score") %in% names(table)))

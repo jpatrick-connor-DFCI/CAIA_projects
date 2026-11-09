@@ -49,7 +49,7 @@ It reads the existing analysis outputs directly; run notebooks 01–04 and have
 the federated Cox/KM/model deliveries available first. It does not require an
 R scene cache or modify the manuscript exports. The default destination is
 `<COMPASS_FIG_ROOT>/ESMO_AI/results_{1,2,3,4}/`, with a composite and individual
-panels in PDF, SVG and 300-dpi PNG, aggregate CSVs in `data/`, and `caption.txt`.
+panels as PDF only, aggregate CSVs in `data/`, and `caption.txt`.
 No patient IDs or patient-level tables are exported. Results are calculated
 from the inputs, so updated analyses can differ from the proposal's old figures.
 
@@ -77,8 +77,6 @@ The script honors `COMPASS_DATA_ROOT`, `COMPASS_FIG_ROOT`, `COMPASS_RHINO_ROOT`,
 ```sh
 COMPASS_ESMO_SECTIONS=2,3,4 \
 COMPASS_ESMO_OUTPUT_ROOT=/path/to/poster-figures \
-COMPASS_ESMO_FORMATS=pdf,svg,png \
-COMPASS_ESMO_DPI=300 \
 Rscript COMPASS/figures/ESMO_AI_Figures.R
 ```
 
