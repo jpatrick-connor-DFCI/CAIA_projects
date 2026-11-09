@@ -39,6 +39,12 @@ use the separate poster entry point:
 Rscript COMPASS/figures/ESMO_AI_Figures.R
 ```
 
+In an R session, `source("COMPASS/figures/ESMO_AI_Figures.R")` or RStudio's
+Source button also runs generation. The script prints the output directory,
+preparation progress, and each saved figure set. For tests or function-only
+loading, set `options(compass.esmo.autorun = FALSE)` before sourcing, then call
+`esmo_main(character())` explicitly when ready to generate.
+
 It reads the existing analysis outputs directly; run notebooks 01–04 and have
 the federated Cox/KM/model deliveries available first. It does not require an
 R scene cache or modify the manuscript exports. The default destination is

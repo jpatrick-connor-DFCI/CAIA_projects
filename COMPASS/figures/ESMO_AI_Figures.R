@@ -1,6 +1,8 @@
 #!/usr/bin/env Rscript
 # Figures for Results 1-4 of COMPASS_ESMO_AI_proposed (9 November 2026).
 # Run from any directory: Rscript /path/to/COMPASS/figures/ESMO_AI_Figures.R
+# Or use source("COMPASS/figures/ESMO_AI_Figures.R") / RStudio's Source button.
+# To load functions without running, set options(compass.esmo.autorun = FALSE).
 # See --help and README.md for paths. Uses original analysis exports, never
 # poster screenshots, PDF-derived estimates, or hard-coded manuscript results.
 # Patient-level inputs are used in memory; only aggregate tables are exported.
@@ -11,6 +13,8 @@ esmo_script_dir <- local({
   path <- if (length(paths)) tail(paths, 1L)[[1L]] else
     sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)[1L])
   if (is.na(path)) stop("Cannot locate ESMO_AI_Figures.R; source it by filename.")
+  # R can encode spaces in --file as ~+~, including in this repository's path.
+  if (!file.exists(path)) path <- gsub("~+~", " ", path, fixed = TRUE)
   dirname(normalizePath(path, mustWork = TRUE))
 })
 
@@ -95,7 +99,7 @@ esmo_result1 <- function(d) {
     scale_fill_manual(values = c(COLOR_PLATINUM_POS, COLOR_PLATINUM_NEG), name = NULL,
       labels = sprintf(c("Platinum+ (n=%s)", "Platinum− (n=%s)"), scales::comma(counts))) +
     scale_y_continuous(limits = c(0, 1), labels = scales::label_percent()) +
-    labs(x = NULL, y = "Fraction within platinum group", title = "Subtype fractions",
+    labs(x = NULL, y = "Fraction within\nplatinum group", title = "Subtype fractions",
       subtitle = sprintf("%s classified patients", scales::comma(d$audit$n_classified))) + theme_fig() +
     guides(fill = guide_legend(ncol = 1))
   enrichment <- d$enrichment %>% mutate(group = factor(group, levels = group))
@@ -216,9 +220,12 @@ esmo_result4 <- function(metrics, gradient) {
     stop("Results 4 probabilities require a five-year horizon on the sequencing clock")
   p1 <- plot_federated_transfer_bars(prepare_federated_transfer(d, federated_transfer_strip_counts(d, 0)), ymax = 1) +
     labs(title = "Three-site XGBoost → DFCI without refitting", subtitle = "Landmarks after ADT initiation; 95% bootstrap CI")
-  probabilities <- lapply(names(FEDERATED_TRANSFER_ENDPOINTS), function(ep)
-    plot_federated_transfer_horizon_risk(list(gradient = gradient), "xgboost_cox", 180,
-      endpoint = ep, score_stratifier = "score_extreme"))
+  probabilities <- lapply(names(FEDERATED_TRANSFER_ENDPOINTS), function(ep) {
+    p <- plot_federated_transfer_horizon_risk(list(gradient = gradient), "xgboost_cox", 180,
+      endpoint = ep, score_stratifier = "score_extreme")
+    levels(p$data$stratifier_label) <- c("XGBoost", "Gleason", "TSG")
+    p
+  })
   # Match the proposal's common 0-0.6 scale, expanding only if a real CI needs it.
   upper <- max(c(.6, unlist(lapply(probabilities, function(p) p$data$probability_hi))), na.rm = TRUE)
   ymax <- min(1, ceiling(upper * 5) / 5)
@@ -242,6 +249,15 @@ esmo_result4 <- function(metrics, gradient) {
 }
 
 esmo_export <- function(result, section, output, formats, dpi) {
+  # Measure text on an explicit Unicode-capable device. ggplotGrob() otherwise
+  # opens Rplots.pdf in a batch run and can substitute glyphs in the composite.
+  measurement <- tempfile(".esmo-measure-", fileext = ".png")
+  figure_measure_device(measurement, result$width, result$height)
+  measurement_device <- grDevices::dev.cur()
+  on.exit({
+    if (measurement_device %in% grDevices::dev.list()) grDevices::dev.off(measurement_device)
+    unlink(measurement)
+  }, add = TRUE)
   folder <- file.path(output, paste0("results_", section))
   dir.create(file.path(folder, "data"), recursive = TRUE, showWarnings = FALSE)
   writeLines(result$caption, file.path(folder, "caption.txt"), useBytes = TRUE)
@@ -304,17 +320,20 @@ esmo_main <- function(args = commandArgs(TRUE)) {
   if (!length(sections) || any(!sections %in% as.character(1:4)) || anyDuplicated(sections)) stop("Invalid COMPASS_ESMO_SECTIONS")
   if (!length(formats) || any(!formats %in% c("pdf", "svg", "png")) || anyDuplicated(formats)) stop("Invalid COMPASS_ESMO_FORMATS")
   if (is.na(dpi) || dpi < 72) stop("COMPASS_ESMO_DPI must be an integer >=72")
-  esmo_load_helpers()
   data <- Sys.getenv("COMPASS_DATA_ROOT", "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS")
   rhino <- Sys.getenv("COMPASS_RHINO_ROOT", file.path(data, "rhino_data_v2"))
   federated <- Sys.getenv("COMPASS_FEDERATED_RESULTS", file.path(rhino, "cox_federated_univariate_adt.csv"))
   transfer <- Sys.getenv("COMPASS_FEDERATED_TRANSFER_NO_DFCI", file.path(rhino, "federated_transfer_adt_no_DFCI"))
   output <- Sys.getenv("COMPASS_ESMO_OUTPUT_ROOT", file.path(Sys.getenv("COMPASS_FIG_ROOT",
     "/data/gusev/USERS/jpconnor/figures/CAIA/COMPASS"), "ESMO_AI"))
+  message("ESMO AI figures: Results ", paste(sections, collapse = ", "))
+  message("Output directory: ", normalizePath(output, mustWork = FALSE))
+  esmo_load_helpers()
   # Build every requested section before publishing; a missing analysis cannot
   # silently turn a requested panel into a partial poster.
   results <- list()
   if ("1" %in% sections) {
+    message("Preparing Results 1: LLM validation and platinum enrichment")
     inputs <- file.path(data, "survival_analysis", "prediction_inputs_adt")
     patients <- readr::read_csv(file.path(inputs, "aggregated_landmark0.csv"),
       col_select = all_of(c("DFCI_MRN", "PLATINUM")), show_col_types = FALSE)
@@ -324,11 +343,13 @@ esmo_main <- function(args = commandArgs(TRUE)) {
     results[["1"]] <- esmo_result1(esmo_llm_data(patients, labels, manual))
   }
   if ("2" %in% sections) {
+    message("Preparing Results 2: lab associations and survival curves")
     fig <- load_federated_figure_data(Sys.getenv("COMPASS_FEDERATED_FIGURE_DATA", file.path(rhino, "figure_data")))
     if (is.null(fig)) stop("Missing federated aggregate KM exports for Results 2")
     results[["2"]] <- esmo_result2(federated_volcano_data(federated), fig)
   }
   if ("3" %in% sections) {
+    message("Preparing Results 3: federated performance and feature importance")
     paths <- lapply(c("elastic_net", "xgboost"), function(family) federated_multivariable_files(federated, family, "pooled"))
     performance <- bind_rows(lapply(seq_along(paths), function(i) {
       family <- c("elastic_net", "xgboost")[i]
@@ -339,14 +360,21 @@ esmo_main <- function(args = commandArgs(TRUE)) {
     results[["3"]] <- esmo_result3(performance, importance)
   }
   if ("4" %in% sections) {
+    message("Preparing Results 4: DFCI transfer and five-year stratification")
     metrics <- esmo_require(load_federated_transfer(transfer, "metrics"), "transfer metrics")
     patients <- esmo_require(load_federated_transfer_km(transfer), "transfer patients")
     results[["4"]] <- esmo_result4(metrics, esmo_transfer_gradient(patients))
   }
   dir.create(output, recursive = TRUE, showWarnings = FALSE)
+  message("Rendering ", length(results), " figure sets (", paste(formats, collapse = ", "), ")")
   for (section in sections) esmo_export(results[[section]], section, output, formats, dpi)
   writeLines(capture.output(utils::sessionInfo()), file.path(output, "sessionInfo.txt"))
+  message("Finished ESMO AI figures in ", normalizePath(output, mustWork = TRUE))
   invisible(results)
 }
 
-if (sys.nframe() == 0L) esmo_main()
+# source() and RStudio run the file inside call frames too. Use an explicit
+# opt-out for tests/library use; a call-depth guard silently skips normal runs.
+if (!identical(getOption("compass.esmo.autorun"), FALSE)) {
+  esmo_main(if (sys.nframe() == 0L) commandArgs(TRUE) else character())
+}
