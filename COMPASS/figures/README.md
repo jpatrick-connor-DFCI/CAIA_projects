@@ -32,6 +32,58 @@ message to rerun notebook 05 (notebook 07 for `checklist_augmentation`).
 
 ## Figure groups
 
+For the four Results blocks in `COMPASS_ESMO_AI_proposed` (9 November 2026),
+use the separate poster entry point:
+
+```sh
+Rscript COMPASS/figures/ESMO_AI_Figures.R
+```
+
+It reads the existing analysis outputs directly; run notebooks 01–04 and have
+the federated Cox/KM/model deliveries available first. It does not require an
+R scene cache or modify the manuscript exports. The default destination is
+`<COMPASS_FIG_ROOT>/ESMO_AI/results_{1,2,3,4}/`, with a composite and individual
+panels in PDF, SVG and 300-dpi PNG, aggregate CSVs in `data/`, and `caption.txt`.
+No patient IDs or patient-level tables are exported. Results are calculated
+from the inputs, so updated analyses can differ from the proposal's old figures.
+
+| Results block | Panels |
+| --- | --- |
+| 1 | Manual-review confusion matrix, subtype fractions by platinum status, AVPC/NEPC platinum enrichment with Wilson CIs and one-sided Fisher test |
+| 2 | Pooled day-0/day-180 mean-lab volcanoes on common axes, day-180 PSA/testosterone extreme-group KM curves with confidence bands and patients/events |
+| 3 | Age-only Cox / elastic-net / XGBoost held-out mean AUC(t) at all three landmarks; day-180 top-15 eligible XGBoost lab features |
+| 4 | Three-site XGBoost transfer mean AUC(t) with bootstrap CIs at all three ADT landmarks; platinum/AVPC/NEPC five-year event probabilities at sequencing report +180 days |
+
+The lower row of Results 4 uses, within each endpoint, the same sequenced
+patients with available Gleason and known TP53/RB1/PTEN indicators for all three
+stratifiers. Q1/Q5 cutpoints are computed in that paired subset, retaining ties;
+Gleason groups are ≤7/≥8 and TSG groups are WT/any alteration. These are
+`1 − KM survival`, with reversed confidence bounds, and death is censored.
+Unavailable horizon risks are labeled. The row uses a common 0–0.6 scale,
+expanding it if an observed interval requires more room.
+Results 2 reads the extreme-group percentage and cutpoints from the pooled KM
+exports, preserving the delivered 10% or 20% analysis and labeling it accordingly.
+
+The script honors `COMPASS_DATA_ROOT`, `COMPASS_FIG_ROOT`, `COMPASS_RHINO_ROOT`,
+`COMPASS_FEDERATED_RESULTS`, `COMPASS_FEDERATED_FIGURE_DATA` and
+`COMPASS_FEDERATED_TRANSFER_NO_DFCI` as above. Poster-specific overrides:
+
+```sh
+COMPASS_ESMO_SECTIONS=2,3,4 \
+COMPASS_ESMO_OUTPUT_ROOT=/path/to/poster-figures \
+COMPASS_ESMO_FORMATS=pdf,svg,png \
+COMPASS_ESMO_DPI=300 \
+Rscript COMPASS/figures/ESMO_AI_Figures.R
+```
+
+Results 1 reads `survival_analysis/prediction_inputs_adt/aggregated_landmark0.csv`,
+`LLM_NEPC_labels/full_manual_annotations.csv`, and
+`primary_subtype_labels.parquet` from `COMPASS_LLM_ANNOTATIONS_PATH` (default:
+the existing classifier path in `COMPASS_generate_figures_pipeline.R`). The
+remaining sections can run without local phenotyping inputs. Missing required
+panels, duplicate metrics or incomplete transfer CIs stop the run before
+publishing the requested sections. Run with `--help` to list all settings.
+
 | Toggle | Export folder (under `<COMPASS_FIG_ROOT>/ADT_figures/`; tables, legends and captions go to the same path under `ADT_figure_data/`) | Contents |
 | --- | --- | --- |
 | `cohort` | `01_cohort/` | Fig 1: consort, event-free survival, time to event, dx-to-treatment, record spans, site counts, `manuscript/01_cohort_overview` |
