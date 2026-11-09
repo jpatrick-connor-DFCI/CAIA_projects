@@ -98,10 +98,12 @@ esmo_result1 <- function(d) {
     geom_col(position = position_dodge(.8), width = .72) +
     scale_fill_manual(values = c(COLOR_PLATINUM_POS, COLOR_PLATINUM_NEG), name = NULL,
       labels = sprintf(c("Platinum+ (n=%s)", "Platinum− (n=%s)"), scales::comma(counts))) +
-    scale_y_continuous(limits = c(0, 1), labels = scales::label_percent()) +
+    # Bars start on the x axis, matching the enrichment panel.
+    scale_y_continuous(limits = c(0, 1), labels = scales::label_percent(),
+      expand = expansion(mult = c(0, .04))) +
     labs(x = NULL, y = "Fraction within\nplatinum group", title = "Subtype fractions",
       subtitle = sprintf("%s classified patients", scales::comma(d$audit$n_classified))) + theme_fig() +
-    guides(fill = guide_legend(ncol = 1))
+    guides(fill = guide_legend(nrow = 1))
   enrichment <- d$enrichment %>% mutate(group = factor(group, levels = group))
   p3 <- ggplot(enrichment, aes(group, probability, fill = group)) +
     geom_col(width = .55) + geom_errorbar(aes(ymin = lo, ymax = hi), width = .18) +
@@ -111,7 +113,8 @@ esmo_result1 <- function(d) {
       subtitle = sprintf("OR = %.1f; one-sided Fisher p = %.1e",
         enrichment$odds_ratio[1], enrichment$fisher_p[1])) + theme_fig()
   list(plots = list(confusion_matrix = p1, subtype_fractions = p2, platinum_enrichment = p3),
-    tables = d, layout = matrix(1:3, nrow = 1), width = 12, height = 4.1,
+    # Narrow confusion matrix and enrichment panels; export aligns the x axes.
+    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(3, 4.6, 2.8), width = 10.4, height = 4.1,
     caption = paste("Results 1. Day-0 ADT prediction cohort intersected with LLM subtype labels.",
       "Manual truth is on the y axis; tile color is row-normalized and labels are counts.",
       "Subtype fractions are conditional on platinum status. Enrichment compares AVPC/NEPC with conventional labels;",
@@ -121,7 +124,8 @@ esmo_result1 <- function(d) {
 esmo_result2 <- function(volcano, fig) {
   plots <- lapply(c(0, 180), function(lm) {
     d <- esmo_require(dplyr::filter(volcano, landmark_days == lm), paste("Cox associations at day", lm))
-    plot_volcano_panel(d, paste("ADT day", lm))
+    plot_volcano_panel(d, paste("ADT day", lm), hr2_reference = FALSE) +
+      guides(fill = guide_legend(nrow = 1, override.aes = list(shape = 21, size = 3, alpha = 1)))
   })
   # Apply the same scales to both selected landmarks. Both retain labeled axes.
   xlim <- range(unlist(lapply(plots, function(p) p$coordinates$limits$x)))
@@ -139,7 +143,9 @@ esmo_result2 <- function(volcano, fig) {
       y = "Platinum-free probability", x = "Days from day-180 landmark")
   }
   names(plots) <- c("volcano_day0", "volcano_day180", "psa_km_day180", "testosterone_km_day180")
-  list(plots = plots, layout = rbind(1:2, 3:4), width = 12, height = 8,
+  # Cell 5 holds the single volcano legend shared by panels a and b.
+  list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = c(1, .09, 1),
+    shared_legend = list(panels = 1:2, cell = 5), width = 10, height = 9.5,
     tables = list(associations = filter(volcano, landmark_days %in% c(0, 180)),
       km_curves = filter(fig$km, scope == "pooled", landmark_days == 180,
         lab %in% c("PSA", "Testosterone"), cutoff_scope == "pooled"),
@@ -166,10 +172,15 @@ esmo_result3 <- function(performance, importance) {
   selected <- esmo_require(federated_manuscript_features(importance, "xgb", 180), "day-180 XGBoost gains")
   p1 <- plot_model_discrimination(d, "auc", "Held-out mean AUC(t)",
     FEDERATED_MODEL_COLORS[models], show_legend = TRUE) +
-    labs(title = "Four-center held-out performance") + guides(fill = guide_legend(ncol = 1))
-  p2 <- plot_model_importance(selected, "xgb", "Day 180: top laboratory features", top_n = 15) +
-    scale_y_discrete(labels = manuscript_federated_feature_label) +
-    guides(fill = guide_legend(nrow = 2, byrow = TRUE))
+    labs(title = "Four-center held-out performance") + guides(fill = guide_legend(nrow = 1))
+  p2 <- plot_model_importance(selected, "xgb", "Day 180: top laboratory features", top_n = 15)
+  # Bold androgen-axis feature names (plotmath, so no vectorized theme faces).
+  androgen <- as.character(p2$data$label[p2$data$category == "Androgen axis"])
+  p2 <- p2 + scale_y_discrete(labels = function(x) as.expression(lapply(x, function(s) {
+      label <- manuscript_federated_feature_label(s)
+      if (s %in% androgen) bquote(bold(.(label))) else label
+    }))) +
+    guides(fill = guide_legend(nrow = 1))
   list(plots = list(heldout_performance = p1, xgboost_features_day180 = p2),
     tables = list(performance = d, top_features = selected), layout = matrix(1:2, nrow = 1),
     width = 12, height = 5.4,
@@ -218,7 +229,10 @@ esmo_result4 <- function(metrics, gradient) {
     stop("Results 4 requires all nine transfer mean AUC(t) estimates and their 95% bootstrap CIs; rerun notebook 04")
   if (any(gradient$clock != "sequencing") || any(gradient$horizon_days != 1825))
     stop("Results 4 probabilities require a five-year horizon on the sequencing clock")
-  p1 <- plot_federated_transfer_bars(prepare_federated_transfer(d, federated_transfer_strip_counts(d, 0)), ymax = 1) +
+  # Zoom (not limit) to 0.25-1 so bars are clipped at the axis, not dropped.
+  p1 <- suppressMessages(plot_federated_transfer_bars(prepare_federated_transfer(d, federated_transfer_strip_counts(d, 0)), ymax = 1) +
+    scale_y_continuous(breaks = seq(.25, 1, .25), expand = expansion(mult = c(0, 0))) +
+    coord_cartesian(ylim = c(.25, 1))) +
     labs(title = "Three-site XGBoost → DFCI without refitting", subtitle = "Landmarks after ADT initiation; 95% bootstrap CI")
   probabilities <- lapply(names(FEDERATED_TRANSFER_ENDPOINTS), function(ep) {
     p <- plot_federated_transfer_horizon_risk(list(gradient = gradient), "xgboost_cox", 180,
@@ -237,9 +251,9 @@ esmo_result4 <- function(metrics, gradient) {
   list(plots = c(list(transfer_auc = p1), setNames(probabilities, paste0(names(FEDERATED_TRANSFER_ENDPOINTS), "_five_year"))),
     tables = list(transfer_performance = d, stratification = gradient,
       event_probabilities = bind_rows(lapply(probabilities, function(p) p$data))),
-    layout = rbind(c(1, 1, 1), 2:4), row_heights = c(1, 1.2), width = 12, height = 7,
+    layout = rbind(c(1, 1, 1), 2:4), row_heights = c(1.5, 1.2), width = 12, height = 8.5,
     caption = paste("Results 4. XGBoost trained for platinum without DFCI, transferred without refitting.",
-      "Top: mean AUC(t) and patient-bootstrap 95% CIs at ADT days 0/90/180; counts are endpoint-specific.",
+      "Top: mean AUC(t) and patient-bootstrap 95% CIs at ADT days 0/90/180; counts are endpoint-specific; the y axis starts at 0.25.",
       "Bottom: five-year event probability (1 − KM survival) and 95% CI from 180 days after the sequencing report.",
       "For each endpoint, score, Gleason and TSG use the same sequenced patients with Gleason and known TP53/RB1/PTEN status.",
       "Q1/Q5 are the bottom/top score quintiles in that paired subset, retaining ties and omitting the middle 60%.",
@@ -279,15 +293,39 @@ esmo_export <- function(result, section, output, formats, dpi) {
   plots <- lapply(result$plots, function(p) p + labs(caption = NULL) +
     theme(plot.title = element_text(size = 11, face = "bold"),
       plot.subtitle = element_text(size = 9), legend.position = "bottom"))
+  row_weights <- if (is.null(result$row_heights)) rep(1, nrow(result$layout)) else result$row_heights
+  col_weights <- if (is.null(result$col_widths)) rep(1, ncol(result$layout)) else result$col_widths
   for (i in seq_along(plots)) {
     cells <- which(result$layout == i, arr.ind = TRUE)
-    weights <- if (is.null(result$row_heights)) rep(1, nrow(result$layout)) else result$row_heights
-    width <- result$width * length(unique(cells[, 2])) / ncol(result$layout)
-    height <- result$height * sum(weights[unique(cells[, 1])]) / sum(weights)
+    width <- result$width * sum(col_weights[unique(cells[, 2])]) / sum(col_weights)
+    height <- result$height * sum(row_weights[unique(cells[, 1])]) / sum(row_weights)
     save(plots[[i]], names(plots)[i], width, height)
   }
-  grobs <- lapply(seq_along(plots), function(i) ggplot2::ggplotGrob(plots[[i]] + labs(tag = letters[i])))
-  combined <- gridExtra::arrangeGrob(grobs = grobs, layout_matrix = result$layout, heights = result$row_heights)
+  # Individual panels keep their legends; the composite can share one.
+  shared <- result$shared_legend
+  grobs <- lapply(seq_along(plots), function(i) {
+    p <- plots[[i]] + labs(tag = letters[i])
+    if (i %in% shared$panels) p <- p + theme(legend.position = "none")
+    ggplot2::ggplotGrob(p)
+  })
+  # Panels confined to one layout row share gtable heights, so their x axes
+  # (and panel bottoms) line up even when only some carry a bottom legend.
+  for (r in seq_len(nrow(result$layout))) {
+    in_row <- Filter(function(i) i <= length(plots) &&
+      all(which(result$layout == i, arr.ind = TRUE)[, 1] == r), unique(result$layout[r, ]))
+    if (length(in_row) > 1L && length(unique(vapply(grobs[in_row], function(g) length(g$heights), integer(1)))) == 1L) {
+      heights <- do.call(grid::unit.pmax, lapply(grobs[in_row], function(g) g$heights))
+      for (i in in_row) grobs[[i]]$heights <- heights
+    }
+  }
+  if (!is.null(shared)) {
+    g <- ggplot2::ggplotGrob(plots[[shared$panels[1]]])
+    boxes <- Filter(function(x) inherits(x, "gtable"), g$grobs[grepl("^guide-box", g$layout$name)])
+    if (!length(boxes)) stop("Results ", section, " shared legend could not be extracted")
+    grobs[[shared$cell]] <- boxes[[1]]
+  }
+  combined <- gridExtra::arrangeGrob(grobs = grobs, layout_matrix = result$layout,
+    heights = row_weights, widths = col_weights)
   save(combined, paste0("ESMO_AI_results_", section), result$width, result$height)
   message("Saved Results ", section, " to ", folder)
   invisible(folder)

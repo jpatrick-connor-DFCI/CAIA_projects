@@ -1206,7 +1206,7 @@ prepare_mean_univariable <- function(d) {
   d
 }
 
-plot_volcano_panel <- function(sub, title) {
+plot_volcano_panel <- function(sub, title, hr2_reference = TRUE) {
   sub <- prepare_mean_univariable(sub) %>%
     filter(!lab_name %in% DROP, is.finite(risk_hr), risk_hr > 0, is.finite(q_value)) %>%
     mutate(
@@ -1244,8 +1244,8 @@ plot_volcano_panel <- function(sub, title) {
 
   p <- ggplot() +
     geom_vline(xintercept = 1, color = "grey", linewidth = 0.7) +
-    geom_vline(xintercept = 2, color = "grey", linetype = "dashed",
-               linewidth = 0.6, alpha = 0.7) +
+    { if (hr2_reference) geom_vline(xintercept = 2, color = "grey", linetype = "dashed",
+                                    linewidth = 0.6, alpha = 0.7) } +
     { if (!is.na(q_y)) geom_hline(yintercept = q_y, color = "black",
                                   linetype = "dotted", linewidth = 0.9) } +
     geom_point(data = ns, aes(risk_hr, y), size = 1.6 * 1.5, color = NS_COLOR, alpha = 0.7) +
