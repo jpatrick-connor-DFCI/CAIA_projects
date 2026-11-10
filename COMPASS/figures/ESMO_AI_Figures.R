@@ -225,13 +225,12 @@ esmo_auc_transform <- function() {
 }
 
 esmo_auc_axis <- function(p, upper = 1) {
+  # Bars remain continuous to zero across the compressed interval; only the
+  # y-axis receives a break mark in esmo_plot_grob().
   suppressMessages(p +
     scale_y_continuous(transform = esmo_auc_transform(), breaks = seq(0, 1, .25),
       labels = scales::label_number(accuracy = .01), expand = expansion(mult = c(0, 0))) +
-    coord_cartesian(ylim = c(0, upper))) +
-    # The white strip interrupts every bar, including every transfer facet.
-    annotate("rect", xmin = -Inf, xmax = Inf, ymin = .01, ymax = .24,
-      fill = "white", color = NA)
+    coord_cartesian(ylim = c(0, upper)))
 }
 
 esmo_result3 <- function(performance, importance) {
