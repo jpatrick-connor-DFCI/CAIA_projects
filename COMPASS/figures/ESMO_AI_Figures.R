@@ -78,19 +78,19 @@ esmo_llm_data <- function(patients, labels, manual) {
 
 esmo_result1 <- function(d) {
   classes <- c("conventional", "avpc", "nepc")
-  class_labels <- c("Conventional", "AVPC", "NEPC")
+  class_labels <- c("Conv.", "AVPC", "NEPC")
   cm <- d$confusion %>% group_by(truth) %>%
     mutate(row_fraction = if (sum(n) > 0) n / sum(n) else 0) %>% ungroup() %>%
     mutate(truth = factor(truth, levels = rev(classes), labels = rev(class_labels)),
       pred = factor(pred, levels = classes, labels = class_labels))
   p1 <- ggplot(cm, aes(pred, truth, fill = row_fraction)) +
     geom_tile(color = "white", linewidth = 1) +
-    geom_text(aes(label = n, color = row_fraction > .5), size = 4, fontface = "bold") +
+    geom_text(aes(label = n, color = row_fraction > .5), size = 5, fontface = "bold") +
     scale_fill_gradient(low = "#eaf1fb", high = COLOR_PLATINUM_POS, limits = c(0, 1), guide = "none") +
     scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "#0b0b0b"), guide = "none") +
-    scale_x_discrete(position = "top") +
+    scale_x_discrete(position = "bottom") +
     labs(x = "LLM label (prediction)", y = "Manual annotation (truth)") + theme_fig() +
-    theme(axis.text.x.top = element_text(angle = 0, hjust = .5))
+    theme(axis.text.x = element_text(angle = 0, hjust = .5))
   landscape <- d$landscape %>% mutate(primary_label = factor(primary_label, levels = classes, labels = class_labels),
     platinum = factor(PLATINUM, levels = c(1, 0), labels = c("Platinum+", "Platinum−")))
   counts <- vapply(c(1, 0), function(x) sum(landscape$n[landscape$PLATINUM == x]), numeric(1))
@@ -103,18 +103,19 @@ esmo_result1 <- function(d) {
       expand = expansion(mult = c(0, .04))) +
     labs(x = NULL, y = "Fraction within\nplatinum group") + theme_fig() +
     guides(fill = guide_legend(ncol = 1)) +
-    theme(legend.text = element_text(size = 9), legend.key.size = grid::unit(9, "pt"),
-      legend.margin = margin(2, 2, 2, 2), legend.background = element_rect(fill = "white", color = NA))
+    theme(legend.margin = margin(2, 2, 2, 2),
+      legend.background = element_rect(fill = "white", color = NA))
   enrichment <- d$enrichment %>% mutate(group = factor(group, levels = group))
   p3 <- ggplot(enrichment, aes(group, probability, fill = group)) +
     geom_col(width = .55) + geom_errorbar(aes(ymin = lo, ymax = hi), width = .18) +
     scale_fill_manual(values = c(COLOR_PLATINUM_POS, "#9a9890"), guide = "none") +
+    scale_x_discrete(labels = function(x) sub("Conventional", "Conv.", x, fixed = TRUE)) +
     scale_y_continuous(labels = scales::label_percent(), expand = expansion(mult = c(0, .24))) +
-    annotate("text", x = 1.5, y = Inf, vjust = 1.3, size = 3.7, family = FIGURE_FONT,
+    annotate("text", x = 1.5, y = Inf, vjust = 1.3, size = 4.2, family = FIGURE_FONT,
       label = sprintf("OR = %.1f (p=%.1e)", enrichment$odds_ratio[1], enrichment$fisher_p[1])) +
     labs(x = NULL, y = "Platinum-positive fraction") + theme_fig()
   list(plots = list(confusion_matrix = p1, subtype_fractions = p2, platinum_enrichment = p3),
-    # Wider panels keep the top prediction labels horizontal and readable.
+    # Wider panels keep the prediction labels horizontal and readable.
     # The subtype legend sits in b's empty upper right, so no panel carries a
     # bottom legend; export aligns the three plotting areas.
     tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.4, 4.8, 4), width = 13.2, height = 3.9,
@@ -132,18 +133,24 @@ esmo_volcano <- function(d, title) {
   p$layers <- lapply(p$layers, function(layer) {
     copy <- ggplot2::ggproto(NULL, layer)
     if (inherits(layer$geom, "GeomTextRepel")) {
-      copy$data$repel_label <- gsub("Alkaline phosphatase", "ALP", copy$data$repel_label, fixed = TRUE)
-      copy$data$repel_label <- gsub(" absolute", " abs.", copy$data$repel_label, fixed = TRUE)
-      copy$aes_params$size <- 3.8
-      copy$aes_params$point.size <- 3.2
-      copy$geom_params$box.padding <- grid::unit(.5, "lines")
-      copy$geom_params$point.padding <- grid::unit(.6, "lines")
-      copy$geom_params$force <- 5
-      copy$geom_params$force_pull <- .1
-      copy$position <- ggrepel::position_nudge_repel(x = .07, y = 1)
+      labels <- layer$data
+      labels$repel_label <- gsub("Alkaline phosphatase", "ALP", labels$repel_label, fixed = TRUE)
+      labels$repel_label <- gsub(" absolute", " abs.", labels$repel_label, fixed = TRUE)
+      # A borderless white backing keeps leader lines from crossing the larger
+      # text. Keep labels above the q threshold and all points in the repulsion.
       # An iteration budget, rather than wall time, makes placement repeatable.
-      copy$geom_params$max.time <- Inf
-      copy$geom_params$max.iter <- 50000
+      repel <- ggrepel::geom_label_repel(data = labels, mapping = layer$mapping,
+        size = 4.2, family = FIGURE_FONT, fill = "white", label.size = 0,
+        label.padding = grid::unit(.05, "lines"), label.r = grid::unit(0, "lines"),
+        point.size = 3.2, box.padding = .5, point.padding = .6,
+        force = 5, force_pull = .1, nudge_x = .07, nudge_y = 1,
+        ylim = c(-log10(.05) + 1.5, NA), max.overlaps = Inf,
+        max.time = Inf, max.iter = 50000, seed = 0,
+        segment.color = "#95a5a6", segment.size = .3, min.segment.length = 0,
+        show.legend = FALSE)
+      # Recent ggrepel uses linewidth; the cluster's older release uses label.size.
+      if ("linewidth" %in% names(repel$geom$default_aes)) repel$aes_params$linewidth <- 0
+      return(repel)
     }
     if (inherits(layer$geom, "GeomPoint")) {
       copy$aes_params$stroke <- .4
@@ -154,9 +161,7 @@ esmo_volcano <- function(d, title) {
   })
   suppressMessages(p + scale_size_manual(values = c(`TRUE` = 3.2, `FALSE` = 2.5), guide = "none")) +
     guides(fill = guide_legend(nrow = 2, byrow = TRUE,
-      override.aes = list(shape = 21, size = 2.5, alpha = 1))) +
-    theme(axis.title = element_text(size = 11), axis.text = element_text(size = 10),
-      legend.text = element_text(size = 9))
+      override.aes = list(shape = 21, size = 2.5, alpha = 1)))
 }
 
 esmo_result2 <- function(volcano, fig) {
@@ -181,11 +186,10 @@ esmo_result2 <- function(volcano, fig) {
   }
   names(plots) <- c("volcano_day0", "volcano_day180", "psa_km_day180", "testosterone_km_day180")
   # Cell 5 holds the single volcano legend shared by panels a and b.
-  list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = c(1, .05, 1),
+  list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = c(1, .06, 1),
     shared_legend = list(panels = 1:2, cell = 5, nrow = 1), width = 10, height = 8.9,
-    plot_theme = theme(plot.margin = margin(4, 5, 4, 5), plot.subtitle = element_text(size = 10),
-      legend.box.spacing = grid::unit(2, "pt"), legend.margin = margin(1, 1, 1, 1),
-      legend.key.height = grid::unit(11, "pt")),
+    plot_theme = theme(plot.margin = margin(4, 5, 4, 5),
+      legend.box.spacing = grid::unit(2, "pt"), legend.margin = margin(1, 1, 1, 1)),
     tables = list(associations = filter(volcano, landmark_days %in% c(0, 180)),
       km_curves = filter(fig$km, scope == "pooled", landmark_days == 180,
         lab %in% c("PSA", "Testosterone"), cutoff_scope == "pooled"),
@@ -210,9 +214,10 @@ esmo_result3 <- function(performance, importance) {
   if (nrow(distinct(d, landmark, n_test, n_events_test)) != 3L)
     stop("Model families have inconsistent held-out patient/event counts")
   selected <- esmo_require(federated_manuscript_features(importance, "xgb", 180), "day-180 XGBoost gains")
-  p1 <- plot_model_discrimination(d, "auc", "Held-out mean AUC(t)",
+  p1 <- suppressMessages(plot_model_discrimination(d, "auc", "Held-out mean AUC(t)",
     FEDERATED_MODEL_COLORS[models], show_legend = TRUE) +
     scale_y_continuous(breaks = seq(0, 1, .25), expand = expansion(mult = c(0, .02))) +
+    coord_cartesian(ylim = c(0, max(1, max(d$auc) * 1.08)))) +
     labs(title = "Four-center held-out performance") + guides(fill = guide_legend(nrow = 1))
   p2 <- plot_model_importance(selected, "xgb", "Day 180: top laboratory features", top_n = 15) +
     scale_x_continuous(expand = expansion(mult = c(0, .04)))
@@ -228,7 +233,9 @@ esmo_result3 <- function(performance, importance) {
     guides(fill = guide_legend(nrow = 1)))
   list(plots = list(heldout_performance = p1, xgboost_features_day180 = p2),
     tables = list(performance = d, top_features = selected), layout = matrix(1:2, nrow = 1),
-    col_widths = c(1, 1.1), width = 12, height = 5.4,
+    col_widths = c(1, 1.1), width = 12, height = 5,
+    plot_theme = theme(plot.margin = margin(4, 6, 4, 6),
+      legend.box.spacing = grid::unit(2, "pt"), legend.margin = margin(1, 1, 1, 1)),
     caption = paste("Results 3. Four-center held-out test mean time-dependent AUC(t) at ADT days 0, 90 and 180.",
       "Age-only Cox, elastic-net Cox and XGBoost are shown; no uncertainty intervals are supplied by these exports.",
       "The feature panel ranks up to 15 eligible positive-gain laboratory features at day 180, excluding age,",
@@ -293,12 +300,12 @@ esmo_result4 <- function(metrics, gradient) {
     coord_cartesian(ylim = c(0, ymax)) +
     labs(title = FEDERATED_TRANSFER_ENDPOINTS_SHORT[[i]], y = "Five-year event probability",
       subtitle = "Sequencing report +180 days") +
-    theme(axis.text.x = element_text(angle = 0, hjust = .5), strip.text = element_text(size = 8),
+    theme(axis.text.x = element_text(angle = 0, hjust = .5),
       plot.title.position = "panel", plot.margin = margin(1, 16, 12, 12)))
   list(plots = c(list(transfer_auc = p1), setNames(probabilities, paste0(names(FEDERATED_TRANSFER_ENDPOINTS), "_five_year"))),
     tables = list(transfer_performance = d, stratification = gradient,
       event_probabilities = bind_rows(lapply(probabilities, function(p) p$data))),
-    layout = rbind(c(1, 1, 1), 2:4), row_heights = c(1.5, 1.2), width = 12, height = 8.2,
+    layout = rbind(c(1, 1, 1), 2:4), row_heights = c(1.5, 1.4), width = 12, height = 8.7,
     caption = paste("Results 4. XGBoost trained for platinum without DFCI, transferred without refitting.",
       "Top: mean AUC(t) and patient-bootstrap 95% CIs at ADT days 0/90/180; counts are endpoint-specific; the y axis starts at 0.25.",
       "Bottom: five-year event probability (1 − KM survival) and 95% CI from 180 days after the sequencing report.",
@@ -313,6 +320,32 @@ esmo_inside_legend <- function(position) {
   if (utils::packageVersion("ggplot2") >= "3.5.0")
     theme(legend.position = "inside", legend.position.inside = position, legend.justification = position)
   else theme(legend.position = position, legend.justification = position)
+}
+
+esmo_style_plot <- function(p) {
+  # Poster typography is local to this entry point, leaving the shared
+  # manuscript theme alone. Set axis children too: some source plots give
+  # their tick labels explicit sizes that otherwise override axis.text.
+  p <- p + labs(caption = NULL) +
+    theme(text = element_text(family = FIGURE_FONT, size = 12),
+      plot.title = element_text(size = 14, face = "bold"),
+      plot.subtitle = element_text(size = 11.5), plot.tag = element_text(size = 16, face = "bold"),
+      axis.title = element_text(size = 13), axis.title.x = element_text(size = 13),
+      axis.title.y = element_text(size = 13), axis.text = element_text(size = 12),
+      axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12),
+      strip.text = element_text(size = 12), legend.text = element_text(size = 11),
+      legend.title = element_text(size = 11), legend.key.height = grid::unit(13, "pt"),
+      legend.key.width = grid::unit(13, "pt"), legend.position = "bottom")
+  p$layers <- lapply(p$layers, function(layer) {
+    if (!inherits(layer$geom, "GeomText")) return(layer)
+    copy <- ggplot2::ggproto(NULL, layer)
+    # Enlarge numeric bar labels and missing-estimate annotations as well as
+    # theme text, while retaining the larger confusion counts and OR label.
+    copy$aes_params$size <- max(c(3.8, layer$aes_params$size))
+    copy$aes_params$family <- FIGURE_FONT
+    copy
+  })
+  p
 }
 
 esmo_export <- function(result, section, output) {
@@ -341,9 +374,7 @@ esmo_export <- function(result, section, output) {
     }, finally = unlink(temporary))
   }
   # Captions live beside the graphics; keep the individual panels easy to place.
-  plots <- lapply(result$plots, function(p) p + labs(caption = NULL) +
-    theme(plot.title = element_text(size = 11, face = "bold"),
-      plot.subtitle = element_text(size = 9), legend.position = "bottom"))
+  plots <- lapply(result$plots, esmo_style_plot)
   if (!is.null(result$plot_theme)) plots <- lapply(plots, function(p) p + result$plot_theme)
   for (name in names(result$legend_inside))
     plots[[name]] <- plots[[name]] + esmo_inside_legend(result$legend_inside[[name]])
