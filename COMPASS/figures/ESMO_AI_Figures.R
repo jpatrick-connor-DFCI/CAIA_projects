@@ -312,10 +312,16 @@ esmo_result4 <- function(metrics, gradient) {
   ymax <- min(1, ceiling(upper * 5) / 5)
   probabilities <- lapply(seq_along(probabilities), function(i) probabilities[[i]] +
     coord_cartesian(ylim = c(0, ymax)) +
+    # Reclaim outer/facet padding for wider scatter areas and more separation
+    # between paired tick labels, retaining the full-size poster typography.
+    scale_x_discrete(expand = expansion(add = .45)) +
     labs(title = NULL, subtitle = NULL,
       y = paste("Five-year", c("platinum", "AVPC", "NEPC")[[i]], "probability")) +
     theme(axis.text.x = element_text(angle = 0, hjust = .5),
-      plot.title.position = "panel", plot.margin = margin(1, 16, 12, 12)))
+      axis.title.y = element_text(margin = margin(r = 2)),
+      axis.text.y = element_text(margin = margin(r = 2)),
+      panel.spacing.x = grid::unit(4, "pt"),
+      plot.title.position = "panel", plot.margin = margin(1, 2, 12, 2)))
   list(plots = c(list(transfer_auc = p1), setNames(probabilities, paste0(names(FEDERATED_TRANSFER_ENDPOINTS), "_five_year"))),
     tables = list(transfer_performance = d, stratification = gradient,
       event_probabilities = bind_rows(lapply(probabilities, function(p) p$data))),
