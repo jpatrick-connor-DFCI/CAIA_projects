@@ -88,10 +88,9 @@ esmo_result1 <- function(d) {
     geom_text(aes(label = n, color = row_fraction > .5), size = 4, fontface = "bold") +
     scale_fill_gradient(low = "#eaf1fb", high = COLOR_PLATINUM_POS, limits = c(0, 1), guide = "none") +
     scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "#0b0b0b"), guide = "none") +
-    labs(x = "LLM label (prediction)", y = "Manual annotation (truth)",
-      title = sprintf("Manual review (n = %d)", d$audit$n_reviewed),
-      subtitle = sprintf("Agreement: %.1f%%", 100 * d$audit$agreement)) + theme_fig() +
-    theme(axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1))
+    scale_x_discrete(position = "top") +
+    labs(x = "LLM label (prediction)", y = "Manual annotation (truth)") + theme_fig() +
+    theme(axis.text.x.top = element_text(angle = 0, hjust = .5))
   landscape <- d$landscape %>% mutate(primary_label = factor(primary_label, levels = classes, labels = class_labels),
     platinum = factor(PLATINUM, levels = c(1, 0), labels = c("Platinum+", "Platinum−")))
   counts <- vapply(c(1, 0), function(x) sum(landscape$n[landscape$PLATINUM == x]), numeric(1))
@@ -102,8 +101,7 @@ esmo_result1 <- function(d) {
     # Bars start on the x axis, matching the enrichment panel.
     scale_y_continuous(limits = c(0, 1), labels = scales::label_percent(),
       expand = expansion(mult = c(0, .04))) +
-    labs(x = NULL, y = "Fraction within\nplatinum group", title = "Subtype fractions",
-      subtitle = sprintf("%s classified patients", scales::comma(d$audit$n_classified))) + theme_fig() +
+    labs(x = NULL, y = "Fraction within\nplatinum group") + theme_fig() +
     guides(fill = guide_legend(ncol = 1)) +
     theme(legend.text = element_text(size = 9), legend.key.size = grid::unit(9, "pt"),
       legend.margin = margin(2, 2, 2, 2), legend.background = element_rect(fill = "white", color = NA))
@@ -111,15 +109,15 @@ esmo_result1 <- function(d) {
   p3 <- ggplot(enrichment, aes(group, probability, fill = group)) +
     geom_col(width = .55) + geom_errorbar(aes(ymin = lo, ymax = hi), width = .18) +
     scale_fill_manual(values = c(COLOR_PLATINUM_POS, "#9a9890"), guide = "none") +
-    scale_y_continuous(labels = scales::label_percent(), expand = expansion(mult = c(0, .12))) +
-    labs(x = NULL, y = "Platinum-positive fraction", title = "Platinum enrichment",
-      subtitle = sprintf("OR = %.1f\none-sided Fisher p = %.1e",
-        enrichment$odds_ratio[1], enrichment$fisher_p[1])) + theme_fig()
+    scale_y_continuous(labels = scales::label_percent(), expand = expansion(mult = c(0, .24))) +
+    annotate("text", x = 1.5, y = Inf, vjust = 1.3, size = 3.7, family = FIGURE_FONT,
+      label = sprintf("OR = %.1f (p=%.1e)", enrichment$odds_ratio[1], enrichment$fisher_p[1])) +
+    labs(x = NULL, y = "Platinum-positive fraction") + theme_fig()
   list(plots = list(confusion_matrix = p1, subtype_fractions = p2, platinum_enrichment = p3),
-    # Narrow confusion matrix and enrichment panels; export aligns the x axes.
+    # Wider panels keep the top prediction labels horizontal and readable.
     # The subtype legend sits in b's empty upper right, so no panel carries a
-    # bottom legend and the three x axes align without dead space.
-    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(3.4, 4, 3.2), width = 10.6, height = 3.9,
+    # bottom legend; export aligns the three plotting areas.
+    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.4, 4.8, 4), width = 13.2, height = 3.9,
     legend_inside = list(subtype_fractions = c(.98, .98)),
     caption = paste("Results 1. Day-0 ADT prediction cohort intersected with LLM subtype labels.",
       "Manual truth is on the y axis; tile color is row-normalized and labels are counts.",
@@ -136,7 +134,7 @@ esmo_volcano <- function(d, title) {
     if (inherits(layer$geom, "GeomTextRepel")) {
       copy$data$repel_label <- gsub("Alkaline phosphatase", "ALP", copy$data$repel_label, fixed = TRUE)
       copy$data$repel_label <- gsub(" absolute", " abs.", copy$data$repel_label, fixed = TRUE)
-      copy$aes_params$size <- 3
+      copy$aes_params$size <- 3.8
       copy$aes_params$point.size <- 3.2
       copy$geom_params$box.padding <- grid::unit(.5, "lines")
       copy$geom_params$point.padding <- grid::unit(.6, "lines")
@@ -183,8 +181,11 @@ esmo_result2 <- function(volcano, fig) {
   }
   names(plots) <- c("volcano_day0", "volcano_day180", "psa_km_day180", "testosterone_km_day180")
   # Cell 5 holds the single volcano legend shared by panels a and b.
-  list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = c(1, .09, 1),
-    shared_legend = list(panels = 1:2, cell = 5, nrow = 1), width = 10, height = 9.5,
+  list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = c(1, .05, 1),
+    shared_legend = list(panels = 1:2, cell = 5, nrow = 1), width = 10, height = 8.9,
+    plot_theme = theme(plot.margin = margin(4, 5, 4, 5), plot.subtitle = element_text(size = 10),
+      legend.box.spacing = grid::unit(2, "pt"), legend.margin = margin(1, 1, 1, 1),
+      legend.key.height = grid::unit(11, "pt")),
     tables = list(associations = filter(volcano, landmark_days %in% c(0, 180)),
       km_curves = filter(fig$km, scope == "pooled", landmark_days == 180,
         lab %in% c("PSA", "Testosterone"), cutoff_scope == "pooled"),
@@ -278,7 +279,7 @@ esmo_result4 <- function(metrics, gradient) {
     scale_y_continuous(breaks = seq(.25, 1, .25), expand = expansion(mult = c(0, 0))) +
     coord_cartesian(ylim = c(.25, 1))) +
     labs(title = "Three-site XGBoost → DFCI without refitting", subtitle = "Landmarks after ADT initiation; 95% bootstrap CI") +
-    theme(plot.title.position = "panel")
+    theme(plot.title.position = "panel", plot.margin = margin(12, 16, 1, 12))
   probabilities <- lapply(names(FEDERATED_TRANSFER_ENDPOINTS), function(ep) {
     p <- plot_federated_transfer_horizon_risk(list(gradient = gradient), "xgboost_cox", 180,
       endpoint = ep, score_stratifier = "score_extreme")
@@ -293,11 +294,11 @@ esmo_result4 <- function(metrics, gradient) {
     labs(title = FEDERATED_TRANSFER_ENDPOINTS_SHORT[[i]], y = "Five-year event probability",
       subtitle = "Sequencing report +180 days") +
     theme(axis.text.x = element_text(angle = 0, hjust = .5), strip.text = element_text(size = 8),
-      plot.title.position = "panel"))
+      plot.title.position = "panel", plot.margin = margin(1, 16, 12, 12)))
   list(plots = c(list(transfer_auc = p1), setNames(probabilities, paste0(names(FEDERATED_TRANSFER_ENDPOINTS), "_five_year"))),
     tables = list(transfer_performance = d, stratification = gradient,
       event_probabilities = bind_rows(lapply(probabilities, function(p) p$data))),
-    layout = rbind(c(1, 1, 1), 2:4), row_heights = c(1.5, 1.2), width = 12, height = 8.5,
+    layout = rbind(c(1, 1, 1), 2:4), row_heights = c(1.5, 1.2), width = 12, height = 8.2,
     caption = paste("Results 4. XGBoost trained for platinum without DFCI, transferred without refitting.",
       "Top: mean AUC(t) and patient-bootstrap 95% CIs at ADT days 0/90/180; counts are endpoint-specific; the y axis starts at 0.25.",
       "Bottom: five-year event probability (1 − KM survival) and 95% CI from 180 days after the sequencing report.",
@@ -343,6 +344,7 @@ esmo_export <- function(result, section, output) {
   plots <- lapply(result$plots, function(p) p + labs(caption = NULL) +
     theme(plot.title = element_text(size = 11, face = "bold"),
       plot.subtitle = element_text(size = 9), legend.position = "bottom"))
+  if (!is.null(result$plot_theme)) plots <- lapply(plots, function(p) p + result$plot_theme)
   for (name in names(result$legend_inside))
     plots[[name]] <- plots[[name]] + esmo_inside_legend(result$legend_inside[[name]])
   row_weights <- if (is.null(result$row_heights)) rep(1, nrow(result$layout)) else result$row_heights
