@@ -104,7 +104,9 @@ esmo_result1 <- function(d) {
       expand = expansion(mult = c(0, .04))) +
     labs(x = NULL, y = "Fraction within\nplatinum group", title = "Subtype fractions",
       subtitle = sprintf("%s classified patients", scales::comma(d$audit$n_classified))) + theme_fig() +
-    guides(fill = guide_legend(nrow = 1))
+    guides(fill = guide_legend(ncol = 1)) +
+    theme(legend.text = element_text(size = 9), legend.key.size = grid::unit(9, "pt"),
+      legend.margin = margin(2, 2, 2, 2), legend.background = element_rect(fill = "white", color = NA))
   enrichment <- d$enrichment %>% mutate(group = factor(group, levels = group))
   p3 <- ggplot(enrichment, aes(group, probability, fill = group)) +
     geom_col(width = .55) + geom_errorbar(aes(ymin = lo, ymax = hi), width = .18) +
@@ -125,11 +127,44 @@ esmo_result1 <- function(d) {
       "intervals are 95% Wilson intervals and the Fisher test is one-sided (greater)."))
 }
 
+esmo_volcano <- function(d, title) {
+  p <- plot_volcano_panel(d, title, hr2_reference = FALSE)
+  # The source plot targets a much wider manuscript panel. Scale its marks and
+  # labels for these five-inch panels, retaining every selected label and point.
+  p$layers <- lapply(p$layers, function(layer) {
+    copy <- ggplot2::ggproto(NULL, layer)
+    if (inherits(layer$geom, "GeomTextRepel")) {
+      copy$data$repel_label <- gsub("Alkaline phosphatase", "ALP", copy$data$repel_label, fixed = TRUE)
+      copy$data$repel_label <- gsub(" absolute", " abs.", copy$data$repel_label, fixed = TRUE)
+      copy$aes_params$size <- 3
+      copy$aes_params$point.size <- 3.2
+      copy$geom_params$box.padding <- grid::unit(.5, "lines")
+      copy$geom_params$point.padding <- grid::unit(.6, "lines")
+      copy$geom_params$force <- 5
+      copy$geom_params$force_pull <- .1
+      copy$position <- ggrepel::position_nudge_repel(x = .07, y = 1)
+      # An iteration budget, rather than wall time, makes placement repeatable.
+      copy$geom_params$max.time <- Inf
+      copy$geom_params$max.iter <- 50000
+    }
+    if (inherits(layer$geom, "GeomPoint")) {
+      copy$aes_params$stroke <- .4
+      if (!is.null(layer$aes_params$size))
+        copy$aes_params$size <- if (identical(layer$aes_params$shape, 24)) 3.4 else 1.8
+    }
+    copy
+  })
+  suppressMessages(p + scale_size_manual(values = c(`TRUE` = 3.2, `FALSE` = 2.5), guide = "none")) +
+    guides(fill = guide_legend(nrow = 2, byrow = TRUE,
+      override.aes = list(shape = 21, size = 2.5, alpha = 1))) +
+    theme(axis.title = element_text(size = 11), axis.text = element_text(size = 10),
+      legend.text = element_text(size = 9))
+}
+
 esmo_result2 <- function(volcano, fig) {
   plots <- lapply(c(0, 180), function(lm) {
     d <- esmo_require(dplyr::filter(volcano, landmark_days == lm), paste("Cox associations at day", lm))
-    plot_volcano_panel(d, paste("ADT day", lm), hr2_reference = FALSE) +
-      guides(fill = guide_legend(nrow = 1, override.aes = list(shape = 21, size = 3, alpha = 1)))
+    esmo_volcano(d, paste("ADT day", lm))
   })
   # Apply the same scales to both selected landmarks. Both retain labeled axes.
   xlim <- range(unlist(lapply(plots, function(p) p$coordinates$limits$x)))
@@ -149,7 +184,7 @@ esmo_result2 <- function(volcano, fig) {
   names(plots) <- c("volcano_day0", "volcano_day180", "psa_km_day180", "testosterone_km_day180")
   # Cell 5 holds the single volcano legend shared by panels a and b.
   list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = c(1, .09, 1),
-    shared_legend = list(panels = 1:2, cell = 5), width = 10, height = 9.5,
+    shared_legend = list(panels = 1:2, cell = 5, nrow = 1), width = 10, height = 9.5,
     tables = list(associations = filter(volcano, landmark_days %in% c(0, 180)),
       km_curves = filter(fig$km, scope == "pooled", landmark_days == 180,
         lab %in% c("PSA", "Testosterone"), cutoff_scope == "pooled"),
@@ -176,8 +211,10 @@ esmo_result3 <- function(performance, importance) {
   selected <- esmo_require(federated_manuscript_features(importance, "xgb", 180), "day-180 XGBoost gains")
   p1 <- plot_model_discrimination(d, "auc", "Held-out mean AUC(t)",
     FEDERATED_MODEL_COLORS[models], show_legend = TRUE) +
+    scale_y_continuous(breaks = seq(0, 1, .25), expand = expansion(mult = c(0, .02))) +
     labs(title = "Four-center held-out performance") + guides(fill = guide_legend(nrow = 1))
-  p2 <- plot_model_importance(selected, "xgb", "Day 180: top laboratory features", top_n = 15)
+  p2 <- plot_model_importance(selected, "xgb", "Day 180: top laboratory features", top_n = 15) +
+    scale_x_continuous(expand = expansion(mult = c(0, .04)))
   # Bold androgen-axis feature names (plotmath, so no vectorized theme faces).
   androgen <- as.character(p2$data$label[p2$data$category == "Androgen axis"])
   p2 <- suppressMessages(p2 + scale_y_discrete(labels = function(x) as.expression(lapply(x, function(s) {
@@ -334,7 +371,11 @@ esmo_export <- function(result, section, output) {
     }
   }
   if (!is.null(shared)) {
-    g <- ggplot2::ggplotGrob(plots[[shared$panels[1]]])
+    legend_plot <- plots[[shared$panels[1]]]
+    if (!is.null(shared$nrow)) legend_plot <- legend_plot +
+      guides(fill = guide_legend(nrow = shared$nrow, byrow = TRUE,
+        override.aes = list(shape = 21, size = 2.5, alpha = 1)))
+    g <- ggplot2::ggplotGrob(legend_plot)
     boxes <- Filter(function(x) inherits(x, "gtable"), g$grobs[grepl("^guide-box", g$layout$name)])
     if (!length(boxes)) stop("Results ", section, " shared legend could not be extracted")
     grobs[[shared$cell]] <- boxes[[1]]
@@ -344,6 +385,29 @@ esmo_export <- function(result, section, output) {
   save(combined, paste0("ESMO_AI_results_", section), result$width, result$height)
   message("Saved Results ", section, " to ", folder)
   invisible(folder)
+}
+
+esmo_from_aggregates <- function(root, sections = as.character(1:4)) {
+  tables <- list(`1` = c("confusion", "landscape", "enrichment", "audit"),
+    `2` = c("associations", "km_curves", "km_summary"),
+    `3` = c("performance", "top_features"),
+    `4` = c("transfer_performance", "stratification"))
+  results <- lapply(sections, function(section) {
+    message("Preparing Results ", section, " from saved aggregate tables")
+    paths <- file.path(root, paste0("results_", section), "data", paste0(tables[[section]], ".csv"))
+    if (any(!file.exists(paths))) stop("Missing aggregate input: ", paste(paths[!file.exists(paths)], collapse = ", "))
+    d <- setNames(lapply(paths, function(path) {
+      table <- readr::read_csv(path, show_col_types = FALSE)
+      readr::stop_for_problems(table)
+      esmo_require(table, path)
+    }), tables[[section]])
+    switch(section,
+      `1` = esmo_result1(d),
+      `2` = esmo_result2(d$associations, list(km = d$km_curves, km_summary = d$km_summary)),
+      `3` = esmo_result3(d$performance, d$top_features),
+      `4` = esmo_result4(d$transfer_performance, d$stratification))
+  })
+  setNames(results, sections)
 }
 
 esmo_main <- function(args = commandArgs(TRUE)) {
@@ -359,6 +423,7 @@ esmo_main <- function(args = commandArgs(TRUE)) {
       "COMPASS_FEDERATED_FIGURE_DATA    <RHINO_ROOT>/figure_data (pooled KM exports)",
       "COMPASS_FEDERATED_TRANSFER_NO_DFCI <RHINO_ROOT>/federated_transfer_adt_no_DFCI",
       "COMPASS_ESMO_OUTPUT_ROOT        <COMPASS_FIG_ROOT>/ESMO_AI",
+      "COMPASS_ESMO_AGGREGATE_ROOT     optional prior ESMO_AI output folder; rerender its saved CSVs",
       "Run preprocessing/univariate/multivariate/transfer notebooks 01-04 first.",
       "Results 1 reads day-0 prediction inputs + manual/LLM labels; 2 uses federated Cox/KM exports;",
       "3 uses federated held-out metrics/gains; 4 uses notebook-04 transfer metrics/patients.",
@@ -378,39 +443,44 @@ esmo_main <- function(args = commandArgs(TRUE)) {
   esmo_load_helpers()
   # Build every requested section before publishing; a missing analysis cannot
   # silently turn a requested panel into a partial poster.
-  results <- list()
-  if ("1" %in% sections) {
-    message("Preparing Results 1: LLM validation and platinum enrichment")
-    inputs <- file.path(data, "survival_analysis", "prediction_inputs_adt")
-    patients <- readr::read_csv(file.path(inputs, "aggregated_landmark0.csv"),
-      col_select = all_of(c("DFCI_MRN", "PLATINUM")), show_col_types = FALSE)
-    patients$DFCI_MRN <- suppressWarnings(as.numeric(patients$DFCI_MRN))
-    labels <- esmo_require(load_llm_strata(Sys.getenv("COMPASS_LLM_ANNOTATIONS_PATH", DEFAULT_LLM_ANNOTATIONS_PATH)), "LLM labels")
-    manual <- load_manual_annotations(file.path(data, "LLM_NEPC_labels", MANUAL_ANNOTATIONS_FILE))
-    results[["1"]] <- esmo_result1(esmo_llm_data(patients, labels, manual))
-  }
-  if ("2" %in% sections) {
-    message("Preparing Results 2: lab associations and survival curves")
-    fig <- load_federated_figure_data(Sys.getenv("COMPASS_FEDERATED_FIGURE_DATA", file.path(rhino, "figure_data")))
-    if (is.null(fig)) stop("Missing federated aggregate KM exports for Results 2")
-    results[["2"]] <- esmo_result2(federated_volcano_data(federated), fig)
-  }
-  if ("3" %in% sections) {
-    message("Preparing Results 3: federated performance and feature importance")
-    paths <- lapply(c("elastic_net", "xgboost"), function(family) federated_multivariable_files(federated, family, "pooled"))
-    performance <- bind_rows(lapply(seq_along(paths), function(i) {
-      family <- c("elastic_net", "xgboost")[i]
-      metrics <- esmo_require(load_federated_multivariable(paths[[i]]$metrics, family, "metrics"), paste(family, "metrics"))
-      prepare_federated_performance(metrics, family)
-    }))
-    importance <- esmo_require(load_federated_multivariable(paths[[2]]$features, "xgboost", "features"), "XGBoost importance")
-    results[["3"]] <- esmo_result3(performance, importance)
-  }
-  if ("4" %in% sections) {
-    message("Preparing Results 4: DFCI transfer and five-year stratification")
-    metrics <- esmo_require(load_federated_transfer(transfer, "metrics"), "transfer metrics")
-    patients <- esmo_require(load_federated_transfer_km(transfer), "transfer patients")
-    results[["4"]] <- esmo_result4(metrics, esmo_transfer_gradient(patients))
+  aggregate <- Sys.getenv("COMPASS_ESMO_AGGREGATE_ROOT", "")
+  if (nzchar(aggregate)) {
+    results <- esmo_from_aggregates(aggregate, sections)
+  } else {
+    results <- list()
+    if ("1" %in% sections) {
+      message("Preparing Results 1: LLM validation and platinum enrichment")
+      inputs <- file.path(data, "survival_analysis", "prediction_inputs_adt")
+      patients <- readr::read_csv(file.path(inputs, "aggregated_landmark0.csv"),
+        col_select = all_of(c("DFCI_MRN", "PLATINUM")), show_col_types = FALSE)
+      patients$DFCI_MRN <- suppressWarnings(as.numeric(patients$DFCI_MRN))
+      labels <- esmo_require(load_llm_strata(Sys.getenv("COMPASS_LLM_ANNOTATIONS_PATH", DEFAULT_LLM_ANNOTATIONS_PATH)), "LLM labels")
+      manual <- load_manual_annotations(file.path(data, "LLM_NEPC_labels", MANUAL_ANNOTATIONS_FILE))
+      results[["1"]] <- esmo_result1(esmo_llm_data(patients, labels, manual))
+    }
+    if ("2" %in% sections) {
+      message("Preparing Results 2: lab associations and survival curves")
+      fig <- load_federated_figure_data(Sys.getenv("COMPASS_FEDERATED_FIGURE_DATA", file.path(rhino, "figure_data")))
+      if (is.null(fig)) stop("Missing federated aggregate KM exports for Results 2")
+      results[["2"]] <- esmo_result2(federated_volcano_data(federated), fig)
+    }
+    if ("3" %in% sections) {
+      message("Preparing Results 3: federated performance and feature importance")
+      paths <- lapply(c("elastic_net", "xgboost"), function(family) federated_multivariable_files(federated, family, "pooled"))
+      performance <- bind_rows(lapply(seq_along(paths), function(i) {
+        family <- c("elastic_net", "xgboost")[i]
+        metrics <- esmo_require(load_federated_multivariable(paths[[i]]$metrics, family, "metrics"), paste(family, "metrics"))
+        prepare_federated_performance(metrics, family)
+      }))
+      importance <- esmo_require(load_federated_multivariable(paths[[2]]$features, "xgboost", "features"), "XGBoost importance")
+      results[["3"]] <- esmo_result3(performance, importance)
+    }
+    if ("4" %in% sections) {
+      message("Preparing Results 4: DFCI transfer and five-year stratification")
+      metrics <- esmo_require(load_federated_transfer(transfer, "metrics"), "transfer metrics")
+      patients <- esmo_require(load_federated_transfer_km(transfer), "transfer patients")
+      results[["4"]] <- esmo_result4(metrics, esmo_transfer_gradient(patients))
+    }
   }
   dir.create(output, recursive = TRUE, showWarnings = FALSE)
   message("Rendering ", length(results), " figure sets (PDF)")

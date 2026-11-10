@@ -90,5 +90,27 @@ tryCatch({
     table <- readr::read_csv(path, show_col_types = FALSE)
     stopifnot(!any(c("person_id", "DFCI_MRN", "risk_score") %in% names(table)))
   }
+  # A delivery must be reusable without patient-level or cluster inputs, with
+  # the same statistics and group membership after CSV serialization.
+  restored <- esmo_from_aggregates(root)
+  for (i in seq_along(results)) {
+    stopifnot(identical(names(restored[[i]]$plots), names(results[[i]]$plots)))
+    for (name in names(results[[i]]$tables)) {
+      before <- results[[i]]$tables[[name]]
+      after <- restored[[i]]$tables[[name]]
+      for (column in names(before)) {
+        x <- before[[column]]; y <- after[[column]]
+        if (is.factor(x)) x <- as.character(x)
+        if (is.factor(y)) y <- as.character(y)
+        # CSVs do not encode a type for a column containing only missing values.
+        if (all(is.na(x)) && all(is.na(y))) { x <- is.na(x); y <- is.na(y) }
+        comparison <- all.equal(x, y, check.attributes = FALSE)
+        if (!isTRUE(comparison)) stop("Aggregate round trip: ", i, "/", name, "/", column,
+          ": ", paste(comparison, collapse = "; "))
+      }
+    }
+  }
+  unlink(file.path(root, "results_2", "data", "km_summary.csv"))
+  expect_error(esmo_from_aggregates(root, "2"), "Missing aggregate input")
 }, finally = unlink(root, recursive = TRUE))
 cat("ESMO AI figure checks passed.\n")

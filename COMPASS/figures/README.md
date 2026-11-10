@@ -80,6 +80,21 @@ COMPASS_ESMO_OUTPUT_ROOT=/path/to/poster-figures \
 Rscript COMPASS/figures/ESMO_AI_Figures.R
 ```
 
+To update the layout of an existing figure delivery locally, use its aggregate
+CSV tables instead of rereading the cluster's analysis files:
+
+```sh
+COMPASS_ESMO_AGGREGATE_ROOT="$HOME/Desktop/ESMO_AI" \
+COMPASS_ESMO_OUTPUT_ROOT="$HOME/Desktop/ESMO_AI_updated" \
+Rscript COMPASS/figures/ESMO_AI_Figures.R
+```
+
+This mode needs the `results_*/data/*.csv` files from a previous run and uses the
+same plot builders and checks. It preserves the saved estimates, cohort counts,
+confidence intervals and KM cutoffs; it does not refit models. Use a separate
+output directory to retain the original delivery. Only PDFs are generated;
+PNG/SVG files from older runs are not updated.
+
 Results 1 reads `survival_analysis/prediction_inputs_adt/aggregated_landmark0.csv`,
 `LLM_NEPC_labels/full_manual_annotations.csv`, and
 `primary_subtype_labels.parquet` from `COMPASS_LLM_ANNOTATIONS_PATH` (default:
