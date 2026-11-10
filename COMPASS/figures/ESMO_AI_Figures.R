@@ -78,7 +78,7 @@ esmo_llm_data <- function(patients, labels, manual) {
 
 esmo_result1 <- function(d) {
   classes <- c("conventional", "avpc", "nepc")
-  class_labels <- c("Conv.", "AVPC", "NEPC")
+  class_labels <- c("Conventional", "AVPC", "NEPC")
   cm <- d$confusion %>% group_by(truth) %>%
     mutate(row_fraction = if (sum(n) > 0) n / sum(n) else 0) %>% ungroup() %>%
     mutate(truth = factor(truth, levels = rev(classes), labels = rev(class_labels)),
@@ -98,27 +98,31 @@ esmo_result1 <- function(d) {
     geom_col(position = position_dodge(.8), width = .72) +
     scale_fill_manual(values = c(COLOR_PLATINUM_POS, COLOR_PLATINUM_NEG), name = NULL,
       labels = sprintf(c("Platinum+ (n=%s)", "Platinum− (n=%s)"), scales::comma(counts))) +
+    scale_x_discrete(expand = expansion(add = .45)) +
     # Bars start on the x axis, matching the enrichment panel.
     scale_y_continuous(limits = c(0, 1), labels = scales::label_percent(),
       expand = expansion(mult = c(0, .04))) +
-    labs(x = NULL, y = "Fraction within\nplatinum group") + theme_fig() +
+    labs(x = NULL, y = "Fraction within platinum group") + theme_fig() +
     guides(fill = guide_legend(ncol = 1)) +
     theme(legend.margin = margin(2, 2, 2, 2),
       legend.background = element_rect(fill = "white", color = NA))
   enrichment <- d$enrichment %>% mutate(group = factor(group, levels = group))
   p3 <- ggplot(enrichment, aes(group, probability, fill = group)) +
-    geom_col(width = .55) + geom_errorbar(aes(ymin = lo, ymax = hi), width = .18) +
+    geom_col(width = .7) + geom_errorbar(aes(ymin = lo, ymax = hi), width = .18) +
     scale_fill_manual(values = c(COLOR_PLATINUM_POS, "#9a9890"), guide = "none") +
-    scale_x_discrete(labels = function(x) sub("Conventional", "Conv.", x, fixed = TRUE)) +
+    scale_x_discrete(expand = expansion(add = .5)) +
     scale_y_continuous(labels = scales::label_percent(), expand = expansion(mult = c(0, .24))) +
     annotate("text", x = 1.5, y = Inf, vjust = 1.3, size = 4.2, family = FIGURE_FONT,
       label = sprintf("OR = %.1f (p=%.1e)", enrichment$odds_ratio[1], enrichment$fisher_p[1])) +
     labs(x = NULL, y = "Platinum-positive fraction") + theme_fig()
   list(plots = list(confusion_matrix = p1, subtype_fractions = p2, platinum_enrichment = p3),
-    # Wider panels keep the prediction labels horizontal and readable.
-    # The subtype legend sits in b's empty upper right, so no panel carries a
-    # bottom legend; export aligns the three plotting areas.
-    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.4, 4.8, 4), width = 13.2, height = 3.9,
+    # Keep room for the full confusion-matrix labels; use narrower bar panels,
+    # especially c, and minimal outer margins to bring the panels together.
+    # Export aligns the plotting areas; b's legend occupies its upper right.
+    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.4, 3.8, 3), width = 11.2, height = 3.9,
+    plot_theme = theme(plot.margin = margin(4, 2, 4, 2),
+      axis.title.y = element_text(margin = margin(r = 2)),
+      axis.text.y = element_text(margin = margin(r = 2))),
     legend_inside = list(subtype_fractions = c(.98, .98)),
     caption = paste("Results 1. Day-0 ADT prediction cohort intersected with LLM subtype labels.",
       "Manual truth is on the y axis; tile color is row-normalized and labels are counts.",
