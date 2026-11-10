@@ -217,6 +217,23 @@ esmo_result2 <- function(volcano, fig) {
       "rather than assumed to be 10% or 20%. Shading is 95% CI; legends give patients/events; log-rank p values appear at the lower left of each KM panel."))
 }
 
+esmo_auc_transform <- function() {
+  # Reserve a short strip for zero and the break; keep AUC >= .25 linear.
+  scales::trans_new("esmo_auc_break",
+    transform = function(x) ifelse(x < .25, x * .36, x - .16),
+    inverse = function(x) ifelse(x < .09, x / .36, x + .16))
+}
+
+esmo_auc_axis <- function(p, upper = 1) {
+  suppressMessages(p +
+    scale_y_continuous(transform = esmo_auc_transform(), breaks = seq(0, 1, .25),
+      labels = scales::label_number(accuracy = .01), expand = expansion(mult = c(0, 0))) +
+    coord_cartesian(ylim = c(0, upper))) +
+    # The white strip interrupts every bar, including every transfer facet.
+    annotate("rect", xmin = -Inf, xmax = Inf, ymin = .01, ymax = .24,
+      fill = "white", color = NA)
+}
+
 esmo_result3 <- function(performance, importance) {
   models <- c("Cox baseline (age)", "Elastic-Net Cox", "XGBoost Survival")
   d <- performance %>% filter(as.character(name) %in% models) %>%
@@ -228,10 +245,8 @@ esmo_result3 <- function(performance, importance) {
   if (nrow(distinct(d, landmark, n_test, n_events_test)) != 3L)
     stop("Model families have inconsistent held-out patient/event counts")
   selected <- esmo_require(federated_manuscript_features(importance, "xgb", 180), "day-180 XGBoost gains")
-  p1 <- suppressMessages(plot_model_discrimination(d, "auc", "Held-out mean AUC(t)",
-    FEDERATED_MODEL_COLORS[models], show_legend = TRUE) +
-    scale_y_continuous(breaks = seq(0, 1, .25), expand = expansion(mult = c(0, .02))) +
-    coord_cartesian(ylim = c(0, max(1, max(d$auc) * 1.08)))) +
+  p1 <- esmo_auc_axis(plot_model_discrimination(d, "auc", "Held-out mean AUC(t)",
+    FEDERATED_MODEL_COLORS[models], show_legend = TRUE), upper = max(1, max(d$auc) * 1.08)) +
     labs(title = "Four-center held-out performance") + guides(fill = guide_legend(nrow = 1))
   p2 <- plot_model_importance(selected, "xgb", "Day 180: top laboratory features", top_n = 15) +
     scale_x_continuous(expand = expansion(mult = c(0, .04)))
@@ -247,11 +262,13 @@ esmo_result3 <- function(performance, importance) {
     guides(fill = guide_legend(nrow = 1)))
   list(plots = list(heldout_performance = p1, xgboost_features_day180 = p2),
     tables = list(performance = d, top_features = selected), layout = matrix(1:2, nrow = 1),
+    broken_auc = "heldout_performance",
     col_widths = c(1, 1.1), width = 12, height = 5,
     plot_theme = theme(plot.margin = margin(4, 6, 4, 6),
       legend.box.spacing = grid::unit(2, "pt"), legend.margin = margin(1, 1, 1, 1)),
     caption = paste("Results 3. Four-center held-out test mean time-dependent AUC(t) at ADT days 0, 90 and 180.",
       "Age-only Cox, elastic-net Cox and XGBoost are shown; no uncertainty intervals are supplied by these exports.",
+      "The AUC axis shows zero with a marked break before 0.25; values from 0.25 upward use a linear scale.",
       "The feature panel ranks up to 15 eligible positive-gain laboratory features at day 180, excluding age,",
       "body height, identifiers, measurement counts and missingness indicators from display.",
       "Gain measures importance, not effect direction. Counts/missingness can still contribute to the fitted model.",
@@ -295,12 +312,12 @@ esmo_result4 <- function(metrics, gradient) {
     stop("Results 4 requires all nine transfer mean AUC(t) estimates and their 95% bootstrap CIs; rerun notebook 04")
   if (any(gradient$clock != "sequencing") || any(gradient$horizon_days != 1825))
     stop("Results 4 probabilities require a five-year horizon on the sequencing clock")
-  # Zoom (not limit) to 0.25-1 so bars are clipped at the axis, not dropped.
-  p1 <- suppressMessages(plot_federated_transfer_bars(prepare_federated_transfer(d, federated_transfer_strip_counts(d, 0)), ymax = 1) +
-    scale_y_continuous(breaks = seq(.25, 1, .25), expand = expansion(mult = c(0, 0))) +
-    coord_cartesian(ylim = c(.25, 1))) +
+  p1 <- esmo_auc_axis(plot_federated_transfer_bars(
+    prepare_federated_transfer(d, federated_transfer_strip_counts(d, 0)), ymax = 1)) +
     labs(title = "Three-site XGBoost model applied to DFCI without refitting", subtitle = NULL) +
-    theme(plot.title.position = "panel", plot.margin = margin(12, 16, 1, 12))
+    theme(plot.title.position = "panel", plot.margin = margin(12, 2, 1, 2),
+      axis.title.y = element_text(margin = margin(r = 2)),
+      axis.text.y = element_text(margin = margin(r = 2)))
   probabilities <- lapply(names(FEDERATED_TRANSFER_ENDPOINTS), function(ep) {
     p <- plot_federated_transfer_horizon_risk(list(gradient = gradient), "xgboost_cox", 180,
       endpoint = ep, score_stratifier = "score_extreme")
@@ -325,12 +342,13 @@ esmo_result4 <- function(metrics, gradient) {
   list(plots = c(list(transfer_auc = p1), setNames(probabilities, paste0(names(FEDERATED_TRANSFER_ENDPOINTS), "_five_year"))),
     tables = list(transfer_performance = d, stratification = gradient,
       event_probabilities = bind_rows(lapply(probabilities, function(p) p$data))),
-    # Lower panels are 4.2 inches each (+5%); center the unchanged 12-inch
-    # upper panel between 0.3-inch gutters on the wider composite canvas.
-    layout = rbind(c(NA, 1, 1, 1, NA), c(2, 2, 3, 4, 4)),
-    col_widths = c(.3, 3.9, 4.2, 3.9, .3), row_heights = c(1.5, 1.4), width = 12.6, height = 8.7,
+    # The upper panel spans the full combined width of the three lower panels.
+    layout = rbind(c(1, 1, 1), 2:4),
+    row_heights = c(1.5, 1.4), width = 12.6, height = 8.7,
+    broken_auc = "transfer_auc",
     caption = paste("Results 4. XGBoost trained for platinum without DFCI, transferred without refitting.",
-      "Top: mean AUC(t) and patient-bootstrap 95% CIs at ADT days 0/90/180; counts are endpoint-specific; the y axis starts at 0.25.",
+      "Top: mean AUC(t) and patient-bootstrap 95% CIs at ADT days 0/90/180; counts are endpoint-specific.",
+      "The AUC axis shows zero with a marked break before 0.25; values from 0.25 upward use a linear scale.",
       "Bottom: five-year event probability (1 − KM survival) and 95% CI from 180 days after the sequencing report.",
       "For each endpoint, score, Gleason and TSG use the same sequenced patients with Gleason and known TP53/RB1/PTEN status.",
       "Q1/Q5 are the bottom/top score quintiles in that paired subset, retaining ties and omitting the middle 60%.",
@@ -371,6 +389,26 @@ esmo_style_plot <- function(p) {
   p
 }
 
+esmo_plot_grob <- function(p, broken_auc = FALSE) {
+  g <- ggplot2::ggplotGrob(p)
+  if (!broken_auc) return(g)
+  built <- ggplot2::ggplot_build(p)
+  limits <- built$layout$panel_params[[1]]$y.range
+  y <- (esmo_auc_transform()$transform(.125) - limits[1]) / diff(limits)
+  panels <- g$layout[grepl("^panel($|-)", g$layout$name), ]
+  panel <- panels[which.min(panels$l), ]
+  # Overlay a white-backed double slash on the y-axis, inside the omitted strip.
+  mark <- grid::grobTree(
+    grid::rectGrob(x = 0, y = y, width = grid::unit(8, "pt"), height = grid::unit(10, "pt"),
+      gp = grid::gpar(fill = "white", col = NA)),
+    grid::segmentsGrob(x0 = grid::unit(-3, "pt"), x1 = grid::unit(3, "pt"),
+      y0 = grid::unit(y, "npc") + grid::unit(c(-4, 0), "pt"),
+      y1 = grid::unit(y, "npc") + grid::unit(c(0, 4), "pt"),
+      gp = grid::gpar(col = "black", lwd = 1)))
+  gtable::gtable_add_grob(g, mark, t = panel$t, b = panel$b, l = panel$l, r = panel$r,
+    clip = "off", z = Inf, name = "auc-axis-break")
+}
+
 esmo_export <- function(result, section, output) {
   # Measure text on an explicit Unicode-capable device. ggplotGrob() otherwise
   # opens Rplots.pdf in a batch run and can substitute glyphs in the composite.
@@ -408,7 +446,8 @@ esmo_export <- function(result, section, output) {
     # Avoid a floating-point value just below 12 becoming a 863-point PDF.
     width <- round(result$width * sum(col_weights[unique(cells[, 2])]) / sum(col_weights), 10)
     height <- result$height * sum(row_weights[unique(cells[, 1])]) / sum(row_weights)
-    save(plots[[i]], names(plots)[i], width, height)
+    p <- if (names(plots)[i] %in% result$broken_auc) esmo_plot_grob(plots[[i]], TRUE) else plots[[i]]
+    save(p, names(plots)[i], width, height)
   }
   # Individual panels keep their legends; the composite can share one.
   shared <- result$shared_legend
@@ -416,7 +455,7 @@ esmo_export <- function(result, section, output) {
     p <- plots[[i]] + labs(tag = letters[i])
     if (!is.null(result$composite_theme)) p <- p + result$composite_theme
     if (i %in% shared$panels) p <- p + theme(legend.position = "none")
-    ggplot2::ggplotGrob(p)
+    esmo_plot_grob(p, names(plots)[i] %in% result$broken_auc)
   })
   # Panels confined to one layout row share gtable heights, so their x axes
   # (and panel bottoms) line up even when only some carry a bottom legend.
