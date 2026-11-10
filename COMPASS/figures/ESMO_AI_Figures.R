@@ -195,9 +195,10 @@ esmo_result2 <- function(volcano, fig) {
   }
   names(plots) <- c("volcano_day0", "volcano_day180", "psa_km_day180", "testosterone_km_day180")
   # Cell 5 holds the single volcano legend shared by panels a and b.
-  # Shorten the volcano row to ~80%, retaining the KM row's previous height.
-  list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = c(.8, .055, 1),
-    shared_legend = list(panels = 1:2, cell = 5, nrow = 1), width = 10, height = 8,
+  # Reduce the KM row by 10%; shrink the canvas proportionally so the
+  # volcano row and shared legend retain their existing physical heights.
+  list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = c(.8, .055, .9),
+    shared_legend = list(panels = 1:2, cell = 5, nrow = 1), width = 10, height = 8 * 1.755 / 1.855,
     plot_theme = theme(plot.margin = margin(1, 5, 1, 5),
       plot.title = element_text(margin = margin(b = 2)),
       legend.box.spacing = grid::unit(2, "pt"), legend.margin = margin(1, 1, 1, 1)),
@@ -318,7 +319,10 @@ esmo_result4 <- function(metrics, gradient) {
   list(plots = c(list(transfer_auc = p1), setNames(probabilities, paste0(names(FEDERATED_TRANSFER_ENDPOINTS), "_five_year"))),
     tables = list(transfer_performance = d, stratification = gradient,
       event_probabilities = bind_rows(lapply(probabilities, function(p) p$data))),
-    layout = rbind(c(1, 1, 1), 2:4), row_heights = c(1.5, 1.4), width = 12, height = 8.7,
+    # Lower panels are 4.2 inches each (+5%); center the unchanged 12-inch
+    # upper panel between 0.3-inch gutters on the wider composite canvas.
+    layout = rbind(c(NA, 1, 1, 1, NA), c(2, 2, 3, 4, 4)),
+    col_widths = c(.3, 3.9, 4.2, 3.9, .3), row_heights = c(1.5, 1.4), width = 12.6, height = 8.7,
     caption = paste("Results 4. XGBoost trained for platinum without DFCI, transferred without refitting.",
       "Top: mean AUC(t) and patient-bootstrap 95% CIs at ADT days 0/90/180; counts are endpoint-specific; the y axis starts at 0.25.",
       "Bottom: five-year event probability (1 − KM survival) and 95% CI from 180 days after the sequencing report.",
@@ -395,7 +399,8 @@ esmo_export <- function(result, section, output) {
   col_weights <- if (is.null(result$col_widths)) rep(1, ncol(result$layout)) else result$col_widths
   for (i in seq_along(plots)) {
     cells <- which(result$layout == i, arr.ind = TRUE)
-    width <- result$width * sum(col_weights[unique(cells[, 2])]) / sum(col_weights)
+    # Avoid a floating-point value just below 12 becoming a 863-point PDF.
+    width <- round(result$width * sum(col_weights[unique(cells[, 2])]) / sum(col_weights), 10)
     height <- result$height * sum(row_weights[unique(cells[, 1])]) / sum(row_weights)
     save(plots[[i]], names(plots)[i], width, height)
   }
@@ -411,7 +416,7 @@ esmo_export <- function(result, section, output) {
   # (and panel bottoms) line up even when only some carry a bottom legend.
   for (r in seq_len(nrow(result$layout))) {
     in_row <- Filter(function(i) i <= length(plots) &&
-      all(which(result$layout == i, arr.ind = TRUE)[, 1] == r), unique(result$layout[r, ]))
+      all(which(result$layout == i, arr.ind = TRUE)[, 1] == r), stats::na.omit(unique(result$layout[r, ])))
     if (length(in_row) > 1L && length(unique(vapply(grobs[in_row], function(g) length(g$heights), integer(1)))) == 1L) {
       heights <- do.call(grid::unit.pmax, lapply(grobs[in_row], function(g) g$heights))
       for (i in in_row) {
