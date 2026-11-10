@@ -121,8 +121,10 @@ esmo_result1 <- function(d) {
     # Export aligns the plotting areas; b's legend occupies its upper right.
     tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.4, 3.8, 3), width = 11.2, height = 3.9,
     plot_theme = theme(plot.margin = margin(4, 2, 4, 2),
+      axis.title.x = element_text(margin = margin(t = 2)),
       axis.title.y = element_text(margin = margin(r = 2)),
       axis.text.y = element_text(margin = margin(r = 2))),
+    compact_x_titles = TRUE,
     legend_inside = list(subtype_fractions = c(.98, .98)),
     caption = paste("Results 1. Day-0 ADT prediction cohort intersected with LLM subtype labels.",
       "Manual truth is on the y axis; tile color is row-normalized and labels are counts.",
@@ -185,15 +187,22 @@ esmo_result2 <- function(volcano, fig) {
       stop("Results 2 requires pooled extreme-group ", lab, " KM exports at day 180")
     p <- plot_federated_lab_km(fig, lab, 180)
     if (is.null(p)) stop("Missing day-180 ", lab, " survival curves")
-    plots[[length(plots) + 1L]] <- p + labs(title = paste(lab, "at ADT day 180"),
-      y = "Platinum-free probability", x = "Days from day-180 landmark")
+    plots[[length(plots) + 1L]] <- p +
+      annotate("text", x = -Inf, y = -Inf, label = p$labels$subtitle,
+        hjust = -.05, vjust = -.6, size = 4, family = FIGURE_FONT) +
+      labs(title = paste(lab, "at ADT day 180"), subtitle = NULL,
+        y = "Platinum-free probability", x = "Days from day-180 landmark")
   }
   names(plots) <- c("volcano_day0", "volcano_day180", "psa_km_day180", "testosterone_km_day180")
   # Cell 5 holds the single volcano legend shared by panels a and b.
-  list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = c(1, .06, 1),
-    shared_legend = list(panels = 1:2, cell = 5, nrow = 1), width = 10, height = 8.9,
-    plot_theme = theme(plot.margin = margin(4, 5, 4, 5),
+  # Shorten the volcano row to ~80%, retaining the KM row's previous height.
+  list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = c(.8, .055, 1),
+    shared_legend = list(panels = 1:2, cell = 5, nrow = 1), width = 10, height = 8,
+    plot_theme = theme(plot.margin = margin(1, 5, 1, 5),
+      plot.title = element_text(margin = margin(b = 2)),
       legend.box.spacing = grid::unit(2, "pt"), legend.margin = margin(1, 1, 1, 1)),
+    composite_theme = theme(plot.tag.position = c(0, 1),
+      plot.tag = element_text(hjust = 0, vjust = 1)),
     tables = list(associations = filter(volcano, landmark_days %in% c(0, 180)),
       km_curves = filter(fig$km, scope == "pooled", landmark_days == 180,
         lab %in% c("PSA", "Testosterone"), cutoff_scope == "pooled"),
@@ -204,7 +213,7 @@ esmo_result2 <- function(volcano, fig) {
       "triangles mark values above the display cap. HRs are oriented toward the higher-hazard direction in each label.",
       "Day-180 KM curves compare pre-landmark mean PSA or testosterone using the exported pooled percentile cutoffs,",
       "retaining tied values. The percentage is read from each source summary and shown in the legend,",
-      "rather than assumed to be 10% or 20%. Shading is 95% CI; legends give patients/events; subtitles give log-rank p values."))
+      "rather than assumed to be 10% or 20%. Shading is 95% CI; legends give patients/events; log-rank p values appear at the lower left of each KM panel."))
 }
 
 esmo_result3 <- function(performance, importance) {
@@ -289,7 +298,7 @@ esmo_result4 <- function(metrics, gradient) {
   p1 <- suppressMessages(plot_federated_transfer_bars(prepare_federated_transfer(d, federated_transfer_strip_counts(d, 0)), ymax = 1) +
     scale_y_continuous(breaks = seq(.25, 1, .25), expand = expansion(mult = c(0, 0))) +
     coord_cartesian(ylim = c(.25, 1))) +
-    labs(title = "Three-site XGBoost → DFCI without refitting", subtitle = "Landmarks after ADT initiation; 95% bootstrap CI") +
+    labs(title = "Three-site XGBoost model applied to DFCI without refitting", subtitle = NULL) +
     theme(plot.title.position = "panel", plot.margin = margin(12, 16, 1, 12))
   probabilities <- lapply(names(FEDERATED_TRANSFER_ENDPOINTS), function(ep) {
     p <- plot_federated_transfer_horizon_risk(list(gradient = gradient), "xgboost_cox", 180,
@@ -302,8 +311,8 @@ esmo_result4 <- function(metrics, gradient) {
   ymax <- min(1, ceiling(upper * 5) / 5)
   probabilities <- lapply(seq_along(probabilities), function(i) probabilities[[i]] +
     coord_cartesian(ylim = c(0, ymax)) +
-    labs(title = FEDERATED_TRANSFER_ENDPOINTS_SHORT[[i]], y = "Five-year event probability",
-      subtitle = "Sequencing report +180 days") +
+    labs(title = NULL, subtitle = NULL,
+      y = paste("Five-year", c("platinum", "AVPC", "NEPC")[[i]], "probability")) +
     theme(axis.text.x = element_text(angle = 0, hjust = .5),
       plot.title.position = "panel", plot.margin = margin(1, 16, 12, 12)))
   list(plots = c(list(transfer_auc = p1), setNames(probabilities, paste0(names(FEDERATED_TRANSFER_ENDPOINTS), "_five_year"))),
@@ -394,6 +403,7 @@ esmo_export <- function(result, section, output) {
   shared <- result$shared_legend
   grobs <- lapply(seq_along(plots), function(i) {
     p <- plots[[i]] + labs(tag = letters[i])
+    if (!is.null(result$composite_theme)) p <- p + result$composite_theme
     if (i %in% shared$panels) p <- p + theme(legend.position = "none")
     ggplot2::ggplotGrob(p)
   })
@@ -404,7 +414,19 @@ esmo_export <- function(result, section, output) {
       all(which(result$layout == i, arr.ind = TRUE)[, 1] == r), unique(result$layout[r, ]))
     if (length(in_row) > 1L && length(unique(vapply(grobs[in_row], function(g) length(g$heights), integer(1)))) == 1L) {
       heights <- do.call(grid::unit.pmax, lapply(grobs[in_row], function(g) g$heights))
-      for (i in in_row) grobs[[i]]$heights <- heights
+      for (i in in_row) {
+        original <- grobs[[i]]$heights
+        grobs[[i]]$heights <- heights
+        # Keep panel bottoms aligned, but don't put extra tick-label space
+        # between a one-line x axis and its title (Figure 1's matrix).
+        axis_row <- unique(grobs[[i]]$layout$t[grobs[[i]]$layout$name == "axis-b"])
+        if (isTRUE(result$compact_x_titles) && !is.null(plots[[i]]$labels$x) && length(axis_row) == 1L) {
+          gap <- heights[axis_row] - original[axis_row]
+          grobs[[i]]$heights[axis_row] <- original[axis_row]
+          bottom <- length(heights)
+          grobs[[i]]$heights[bottom] <- heights[bottom] + gap
+        }
+      }
     }
   }
   if (!is.null(shared)) {
