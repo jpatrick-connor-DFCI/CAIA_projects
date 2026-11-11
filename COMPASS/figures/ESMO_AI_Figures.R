@@ -106,7 +106,7 @@ esmo_result1 <- function(d) {
       expand = expansion(mult = c(0, .13))) +
     labs(x = NULL, y = "Fraction within platinum group") + theme_fig() +
     guides(fill = guide_legend(ncol = 1)) +
-    theme(legend.margin = margin(2, 2, 2, 2),
+    theme(legend.margin = margin(0, 0, 0, 0),
       legend.background = element_rect(fill = "white", color = NA))
   enrichment <- d$enrichment %>% mutate(group = factor(group, levels = group))
   p3 <- ggplot(enrichment, aes(group, probability, fill = group)) +
@@ -123,7 +123,7 @@ esmo_result1 <- function(d) {
     # Export aligns the plotting areas; b's legend occupies its upper right.
     # Drawn at its poster size (column A, 10.35 in wide). The height keeps
     # the confusion-matrix panel square; Results 2 takes the rest of column A.
-    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.4, 3.65, 3.2), width = 10.35, height = 3.73,
+    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.3, 3.75, 3.2), width = 10.35, height = 3.64,
     plot_theme = theme(plot.margin = margin(4, 2, 4, 2),
       axis.title.x = element_text(margin = margin(t = 2)),
       axis.title.y = element_text(margin = margin(r = 2)),
@@ -203,9 +203,9 @@ esmo_result2 <- function(volcano, fig) {
   names(plots) <- c("volcano_day0", "volcano_day180", "psa_km_day180", "testosterone_km_day180")
   # Cell 5 holds the single volcano legend shared by panels a and b.
   # Drawn at its poster size: the rest of column A below Results 1
-  # (10.35 x 9.16 in). Row heights are in inches; the shared legend row
+  # (10.35 x 9.25 in). Row heights are in inches; the shared legend row
   # grows with the poster font and the volcano and KM rows share the rest.
-  height <- 9.16
+  height <- 9.25
   legend_row <- .25 * ESMO_FONT_SCALE
   row_heights <- c(.475 * (height - legend_row), legend_row, .525 * (height - legend_row))
   list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = row_heights,
