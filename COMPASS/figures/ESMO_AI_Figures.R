@@ -78,7 +78,9 @@ esmo_llm_data <- function(patients, labels, manual) {
 
 esmo_result1 <- function(d) {
   classes <- c("conventional", "avpc", "nepc")
-  class_labels <- c("Conventional", "AVPC", "NEPC")
+  # Figure labels abbreviate "Conventional" (defined in the poster caption);
+  # exported tables keep the full name.
+  class_labels <- c("Conv.", "AVPC", "NEPC")
   cm <- d$confusion %>% group_by(truth) %>%
     mutate(row_fraction = if (sum(n) > 0) n / sum(n) else 0) %>% ungroup() %>%
     mutate(truth = factor(truth, levels = rev(classes), labels = rev(class_labels)),
@@ -99,16 +101,17 @@ esmo_result1 <- function(d) {
     scale_fill_manual(values = c(COLOR_PLATINUM_POS, COLOR_PLATINUM_NEG), name = NULL,
       labels = sprintf(c("Platinum+ (n=%s)", "Platinum− (n=%s)"), scales::comma(counts))) +
     scale_x_discrete(expand = expansion(add = c(.65, .45))) +
-    # Extra left room keeps "Conventional" clear of the 0% tick label.
+    # Extra left room keeps the first label clear of the 0% tick label.
     # Bars start on the x axis, matching the enrichment panel; the headroom
     # keeps the top-right legend clear of the tallest bar.
     scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, .25), labels = scales::label_percent(),
-      expand = expansion(mult = c(0, .13))) +
+      expand = expansion(mult = c(0, .04))) +
     labs(x = NULL, y = "Fraction within platinum group") + theme_fig() +
     guides(fill = guide_legend(ncol = 1)) +
     theme(legend.margin = margin(0, 0, 0, 0),
       legend.background = element_rect(fill = "white", color = NA))
-  enrichment <- d$enrichment %>% mutate(group = factor(group, levels = group))
+  enrichment <- d$enrichment %>% mutate(group = sub("^Conventional$", "Conv.", group),
+    group = factor(group, levels = group))
   p3 <- ggplot(enrichment, aes(group, probability, fill = group)) +
     geom_col(width = .7) + geom_errorbar(aes(ymin = lo, ymax = hi), width = .18) +
     scale_fill_manual(values = c(COLOR_PLATINUM_POS, "#9a9890"), guide = "none") +
@@ -123,7 +126,7 @@ esmo_result1 <- function(d) {
     # Export aligns the plotting areas; b's legend occupies its upper right.
     # Drawn at its poster size (column A, 10.35 in wide). The height keeps
     # the confusion-matrix panel square; Results 2 takes the rest of column A.
-    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.3, 3.75, 3.2), width = 10.35, height = 3.64,
+    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4, 4.05, 3.2), width = 10.35, height = 3.90,
     plot_theme = theme(plot.margin = margin(4, 2, 4, 2),
       axis.title.x = element_text(margin = margin(t = 2)),
       axis.title.y = element_text(margin = margin(r = 2)),
@@ -132,7 +135,9 @@ esmo_result1 <- function(d) {
     # (which run above the panel tops) clear the letters.
     composite_theme = theme(plot.tag = element_text(margin = margin(b = 12))),
     compact_x_titles = TRUE,
-    legend_inside = list(subtype_fractions = c(1, 1)),
+    # b's legend sits above its panel's top-right corner, beside the letter,
+    # so it never covers the bars.
+    legend_inside = list(subtype_fractions = list(c(1, 1), c(1, 0))),
     caption = paste("Results 1. Day-0 ADT prediction cohort intersected with LLM subtype labels.",
       "Manual truth is on the y axis; tile color is row-normalized and labels are counts.",
       "Subtype fractions are conditional on platinum status. Enrichment compares AVPC/NEPC with conventional labels;",
@@ -203,9 +208,9 @@ esmo_result2 <- function(volcano, fig) {
   names(plots) <- c("volcano_day0", "volcano_day180", "psa_km_day180", "testosterone_km_day180")
   # Cell 5 holds the single volcano legend shared by panels a and b.
   # Drawn at its poster size: the rest of column A below Results 1
-  # (10.35 x 9.25 in). Row heights are in inches; the shared legend row
+  # (10.35 x 8.99 in). Row heights are in inches; the shared legend row
   # grows with the poster font and the volcano and KM rows share the rest.
-  height <- 9.25
+  height <- 8.99
   legend_row <- .25 * ESMO_FONT_SCALE
   row_heights <- c(.475 * (height - legend_row), legend_row, .525 * (height - legend_row))
   list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = row_heights,
@@ -382,10 +387,10 @@ esmo_result4 <- function(metrics, gradient) {
       "This descriptive comparison does not test incremental clinical utility or superiority."))
 }
 
-esmo_inside_legend <- function(position) {
+esmo_inside_legend <- function(position, justification = position) {
   if (utils::packageVersion("ggplot2") >= "3.5.0")
-    theme(legend.position = "inside", legend.position.inside = position, legend.justification = position)
-  else theme(legend.position = position, legend.justification = position)
+    theme(legend.position = "inside", legend.position.inside = position, legend.justification = justification)
+  else theme(legend.position = position, legend.justification = justification)
 }
 
 # Each composite is drawn at the size it is placed on the 16:9 poster
@@ -475,7 +480,7 @@ esmo_export <- function(result, section, output) {
   plots <- lapply(result$plots, esmo_style_plot)
   if (!is.null(result$plot_theme)) plots <- lapply(plots, function(p) p + result$plot_theme)
   for (name in names(result$legend_inside))
-    plots[[name]] <- plots[[name]] + esmo_inside_legend(result$legend_inside[[name]])
+    plots[[name]] <- plots[[name]] + do.call(esmo_inside_legend, as.list(result$legend_inside[[name]]))
   row_weights <- if (is.null(result$row_heights)) rep(1, nrow(result$layout)) else result$row_heights
   col_weights <- if (is.null(result$col_widths)) rep(1, ncol(result$layout)) else result$col_widths
   for (i in seq_along(plots)) {
