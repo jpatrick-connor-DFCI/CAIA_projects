@@ -90,7 +90,7 @@ esmo_result1 <- function(d) {
     scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "#0b0b0b"), guide = "none") +
     scale_x_discrete(position = "bottom") +
     labs(x = "LLM label (prediction)", y = "Manual annotation (truth)") + theme_fig() +
-    theme(axis.text.x = element_text(angle = 0, hjust = .5))
+    theme(axis.text.x = element_text(angle = 0, hjust = .5, margin = margin(t = 2, b = 5)))
   landscape <- d$landscape %>% mutate(primary_label = factor(primary_label, levels = classes, labels = class_labels),
     platinum = factor(PLATINUM, levels = c(1, 0), labels = c("Platinum+", "Platinum−")))
   counts <- vapply(c(1, 0), function(x) sum(landscape$n[landscape$PLATINUM == x]), numeric(1))
@@ -98,11 +98,12 @@ esmo_result1 <- function(d) {
     geom_col(position = position_dodge(.8), width = .72) +
     scale_fill_manual(values = c(COLOR_PLATINUM_POS, COLOR_PLATINUM_NEG), name = NULL,
       labels = sprintf(c("Platinum+ (n=%s)", "Platinum− (n=%s)"), scales::comma(counts))) +
-    scale_x_discrete(expand = expansion(add = .45)) +
+    scale_x_discrete(expand = expansion(add = c(.65, .45))) +
+    # Extra left room keeps "Conventional" clear of the 0% tick label.
     # Bars start on the x axis, matching the enrichment panel; the headroom
     # keeps the top-right legend clear of the tallest bar.
-    scale_y_continuous(limits = c(0, 1), labels = scales::label_percent(),
-      expand = expansion(mult = c(0, .1))) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, .25), labels = scales::label_percent(),
+      expand = expansion(mult = c(0, .13))) +
     labs(x = NULL, y = "Fraction within platinum group") + theme_fig() +
     guides(fill = guide_legend(ncol = 1)) +
     theme(legend.margin = margin(2, 2, 2, 2),
@@ -122,11 +123,14 @@ esmo_result1 <- function(d) {
     # Export aligns the plotting areas; b's legend occupies its upper right.
     # Drawn at its poster size (column A, 10.35 in wide). The height keeps
     # the confusion-matrix panel square; Results 2 takes the rest of column A.
-    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.4, 3.65, 3.2), width = 10.35, height = 3.56,
+    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.4, 3.65, 3.2), width = 10.35, height = 3.73,
     plot_theme = theme(plot.margin = margin(4, 2, 4, 2),
       axis.title.x = element_text(margin = margin(t = 2)),
       axis.title.y = element_text(margin = margin(r = 2)),
       axis.text.y = element_text(margin = margin(r = 2))),
+    # Space under the panel letters drops the panels so the long y titles
+    # (which run above the panel tops) clear the letters.
+    composite_theme = theme(plot.tag = element_text(margin = margin(b = 12))),
     compact_x_titles = TRUE,
     legend_inside = list(subtype_fractions = c(1, 1)),
     caption = paste("Results 1. Day-0 ADT prediction cohort intersected with LLM subtype labels.",
@@ -170,7 +174,7 @@ esmo_volcano <- function(d, title) {
   })
   suppressMessages(p + scale_size_manual(values = c(`TRUE` = 3.2, `FALSE` = 2.5), guide = "none")) +
     guides(fill = guide_legend(nrow = 2, byrow = TRUE,
-      override.aes = list(shape = 21, size = 2.5, alpha = 1)))
+      override.aes = list(shape = 21, size = 3.2, alpha = 1)))
 }
 
 esmo_result2 <- function(volcano, fig) {
@@ -199,9 +203,9 @@ esmo_result2 <- function(volcano, fig) {
   names(plots) <- c("volcano_day0", "volcano_day180", "psa_km_day180", "testosterone_km_day180")
   # Cell 5 holds the single volcano legend shared by panels a and b.
   # Drawn at its poster size: the rest of column A below Results 1
-  # (10.35 x 9.33 in). Row heights are in inches; the shared legend row
+  # (10.35 x 9.16 in). Row heights are in inches; the shared legend row
   # grows with the poster font and the volcano and KM rows share the rest.
-  height <- 9.33
+  height <- 9.16
   legend_row <- .25 * ESMO_FONT_SCALE
   row_heights <- c(.475 * (height - legend_row), legend_row, .525 * (height - legend_row))
   list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = row_heights,
@@ -210,7 +214,8 @@ esmo_result2 <- function(volcano, fig) {
       plot.title = element_text(margin = margin(b = 2)),
       legend.box.spacing = grid::unit(2, "pt"), legend.margin = margin(1, 1, 1, 1)),
     composite_theme = theme(plot.tag.position = c(0, 1),
-      plot.tag = element_text(hjust = 0, vjust = 1)),
+      plot.tag = element_text(hjust = 0, vjust = 1),
+      plot.title = element_text(margin = margin(t = ESMO_TAG_BASELINE, b = 2))),
     tables = list(associations = filter(volcano, landmark_days %in% c(0, 180)),
       km_curves = filter(fig$km, scope == "pooled", landmark_days == 180,
         lab %in% c("PSA", "Testosterone"), cutoff_scope == "pooled"),
@@ -271,6 +276,11 @@ esmo_result3 <- function(performance, importance) {
   list(plots = list(heldout_performance = p1, xgboost_features_day180 = p2),
     tables = list(performance = d, top_features = selected), layout = matrix(1:2, nrow = 1),
     broken_auc = "heldout_performance",
+    # Panel letters sit on the title line (as in Results 2); titles are
+    # indented past the letter.
+    composite_theme = theme(plot.tag.position = c(0, 1),
+      plot.tag = element_text(hjust = 0, vjust = 1),
+      plot.title = element_text(margin = margin(t = ESMO_TAG_BASELINE, l = 16 * ESMO_FONT_SCALE, b = 5.5))),
     # Drawn at its poster size (top of column B).
     col_widths = c(1.12, 1), width = 10.09, height = 4.48,
     # Titles start at the left of each panel, so the long feature-panel title fits.
@@ -325,7 +335,7 @@ esmo_result4 <- function(metrics, gradient) {
   p1 <- esmo_auc_axis(plot_federated_transfer_bars(
     prepare_federated_transfer(d, federated_transfer_strip_counts(d, 0)), ymax = 1)) +
     labs(title = "Three-site XGBoost model applied to DFCI without refitting", subtitle = NULL) +
-    theme(plot.title.position = "panel", plot.margin = margin(12, 2, 1, 2),
+    theme(plot.title.position = "panel", plot.margin = margin(4, 2, 1, 2),
       axis.title.y = element_text(margin = margin(r = 2)),
       axis.text.y = element_text(margin = margin(r = 2)))
   probabilities <- lapply(names(FEDERATED_TRANSFER_ENDPOINTS), function(ep) {
@@ -357,6 +367,10 @@ esmo_result4 <- function(metrics, gradient) {
     layout = rbind(c(1, 1, 1), 2:4),
     row_heights = c(3.92, 4.23), width = 10.09, height = 8.15,
     broken_auc = "transfer_auc",
+    # Panel letters sit on the title (a) or strip (b-d) line, as in Results 2.
+    composite_theme = theme(plot.tag.position = c(0, 1),
+      plot.tag = element_text(hjust = 0, vjust = 1),
+      plot.title = element_text(margin = margin(t = ESMO_TAG_BASELINE, b = 5.5))),
     caption = paste("Results 4. XGBoost trained for platinum without DFCI, transferred without refitting.",
       "Top: mean AUC(t) and patient-bootstrap 95% CIs at ADT days 0/90/180; counts are endpoint-specific.",
       "The AUC axis shows zero with a marked break before 0.25; values from 0.25 upward use a linear scale.",
@@ -381,6 +395,9 @@ esmo_inside_legend <- function(position) {
 # that keeps every label clear (Results 1 is the limiting figure); a larger
 # value needs the Results 1 height re-fitted to keep its matrix square.
 ESMO_FONT_SCALE <- 1.05
+# Results 2-4 draw each panel letter on its title line; this top margin (pt)
+# drops the smaller title onto the letter's baseline.
+ESMO_TAG_BASELINE <- 1.8 * ESMO_FONT_SCALE
 
 esmo_style_plot <- function(p) {
   # Poster typography is local to this entry point, leaving the shared
@@ -394,9 +411,9 @@ esmo_style_plot <- function(p) {
       axis.title = element_text(size = pt(13)), axis.title.x = element_text(size = pt(13)),
       axis.title.y = element_text(size = pt(13)), axis.text = element_text(size = pt(12)),
       axis.text.x = element_text(size = pt(12)), axis.text.y = element_text(size = pt(12)),
-      strip.text = element_text(size = pt(12)), legend.text = element_text(size = pt(11)),
-      legend.title = element_text(size = pt(11)), legend.key.height = grid::unit(pt(13), "pt"),
-      legend.key.width = grid::unit(pt(13), "pt"), legend.position = "bottom")
+      strip.text = element_text(size = pt(12)), legend.text = element_text(size = pt(12)),
+      legend.title = element_text(size = pt(12)), legend.key.height = grid::unit(pt(14), "pt"),
+      legend.key.width = grid::unit(pt(14), "pt"), legend.position = "bottom")
   p$layers <- lapply(p$layers, function(layer) {
     if (!inherits(layer$geom, c("GeomText", "GeomLabel", "GeomTextRepel", "GeomLabelRepel"))) return(layer)
     copy <- ggplot2::ggproto(NULL, layer)
@@ -503,7 +520,7 @@ esmo_export <- function(result, section, output) {
     legend_plot <- plots[[shared$panels[1]]]
     if (!is.null(shared$nrow)) legend_plot <- legend_plot +
       guides(fill = guide_legend(nrow = shared$nrow, byrow = TRUE,
-        override.aes = list(shape = 21, size = 2.5, alpha = 1)))
+        override.aes = list(shape = 21, size = 3.2, alpha = 1)))
     g <- ggplot2::ggplotGrob(legend_plot)
     boxes <- Filter(function(x) inherits(x, "gtable"), g$grobs[grepl("^guide-box", g$layout$name)])
     if (!length(boxes)) stop("Results ", section, " shared legend could not be extracted")
