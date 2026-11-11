@@ -99,9 +99,10 @@ esmo_result1 <- function(d) {
     scale_fill_manual(values = c(COLOR_PLATINUM_POS, COLOR_PLATINUM_NEG), name = NULL,
       labels = sprintf(c("Platinum+ (n=%s)", "Platinum− (n=%s)"), scales::comma(counts))) +
     scale_x_discrete(expand = expansion(add = .45)) +
-    # Bars start on the x axis, matching the enrichment panel.
+    # Bars start on the x axis, matching the enrichment panel; the headroom
+    # keeps the top-right legend clear of the tallest bar.
     scale_y_continuous(limits = c(0, 1), labels = scales::label_percent(),
-      expand = expansion(mult = c(0, .04))) +
+      expand = expansion(mult = c(0, .1))) +
     labs(x = NULL, y = "Fraction within platinum group") + theme_fig() +
     guides(fill = guide_legend(ncol = 1)) +
     theme(legend.margin = margin(2, 2, 2, 2),
@@ -119,16 +120,15 @@ esmo_result1 <- function(d) {
     # Keep room for the full confusion-matrix labels; use narrower bar panels,
     # especially c, and minimal outer margins to bring the panels together.
     # Export aligns the plotting areas; b's legend occupies its upper right.
-    # Height keeps the confusion-matrix panel square (about 3.0 x 3.0 in at
-    # this width). On the 16:9 poster (160 x 90 cm) it is placed at
-    # 10.35 x 3.63 in; Results 2 takes the remaining column A height.
-    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.4, 3.8, 3), width = 11.2, height = 3.93,
+    # Drawn at its poster size (column A, 10.35 in wide). The height keeps
+    # the confusion-matrix panel square; Results 2 takes the rest of column A.
+    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.4, 3.65, 3.2), width = 10.35, height = 3.56,
     plot_theme = theme(plot.margin = margin(4, 2, 4, 2),
       axis.title.x = element_text(margin = margin(t = 2)),
       axis.title.y = element_text(margin = margin(r = 2)),
       axis.text.y = element_text(margin = margin(r = 2))),
     compact_x_titles = TRUE,
-    legend_inside = list(subtype_fractions = c(.98, .98)),
+    legend_inside = list(subtype_fractions = c(1, 1)),
     caption = paste("Results 1. Day-0 ADT prediction cohort intersected with LLM subtype labels.",
       "Manual truth is on the y axis; tile color is row-normalized and labels are counts.",
       "Subtype fractions are conditional on platinum status. Enrichment compares AVPC/NEPC with conventional labels;",
@@ -198,14 +198,14 @@ esmo_result2 <- function(volcano, fig) {
   }
   names(plots) <- c("volcano_day0", "volcano_day180", "psa_km_day180", "testosterone_km_day180")
   # Cell 5 holds the single volcano legend shared by panels a and b.
-  # Row heights are in inches. Sized for the 16:9 poster (160 x 90 cm):
-  # placed at 10.35 in wide, the lower column A slot is 9.26 in tall
-  # (aspect 1.12), including the height freed by the square Results 1
-  # matrix. The shared legend row keeps its 0.24 in height; the extra height
-  # is split between the volcano and KM rows.
-  row_heights <- c(4.14, .24, 4.57)
+  # Drawn at its poster size: the rest of column A below Results 1
+  # (10.35 x 9.33 in). Row heights are in inches; the shared legend row
+  # grows with the poster font and the volcano and KM rows share the rest.
+  height <- 9.33
+  legend_row <- .25 * ESMO_FONT_SCALE
+  row_heights <- c(.475 * (height - legend_row), legend_row, .525 * (height - legend_row))
   list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = row_heights,
-    shared_legend = list(panels = 1:2, cell = 5, nrow = 1), width = 10, height = sum(row_heights),
+    shared_legend = list(panels = 1:2, cell = 5, nrow = 1), width = 10.35, height = height,
     plot_theme = theme(plot.margin = margin(1, 5, 1, 5),
       plot.title = element_text(margin = margin(b = 2)),
       legend.box.spacing = grid::unit(2, "pt"), legend.margin = margin(1, 1, 1, 1)),
@@ -253,7 +253,9 @@ esmo_result3 <- function(performance, importance) {
   selected <- esmo_require(federated_manuscript_features(importance, "xgb", 180), "day-180 XGBoost gains")
   p1 <- esmo_auc_axis(plot_model_discrimination(d, "auc", "Held-out mean AUC(t)",
     FEDERATED_MODEL_COLORS[models], show_legend = TRUE), upper = max(1, max(d$auc) * 1.08)) +
-    labs(title = "Four-center held-out performance") + guides(fill = guide_legend(nrow = 1))
+    labs(title = "Four-center held-out performance") + guides(fill = guide_legend(nrow = 1)) +
+    # Centre the legend under the whole panel (it is wider than the plot area).
+    theme(legend.location = "plot")
   p2 <- plot_model_importance(selected, "xgb", "Day 180: top laboratory features", top_n = 15) +
     scale_x_continuous(expand = expansion(mult = c(0, .04)))
   # Bold androgen-axis feature names (plotmath, so no vectorized theme faces).
@@ -269,10 +271,10 @@ esmo_result3 <- function(performance, importance) {
   list(plots = list(heldout_performance = p1, xgboost_features_day180 = p2),
     tables = list(performance = d, top_features = selected), layout = matrix(1:2, nrow = 1),
     broken_auc = "heldout_performance",
-    # Sized for the 16:9 poster (160 x 90 cm): placed at 10.09 in wide, the
-    # slot under the column B title is 4.48 in tall (aspect 2.25).
-    col_widths = c(1, 1.1), width = 12, height = 5.33,
-    plot_theme = theme(plot.margin = margin(4, 6, 4, 6),
+    # Drawn at its poster size (top of column B).
+    col_widths = c(1.12, 1), width = 10.09, height = 4.48,
+    # Titles start at the left of each panel, so the long feature-panel title fits.
+    plot_theme = theme(plot.margin = margin(4, 6, 4, 6), plot.title.position = "plot",
       legend.box.spacing = grid::unit(2, "pt"), legend.margin = margin(1, 1, 1, 1)),
     caption = paste("Results 3. Four-center held-out test mean time-dependent AUC(t) at ADT days 0, 90 and 180.",
       "Age-only Cox, elastic-net Cox and XGBoost are shown; no uncertainty intervals are supplied by these exports.",
@@ -346,16 +348,14 @@ esmo_result4 <- function(metrics, gradient) {
       axis.title.y = element_text(margin = margin(r = 2)),
       axis.text.y = element_text(margin = margin(r = 2)),
       panel.spacing.x = grid::unit(4, "pt"),
-      plot.title.position = "panel", plot.margin = margin(1, 2, 12, 2)))
+      plot.title.position = "panel", plot.margin = margin(1, 6, 12, 2)))
   list(plots = c(list(transfer_auc = p1), setNames(probabilities, paste0(names(FEDERATED_TRANSFER_ENDPOINTS), "_five_year"))),
     tables = list(transfer_performance = d, stratification = gradient,
       event_probabilities = bind_rows(lapply(probabilities, function(p) p$data))),
     # The upper panel spans the full combined width of the three lower panels.
-    # Row heights are in inches. Sized for the 16:9 poster (160 x 90 cm):
-    # placed at 10.09 in wide, the lower column B slot is 8.15 in tall
-    # (aspect 1.24); most of the extra height goes to the probability panels.
+    # Drawn at its poster size (bottom of column B); row heights are in inches.
     layout = rbind(c(1, 1, 1), 2:4),
-    row_heights = c(4.9, 5.3), width = 12.6, height = 10.2,
+    row_heights = c(3.92, 4.23), width = 10.09, height = 8.15,
     broken_auc = "transfer_auc",
     caption = paste("Results 4. XGBoost trained for platinum without DFCI, transferred without refitting.",
       "Top: mean AUC(t) and patient-bootstrap 95% CIs at ADT days 0/90/180; counts are endpoint-specific.",
@@ -374,26 +374,35 @@ esmo_inside_legend <- function(position) {
   else theme(legend.position = position, legend.justification = position)
 }
 
+# Each composite is drawn at the size it is placed on the 16:9 poster
+# (160 x 90 cm board, 34.5 x 19.4 in slide), so one set of point sizes prints
+# identically in Results 1-4. All poster text, including text layers, is
+# multiplied by this factor; 1 gives 12 pt tick labels. 1.05 is the largest
+# that keeps every label clear (Results 1 is the limiting figure); a larger
+# value needs the Results 1 height re-fitted to keep its matrix square.
+ESMO_FONT_SCALE <- 1.05
+
 esmo_style_plot <- function(p) {
   # Poster typography is local to this entry point, leaving the shared
   # manuscript theme alone. Set axis children too: some source plots give
   # their tick labels explicit sizes that otherwise override axis.text.
+  pt <- function(x) x * ESMO_FONT_SCALE
   p <- p + labs(caption = NULL) +
-    theme(text = element_text(family = FIGURE_FONT, size = 12),
-      plot.title = element_text(size = 14, face = "bold"),
-      plot.subtitle = element_text(size = 11.5), plot.tag = element_text(size = 16, face = "bold"),
-      axis.title = element_text(size = 13), axis.title.x = element_text(size = 13),
-      axis.title.y = element_text(size = 13), axis.text = element_text(size = 12),
-      axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12),
-      strip.text = element_text(size = 12), legend.text = element_text(size = 11),
-      legend.title = element_text(size = 11), legend.key.height = grid::unit(13, "pt"),
-      legend.key.width = grid::unit(13, "pt"), legend.position = "bottom")
+    theme(text = element_text(family = FIGURE_FONT, size = pt(12)),
+      plot.title = element_text(size = pt(14), face = "bold"),
+      plot.subtitle = element_text(size = pt(11.5)), plot.tag = element_text(size = pt(16), face = "bold"),
+      axis.title = element_text(size = pt(13)), axis.title.x = element_text(size = pt(13)),
+      axis.title.y = element_text(size = pt(13)), axis.text = element_text(size = pt(12)),
+      axis.text.x = element_text(size = pt(12)), axis.text.y = element_text(size = pt(12)),
+      strip.text = element_text(size = pt(12)), legend.text = element_text(size = pt(11)),
+      legend.title = element_text(size = pt(11)), legend.key.height = grid::unit(pt(13), "pt"),
+      legend.key.width = grid::unit(pt(13), "pt"), legend.position = "bottom")
   p$layers <- lapply(p$layers, function(layer) {
-    if (!inherits(layer$geom, "GeomText")) return(layer)
+    if (!inherits(layer$geom, c("GeomText", "GeomLabel", "GeomTextRepel", "GeomLabelRepel"))) return(layer)
     copy <- ggplot2::ggproto(NULL, layer)
     # Enlarge numeric bar labels and missing-estimate annotations as well as
     # theme text, while retaining the larger confusion counts and OR label.
-    copy$aes_params$size <- max(c(3.8, layer$aes_params$size))
+    copy$aes_params$size <- pt(max(c(3.8, layer$aes_params$size)))
     copy$aes_params$family <- FIGURE_FONT
     copy
   })
