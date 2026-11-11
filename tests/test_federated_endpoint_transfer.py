@@ -407,3 +407,76 @@ def test_deephit_per_horizon_mean_reduces_to_sksurv_for_a_constant_score():
                                        auc_score=np.clip(1 / (1 + np.exp(-cif_h)), 0, 1))
     assert np.isfinite(summary["ibs"]) and auc_df["brier"].notna().all()
 
+
+
+def _tree_transfer_bundle() -> dict:
+    """Depth-1 tree ``Hgb <= 13`` (high risk when true) plus a one-leaf baseline."""
+    def km(survival):
+        return {"time_unit": [100.0, 300.0], "survival": survival, "lower": survival,
+                "upper": survival, "cumhaz": [0.1, 0.3], "n": [30, 15], "events": [5, 5]}
+    item = {"feature": HGB_FEATURE, "op": "<=", "threshold": 13.0, "name": "hgb <= 13"}
+    leaf = {"split_item": None, "item": None, "false_child": None, "true_child": None}
+    both = {"landmark_days": 0, "config": "both", "time_unit_days": 7, "root_rate": 0.01,
+            "missing_policy": "item_false",
+            "nodes": [{"id": 1, "depth": 0, "n": 60, "events": 30, "z": 3000.0, "split_item": 0,
+                       "item": item, "false_child": 2, "true_child": 3},
+                      {"id": 2, "depth": 1, "n": 40, "events": 10, "z": 2000.0, **leaf},
+                      {"id": 3, "depth": 1, "n": 20, "events": 20, "z": 1000.0, **leaf}],
+            "leaves": [{"id": 2, "rule": "hgb > 13", "rate": 0.005, "km": km([0.9, 0.8])},
+                       {"id": 3, "rule": "hgb <= 13", "rate": 0.02, "km": km([0.6, 0.3])}],
+            "preprocessing": {"covariate_cols": [HGB_FEATURE]}}
+    base = {"landmark_days": 0, "config": "baseline", "time_unit_days": 7, "root_rate": 0.01,
+            "missing_policy": "item_false",
+            "nodes": [{"id": 1, "depth": 0, "n": 60, "events": 30, "z": 3000.0, **leaf}],
+            "leaves": [{"id": 1, "rule": "all", "rate": 0.01, "km": km([0.8, 0.6])}],
+            "preprocessing": {"covariate_cols": []}}
+    return {"format": "caia-federated-model-bundle", "format_version": 1,
+            "model_family": "survival_tree", "model_family_version": 1,
+            "analysis_label": "adt", "models": [both, base]}
+
+
+def test_survival_tree_transfer_scores_leaf_rate_and_leaf_km_auc():
+    from sksurv.metrics import cumulative_dynamic_auc
+    from sksurv.util import Surv
+
+    local = _local(n=80, seed=3)
+    res = fet.evaluate_transfer(local, {"tree": _tree_transfer_bundle()}, endpoints=("nepc",),
+                                lab_mapping=MAPPING, n_bootstrap=30, verbose=False)
+    long_df, _ = fet.to_federated_long(local, "nepc", MAPPING)
+    wide, _ = fs.build_landmark_frame(long_df, 0)
+    duration = wide[fs.DURATION_COL].to_numpy(dtype=float)
+    event = wide[fs.EVENT_COL].to_numpy(dtype=int)
+    hgb = wide[HGB_FEATURE].to_numpy(dtype=float)
+    true = hgb <= 13.0
+
+    scores = res["scores"].query("config == 'both'").set_index(fs.ID_COL).loc[wide[fs.ID_COL]]
+    np.testing.assert_array_equal(scores["leaf"].to_numpy(), np.where(true, 3, 2))
+    np.testing.assert_allclose(scores["risk_score"], np.where(true, 0.02, 0.005))
+
+    m = res["metrics"].set_index("config")
+    assert m.loc["both", "c_index"] == pytest.approx(
+        fet.harrell_c(duration, event, np.where(true, 0.02, 0.005)))
+    assert m.loc["both", "c_index"] > 0.55
+    assert m.loc["baseline", "c_index"] == pytest.approx(0.5)
+    assert m.loc["both", "delta_c_vs_baseline"] == pytest.approx(m.loc["both", "c_index"] - 0.5)
+
+    # AUC(t) scores 1 - S_leaf(t) at each grid week (KM step, held past its end)
+    grid = fet.auc_horizon_grid(duration, event)
+    valid = fet.valid_horizons(duration, grid)
+    assert valid.size
+    units = fet.to_auc_units(duration)
+    y = Surv.from_arrays(event=event.astype(bool), time=units)
+    auc_t = res["auc_t"].query("config == 'both'")
+    np.testing.assert_array_equal(auc_t["horizon_time_unit"].to_numpy(), valid.astype(int))
+    for h, got in zip(valid, auc_t["auc"]):
+        step = lambda s: s[0] if h < 300 else s[1]
+        s_true = 1.0 if h < 100 else step([0.6, 0.3])
+        s_false = 1.0 if h < 100 else step([0.9, 0.8])
+        fail = 1.0 - np.where(true, s_true, s_false)
+        if np.ptp(fail) == 0:
+            assert got == pytest.approx(0.5)
+            continue
+        ref = cumulative_dynamic_auc(y, y, fail, np.array([h]))[0][0]
+        assert got == pytest.approx(ref, abs=1e-12)
+    assert np.isfinite(m.loc["both", "ibs"])
+    assert m.loc["both", "mean_auc_lo"] <= m.loc["both", "mean_auc"] <= m.loc["both", "mean_auc_hi"]

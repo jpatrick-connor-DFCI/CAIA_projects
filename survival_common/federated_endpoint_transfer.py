@@ -55,8 +55,8 @@ import pandas as pd
 
 from survival_common import federated_scoring as fs
 from survival_common.federated_inference import (
-    BundleError, deephit_survival, load_bundle, model_identity, predict_checklist,
-    predict_cif, predict_risk,
+    SURVIVAL_TREE_FAMILY, BundleError, FederatedSurvivalTree, deephit_survival, load_bundle,
+    model_identity, predict_checklist, predict_cif, predict_risk,
 )
 from survival_common.helper import (
     DEFAULT_AUC_TIME_UNIT_DAYS, MIN_IPCW_TIMELINE_COVERAGE, MIN_IPCW_VALID_HORIZONS,
@@ -597,7 +597,9 @@ def evaluate_transfer(
     (endpoint, landmark) frame (:func:`auc_horizon_grid`) and gated by
     :func:`valid_horizons`.  DeepHit gets one row per model: ``risk_score``
     and the C-index use CIF_total, as the federated C does, and AUC(t) scores
-    CIF(h) at each grid week.  ``horizons_days`` only selects the checklist
+    CIF(h) at each grid week.  A survival tree's risk is its leaf rate and its
+    AUC(t) scores the leaf KM failure ``1 - S_leaf(t)`` per grid week (the
+    federated grading); its score rows carry the ``leaf`` id.  ``horizons_days`` only selects the checklist
     models to evaluate, each at its own model horizon.
 
     ``baseline_fallback`` maps a bundle stem that ships no age-only model to
@@ -664,6 +666,7 @@ def evaluate_transfer(
                     if model_horizon is not None and model_horizon not in horizons_days:
                         continue
                     predictions = []
+                    extra_cols: dict[str, np.ndarray] = {}
                     if family == "dynamic_deephit":
                         if model["preprocessing"].get("input_kind") == "age":
                             got, cif = predict_cif(wide, model, ids=ids, age_col=fs.AGE_COL)
@@ -682,6 +685,18 @@ def evaluate_transfer(
                         predictions.append((model_horizon, score,
                                             pred["probability"].to_numpy(dtype=float),
                                             pred["flag"].to_numpy(dtype=int), score))
+                    elif family == SURVIVAL_TREE_FAMILY:
+                        # Risk (and C) is the leaf rate; AUC(t) scores the leaf
+                        # KM failure 1 - S_leaf(t) at each grid week, as the
+                        # federated run grades the tree.
+                        tree = FederatedSurvivalTree.from_model(model)
+                        leaf = tree.apply(wide)
+                        rate = {lid: float(lf["rate"]) for lid, lf in tree.leaves.items()}
+                        risk = np.array([rate[int(k)] for k in leaf])
+                        fail = (1.0 - tree.survival_at(leaf, grid * DEFAULT_AUC_TIME_UNIT_DAYS)
+                                .to_numpy(dtype=float) if grid.size else np.zeros((len(ids), 0)))
+                        extra_cols = {"leaf": leaf}
+                        predictions.append((None, risk, None, None, fail))
                     else:
                         risk = predict_risk(wide, bundle, model, age_col=fs.AGE_COL)
                         predictions.append((None, risk, None, None, risk))
@@ -706,6 +721,8 @@ def evaluate_transfer(
                             block["probability"] = probability
                         if flag is not None:
                             block["flag"] = flag
+                        for name, values in extra_cols.items():
+                            block[name] = values
                         scores.append(block)
                     if endpoint == endpoints[0]:
                         cov = fs.covariate_coverage(wide, model)

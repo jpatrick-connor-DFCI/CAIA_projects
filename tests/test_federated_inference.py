@@ -841,3 +841,91 @@ def test_v3_deephit_arms_and_frozen_age_channel():
     later = labs.copy()
     later.loc[len(later)] = ["p1", DH_LABS[0], 99.0, 4.0]
     np.testing.assert_allclose(predict_cif(later, main, ids=ids, cohort=cohort)[1], cif)
+
+
+# --------------------------------------------------------------------- #
+# survival_tree
+# --------------------------------------------------------------------- #
+def _tree_bundle() -> dict:
+    """Depth-2 tree: Hemoglobin <= 9 at the root, Glucose >= 11 under its false side."""
+    km = lambda s: {"time_unit": [10.0, 50.0], "survival": s, "lower": s, "upper": s,
+                    "cumhaz": [0.1, 0.2], "n": [5, 3], "events": [1, 1]}
+    hb = {"feature": "Hemoglobin__mean", "op": "<=", "threshold": 9.0, "name": "Hemoglobin__mean <= 9"}
+    gl = {"feature": "Glucose__max", "op": ">=", "threshold": 11.0, "name": "Glucose__max >= 11"}
+    nodes = [
+        {"id": 1, "depth": 0, "n": 10, "events": 4, "z": 4.0, "split_item": 0, "item": hb,
+         "false_child": 2, "true_child": 3},
+        {"id": 2, "depth": 1, "n": 6, "events": 2, "z": 3.0, "split_item": 1, "item": gl,
+         "false_child": 4, "true_child": 5},
+        {"id": 3, "depth": 1, "n": 4, "events": 2, "z": 1.0, "split_item": None, "item": None,
+         "false_child": None, "true_child": None},
+        {"id": 4, "depth": 2, "n": 3, "events": 0, "z": 2.0, "split_item": None, "item": None,
+         "false_child": None, "true_child": None},
+        {"id": 5, "depth": 2, "n": 3, "events": 2, "z": 1.0, "split_item": None, "item": None,
+         "false_child": None, "true_child": None},
+    ]
+    leaves = [{"id": 3, "rule": "Hb <= 9", "rate": 1.5, "km": km([0.8, 0.5])},
+              {"id": 4, "rule": "Hb > 9 & Glu < 11", "rate": 0.3, "km": km([0.95, 0.9])},
+              {"id": 5, "rule": "Hb > 9 & Glu >= 11", "rate": 1.2, "km": km([0.85, 0.6])}]
+    model = {"landmark_days": 0, "config": "both", "time_unit_days": 7, "root_rate": 1.0,
+             "nodes": nodes, "leaves": leaves, "missing_policy": "item_false",
+             "preprocessing": {"covariate_cols": ["Glucose__max", "Hemoglobin__mean"]}}
+    return {"format": "caia-federated-model-bundle", "format_version": 1,
+            "model_family": "survival_tree", "model_family_version": 1, "models": [model]}
+
+
+def test_survival_tree_routes_rows_and_treats_missing_as_false(tmp_path):
+    from survival_common.federated_inference import FederatedSurvivalTree, predict_tree
+
+    p = tmp_path / "tree.json"
+    p.write_text(json.dumps(_tree_bundle()))
+    bundle = load_bundle(p)
+    model = select_model(bundle, 0, "both")
+    df = pd.DataFrame({"Hemoglobin__mean": [8.0, 9.0, 12.0, 12.0, np.nan, 12.0, "x"],
+                       "Glucose__max": [20.0, 1.0, 11.0, 10.9, 20.0, np.nan, 11.0]})
+    pred = predict_tree(df, model, [35, 70, 700])
+    # Hb missing or non-numeric -> "Hb <= 9" is false -> right subtree.
+    assert pred["leaf"].tolist() == [3, 3, 5, 4, 5, 4, 5]
+    np.testing.assert_array_equal(predict_risk(df, bundle, model), pred["rate"].to_numpy())
+    assert pred["rate"].tolist() == [1.5, 1.5, 1.2, 0.3, 1.2, 0.3, 1.2]
+    # 35 days = 5 units (before the first step), 70 = 10 units (on it), 700 = past the curve.
+    assert pred["survival_35d"].tolist() == [1.0] * 7
+    assert pred["survival_70d"].tolist() == [0.8, 0.8, 0.85, 0.95, 0.85, 0.95, 0.85]
+    assert pred["survival_700d"].tolist() == [0.5, 0.5, 0.6, 0.9, 0.6, 0.9, 0.6]
+    assert isinstance(load_model(bundle, model), FederatedSurvivalTree)
+
+
+def test_survival_tree_refuses_absent_features_and_bad_payloads():
+    from survival_common.federated_inference import FederatedSurvivalTree, predict_tree
+
+    model = _tree_bundle()["models"][0]
+    with pytest.raises(BundleError, match="absent locally"):
+        predict_tree(pd.DataFrame({"Hemoglobin__mean": [10.0]}), model)
+    bad = json.loads(json.dumps(model))
+    bad["missing_policy"] = "median"
+    with pytest.raises(BundleError, match="missing_policy"):
+        FederatedSurvivalTree.from_model(bad)
+    bad = json.loads(json.dumps(model))
+    bad["nodes"][1]["item"]["op"] = "is_missing"
+    with pytest.raises(BundleError, match="unsupported op"):
+        FederatedSurvivalTree.from_model(bad)
+    bad = json.loads(json.dumps(model))
+    bad["leaves"] = bad["leaves"][:2]
+    with pytest.raises(BundleError, match="no leaf entry"):
+        FederatedSurvivalTree.from_model(bad)
+
+
+def test_survival_tree_cli_writes_leaf_and_survival(tmp_path):
+    p = tmp_path / "tree.json"
+    p.write_text(json.dumps(_tree_bundle()))
+    data = tmp_path / "wide.csv"
+    pd.DataFrame({"person_id": [1, 2], "Hemoglobin__mean": [8.0, 12.0],
+                  "Glucose__max": [5.0, 5.0]}).to_csv(data, index=False)
+    out = tmp_path / "scores.csv"
+    assert main(["--bundle", str(p), "--data", str(data), "--landmark", "0",
+                 "--horizons", "365", "--output", str(out)]) == 0
+    got = pd.read_csv(out)
+    assert got["leaf"].tolist() == [3, 4]
+    assert got["risk_score"].tolist() == [1.5, 0.3]
+    assert got["survival_365d"].tolist() == [0.5, 0.9]
+    assert (got["model_family"] == "survival_tree").all()

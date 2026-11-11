@@ -65,10 +65,12 @@ from survival_common.federated_inference import (
     deephit_survival,
     load_bundle,
     model_identity,
+    SURVIVAL_TREE_FAMILY,
     predict_checklist,
     predict_cif,
     predict_risk,
     predict_survival,
+    predict_tree,
 )
 
 # --------------------------------------------------------------------------- #
@@ -554,7 +556,7 @@ def score_bundle(
         for model in [m for m in wanted if int(m["landmark_days"]) == lm]:
             config = str(model.get("config"))
             _, _, arm, model_horizon = model_identity(bundle, model)
-            probability = flag = None
+            probability = flag = tree_pred = None
             if family == "dynamic_deephit":
                 ids = wide[id_col].tolist()
                 if model["preprocessing"].get("input_kind") == "age":
@@ -570,6 +572,9 @@ def score_bundle(
                 risk = prediction["score"].to_numpy(dtype=float)
                 probability = prediction["probability"].to_numpy(dtype=float)
                 flag = prediction["flag"].to_numpy(dtype=int)
+            elif family == SURVIVAL_TREE_FAMILY:
+                tree_pred = predict_tree(wide, model, horizons_days)
+                risk = tree_pred["rate"].to_numpy(dtype=float)
             else:
                 risk = predict_risk(wide, bundle, model, age_col=AGE_COL)
 
@@ -591,7 +596,11 @@ def score_bundle(
                 block["probability"] = probability
                 block["flag"] = flag
 
-            if horizons_days and family == "dynamic_deephit":
+            if tree_pred is not None:
+                block["leaf"] = tree_pred["leaf"].to_numpy()
+                for col in tree_pred.columns.drop(["leaf", "rate"]):
+                    block[col] = tree_pred[col].to_numpy()
+            elif horizons_days and family == "dynamic_deephit":
                 surv = deephit_survival(cif, model, horizons_days)
                 block = pd.concat([block, surv.set_index(block.index)], axis=1)
             elif horizons_days and model.get("baseline_cumhaz"):

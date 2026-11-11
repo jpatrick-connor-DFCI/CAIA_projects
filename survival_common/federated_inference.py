@@ -94,6 +94,9 @@ class BundleError(ValueError):
 # --------------------------------------------------------------------- #
 # Loading
 # --------------------------------------------------------------------- #
+SURVIVAL_TREE_FAMILY = "survival_tree"
+
+
 def load_bundle(path) -> dict:
     """Read a bundle and check it is one this module understands.
 
@@ -122,7 +125,8 @@ def load_bundle(path) -> dict:
         )
     family = bundle.get("model_family")
     allowed = {"elastic_net_cox": {1}, "xgboost_cox": {1},
-               DEEPHIT_FAMILY: {1, 2, 3}, "predictive_checklist": {1}}
+               DEEPHIT_FAMILY: {1, 2, 3}, "predictive_checklist": {1},
+               SURVIVAL_TREE_FAMILY: {1}}
     if family not in allowed or version not in allowed[family]:
         raise BundleError(f"{path}: unsupported model_family/version {family!r}/{version}")
     return bundle
@@ -440,6 +444,9 @@ def load_model(bundle: dict, model: dict):
     if family == "predictive_checklist":
         return _checklist_components(model)
 
+    if family == SURVIVAL_TREE_FAMILY:
+        return FederatedSurvivalTree.from_model(model)
+
     raise BundleError(f"unknown model_family {family!r}")
 
 
@@ -556,6 +563,105 @@ def predict_checklist(frame: pd.DataFrame, model: dict) -> pd.DataFrame:
         "flag": checklist.predict(matrix),
         "probability": calibrator.predict(score / max(len(checklist.selected_indices), 1)),
     }, index=frame.index)
+
+
+class FederatedSurvivalTree:
+    """A frozen federated shallow survival tree (rpart ``method="exp"``).
+
+    Each internal node tests one item ``feature op threshold`` (``op`` is
+    ``<=`` or ``>=``); a missing or non-numeric value makes the item false, the
+    ``item_false`` policy the federated run used.  A row goes to
+    ``true_child`` when the item holds and to ``false_child`` otherwise.  Each
+    leaf carries its shrunken event rate (the risk score; higher is higher
+    risk) and the Kaplan-Meier curve of its pooled training rows in
+    ``time_unit_days`` units.
+
+    Routing reads only the node dicts, not a binarizer object, so scoring does
+    not depend on COMPASS's predictive-checklist package.
+    """
+
+    def __init__(self, nodes: dict[int, dict], leaves: dict[int, dict], time_unit_days: float):
+        self.nodes, self.leaves, self.time_unit_days = nodes, leaves, float(time_unit_days)
+
+    @classmethod
+    def from_model(cls, model: dict) -> "FederatedSurvivalTree":
+        if model.get("missing_policy") != "item_false":
+            raise BundleError(f"unsupported survival tree missing_policy {model.get('missing_policy')!r}")
+        nodes = {int(n["id"]): n for n in model["nodes"]}
+        leaves = {int(lf["id"]): lf for lf in model["leaves"]}
+        if 1 not in nodes:
+            raise BundleError("survival tree has no root node")
+        for nid, node in nodes.items():
+            if node.get("item") is None:
+                if nid not in leaves:
+                    raise BundleError(f"survival tree node {nid} has no split and no leaf entry")
+                continue
+            if node["item"].get("op") not in ("<=", ">="):
+                raise BundleError(f"survival tree node {nid}: unsupported op {node['item'].get('op')!r}")
+            for child in (node["false_child"], node["true_child"]):
+                if int(child) not in nodes:
+                    raise BundleError(f"survival tree node {nid}: child {child} missing")
+        return cls(nodes, leaves, model.get("time_unit_days") or 7)
+
+    @property
+    def features(self) -> list[str]:
+        return sorted({n["item"]["feature"] for n in self.nodes.values() if n.get("item")})
+
+    def item_holds(self, frame: pd.DataFrame, item: dict) -> np.ndarray:
+        values = pd.to_numeric(frame[item["feature"]], errors="coerce").astype(float)
+        values = values.replace([np.inf, -np.inf], np.nan).to_numpy()
+        threshold = float(item["threshold"])
+        with np.errstate(invalid="ignore"):
+            hit = values <= threshold if item["op"] == "<=" else values >= threshold
+        return hit & ~np.isnan(values)
+
+    def apply(self, frame: pd.DataFrame) -> np.ndarray:
+        """Leaf id for every row."""
+        absent = sorted(set(self.features) - set(frame.columns))
+        if absent:
+            raise BundleError(f"survival tree feature(s) absent locally: {absent}")
+        leaf = np.ones(len(frame), dtype=np.int64)
+        for nid in sorted(self.nodes):            # parents precede children
+            node = self.nodes[nid]
+            if node.get("item") is None:
+                continue
+            here = leaf == nid
+            hit = self.item_holds(frame, node["item"])
+            leaf[here & hit] = int(node["true_child"])
+            leaf[here & ~hit] = int(node["false_child"])
+        return leaf
+
+    def survival_at(self, leaf: np.ndarray, horizons_days) -> pd.DataFrame:
+        """Leaf KM survival at each horizon (held at its last value past the curve)."""
+        out = {}
+        for h in horizons_days:
+            t = float(h) / self.time_unit_days
+            by_leaf = {}
+            for lid, lf in self.leaves.items():
+                times = np.asarray(lf["km"]["time_unit"], dtype=float)
+                values = np.concatenate([[1.0], np.asarray(lf["km"]["survival"], dtype=float)])
+                by_leaf[lid] = float(values[np.searchsorted(times, t, side="right")])
+            out[f"survival_{int(h)}d"] = np.array([by_leaf[int(k)] for k in leaf])
+        return pd.DataFrame(out)
+
+    def predict(self, frame: pd.DataFrame, horizons_days=()) -> pd.DataFrame:
+        leaf = self.apply(frame)
+        rate = {lid: float(lf["rate"]) for lid, lf in self.leaves.items()}
+        out = pd.DataFrame({"leaf": leaf, "rate": [rate[int(k)] for k in leaf]}, index=frame.index)
+        if horizons_days:
+            out = pd.concat([out, self.survival_at(leaf, horizons_days).set_index(frame.index)], axis=1)
+        return out
+
+    def rules(self) -> dict[int, str]:
+        return {lid: lf.get("rule", "") for lid, lf in self.leaves.items()}
+
+    def __repr__(self) -> str:
+        return f"FederatedSurvivalTree(leaves={len(self.leaves)}, features={self.features})"
+
+
+def predict_tree(frame: pd.DataFrame, model: dict, horizons_days=()) -> pd.DataFrame:
+    """Leaf, leaf rate (the risk score) and optional leaf-KM survival per row."""
+    return FederatedSurvivalTree.from_model(model).predict(frame, horizons_days)
 
 
 def _load_deephit_module(model: dict):
@@ -855,6 +961,9 @@ def predict_risk(
     if family == "predictive_checklist":
         return predict_checklist(df, model)["score"].to_numpy(dtype=float)
 
+    if family == SURVIVAL_TREE_FAMILY:
+        return predict_tree(df, model)["rate"].to_numpy(dtype=float)
+
     design = build_design_matrix(df, model, age_col=age_col)
 
     if family == "elastic_net_cox":
@@ -953,7 +1062,7 @@ def main(argv=None) -> int:
     ap.add_argument("--id-col", default="person_id")
     ap.add_argument(
         "--horizons", default="",
-        help="comma-separated days, e.g. 365,730 (elastic-net, dynamic_deephit)"
+        help="comma-separated days, e.g. 365,730 (elastic-net, dynamic_deephit, survival_tree)"
     )
     ap.add_argument("--output", required=True)
     args = ap.parse_args(argv)
@@ -985,9 +1094,14 @@ def main(argv=None) -> int:
         print(f"[federated_inference] wrote {len(out):,} rows -> {args.output}")
         return 0
 
+    tree_pred = None
     if bundle.get("model_family") == "predictive_checklist":
         pred = predict_checklist(df, model)
         risk = pred["score"].to_numpy(dtype=float)
+    elif bundle.get("model_family") == SURVIVAL_TREE_FAMILY:
+        pred = None
+        tree_pred = predict_tree(df, model, horizons)
+        risk = tree_pred["rate"].to_numpy(dtype=float)
     else:
         pred = None
         risk = predict_risk(df, bundle, model, age_col=args.age_col)
@@ -1005,7 +1119,9 @@ def main(argv=None) -> int:
         out["probability"] = pred["probability"].to_numpy()
         out["flag"] = pred["flag"].to_numpy()
 
-    if horizons and pred is None:
+    if tree_pred is not None:
+        out = pd.concat([out, tree_pred.drop(columns="rate")], axis=1)
+    elif horizons and pred is None:
         surv = predict_survival(risk, model, horizons)
         out = pd.concat([out, surv.set_index(out.index)], axis=1)
 

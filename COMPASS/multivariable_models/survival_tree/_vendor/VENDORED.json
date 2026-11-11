@@ -1,0 +1,11 @@
+{
+  "source_repo": "caia-project-compass",
+  "source_dir": "rhino_scripts/feature_set_survival_tree",
+  "source_head_commit": "95cef2fcd5f0ccf955b1c244c1b352cfc6a22fdf",
+  "note": "source files were uncommitted working-tree copies at vendoring time; the hashes are authoritative",
+  "files": {
+    "checklist_core.py": "17643ca96556745552659d5e9864f11d1961cddf7918c2ddd31f46e8834eb789",
+    "federated_checklist.py": "e0b95bc335c167ea7791062222e9e866b227e91161f475bf6c3bacb589bb084a",
+    "survival_tree_core.py": "f00bc219e1052ce4191281b46841399adc4ca98d196f2bea0beca692134fe7d4"
+  }
+}
