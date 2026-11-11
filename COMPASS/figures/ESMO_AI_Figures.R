@@ -119,7 +119,9 @@ esmo_result1 <- function(d) {
     # Keep room for the full confusion-matrix labels; use narrower bar panels,
     # especially c, and minimal outer margins to bring the panels together.
     # Export aligns the plotting areas; b's legend occupies its upper right.
-    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.4, 3.8, 3), width = 11.2, height = 3.9,
+    # Sized for the 16:9 poster (160 x 90 cm): placed at 10.35 in wide, the
+    # slot under the column A title is 4.48 in tall (aspect 2.31).
+    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.4, 3.8, 3), width = 11.2, height = 4.85,
     plot_theme = theme(plot.margin = margin(4, 2, 4, 2),
       axis.title.x = element_text(margin = margin(t = 2)),
       axis.title.y = element_text(margin = margin(r = 2)),
@@ -195,10 +197,13 @@ esmo_result2 <- function(volcano, fig) {
   }
   names(plots) <- c("volcano_day0", "volcano_day180", "psa_km_day180", "testosterone_km_day180")
   # Cell 5 holds the single volcano legend shared by panels a and b.
-  # Reduce the KM row by 10%; shrink the canvas proportionally so the
-  # volcano row and shared legend retain their existing physical heights.
-  list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = c(.8, .055, .9),
-    shared_legend = list(panels = 1:2, cell = 5, nrow = 1), width = 10, height = 8 * 1.755 / 1.855,
+  # Row heights are in inches. Sized for the 16:9 poster (160 x 90 cm):
+  # placed at 10.35 in wide, the lower column A slot is 8.41 in tall
+  # (aspect 1.23). The shared legend row keeps its 0.24 in height; the extra
+  # height is split between the volcano and KM rows.
+  row_heights <- c(3.73, .24, 4.16)
+  list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = row_heights,
+    shared_legend = list(panels = 1:2, cell = 5, nrow = 1), width = 10, height = sum(row_heights),
     plot_theme = theme(plot.margin = margin(1, 5, 1, 5),
       plot.title = element_text(margin = margin(b = 2)),
       legend.box.spacing = grid::unit(2, "pt"), legend.margin = margin(1, 1, 1, 1)),
@@ -262,7 +267,9 @@ esmo_result3 <- function(performance, importance) {
   list(plots = list(heldout_performance = p1, xgboost_features_day180 = p2),
     tables = list(performance = d, top_features = selected), layout = matrix(1:2, nrow = 1),
     broken_auc = "heldout_performance",
-    col_widths = c(1, 1.1), width = 12, height = 5,
+    # Sized for the 16:9 poster (160 x 90 cm): placed at 10.09 in wide, the
+    # slot under the column B title is 4.48 in tall (aspect 2.25).
+    col_widths = c(1, 1.1), width = 12, height = 5.33,
     plot_theme = theme(plot.margin = margin(4, 6, 4, 6),
       legend.box.spacing = grid::unit(2, "pt"), legend.margin = margin(1, 1, 1, 1)),
     caption = paste("Results 3. Four-center held-out test mean time-dependent AUC(t) at ADT days 0, 90 and 180.",
@@ -342,8 +349,11 @@ esmo_result4 <- function(metrics, gradient) {
     tables = list(transfer_performance = d, stratification = gradient,
       event_probabilities = bind_rows(lapply(probabilities, function(p) p$data))),
     # The upper panel spans the full combined width of the three lower panels.
+    # Row heights are in inches. Sized for the 16:9 poster (160 x 90 cm):
+    # placed at 10.09 in wide, the lower column B slot is 8.15 in tall
+    # (aspect 1.24); most of the extra height goes to the probability panels.
     layout = rbind(c(1, 1, 1), 2:4),
-    row_heights = c(1.5, 1.4), width = 12.6, height = 8.7,
+    row_heights = c(4.9, 5.3), width = 12.6, height = 10.2,
     broken_auc = "transfer_auc",
     caption = paste("Results 4. XGBoost trained for platinum without DFCI, transferred without refitting.",
       "Top: mean AUC(t) and patient-bootstrap 95% CIs at ADT days 0/90/180; counts are endpoint-specific.",
