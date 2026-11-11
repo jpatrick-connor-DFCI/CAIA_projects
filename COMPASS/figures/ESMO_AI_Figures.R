@@ -100,8 +100,7 @@ esmo_result1 <- function(d) {
     geom_col(position = position_dodge(.8), width = .72) +
     scale_fill_manual(values = c(COLOR_PLATINUM_POS, COLOR_PLATINUM_NEG), name = NULL,
       labels = sprintf(c("Platinum+ (n=%s)", "Platinum− (n=%s)"), scales::comma(counts))) +
-    scale_x_discrete(expand = expansion(add = c(.65, .45))) +
-    # Extra left room keeps the first label clear of the 0% tick label.
+    scale_x_discrete(expand = expansion(add = .45)) +
     # Bars start on the x axis, matching the enrichment panel; the headroom
     # keeps the top-right legend clear of the tallest bar.
     scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, .25), labels = scales::label_percent(),
@@ -113,7 +112,7 @@ esmo_result1 <- function(d) {
   enrichment <- d$enrichment %>% mutate(group = sub("^Conventional$", "Conv.", group),
     group = factor(group, levels = group))
   p3 <- ggplot(enrichment, aes(group, probability, fill = group)) +
-    geom_col(width = .7) + geom_errorbar(aes(ymin = lo, ymax = hi), width = .18) +
+    geom_col(width = .55) + geom_errorbar(aes(ymin = lo, ymax = hi), width = .15) +
     scale_fill_manual(values = c(COLOR_PLATINUM_POS, "#9a9890"), guide = "none") +
     scale_x_discrete(expand = expansion(add = .5)) +
     scale_y_continuous(labels = scales::label_percent(), expand = expansion(mult = c(0, .24))) +
@@ -135,9 +134,9 @@ esmo_result1 <- function(d) {
     # (which run above the panel tops) clear the letters.
     composite_theme = theme(plot.tag = element_text(margin = margin(b = 12))),
     compact_x_titles = TRUE,
-    # b's legend sits above its panel's top-right corner, beside the letter,
-    # so it never covers the bars.
-    legend_inside = list(subtype_fractions = list(c(1, 1), c(1, 0))),
+    # b's legend sits in the top-right corner, centred near the 95% gridline
+    # (y range is 0-104%), where only the short AVPC/NEPC bars are below it.
+    legend_inside = list(subtype_fractions = list(c(1, .95 / 1.04), c(1, .5))),
     caption = paste("Results 1. Day-0 ADT prediction cohort intersected with LLM subtype labels.",
       "Manual truth is on the y axis; tile color is row-normalized and labels are counts.",
       "Subtype fractions are conditional on platinum status. Enrichment compares AVPC/NEPC with conventional labels;",
