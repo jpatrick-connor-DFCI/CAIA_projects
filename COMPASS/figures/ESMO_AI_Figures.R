@@ -87,7 +87,7 @@ esmo_result1 <- function(d) {
       pred = factor(pred, levels = classes, labels = class_labels))
   p1 <- ggplot(cm, aes(pred, truth, fill = row_fraction)) +
     geom_tile(color = "white", linewidth = 1) +
-    geom_text(aes(label = n, color = row_fraction > .5), size = 5, fontface = "bold") +
+    geom_text(aes(label = scales::comma(n), color = row_fraction > .5), size = 5, fontface = "bold") +
     scale_fill_gradient(low = "#eaf1fb", high = COLOR_PLATINUM_POS, limits = c(0, 1), guide = "none") +
     scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "#0b0b0b"), guide = "none") +
     scale_x_discrete(position = "bottom") +
@@ -181,6 +181,14 @@ esmo_volcano <- function(d, title) {
       override.aes = list(shape = 21, size = 3.2, alpha = 1)))
 }
 
+# Add thousands separators to standalone integers in figure text (e.g. the
+# shared KM legend's "n=1234; events=567" labels) without touching decimals.
+esmo_comma_text <- function(x) {
+  m <- gregexpr("(?<![0-9.,])[0-9]{4,}(?![0-9.,])", x, perl = TRUE)
+  regmatches(x, m) <- lapply(regmatches(x, m), function(v) scales::comma(as.numeric(v)))
+  x
+}
+
 esmo_result2 <- function(volcano, fig) {
   plots <- lapply(c(0, 180), function(lm) {
     d <- esmo_require(dplyr::filter(volcano, landmark_days == lm), paste("Cox associations at day", lm))
@@ -198,6 +206,9 @@ esmo_result2 <- function(volcano, fig) {
       stop("Results 2 requires pooled extreme-group ", lab, " KM exports at day 180")
     p <- plot_federated_lab_km(fig, lab, 180)
     if (is.null(p)) stop("Missing day-180 ", lab, " survival curves")
+    # The shared KM helper prints raw patient/event counts in its legend.
+    km_colour <- p$scales$get_scales("colour")
+    km_colour$labels <- setNames(esmo_comma_text(km_colour$labels), names(km_colour$labels))
     plots[[length(plots) + 1L]] <- p +
       annotate("text", x = -Inf, y = -Inf, label = p$labels$subtitle,
         hjust = -.05, vjust = -.6, size = 4, family = FIGURE_FONT) +
