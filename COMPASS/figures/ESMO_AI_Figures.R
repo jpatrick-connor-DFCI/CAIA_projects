@@ -119,9 +119,10 @@ esmo_result1 <- function(d) {
     # Keep room for the full confusion-matrix labels; use narrower bar panels,
     # especially c, and minimal outer margins to bring the panels together.
     # Export aligns the plotting areas; b's legend occupies its upper right.
-    # Sized for the 16:9 poster (160 x 90 cm): placed at 10.35 in wide, the
-    # slot under the column A title is 4.48 in tall (aspect 2.31).
-    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.4, 3.8, 3), width = 11.2, height = 4.85,
+    # Height keeps the confusion-matrix panel square (about 3.0 x 3.0 in at
+    # this width). On the 16:9 poster (160 x 90 cm) it is placed at
+    # 10.35 x 3.63 in; Results 2 takes the remaining column A height.
+    tables = d, layout = matrix(1:3, nrow = 1), col_widths = c(4.4, 3.8, 3), width = 11.2, height = 3.93,
     plot_theme = theme(plot.margin = margin(4, 2, 4, 2),
       axis.title.x = element_text(margin = margin(t = 2)),
       axis.title.y = element_text(margin = margin(r = 2)),
@@ -198,10 +199,11 @@ esmo_result2 <- function(volcano, fig) {
   names(plots) <- c("volcano_day0", "volcano_day180", "psa_km_day180", "testosterone_km_day180")
   # Cell 5 holds the single volcano legend shared by panels a and b.
   # Row heights are in inches. Sized for the 16:9 poster (160 x 90 cm):
-  # placed at 10.35 in wide, the lower column A slot is 8.41 in tall
-  # (aspect 1.23). The shared legend row keeps its 0.24 in height; the extra
-  # height is split between the volcano and KM rows.
-  row_heights <- c(3.73, .24, 4.16)
+  # placed at 10.35 in wide, the lower column A slot is 9.26 in tall
+  # (aspect 1.12), including the height freed by the square Results 1
+  # matrix. The shared legend row keeps its 0.24 in height; the extra height
+  # is split between the volcano and KM rows.
+  row_heights <- c(4.14, .24, 4.57)
   list(plots = plots, layout = rbind(1:2, c(5, 5), 3:4), row_heights = row_heights,
     shared_legend = list(panels = 1:2, cell = 5, nrow = 1), width = 10, height = sum(row_heights),
     plot_theme = theme(plot.margin = margin(1, 5, 1, 5),
