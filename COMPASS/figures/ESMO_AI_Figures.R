@@ -479,7 +479,11 @@ esmo_export <- function(result, section, output) {
   plots <- lapply(result$plots, esmo_style_plot)
   if (!is.null(result$plot_theme)) plots <- lapply(plots, function(p) p + result$plot_theme)
   for (name in names(result$legend_inside))
-    plots[[name]] <- plots[[name]] + do.call(esmo_inside_legend, as.list(result$legend_inside[[name]]))
+    # Legends drawn over a panel are set a step smaller than the outside ones.
+    plots[[name]] <- plots[[name]] + do.call(esmo_inside_legend, as.list(result$legend_inside[[name]])) +
+      theme(legend.text = element_text(size = 10.5 * ESMO_FONT_SCALE),
+        legend.key.height = grid::unit(11 * ESMO_FONT_SCALE, "pt"),
+        legend.key.width = grid::unit(11 * ESMO_FONT_SCALE, "pt"))
   row_weights <- if (is.null(result$row_heights)) rep(1, nrow(result$layout)) else result$row_heights
   col_weights <- if (is.null(result$col_widths)) rep(1, ncol(result$layout)) else result$col_widths
   for (i in seq_along(plots)) {
