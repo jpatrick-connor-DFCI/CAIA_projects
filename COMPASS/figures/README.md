@@ -5,22 +5,22 @@ Manuscript figures for the ADT cohort, platinum endpoint. The R stages prepare a
 
 ## Running
 
-1. For the standard figure groups, run `COMPASS/notebooks/05_prep_figure_data.ipynb`.
+1. For the standard figure groups, run `COMPASS/notebooks/manuscript/05_prep_figure_data.ipynb`.
    It calls `prepare_figure_data.py` to scan the cohort data and federated
    deliveries into Polars tables plus a manifest under `COMPASS_FIGURE_DATA_ROOT`.
-2. Run the two R entry scripts (both in `COMPASS/notebooks/`; the code they source
+2. Run the two R entry scripts (both in `COMPASS/notebooks/figures/`; the code they source
    stays in this folder):
 
    ```sh
-   Rscript COMPASS/notebooks/final_figure_data_prep.R   # R-side data prep / cache
-   Rscript COMPASS/notebooks/run_figure_render.R        # draw PDF and SVG figures, write figure data
+   Rscript COMPASS/notebooks/figures/final_figure_data_prep.R   # R-side data prep / cache
+   Rscript COMPASS/notebooks/figures/run_figure_render.R        # draw PDF and SVG figures, write figure data
    ```
 
    Flip the `FIGURES` toggles at the top of `figure_run.R` to run a subset, or
    override them without editing the file:
 
    ```sh
-   COMPASS_FIGURE_GROUPS=transfer_survival,transfer_checklists Rscript COMPASS/notebooks/run_figure_render.R
+   COMPASS_FIGURE_GROUPS=transfer_survival,transfer_checklists Rscript COMPASS/notebooks/figures/run_figure_render.R
    ```
 
    Preparation computes the source panels and tables needed by composites, but
@@ -36,10 +36,10 @@ For the four Results blocks in `COMPASS_ESMO_AI_proposed` (9 November 2026),
 use the separate poster entry point:
 
 ```sh
-Rscript COMPASS/figures/ESMO_AI_Figures.R
+Rscript COMPASS/notebooks/figures/ESMO_AI_Figures.R
 ```
 
-In an R session, `source("COMPASS/figures/ESMO_AI_Figures.R")` or RStudio's
+In an R session, `source("COMPASS/notebooks/figures/ESMO_AI_Figures.R")` or RStudio's
 Source button also runs generation. The script prints the output directory,
 preparation progress, and each saved figure set. For tests or function-only
 loading, set `options(compass.esmo.autorun = FALSE)` before sourcing, then call
@@ -77,7 +77,7 @@ The script honors `COMPASS_DATA_ROOT`, `COMPASS_FIG_ROOT`, `COMPASS_RHINO_ROOT`,
 ```sh
 COMPASS_ESMO_SECTIONS=2,3,4 \
 COMPASS_ESMO_OUTPUT_ROOT=/path/to/poster-figures \
-Rscript COMPASS/figures/ESMO_AI_Figures.R
+Rscript COMPASS/notebooks/figures/ESMO_AI_Figures.R
 ```
 
 To update the layout of an existing figure delivery locally, use its aggregate
@@ -86,7 +86,7 @@ CSV tables instead of rereading the cluster's analysis files:
 ```sh
 COMPASS_ESMO_AGGREGATE_ROOT="$HOME/Desktop/ESMO_AI" \
 COMPASS_ESMO_OUTPUT_ROOT="$HOME/Desktop/ESMO_AI_updated" \
-Rscript COMPASS/figures/ESMO_AI_Figures.R
+Rscript COMPASS/notebooks/figures/ESMO_AI_Figures.R
 ```
 
 This mode needs the `results_*/data/*.csv` files from a previous run and uses the
@@ -170,7 +170,7 @@ still resolve.
 
 ## Alternative Figure 6: notebook 07
 
-Run `COMPASS/notebooks/07_checklist_test.ipynb` after notebook 04. The analysis
+Run `COMPASS/notebooks/testing/07_checklist_test.ipynb` after notebook 04. The analysis
 implements [the November 7 plan](../federated_models/Figure_6_augmentation_analysis_plan.md)
 in `federated_models/checklist_augmentation{,_inputs}.py`. It checks frozen item
 definitions, patient scores/flags, counts and AUCs against notebook 04 and the
@@ -198,8 +198,8 @@ and `supplement/` to publish there directly. It defaults to
 ```sh
 export COMPASS_FIGURE_GROUPS=checklist_augmentation
 export COMPASS_MANUSCRIPT_FIG_ROOT=/path/to/figures-repo
-Rscript COMPASS/notebooks/final_figure_data_prep.R
-Rscript COMPASS/notebooks/run_figure_render.R
+Rscript COMPASS/notebooks/figures/final_figure_data_prep.R
+Rscript COMPASS/notebooks/figures/run_figure_render.R
 ```
 
 All three landmarks have their own output subfolder under `main/alternative_06/`:

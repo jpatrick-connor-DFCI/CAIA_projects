@@ -1,7 +1,7 @@
 local({
   old <- options(compass.esmo.autorun = FALSE)
   on.exit(options(old))
-  source("COMPASS/figures/ESMO_AI_Figures.R", local = .GlobalEnv)
+  source("COMPASS/notebooks/figures/ESMO_AI_Figures.R", local = .GlobalEnv)
 })
 esmo_load_helpers()
 

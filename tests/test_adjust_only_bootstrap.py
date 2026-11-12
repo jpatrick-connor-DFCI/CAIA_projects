@@ -220,7 +220,7 @@ def test_modes_with_different_test_patients_are_refused(runs):
 
 
 def _notebook():
-    path = Path(cp.COMPASS_DIR) / "notebooks" / "03c_multivariate_adjust_only.ipynb"
+    path = Path(cp.COMPASS_DIR) / "notebooks" / "manuscript" / "03c_multivariate_adjust_only.ipynb"
     return {cell["id"]: "".join(cell["source"]) for cell in json.loads(path.read_text())["cells"]}
 
 

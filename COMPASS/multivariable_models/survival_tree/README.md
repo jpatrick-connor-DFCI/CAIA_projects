@@ -4,7 +4,7 @@ A shallow survival tree (depth 1 to 3) fit on the local DFCI ADT cohort for **ti
 scores are then evaluated for **time to NEPC** and **time to AVPC**. This is the single-site counterpart of
 `caia-project-compass/rhino_scripts/feature_set_survival_tree`. That app's README gives the full model description.
 
-Notebook: `COMPASS/notebooks/03d_shallow_decision_tree.ipynb`. It runs this package and scores the federated
+Notebook: `COMPASS/notebooks/manuscript/03d_shallow_decision_tree.ipynb`. It runs this package and scores the federated
 (no-DFCI) tree bundle on the same rows.
 
 ## Model

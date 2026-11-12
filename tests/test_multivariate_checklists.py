@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-NOTEBOOK_DIR = ROOT / "COMPASS/notebooks"
+NOTEBOOK_DIR = ROOT / "COMPASS/notebooks/manuscript"
 INPUTS_ROOT = 'Path("/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/survival_analysis")'
 
 

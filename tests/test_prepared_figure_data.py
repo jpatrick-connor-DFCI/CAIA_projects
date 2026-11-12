@@ -168,7 +168,7 @@ def test_federated_scope_needs_no_patient_data(tmp_path, monkeypatch):
 
 def test_transfer_notebook_skips_feature_set_bundles(tmp_path):
     """The feature-set refits share the regular file names, so 04 must not merge them."""
-    notebook = json.loads((Path(prep.__file__).parents[1] / "notebooks" / "04_federated_transfer.ipynb").read_text())
+    notebook = json.loads((Path(prep.__file__).parents[1] / "notebooks" / "manuscript" / "04_federated_transfer.ipynb").read_text())
     source = "".join(next(c["source"] for c in notebook["cells"] if "def find_bundles" in "".join(c["source"])))
     helpers = source[source.index("def is_no_dfci"):source.index("BUNDLE_PATHS, DELIVERY")]
     namespace = {"re": __import__("re"), "OUTPUT_DIR": tmp_path / "federated_transfer_adt_no_DFCI",
@@ -276,7 +276,7 @@ def test_preparation_notebook_runs_all_python_cells(tmp_path, monkeypatch):
     monkeypatch.delenv("COMPASS_PREPARE_OVERWRITE", raising=False)
     root = Path(__file__).resolve().parents[1]
     monkeypatch.chdir(root)
-    notebook = json.loads((root / "COMPASS/notebooks/05_prep_figure_data.ipynb").read_text())
+    notebook = json.loads((root / "COMPASS/notebooks/manuscript/05_prep_figure_data.ipynb").read_text())
     state = {"display": lambda frame: None}
     for i, cell in enumerate(notebook["cells"]):
         if cell["cell_type"] == "code":

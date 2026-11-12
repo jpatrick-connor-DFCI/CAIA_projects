@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 # Figures for Results 1-4 of COMPASS_ESMO_AI_proposed (9 November 2026).
-# Run from any directory: Rscript /path/to/COMPASS/figures/ESMO_AI_Figures.R
-# Or use source("COMPASS/figures/ESMO_AI_Figures.R") / RStudio's Source button.
+# Run from any directory: Rscript /path/to/COMPASS/notebooks/figures/ESMO_AI_Figures.R
+# Or use source("COMPASS/notebooks/figures/ESMO_AI_Figures.R") / RStudio's Source button.
 # To load functions without running, set options(compass.esmo.autorun = FALSE).
 # See --help and README.md for paths. Uses original analysis exports, never
 # poster screenshots, PDF-derived estimates, or hard-coded manuscript results.
@@ -17,11 +17,13 @@ esmo_script_dir <- local({
   if (!file.exists(path)) path <- gsub("~+~", " ", path, fixed = TRUE)
   dirname(normalizePath(path, mustWork = TRUE))
 })
+# Plotting and workflow helpers stay in COMPASS/figures/.
+esmo_lib_dir <- normalizePath(file.path(esmo_script_dir, "..", "..", "figures"), mustWork = TRUE)
 
 esmo_load_helpers <- function() {
   target <- environment(esmo_load_helpers)
-  source(file.path(esmo_script_dir, "COMPASS_generate_figures_pipeline.R"), local = target)
-  source(file.path(esmo_script_dir, "figure_workflow.R"), local = target)
+  source(file.path(esmo_lib_dir, "COMPASS_generate_figures_pipeline.R"), local = target)
+  source(file.path(esmo_lib_dir, "figure_workflow.R"), local = target)
 }
 
 esmo_require <- function(d, what) {
@@ -552,7 +554,7 @@ esmo_main <- function(args = commandArgs(TRUE)) {
   if (length(args)) {
     if (!identical(args, "--help")) stop("Only --help is accepted; configure paths with environment variables.")
     cat(paste(c("Generate Results 1-4 from COMPASS_ESMO_AI_proposed.",
-      "Usage: Rscript COMPASS/figures/ESMO_AI_Figures.R",
+      "Usage: Rscript COMPASS/notebooks/figures/ESMO_AI_Figures.R",
       "COMPASS_ESMO_SECTIONS           1,2,3,4 (comma-separated subset)",
       "COMPASS_DATA_ROOT               COMPASS analysis data (existing cluster default)",
       "COMPASS_LLM_ANNOTATIONS_PATH     directory containing primary_subtype_labels.parquet",

@@ -1,5 +1,5 @@
 # Startup regressions need only base R, independently of plotting packages/data.
-path <- normalizePath("COMPASS/figures/ESMO_AI_Figures.R", mustWork = TRUE)
+path <- normalizePath("COMPASS/notebooks/figures/ESMO_AI_Figures.R", mustWork = TRUE)
 local({
   old <- options(compass.esmo.autorun = NULL)
   on.exit(options(old))

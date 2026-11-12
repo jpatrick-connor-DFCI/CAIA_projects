@@ -1,13 +1,13 @@
 #!/usr/bin/env Rscript
-# Figure render: draws the PDF and SVG figures from the prepared cache and writes the figure data tables.
+# Figure data prep: builds the cached tables and scene objects the R figures consume (no rendering).
 #
-#   Rscript COMPASS/notebooks/run_figure_render.R
-#   COMPASS_FIGURE_GROUPS=checklist_augmentation Rscript COMPASS/notebooks/run_figure_render.R
-# Notebook 07's alternative Figure 6 goes to main/alternative_06 in COMPASS_MANUSCRIPT_FIG_ROOT.
+#   Rscript COMPASS/notebooks/figures/final_figure_data_prep.R
+#   COMPASS_FIGURE_GROUPS=checklist_augmentation Rscript COMPASS/notebooks/figures/final_figure_data_prep.R
+# The augmentation group consumes notebook 07's aggregate receipt independently of notebook 05.
 #
 # Toggles, paths and environment overrides live in COMPASS/figures/figure_run.R;
 # the plotting and workflow code it sources stays in COMPASS/figures/.
-FIGURE_STAGE <- "render"
+FIGURE_STAGE <- "prepare"
 script_dir <- local({
   frames <- Filter(function(path) is.character(path) && length(path) == 1L && nzchar(path),
     lapply(sys.frames(), function(frame) frame$ofile))
@@ -15,6 +15,6 @@ script_dir <- local({
     sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)[1L])
   if (is.na(path)) file.path(Sys.getenv("CAIA_PROJECT_ROOT", "/data/gusev/USERS/jpconnor/code/CAIA"),
     "COMPASS", "figures") else normalizePath(file.path(dirname(normalizePath(path, mustWork = TRUE)),
-    "..", "figures"), mustWork = TRUE)
+    "..", "..", "figures"), mustWork = TRUE)
 })
 source(file.path(script_dir, "figure_run.R"))

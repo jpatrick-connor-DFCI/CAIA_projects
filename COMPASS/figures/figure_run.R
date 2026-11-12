@@ -1,5 +1,5 @@
 # Shared run logic for the COMPASS manuscript figures (ADT cohort, platinum endpoint).
-# Sourced by the two entry scripts in COMPASS/notebooks/:
+# Sourced by the two entry scripts in COMPASS/notebooks/figures/:
 #   final_figure_data_prep.R  stage "prepare": builds the cached figure data R needs
 #   run_figure_render.R       stage "render":  draws PDFs and writes figure data tables
 # Both expect `script_dir` (this folder) and `FIGURE_STAGE` to be set before sourcing.
@@ -11,7 +11,7 @@
 # read in the configuration section. COMPASS_FIGURE_GROUPS (comma-separated
 # group names) overrides the toggles, e.g. for cluster jobs:
 #
-#   COMPASS_FIGURE_GROUPS=transfer_survival,transfer_checklists Rscript COMPASS/notebooks/run_figure_render.R
+#   COMPASS_FIGURE_GROUPS=transfer_survival,transfer_checklists Rscript COMPASS/notebooks/figures/run_figure_render.R
 
 # ---- Figure groups ----------------------------------------------------------
 # Prepare and render only the manuscript figures.

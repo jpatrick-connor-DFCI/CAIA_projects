@@ -44,7 +44,7 @@ local({
     COMPASS_AUGMENTATION_LANDMARKS="90")
   entry <- function(name, success=TRUE) {
     log <- file.path(root,paste0(name,".log"))
-    result <- system2(file.path(R.home("bin"),"Rscript"),file.path("COMPASS/notebooks",paste0(name,".R")),stdout=log,stderr=log)
+    result <- system2(file.path(R.home("bin"),"Rscript"),file.path("COMPASS/notebooks/figures",paste0(name,".R")),stdout=log,stderr=log)
     if(success && result!=0L) stop(paste(readLines(log),collapse="\n"))
     if(!success) stopifnot(result!=0L)
   }
