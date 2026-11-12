@@ -1242,9 +1242,9 @@ render_federated_checklist_cards <- function(root,federated_path,dpi,overwrite,v
     ggplot2::facet_wrap(~landmark_label,nrow=1,drop=FALSE) +
     ggplot2::scale_x_discrete(drop=FALSE) +
     ggplot2::scale_fill_manual(values=FEDERATED_CHECKLIST_COLORS,name=NULL,drop=FALSE) +
-    ggplot2::coord_cartesian(ylim=c(0,1)) +
     ggplot2::labs(title="a  Held-out test AUC(t)",x="Checklist horizon",y="AUC(t)") +
     federated_transfer_theme()
+  auc <- auc_break_axis(auc)
   cards <- list()
   for(h in names(FEDERATED_CHECKLIST_HORIZONS)) for(lm in c(0,90,180)) {
     days <- FEDERATED_CHECKLIST_HORIZONS[[h]]
@@ -1534,14 +1534,14 @@ plot_federated_transfer <- function(d, caption, title=FEDERATED_TRANSFER_SPEC$ti
 plot_federated_transfer_bars <- function(d, ymax=1) {
   d <- droplevels(d)
   fill <- unname(federated_transfer_colors(levels(d$model))[as.character(d$model[1L])])
-  ggplot(d,aes(landmark,value)) +
+  p <- ggplot(d,aes(landmark,value)) +
     geom_col(fill=fill,width=.65,na.rm=TRUE) +
     geom_errorbar(aes(ymin=lo,ymax=hi),width=.22,linewidth=.5,na.rm=TRUE) +
     geom_hline(yintercept=.5,color="grey40",linetype="dotted",linewidth=.5) +
-    scale_y_continuous(limits=c(0,ymax),breaks=seq(0,1,.25),expand=expansion(mult=c(0,0))) +
     facet_grid(.~endpoint_label) +
     labs(x="Landmark after ADT initiation",y="Mean AUC(t)") +
     federated_transfer_theme() + theme(legend.position="none")
+  auc_break_axis(p,upper=ymax)
 }
 
 plot_federated_transfer_clinical <- function(d, caption, title=NULL, subtitle=NULL) {
@@ -2289,16 +2289,16 @@ plot_federated_checklist_comparison <- function(comparison, f=FEDERATED_CHECKLIS
     scales::comma(strips$n_patients),scales::comma(strips$n_events)),strips$endpoint)
   d <- mutate(comparison,endpoint_label=factor(labels[endpoint],levels=labels),
     rule_label=factor(FEDERATED_CHECKLIST_RULES[rule],levels=FEDERATED_CHECKLIST_RULES))
-  ggplot(d,aes(rule_label,auc,fill=rule==FEDERATED_CHECKLIST_RULE)) +
+  p <- ggplot(d,aes(rule_label,auc,fill=rule==FEDERATED_CHECKLIST_RULE)) +
     geom_col(width=.65,na.rm=TRUE) +
     geom_errorbar(aes(ymin=auc_lo,ymax=auc_hi),width=.22,linewidth=.5,na.rm=TRUE) +
     geom_hline(yintercept=.5,color="grey40",linetype="dotted",linewidth=.5) +
     scale_fill_manual(values=c(`TRUE`=FEDERATED_CHECKLIST_COLORS[["Checklist"]],`FALSE`="#9a9a96"),guide="none") +
-    scale_y_continuous(limits=c(0,1),breaks=seq(0,1,.25),expand=expansion(mult=c(0,.02))) +
     facet_grid(.~endpoint_label) +
     labs(x=NULL,y=paste(federated_transfer_horizon_label(f$horizon_days),"AUC")) +
     federated_transfer_theme() +
     theme(axis.text.x=element_text(angle=30,hjust=1))
+  auc_break_axis(p)
 }
 
 # Aggregate KM curves and binned trajectories exported by the federated run
@@ -3465,11 +3465,11 @@ manuscript_full_checklist_transfer <- function(direct, generalized) {
     ggplot2::geom_errorbar(ggplot2::aes(ymin=auc_lo,ymax=auc_hi),position=dodge,width=.18,na.rm=TRUE) +
     ggplot2::facet_grid(endpoint~horizon) +
     ggplot2::scale_fill_manual(values=c("Generalized"="#7852A1","Direct transfer"="#B6A2CC"),drop=FALSE) +
-    ggplot2::scale_y_continuous(limits=c(0,1),breaks=seq(0,1,.25),expand=ggplot2::expansion(mult=c(0,.02))) +
     ggplot2::labs(x="Landmark after ADT start",y="Horizon-specific AUC(t)",fill="Checklist") +
     ggplot2::theme_classic(base_size=10) +
     ggplot2::theme(legend.position="top",strip.background=ggplot2::element_blank(),
       strip.text=ggplot2::element_text(face="bold"),panel.spacing=grid::unit(.8,"lines"))
+  p <- auc_break_axis(p)
   list(plot=p,spec=list(key="federated_06_checklist_no_dfci__full_transfer",width=10,height=7),data=d,
     legend=paste("Full Dana-Farber ADT cohort, without a sequencing or Gleason-score restriction.",
       "Bars show horizon-specific inverse-probability-of-censoring-weighted AUC (balanced accuracy for a binary checklist);",

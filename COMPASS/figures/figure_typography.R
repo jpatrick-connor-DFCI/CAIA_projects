@@ -109,6 +109,45 @@ figure_style_grob <- function(g) {
   g
 }
 
+# Shared AUC(t) axis: zero, a marked break, then a linear scale from 0.25.
+# Bars stay continuous to zero; figure_plot_grob() draws the break mark.
+auc_break_transform <- function() {
+  scales::trans_new("esmo_auc_break",
+    transform = function(x) ifelse(x < .25, x * .36, x - .16),
+    inverse = function(x) ifelse(x < .09, x / .36, x + .16))
+}
+
+auc_break_axis <- function(p, upper = 1) {
+  suppressMessages(p +
+    ggplot2::scale_y_continuous(transform = auc_break_transform(), breaks = seq(0, 1, .25),
+      labels = scales::label_number(accuracy = .01), expand = ggplot2::expansion(mult = c(0, 0))) +
+    ggplot2::coord_cartesian(ylim = c(0, upper)))
+}
+
+# Overlay a white-backed double slash on the y axis inside the omitted strip.
+auc_break_mark <- function(g, p) {
+  built <- ggplot2::ggplot_build(p)
+  limits <- built$layout$panel_params[[1]]$y.range
+  y <- (auc_break_transform()$transform(.125) - limits[1]) / diff(limits)
+  panels <- g$layout[grepl("^panel($|-)", g$layout$name), ]
+  panel <- panels[which.min(panels$l), ]
+  mark <- grid::grobTree(
+    grid::rectGrob(x = 0, y = y, width = grid::unit(8, "pt"), height = grid::unit(10, "pt"),
+      gp = grid::gpar(fill = "white", col = NA)),
+    grid::segmentsGrob(x0 = grid::unit(-3, "pt"), x1 = grid::unit(3, "pt"),
+      y0 = grid::unit(y, "npc") + grid::unit(c(-4, 0), "pt"),
+      y1 = grid::unit(y, "npc") + grid::unit(c(0, 4), "pt"),
+      gp = grid::gpar(col = "black", lwd = 1)))
+  gtable::gtable_add_grob(g, mark, t = panel$t, b = panel$b, l = panel$l, r = panel$r,
+    clip = "off", z = Inf, name = "auc-axis-break")
+}
+
+auc_break_plot <- function(p) {
+  scale <- tryCatch(p$scales$get_scales("y"), error = function(e) NULL)
+  trans <- if (is.null(scale)) NULL else if (!is.null(scale$transformation)) scale$transformation else scale$trans
+  !is.null(trans) && identical(trans$name, "esmo_auc_break")
+}
+
 figure_plot_grob <- function(p, legend_size=NULL) {
   figure_require_font()
   # grid measures labels while building the gtable. Base PDF/PostScript devices
@@ -119,7 +158,10 @@ figure_plot_grob <- function(p, legend_size=NULL) {
     figure_pdf_device(path,width=size[1],height=size[2])
     on.exit({grDevices::dev.off();unlink(path)},add=TRUE)
   }
-  figure_style_grob(ggplot2::ggplotGrob(figure_style_plot(p, legend_size=legend_size)))
+  styled <- figure_style_plot(p, legend_size=legend_size)
+  g <- ggplot2::ggplotGrob(styled)
+  if (auc_break_plot(styled)) g <- auc_break_mark(g, styled)
+  figure_style_grob(g)
 }
 
 # The standalone checklist metrics use base graphics instead of ggplot.

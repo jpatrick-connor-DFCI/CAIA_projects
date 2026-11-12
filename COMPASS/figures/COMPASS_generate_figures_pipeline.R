@@ -794,16 +794,18 @@ plot_model_discrimination <- function(data, metric, ylabel, colors,
       position = position_dodge(width = 0.85), width = 0.8, color = "white") +
       scale_linetype_manual(values = c(`TRUE` = "dashed", `FALSE` = "solid"), guide = "none")
   }
-  p + geom_text(aes(label = ifelse(is.finite(value), sprintf("%.3f", value), "")),
+  p <- p + geom_text(aes(label = ifelse(is.finite(value), sprintf("%.3f", value), "")),
       position = position_dodge(width = 0.85), vjust = -0.4, size = 2.5, show.legend = FALSE) +
     geom_hline(yintercept = 0.5, color = "grey", linetype = "dotted", linewidth = 0.9) +
     scale_fill_manual(values = colors, name = NULL, drop = FALSE) +
-    coord_cartesian(ylim = c(0, max(1.04, ymax))) +
     labs(x = NULL, y = ylabel) + theme_fig() +
     guides(fill = guide_legend(ncol = 2, byrow = TRUE)) +
     theme(legend.position = if (show_legend) "top" else "none",
       legend.justification = "right", legend.box.just = "right",
       legend.direction = "horizontal", panel.grid.major.x = element_blank())
+  # Every AUC(t) panel shares the zero / break / linear-from-0.25 axis.
+  if (grepl("AUC", ylabel, fixed = TRUE)) auc_break_axis(p, upper = max(1.04, ymax)) else
+    p + coord_cartesian(ylim = c(0, max(1.04, ymax)))
 }
 
 plot_model_importance <- function(df, kind, title, top_n=15, exclude_drop=TRUE) {

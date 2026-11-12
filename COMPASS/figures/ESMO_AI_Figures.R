@@ -244,21 +244,8 @@ esmo_result2 <- function(volcano, fig) {
       "rather than assumed to be 10% or 20%. Shading is 95% CI; legends give patients/events; log-rank p values appear at the lower left of each KM panel."))
 }
 
-esmo_auc_transform <- function() {
-  # Reserve a short strip for zero and the break; keep AUC >= .25 linear.
-  scales::trans_new("esmo_auc_break",
-    transform = function(x) ifelse(x < .25, x * .36, x - .16),
-    inverse = function(x) ifelse(x < .09, x / .36, x + .16))
-}
-
-esmo_auc_axis <- function(p, upper = 1) {
-  # Bars remain continuous to zero across the compressed interval; only the
-  # y-axis receives a break mark in esmo_plot_grob().
-  suppressMessages(p +
-    scale_y_continuous(transform = esmo_auc_transform(), breaks = seq(0, 1, .25),
-      labels = scales::label_number(accuracy = .01), expand = expansion(mult = c(0, 0))) +
-    coord_cartesian(ylim = c(0, upper)))
-}
+esmo_auc_transform <- auc_break_transform
+esmo_auc_axis <- auc_break_axis
 
 esmo_result3 <- function(performance, importance) {
   models <- c("Cox baseline (age)", "Elastic-Net Cox", "XGBoost Survival")
@@ -444,21 +431,7 @@ esmo_style_plot <- function(p) {
 esmo_plot_grob <- function(p, broken_auc = FALSE) {
   g <- ggplot2::ggplotGrob(p)
   if (!broken_auc) return(g)
-  built <- ggplot2::ggplot_build(p)
-  limits <- built$layout$panel_params[[1]]$y.range
-  y <- (esmo_auc_transform()$transform(.125) - limits[1]) / diff(limits)
-  panels <- g$layout[grepl("^panel($|-)", g$layout$name), ]
-  panel <- panels[which.min(panels$l), ]
-  # Overlay a white-backed double slash on the y-axis, inside the omitted strip.
-  mark <- grid::grobTree(
-    grid::rectGrob(x = 0, y = y, width = grid::unit(8, "pt"), height = grid::unit(10, "pt"),
-      gp = grid::gpar(fill = "white", col = NA)),
-    grid::segmentsGrob(x0 = grid::unit(-3, "pt"), x1 = grid::unit(3, "pt"),
-      y0 = grid::unit(y, "npc") + grid::unit(c(-4, 0), "pt"),
-      y1 = grid::unit(y, "npc") + grid::unit(c(0, 4), "pt"),
-      gp = grid::gpar(col = "black", lwd = 1)))
-  gtable::gtable_add_grob(g, mark, t = panel$t, b = panel$b, l = panel$l, r = panel$r,
-    clip = "off", z = Inf, name = "auc-axis-break")
+  auc_break_mark(g, p)
 }
 
 esmo_export <- function(result, section, output) {
