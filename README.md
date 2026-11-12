@@ -89,6 +89,8 @@ COMPASS/
 │   │   ├── 06_reviewer_suggestions.ipynb
 │   │   ├── 07_checklist_test.ipynb
 │   │   └── 08_metastatic_transfer_test.ipynb
+│   ├── patient_extraction/               # data requests (PHI outputs go to the protected data root)
+│   │   └── 01_high_vs_low_risk_transfer_pxs.ipynb  # top/bottom-decile transferred-XGBoost patients + pathology reports
 │   └── figures/                          # R entry scripts (code they source stays in COMPASS/figures/)
 │       ├── final_figure_data_prep.R
 │       ├── run_figure_render.R
