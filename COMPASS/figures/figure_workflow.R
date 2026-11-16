@@ -431,6 +431,9 @@ manuscript_renders_plan <- function() {
       target=file.path("main",paste0(c("02_llm_phenotyping","03_federated_lab_associations",
         "04_federated_predictions","05_federated_transfer_to_DFCI",
         "06_federated_checklist_transfer_to_DFCI"),".pdf"))),
+    # Alternative Figure 5 with the Cox hazard-ratio forest as panel b.
+    data.frame(source=manuscript("federated_05_transfer_no_dfci__cox_hr"),
+      target=file.path("main","alternative_05","05_federated_transfer_to_DFCI_cox_hr.pdf")),
     data.frame(source=file.path(FIGURE_SECTIONS[["multivariate_federated"]],"checklist_supplement__platinum.pdf"),
       target=file.path("supplement","S4_checklist_supplement_platinum.pdf")),
     data.frame(source=vapply(keys$supplement,manuscript,character(1)),
@@ -1836,6 +1839,64 @@ federated_transfer_km_tables <- function(km) {
   lapply(out,bind_rows)
 }
 
+# Alternative Figure 5 panel b: unpenalized univariable Cox of time to each endpoint
+# from each landmark (ADT clock) on the transferred score, standardized within the
+# Dana-Farber patients at risk in that endpoint x bundle x landmark cell (HR per SD,
+# 95% Wald CI). Cells below the KM event floor, without score variation or whose
+# fit fails are kept with NA estimates so the panel can label them.
+FEDERATED_TRANSFER_COX_HR_TABLE <- "transfer_km_cox_hr_no_dfci"
+federated_transfer_cox_hr_cell <- function(z) {
+  na <- tibble(sd_score=NA_real_,log_hr=NA_real_,se=NA_real_,hazard_ratio_per_sd=NA_real_,
+    ci_lower=NA_real_,ci_upper=NA_real_,p_value=NA_real_)
+  z <- z[is.finite(z$risk_score),,drop=FALSE]
+  s <- if(nrow(z)>1L) stats::sd(z$risk_score) else NA_real_
+  if(sum(z$event)<FEDERATED_TRANSFER_KM_MIN_EVENTS || !is.finite(s) || s<=0) return(mutate(na,sd_score=s))
+  z$score_sd <- (z$risk_score-mean(z$risk_score))/s
+  fit <- tryCatch(survival::coxph(survival::Surv(duration_days,event)~score_sd,data=z,ties="efron"),
+    error=function(e) NULL)
+  if(is.null(fit)) return(mutate(na,sd_score=s))
+  b <- unname(stats::coef(fit)[["score_sd"]]); se <- sqrt(unname(stats::vcov(fit)[1,1]))
+  if(!is.finite(b) || !is.finite(se)) return(mutate(na,sd_score=s))
+  tibble(sd_score=s,log_hr=b,se=se,hazard_ratio_per_sd=exp(b),ci_lower=exp(b-stats::qnorm(.975)*se),
+    ci_upper=exp(b+stats::qnorm(.975)*se),p_value=2*stats::pnorm(-abs(b/se)))
+}
+federated_transfer_cox_hr <- function(km) {
+  d <- km[km$clock=="adt",,drop=FALSE]
+  if(!nrow(d)) return(NULL)
+  d %>% group_by(endpoint,bundle,model_family,landmark_days) %>%
+    group_modify(function(z,key) bind_cols(tibble(n=nrow(z),events=sum(z$event)),federated_transfer_cox_hr_cell(z))) %>%
+    ungroup() %>% mutate(clock="adt") %>%
+    arrange(match(endpoint,names(FEDERATED_TRANSFER_ENDPOINTS)),model_family,landmark_days)
+}
+
+# Forest of the HRs above for one bundle: landmarks on y, one facet per endpoint,
+# log-scale HR on x with the estimate and n/events printed at the right edge.
+plot_federated_transfer_cox_hr <- function(d, model_family=FEDERATED_TRANSFER_KM_FIGURE$model_family) {
+  d <- d[d$model_family==model_family & d$endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS),,drop=FALSE]
+  if(!nrow(d)) return(NULL)
+  short <- FEDERATED_TRANSFER_ENDPOINTS_SHORT
+  landmarks <- sort(unique(as.integer(d$landmark_days)))
+  d <- mutate(d,endpoint_label=factor(unname(short[endpoint]),levels=unname(short)),
+    landmark=factor(paste("Day",as.integer(landmark_days)),levels=rev(paste("Day",landmarks))),
+    estimable=is.finite(hazard_ratio_per_sd),
+    label=ifelse(estimable,sprintf("%.2f (%.2f–%.2f)\n%s/%s",hazard_ratio_per_sd,ci_lower,ci_upper,
+      scales::comma(n),scales::comma(events)),sprintf("Not estimable\n%s/%s",scales::comma(n),scales::comma(events))))
+  limits <- range(c(1,d$ci_lower,d$ci_upper),finite=TRUE)
+  # Leave room on the right for the printed estimates.
+  span <- diff(log(limits)); limits <- exp(log(limits)+c(-.08,.75)*max(span,.2))
+  model <- federated_transfer_model_label(model_family)
+  color <- unname(federated_transfer_colors(model)[[model]])
+  ggplot(d,aes(hazard_ratio_per_sd,landmark)) +
+    geom_vline(xintercept=1,linetype="dashed",color="grey55",linewidth=.4) +
+    geom_errorbar(aes(xmin=ci_lower,xmax=ci_upper),orientation="y",width=.2,linewidth=.6,color=color,na.rm=TRUE) +
+    geom_point(size=2.4,color=color,na.rm=TRUE) +
+    geom_text(aes(x=limits[2],label=label),hjust=1,size=2.2,lineheight=.9,color="#52514e") +
+    scale_x_log10(limits=limits,labels=scales::label_number(accuracy=.1),expand=expansion(0)) +
+    facet_grid(.~endpoint_label) +
+    labs(x="Hazard ratio per SD of the transferred score (95% CI; log scale)",y="Landmark after\nADT initiation") +
+    federated_transfer_theme() + theme(legend.position="none")
+}
+
 federated_transfer_km_pick <- function(d, endpoint=NULL, model_family, landmark_days, view=NULL) {
   keep <- d$model_family==model_family & d$landmark_days==landmark_days
   if(!is.null(endpoint)) keep <- keep & d$endpoint==endpoint
@@ -1978,6 +2039,8 @@ render_federated_transfer_km <- function(root, directory, dpi, overwrite) {
   tables <- federated_transfer_km_tables(km)
   for(name in names(FEDERATED_TRANSFER_KM_TABLES))
     write_federated_transfer_table(root,tables[[name]],FEDERATED_TRANSFER_KM_TABLES[[name]])
+  cox_hr <- federated_transfer_cox_hr(km)
+  if(!is.null(cox_hr) && nrow(cox_hr)) write_federated_transfer_table(root,cox_hr,FEDERATED_TRANSFER_COX_HR_TABLE)
   save <- function(p, stem, width, height)
     if(!is.null(p)) save_federated_panel(p,federated_output_path(root,stem,".pdf"),width,height,dpi,overwrite)
   cutoffs <- "Score cutpoints: Dana-Farber patients at risk for this endpoint at this landmark (not federated training cutoffs)."
@@ -2678,6 +2741,40 @@ manuscript_transfer_xgboost_caption <- function(extreme_percent=10L) {
   caption
 }
 
+# Main Figure 5: the 20% XGBoost caption with probability panels for all three endpoints (e-g).
+manuscript_transfer_all_endpoints_caption <- function()
+  gsub("\\(e\\) Probability of platinum treatment within 5 years",
+    "(e-g) Probability of platinum treatment, AVPC, and NEPC, respectively, within 5 years",
+    gsub("platinum-free probability", "endpoint-free probability",
+      gsub("among sequenced patients in e;", "among sequenced patients in e-g;",
+        gsub("all groups in e use", "all groups in e-g use",
+          gsub("For e,", "For e-g,", manuscript_transfer_xgboost_caption(20L), fixed=TRUE), fixed=TRUE), fixed=TRUE), fixed=TRUE),
+    fixed=TRUE)
+
+# Alternative Figure 5: main Figure 5 with the Cox hazard-ratio forest as panel b,
+# so the KM panels become c-e and the probability panels f-h. Every relabel must
+# match exactly once, so an edit to the main caption fails here instead of
+# silently leaving stale letters.
+manuscript_transfer_cox_hr_caption <- function() {
+  caption <- manuscript_transfer_all_endpoints_caption()
+  relabel <- c(
+    "with time-to-event risk separation"="with Cox hazard ratios, time-to-event risk separation",
+    "(b-d) Kaplan-Meier platinum-free (b), AVPC-free (c), and NEPC-free (d) survival"=paste0(
+      "(b) Hazard ratios per standard deviation of the transferred XGBoost score from unpenalized univariable Cox proportional-hazards models of time to platinum treatment, AVPC, and NEPC from the 0-, 90-, and 180-day landmarks after ADT initiation; points and bars denote hazard ratios and 95% Wald confidence intervals on a logarithmic scale, the dashed line marks a hazard ratio of 1, and labels give the hazard ratio (95% confidence interval) and patients/events. ",
+      "(c-e) Kaplan-Meier platinum-free (c), AVPC-free (d), and NEPC-free (e) survival"),
+    "(e-g) Probability of"="(f-h) Probability of",
+    "among sequenced patients in e-g;"="among sequenced patients in f-h; for b, the score was standardized among the Dana-Farber patients at risk for each endpoint at each landmark;",
+    "Panels b-d use the ADT-initiation clock; all groups in e-g use"="Panels b-e use the ADT-initiation clock; all groups in f-h use",
+    "For e-g,"="For f-h,",
+    "the 0- and 90-day landmarks,"="the 0- and 90-day landmarks for panels c-h,")
+  for(old in names(relabel)) {
+    hits <- lengths(regmatches(caption,gregexpr(old,caption,fixed=TRUE)))
+    if(hits!=1L) stop("Cox HR Figure 5 caption: expected one '",old,"' in the main caption, found ",hits)
+    caption <- sub(old,relabel[[old]],caption,fixed=TRUE)
+  }
+  caption
+}
+
 manuscript_checklist_caption <- function(f=FEDERATED_CHECKLIST_FIGURE) {
   caption <- manuscript_checklist_caption_text()
   if(identical(as.integer(c(f$landmark_days,f$horizon_days)),as.integer(c(180,365)))) return(caption)
@@ -2776,13 +2873,8 @@ manuscript_captions <- function() {
       "Federated Figure 4 supplement. Federated model performance and the strongest feature values.",
       "(a) Held-out mean AUC(t) for the full models and both age-only baselines at each landmark. (b) Up to 20 Elastic-Net coefficients per landmark, ranked by absolute value. (c) Up to 20 XGBoost split gains per landmark. Panels b and c are chosen from all supplied features, including age, body height, observation counts, missingness indicators and zero-valued features when present. Colors identify feature categories.",
       "Models pool four sites. Coefficients are signed log hazard ratios; gains measure split improvement and do not encode direction. Identifier features, if present, are retained for audit; consult the accompanying data legend."),
-    federated_05_transfer_no_dfci__top_bottom_20_all_endpoints=gsub("\\(e\\) Probability of platinum treatment within 5 years",
-      "(e-g) Probability of platinum treatment, AVPC, and NEPC, respectively, within 5 years",
-      gsub("platinum-free probability", "endpoint-free probability",
-        gsub("among sequenced patients in e;", "among sequenced patients in e-g;",
-          gsub("all groups in e use", "all groups in e-g use",
-            gsub("For e,", "For e-g,", manuscript_transfer_xgboost_caption(20L), fixed=TRUE), fixed=TRUE), fixed=TRUE), fixed=TRUE),
-      fixed=TRUE),
+    federated_05_transfer_no_dfci__top_bottom_20_all_endpoints=manuscript_transfer_all_endpoints_caption(),
+    federated_05_transfer_no_dfci__cox_hr=manuscript_transfer_cox_hr_caption(),
     federated_05_transfer_no_dfci__no_d=manuscript_transfer_caption(no_d=TRUE,km_panels=FALSE),
     federated_06_checklist_no_dfci=sub("^Generalized federated checklist transfer supplement\\.","Federated Figure 6.",
       manuscript_guideline_caption(federated_checklist_cell(90L,1825L))),
@@ -3249,11 +3341,13 @@ manuscript_federated_multivariable <- function(performance,coefficients,importan
 # Per-horizon AUC(t) stays on the standalone transfer page. With the KM tables
 # (`km`), a row of top- vs bottom-10% score KM panels (one per endpoint) and the
 # event-free gradient follow (manuscript_federated_transfer_km).
-MANUSCRIPT_TRANSFER_ROW_HEIGHTS <- c(first=2.6,single=3.2,clinical=2.6,km=2.7,gradient=2.6)
+# cox_hr (the FEDERATED_TRANSFER_COX_HR_TABLE capture) inserts the hazard-ratio
+# forest of model_families' score as panel b; later panels shift by one letter.
+MANUSCRIPT_TRANSFER_ROW_HEIGHTS <- c(first=2.6,single=3.2,hr=2.6,clinical=2.6,km=2.7,gradient=2.6)
 manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
     include=names(FEDERATED_TRANSFER_CLINICAL),key="federated_05_transfer_no_dfci",
     settings=manuscript_transfer_settings(),model_families=NULL,probability=FALSE, extreme_percent=10L,
-    probability_endpoints=FALSE,probability_tertile=FALSE) {
+    probability_endpoints=FALSE,probability_tertile=FALSE,cox_hr=NULL) {
   metrics <- filter(metrics,landmark_days %in% settings$landmarks)
   if (!is.null(model_families)) metrics <- filter(metrics,model_family %in% model_families)
   if (!is.null(clinical)) clinical <- filter(clinical,landmark_days %in% settings$landmarks)
@@ -3279,6 +3373,18 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
     paste0("Display: ",if(length(model_families)==1L) "bars with 95% bootstrap CIs by landmark" else settings$layout,
       "; landmarks: ",paste(settings$landmarks,collapse=", ")," days."),
     paste0("Patients/events by landmark — ",federated_transfer_count_note(metrics),"."))
+  hr_family <- if(length(model_families)==1L) model_families else FEDERATED_TRANSFER_KM_FIGURE$model_family
+  hr_panel <- if(is.null(cox_hr)) NULL else plot_federated_transfer_cox_hr(
+    filter(cox_hr,landmark_days %in% settings$landmarks),hr_family)
+  if(!is.null(cox_hr) && is.null(hr_panel)) message("Federated Figure 5: no Cox hazard ratios for ",hr_family,"; omitting panel b")
+  if(!is.null(hr_panel)) {
+    plots[[2L]] <- hr_panel; titles <- c(titles,"Cox hazard ratio")
+    legend <- c(legend,paste0("b: hazard ratio per SD of the transferred ",federated_transfer_model_label(hr_family),
+      " score from unpenalized univariable Cox models of time to each endpoint from each landmark after ADT initiation",
+      " (ADT clock); 95% Wald CIs, log scale. The score is standardized among the Dana-Farber patients at risk for each",
+      " endpoint at each landmark. Labels give HR (95% CI) and patients/events."))
+  }
+  n_hr <- length(plots)-1L
   panel_titles <- c(gleason="Patients with Gleason score",trio="Sequenced patients",
     trio_gleason="Sequenced patients with Gleason score")
   panel_text <- c(
@@ -3310,7 +3416,7 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
   # row and the gradient spans the width.
   rows <- lapply(seq_len(n),function(i) rep(i,6L))
   row_heights <- MANUSCRIPT_TRANSFER_ROW_HEIGHTS[c(if(length(model_families)==1L) "single" else "first",
-    rep("clinical",n-1L))]
+    rep("hr",n_hr),rep("clinical",n-1L-n_hr))]
   extra <- if(is.null(km)) NULL else manuscript_federated_transfer_km(km,first=n+1L,
     probability=probability,extreme_percent=extreme_percent,probability_endpoints=probability_endpoints,
     probability_tertile=probability_tertile)
@@ -3745,6 +3851,15 @@ manuscript_build <- function(items,tables,root) {
     if (!is.null(km)) result[["federated_05__top_bottom_20_all_endpoints"]] <- manuscript_federated_transfer_no_dfci(
       transfer,NULL,km,include=character(),key="federated_05_transfer_no_dfci__top_bottom_20_all_endpoints",
       model_families="xgboost_cox",probability=TRUE,extreme_percent=20L,probability_endpoints=TRUE,probability_tertile=FALSE)
+    # Alternative main figure: the same panels with the Cox hazard-ratio forest inserted as b.
+    cox_hr <- read(paste0("^",FEDERATED_TRANSFER_COX_HR_TABLE,"__platinum[.]csv$"))
+    if (!is.null(km) && !is.null(cox_hr) && nrow(cox_hr))
+      result[["federated_05__cox_hr"]] <- manuscript_federated_transfer_no_dfci(
+        transfer,NULL,km,include=character(),key="federated_05_transfer_no_dfci__cox_hr",
+        model_families="xgboost_cox",probability=TRUE,extreme_percent=20L,probability_endpoints=TRUE,
+        probability_tertile=FALSE,cox_hr=cox_hr)
+    else if (!is.null(km)) message("Skipping alternative federated Figure 5 (Cox HR): missing captured ",
+      FEDERATED_TRANSFER_COX_HR_TABLE)
     # Supplement: panels a-c only (discrimination and clinical comparisons), no KM or probability panels.
     result[["federated_05__no_d"]] <- manuscript_federated_transfer_no_dfci(transfer,clinical,NULL,
       include=c("gleason","trio"),key="federated_05_transfer_no_dfci__no_d")

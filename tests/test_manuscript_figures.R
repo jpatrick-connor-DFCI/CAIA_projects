@@ -62,10 +62,10 @@ v2_keys <- paste0("federated_06_checklist_guideline_no_dfci__lm",rep(c(90,180),e
 extension_keys <- paste0("federated_06_checklist_no_dfci__extension_lm",c(0,90,180))
 federated_keys <- c("federated_03_univariable","federated_04_multivariable","federated_04_multivariable__full_features",
   "federated_05_transfer_no_dfci__top_bottom_20_all_endpoints","federated_05_transfer_no_dfci__no_d",
-  "federated_06_checklist_no_dfci","federated_06_checklist_no_dfci__v2","federated_06_checklist_no_dfci__full_transfer",
+  "federated_05_transfer_no_dfci__cox_hr","federated_06_checklist_no_dfci","federated_06_checklist_no_dfci__v2","federated_06_checklist_no_dfci__full_transfer",
   grid_keys,guideline_keys,v2_keys,extension_keys)
 local_keys <- c("01_cohort_overview","02_llm_nepc_avpc__lm0","03_cohort_sensitivity_supplement")
-stopifnot(length(captions)==30,setequal(names(captions),c(local_keys,federated_keys)),
+stopifnot(length(captions)==31,setequal(names(captions),c(local_keys,federated_keys)),
   all(startsWith(unname(captions[local_keys]),paste0("Figure ",c(1,2,3),". "))),
   all(grepl("^Federated Figure ([3-6])[. ]",unname(captions[federated_keys[c(1,2,5,6)]]))),
   setequal(unique(manuscript_base_key(names(captions))),names(MANUSCRIPT_SECTIONS)),
@@ -87,16 +87,25 @@ stopifnot(length(captions)==30,setequal(names(captions),c(local_keys,federated_k
   grepl("4,429/133",captions[["federated_04_multivariable"]],fixed=TRUE),
   all(startsWith(unname(captions[extension_keys]),paste0("Supplementary Figure 8 (landmark +",c(0,90,180)," days)."))),
   all(grepl("do not include the variability of re-tuning",unname(captions[extension_keys]),fixed=TRUE)),
-  all(grepl("tuning endpoint",unname(captions[extension_keys]),fixed=TRUE)))
+  all(grepl("tuning endpoint",unname(captions[extension_keys]),fixed=TRUE)),
+  # Alternative Figure 5: the Cox HR forest is b, so the KM panels are c-e and the probabilities f-h.
+  grepl("(b) Hazard ratios per standard deviation of the transferred XGBoost score",
+    captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
+  grepl("(c-e) Kaplan-Meier platinum-free (c), AVPC-free (d), and NEPC-free (e)",
+    captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
+  grepl("(f-h) Probability of platinum treatment, AVPC, and NEPC",captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
+  !grepl("(e-g)",captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
+  !grepl("(b-d)",captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
+  !grepl("Hazard ratios",captions[["federated_05_transfer_no_dfci__top_bottom_20_all_endpoints"]],fixed=TRUE))
 caption_root <- tempfile("manuscript-caption-test-")
 caption_paths <- manuscript_write_captions(caption_root)
-stopifnot(length(caption_paths)==60,all(file.exists(caption_paths)))
+stopifnot(length(caption_paths)==62,all(file.exists(caption_paths)))
 # The federated set is numbered on its own; each caption sits in the
 # manuscript folder of its figure's section.
 caption_md <- caption_paths[endsWith(caption_paths,".md")]
 stopifnot(setequal(basename(caption_md),paste0(c("figure1","figure2_lm0","figure3_supplement",
   paste0("federated_figure",c(3,4,6)),"federated_figure4_full_features","federated_figure5_no_d",
-  "federated_figure5_top_bottom_20_all_endpoints",
+  "federated_figure5_top_bottom_20_all_endpoints","federated_figure5_cox_hr",
   "federated_figure6_full_transfer","federated_figure6_v2",
   paste0("federated_figure6_lm",rep(c(0,90,180),each=2),"_h",c(365,1825)),
   paste0("federated_figure6_guideline_lm",rep(c(0,90,180),each=2),"_h",c(365,1825)),
@@ -472,6 +481,42 @@ stopifnot(length(fig5_endpoints$panels)==7L,
 wrong_clock <- km_tables; wrong_clock$gradient$clock <- "adt"
 clock_error <- tryCatch(plot_federated_transfer_horizon_risk(wrong_clock,"xgboost_cox",180L),error=conditionMessage)
 stopifnot(grepl("sequencing-landmark",clock_error,fixed=TRUE))
+# Alternative Figure 5 panel b: unpenalized Cox HR per SD of the transferred score, ADT clock,
+# one row per endpoint x bundle x landmark; matches a direct coxph on the standardized score.
+cox_hr <- federated_transfer_cox_hr(km_input)
+hr_cell <- filter(km_input,clock=="adt",endpoint=="platinum",model_family=="elastic_net_cox")
+hr_direct <- survival::coxph(survival::Surv(duration_days,event)~z,
+  data=mutate(hr_cell,z=as.vector(scale(risk_score))))
+hr_row <- filter(cox_hr,endpoint=="platinum",model_family=="elastic_net_cox")
+stopifnot(nrow(cox_hr)==6L,all(cox_hr$clock=="adt"),!anyDuplicated(cox_hr[c("endpoint","bundle","landmark_days")]),
+  setequal(cox_hr$endpoint,names(FEDERATED_TRANSFER_ENDPOINTS)),
+  nrow(hr_row)==1L,hr_row$n==nrow(hr_cell),hr_row$events==sum(hr_cell$event),
+  abs(hr_row$log_hr-unname(coef(hr_direct)))<1e-8,abs(hr_row$se-sqrt(vcov(hr_direct)[1,1]))<1e-8,
+  all(abs(cox_hr$hazard_ratio_per_sd-exp(cox_hr$log_hr))<1e-12),
+  all(cox_hr$ci_lower<cox_hr$hazard_ratio_per_sd & cox_hr$hazard_ratio_per_sd<cox_hr$ci_upper),
+  all(cox_hr$hazard_ratio_per_sd>1),all(cox_hr$p_value<.05))
+# Below the event floor the cell stays, with NA estimates labeled "Not estimable".
+hr_none <- federated_transfer_cox_hr(mutate(km_input,event=0L))
+hr_none_plot <- plot_federated_transfer_cox_hr(hr_none)
+stopifnot(nrow(hr_none)==6L,all(is.na(hr_none$hazard_ratio_per_sd)),inherits(hr_none_plot,"ggplot"),
+  all(startsWith(hr_none_plot$data$label,"Not estimable")),
+  is.null(plot_federated_transfer_cox_hr(cox_hr,"no_such_model")))
+hr_plot <- plot_federated_transfer_cox_hr(cox_hr)
+stopifnot(all(hr_plot$data$model_family=="xgboost_cox"),
+  identical(levels(hr_plot$data$endpoint_label),unname(FEDERATED_TRANSFER_ENDPOINTS_SHORT)),
+  identical(as.character(unique(hr_plot$data$landmark)),"Day 180"))
+fig5_hr <- manuscript_federated_transfer_no_dfci(transfer_metrics,NULL,km_tables,include=character(),
+  key="federated_05_transfer_no_dfci__cox_hr",model_families="xgboost_cox",probability=TRUE,
+  extreme_percent=20L,probability_endpoints=TRUE,cox_hr=cox_hr)
+stopifnot(inherits(fig5_hr$plot,"gtable"),length(fig5_hr$panels)==8L,
+  identical(fig5_hr$spec$titles[-2],fig5_endpoints$spec$titles),fig5_hr$spec$titles[2]=="Cox hazard ratio",
+  all(fig5_hr$spec$layout[2,]==2L),identical(fig5_hr$spec$layout[3,],rep(3:5,each=2)),
+  identical(fig5_hr$spec$layout[4,],rep(6:8,each=2)),
+  abs(fig5_hr$spec$height-fig5_endpoints$spec$height-MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["hr"]])<1e-9,
+  grepl("b: hazard ratio per SD of the transferred Federated XGBoost score",fig5_hr$legend,fixed=TRUE),
+  grepl("c: Kaplan-Meier platinum-free survival",fig5_hr$legend,fixed=TRUE),
+  grepl("f: Kaplan-Meier 5-year Platinum probability",fig5_hr$legend,fixed=TRUE),
+  !grepl("hazard ratio",fig5_endpoints$legend,ignore.case=TRUE))
 # Checklist thresholds use supplied units or known canonical lab units.
 checklist_labels <- federated_checklist_item_label(
   c("Prostate_specific_Ag__mean","Testosterone__last","age_at_anchor","Unknown__mean","RDW__mean"),
@@ -584,9 +629,9 @@ expected_names <- c(
   "supplement/S4_checklist_supplement_platinum.pdf"="04_multivariate/federated/checklist_supplement__platinum.pdf",
   "supplement/S5_multivariable_full_features.pdf"="04_multivariate/federated/manuscript/federated_04_multivariable__full_features.pdf",
   "supplement/S6_full_transfer_to_dfci.pdf"="05_transfer_survival/manuscript/federated_05_transfer_no_dfci__no_d.pdf")
-stopifnot(nrow(renders_plan)==5L+1L+4L+1L+1L+6L+6L+3L,!anyDuplicated(renders_plan$target),
+stopifnot(nrow(renders_plan)==5L+1L+1L+4L+1L+1L+6L+6L+3L,!anyDuplicated(renders_plan$target),
   identical(unname(renders_plan$source[match(names(expected_names),renders_plan$target)]),unname(expected_names)),
-  setequal(dirname(renders_plan$target),c("main","supplement",file.path("supplement","federated_checklist_transfer"),
+  setequal(dirname(renders_plan$target),c("main",file.path("main","alternative_05"),"supplement",file.path("supplement","federated_checklist_transfer"),
     file.path("supplement","generalized_federated_checklist_transfer"),
     file.path("supplement","S8_checklist_extension"))),
   "supplement/S8_checklist_extension/federated_06_checklist_no_dfci__extension_lm90.pdf" %in% renders_plan$target,
@@ -598,6 +643,8 @@ stopifnot(nrow(renders_plan)==5L+1L+4L+1L+1L+6L+6L+3L,!anyDuplicated(renders_pla
   identical(manuscript_folder("root","federated_06_checklist_guideline_no_dfci__lm0_h365"),
     manuscript_folder("root","federated_06_checklist_no_dfci")),
   "supplement/S7_full_checklist_transfer.pdf" %in% renders_plan$target,
+  identical(renders_plan$source[renders_plan$target=="main/alternative_05/05_federated_transfer_to_DFCI_cox_hr.pdf"],
+    "05_transfer_survival/manuscript/federated_05_transfer_no_dfci__cox_hr.pdf"),
   "supplement/federated_checklist_transfer/federated_06_checklist_no_dfci__lm0_h1825.pdf" %in% renders_plan$target,
   all(renders_plan$source %in% readLines("COMPASS/figures/retained_exports.txt")))
 renders_root <- tempfile("renders-")
