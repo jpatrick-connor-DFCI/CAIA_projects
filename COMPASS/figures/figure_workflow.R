@@ -441,6 +441,8 @@ manuscript_renders_plan <- function() {
         "S5_multivariable_full_features","S6_full_transfer_to_dfci"),".pdf"))),
     data.frame(source=manuscript("federated_06_checklist_no_dfci__full_transfer"),
       target=file.path("supplement","S7_full_checklist_transfer.pdf")),
+    data.frame(source=manuscript("federated_05_transfer_no_dfci__cox_hr_cohorts"),
+      target=file.path("supplement","S9_transfer_cox_hr_cohorts.pdf")),
     data.frame(source=vapply(grid,manuscript,character(1)),
       target=file.path("supplement","federated_checklist_transfer",paste0(grid,".pdf"))),
     data.frame(source=file.path(FIGURE_SECTIONS[["cohort_sensitivity"]],"adt_vs_llm__platinum__all__incl.pdf"),
@@ -1839,23 +1841,40 @@ federated_transfer_km_tables <- function(km) {
   lapply(out,bind_rows)
 }
 
-# Alternative Figure 5 panel b: unpenalized univariable Cox models of time to each
-# endpoint from each landmark, one per predictor, all on one clock: the sequencing
-# date in sequenced patients (somatic status never enters the ADT clock), as in f-h:
-#   score   transferred score per SD (standardized within the sequenced Dana-Farber
-#           patients at risk in that endpoint x bundle x landmark cell);
-#   gleason Gleason score as a continuous covariate, per 1-point increase (valid
-#           scores 2-10 before sequencing + landmark; patients without one excluded);
-#   tsg     >=1 TP53/RB1/PTEN alteration vs wild-type.
-# 95% Wald CIs and two-sided Wald P. Cells below the KM event floor, without
-# predictor variation (or, for a binary predictor, without events in both groups)
-# or whose fit fails are kept with NA estimates so the panel can label them.
+# Unpenalized univariable Cox models of time to each endpoint from each landmark,
+# one per predictor, within four landmark cohorts. Every predictor in a cohort is fit
+# in the same patients, so the patients/events of a cell match across its predictors:
+#   adt                 ADT clock, everyone at risk: score;
+#   adt_gleason         ADT clock, valid (2-10) Gleason score before the landmark:
+#                       score, Gleason (Alternative Figure 5 panel b);
+#   sequencing          sequencing clock, sequenced with known TP53/RB1/PTEN status:
+#                       score, TP53, RB1, PTEN;
+#   sequencing_gleason  the sequencing cohort with a valid Gleason score before
+#                       sequencing + landmark: score, Gleason, TP53, RB1, PTEN.
+# Somatic status never enters the ADT clock. The score is per SD (standardized within
+# the cohort's patients at risk in each endpoint x bundle x landmark cell), Gleason a
+# continuous covariate per 1-point increase, each gene any alteration (MT) vs none (WT).
+# 95% Wald CIs and two-sided Wald P. Cells below the KM event floor, without predictor
+# variation (or, for a gene, without events in both groups) or whose fit fails are kept
+# with NA estimates so the panels can label them.
 FEDERATED_TRANSFER_COX_HR_TABLE <- "transfer_km_cox_hr_no_dfci"
-FEDERATED_TRANSFER_COX_HR_CLOCK <- "sequencing"
 FEDERATED_TRANSFER_COX_HR_PREDICTORS <- list(
   score=list(column="risk_score",type="per SD",label="Score\n(per SD)",color=NULL),
   gleason=list(column="gleason_score",type="per point",label="Gleason\n(per point)",color="#1baf7a"),
-  tsg=list(column="tsg_altered",type="binary",label="TSG\n≥1 MT vs WT",color="#8e44ad"))
+  tp53=list(column="tp53_mt",type="binary",label="TP53\nMT vs WT",color="#8e44ad"),
+  rb1=list(column="rb1_mt",type="binary",label="RB1\nMT vs WT",color="#c0392b"),
+  pten=list(column="pten_mt",type="binary",label="PTEN\nMT vs WT",color="#2e86c1"))
+FEDERATED_TRANSFER_COX_HR_COHORTS <- list(
+  adt=list(clock="adt",gleason=FALSE,genes=FALSE,predictors="score",
+    title="ADT landmark cohort"),
+  adt_gleason=list(clock="adt",gleason=TRUE,genes=FALSE,predictors=c("score","gleason"),
+    title="ADT landmark cohort with Gleason score"),
+  sequencing=list(clock="sequencing",gleason=FALSE,genes=TRUE,predictors=c("score","tp53","rb1","pten"),
+    title="Sequencing cohort"),
+  sequencing_gleason=list(clock="sequencing",gleason=TRUE,genes=TRUE,
+    predictors=c("score","gleason","tp53","rb1","pten"),title="Sequencing cohort with Gleason score"))
+# Alternative Figure 5 panel b.
+FEDERATED_TRANSFER_COX_HR_MAIN_COHORT <- "adt_gleason"
 federated_transfer_cox_hr_cell <- function(z, column="risk_score", type=c("per SD","per point","binary")) {
   type <- match.arg(type)
   na <- tibble(sd_score=NA_real_,log_hr=NA_real_,se=NA_real_,hazard_ratio=NA_real_,
@@ -1881,30 +1900,47 @@ federated_transfer_cox_hr_cell <- function(z, column="risk_score", type=c("per S
 federated_transfer_cox_hr <- function(km) {
   if(is.null(km) || !nrow(km)) return(NULL)
   d <- federated_transfer_km_groups(km)
-  d <- d[d$clock==FEDERATED_TRANSFER_COX_HR_CLOCK & d$sequenced %in% TRUE,,drop=FALSE]
-  if(!nrow(d)) return(NULL)
-  # Valid Gleason scores only (gleason_group is NA outside 2-10).
-  d <- mutate(d,gleason_score=if_else(is.na(gleason_group),NA_real_,suppressWarnings(as.numeric(GLEASON_SCORE))),
-    tsg_altered=case_when(trio_group==FEDERATED_TRANSFER_TRIO[2] ~ 1,trio_group==FEDERATED_TRANSFER_TRIO[1] ~ 0))
-  rows <- lapply(names(FEDERATED_TRANSFER_COX_HR_PREDICTORS),function(predictor) {
-    spec <- FEDERATED_TRANSFER_COX_HR_PREDICTORS[[predictor]]
-    # Plain assignment after group_modify(): inside mutate() `predictor` would mask to the new column.
-    d %>% group_by(endpoint,bundle,model_family,landmark_days) %>%
-      group_modify(function(cell,key) federated_transfer_cox_hr_cell(cell,spec$column,spec$type)) %>%
-      ungroup() %>% { .$predictor <- predictor; .$clock <- FEDERATED_TRANSFER_COX_HR_CLOCK; .$unit <- spec$type; . }
-  })
+  # Valid Gleason scores only (gleason_group is NA outside 2-10 and off the two clocks' cohorts).
+  d$gleason_score <- ifelse(is.na(d$gleason_group),NA_real_,suppressWarnings(as.numeric(d$GLEASON_SCORE)))
+  for(gene in c("TP53","RB1","PTEN")) {
+    x <- suppressWarnings(as.numeric(d[[paste0(gene,"_ANY")]]))
+    d[[paste0(tolower(gene),"_mt")]] <- ifelse(is.finite(x),as.numeric(x>0),NA_real_)
+  }
+  genes_known <- is.finite(d$tp53_mt) & is.finite(d$rb1_mt) & is.finite(d$pten_mt)
+  rows <- list()
+  for(cohort in names(FEDERATED_TRANSFER_COX_HR_COHORTS)) {
+    spec <- FEDERATED_TRANSFER_COX_HR_COHORTS[[cohort]]
+    keep <- d$clock==spec$clock
+    if(spec$clock=="sequencing") keep <- keep & d$sequenced %in% TRUE
+    if(spec$gleason) keep <- keep & is.finite(d$gleason_score)
+    if(spec$genes) keep <- keep & genes_known
+    z <- d[keep,,drop=FALSE]
+    if(!nrow(z)) next
+    for(predictor in spec$predictors) {
+      p <- FEDERATED_TRANSFER_COX_HR_PREDICTORS[[predictor]]
+      # Plain assignment after group_modify(): inside mutate() `predictor` would mask to a column.
+      r <- z %>% group_by(endpoint,bundle,model_family,landmark_days) %>%
+        group_modify(function(cell,key) federated_transfer_cox_hr_cell(cell,p$column,p$type)) %>% ungroup()
+      r$cohort <- cohort; r$predictor <- predictor; r$clock <- spec$clock; r$unit <- p$type
+      rows[[length(rows)+1L]] <- r
+    }
+  }
   out <- bind_rows(rows)
   if(!nrow(out)) return(NULL)
   arrange(out,match(endpoint,names(FEDERATED_TRANSFER_ENDPOINTS)),model_family,
+    match(cohort,names(FEDERATED_TRANSFER_COX_HR_COHORTS)),
     match(predictor,names(FEDERATED_TRANSFER_COX_HR_PREDICTORS)),landmark_days)
 }
 
-# Forest of the HRs above for one bundle: landmarks on y within one row block per
-# predictor, one column per endpoint, log-scale HR on x (shared), with HR (CI), P and
-# patients/events printed at the right edge. Score-only tables (no `predictor`) draw
+# Forest of the HRs above for one bundle and cohort: landmarks on y within one row
+# block per predictor, one column per endpoint, log-scale HR on x (shared), with HR (CI),
+# P and patients/events printed at the right edge. Tables captured before cohorts
+# existed (no `cohort` column) are drawn whole; score-only ones (no `predictor`) draw
 # the score block alone.
-plot_federated_transfer_cox_hr <- function(d, model_family=FEDERATED_TRANSFER_KM_FIGURE$model_family) {
+plot_federated_transfer_cox_hr <- function(d, model_family=FEDERATED_TRANSFER_KM_FIGURE$model_family,
+    cohort=FEDERATED_TRANSFER_COX_HR_MAIN_COHORT) {
   d <- d[d$model_family==model_family & d$endpoint %in% names(FEDERATED_TRANSFER_ENDPOINTS),,drop=FALSE]
+  if("cohort" %in% names(d)) d <- d[d$cohort %in% cohort,,drop=FALSE]
   if(!nrow(d)) return(NULL)
   if(!"predictor" %in% names(d)) d$predictor <- "score"
   if(!"hazard_ratio" %in% names(d)) d$hazard_ratio <- d$hazard_ratio_per_sd
@@ -1940,6 +1976,38 @@ plot_federated_transfer_cox_hr <- function(d, model_family=FEDERATED_TRANSFER_KM
     labs(x="Hazard ratio (95% CI; log scale)",y=NULL) +
     federated_transfer_theme() + theme(legend.position="none",strip.text.y.left=element_text(angle=0))
 }
+
+# Supplementary figure: one forest per cohort (a-d), stacked, each row as tall as its
+# predictor blocks need.
+FEDERATED_TRANSFER_COX_HR_COHORTS_KEY <- "federated_05_transfer_no_dfci__cox_hr_cohorts"
+manuscript_federated_transfer_cox_hr_cohorts <- function(cox_hr, model_family=FEDERATED_TRANSFER_KM_FIGURE$model_family,
+    key=FEDERATED_TRANSFER_COX_HR_COHORTS_KEY) {
+  if(is.null(cox_hr) || !nrow(cox_hr) || !"cohort" %in% names(cox_hr)) return(NULL)
+  cohorts <- FEDERATED_TRANSFER_COX_HR_COHORTS
+  plots <- list(); titles <- character(); heights <- numeric(); legend <- character()
+  model <- federated_transfer_model_label(model_family)
+  for(cohort in names(cohorts)) {
+    p <- plot_federated_transfer_cox_hr(cox_hr,model_family,cohort)
+    if(is.null(p)) next
+    i <- length(plots)+1L
+    plots[[i]] <- p; titles[i] <- cohorts[[cohort]]$title
+    heights[i] <- .8+1.15*length(unique(p$data$predictor))
+    legend[i] <- paste0(letters[i],": ",cohorts[[cohort]]$title," (",if(cohorts[[cohort]]$clock=="adt") "ADT" else "sequencing"," clock); ",
+      paste(vapply(cohorts[[cohort]]$predictors,function(x) sub("\n"," ",FEDERATED_TRANSFER_COX_HR_PREDICTORS[[x]]$label),
+        character(1)),collapse=", "),".")
+  }
+  if(!length(plots)) return(NULL)
+  spec <- list(key=key,width=10,height=sum(heights),layout=matrix(seq_along(plots),ncol=1),titles=titles,
+    row_heights=heights,shared_legend_panels=integer())
+  data <- cox_hr[cox_hr$model_family==model_family,,drop=FALSE]
+  list(plot=manuscript_combine(plots,spec),spec=spec,data=data,panels=plots,legend=paste(c(
+    paste0("Unpenalized univariable Cox models of time to each endpoint from each landmark for the transferred ",model,
+      " score and clinical/somatic predictors, one model per predictor; every predictor in a cohort is fit in the same patients.",
+      " Score per SD (standardized among the cohort's Dana-Farber patients at risk for each endpoint at each landmark),",
+      " Gleason score per 1-point increase, genes any alteration (MT) vs none (WT). 95% Wald CIs, log scale.",
+      " Labels give HR (95% CI), the two-sided Wald P and patients/events."),legend),collapse=" "))
+}
+
 
 federated_transfer_km_pick <- function(d, endpoint=NULL, model_family, landmark_days, view=NULL) {
   keep <- d$model_family==model_family & d$landmark_days==landmark_days
@@ -2805,14 +2873,14 @@ manuscript_transfer_cox_hr_caption <- function() {
   relabel <- c(
     "with time-to-event risk separation"="with Cox hazard ratios, time-to-event risk separation",
     "(b-d) Kaplan-Meier platinum-free (b), AVPC-free (c), and NEPC-free (d) survival"=paste0(
-      "(b) Hazard ratios from unpenalized univariable Cox proportional-hazards models of time to platinum treatment, AVPC, and NEPC from the 0-, 90-, and 180-day landmarks after the sequencing date in sequenced patients, one model per predictor: the transferred XGBoost score per standard deviation, Gleason score as a continuous covariate per 1-point increase (among patients with a Gleason score), and ≥1 altered TP53/RB1/PTEN vs. wild-type; points and bars denote hazard ratios and 95% Wald confidence intervals on a logarithmic scale, the dashed line marks a hazard ratio of 1, and labels give the hazard ratio (95% confidence interval), the two-sided Wald P value, and patients/events. ",
+      "(b) Hazard ratios from unpenalized univariable Cox proportional-hazards models of time to platinum treatment, AVPC, and NEPC from the 0-, 90-, and 180-day landmarks after ADT initiation in patients with a Gleason score, one model per predictor in the same patients: the transferred XGBoost score per standard deviation and Gleason score as a continuous covariate per 1-point increase; points and bars denote hazard ratios and 95% Wald confidence intervals on a logarithmic scale, the dashed line marks a hazard ratio of 1, and labels give the hazard ratio (95% confidence interval), the two-sided Wald P value, and patients/events. ",
       "(c-e) Kaplan-Meier platinum-free (c), AVPC-free (d), and NEPC-free (e) survival"),
     "(e-g) Probability of"="(f-h) Probability of",
     "among sequenced patients in e-g;"="among sequenced patients in f-h;",
     "they are not federated training cutoffs."=paste("they are not federated training cutoffs.",
-      "For b, the score was standardized among the sequenced Dana-Farber patients at risk for each endpoint at each landmark."),
-    "Panels b-d use the ADT-initiation clock; all groups in e-g use"="Panels c-e use the ADT-initiation clock; all hazard ratios in b use the sequencing-date clock from each landmark, and all groups in f-h use",
-    "For e-g,"="For b and f-h,",
+      "For b, the score was standardized among the Dana-Farber patients with a Gleason score at risk for each endpoint at each landmark."),
+    "Panels b-d use the ADT-initiation clock; all groups in e-g use"="Panels b-e use the ADT-initiation clock; all groups in f-h use",
+    "For e-g,"="For f-h,",
     "the 0- and 90-day landmarks,"="the 0- and 90-day landmarks for panels c-h,")
   for(old in names(relabel)) {
     hits <- lengths(regmatches(caption,gregexpr(old,caption,fixed=TRUE)))
@@ -2821,6 +2889,22 @@ manuscript_transfer_cox_hr_caption <- function() {
   }
   caption
 }
+
+# Supplementary Figure 9: the Cox hazard ratios of every landmark cohort; panel b is
+# the alternative Figure 5 panel b.
+manuscript_transfer_cox_hr_cohorts_caption <- function() paste(c(
+  "Supplementary Figure 9. Cox hazard ratios of the transferred federated XGBoost score, Gleason score, and tumor suppressor genes across Dana-Farber landmark cohorts.",
+  paste("An XGBoost survival model trained for platinum treatment on Fred Hutch, Johns Hopkins, and Memorial Sloan Kettering data was applied unchanged to Dana-Farber patients.",
+    "Points and bars denote hazard ratios and 95% Wald confidence intervals on a logarithmic scale from unpenalized univariable Cox proportional-hazards models of time to platinum treatment, AVPC, and NEPC from the 0-, 90-, and 180-day landmarks, one model per predictor; the dashed line marks a hazard ratio of 1, and labels give the hazard ratio (95% confidence interval), the two-sided Wald P value, and patients/events. Within each cohort, every predictor was fit in the same patients.",
+    "(a) ADT landmark cohort: all patients at risk at each landmark after ADT initiation; transferred score.",
+    "(b) ADT landmark cohort with Gleason score: patients with a Gleason score before the landmark; transferred score and Gleason score (as in panel b of the alternative Figure 5).",
+    "(c) Sequencing cohort: sequenced patients with known TP53, RB1, and PTEN status, with landmarks measured from the sequencing date; transferred score and each of TP53, RB1, and PTEN.",
+    "(d) Sequencing cohort with Gleason score: the sequencing cohort restricted to patients with a Gleason score before the sequencing date plus the landmark; transferred score, Gleason score, and each gene."),
+  paste("The score is expressed per standard deviation, standardized among each cohort's Dana-Farber patients at risk for each endpoint at each landmark; Gleason score is a continuous covariate per 1-point increase; gene status compares any mutation, deletion, amplification, or structural variant (MT) with none (WT).",
+    "On the sequencing clock, the transferred model was rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, and the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation; somatic status was not used on the ADT clock.",
+    "Cells with fewer than 5 events, without events in both gene groups, or whose model could not be fit are labeled not estimable, and competing risks were not modeled.",
+    "ADT, androgen-deprivation therapy; AVPC, aggressive-variant prostate cancer; MT, altered; NEPC, neuroendocrine prostate cancer; WT, wild-type.")),
+  collapse="\n\n")
 
 manuscript_checklist_caption <- function(f=FEDERATED_CHECKLIST_FIGURE) {
   caption <- manuscript_checklist_caption_text()
@@ -2922,6 +3006,7 @@ manuscript_captions <- function() {
       "Models pool four sites. Coefficients are signed log hazard ratios; gains measure split improvement and do not encode direction. Identifier features, if present, are retained for audit; consult the accompanying data legend."),
     federated_05_transfer_no_dfci__top_bottom_20_all_endpoints=manuscript_transfer_all_endpoints_caption(),
     federated_05_transfer_no_dfci__cox_hr=manuscript_transfer_cox_hr_caption(),
+    federated_05_transfer_no_dfci__cox_hr_cohorts=manuscript_transfer_cox_hr_cohorts_caption(),
     federated_05_transfer_no_dfci__no_d=manuscript_transfer_caption(no_d=TRUE,km_panels=FALSE),
     federated_06_checklist_no_dfci=sub("^Generalized federated checklist transfer supplement\\.","Federated Figure 6.",
       manuscript_guideline_caption(federated_checklist_cell(90L,1825L))),
@@ -3390,7 +3475,7 @@ manuscript_federated_multivariable <- function(performance,coefficients,importan
 # event-free gradient follow (manuscript_federated_transfer_km).
 # cox_hr (the FEDERATED_TRANSFER_COX_HR_TABLE capture) inserts the hazard-ratio
 # forest of model_families' score as panel b; later panels shift by one letter.
-MANUSCRIPT_TRANSFER_ROW_HEIGHTS <- c(first=2.6,single=3.2,hr=4.6,clinical=2.6,km=2.7,gradient=2.6)
+MANUSCRIPT_TRANSFER_ROW_HEIGHTS <- c(first=2.6,single=3.2,hr=3.6,clinical=2.6,km=2.7,gradient=2.6)
 manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
     include=names(FEDERATED_TRANSFER_CLINICAL),key="federated_05_transfer_no_dfci",
     settings=manuscript_transfer_settings(),model_families=NULL,probability=FALSE, extreme_percent=10L,
@@ -3426,11 +3511,10 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
   if(!is.null(cox_hr) && is.null(hr_panel)) message("Federated Figure 5: no Cox hazard ratios for ",hr_family,"; omitting panel b")
   if(!is.null(hr_panel)) {
     plots[[2L]] <- hr_panel; titles <- c(titles,"Cox hazard ratio")
-    legend <- c(legend,paste0("b: hazard ratios from unpenalized univariable Cox models of time to each endpoint from each landmark,",
-      " all on the sequencing-date clock in sequenced patients, one model per predictor: the transferred ",
-      federated_transfer_model_label(hr_family)," score per SD (standardized among the sequenced Dana-Farber patients at risk",
-      " for each endpoint at each landmark), Gleason score per 1-point increase (patients with a Gleason score) and",
-      " ≥1 TP53/RB1/PTEN alteration vs wild-type.",
+    legend <- c(legend,paste0("b: hazard ratios from unpenalized univariable Cox models of time to each endpoint from each landmark",
+      " after ADT initiation (ADT clock) in patients with a Gleason score, one model per predictor in the same patients:",
+      " the transferred ",federated_transfer_model_label(hr_family)," score per SD (standardized among those patients at",
+      " risk for each endpoint at each landmark) and Gleason score per 1-point increase.",
       " 95% Wald CIs, log scale. Labels give HR (95% CI), the two-sided Wald P and patients/events."))
   }
   n_hr <- length(plots)-1L
@@ -3909,6 +3993,11 @@ manuscript_build <- function(items,tables,root) {
         probability_tertile=FALSE,cox_hr=cox_hr)
     else if (!is.null(km)) message("Skipping alternative federated Figure 5 (Cox HR): missing captured ",
       FEDERATED_TRANSFER_COX_HR_TABLE)
+    # Supplement: the Cox hazard ratios in every landmark cohort.
+    hr_cohorts <- manuscript_federated_transfer_cox_hr_cohorts(cox_hr)
+    if (!is.null(hr_cohorts)) result[["federated_05__cox_hr_cohorts"]] <- hr_cohorts
+    else if (!is.null(cox_hr)) message("Skipping Cox hazard-ratio cohort supplement: captured ",
+      FEDERATED_TRANSFER_COX_HR_TABLE," has no cohort column (rerun the transfer KM render)")
     # Supplement: panels a-c only (discrimination and clinical comparisons), no KM or probability panels.
     result[["federated_05__no_d"]] <- manuscript_federated_transfer_no_dfci(transfer,clinical,NULL,
       include=c("gleason","trio"),key="federated_05_transfer_no_dfci__no_d")
