@@ -2743,7 +2743,8 @@ manuscript_transfer_xgboost_caption <- function(extreme_percent=10L) {
 
 # Main Figure 5: the 20% XGBoost caption with probability panels for all three endpoints (e-g).
 manuscript_transfer_all_endpoints_caption <- function()
-  gsub("\\(e\\) Probability of platinum treatment within 5 years",
+  # fixed=TRUE: the pattern is literal (an escaped regex here would never match).
+  gsub("(e) Probability of platinum treatment within 5 years",
     "(e-g) Probability of platinum treatment, AVPC, and NEPC, respectively, within 5 years",
     gsub("platinum-free probability", "endpoint-free probability",
       gsub("among sequenced patients in e;", "among sequenced patients in e-g;",
@@ -2763,7 +2764,9 @@ manuscript_transfer_cox_hr_caption <- function() {
       "(b) Hazard ratios per standard deviation of the transferred XGBoost score from unpenalized univariable Cox proportional-hazards models of time to platinum treatment, AVPC, and NEPC from the 0-, 90-, and 180-day landmarks after ADT initiation; points and bars denote hazard ratios and 95% Wald confidence intervals on a logarithmic scale, the dashed line marks a hazard ratio of 1, and labels give the hazard ratio (95% confidence interval) and patients/events. ",
       "(c-e) Kaplan-Meier platinum-free (c), AVPC-free (d), and NEPC-free (e) survival"),
     "(e-g) Probability of"="(f-h) Probability of",
-    "among sequenced patients in e-g;"="among sequenced patients in f-h; for b, the score was standardized among the Dana-Farber patients at risk for each endpoint at each landmark;",
+    "among sequenced patients in e-g;"="among sequenced patients in f-h;",
+    "they are not federated training cutoffs."=paste("they are not federated training cutoffs.",
+      "For b, the score was standardized among the Dana-Farber patients at risk for each endpoint at each landmark."),
     "Panels b-d use the ADT-initiation clock; all groups in e-g use"="Panels b-e use the ADT-initiation clock; all groups in f-h use",
     "For e-g,"="For f-h,",
     "the 0- and 90-day landmarks,"="the 0- and 90-day landmarks for panels c-h,")
