@@ -90,9 +90,9 @@ stopifnot(length(captions)==31,setequal(names(captions),c(local_keys,federated_k
   all(grepl("tuning endpoint",unname(captions[extension_keys]),fixed=TRUE)),
   # Alternative Figure 5: the Cox HR forest is b, so the KM panels are c-e and the probabilities f-h.
   grepl("(b) Hazard ratios from unpenalized univariable Cox",captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
-  grepl("the transferred XGBoost score per standard deviation and Gleason score ≥8 vs. ≤7",
+  grepl("Gleason score as a continuous covariate per 1-point increase",
     captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
-  grepl("the TSG row of b the sequencing-date clock",captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
+  grepl("all hazard ratios in b use the sequencing-date clock",captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
   grepl("(c-e) Kaplan-Meier platinum-free (c), AVPC-free (d), and NEPC-free (e)",
     captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
   grepl("(f-h) Probability of platinum treatment, AVPC, and NEPC",captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
@@ -484,28 +484,28 @@ wrong_clock <- km_tables; wrong_clock$gradient$clock <- "adt"
 clock_error <- tryCatch(plot_federated_transfer_horizon_risk(wrong_clock,"xgboost_cox",180L),error=conditionMessage)
 stopifnot(grepl("sequencing-landmark",clock_error,fixed=TRUE))
 # Alternative Figure 5 panel b: unpenalized univariable Cox HRs, one row per endpoint x bundle x
-# landmark x predictor: score per SD (ADT clock), Gleason >=8 vs <=7 (ADT clock, Gleason known) and
-# any TP53/RB1/PTEN alteration (sequencing clock); each matches a direct coxph.
+# landmark x predictor, all on the sequencing clock: score per SD, Gleason per point (Gleason known)
+# and any TP53/RB1/PTEN alteration; each matches a direct coxph.
 cox_hr <- federated_transfer_cox_hr(km_input)
-hr_cell <- filter(km_input,clock=="adt",endpoint=="platinum",model_family=="elastic_net_cox")
+hr_cell <- filter(km_input,clock=="sequencing",endpoint=="platinum",model_family=="elastic_net_cox")
 hr_direct <- survival::coxph(survival::Surv(duration_days,event)~z,
   data=mutate(hr_cell,z=as.vector(scale(risk_score))))
 hr_row <- filter(cox_hr,endpoint=="platinum",model_family=="elastic_net_cox",predictor=="score")
 gl_cell <- filter(hr_cell,!is.na(GLEASON_SCORE))
-gl_direct <- survival::coxph(survival::Surv(duration_days,event)~I(GLEASON_SCORE>=8),data=gl_cell)
+gl_direct <- survival::coxph(survival::Surv(duration_days,event)~GLEASON_SCORE,data=gl_cell)
 gl_row <- filter(cox_hr,endpoint=="platinum",model_family=="elastic_net_cox",predictor=="gleason")
-tsg_cell <- filter(km_input,clock=="sequencing",endpoint=="platinum",model_family=="elastic_net_cox")
-tsg_direct <- survival::coxph(survival::Surv(duration_days,event)~I(TP53_ANY+RB1_ANY+PTEN_ANY>=1),data=tsg_cell)
+tsg_direct <- survival::coxph(survival::Surv(duration_days,event)~I(TP53_ANY+RB1_ANY+PTEN_ANY>=1),data=hr_cell)
 tsg_row <- filter(cox_hr,endpoint=="platinum",model_family=="elastic_net_cox",predictor=="tsg")
 stopifnot(nrow(cox_hr)==18L,!anyDuplicated(cox_hr[c("endpoint","bundle","landmark_days","predictor")]),
   identical(unique(cox_hr$predictor),c("score","gleason","tsg")),
-  all(cox_hr$clock==ifelse(cox_hr$predictor=="tsg","sequencing","adt")),
+  identical(unique(cox_hr$unit),c("per SD","per point","binary")),
+  all(cox_hr$clock=="sequencing"),
   setequal(cox_hr$endpoint,names(FEDERATED_TRANSFER_ENDPOINTS)),
   nrow(hr_row)==1L,hr_row$n==nrow(hr_cell),hr_row$events==sum(hr_cell$event),
   abs(hr_row$log_hr-unname(coef(hr_direct)))<1e-8,abs(hr_row$se-sqrt(vcov(hr_direct)[1,1]))<1e-8,
   nrow(gl_row)==1L,gl_row$n==nrow(gl_cell),is.na(gl_row$sd_score),
   abs(gl_row$log_hr-unname(coef(gl_direct)))<1e-8,abs(gl_row$se-sqrt(vcov(gl_direct)[1,1]))<1e-8,
-  nrow(tsg_row)==1L,tsg_row$n==nrow(tsg_cell),
+  nrow(tsg_row)==1L,tsg_row$n==nrow(hr_cell),
   abs(tsg_row$log_hr-unname(coef(tsg_direct)))<1e-8,
   all(abs(cox_hr$hazard_ratio-exp(cox_hr$log_hr))<1e-12),
   all(cox_hr$ci_lower<cox_hr$hazard_ratio & cox_hr$hazard_ratio<cox_hr$ci_upper),
@@ -518,8 +518,8 @@ stopifnot(nrow(hr_none)==18L,all(is.na(hr_none$hazard_ratio)),inherits(hr_none_p
   all(startsWith(hr_none_plot$data$label,"Not estimable")),
   is.null(plot_federated_transfer_cox_hr(cox_hr,"no_such_model")))
 # A binary predictor without events in one group is not estimable.
-one_group <- filter(km_input,!(clock=="adt" & !is.na(GLEASON_SCORE) & GLEASON_SCORE>=8 & event==1L))
-stopifnot(all(is.na(filter(federated_transfer_cox_hr(one_group),predictor=="gleason")$hazard_ratio)))
+one_group <- filter(km_input,!(clock=="sequencing" & TP53_ANY+RB1_ANY+PTEN_ANY>=1 & event==1L))
+stopifnot(all(is.na(filter(federated_transfer_cox_hr(one_group),predictor=="tsg")$hazard_ratio)))
 hr_plot <- plot_federated_transfer_cox_hr(cox_hr)
 stopifnot(all(hr_plot$data$model_family=="xgboost_cox"),
   identical(levels(hr_plot$data$endpoint_label),unname(FEDERATED_TRANSFER_ENDPOINTS_SHORT)),
@@ -543,7 +543,8 @@ stopifnot(inherits(fig5_hr$plot,"gtable"),length(fig5_hr$panels)==8L,
   identical(fig5_hr$spec$layout[4,],rep(6:8,each=2)),
   abs(fig5_hr$spec$height-fig5_endpoints$spec$height-MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["hr"]])<1e-9,
   grepl("the transferred Federated XGBoost score per SD",fig5_hr$legend,fixed=TRUE),
-  grepl("TP53/RB1/PTEN alteration vs wild-type (sequencing clock",fig5_hr$legend,fixed=TRUE),
+  grepl("all on the sequencing-date clock in sequenced patients",fig5_hr$legend,fixed=TRUE),
+  grepl("Gleason score per 1-point increase",fig5_hr$legend,fixed=TRUE),
   grepl("c: Kaplan-Meier platinum-free survival",fig5_hr$legend,fixed=TRUE),
   grepl("f: Kaplan-Meier 5-year Platinum probability",fig5_hr$legend,fixed=TRUE),
   !grepl("hazard ratio",fig5_endpoints$legend,ignore.case=TRUE))
