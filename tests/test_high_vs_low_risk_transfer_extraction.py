@@ -1,5 +1,6 @@
 """Exercise the patient-extraction notebook with synthetic data only."""
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -128,7 +129,9 @@ def _write_term_inputs(env, scores):
     pl.DataFrame({"DFCI_MRN": [n[0] for n in notes], "EVENT_DATE": [n[1] for n in notes],
                   "RPT_ID": list(range(len(notes))), "RPT_TEXT": [n[2] for n in notes]}
                  ).write_parquet(env["PATHOLOGY_PATH"])
-    env.update(TERM_MIN_PATIENTS=2, TERM_NGRAMS=(1, 2), TERM_FDR=0.05, TERM_TOP_N=5)
+    env.update(TERM_MIN_PATIENTS=2, TERM_NGRAMS=(1, 2), TERM_FDR=0.05, TERM_TOP_N=5,
+               TERM_NEGATION=True, NEG_WINDOW=6, ADJUST_REPORT_BANDS=(1, 2, 4), SPECIMEN_HEADER_CHARS=300,
+               TEXT_C=1.0, TEXT_FOLDS=2, TEXT_PERMUTATIONS=5, TEXT_SEED=0, N_JOBS=1)
     return notes
 
 
@@ -138,9 +141,13 @@ def test_term_enrichment_contrasts_deciles_with_middle_on_pre_landmark_reports(e
     _write_term_inputs(env, scores)
     _run_cells(env, 4, 5, 7, 9, 11, 13, 14, 15)
 
-    res = pd.read_csv(env["OUTPUT_DIR"] / "pathology_term_enrichment.csv")
-    assert set(res["group"]) == {"top", "bottom"}
-    assert (res["n_control"] == 16).all() and (res["n_group"] == 2).all()
+    all_res = pd.read_csv(env["OUTPUT_DIR"] / "pathology_term_enrichment.csv")
+    assert set(zip(all_res["group"], all_res["control"])) == {
+        ("top", "middle"), ("bottom", "middle"), ("top", "bottom"), ("bottom", "top")}
+    assert (all_res["n_group"] == 2).all()
+    vs_middle = all_res["control"].eq("middle")
+    assert (all_res.loc[vs_middle, "n_control"] == 16).all() and (all_res.loc[~vs_middle, "n_control"] == 2).all()
+    res = all_res[vs_middle]
     for lm in (0, 90, 180):
         t = res[(res["landmark"] == lm) & (res["group"] == "top")].set_index("term")
         assert t.loc["neuroendocrine", "pct_group"] == 1 and t.loc["neuroendocrine", "pct_control"] == 0
@@ -153,6 +160,17 @@ def test_term_enrichment_contrasts_deciles_with_middle_on_pre_landmark_reports(e
     ductal = res[res["term"].eq("ductal")]
     assert set(ductal["landmark"]) == {180}
     assert ductal.loc[ductal["group"].eq("bottom"), "pct_group"].eq(1).all()
+
+    # Top vs bottom, one-sided in each direction: 2/2 vs 0/2 gives p = 1 / C(4, 2).
+    def contrast(lm, group, control):
+        return all_res[(all_res["landmark"] == lm) & (all_res["group"] == group)
+                       & (all_res["control"] == control)].set_index("term")
+    for lm in (0, 90, 180):
+        assert contrast(lm, "top", "bottom").loc["neuroendocrine", "p_value"] == pytest.approx(1 / 6)
+        assert contrast(lm, "bottom", "top").loc["neuroendocrine", "p_value"] == pytest.approx(1)
+        assert contrast(lm, "top", "bottom").loc["prostate", "pct_control"] == 1
+    assert contrast(180, "bottom", "top").loc["ductal", "p_value"] == pytest.approx(1 / 6)
+    assert contrast(180, "bottom", "top").index[0] in {"ductal", "ductal pattern", "pattern"}
     sizes = env["group_sizes"]
     assert sizes.loc[(0, "middle"), "patients_scored"] == 16
     assert sizes.loc[(180, "bottom"), "reports"] == 4 and sizes.loc[(0, "bottom"), "reports"] == 2
@@ -160,6 +178,7 @@ def test_term_enrichment_contrasts_deciles_with_middle_on_pre_landmark_reports(e
 
     output = capsys.readouterr().out
     assert "Landmark 0 · top decile vs middle" in output
+    assert "Landmark 180 · bottom decile vs top decile" in output
     assert not any(str(patient_id) in output for patient_id in ids)
     assert "neuroendocrine features present" not in output
 
@@ -307,9 +326,13 @@ def test_bertopic_enriches_topics_from_precomputed_embeddings_without_leaking_te
     assert topics.set_index("topic").loc[-1, "n_reports"] == 1
     res = pd.read_csv(env["OUTPUT_DIR"] / "pathology_topic_enrichment.csv")
     assert not any("Representative" in c for c in topics.columns.tolist() + res.columns.tolist())
-    assert (res["n_control"] == 16).all() and (res["n_group"] == 2).all()   # outlier patient stays in the denominator
+    vs_middle = res["control"].eq("middle")
+    assert (res.loc[vs_middle, "n_control"] == 16).all()   # outlier patient stays in the denominator
+    assert (res["n_group"] == 2).all() and (res.loc[~vs_middle, "n_control"] == 2).all()
     for lm in (0, 90, 180):
-        top = res[(res["landmark"] == lm) & (res["group"] == "top")].set_index("topic")
+        tvb = res[(res["landmark"] == lm) & (res["group"] == "top") & (res["control"] == "bottom")].set_index("topic")
+        assert tvb.loc[0, "p_value"] == pytest.approx(1 / 6)
+        top = res[(res["landmark"] == lm) & (res["group"] == "top") & vs_middle].set_index("topic")
         assert top.loc[0, "top_words"] == "neuroendocrine" and top.loc[0, "pct_group"] == 1
         assert top.loc[0, "p_value"] == pytest.approx(1 / 153)
         assert top.loc[2, "pct_control"] == pytest.approx(15 / 16)
@@ -319,6 +342,7 @@ def test_bertopic_enriches_topics_from_precomputed_embeddings_without_leaking_te
     out = capsys.readouterr().out
     assert "24 of 24 in-window pathology reports have a precomputed embedding" in out
     assert "Landmark 0 · top decile vs middle (topics)" in out
+    assert "Landmark 0 · top decile vs bottom decile (topics)" in out
     assert not any(str(patient_id) in out for patient_id in IDS)
     # Whole reports never print; two-word reports such as "ductal pattern" are also legitimate aggregate bigrams.
     assert [n[2] for n in notes if len(n[2].split()) > 2 and n[2] in out] == []
@@ -327,3 +351,250 @@ def test_bertopic_enriches_topics_from_precomputed_embeddings_without_leaking_te
     want = np.array([0, 3, 4, 9, len(rows) - 1])
     got = env["read_embedding_rows"](array_path, want, mods["zstandard"], chunk_rows=2)
     np.testing.assert_array_equal(got, np.load(array_path)[want].astype(np.float32))
+
+
+# --- Sensitivity and complementary analyses (cells 19-22) ---
+EXTRA_CELLS = (20, 21, 22)
+
+
+def _no_topic_modules(env, monkeypatch):
+    for name in TOPIC_MODULES:
+        monkeypatch.setitem(sys.modules, name, None)
+    env.update(EMBED_METADATA_PATH=Path("/nonexistent/meta.parquet"), EMBED_ARRAY_PATH=Path("/nonexistent/a.npy.zst"),
+               TOPIC_MIN_SIZE=2, TOPIC_SEED=0)
+
+
+def _write_notes(env, notes):
+    pl.DataFrame({"DFCI_MRN": [n[0] for n in notes], "EVENT_DATE": [n[1] for n in notes],
+                  "RPT_ID": list(range(len(notes))), "RPT_TEXT": [n[2] for n in notes]}
+                 ).write_parquet(env["PATHOLOGY_PATH"])
+
+
+NEGATED_MIDDLE = (100005, 100006)
+
+
+def _write_extra_inputs(env, scores):
+    """The term inputs plus a negated NE mention in two middle patients and a Gleason 9 in both top patients."""
+    notes = _write_term_inputs(env, scores)
+    notes += [(pid, "2019-06-01", "Negative for neuroendocrine differentiation.") for pid in NEGATED_MIDDLE]
+    notes += [(pid, "2019-06-01", "Gleason score 4+5=9 (grade group 5)") for pid in sorted(TOP)]
+    _write_notes(env, notes)
+    return notes
+
+
+@pytest.mark.parametrize("text, negated", [
+    ("negative for synaptophysin, chromogranin and cd56", {"synaptophysin", "chromogranin", "cd56"}),
+    ("positive for synaptophysin and negative for chromogranin", {"chromogranin"}),
+    ("chromogranin: negative", {"chromogranin"}),
+    ("no carcinoma identified.", {"carcinoma"}),
+    ("cannot rule out carcinoma", set()),
+    ("synaptophysin positive, chromogranin negative", {"chromogranin"}),
+    ("no carcinoma. adenocarcinoma present", {"carcinoma"}),
+    ("no carcinoma\nadenocarcinoma present", {"carcinoma"}),
+    ("specimen no. 2 adenocarcinoma", set()),
+    ("negative for synaptophysin, chromogranin positive", {"synaptophysin"}),
+    ("negative for synaptophysin and chromogranin positive", {"synaptophysin"}),
+    ("negative for synaptophysin, chromogranin and cd56 positive", {"synaptophysin"}),
+    ("negative for synaptophysin, chromogranin negative and cd56 positive", {"synaptophysin", "chromogranin"}),
+    ("no carcinoma identified, synaptophysin positive", {"carcinoma"}),
+])
+def test_negation_marks_only_words_in_scope(extraction, text, negated):
+    env, _ = extraction
+    env.update(NEG_WINDOW=6, TERM_NEGATION=True)
+    cells = json.loads(NOTEBOOK.read_text())["cells"]
+    src = "".join(cells[13]["source"])
+    # Only the regex / function definitions (everything before the data loading) are needed.
+    exec(compile(src[:src.index("# Per-landmark group")], "cell_13_defs", "exec"), env)
+    marked = env["mark_negation"](text)
+    assert set(re.findall(r"\bneg_([a-z0-9]+)", marked)) == negated
+    assert marked.replace("neg_", "") == text.lower()
+
+
+def test_negated_mentions_are_separate_terms_and_lexicon_features(extraction, capsys, monkeypatch):
+    env, scores = extraction
+    _write_extra_inputs(env, scores)
+    _no_topic_modules(env, monkeypatch)
+    _run_cells(env, *TERM_CELLS, *TOPIC_CELLS, 20)
+
+    hits = env["lexicon_hits"]("Negative for synaptophysin, chromogranin positive.")
+    assert hits["synaptophysin (negated)"] and hits["chromogranin"]
+    assert "synaptophysin" not in hits and "chromogranin (negated)" not in hits
+
+    terms = pd.read_csv(env["OUTPUT_DIR"] / "pathology_term_enrichment.csv")
+    lex = pd.read_csv(env["OUTPUT_DIR"] / "pathology_lexicon_enrichment.csv")
+    assert list(lex.columns) == env["LEXICON_COLS"]
+    for lm in (0, 90, 180):
+        t = terms[(terms["landmark"] == lm) & (terms["group"] == "top") & (terms["control"] == "middle")].set_index("term")
+        assert t.loc["neuroendocrine", "control_with_term"] == 0            # negated mentions do not count
+        assert t.loc["neuroendocrine", "p_value"] == pytest.approx(1 / 153)
+        assert t.loc["neg_neuroendocrine", "control_with_term"] == 2
+        x = lex[(lex["landmark"] == lm) & (lex["group"] == "top") & (lex["control"] == "middle")].set_index("feature")
+        assert x.loc["NE term (any)", "group_with_feature"] == 2 and x.loc["NE term (any)", "control_with_feature"] == 0
+        assert x.loc["NE term (any) (negated)", "control_with_feature"] == 2
+        assert x.loc["Gleason max 8-10", "group_with_feature"] == 2
+        assert x.loc["Gleason max 8-10", "p_value"] == pytest.approx(1 / 153)
+        assert "Gleason max 7" not in x.index and "sarcomatoid" not in x.index      # unseen features are not tested
+    assert set(lex.loc[lex["feature"].eq("ductal"), "landmark"]) == {180}
+    assert "Landmark 0 · curated lexicon" in capsys.readouterr().out
+
+    # Without negation handling the negated mentions count as plain mentions.
+    env["TERM_NEGATION"] = False
+    _run_cells(env, *TERM_CELLS, 20)
+    terms = pd.read_csv(env["OUTPUT_DIR"] / "pathology_term_enrichment.csv")
+    t = terms[(terms["landmark"] == 0) & (terms["group"] == "top") & (terms["control"] == "middle")].set_index("term")
+    assert t.loc["neuroendocrine", "control_with_term"] == 2 and not t.index.str.startswith("neg_").any()
+    lex = pd.read_csv(env["OUTPUT_DIR"] / "pathology_lexicon_enrichment.csv")
+    assert not lex["feature"].str.endswith("(negated)").any()
+
+
+def test_mantel_haenszel_adjusts_for_strata(extraction):
+    env, _ = extraction
+    env.update(TERM_NEGATION=True, NEG_WINDOW=6, TERM_NGRAMS=(1, 2), TERM_MIN_PATIENTS=2)
+    cells = json.loads(NOTEBOOK.read_text())["cells"]
+    for i in (13, 14):
+        src = "".join(cells[i]["source"])
+        cut = src.index("# Per-landmark group") if i == 13 else src.index("term_matrices = {}")
+        exec(compile(src[:cut], f"cell_{i}_defs", "exec"), env)
+    from scipy import sparse
+
+    def run(present, label, strata):
+        res = env["fisher_enrichment"](sparse.csr_matrix(np.array(present).reshape(-1, 1)), np.array(label),
+                                       np.array(["f"], dtype=object), 0, None if strata is None else np.array(strata))
+        return res[(res["group"] == "top") & (res["control"] == "middle")].iloc[0]
+
+    # One stratum: MH odds ratio = the Haldane-corrected odds ratio (zero cell), p from the continuity-corrected MH.
+    one = run([1, 1, 0, 0, 0, 0], ["top", "top", "middle", "middle", "middle", "middle"], [0] * 6)
+    assert one["odds_ratio_mh"] == pytest.approx(one["odds_ratio"])
+    # Confounding: within each stratum the feature rate is the same in both groups (8/16 vs 2/4, then 0/4 vs 0/16),
+    # but top sits mostly in the stratum where the feature is common, so the pooled Fisher test is significant.
+    label = ["top"] * 16 + ["middle"] * 4 + ["top"] * 4 + ["middle"] * 16
+    strata = [0] * 20 + [1] * 20
+    present = [1] * 8 + [0] * 8 + [1] * 2 + [0] * 2 + [0] * 20
+    res = run(present, label, strata)
+    assert res["p_value"] < 0.05
+    assert res["p_value_mh"] > 0.5 and res["odds_ratio_mh"] < res["odds_ratio"] / 3
+    # Strata that never contain both groups carry no information.
+    confounded = run([1, 1, 0, 0], ["top", "top", "middle", "middle"], [0, 0, 1, 1])
+    assert np.isnan(confounded["odds_ratio_mh"]) and np.isnan(confounded["p_value_mh"])
+    assert run([1, 1, 0, 0], ["top", "top", "middle", "middle"], None)[["odds_ratio_mh", "p_value_mh"]].isna().all()
+
+
+def test_score_association_and_text_classifier(extraction, capsys, monkeypatch):
+    env, scores = extraction
+    notes = _write_extra_inputs(env, scores)
+    _no_topic_modules(env, monkeypatch)
+    _run_cells(env, *TERM_CELLS, *TOPIC_CELLS, *EXTRA_CELLS)
+
+    assoc = pd.read_csv(env["OUTPUT_DIR"] / "pathology_score_association.csv")
+    assert list(assoc.columns) == env["ASSOC_COLS"]
+    for lm in (0, 90, 180):
+        a = assoc[(assoc["landmark"] == lm) & (assoc["feature_set"] == "term")].set_index("feature")
+        assert a.loc["neuroendocrine", "auc"] == 1 and a.loc["neuroendocrine", "p_value"] < 0.05
+        assert a.loc["neuroendocrine", "n_patients"] == 20
+        x = assoc[(assoc["landmark"] == lm) & (assoc["feature_set"] == "lexicon")].set_index("feature")
+        assert x.loc["Gleason max 8-10", "auc"] == 1 and np.isfinite(x.loc["Gleason max 8-10", "auc_adj"])
+    a180 = assoc[(assoc["landmark"] == 180) & (assoc["feature_set"] == "term")].set_index("feature")
+    assert a180.loc["ductal", "auc"] == 0 and a180.loc["ductal", "mean_percentile_with"] < 0.1
+    assert ((assoc["n_with_feature"] > 0) & (assoc["n_with_feature"] < assoc["n_patients"])).all()
+
+    clf = pd.read_csv(env["OUTPUT_DIR"] / "pathology_text_classifier.csv")
+    assert list(clf.columns) == env["CLASSIFIER_COLS"]
+    assert set(clf["features"]) == {"tfidf"} and len(clf) == 9
+    assert clf["cv_auc"].between(0, 1).all() and clf["p_permutation"].between(0, 1).all()
+    row = clf[(clf["landmark"] == 180) & (clf["positive_group"] == "bottom")].iloc[0]
+    assert row["negative_group"] == "middle" and row["n_positive"] == 2 and row["n_negative"] == 16
+
+    # Too few patients for the folds: skipped with a note, not an error.
+    env["TEXT_FOLDS"] = 3
+    _run_cells(env, 22)
+    clf = pd.read_csv(env["OUTPUT_DIR"] / "pathology_text_classifier.csv")
+    assert clf["cv_auc"].isna().all() and clf["note"].str.startswith("skipped").all()
+
+    out = capsys.readouterr().out
+    assert "Embedding classifier skipped (packages not installed: zstandard); TF-IDF only." in out
+    assert not any(str(patient_id) in out for patient_id in IDS)
+    assert [n[2] for n in notes if len(n[2].split()) > 2 and n[2] in out] == []
+
+
+def test_embedding_classifier_uses_precomputed_embeddings(extraction, capsys, monkeypatch, tmp_path):
+    env, scores = extraction
+    notes = _write_term_inputs(env, scores)
+    _fake_topic_modules(monkeypatch)
+    rows, meta = [], []
+    for rpt_id, (pid, _, text) in enumerate(notes):
+        meta.append({"RPT_ID": float(rpt_id), "NOTE_TYPE": "Pathology", "EMBEDDING_INDEX": len(rows)})
+        rows.append([1.0 if "neuroendocrine" in text else 0.0, 1.0 if "ductal" in text else 0.0, pid % 3 + 1.0])
+    np.save(tmp_path / "emb.npy", np.asarray(rows, dtype=np.float16))
+    pl.DataFrame(meta).write_parquet(tmp_path / "meta.parquet")
+    env.update(EMBED_METADATA_PATH=tmp_path / "meta.parquet", EMBED_ARRAY_PATH=tmp_path / "emb.npy",
+               TOPIC_MIN_SIZE=2, TOPIC_SEED=0)
+    _run_cells(env, *TERM_CELLS, *TOPIC_CELLS, *EXTRA_CELLS)
+
+    ids, x = env["patient_embeddings"](0)
+    assert len(ids) == 20 and x.shape == (20, 3)
+    top_rows = ids.get_indexer(sorted(TOP))
+    np.testing.assert_allclose(x[top_rows, 0], 0.5)         # mean of the adenocarcinoma and neuroendocrine reports
+    clf = pd.read_csv(env["OUTPUT_DIR"] / "pathology_text_classifier.csv")
+    emb = clf[clf["features"].eq("embedding")]
+    assert len(emb) == 9 and (emb["n_features"] == 3).all() and emb["cv_auc"].between(0, 1).all()
+    assert emb["top_terms_positive"].isna().all()
+    assert "Embedding classifier skipped" not in capsys.readouterr().out
+
+
+def _classifier_definitions(env):
+    env.update(TERM_MIN_PATIENTS=2, TERM_NGRAMS=(1, 2), TEXT_C=1.0, TEXT_FOLDS=2,
+               TEXT_PERMUTATIONS=2, TEXT_SEED=0, N_JOBS=1, CONTROL_GROUP="middle")
+    cells = json.loads(NOTEBOOK.read_text())["cells"]
+    for index, stop in ((14, "term_matrices = {}"), (22, "embed_pos =")):
+        src = "".join(cells[index]["source"])
+        exec(compile(src[:src.index(stop)], f"cell_{index}_defs", "exec"), env)
+
+
+def test_classifier_fits_vocabulary_and_idf_inside_permutation_cv(extraction, monkeypatch):
+    env, _ = extraction
+    _classifier_definitions(env)
+    y = np.array([0, 1] * 4)
+    cv = env["StratifiedKFold"](2, shuffle=True, random_state=0)
+    train, held_out = next(cv.split(np.zeros(len(y)), y))
+    documents = np.empty(len(y), dtype=object)
+    documents[:] = [["common alpha", "beta"] for _ in y]
+    for i in held_out:
+        documents[i] = ["common unseen", "beta"]
+
+    fits = []
+    transformer = env["PatientTfidf"]
+    original_fit = transformer.fit
+
+    def record_fit(self, X, y=None):
+        result = original_fit(self, X, y)
+        fits.append((len(X), self.get_feature_names_out(), self.transform(documents[train]).toarray()))
+        return result
+
+    monkeypatch.setattr(transformer, "fit", record_fit)
+    env["classify"](documents, y, "tfidf")
+    # Two observed folds + two folds per permutation, followed by the separate descriptive full-data fit.
+    assert [size for size, _, _ in fits] == [4] * 6 + [8]
+    assert "unseen" not in fits[0][1] and "unseen" in fits[-1][1]
+    assert "alpha beta" not in fits[0][1]  # the bigram would cross two reports
+
+    baseline = fits[0]
+    for i in held_out:
+        documents[i] = ["changed heldout vocabulary alpha alpha", "beta"]
+    fits.clear()
+    env["classify"](documents, y, "tfidf")
+    np.testing.assert_array_equal(fits[0][1], baseline[1])
+    np.testing.assert_allclose(fits[0][2], baseline[2])
+
+
+@pytest.mark.parametrize("n_jobs", [1, 2])
+def test_classifier_empty_vocabulary_uses_intercept_only_predictions(extraction, n_jobs):
+    env, _ = extraction
+    _classifier_definitions(env)
+    env["N_JOBS"] = n_jobs
+    documents = np.empty(6, dtype=object)
+    # Repeated reports from one patient must not meet the minimum distinct-patient frequency.
+    documents[:] = [[word, word] for word in ("alpha", "beta", "gamma", "delta", "epsilon", "zeta")]
+    result = env["classify"](documents, np.array([0, 1] * 3), "tfidf")
+    assert result["cv_auc"] == 0.5 and result["null_auc_mean"] == 0.5
+    assert result["p_permutation"] == 1 and result["n_features"] == 0
+    assert result["top_terms_positive"] == result["top_terms_negative"] == ""
