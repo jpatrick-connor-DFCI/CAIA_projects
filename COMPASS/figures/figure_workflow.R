@@ -1890,8 +1890,9 @@ federated_transfer_cox_hr <- function(km) {
     z %>% group_by(endpoint,bundle,model_family,landmark_days) %>%
       group_modify(function(cell,key) federated_transfer_cox_hr_cell(cell,columns[[predictor]],
         standardize=predictor=="score")) %>%
-      ungroup() %>% mutate(predictor=predictor,clock=clock,
-        unit=if(predictor=="score") "per SD" else "binary")
+      # Plain assignment: inside mutate() `predictor` would mask to the new column.
+      ungroup() %>% { .$predictor <- predictor; .$clock <- clock
+        .$unit <- if(predictor=="score") "per SD" else "binary"; . }
   })
   out <- bind_rows(rows)
   if(!nrow(out)) return(NULL)
