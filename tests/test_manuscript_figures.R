@@ -524,8 +524,8 @@ cells <- list(
   # The ADT-anchored genes stand in for the trio columns in the direct fit.
   adt_sequenced=filter(km_input,clock=="adt",endpoint=="platinum",model_family=="elastic_net_cox",!is.na(ADT_TP53_ANY)) %>%
     mutate(TP53_ANY=ADT_TP53_ANY,RB1_ANY=ADT_RB1_ANY,PTEN_ANY=ADT_PTEN_ANY))
-cells$sequencing_score <- cells$sequencing
-cells$sequencing_gleason_available <- cells$sequencing_gleason
+cells$adt_score <- cells$adt
+cells$adt_gleason_available <- cells$adt_gleason
 cells$sequencing_tsg <- cells$sequencing
 formulas <- list(score=survival::Surv(duration_days,event)~as.vector(scale(risk_score)),
   gleason=survival::Surv(duration_days,event)~GLEASON_SCORE,
@@ -552,10 +552,10 @@ stopifnot(nrow(hr_none)==nrow(cox_hr),all(is.na(hr_none$hazard_ratio)),inherits(
 # A gene group without events is not estimable.
 no_tp53_events <- filter(km_input,!(clock=="sequencing" & TP53_ANY>0 & event==1L))
 stopifnot(all(is.na(filter(federated_transfer_cox_hr(no_tp53_events),predictor=="tp53")$hazard_ratio)))
-# The default panel uses the three probability analysis sets (Alternative Figure 5 panel b).
+# The default panel uses full ADT score/Gleason cohorts and sequencing-clock genes.
 hr_plot <- plot_federated_transfer_cox_hr(cox_hr)
 stopifnot(all(hr_plot$data$model_family=="xgboost_cox"),setequal(hr_plot$data$cohort,names(FEDERATED_TRANSFER_COX_HR_MAIN_COHORTS)),
-  all(hr_plot$data$clock=="sequencing"),
+  all(hr_plot$data$clock==ifelse(hr_plot$data$predictor %in% c("score","gleason"),"adt","sequencing")),
   identical(levels(hr_plot$data$endpoint_label),unname(FEDERATED_TRANSFER_ENDPOINTS_SHORT)),
   identical(levels(hr_plot$data$predictor_label),
     unname(vapply(FEDERATED_TRANSFER_COX_HR_PREDICTORS,`[[`,character(1),"label"))),
@@ -565,16 +565,17 @@ stopifnot(all(hr_plot$data$model_family=="xgboost_cox"),setequal(hr_plot$data$co
     hr_plot$data$ci_lower[1],hr_plot$data$ci_upper[1],hr_plot$data$p_value[1],
     scales::comma(hr_plot$data$n[1]),scales::comma(hr_plot$data$events[1]))))
 # Missing gene status must not restrict score/Gleason, and missing Gleason must not
-# restrict genes. The main analysis counts match the probability panels' source sets.
+# restrict genes. Score/Gleason use all eligible ADT rows, including unsequenced patients.
 missing_genes <- km_input
 missing_genes$TP53_ANY[missing_genes$clock=="sequencing" & missing_genes$person_id %% 7L==0L] <- NA_real_
 missing_hr <- plot_federated_transfer_cox_hr(federated_transfer_cox_hr(missing_genes))$data
 missing_groups <- federated_transfer_km_groups(missing_genes)
 for(endpoint in names(FEDERATED_TRANSFER_ENDPOINTS)) {
   z <- filter(missing_groups,clock=="sequencing",model_family=="xgboost_cox",endpoint==!!endpoint)
+  a <- filter(missing_groups,clock=="adt",model_family=="xgboost_cox",endpoint==!!endpoint)
   h <- filter(missing_hr,endpoint==!!endpoint)
-  stopifnot(h$n[h$predictor=="score"]==sum(is.finite(z$risk_score)),
-    h$n[h$predictor=="gleason"]==sum(!is.na(z$gleason_group)),
+  stopifnot(h$n[h$predictor=="score"]==sum(is.finite(a$risk_score)),
+    h$n[h$predictor=="gleason"]==sum(!is.na(a$gleason_group)),
     all(h$n[h$predictor %in% c("tp53","rb1","pten")]==sum(!is.na(z$trio_group))),
     h$n[h$predictor=="score"]>h$n[h$predictor=="gleason"],
     h$n[h$predictor=="score"]>h$n[h$predictor=="tp53"])
@@ -609,7 +610,8 @@ stopifnot(inherits(fig5_hr$plot,"gtable"),length(fig5_hr$panels)==8L,
   identical(fig5_hr$spec$layout[4,],rep(6:8,each=2)),
   abs(fig5_hr$spec$height-fig5_endpoints$spec$height-MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["hr"]])<1e-9,
   grepl("the transferred Federated XGBoost score per SD",fig5_hr$legend,fixed=TRUE),
-  grepl("after the sequencing report date, using three analysis sets",fig5_hr$legend,fixed=TRUE),
+  grepl("using three analysis sets: the full scored ADT cohort",fig5_hr$legend,fixed=TRUE),
+  grepl("follow-up from sequencing report + landmark",fig5_hr$legend,fixed=TRUE),
   grepl("Gleason score per 1-point increase",fig5_hr$legend,fixed=TRUE),
   grepl("c: Kaplan-Meier platinum-free survival",fig5_hr$legend,fixed=TRUE),
   grepl("f: Kaplan-Meier 5-year Platinum probability",fig5_hr$legend,fixed=TRUE),

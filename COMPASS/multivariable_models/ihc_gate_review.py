@@ -571,3 +571,131 @@ def label_flips(joined: pd.DataFrame) -> pd.DataFrame:
             *[c for c in joined.columns if c.startswith("n_findings_")],
             *(["scored"] if "scored" in joined else [])]
     return joined.loc[changed, keep].reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# Patient-level review sheet for gate flips (gated non_nepc -> nepc ungated)
+# --------------------------------------------------------------------------- #
+FLIP_TYPES = ("ne_gate", "trial_context")   # the screen whose removal makes the patient nepc
+FLIP_SHEET_COLUMNS = ["review_id", "flip_type", LOCAL_ID_COL, "review_status", "scored", "manual_label",
+                      "n_findings", "n_notes", "note_types", "evidence_types", "reason_codes",
+                      "earliest_event_date", "findings", "context", "reviewer_call", "reviewer_note"]
+
+
+def _reason_code(stage, reason):
+    code = str(reason or "").split(":")[0] or "(none)"
+    return code if stage == STAGE_NE_GATE else f"trial:{code}"
+
+
+def flipped_patients(labels: pd.DataFrame) -> pd.DataFrame:
+    """Patients ``non_nepc`` when gated but ``nepc`` with no gate, with the screen that flips them."""
+    f = labels[labels["nepc_status_gated"].ne("nepc") & labels["nepc_status_no_gate"].eq("nepc")].copy()
+    f["flip_type"] = np.where(f["nepc_status_no_ne_gate"].eq("nepc"), "ne_gate", "trial_context")
+    return f.reset_index(drop=True)
+
+
+def flip_findings(lca, inputs, mrns) -> pd.DataFrame:
+    """Every final-attempt finding (all note types) of ``mrns`` with its gate step and reason."""
+    selected = {int(m) for m in mrns}
+    f = _to_pandas(inputs["findings"])
+    f = f[f[LOCAL_ID_COL].notna()].copy()
+    f[LOCAL_ID_COL] = f[LOCAL_ID_COL].astype(int)
+    f = f[f[LOCAL_ID_COL].isin(selected)].copy()
+    screen = lca["nepc"].screen_ne_quote
+    stages, reasons = [], []
+    for trial, quote, etype in zip(f["_trial_context_reason"], f["quote"], f["evidence_type"]):
+        if isinstance(trial, str) and trial:
+            stages.append(STAGE_TRIAL)
+            reasons.append(trial)
+            continue
+        ok, reason = screen(quote, etype)
+        stages.append(STAGE_PASSED if ok else STAGE_NE_GATE)
+        reasons.append(None if ok else reason)
+    f["gate_stage"], f["gate_reason"] = stages, reasons
+    if f["gate_stage"].eq(STAGE_PASSED).any():
+        raise RuntimeError("A flipped patient has a finding that passes the gate; the labels are stale.")
+    return f.reset_index(drop=True)
+
+
+def quote_window(snippet: str, quote: str, fallback: re.Pattern, *, window: int = DEFAULT_WINDOW_CHARS) -> str:
+    """Snippet text within ``window`` characters of the quote (whitespace-insensitive), else of NE terms."""
+    snippet, words = snippet or "", (quote or "").split()
+    m = re.search(r"\s+".join(map(re.escape, words)), snippet, re.IGNORECASE) if words else None
+    if m is None:
+        return "[quote not found in snippet] " + text_window(snippet, fallback, window=window,
+                                                             max_chars=2 * DEFAULT_MAX_TEXT_CHARS)
+    lo, hi = max(0, m.start() - window), min(len(snippet), m.end() + window)
+    body = snippet[lo:m.start()] + ">>" + snippet[m.start():m.end()] + "<<" + snippet[m.end():hi]
+    return re.sub(r"\s+", " ", ("…" if lo else "") + body + ("…" if hi < len(snippet) else "")).strip()
+
+
+def build_flip_sheet(flips: pd.DataFrame, findings: pd.DataFrame, notes: dict, rx: re.Pattern, *,
+                     manual: pd.DataFrame | None = None, scored_ids=None,
+                     window: int = DEFAULT_WINDOW_CHARS, max_chars: int = DEFAULT_MAX_TEXT_CHARS) -> pd.DataFrame:
+    """One row per flipped patient: every rejected finding, its step:reason, and the snippet around its quote.
+
+    ``findings`` entries are numbered ``[k]`` and the matching ``context`` entry carries the
+    same number; the quote is marked ``>>…<<``. ``context`` is the evidence snippet the
+    LLM read, not the full note.
+    """
+    man = {} if manual is None else dict(zip(manual[LOCAL_ID_COL].astype(int), manual["manual_label"]))
+    scored = None if scored_ids is None else {int(m) for m in scored_ids}
+    by_mrn = {int(m): g for m, g in findings.groupby(LOCAL_ID_COL)}
+    rows = []
+    for p in flips.itertuples(index=False):
+        mrn = int(getattr(p, LOCAL_ID_COL))
+        g = by_mrn.get(mrn, findings.iloc[0:0])
+        g = g[g["gate_stage"].ne(STAGE_PASSED)].sort_values(["source_note_date", "note_uid", "finding_index"],
+                                                            na_position="last")
+        f_parts, c_parts = [], []
+        for k, r in enumerate(g.itertuples(index=False), start=1):
+            head = f"[{k}] {r.note_type} {r.source_note_date or '?'} | {r.evidence_type} | " \
+                   f"{r.gate_stage}:{r.gate_reason or ''}"
+            f_parts.append(f"{head} | event {r.event_date or '?'} | {re.sub(chr(10), ' ', str(r.quote or ''))}")
+            snippet = (notes.get((mrn, r.note_uid)) or {}).get("snippet", "")
+            c_parts.append(f"[{k}] " + quote_window(snippet, r.quote, rx, window=window))
+        context = " || ".join(c_parts)
+        if len(context) > max_chars:
+            context = context[:max_chars] + " [truncated]"
+        uniq = lambda s: ";".join(sorted({str(x) for x in s if pd.notna(x) and str(x)}))  # noqa: E731
+        dates = pd.to_datetime(g["event_date"], errors="coerce").dropna()
+        rows.append({
+            "review_id": str(mrn), "flip_type": p.flip_type, LOCAL_ID_COL: mrn,
+            "review_status": p.review_status,
+            "scored": "" if scored is None else int(mrn in scored), "manual_label": man.get(mrn, ""),
+            "n_findings": len(g), "n_notes": g["note_uid"].nunique(), "note_types": uniq(g["note_type"]),
+            "evidence_types": uniq(g["evidence_type"]),
+            "reason_codes": uniq(_reason_code(s, r) for s, r in zip(g["gate_stage"], g["gate_reason"])),
+            "earliest_event_date": dates.min().strftime("%Y-%m-%d") if len(dates) else "",
+            "findings": " || ".join(f_parts), "context": context, "reviewer_call": "", "reviewer_note": ""})
+    order = {t: i for i, t in enumerate(FLIP_TYPES)}
+    out = pd.DataFrame(rows, columns=FLIP_SHEET_COLUMNS)
+    return out.sort_values(["flip_type", LOCAL_ID_COL], key=lambda c: c.map(order) if c.name == "flip_type" else c
+                           ).reset_index(drop=True)
+
+
+def summarize_flip_review(reviewed: pd.DataFrame) -> dict:
+    """Calls by flip type, by reason code (a patient with several codes counts under each) and overall."""
+    order = {t: i for i, t in enumerate(FLIP_TYPES)}
+    by_type = _call_table(reviewed, "flip_type").sort_values(
+        "flip_type", key=lambda c: c.map(order)).reset_index(drop=True)
+    r = reviewed.assign(reason=reviewed["reason_codes"].map(lambda s: s.split(";") if s else ["(none)"]))
+    by_reason = _call_table(r.explode("reason"), "reason").sort_values("notes", ascending=False)
+    overall = _call_table(reviewed.assign(all="all"), "all")
+    rename = {"notes": "patients"}
+    return {"by_flip_type": by_type.rename(columns=rename), "by_reason": by_reason.reset_index(drop=True)
+            .rename(columns=rename), "overall": overall.rename(columns=rename)}
+
+
+def flip_label_counts(labels: pd.DataFrame, reviewed: pd.DataFrame) -> pd.DataFrame:
+    """Cohort NEPC counts: gated, no_ne_gate, no_gate, and ``reviewed`` = gated + flips called ``true_ne``.
+
+    ``reviewed_with_unclear`` also adds the ``unclear`` calls (an upper bound).
+    """
+    calls = reviewed["reviewer_call"]
+    gated = int(labels["nepc_status_gated"].eq("nepc").sum())
+    counts = {name: int(labels[f"nepc_status_{name}"].eq("nepc").sum()) for name in LABEL_DEFINITIONS}
+    counts["reviewed"] = gated + int(calls.eq("true_ne").sum())
+    counts["reviewed_with_unclear"] = counts["reviewed"] + int(calls.eq("unclear").sum())
+    counts["not_yet_reviewed"] = int(calls.eq("").sum())
+    return pd.DataFrame([{"definition": k, "nepc_patients": v} for k, v in counts.items()])

@@ -30,15 +30,16 @@ Manuscript figures for the ADT cohort, platinum endpoint. The R stages prepare a
 The R code never calls Python. Missing or changed prepared inputs stop with a
 message to rerun notebook 05 (notebook 07 for `checklist_augmentation`).
 
-The Figure 05 Cox-HR alternative uses three sequencing-based analysis sets:
-all eligible scored patients for the continuous XGBoost score (per SD), patients
-with a valid pre-landmark Gleason score for Gleason (per point), and patients
-with known TP53/RB1/PTEN status for separate gene HRs (any alteration vs WT).
-These follow the probability panels' eligibility rules at each of the 0-, 90-,
-and 180-day sequencing-report landmarks. Missing Gleason does not restrict the
-score or gene sets; the continuous score includes all quintiles. Panel b sits
-below the c/d/e KM row, giving row order a, c/d/e, b, f/g/h. Rerun R preparation
-before rendering to rebuild the HR table and scene cache after this change.
+The Figure 05 Cox-HR alternative uses three analysis sets at the 0-, 90-, and
+180-day landmarks: the full scored ADT cohort for the continuous XGBoost score
+(per SD), the full cohort with valid pre-landmark Gleason for Gleason (per point)
+on the ADT clock, and the sequenced cohort with known TP53/RB1/PTEN status for
+separate gene HRs (any alteration vs WT) on the sequencing-report clock. Each
+score uses the corresponding ADT-landmark model and pre-landmark laboratory
+values. Score and Gleason do not require sequencing; missing Gleason does not
+restrict the score or gene sets. The continuous score includes all quintiles.
+Panel b sits below the c/d/e KM row, giving row order a, c/d/e, b, f/g/h. Rerun
+R preparation before rendering to rebuild the HR table and scene cache.
 
 ## Figure groups
 

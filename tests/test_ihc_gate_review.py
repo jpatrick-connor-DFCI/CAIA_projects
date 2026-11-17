@@ -290,3 +290,68 @@ def test_manual_annotations_validate(tmp_path):
     pd.DataFrame({"DFCI_MRN": ["1", "1"], "updated_manual_low_confidence": ["nepc", "avpc"]}).to_csv(path, index=False)
     with pytest.raises(ValueError, match="one row"):
         gr.load_manual_annotations(path)
+
+
+def _flip_setup():
+    findings = pd.DataFrame([
+        {"DFCI_MRN": m, "note_uid": f"Pathology:{r}", "finding_index": i, "attempt_id": "a",
+         "evidence_type": t, "specimen_site": None, "confidence": "high", "quote": q,
+         "_trial_context_reason": tr, "note_type": "Pathology", "source_note_date": "2021-01-01",
+         "event_date": "2021-01-01"} for m, r, i, t, q, tr in FINDINGS])
+    lca = _lca(findings=findings)
+    inputs, _ = gr.load_llm_inputs(lca, "dir")
+    inputs = {**inputs, "status": {1: "ok", 3: "ok", 4: "ok", 5: "ok"}}
+    labels = gr.patient_label_definitions(lca, inputs)
+    flips = gr.flipped_patients(labels)
+    return lca, inputs, labels, flips
+
+
+def test_flipped_patients_and_sheet():
+    lca, inputs, labels, flips = _flip_setup()
+    assert dict(zip(flips["DFCI_MRN"], flips["flip_type"])) == {3: "trial_context", 5: "ne_gate"}
+    f = gr.flip_findings(lca, inputs, flips["DFCI_MRN"])
+    assert set(f["DFCI_MRN"]) == {3, 5}
+    manual = pd.DataFrame({"DFCI_MRN": [5], "manual_label": ["conventional"]})
+    sheet = gr.build_flip_sheet(flips, f, inputs["notes"], gr.review_pattern(_lca()["ne_gate"]),
+                                manual=manual, scored_ids={5})
+    assert list(sheet.columns) == gr.FLIP_SHEET_COLUMNS
+    assert list(sheet["flip_type"]) == ["ne_gate", "trial_context"]           # ne_gate first
+    row = sheet.set_index("DFCI_MRN")
+    assert row.loc[5, "reason_codes"] == "negative_ihc" and row.loc[3, "reason_codes"] == "trial:boilerplate"
+    assert row.loc[5, "manual_label"] == "conventional" and row.loc[5, "scored"] == 1 and row.loc[3, "scored"] == 0
+    assert ">>Synaptophysin negative<<" in row.loc[5, "context"]
+    assert row.loc[5, "findings"].startswith("[1] Pathology 2021-01-01 | positive_ne_ihc | ne_gate:negative_ihc")
+    assert (sheet["reviewer_call"] == "").all()
+
+
+def test_flip_findings_rejects_stale_labels():
+    lca, inputs, _, _ = _flip_setup()
+    with pytest.raises(RuntimeError, match="stale"):
+        gr.flip_findings(lca, inputs, [1])
+
+
+def test_quote_window_is_whitespace_insensitive_and_falls_back():
+    rx = re.compile("synaptophysin", re.I)
+    assert ">>Synaptophysin positive<<" in gr.quote_window("A. Synaptophysin  positive. B.", "synaptophysin positive", rx)
+    assert gr.quote_window("Synaptophysin stain.", "not here", rx).startswith("[quote not found in snippet]")
+
+
+def test_flip_read_back(tmp_path):
+    lca, inputs, labels, flips = _flip_setup()
+    sheet = gr.build_flip_sheet(flips, gr.flip_findings(lca, inputs, flips["DFCI_MRN"]), inputs["notes"],
+                                re.compile("x"))
+    path = tmp_path / "flip.csv"
+    gr.write_review_sheet(sheet, path)
+    filled = sheet.assign(reviewer_call=["true_ne", "unclear"])
+    filled.to_csv(path, index=False)
+    with pytest.raises(FileExistsError):
+        gr.write_review_sheet(sheet, path)
+    reviewed, stale = gr.read_reviewed(path, sheet)
+    assert stale == []
+    s = gr.summarize_flip_review(reviewed)
+    t = s["by_flip_type"].set_index("flip_type")
+    assert (t.loc["ne_gate", "true_ne"], t.loc["trial_context", "unclear"]) == (1, 1)
+    assert s["overall"]["patients"].iloc[0] == 2
+    counts = gr.flip_label_counts(labels, reviewed).set_index("definition")["nepc_patients"]
+    assert counts.to_dict() == {"gated": 2, "no_ne_gate": 3, "no_gate": 4, "reviewed": 3,
+                                "reviewed_with_unclear": 4, "not_yet_reviewed": 0}

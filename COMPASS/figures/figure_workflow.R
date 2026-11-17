@@ -1887,11 +1887,11 @@ FEDERATED_TRANSFER_COX_HR_COHORTS <- list(
     predictors=c("score","gleason","tp53","rb1","pten"),title="Sequencing cohort with Gleason score"),
   adt_sequenced=list(clock="adt",gleason=FALSE,genes=TRUE,predictors=c("score","tp53","rb1","pten"),
     title="ADT landmark cohort sequenced before the landmark"))
-# Alternative Figure 5 panel b uses the probability panels' three analysis sets.
+# Alternative Figure 5 panel b: score/Gleason on the ADT clock, genes on the sequencing clock.
 # Score uses the full continuous score, not only the displayed Q1/Q5 extremes.
 FEDERATED_TRANSFER_COX_HR_MAIN_COHORTS <- list(
-  sequencing_score=list(clock="sequencing",gleason=FALSE,genes=FALSE,predictors="score"),
-  sequencing_gleason_available=list(clock="sequencing",gleason=TRUE,genes=FALSE,predictors="gleason"),
+  adt_score=list(clock="adt",gleason=FALSE,genes=FALSE,predictors="score"),
+  adt_gleason_available=list(clock="adt",gleason=TRUE,genes=FALSE,predictors="gleason"),
   sequencing_tsg=list(clock="sequencing",gleason=FALSE,genes=TRUE,predictors=c("tp53","rb1","pten")))
 federated_transfer_cox_hr_cell <- function(z, column="risk_score", type=c("per SD","per point","binary")) {
   type <- match.arg(type)
@@ -2898,16 +2898,16 @@ manuscript_transfer_cox_hr_caption <- function() {
   relabel <- c(
     "with time-to-event risk separation"="with Cox hazard ratios, time-to-event risk separation",
     "(b-d) Kaplan-Meier platinum-free (b), AVPC-free (c), and NEPC-free (d) survival"=paste0(
-      "(b) Hazard ratios from unpenalized univariable Cox proportional-hazards models of time to platinum treatment, AVPC, and NEPC from the 0-, 90-, and 180-day landmarks after the sequencing report date, using three analysis sets within each endpoint and landmark: the transferred XGBoost score per standard deviation in all eligible scored sequencing patients, Gleason score per 1-point increase in those with an available valid Gleason score, and each of TP53, RB1, and PTEN (any alteration vs. wild-type) in those with known status for all three genes. Each predictor is fit in a separate univariable model; points and bars denote hazard ratios and 95% Wald confidence intervals on a logarithmic scale, the dashed line marks a hazard ratio of 1, and labels give the hazard ratio (95% confidence interval), the two-sided Wald P value, and patients/events. ",
+      "(b) Hazard ratios from unpenalized univariable Cox proportional-hazards models of time to platinum treatment, AVPC, and NEPC from the 0-, 90-, and 180-day landmarks, using three analysis sets within each endpoint: the transferred XGBoost score per standard deviation in the full scored ADT cohort, with the matching landmark model and laboratory values before that ADT landmark; Gleason score per 1-point increase in the full cohort with a valid Gleason score available before that ADT landmark; and each of TP53, RB1, and PTEN (any alteration vs. wild-type) in the sequenced cohort with known status for all three genes, with follow-up from the sequencing report date plus the landmark. Each predictor is fit in a separate univariable model; points and bars denote hazard ratios and 95% Wald confidence intervals on a logarithmic scale, the dashed line marks a hazard ratio of 1, and labels give the hazard ratio (95% confidence interval), the two-sided Wald P value, and patients/events. ",
       "(c-e) Kaplan-Meier platinum-free (c), AVPC-free (d), and NEPC-free (e) survival"),
     "(e-g) Probability of"="(f-h) Probability of",
     "among sequenced patients in e-g;"="among sequenced patients in f-h;",
     "they are not federated training cutoffs."=paste("they are not federated training cutoffs.",
-      "For b, the continuous score was standardized among all eligible scored sequencing patients at risk for each endpoint at each landmark; the score analysis includes the middle three quintiles. Missing Gleason does not exclude patients from the score or gene analyses. The HR row is displayed below panels c-e."),
+      "For b, the continuous score was standardized among the full scored ADT cohort at risk for each endpoint at each landmark; the score analysis includes the middle three quintiles. Neither the score nor Gleason analysis requires sequencing, and missing Gleason does not exclude patients from the score or gene analyses. The HR row is displayed below panels c-e."),
     "Panels b-d use the ADT-initiation clock; all groups in e-g use the sequencing-date clock from day 180."=paste(
-      "Panels c-e use the ADT-initiation clock; panel b uses the sequencing-date clock at each indicated landmark,",
+      "Panels c-e use the ADT-initiation clock; in panel b, score and Gleason use ADT landmarks and genes use sequencing landmarks,",
       "and all groups in f-h use the sequencing-date clock from day 180."),
-    "For e-g,"="For b and f-h,",
+    "For e-g,"="For f-h,",
     "the 0- and 90-day landmarks,"="the 0- and 90-day landmarks for panels c-h,")
   for(old in names(relabel)) {
     hits <- lengths(regmatches(caption,gregexpr(old,caption,fixed=TRUE)))
@@ -3539,11 +3539,14 @@ manuscript_federated_transfer_no_dfci <- function(metrics,clinical=NULL,km=NULL,
   if(!is.null(hr_panel)) {
     plots[[2L]] <- hr_panel; titles <- c(titles,"Cox hazard ratio")
     legend <- c(legend,paste0("b: hazard ratios from unpenalized univariable Cox models of time to each endpoint from each landmark",
-      " after the sequencing report date, using three analysis sets: all eligible scored sequencing patients for",
-      " the transferred ",federated_transfer_model_label(hr_family)," score per SD (standardized within each endpoint and landmark);",
-      " patients with available valid Gleason for Gleason score per 1-point increase; and patients with known",
-      " TP53/RB1/PTEN status for each gene separately (any alteration vs. wild-type).",
-      " Missing Gleason does not exclude patients from the score or gene analyses; the continuous score uses all quintiles.",
+      " using three analysis sets: the full scored ADT cohort for",
+      " the transferred ",federated_transfer_model_label(hr_family)," score per SD (standardized within each endpoint and ADT landmark),",
+      " using the matching landmark model and laboratory values before that ADT landmark;",
+      " the full cohort with valid Gleason available before the ADT landmark for Gleason score per 1-point increase;",
+      " and the sequenced cohort with known TP53/RB1/PTEN status for each gene separately",
+      " (any alteration vs. wild-type), with follow-up from sequencing report + landmark.",
+      " Score and Gleason do not require sequencing. Missing Gleason does not exclude patients from the score",
+      " or gene analyses; the continuous score uses all quintiles.",
       " 95% Wald CIs, log scale. Labels give HR (95% CI), the two-sided Wald P and patients/events."))
   }
   n_hr <- length(plots)-1L
