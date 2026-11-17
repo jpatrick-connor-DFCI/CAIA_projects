@@ -34,7 +34,8 @@ The Figure 05 Cox-HR alternative uses three analysis sets at the 0-, 90-, and
 180-day landmarks: the full scored ADT cohort for the continuous XGBoost score
 (per SD), the full cohort with valid pre-landmark Gleason for Gleason (per point)
 on the ADT clock, and the sequenced cohort with known TP53/RB1/PTEN status for
-separate gene HRs (any alteration vs WT) on the sequencing-report clock. Each
+a single TSG-count HR per additional altered gene (0–3) on the sequencing-report
+clock. Each gene counts once if it has any alteration. Each
 score uses the corresponding ADT-landmark model and pre-landmark laboratory
 values. Score and Gleason do not require sequencing; missing Gleason does not
 restrict the score or gene sets. The continuous score includes all quintiles.

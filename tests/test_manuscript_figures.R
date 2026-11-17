@@ -530,7 +530,8 @@ cells$sequencing_tsg <- cells$sequencing
 formulas <- list(score=survival::Surv(duration_days,event)~as.vector(scale(risk_score)),
   gleason=survival::Surv(duration_days,event)~GLEASON_SCORE,
   tp53=survival::Surv(duration_days,event)~I(TP53_ANY>0),rb1=survival::Surv(duration_days,event)~I(RB1_ANY>0),
-  pten=survival::Surv(duration_days,event)~I(PTEN_ANY>0))
+  pten=survival::Surv(duration_days,event)~I(PTEN_ANY>0),
+  tsg_count=survival::Surv(duration_days,event)~I((TP53_ANY>0)+(RB1_ANY>0)+(PTEN_ANY>0)))
 for(k in names(cohort_predictors)) for(x in cohort_predictors[[k]]) {
   row <- hr_one(k,x); fit <- hr_direct(cells[[k]],formulas[[x]])
   stopifnot(nrow(row)==1L,row$n==nrow(cells[[k]]),row$events==sum(cells[[k]]$event),
@@ -552,13 +553,17 @@ stopifnot(nrow(hr_none)==nrow(cox_hr),all(is.na(hr_none$hazard_ratio)),inherits(
 # A gene group without events is not estimable.
 no_tp53_events <- filter(km_input,!(clock=="sequencing" & TP53_ANY>0 & event==1L))
 stopifnot(all(is.na(filter(federated_transfer_cox_hr(no_tp53_events),predictor=="tp53")$hazard_ratio)))
-# The default panel uses full ADT score/Gleason cohorts and sequencing-clock genes.
+# TSG count is one continuous 0-3 predictor; no variation is not estimable.
+no_tsg_variation <- mutate(km_input,TP53_ANY=0, RB1_ANY=0, PTEN_ANY=0)
+count_hr <- filter(federated_transfer_cox_hr(no_tsg_variation),predictor=="tsg_count")
+stopifnot(nrow(count_hr)==hr_cells,all(is.na(count_hr$hazard_ratio)),all(count_hr$unit=="per gene"))
+# The default panel uses full ADT score/Gleason cohorts and sequencing-clock TSG count.
 hr_plot <- plot_federated_transfer_cox_hr(cox_hr)
 stopifnot(all(hr_plot$data$model_family=="xgboost_cox"),setequal(hr_plot$data$cohort,names(FEDERATED_TRANSFER_COX_HR_MAIN_COHORTS)),
   all(hr_plot$data$clock==ifelse(hr_plot$data$predictor %in% c("score","gleason"),"adt","sequencing")),
   identical(levels(hr_plot$data$endpoint_label),unname(FEDERATED_TRANSFER_ENDPOINTS_SHORT)),
   identical(levels(hr_plot$data$predictor_label),
-    unname(vapply(FEDERATED_TRANSFER_COX_HR_PREDICTORS,`[[`,character(1),"label"))),
+    unname(vapply(FEDERATED_TRANSFER_COX_HR_PREDICTORS[c("score","gleason","tsg_count")],`[[`,character(1),"label"))),
   identical(as.character(unique(hr_plot$data$landmark)),"Day 180"),
   all(grepl("\nP = ",hr_plot$data$label,fixed=TRUE)),
   identical(hr_plot$data$label[1],sprintf("%.2f (%.2f–%.2f)\nP = %.2g · %s/%s",hr_plot$data$hazard_ratio[1],
@@ -576,9 +581,9 @@ for(endpoint in names(FEDERATED_TRANSFER_ENDPOINTS)) {
   h <- filter(missing_hr,endpoint==!!endpoint)
   stopifnot(h$n[h$predictor=="score"]==sum(is.finite(a$risk_score)),
     h$n[h$predictor=="gleason"]==sum(!is.na(a$gleason_group)),
-    all(h$n[h$predictor %in% c("tp53","rb1","pten")]==sum(!is.na(z$trio_group))),
+    h$n[h$predictor=="tsg_count"]==sum(!is.na(z$trio_group)),
     h$n[h$predictor=="score"]>h$n[h$predictor=="gleason"],
-    h$n[h$predictor=="score"]>h$n[h$predictor=="tp53"])
+    h$n[h$predictor=="score"]>h$n[h$predictor=="tsg_count"])
 }
 # Older score-only captures (no cohort/predictor columns, hazard_ratio_per_sd) still draw the
 # score block, but cannot make the cohort supplement.
@@ -612,6 +617,7 @@ stopifnot(inherits(fig5_hr$plot,"gtable"),length(fig5_hr$panels)==8L,
   grepl("the transferred Federated XGBoost score per SD",fig5_hr$legend,fixed=TRUE),
   grepl("using three analysis sets: the full scored ADT cohort",fig5_hr$legend,fixed=TRUE),
   grepl("follow-up from sequencing report + landmark",fig5_hr$legend,fixed=TRUE),
+  grepl("TSG count (0–3), per additional altered gene",fig5_hr$legend,fixed=TRUE),
   grepl("Gleason score per 1-point increase",fig5_hr$legend,fixed=TRUE),
   grepl("c: Kaplan-Meier platinum-free survival",fig5_hr$legend,fixed=TRUE),
   grepl("f: Kaplan-Meier 5-year Platinum probability",fig5_hr$legend,fixed=TRUE),
