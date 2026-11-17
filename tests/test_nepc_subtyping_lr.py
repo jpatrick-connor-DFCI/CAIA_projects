@@ -344,3 +344,25 @@ def test_calibration_summary_and_bins():
     a = b[b["g"].eq("a")]
     assert a["mean_predicted"].is_monotonic_increasing
     np.testing.assert_allclose(a["observed_rate"], a["mean_predicted"], atol=0.03)
+
+
+def test_raw_score_auc_on_risk_rows_only_and_independent_of_cv(monkeypatch):
+    from sklearn.metrics import roc_auc_score
+    frame = _synthetic_frame()
+    models, _, _ = nsl.run_lr(frame, {"all": None}, [0], n_bootstrap=100)
+    assert {"auc_raw_score", "auc_raw_score_lo", "auc_raw_score_hi"} <= set(models.columns)
+    for population, g in models.groupby("population"):
+        risk = g[g["model"].eq("risk")].iloc[0]
+        assert risk["auc_raw_score_lo"] <= risk["auc_raw_score"] <= risk["auc_raw_score_hi"]
+        assert g[g["model"].ne("risk")]["auc_raw_score"].isna().all()
+    available = models.query("population == 'available' and model == 'risk'").iloc[0]
+    assert available["auc_raw_score"] == pytest.approx(
+        roc_auc_score(frame[nsl.EVENT_COL], frame[nsl.RISK_COL]))
+
+    nan_oof = lambda y, X, **kw: (np.full(len(y), np.nan), 1)
+    monkeypatch.setattr(nsl, "oof_predictions", nan_oof)
+    failed, _, _ = nsl.run_lr(frame, {"all": None}, [0], models=("risk",), n_bootstrap=50)
+    row = failed.query("population == 'available'").iloc[0]
+    assert np.isnan(row["auc"]) and np.isnan(row["auc_lo"])
+    assert row["auc_raw_score"] == pytest.approx(available["auc_raw_score"])
+    assert np.isfinite([row["auc_raw_score_lo"], row["auc_raw_score_hi"]]).all()

@@ -65,6 +65,7 @@ MAX_ABS_COEF = 15.0                     # |beta| beyond this on a fitted term = 
 MODEL_COLUMNS = [
     "cohort", "landmark_days", "population", "model", "predictors", "n", "events",
     "lrt_stat", "lrt_df", "p_lrt", "auc", "auc_lo", "auc_hi",
+    "auc_raw_score", "auc_raw_score_lo", "auc_raw_score_hi",
     "delta_auc_vs_risk", "delta_auc_lo", "delta_auc_hi", "converged", "n_failed_folds", "note",
 ]
 COEF_COLUMNS = [
@@ -439,7 +440,7 @@ def _evaluate_population(pop: pd.DataFrame, models, tags: dict, *, min_events: i
     per-patient OOF predictions of the fitted models named in ``predict_models``.
     """
     model_rows, coef_rows, oof, prediction_frames = [], [], {}, []
-    pops = {}
+    pops, raw = {}, {}
     for model in models:
         sub = pop if paired else pop.dropna(subset=list(MODEL_SPECS[model]))
         pops[model] = sub
@@ -462,10 +463,15 @@ def _evaluate_population(pop: pd.DataFrame, models, tags: dict, *, min_events: i
             cv_note = (f"{failed} failed CV folds; AUC and delta-AUC suppressed" if failed
                        else "fewer than 2 CV folds; AUC and delta-AUC suppressed")
             note = "; ".join(filter(None, [note, cv_note]))
-        model_rows.append({**base, "predictors": "+".join(X.columns), "lrt_stat": fit["lrt_stat"],
-                           "lrt_df": fit["lrt_df"], "p_lrt": fit["p_lrt"],
-                           "auc": _auc(y, oof[model]), "converged": fit["converged"],
-                           "n_failed_folds": failed, "note": note})
+        row = {**base, "predictors": "+".join(X.columns), "lrt_stat": fit["lrt_stat"],
+               "lrt_df": fit["lrt_df"], "p_lrt": fit["p_lrt"],
+               "auc": _auc(y, oof[model]), "converged": fit["converged"],
+               "n_failed_folds": failed, "note": note}
+        if model == REFERENCE_MODEL:
+            # Untransformed frozen score: no fitting, no sign flip, so no CV is needed.
+            raw[model] = sub[RISK_COL].to_numpy(dtype=float)
+            row["auc_raw_score"] = _auc(y, raw[model])
+        model_rows.append(row)
         coef_rows.extend({**base, **row, "note": fit["note"]}
                          for row in fit["terms"].to_dict("records"))
 
@@ -487,6 +493,15 @@ def _evaluate_population(pop: pd.DataFrame, models, tags: dict, *, min_events: i
                 row["delta_auc_vs_risk"] = row["auc"] - next(
                     r["auc"] for r in model_rows if r["model"] == REFERENCE_MODEL)
                 row["delta_auc_lo"], row["delta_auc_hi"] = _ci(draws[m] - draws[REFERENCE_MODEL])
+
+    if n_bootstrap and raw:
+        # Same seed and n as the OOF bootstrap, so the resamples are paired with it.
+        for model, score in raw.items():
+            y = pops[model][EVENT_COL].to_numpy(dtype=int)
+            draws = bootstrap_auc(y, {model: score}, n_bootstrap=n_bootstrap, seed=seed)
+            for row in model_rows:
+                if row["model"] == model:
+                    row["auc_raw_score_lo"], row["auc_raw_score_hi"] = _ci(draws[model])
     return model_rows, coef_rows, prediction_frames
 
 

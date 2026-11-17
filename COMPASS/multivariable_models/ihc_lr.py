@@ -70,7 +70,8 @@ OUTCOMES = {
 
 MODEL_COLUMNS = [
     "cohort", "landmark_days", "outcome", "n", "events", "lrt_stat", "lrt_df", "p_lrt",
-    "auc", "auc_lo", "auc_hi", "converged", "n_failed_folds", "note",
+    "auc", "auc_lo", "auc_hi", "auc_raw_score", "auc_raw_score_lo", "auc_raw_score_hi",
+    "converged", "n_failed_folds", "note",
 ]
 COEF_COLUMNS = [
     "cohort", "landmark_days", "outcome", "term", "n", "events",
@@ -580,7 +581,13 @@ def _fit_outcome(pop, outcome, tags, *, min_events, n_folds, n_bootstrap, seed):
     if n_bootstrap and np.isfinite(oof).all():
         draws = nsl.bootstrap_auc(y, {outcome: oof}, n_bootstrap=n_bootstrap, seed=seed)
         row["auc_lo"], row["auc_hi"] = nsl._ci(draws[outcome])
-    coefs = [{**base, **r, "note": fit["note"]} for r in fit["terms"].to_dict("records")]
+    # Untransformed frozen score: no fitting, so it needs no CV and is not suppressed by failed folds.
+    raw = pop[nsl.RISK_COL].to_numpy(dtype=float)
+    row["auc_raw_score"] = nsl._auc(y, raw)
+    if n_bootstrap:
+        draws = nsl.bootstrap_auc(y, {outcome: raw}, n_bootstrap=n_bootstrap, seed=seed)
+        row["auc_raw_score_lo"], row["auc_raw_score_hi"] = nsl._ci(draws[outcome])
+    coefs =[{**base, **r, "note": fit["note"]} for r in fit["terms"].to_dict("records")]
     return row, coefs, predictions
 
 

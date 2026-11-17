@@ -379,3 +379,24 @@ def test_run_ihc_lr_oof_predictions_per_outcome():
     frame["ne_pos_future"] = frame["ne_pos_future"] * 0                        # no NE events
     _, _, _, few = il.run_ihc_lr(frame, {"all": None}, (0,), n_bootstrap=0, return_predictions=True)
     assert set(few["outcome"]) == {"ihc_any"}
+
+
+def test_raw_score_auc_per_outcome_independent_of_cv(monkeypatch):
+    from sklearn.metrics import roc_auc_score
+    frame = _synthetic()
+    models, _, _, preds = il.run_ihc_lr(frame, {"all": None}, (0,), n_bootstrap=100,
+                                        return_predictions=True)
+    assert list(models.columns) == il.MODEL_COLUMNS
+    fit = models[models["auc"].notna()]
+    assert len(fit)
+    for _, row in fit.iterrows():
+        g = preds[preds["outcome"].eq(row["outcome"])]
+        assert row["auc_raw_score"] == pytest.approx(roc_auc_score(g["event"], g["risk_score"]))
+        assert row["auc_raw_score_lo"] <= row["auc_raw_score"] <= row["auc_raw_score_hi"]
+
+    monkeypatch.setattr(il.nsl, "oof_predictions", lambda y, X, **kw: (np.full(len(y), np.nan), 1))
+    failed, _, _ = il.run_ihc_lr(frame, {"all": None}, (0,), n_bootstrap=50)
+    failed = failed.set_index("outcome").loc[fit["outcome"]]
+    assert failed["auc"].isna().all() and failed["auc_lo"].isna().all()
+    np.testing.assert_allclose(failed["auc_raw_score"], fit["auc_raw_score"])
+    assert failed[["auc_raw_score_lo", "auc_raw_score_hi"]].notna().all().all()
