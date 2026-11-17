@@ -90,9 +90,9 @@ stopifnot(length(captions)==32,setequal(names(captions),c(local_keys,federated_k
   all(grepl("tuning endpoint",unname(captions[extension_keys]),fixed=TRUE)),
   # Alternative Figure 5: the Cox HR forest is b, so the KM panels are c-e and the probabilities f-h.
   grepl("(b) Hazard ratios from unpenalized univariable Cox",captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
-  grepl("Gleason score as a continuous covariate per 1-point increase",
+  grepl("Gleason score per 1-point increase",
     captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
-  grepl("Panels b-e use the ADT-initiation clock",captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
+  grepl("Panels c-e use the ADT-initiation clock",captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
   grepl("(c-e) Kaplan-Meier platinum-free (c), AVPC-free (d), and NEPC-free (e)",
     captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
   grepl("(f-h) Probability of platinum treatment, AVPC, and NEPC",captions[["federated_05_transfer_no_dfci__cox_hr"]],fixed=TRUE),
@@ -497,11 +497,12 @@ stopifnot(grepl("sequencing-landmark",clock_error,fixed=TRUE))
 # Cox HRs: one row per endpoint x bundle x landmark x cohort x predictor, unpenalized and
 # univariable; every predictor in a cohort cell is fit in the same patients and matches a direct coxph.
 cox_hr <- federated_transfer_cox_hr(km_input)
-cohort_predictors <- lapply(FEDERATED_TRANSFER_COX_HR_COHORTS,`[[`,"predictors")
+all_hr_cohorts <- c(FEDERATED_TRANSFER_COX_HR_COHORTS,FEDERATED_TRANSFER_COX_HR_MAIN_COHORTS)
+cohort_predictors <- lapply(all_hr_cohorts,`[[`,"predictors")
 hr_cells <- 3L*2L  # endpoints x bundles at the fixture's single landmark
 stopifnot(nrow(cox_hr)==hr_cells*sum(lengths(cohort_predictors)),
   !anyDuplicated(cox_hr[c("endpoint","bundle","landmark_days","cohort","predictor")]),
-  identical(unique(cox_hr$cohort),names(FEDERATED_TRANSFER_COX_HR_COHORTS)),
+  identical(unique(cox_hr$cohort),names(all_hr_cohorts)),
   all(vapply(names(cohort_predictors),function(k) identical(unique(cox_hr$predictor[cox_hr$cohort==k]),cohort_predictors[[k]]),logical(1))),
   all(cox_hr$clock==ifelse(startsWith(cox_hr$cohort,"sequencing"),"sequencing","adt")),
   # Same patients for every predictor in a cohort cell.
@@ -523,6 +524,9 @@ cells <- list(
   # The ADT-anchored genes stand in for the trio columns in the direct fit.
   adt_sequenced=filter(km_input,clock=="adt",endpoint=="platinum",model_family=="elastic_net_cox",!is.na(ADT_TP53_ANY)) %>%
     mutate(TP53_ANY=ADT_TP53_ANY,RB1_ANY=ADT_RB1_ANY,PTEN_ANY=ADT_PTEN_ANY))
+cells$sequencing_score <- cells$sequencing
+cells$sequencing_gleason_available <- cells$sequencing_gleason
+cells$sequencing_tsg <- cells$sequencing
 formulas <- list(score=survival::Surv(duration_days,event)~as.vector(scale(risk_score)),
   gleason=survival::Surv(duration_days,event)~GLEASON_SCORE,
   tp53=survival::Surv(duration_days,event)~I(TP53_ANY>0),rb1=survival::Surv(duration_days,event)~I(RB1_ANY>0),
@@ -538,7 +542,7 @@ stopifnot(hr_one("adt_gleason","score")$n<hr_one("adt","score")$n,
   hr_one("adt_sequenced","score")$n==300L,is.numeric(km_input$ADT_TP53_ANY))
 # Older exports without the ADT_* columns drop only the ADT-sequenced cohort.
 hr_old <- federated_transfer_cox_hr(select(km_input,-starts_with("ADT_")))
-stopifnot(identical(unique(hr_old$cohort),setdiff(names(FEDERATED_TRANSFER_COX_HR_COHORTS),"adt_sequenced")))
+stopifnot(identical(unique(hr_old$cohort),setdiff(names(all_hr_cohorts),"adt_sequenced")))
 # Below the event floor the cell stays, with NA estimates labeled "Not estimable".
 hr_none <- federated_transfer_cox_hr(mutate(km_input,event=0L))
 hr_none_plot <- plot_federated_transfer_cox_hr(hr_none)
@@ -548,17 +552,33 @@ stopifnot(nrow(hr_none)==nrow(cox_hr),all(is.na(hr_none$hazard_ratio)),inherits(
 # A gene group without events is not estimable.
 no_tp53_events <- filter(km_input,!(clock=="sequencing" & TP53_ANY>0 & event==1L))
 stopifnot(all(is.na(filter(federated_transfer_cox_hr(no_tp53_events),predictor=="tp53")$hazard_ratio)))
-# The default panel is the ADT Gleason cohort (Alternative Figure 5 panel b).
+# The default panel uses the three probability analysis sets (Alternative Figure 5 panel b).
 hr_plot <- plot_federated_transfer_cox_hr(cox_hr)
-stopifnot(all(hr_plot$data$model_family=="xgboost_cox"),all(hr_plot$data$cohort=="adt_gleason"),
+stopifnot(all(hr_plot$data$model_family=="xgboost_cox"),setequal(hr_plot$data$cohort,names(FEDERATED_TRANSFER_COX_HR_MAIN_COHORTS)),
+  all(hr_plot$data$clock=="sequencing"),
   identical(levels(hr_plot$data$endpoint_label),unname(FEDERATED_TRANSFER_ENDPOINTS_SHORT)),
   identical(levels(hr_plot$data$predictor_label),
-    unname(vapply(FEDERATED_TRANSFER_COX_HR_PREDICTORS[c("score","gleason")],`[[`,character(1),"label"))),
+    unname(vapply(FEDERATED_TRANSFER_COX_HR_PREDICTORS,`[[`,character(1),"label"))),
   identical(as.character(unique(hr_plot$data$landmark)),"Day 180"),
   all(grepl("\nP = ",hr_plot$data$label,fixed=TRUE)),
   identical(hr_plot$data$label[1],sprintf("%.2f (%.2f–%.2f)\nP = %.2g · %s/%s",hr_plot$data$hazard_ratio[1],
     hr_plot$data$ci_lower[1],hr_plot$data$ci_upper[1],hr_plot$data$p_value[1],
     scales::comma(hr_plot$data$n[1]),scales::comma(hr_plot$data$events[1]))))
+# Missing gene status must not restrict score/Gleason, and missing Gleason must not
+# restrict genes. The main analysis counts match the probability panels' source sets.
+missing_genes <- km_input
+missing_genes$TP53_ANY[missing_genes$clock=="sequencing" & missing_genes$person_id %% 7L==0L] <- NA_real_
+missing_hr <- plot_federated_transfer_cox_hr(federated_transfer_cox_hr(missing_genes))$data
+missing_groups <- federated_transfer_km_groups(missing_genes)
+for(endpoint in names(FEDERATED_TRANSFER_ENDPOINTS)) {
+  z <- filter(missing_groups,clock=="sequencing",model_family=="xgboost_cox",endpoint==!!endpoint)
+  h <- filter(missing_hr,endpoint==!!endpoint)
+  stopifnot(h$n[h$predictor=="score"]==sum(is.finite(z$risk_score)),
+    h$n[h$predictor=="gleason"]==sum(!is.na(z$gleason_group)),
+    all(h$n[h$predictor %in% c("tp53","rb1","pten")]==sum(!is.na(z$trio_group))),
+    h$n[h$predictor=="score"]>h$n[h$predictor=="gleason"],
+    h$n[h$predictor=="score"]>h$n[h$predictor=="tp53"])
+}
 # Older score-only captures (no cohort/predictor columns, hazard_ratio_per_sd) still draw the
 # score block, but cannot make the cohort supplement.
 legacy <- filter(cox_hr,cohort=="adt",predictor=="score") %>% select(-predictor,-cohort) %>%
@@ -572,7 +592,7 @@ stopifnot(inherits(hr_supp$plot,"gtable"),length(hr_supp$panels)==5L,
   identical(hr_supp$spec$key,"federated_05_transfer_no_dfci__cox_hr_cohorts"),
   identical(hr_supp$spec$titles,unname(vapply(FEDERATED_TRANSFER_COX_HR_COHORTS,`[[`,character(1),"title"))),
   identical(as.vector(hr_supp$spec$layout),1:5),
-  identical(vapply(hr_supp$panels,function(p) nlevels(p$data$predictor_label),integer(1)),unname(lengths(cohort_predictors))),
+  identical(vapply(hr_supp$panels,function(p) nlevels(p$data$predictor_label),integer(1)),unname(lengths(cohort_predictors[names(FEDERATED_TRANSFER_COX_HR_COHORTS)]))),
   all(diff(hr_supp$spec$row_heights[c(1,2,3)])>0),abs(hr_supp$spec$height-sum(hr_supp$spec$row_heights))<1e-9,
   all(hr_supp$data$model_family=="xgboost_cox"),
   grepl("a: ADT landmark cohort (ADT clock); Score (per SD).",hr_supp$legend,fixed=TRUE),
@@ -585,11 +605,11 @@ fig5_hr <- manuscript_federated_transfer_no_dfci(transfer_metrics,NULL,km_tables
   extreme_percent=20L,probability_endpoints=TRUE,cox_hr=cox_hr)
 stopifnot(inherits(fig5_hr$plot,"gtable"),length(fig5_hr$panels)==8L,
   identical(fig5_hr$spec$titles[-2],fig5_endpoints$spec$titles),fig5_hr$spec$titles[2]=="Cox hazard ratio",
-  all(fig5_hr$spec$layout[2,]==2L),identical(fig5_hr$spec$layout[3,],rep(3:5,each=2)),
+  all(fig5_hr$spec$layout[3,]==2L),identical(fig5_hr$spec$layout[2,],rep(3:5,each=2)),
   identical(fig5_hr$spec$layout[4,],rep(6:8,each=2)),
   abs(fig5_hr$spec$height-fig5_endpoints$spec$height-MANUSCRIPT_TRANSFER_ROW_HEIGHTS[["hr"]])<1e-9,
   grepl("the transferred Federated XGBoost score per SD",fig5_hr$legend,fixed=TRUE),
-  grepl("after ADT initiation (ADT clock) in patients with a Gleason score",fig5_hr$legend,fixed=TRUE),
+  grepl("after the sequencing report date, using three analysis sets",fig5_hr$legend,fixed=TRUE),
   grepl("Gleason score per 1-point increase",fig5_hr$legend,fixed=TRUE),
   grepl("c: Kaplan-Meier platinum-free survival",fig5_hr$legend,fixed=TRUE),
   grepl("f: Kaplan-Meier 5-year Platinum probability",fig5_hr$legend,fixed=TRUE),
