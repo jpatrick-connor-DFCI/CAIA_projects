@@ -74,6 +74,7 @@ def _lca(findings=None, gate=_gate, notes=None):
 
     class Nepc:
         SPEC = "SPEC"
+        UNLABELED_STATUSES = {"failed", "not_run"}
         screen_ne_quote = staticmethod(_screen)
         gate_findings = staticmethod(gate)
 
@@ -216,3 +217,76 @@ def test_definitions_change_nb11_event_counts(tmp_path):
     assert e[("ungated", "ne_pos_all")] == 2                     # + patient 5
     assert e[("reviewed", "ne_pos_all")] == 2                    # patients 5 and 2; patient 1 dropped
     assert ev.set_index(["definition", "outcome"]).loc[("gated", "ne_pos_all"), "n"] == 5
+
+
+def _label_inputs(status=None):
+    lca = _lca()
+    inputs, _ = gr.load_llm_inputs(lca, "dir")
+    if status is not None:
+        inputs = {**inputs, "status": status}
+    return lca, inputs
+
+
+def test_patient_label_definitions_drop_each_screen():
+    lca, inputs = _label_inputs({1: "ok", 3: "ok", 4: "ok", 5: "ok", 6: "failed", 7: "ok"})
+    lab = gr.patient_label_definitions(lca, inputs).set_index("DFCI_MRN")
+    # 1 passes; 5 rejected by ne_gate; 3 dropped by the trial screen; 4 passes (non-prostate, still a label)
+    assert lab["nepc_status_gated"].to_dict() == {1: "nepc", 3: "non_nepc", 4: "nepc", 5: "non_nepc",
+                                                 6: "unlabeled", 7: "non_nepc"}
+    assert lab.loc[5, "nepc_status_no_ne_gate"] == "nepc" and lab.loc[3, "nepc_status_no_ne_gate"] == "non_nepc"
+    assert lab.loc[3, "nepc_status_no_gate"] == "nepc"
+    assert lab.loc[5, "n_findings_ne_gate"] == 1 and lab.loc[3, "n_findings_trial_context"] == 1
+
+
+def test_patient_label_definitions_require_gate_parity():
+    lca = _lca(gate=lambda f: ({5: [f.iloc[1].to_dict()]}, {}))
+    inputs, _ = gr.load_llm_inputs(lca, "dir")
+    with pytest.raises(RuntimeError, match="disagrees"):
+        gr.patient_label_definitions(lca, inputs)
+
+
+def test_stored_label_drift():
+    lca, inputs = _label_inputs()
+    lab = gr.patient_label_definitions(lca, inputs)
+    stored = lab[["DFCI_MRN"]].assign(nepc_status=lab["nepc_status_gated"])
+    assert gr.stored_label_drift(lab, stored) == 0
+    stored.loc[stored["DFCI_MRN"].eq(5), "nepc_status"] = "nepc"
+    assert gr.stored_label_drift(lab, stored) == 1
+
+
+def test_manual_comparison(tmp_path):
+    lca, inputs = _label_inputs({1: "ok", 3: "ok", 4: "ok", 5: "ok", 6: "failed"})
+    lab = gr.patient_label_definitions(lca, inputs)
+    path = tmp_path / "manual.csv"
+    pd.DataFrame({"DFCI_MRN": ["1", "3.0", "4", "5", "6", "8", "9"],
+                  "updated_manual_low_confidence": ["NEPC", "nepc", "avpc", "conventional",
+                                                    "nepc", "conventional", ""]}).to_csv(path, index=False)
+    manual = gr.load_manual_annotations(path)
+    assert len(manual) == 6                                              # blank dropped
+    j = gr.join_manual(lab, manual, scored_ids={1, 5})
+    assert not j.set_index("DFCI_MRN").loc[8, "in_llm_cohort"]
+
+    m = gr.manual_metrics(j).set_index(["definition", "scope"])
+    g = m.loc[("gated", "annotated")]
+    # labeled: 1 nepc/nepc (tp), 3 nepc/non (fn), 4 avpc/nepc (fp), 5 conv/non (tn); 6 and 8 unlabeled
+    assert (g["tp"], g["fn"], g["fp"], g["tn"], g["n"], g["n_unlabeled"]) == (1, 1, 1, 1, 4, 2)
+    assert m.loc[("no_ne_gate", "annotated"), "fp"] == 2               # 5 flips to nepc
+    assert m.loc[("no_gate", "annotated"), "sensitivity"] == 1.0       # 3 flips to nepc
+    assert m.loc[("gated", "annotated_scored"), "n"] == 2
+
+    c = gr.manual_confusion(j).set_index(["definition", "scope", "manual_label"])
+    assert c.loc[("gated", "annotated", "nepc")].to_dict() == {"nepc": 1, "non_nepc": 1, "unlabeled": 1}
+    assert c.loc[("gated", "annotated", "conventional"), "unlabeled"] == 1
+
+    flips = gr.label_flips(j)
+    assert set(flips["DFCI_MRN"]) == {3, 5}
+
+
+def test_manual_annotations_validate(tmp_path):
+    path = tmp_path / "m.csv"
+    pd.DataFrame({"DFCI_MRN": ["1"], "updated_manual_low_confidence": ["squamous"]}).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="Unexpected"):
+        gr.load_manual_annotations(path)
+    pd.DataFrame({"DFCI_MRN": ["1", "1"], "updated_manual_low_confidence": ["nepc", "avpc"]}).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="one row"):
+        gr.load_manual_annotations(path)

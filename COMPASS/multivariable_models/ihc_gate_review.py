@@ -421,3 +421,153 @@ def event_counts(scores, ihc_notes, definitions: dict, review_status: dict, anch
                 rows.append({"definition": name, "landmark_days": int(lm), "outcome": outcome,
                              "n": len(pop), "events": int(pop[il.OUTCOMES[outcome]].sum())})
     return pd.DataFrame(rows, columns=["definition", "landmark_days", "outcome", "n", "events"])
+
+
+# --------------------------------------------------------------------------- #
+# Patient-level LLM NEPC labels re-compiled without the gate vs manual review
+# --------------------------------------------------------------------------- #
+# Each definition = the gate stages whose findings still make a patient "nepc".
+LABEL_DEFINITIONS = {
+    "gated": (STAGE_PASSED,),                                   # LCA nepc_labels (build_labels)
+    "no_ne_gate": (STAGE_PASSED, STAGE_NE_GATE),                # ne_gate removed, trial screen kept
+    "no_gate": (STAGE_PASSED, STAGE_NE_GATE, STAGE_TRIAL),      # every final-attempt finding counts
+}
+MANUAL_LABEL_COL = "updated_manual_low_confidence"              # Figure 1's chart-review column
+MANUAL_LABEL_LEVELS = ("conventional", "avpc", "nepc")
+LLM_LABEL_LEVELS = ("nepc", "non_nepc", "unlabeled")
+METRIC_COLUMNS = ["definition", "scope", "n_annotated", "n_unlabeled", "n", "tp", "fp", "fn", "tn",
+                  "sensitivity", "sensitivity_lo", "sensitivity_hi", "specificity", "specificity_lo",
+                  "specificity_hi", "ppv", "ppv_lo", "ppv_hi", "npv", "npv_lo", "npv_hi"]
+
+
+def _gate_stage(trial, quote, etype, screen):
+    if isinstance(trial, str) and trial:
+        return STAGE_TRIAL
+    return STAGE_PASSED if screen(quote, etype)[0] else STAGE_NE_GATE
+
+
+def patient_label_definitions(lca, inputs) -> pd.DataFrame:
+    """One row per LLM_nepc cohort patient: its nepc_status under each of ``LABEL_DEFINITIONS``.
+
+    Uses every final-attempt finding (all note types, not only pathology), with
+    ``build_labels``' rule: >=1 counted finding -> ``nepc``; otherwise ``unlabeled``
+    when review status is in ``UNLABELED_STATUSES`` (failed / not_run), else
+    ``non_nepc``. Raises unless ``gated`` matches ``gate_findings`` patient for patient.
+    """
+    f = _to_pandas(inputs["findings"])
+    if "_trial_context_reason" not in f.columns:
+        raise ValueError("Findings lack _trial_context_reason; load them with load_label_inputs.")
+    f = f[f[LOCAL_ID_COL].notna()].copy()
+    f[LOCAL_ID_COL] = f[LOCAL_ID_COL].astype(int)
+    screen = lca["nepc"].screen_ne_quote
+    f["gate_stage"] = [_gate_stage(t, q, e, screen) for t, q, e in
+                       zip(f["_trial_context_reason"], f["quote"], f["evidence_type"])]
+
+    gated, _ = lca["nepc"].gate_findings(inputs["findings"])
+    theirs = {int(m) for m, rows in gated.items() if rows}
+    mine = set(f.loc[f["gate_stage"].eq(STAGE_PASSED), LOCAL_ID_COL])
+    if mine != theirs:
+        raise RuntimeError(f"Re-run gate disagrees with gate_findings on {len(mine ^ theirs)} "
+                           "patients; the LCA gate logic has changed.")
+
+    unlabeled = set(lca["nepc"].UNLABELED_STATUSES)
+    status = {int(m): s for m, s in inputs["status"].items()}
+    counts = f.groupby([LOCAL_ID_COL, "gate_stage"]).size().unstack(fill_value=0)
+    out = pd.DataFrame({LOCAL_ID_COL: sorted(status)})
+    out["review_status"] = out[LOCAL_ID_COL].map(status)
+    for stage in (STAGE_PASSED, STAGE_NE_GATE, STAGE_TRIAL):
+        col = counts[stage] if stage in counts else pd.Series(dtype=int)
+        out[f"n_findings_{stage}"] = out[LOCAL_ID_COL].map(col).fillna(0).astype(int)
+    for name, stages in LABEL_DEFINITIONS.items():
+        pos = sum(out[f"n_findings_{s}"] for s in stages).gt(0)
+        out[f"nepc_status_{name}"] = np.where(pos, "nepc", np.where(
+            out["review_status"].isin(unlabeled), "unlabeled", "non_nepc"))
+    return out
+
+
+def stored_label_drift(labels: pd.DataFrame, stored) -> int:
+    """Patients whose stored ``nepc_labels.parquet`` status differs from the re-compiled ``gated`` one."""
+    s = _to_pandas(stored)[[LOCAL_ID_COL, "nepc_status"]].copy()
+    s[LOCAL_ID_COL] = s[LOCAL_ID_COL].astype(int)
+    s["nepc_status"] = s["nepc_status"].fillna("unlabeled")
+    m = labels[[LOCAL_ID_COL, "nepc_status_gated"]].merge(s, on=LOCAL_ID_COL, how="outer")
+    return int(m["nepc_status_gated"].ne(m["nepc_status"]).sum())
+
+
+def load_manual_annotations(path) -> pd.DataFrame:
+    """Chart-review truth (one row per patient, ``manual_label`` in ``MANUAL_LABEL_LEVELS``, blanks dropped)."""
+    m = pd.read_csv(path, dtype=str, keep_default_na=False)
+    missing = {LOCAL_ID_COL, MANUAL_LABEL_COL} - set(m.columns)
+    if missing:
+        raise ValueError(f"{path} lacks columns {sorted(missing)}")
+    m = pd.DataFrame({
+        LOCAL_ID_COL: pd.to_numeric(m[LOCAL_ID_COL].str.strip().str.replace(r"\.0$", "", regex=True),
+                                    errors="coerce"),
+        "manual_label": m[MANUAL_LABEL_COL].str.strip().str.lower()})
+    m = m[~m["manual_label"].isin(["", "nan", "na", "null", "none"])]
+    bad = sorted(set(m["manual_label"]) - set(MANUAL_LABEL_LEVELS))
+    if bad:
+        raise ValueError(f"Unexpected {MANUAL_LABEL_COL} values {bad}; expected {list(MANUAL_LABEL_LEVELS)}.")
+    if m[LOCAL_ID_COL].isna().any() or m[LOCAL_ID_COL].duplicated().any():
+        raise ValueError(f"{path} must have one row per non-missing {LOCAL_ID_COL}.")
+    return m.astype({LOCAL_ID_COL: int}).reset_index(drop=True)
+
+
+def join_manual(labels: pd.DataFrame, manual: pd.DataFrame, scored_ids=None) -> pd.DataFrame:
+    """Annotated patients with their LLM labels; annotated patients outside the LLM cohort -> ``unlabeled``."""
+    j = manual.merge(labels, on=LOCAL_ID_COL, how="left", validate="one_to_one")
+    j["in_llm_cohort"] = j["review_status"].notna()
+    for name in LABEL_DEFINITIONS:
+        j[f"nepc_status_{name}"] = j[f"nepc_status_{name}"].fillna("unlabeled")
+    if scored_ids is not None:
+        j["scored"] = j[LOCAL_ID_COL].isin({int(m) for m in scored_ids})
+    return j
+
+
+def _scopes(joined):
+    yield "annotated", joined
+    if "scored" in joined:
+        yield "annotated_scored", joined[joined["scored"]]
+
+
+def manual_confusion(joined: pd.DataFrame) -> pd.DataFrame:
+    """Long confusion table: definition x scope x manual_label (rows) x LLM label (cols), counts."""
+    rows = []
+    for scope, d in _scopes(joined):
+        for name in LABEL_DEFINITIONS:
+            ct = pd.crosstab(d["manual_label"], d[f"nepc_status_{name}"]).reindex(
+                index=list(MANUAL_LABEL_LEVELS), columns=list(LLM_LABEL_LEVELS), fill_value=0)
+            for man, row in ct.iterrows():
+                rows.append({"definition": name, "scope": scope, "manual_label": man, **row.to_dict()})
+    return pd.DataFrame(rows, columns=["definition", "scope", "manual_label", *LLM_LABEL_LEVELS])
+
+
+def manual_metrics(joined: pd.DataFrame) -> pd.DataFrame:
+    """Manual nepc vs (conventional + avpc) against each LLM label; unlabeled patients left out. Wilson CIs."""
+    rows = []
+    for scope, d in _scopes(joined):
+        for name in LABEL_DEFINITIONS:
+            lab = d[f"nepc_status_{name}"]
+            k = d[lab.ne("unlabeled")]
+            truth, pred = k["manual_label"].eq("nepc"), k[f"nepc_status_{name}"].eq("nepc")
+            tp, fp = int((truth & pred).sum()), int((~truth & pred).sum())
+            fn, tn = int((truth & ~pred).sum()), int((~truth & ~pred).sum())
+            r = {"definition": name, "scope": scope, "n_annotated": len(d),
+                 "n_unlabeled": int(lab.eq("unlabeled").sum()), "n": len(k),
+                 "tp": tp, "fp": fp, "fn": fn, "tn": tn}
+            for metric, (a, b) in {"sensitivity": (tp, fn), "specificity": (tn, fp),
+                                   "ppv": (tp, fp), "npv": (tn, fn)}.items():
+                r[metric] = a / (a + b) if a + b else math.nan
+                r[f"{metric}_lo"], r[f"{metric}_hi"] = wilson(a, a + b)
+            rows.append(r)
+    return pd.DataFrame(rows, columns=METRIC_COLUMNS)
+
+
+def label_flips(joined: pd.DataFrame) -> pd.DataFrame:
+    """Annotated patients whose LLM label changes when the gate is removed, with the manual call."""
+    cols = [f"nepc_status_{n}" for n in LABEL_DEFINITIONS]
+    changed = joined[cols].nunique(axis=1).gt(1)
+    keep = [LOCAL_ID_COL, "manual_label", "review_status", *cols,
+            *[c for c in joined.columns if c.startswith("n_findings_")],
+            *(["scored"] if "scored" in joined else [])]
+    return joined.loc[changed, keep].reset_index(drop=True)
