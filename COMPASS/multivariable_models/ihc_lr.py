@@ -33,7 +33,9 @@ NE-positive IHC notes exclude the patient from both NE outcomes.
 
 AUC is from out-of-fold predictions (stratified K-fold) with a patient bootstrap 95%
 CI; odds ratios (per SD), Wald CIs and LRT p-values come from the full-population fit.
-The LR machinery is reused from ``nepc_subtyping_lr``.
+``run_ihc_lr(..., return_predictions=True)`` also returns each patient's out-of-fold
+probability (the fold that held the patient out), so every fit patient has a held-out
+prediction. The LR machinery is reused from ``nepc_subtyping_lr``.
 """
 from __future__ import annotations
 
@@ -87,6 +89,8 @@ AUDIT_COLUMNS = [
     "non_prostate_primary", "qualifies", "gated_evidence_types", "ne_gated", "ne_positive",
     "ne_review_status",
 ]
+# Per-patient OOF predictions; ``event`` is that outcome's label (OUTCOMES[outcome]).
+PREDICTION_COLUMNS = ["cohort", "landmark_days", "outcome", *nsl.PREDICTION_KEY_COLUMNS]
 
 
 # --------------------------------------------------------------------------- #
@@ -559,10 +563,12 @@ def _fit_outcome(pop, outcome, tags, *, min_events, n_folds, n_bootstrap, seed):
     n, events = len(y), int(y.sum())
     base = {**tags, "outcome": outcome, "n": n, "events": events}
     if events < min_events or n - events < min_events:
-        return ({**base, "note": f"fewer than {min_events} events or non-events; not fit"}, [])
+        return ({**base, "note": f"fewer than {min_events} events or non-events; not fit"}, [], None)
     X = nsl._design(pop, nsl.REFERENCE_MODEL)          # RISK_Z, z-scored within this fit
     fit = nsl.fit_logistic(y, X)
     oof, failed = nsl.oof_predictions(y, X, n_folds=n_folds, seed=seed, return_diagnostics=True)
+    predictions = nsl.oof_prediction_frame(pop, y, oof, n_folds=n_folds, seed=seed,
+                                           tags={**tags, "outcome": outcome})
     note = fit["note"]
     if not np.isfinite(oof).all():
         cv_note = (f"{failed} failed CV folds; AUC suppressed" if failed
@@ -575,7 +581,7 @@ def _fit_outcome(pop, outcome, tags, *, min_events, n_folds, n_bootstrap, seed):
         draws = nsl.bootstrap_auc(y, {outcome: oof}, n_bootstrap=n_bootstrap, seed=seed)
         row["auc_lo"], row["auc_hi"] = nsl._ci(draws[outcome])
     coefs = [{**base, **r, "note": fit["note"]} for r in fit["terms"].to_dict("records")]
-    return row, coefs
+    return row, coefs, predictions
 
 
 def _counts(sub: pd.DataFrame, tags: dict, n_list) -> dict:
@@ -595,13 +601,16 @@ def _counts(sub: pd.DataFrame, tags: dict, n_list) -> dict:
 
 
 def run_ihc_lr(frame: pd.DataFrame, members: dict, landmarks, *, outcomes=tuple(OUTCOMES),
-               min_events: int = 5, n_folds: int = 5, n_bootstrap: int = 200, seed: int = 0):
+               min_events: int = 5, n_folds: int = 5, n_bootstrap: int = 200, seed: int = 0,
+               return_predictions: bool = False):
     """Fit ``outcome ~ RISK_Z`` per cohort x landmark x outcome.
 
     ``members`` maps cohort -> MRN set (None = every scored patient). Rows with a
-    missing risk score are dropped. Returns ``(models, coefficients, counts)``.
+    missing risk score are dropped. Returns ``(models, coefficients, counts)``;
+    with ``return_predictions``, also per-patient out-of-fold predictions
+    (``PREDICTION_COLUMNS``) for every fitted outcome population.
     """
-    model_rows, coef_rows, count_rows = [], [], []
+    model_rows, coef_rows, count_rows, prediction_frames = [], [], [], []
     for cohort, ids in members.items():
         for lm in landmarks:
             sub = frame[frame["landmark_days"].eq(int(lm)) & frame[RISK_COL].notna()]
@@ -610,14 +619,21 @@ def run_ihc_lr(frame: pd.DataFrame, members: dict, landmarks, *, outcomes=tuple(
             tags = {"cohort": cohort, "landmark_days": int(lm)}
             count_rows.append(_counts(sub, tags, None if ids is None else len(ids)))
             for outcome in outcomes:
-                row, coefs = _fit_outcome(
+                row, coefs, predictions = _fit_outcome(
                     outcome_population(sub, outcome), outcome, tags, min_events=min_events,
                     n_folds=n_folds, n_bootstrap=n_bootstrap, seed=seed)
                 model_rows.append(row)
                 coef_rows += coefs
-    return (pd.DataFrame(model_rows).reindex(columns=MODEL_COLUMNS),
-            pd.DataFrame(coef_rows).reindex(columns=COEF_COLUMNS),
-            pd.DataFrame(count_rows).reindex(columns=COUNT_COLUMNS))
+                if predictions is not None:
+                    prediction_frames.append(predictions)
+    out = (pd.DataFrame(model_rows).reindex(columns=MODEL_COLUMNS),
+           pd.DataFrame(coef_rows).reindex(columns=COEF_COLUMNS),
+           pd.DataFrame(count_rows).reindex(columns=COUNT_COLUMNS))
+    if not return_predictions:
+        return out
+    predictions = (pd.concat(prediction_frames, ignore_index=True) if prediction_frames
+                   else pd.DataFrame())
+    return (*out, predictions.reindex(columns=PREDICTION_COLUMNS))
 
 
 def marker_frequency(notes: pd.DataFrame) -> pd.DataFrame:

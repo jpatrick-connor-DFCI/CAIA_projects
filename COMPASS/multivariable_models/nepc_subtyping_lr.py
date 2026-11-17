@@ -77,6 +77,11 @@ COUNT_COLUMNS = [
     "n_trio_eligible", "events_trio_eligible",
     "n_matched", "events_matched",
 ]
+# Per-patient out-of-fold predictions: the same CV fits the AUC is computed from.
+PREDICTION_KEY_COLUMNS = [ID_COL, EVENT_COL, RISK_COL, "cv_fold", "oof_logit", "oof_prob"]
+PREDICTION_COLUMNS = ["cohort", "landmark_days", "population", "model", *PREDICTION_KEY_COLUMNS]
+CALIBRATION_COLUMNS = ["n", "events", "observed_rate", "mean_predicted", "brier",
+                       "calibration_intercept", "calibration_slope"]
 
 
 # --------------------------------------------------------------------------- #
@@ -266,6 +271,94 @@ def _linear_predictor(beta: dict, X: pd.DataFrame) -> np.ndarray:
     return beta["_intercept"] + X.astype(float).to_numpy() @ np.array([beta[c] for c in X.columns])
 
 
+def cv_folds(y, *, n_folds: int = 5, seed: int = 0) -> np.ndarray:
+    """Stratified K-fold test-fold index per row (-1 when fewer than 2 folds are possible).
+
+    Folds are capped by the minority class count. ``oof_predictions`` uses these
+    folds, so a saved ``cv_fold`` names the fit that produced each prediction.
+    """
+    y = np.asarray(y, dtype=int)
+    k = int(min(n_folds, y.sum(), len(y) - y.sum()))
+    out = np.full(len(y), -1, dtype=int)
+    if k < 2:
+        return out
+    splits = StratifiedKFold(n_splits=k, shuffle=True, random_state=seed)
+    for fold, (_, test) in enumerate(splits.split(np.zeros(len(y)), y)):
+        out[test] = fold
+    return out
+
+
+def oof_prediction_frame(pop: pd.DataFrame, y, oof, *, n_folds: int, seed: int,
+                         tags: dict) -> pd.DataFrame:
+    """Per-patient OOF rows: linear predictor, probability (expit) and CV fold.
+
+    All-NaN predictions (failed or impossible CV) are kept as NaN rows so the
+    patient set matches the fit population; they are dropped from calibration.
+    """
+    oof = np.asarray(oof, dtype=float)
+    out = pd.DataFrame({ID_COL: pop[ID_COL].to_numpy(), EVENT_COL: np.asarray(y, dtype=int),
+                        RISK_COL: pop[RISK_COL].to_numpy(dtype=float),
+                        "cv_fold": cv_folds(y, n_folds=n_folds, seed=seed),
+                        "oof_logit": oof, "oof_prob": expit(oof)})
+    for key, value in reversed(list(tags.items())):
+        out.insert(0, key, value)
+    return out
+
+
+def calibration_summary(predictions: pd.DataFrame, by) -> pd.DataFrame:
+    """Brier score and logistic recalibration of OOF predictions, per group.
+
+    ``calibration_intercept`` is calibration-in-the-large (the logit offset with
+    the slope fixed at 1, 0 = mean prediction matches the event rate);
+    ``calibration_slope`` is the coefficient of ``y ~ oof_logit`` (1 = ideal,
+    <1 = predictions too extreme). Rows with a missing prediction are dropped.
+    """
+    by = list(by)
+    rows = []
+    for key, g in predictions.dropna(subset=["oof_logit"]).groupby(by, sort=False):
+        y = g[EVENT_COL].to_numpy(dtype=float)
+        lp = g["oof_logit"].to_numpy(dtype=float)
+        p = expit(lp)
+        slope_fit = fit_logistic(y, pd.DataFrame({"oof_logit": lp}))
+        slope = slope_fit["terms"]["coef"].iloc[0]
+        rows.append({**dict(zip(by, key if isinstance(key, tuple) else (key,))),
+                     "n": len(y), "events": int(y.sum()), "observed_rate": float(y.mean()),
+                     "mean_predicted": float(p.mean()), "brier": float(np.mean((p - y) ** 2)),
+                     "calibration_intercept": _offset_intercept(y, lp),
+                     "calibration_slope": float(slope)})
+    return pd.DataFrame(rows).reindex(columns=[*by, *CALIBRATION_COLUMNS])
+
+
+def _offset_intercept(y: np.ndarray, offset: np.ndarray, *, max_iter: int = 100,
+                      tol: float = 1e-10) -> float:
+    """Intercept a in logit P(y) = a + offset (Newton steps on one parameter)."""
+    if y.min() == y.max():
+        return np.nan
+    a = 0.0
+    for _ in range(max_iter):
+        p = expit(a + offset)
+        step = np.sum(y - p) / max(np.sum(p * (1 - p)), 1e-12)
+        a += step
+        if abs(step) < tol:
+            break
+    return float(a)
+
+
+def calibration_bins(predictions: pd.DataFrame, by, *, n_bins: int = 5) -> pd.DataFrame:
+    """Observed event rate vs mean OOF probability per quantile bin of the prediction."""
+    by = list(by)
+    rows = []
+    for key, g in predictions.dropna(subset=["oof_prob"]).groupby(by, sort=False):
+        bins = pd.qcut(g["oof_prob"].rank(method="first"), q=min(n_bins, len(g)), labels=False)
+        for b, gb in g.groupby(bins):
+            rows.append({**dict(zip(by, key if isinstance(key, tuple) else (key,))),
+                         "bin": int(b) + 1, "n": len(gb), "events": int(gb[EVENT_COL].sum()),
+                         "mean_predicted": float(gb["oof_prob"].mean()),
+                         "observed_rate": float(gb[EVENT_COL].mean())})
+    return pd.DataFrame(rows).reindex(
+        columns=[*by, "bin", "n", "events", "mean_predicted", "observed_rate"])
+
+
 def oof_predictions(y, X: pd.DataFrame, *, n_folds: int = 5, seed: int = 0,
                     return_diagnostics: bool = False):
     """Out-of-fold linear predictors from stratified K-fold logistic fits.
@@ -276,13 +369,14 @@ def oof_predictions(y, X: pd.DataFrame, *, n_folds: int = 5, seed: int = 0,
     With return_diagnostics, also returns the number of failed folds.
     """
     y = np.asarray(y, dtype=int)
-    k = int(min(n_folds, y.sum(), len(y) - y.sum()))
+    folds = cv_folds(y, n_folds=n_folds, seed=seed)
     out = np.full(len(y), np.nan)
-    if k < 2:
+    if folds.max() < 1:
         return (out, 0) if return_diagnostics else out
     failed = 0
-    folds = StratifiedKFold(n_splits=k, shuffle=True, random_state=seed)
-    for train, test in folds.split(np.zeros(len(y)), y):
+    for fold in range(folds.max() + 1):
+        test = np.flatnonzero(folds == fold)
+        train = np.flatnonzero(folds != fold)
         fit = fit_logistic(y[train], X.iloc[train])
         if not fit["converged"]:
             failed += 1
@@ -337,9 +431,14 @@ def _design(pop: pd.DataFrame, model: str) -> pd.DataFrame:
 
 
 def _evaluate_population(pop: pd.DataFrame, models, tags: dict, *, min_events: int,
-                         n_folds: int, n_bootstrap: int, seed: int, paired: bool):
-    """Fit every model on ``pop`` (one shared population) or each on its own available cases."""
-    model_rows, coef_rows, oof = [], [], {}
+                         n_folds: int, n_bootstrap: int, seed: int, paired: bool,
+                         predict_models=()):
+    """Fit every model on ``pop`` (one shared population) or each on its own available cases.
+
+    Returns ``(model_rows, coef_rows, prediction_frames)``; the last holds the
+    per-patient OOF predictions of the fitted models named in ``predict_models``.
+    """
+    model_rows, coef_rows, oof, prediction_frames = [], [], {}, []
     pops = {}
     for model in models:
         sub = pop if paired else pop.dropna(subset=list(MODEL_SPECS[model]))
@@ -355,6 +454,9 @@ def _evaluate_population(pop: pd.DataFrame, models, tags: dict, *, min_events: i
         fit = fit_logistic(y, X)
         oof[model], failed = oof_predictions(
             y, X, n_folds=n_folds, seed=seed, return_diagnostics=True)
+        if model in predict_models:
+            prediction_frames.append(oof_prediction_frame(
+                sub, y, oof[model], n_folds=n_folds, seed=seed, tags={**tags, "model": model}))
         note = fit["note"]
         if not np.isfinite(oof[model]).all():
             cv_note = (f"{failed} failed CV folds; AUC and delta-AUC suppressed" if failed
@@ -385,7 +487,7 @@ def _evaluate_population(pop: pd.DataFrame, models, tags: dict, *, min_events: i
                 row["delta_auc_vs_risk"] = row["auc"] - next(
                     r["auc"] for r in model_rows if r["model"] == REFERENCE_MODEL)
                 row["delta_auc_lo"], row["delta_auc_hi"] = _ci(draws[m] - draws[REFERENCE_MODEL])
-    return model_rows, coef_rows
+    return model_rows, coef_rows, prediction_frames
 
 
 def _counts(sub: pd.DataFrame, tags: dict, n_list) -> dict:
@@ -402,13 +504,19 @@ def _counts(sub: pd.DataFrame, tags: dict, n_list) -> dict:
 
 
 def run_lr(frame: pd.DataFrame, members: dict, landmarks, *, models=tuple(MODEL_SPECS),
-           min_events: int = 5, n_folds: int = 5, n_bootstrap: int = 200, seed: int = 0):
+           min_events: int = 5, n_folds: int = 5, n_bootstrap: int = 200, seed: int = 0,
+           return_predictions: bool = False, prediction_models=(REFERENCE_MODEL,),
+           prediction_populations=("available",)):
     """Fit every model per cohort x landmark x population.
 
     ``members`` maps cohort -> MRN set (None = every scored patient). Returns
-    ``(models, coefficients, counts)`` DataFrames.
+    ``(models, coefficients, counts)`` DataFrames; with ``return_predictions``,
+    also a fourth: per-patient out-of-fold predictions (``PREDICTION_COLUMNS``)
+    for ``prediction_models`` in ``prediction_populations``. Each patient's
+    prediction comes from the CV fit that held that patient out, the same
+    predictions the AUC uses; models below ``min_events`` contribute no rows.
     """
-    model_rows, coef_rows, count_rows = [], [], []
+    model_rows, coef_rows, count_rows, prediction_frames = [], [], [], []
     for cohort, ids in members.items():
         for lm in landmarks:
             sub = frame[frame["landmark_days"].eq(int(lm))]
@@ -418,11 +526,20 @@ def run_lr(frame: pd.DataFrame, members: dict, landmarks, *, models=tuple(MODEL_
             count_rows.append(_counts(sub, tags, None if ids is None else len(ids)))
             matched = sub.dropna(subset=[RISK_COL, GLEASON_FEATURE, *TRIO_FEATURES])
             for population, pop, paired in (("available", sub, False), ("matched", matched, True)):
-                m, c = _evaluate_population(
+                predict = (tuple(prediction_models)
+                           if return_predictions and population in prediction_populations else ())
+                m, c, p = _evaluate_population(
                     pop, models, {**tags, "population": population}, min_events=min_events,
-                    n_folds=n_folds, n_bootstrap=n_bootstrap, seed=seed, paired=paired)
+                    n_folds=n_folds, n_bootstrap=n_bootstrap, seed=seed, paired=paired,
+                    predict_models=predict)
                 model_rows += m
                 coef_rows += c
-    return (pd.DataFrame(model_rows).reindex(columns=MODEL_COLUMNS),
-            pd.DataFrame(coef_rows).reindex(columns=COEF_COLUMNS),
-            pd.DataFrame(count_rows).reindex(columns=COUNT_COLUMNS))
+                prediction_frames += p
+    out = (pd.DataFrame(model_rows).reindex(columns=MODEL_COLUMNS),
+           pd.DataFrame(coef_rows).reindex(columns=COEF_COLUMNS),
+           pd.DataFrame(count_rows).reindex(columns=COUNT_COLUMNS))
+    if not return_predictions:
+        return out
+    predictions = (pd.concat(prediction_frames, ignore_index=True) if prediction_frames
+                   else pd.DataFrame())
+    return (*out, predictions.reindex(columns=PREDICTION_COLUMNS))

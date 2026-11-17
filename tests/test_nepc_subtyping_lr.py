@@ -256,3 +256,91 @@ def test_failed_cv_suppresses_auc_and_paired_comparison():
 def test_auc_rejects_partial_predictions():
     y = np.array([0, 0, 1, 1])
     assert np.isnan(nsl._auc(y, np.array([0., np.nan, 1., 2.])))
+
+
+# --------------------------------------------------------------------------- #
+# Out-of-fold predictions
+# --------------------------------------------------------------------------- #
+def _reference_oof(y, X, n_folds=5, seed=0):
+    """The pre-refactor loop, straight over StratifiedKFold."""
+    from sklearn.model_selection import StratifiedKFold
+    y = np.asarray(y, dtype=int)
+    k = int(min(n_folds, y.sum(), len(y) - y.sum()))
+    out = np.full(len(y), np.nan)
+    for train, test in StratifiedKFold(k, shuffle=True, random_state=seed).split(np.zeros(len(y)), y):
+        fit = nsl.fit_logistic(y[train], X.iloc[train])
+        out[test] = nsl._linear_predictor(fit["beta"], X.iloc[test])
+    return out
+
+
+def test_cv_folds_drive_oof_predictions_unchanged():
+    frame = _synthetic_frame()
+    X = nsl._design(frame, "risk")
+    y = frame[nsl.EVENT_COL].to_numpy()
+    np.testing.assert_allclose(nsl.oof_predictions(y, X, seed=4), _reference_oof(y, X, seed=4))
+    folds = nsl.cv_folds(y, seed=4)
+    assert set(folds) == set(range(5))
+    assert (nsl.cv_folds(np.r_[1, np.zeros(20)]) == -1).all()
+
+
+def test_run_lr_returns_oof_predictions_matching_auc():
+    frame = pd.concat([_synthetic_frame(), _synthetic_frame(seed=2).assign(landmark_days=90)],
+                      ignore_index=True)
+    members = {"all": None, "half": set(range(200))}
+    assert len(nsl.run_lr(frame, members, [0, 90], n_bootstrap=0)) == 3
+    models, _, _, preds = nsl.run_lr(frame, members, [0, 90], n_bootstrap=0, return_predictions=True)
+    assert list(preds.columns) == nsl.PREDICTION_COLUMNS
+    assert set(preds["model"]) == {"risk"} and set(preds["population"]) == {"available"}
+    np.testing.assert_allclose(preds["oof_prob"], 1 / (1 + np.exp(-preds["oof_logit"])))
+    for (cohort, lm), g in preds.groupby(["cohort", "landmark_days"]):
+        row = models.set_index(["cohort", "landmark_days", "population", "model"]).loc[
+            (cohort, lm, "available", "risk")]
+        assert len(g) == row["n"] == g[nsl.ID_COL].nunique()
+        assert g[nsl.EVENT_COL].sum() == row["events"]
+        assert nsl._auc(g[nsl.EVENT_COL].to_numpy(), g["oof_prob"].to_numpy()) == pytest.approx(row["auc"])
+    assert preds.query("cohort == 'half'")[nsl.ID_COL].max() < 200
+
+    _, _, _, more = nsl.run_lr(frame, {"all": None}, [0], n_bootstrap=0, return_predictions=True,
+                               prediction_models=("risk", "gleason"),
+                               prediction_populations=("available", "matched"))
+    assert set(zip(more["population"], more["model"])) == {
+        ("available", "risk"), ("available", "gleason"), ("matched", "risk"), ("matched", "gleason")}
+
+
+def test_failed_cv_keeps_nan_prediction_rows_and_unfit_models_add_none():
+    frame = _synthetic_frame(n=100)
+    frame[nsl.EVENT_COL] = np.r_[np.ones(10), np.zeros(90)]
+    frame[nsl.GLEASON_FEATURE] = 8.0
+    frame[nsl.HAS_SEQUENCING] = True
+    frame[TRIO] = 0.0
+    frame.loc[[0, 10, 11], "TP53_ANY"] = 1.0
+    _, _, _, preds = nsl.run_lr(frame, {"all": None}, [0], models=("risk", "tp53"), n_bootstrap=0,
+                                return_predictions=True, prediction_models=("risk", "tp53"))
+    gene = preds[preds["model"].eq("tp53")]
+    assert len(gene) == 100 and gene["oof_prob"].isna().all()
+    assert preds[preds["model"].eq("risk")]["oof_prob"].notna().all()
+
+    frame[nsl.EVENT_COL] = np.r_[np.ones(3), np.zeros(97)]
+    _, _, _, none = nsl.run_lr(frame, {"all": None}, [0], n_bootstrap=0, return_predictions=True)
+    assert none.empty and list(none.columns) == nsl.PREDICTION_COLUMNS
+
+
+def test_calibration_summary_and_bins():
+    rng = np.random.default_rng(0)
+    lp = rng.normal(-1, 1.2, 20000)
+    y = rng.binomial(1, 1 / (1 + np.exp(-lp)))
+    preds = pd.DataFrame({"g": "a", nsl.EVENT_COL: y, "oof_logit": lp, "oof_prob": 1 / (1 + np.exp(-lp))})
+    preds = pd.concat([preds, preds.assign(g="b", oof_logit=2 * lp + 1, oof_prob=1 / (1 + np.exp(-(2 * lp + 1)))),
+                       pd.DataFrame({"g": ["a"], nsl.EVENT_COL: [1], "oof_logit": [np.nan], "oof_prob": [np.nan]})])
+    s = nsl.calibration_summary(preds, ["g"]).set_index("g")
+    assert list(s.columns) == nsl.CALIBRATION_COLUMNS
+    assert s.loc["a", "n"] == 20000
+    assert s.loc["a", "calibration_slope"] == pytest.approx(1, abs=0.05)
+    assert s.loc["a", "calibration_intercept"] == pytest.approx(0, abs=0.05)
+    assert s.loc["b", "calibration_slope"] == pytest.approx(0.5, abs=0.03)  # too extreme
+    assert s.loc["a", "brier"] < s.loc["b", "brier"]
+    b = nsl.calibration_bins(preds, ["g"], n_bins=5)
+    assert b.groupby("g")["n"].sum().to_dict() == {"a": 20000, "b": 20000}
+    a = b[b["g"].eq("a")]
+    assert a["mean_predicted"].is_monotonic_increasing
+    np.testing.assert_allclose(a["observed_rate"], a["mean_predicted"], atol=0.03)

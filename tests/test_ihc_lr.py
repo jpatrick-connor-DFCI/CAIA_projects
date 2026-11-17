@@ -353,3 +353,29 @@ def test_missing_anchor_fails_even_without_notes(missing_patient):
     with pytest.raises(ValueError, match="lack an ADT anchor"):
         il.build_ihc_frame(scores, notes, [0], anchors=anchors,
                            review_status={1: "ok", 2: "ok"})
+
+
+def test_run_ihc_lr_oof_predictions_per_outcome():
+    frame = _synthetic()
+    frame.loc[0, "risk_score"] = np.nan
+    frame.loc[1:20, "ne_review_complete"] = False
+    frame.loc[1:20, ["ne_pos_future", "prior_ne_pos"]] = np.nan
+    assert len(il.run_ihc_lr(frame, {"all": None}, (0,), n_bootstrap=0)) == 3
+    models, _, _, preds = il.run_ihc_lr(frame, {"all": None}, (0,), n_bootstrap=0,
+                                        return_predictions=True)
+    assert list(preds.columns) == il.PREDICTION_COLUMNS
+    m = models.set_index("outcome")
+    for outcome, g in preds.groupby("outcome"):
+        assert len(g) == m.loc[outcome, "n"] and g["event"].sum() == m.loc[outcome, "events"]
+        assert il.nsl._auc(g["event"].to_numpy(), g["oof_prob"].to_numpy()) == pytest.approx(
+            m.loc[outcome, "auc"])
+        assert g["cv_fold"].between(0, 4).all() and g["oof_prob"].between(0, 1).all()
+    assert 0 not in set(preds["person_id"])                                    # no risk score
+    assert set(preds.query("outcome == 'ihc_any'")["person_id"]) >= set(range(1, 21))
+    assert not set(preds.query("outcome != 'ihc_any'")["person_id"]) & set(range(1, 21))
+    given = preds.query("outcome == 'ne_pos_given_ihc'")["person_id"]
+    assert frame.set_index("person_id").loc[given, "ihc_future"].eq(1).all()
+
+    frame["ne_pos_future"] = frame["ne_pos_future"] * 0                        # no NE events
+    _, _, _, few = il.run_ihc_lr(frame, {"all": None}, (0,), n_bootstrap=0, return_predictions=True)
+    assert set(few["outcome"]) == {"ihc_any"}
