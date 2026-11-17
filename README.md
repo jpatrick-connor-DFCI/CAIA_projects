@@ -85,12 +85,14 @@ COMPASS/
 │   │   ├── 03d_shallow_decision_tree.ipynb
 │   │   ├── 04_federated_transfer.ipynb   # frozen rhino_data_v2 bundles scored on local DFCI endpoints
 │   │   └── 05_prep_figure_data.ipynb     # Polars figure tables + cache manifest
-│   ├── testing/                          # 06-08, reviewer/exploratory analyses
+│   ├── testing/                          # reviewer/exploratory analyses
 │   │   ├── 06_reviewer_suggestions.ipynb
 │   │   ├── 07_checklist_test.ipynb
-│   │   └── 08_metastatic_transfer_test.ipynb
+│   │   ├── 08_metastatic_transfer_test.ipynb
+│   │   ├── 13_pathology_topics_vs_risk.ipynb # pathology-only topic/term analyses + continuous risk
+│   │   └── 14_clinical_notes_topics_vs_risk.ipynb # shared topics across Clinician/Imaging/Pathology; pooled + per-type risk
 │   ├── patient_extraction/               # data requests (PHI outputs go to the protected data root)
-│   │   └── 01_high_vs_low_risk_transfer_pxs.ipynb  # top/bottom-decile transferred-XGBoost patients + pathology reports
+│   │   └── 01_high_vs_low_risk_transfer_pxs.ipynb  # Elio request: high vs low risk patient manifest + pathology reports
 │   └── figures/                          # R entry scripts (code they source stays in COMPASS/figures/)
 │       ├── final_figure_data_prep.R
 │       ├── run_figure_render.R

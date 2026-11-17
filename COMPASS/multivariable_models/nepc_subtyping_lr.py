@@ -1,6 +1,7 @@
 """Logistic regression for incident NEPC: federated risk score vs Gleason vs TP53/PTEN/RB1.
 
-Backs ``notebooks/testing/10_LR_for_subtyping.ipynb``. For each subcohort and
+Its notebook (10_LR_for_subtyping) was removed on 2026-11-17. The LR machinery
+(CV AUC, bootstrap, calibration) is still used by ``ihc_lr`` (notebooks 11-12). For each subcohort and
 ADT landmark, three predictor sets are fit as separate unpenalized logistic
 regressions of incident NEPC (first NEPC after ADT + landmark):
 

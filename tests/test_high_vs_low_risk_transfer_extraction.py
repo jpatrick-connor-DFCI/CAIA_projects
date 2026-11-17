@@ -1,4 +1,4 @@
-"""Exercise the patient-extraction notebook with synthetic data only."""
+"""Exercise the separate extraction and exploratory notebooks with synthetic data only."""
 import json
 import sys
 import types
@@ -16,6 +16,19 @@ from survival_common import federated_scoring as fs
 NOTEBOOK = Path(__file__).resolve().parents[1] / (
     "COMPASS/notebooks/patient_extraction/01_high_vs_low_risk_transfer_pxs.ipynb"
 )
+
+
+ANALYSIS_NOTEBOOK = NOTEBOOK.parents[1] / "testing/13_pathology_topics_vs_risk.ipynb"
+
+
+def _analysis_source(cell_id):
+    cells = json.loads(ANALYSIS_NOTEBOOK.read_text())["cells"]
+    return "".join(next(c for c in cells if c.get("id") == cell_id)["source"])
+
+
+def _run_analysis(env, *cell_ids):
+    for cell_id in cell_ids:
+        exec(compile(_analysis_source(cell_id), f"{ANALYSIS_NOTEBOOK}:{cell_id}", "exec"), env)
 
 
 def _run_cells(env, *indices):
@@ -134,11 +147,11 @@ def _write_term_inputs(env, scores):
     return notes
 
 
-def test_term_enrichment_contrasts_deciles_with_middle_on_pre_landmark_reports(extraction, capsys):
+def test_term_enrichment_contrasts_deciles_with_middle_on_all_reports(extraction, capsys):
     env, scores = extraction
     ids = IDS
     _write_term_inputs(env, scores)
-    _run_cells(env, 4, 5, 7, 9, 11, 13, 14, 15)
+    _run_analysis(env, 'risk-scores', 'reports', 'term-enrichment', 'term-display')
 
     all_res = pd.read_csv(env["OUTPUT_DIR"] / "pathology_term_enrichment.csv")
     assert set(zip(all_res["group"], all_res["control"])) == {
@@ -207,7 +220,7 @@ def test_term_enrichment_handles_empty_patient_vocabulary(extraction, capsys):
     # Five reports pass min_df, but one distinct patient cannot pass the patient threshold.
     pl.DataFrame({"DFCI_MRN": [IDS[0]] * 5, "EVENT_DATE": ["2019-06-01"] * 5,
                   "RPT_TEXT": ["adenocarcinoma prostate"] * 5}).write_parquet(env["PATHOLOGY_PATH"])
-    _run_cells(env, 4, 5, 7, 9, 11, 13, 14, 15)
+    _run_analysis(env, 'risk-scores', 'reports', 'term-enrichment', 'term-display')
 
     result = pd.read_csv(env["OUTPUT_DIR"] / "pathology_term_enrichment.csv")
     assert result.empty and list(result.columns) == env["ENRICHMENT_COLS"]
@@ -215,8 +228,8 @@ def test_term_enrichment_handles_empty_patient_vocabulary(extraction, capsys):
 
 
 TOPIC_MODULES = ("zstandard", "bertopic", "umap", "hdbscan")
-TERM_CELLS = (4, 5, 7, 9, 11, 13, 14, 15)
-TOPIC_CELLS = (17, 18)
+TERM_CELLS = ("risk-scores", "reports", "term-enrichment", "term-display")
+TOPIC_CELLS = ("topic-fit", "topic-enrichment")
 
 
 def test_bertopic_section_skips_cleanly_without_packages(extraction, capsys, monkeypatch):
@@ -226,7 +239,7 @@ def test_bertopic_section_skips_cleanly_without_packages(extraction, capsys, mon
         monkeypatch.setitem(sys.modules, name, None)      # import raises ImportError
     env.update(EMBED_METADATA_PATH=Path("/nonexistent/meta.parquet"), EMBED_ARRAY_PATH=Path("/nonexistent/a.npy.zst"),
                TOPIC_MIN_SIZE=2, TOPIC_SEED=0)
-    _run_cells(env, *TERM_CELLS, *TOPIC_CELLS)
+    _run_analysis(env, *TERM_CELLS, *TOPIC_CELLS)
     out = capsys.readouterr().out
     assert "BERTopic section skipped (packages not installed: zstandard, bertopic, umap-learn, hdbscan)" in out
     assert (env["OUTPUT_DIR"] / "pathology_term_enrichment.csv").exists()
@@ -311,7 +324,7 @@ def test_bertopic_enriches_topics_from_precomputed_embeddings_without_leaking_te
     pl.DataFrame(meta).write_parquet(tmp_path / "meta.parquet")
     env.update(EMBED_METADATA_PATH=tmp_path / "meta.parquet", EMBED_ARRAY_PATH=array_path,
                TOPIC_MIN_SIZE=2, TOPIC_SEED=0)
-    _run_cells(env, *TERM_CELLS, *TOPIC_CELLS)
+    _run_analysis(env, *TERM_CELLS, *TOPIC_CELLS)
 
     (docs, embeddings, kwargs), = _FakeBERTopic.calls
     assert len(docs) == 28 and embeddings.dtype == np.float32      # every report, whatever its date
@@ -352,8 +365,8 @@ def test_bertopic_enriches_topics_from_precomputed_embeddings_without_leaking_te
     np.testing.assert_array_equal(got, np.load(array_path)[want].astype(np.float32))
 
 
-# --- Sensitivity and complementary analyses (cells 19-22) ---
-EXTRA_CELLS = (20, 21, 22)
+# --- Sensitivity and complementary analyses ---
+EXTRA_CELLS = ("lexicon", "score-association", "classifiers")
 
 
 def _no_topic_modules(env, monkeypatch):
@@ -386,7 +399,7 @@ def test_lexicon_enrichment_uses_all_reports(extraction, capsys, monkeypatch):
     env, scores = extraction
     _write_extra_inputs(env, scores)
     _no_topic_modules(env, monkeypatch)
-    _run_cells(env, *TERM_CELLS, *TOPIC_CELLS, 20)
+    _run_analysis(env, *TERM_CELLS, *TOPIC_CELLS, 'lexicon')
 
     hits = env["lexicon_hits"]("Negative for synaptophysin, chromogranin positive.")
     assert hits == {"NE marker (any)": True, "synaptophysin": True, "chromogranin": True}
@@ -412,10 +425,9 @@ def test_lexicon_enrichment_uses_all_reports(extraction, capsys, monkeypatch):
 def test_mantel_haenszel_adjusts_for_strata(extraction):
     env, _ = extraction
     env.update(TERM_NGRAMS=(1, 2), TERM_MIN_PATIENTS=2)
-    cells = json.loads(NOTEBOOK.read_text())["cells"]
-    for i in (13, 14):
-        src = "".join(cells[i]["source"])
-        cut = src.index("# Per-landmark group") if i == 13 else src.index("term_matrices = {}")
+    for i in ("reports", "term-enrichment"):
+        src = _analysis_source(i)
+        cut = src.index("# Per-landmark group") if i == "reports" else src.index("term_matrices = {}")
         exec(compile(src[:cut], f"cell_{i}_defs", "exec"), env)
     from scipy import sparse
 
@@ -445,7 +457,7 @@ def test_score_association_and_text_classifier(extraction, capsys, monkeypatch):
     env, scores = extraction
     notes = _write_extra_inputs(env, scores)
     _no_topic_modules(env, monkeypatch)
-    _run_cells(env, *TERM_CELLS, *TOPIC_CELLS, *EXTRA_CELLS)
+    _run_analysis(env, *TERM_CELLS, *TOPIC_CELLS, *EXTRA_CELLS)
 
     assoc = pd.read_csv(env["OUTPUT_DIR"] / "pathology_score_association.csv")
     assert list(assoc.columns) == env["ASSOC_COLS"]
@@ -467,7 +479,7 @@ def test_score_association_and_text_classifier(extraction, capsys, monkeypatch):
 
     # Too few patients for the folds: skipped with a note, not an error.
     env["TEXT_FOLDS"] = 3
-    _run_cells(env, 22)
+    _run_analysis(env, 'classifiers')
     clf = pd.read_csv(env["OUTPUT_DIR"] / "pathology_text_classifier.csv")
     assert clf["cv_auc"].isna().all() and clf["note"].str.startswith("skipped").all()
 
@@ -489,7 +501,7 @@ def test_embedding_classifier_uses_precomputed_embeddings(extraction, capsys, mo
     pl.DataFrame(meta).write_parquet(tmp_path / "meta.parquet")
     env.update(EMBED_METADATA_PATH=tmp_path / "meta.parquet", EMBED_ARRAY_PATH=tmp_path / "emb.npy",
                TOPIC_MIN_SIZE=2, TOPIC_SEED=0)
-    _run_cells(env, *TERM_CELLS, *TOPIC_CELLS, *EXTRA_CELLS)
+    _run_analysis(env, *TERM_CELLS, *TOPIC_CELLS, *EXTRA_CELLS)
 
     ids, x = env["patient_embeddings"](0)
     assert len(ids) == 20 and x.shape == (20, 3)
@@ -505,9 +517,8 @@ def test_embedding_classifier_uses_precomputed_embeddings(extraction, capsys, mo
 def _classifier_definitions(env):
     env.update(TERM_MIN_PATIENTS=2, TERM_NGRAMS=(1, 2), TEXT_C=1.0, TEXT_FOLDS=2,
                TEXT_PERMUTATIONS=2, TEXT_SEED=0, N_JOBS=1, CONTROL_GROUP="middle")
-    cells = json.loads(NOTEBOOK.read_text())["cells"]
-    for index, stop in ((14, "term_matrices = {}"), (22, "embed_pos =")):
-        src = "".join(cells[index]["source"])
+    for index, stop in (("term-enrichment", "term_matrices = {}"), ("classifiers", "embed_pos =")):
+        src = _analysis_source(index)
         exec(compile(src[:src.index(stop)], f"cell_{index}_defs", "exec"), env)
 
 
@@ -559,3 +570,277 @@ def test_classifier_empty_vocabulary_uses_intercept_only_predictions(extraction,
     assert result["cv_auc"] == 0.5 and result["null_auc_mean"] == 0.5
     assert result["p_permutation"] == 1 and result["n_features"] == 0
     assert result["top_terms_positive"] == result["top_terms_negative"] == ""
+
+
+# Continuous topic models use raw scores and keep patients (not notes) as independent units.
+def _continuous_definitions():
+    import importlib
+    env = dict(np=np, pd=pd, optional_import=importlib.import_module, CONTINUOUS_MIN_PATIENTS=30,
+               CONTINUOUS_MIN_TOPIC_PATIENTS=5, TOPIC_PERMUTATIONS=99, TOPIC_SEED=42)
+    src = _analysis_source("continuous-topics")
+    exec(compile(src[:src.index("continuous_frames, curve_frames")], "continuous_defs", "exec"), env)
+    return env
+
+
+def _continuous_inputs():
+    rng = np.random.default_rng(71)
+    risk = pd.Series(np.linspace(-2, 2, 160), index=pd.Index(range(160), name="DFCI_MRN"))
+    # Repeated patient outcomes intentionally induce strong within-patient correlation.
+    topic = np.where(rng.random(len(risk)) < 1 / (1 + np.exp(-risk.to_numpy())), 0, 1)
+    docs = pd.DataFrame({"DFCI_MRN": risk.index, "topic": topic, "specimen_site": "prostate"})
+    docs = docs.loc[docs.index.repeat(3)].reset_index(drop=True)
+    return docs, risk
+
+
+def test_continuous_topics_cluster_by_patient_and_retain_raw_score_scale():
+    pytest.importorskip("statsmodels.api")
+    env = _continuous_definitions()
+    docs, risk = _continuous_inputs()
+    run = env["continuous_topic_association"]
+    result, curves = run(docs, risk, 0, {0: "synthetic positive", 1: "synthetic negative"})
+    assert result["status"].eq("ok").all()
+    gee = result[result["model"].eq("gee")].set_index("topic")
+    assert gee.loc[0, "odds_ratio_per_sd"] > 1 and gee.loc[0, "p_value"] < 0.01
+    assert gee.loc[1, "odds_ratio_per_sd"] < 1
+    assert gee["risk_sd"].eq(risk.std(ddof=0)).all()
+    assert curves["probability"].between(0, 1).all()
+    assert (curves["ci95_low"] <= curves["probability"]).all()
+    assert (curves["ci95_high"] >= curves["probability"]).all()
+    # Uniform note duplication cannot create new independent patients or tighten clustered intervals.
+    repeated, _ = run(pd.concat([docs] * 5, ignore_index=True), risk, 0, {})
+    for col in ("beta_per_sd", "ci95_low", "ci95_high", "spearman_rho", "p_value"):
+        np.testing.assert_allclose(result[col], repeated[col], rtol=1e-7, atol=1e-10, equal_nan=True)
+    reversed_result, _ = run(docs, -risk, 0, {})
+    np.testing.assert_allclose(result["beta_per_sd"], -reversed_result["beta_per_sd"], atol=1e-10, equal_nan=True)
+    # Scaling raw risk retains the per-SD OR; no decile or percentile inputs enter the model.
+    scaled, scaled_curves = run(docs, 10 + 3 * risk, 0, {})
+    np.testing.assert_allclose(result["odds_ratio_per_sd"], scaled["odds_ratio_per_sd"], equal_nan=True)
+    np.testing.assert_allclose(scaled_curves["risk_score"], 10 + 3 * curves["risk_score"])
+
+
+def test_continuous_topics_exclude_invalid_scores_keep_outliers_and_handle_constant_risk():
+    pytest.importorskip("statsmodels.api")
+    env = _continuous_definitions()
+    docs, risk = _continuous_inputs()
+    docs.loc[docs["DFCI_MRN"].eq(0), "topic"] = -1
+    risk.loc[1] = np.inf
+    risk.loc[2] = np.nan
+    result, _ = env["continuous_topic_association"](docs, risk, 90, {})
+    assert result["n_patients"].eq(158).all()  # outlier-only patient retained, two invalid scores excluded
+    assert result["n_reports"].eq(474).all()
+    assert -1 not in result["topic"].values
+    constant, curves = env["continuous_topic_association"](docs, risk * 0 + 1, 90, {})
+    assert constant["status"].str.contains("constant risk").all()
+    assert constant["p_value"].isna().all() and curves.empty
+    empty, curves = env["continuous_topic_association"](docs.iloc[:0], risk, 90, {})
+    assert empty.empty and list(empty.columns) == env["CONTINUOUS_COLS"] and curves.empty
+
+
+def test_continuous_patient_fraction_runs_without_statsmodels():
+    env = _continuous_definitions()
+    env["optional_import"] = lambda name: None
+    docs, risk = _continuous_inputs()
+    result, curves = env["continuous_topic_association"](docs, risk, 0, {})
+    assert result.loc[result["model"].str.startswith("gee"), "status"].str.contains("statsmodels").all()
+    fraction = result[result["model"].eq("patient_fraction_spearman")].set_index("topic")
+    assert fraction["status"].eq("ok").all() and fraction.loc[0, "spearman_rho"] > 0
+    assert fraction["p_value"].between(0, 1).all() and curves.empty
+
+
+def test_analysis_runs_standalone_without_export_or_local_endpoint_data(extraction, monkeypatch):
+    env, scores = extraction
+    _write_term_inputs(env, scores)
+    _no_topic_modules(env, monkeypatch)
+    env["DATA_PATH"].unlink()  # exploratory notebook needs scores/notes, not the extraction's endpoint table
+    env.update(CONTINUOUS_MIN_PATIENTS=30, CONTINUOUS_MIN_TOPIC_PATIENTS=5, TOPIC_PERMUTATIONS=99)
+    notebook = json.loads(ANALYSIS_NOTEBOOK.read_text())
+    for cell in notebook["cells"]:
+        if cell["cell_type"] == "code" and cell["id"] != "config":
+            _run_analysis(env, cell["id"])
+    assert (env["OUTPUT_DIR"] / "pathology_term_enrichment.csv").exists()
+    assert not (env["OUTPUT_DIR"] / "patient_manifest.csv").exists()
+    assert not (env["OUTPUT_DIR"] / "pathology_reports.tsv").exists()
+
+
+def test_continuous_topics_write_aggregate_results_with_global_fdr(extraction, monkeypatch):
+    pytest.importorskip("statsmodels.api")
+    import importlib
+    from scipy.stats import false_discovery_control
+    env, _ = extraction
+    docs, risk = _continuous_inputs()
+    docs["rpt_key"] = np.arange(len(docs)).astype(str)
+    docs["RPT_ID"] = docs["rpt_key"]
+    env.update(topic_docs=docs, topic_table=pd.DataFrame({"topic": [0, 1], "top_words": ["positive", "negative"]}),
+               by_lm={lm: pd.DataFrame({fs.ID_COL: risk.index, "risk_score": risk.values}) for lm in env["LANDMARKS"]},
+               reports_by_lm={lm: docs for lm in env["LANDMARKS"]},
+               optional_import=importlib.import_module, rpt_key=lambda values: values.astype(str),
+               CONTINUOUS_MIN_PATIENTS=30, CONTINUOUS_MIN_TOPIC_PATIENTS=5, TOPIC_PERMUTATIONS=99,
+               TOPIC_SEED=42, TERM_FDR=0.05, TERM_TOP_N=5, display=lambda *args: None)
+    # Reuse the existing tested BH implementation without running term enrichment.
+    source = _analysis_source("term-enrichment")
+    exec(source[:source.index("term_matrices = {}")], env)
+    _run_analysis(env, "continuous-topics")
+    result = pd.read_csv(env["OUTPUT_DIR"] / "pathology_topic_continuous_association.csv")
+    assert len(result) == 18 and set(result["landmark"]) == {0, 90, 180}
+    for _, sub in result.groupby("model"):
+        np.testing.assert_allclose(sub["q_value"], false_discovery_control(sub["p_value"]))
+    for filename in ("pathology_topic_continuous_association.csv", "pathology_topic_continuous_coverage.csv",
+                     "pathology_topic_risk_curves.csv"):
+        table = pd.read_csv(env["OUTPUT_DIR"] / filename)
+        assert not {"DFCI_MRN", "RPT_ID", "RPT_TEXT", "Representative_Docs"}.intersection(table.columns)
+
+
+def test_analysis_does_not_require_distinct_decile_cutoffs(extraction):
+    env, scores = extraction
+    scores.loc[:, "risk_score"] = 1.0
+    scores.to_csv(env["SCORES_PATH"], index=False)
+    _run_analysis(env, "risk-scores")
+    assert all(g["risk_score"].notna().all() for g in env["by_lm"].values())
+    assert all(g["decile_group"].isna().all() for g in env["by_lm"].values())
+
+
+CROSS_NOTEBOOK = ANALYSIS_NOTEBOOK.with_name("14_clinical_notes_topics_vs_risk.ipynb")
+
+
+def _cross_source(cell_id):
+    cells = json.loads(CROSS_NOTEBOOK.read_text())["cells"]
+    return "".join(next(c for c in cells if c.get("id") == cell_id)["source"])
+
+
+def _run_cross(env, *cell_ids):
+    for cell_id in cell_ids:
+        exec(compile(_cross_source(cell_id), f"{CROSS_NOTEBOOK}:{cell_id}", "exec"), env)
+
+
+def _write_cross_inputs(env, scores, tmp_path):
+    scores.to_csv(env["SCORES_PATH"], index=False)
+    kinds = ("Clinician", "Imaging", "Pathology")
+    env.update(Path=Path, NOTE_TYPES=kinds, NOTE_PATHS={},
+               TERM_MIN_PATIENTS=2, TERM_NGRAMS=(1, 2), TERM_FDR=0.05, TERM_TOP_N=3,
+               ADJUST_REPORT_BANDS=(1, 2, 4), TEXT_C=1.0, TEXT_FOLDS=2, TEXT_PERMUTATIONS=2,
+               TEXT_SEED=0, N_JOBS=1, TOPIC_MIN_SIZE=2, TOPIC_SEED=0,
+               CONTINUOUS_MIN_PATIENTS=10, CONTINUOUS_MIN_TOPIC_PATIENTS=2, TOPIC_PERMUTATIONS=19)
+    rows, meta = [], []
+    for k, kind in enumerate(kinds):
+        records = []
+        for i, pid in enumerate(IDS):
+            # Same report ID across patients AND across note types: only the full identity is unique.
+            topic = int((i + k) % 4 == 0 or i < 10)
+            records.append(dict(DFCI_MRN=pid, RPT_ID=7, RPT_TEXT=("ductal pattern" if topic else "neuroendocrine features present")))
+            # One missing embedding in each of two types; never treat them as topic-negative notes.
+            if (kind, i) in (("Imaging", 0), ("Clinician", 19)):
+                continue
+            meta.append(dict(DFCI_MRN=float(pid), NOTE_TYPE=kind, RPT_ID=7.0, EMBEDDING_INDEX=len(rows)))
+            rows.append([0, 1, 0] if topic else [1, 0, 0])
+        path = tmp_path / f"{kind}.parquet"
+        pl.DataFrame(records).write_parquet(path)
+        env["NOTE_PATHS"][kind] = path
+    # One irrelevant type must not join, even when patient and report IDs match.
+    meta.append(dict(DFCI_MRN=float(IDS[0]), NOTE_TYPE="Other", RPT_ID=7.0, EMBEDDING_INDEX=len(rows)))
+    rows.append([0, 0, 1])
+    np.save(tmp_path / "cross_emb.npy", np.asarray(rows, dtype=np.float32))
+    pl.DataFrame(meta).write_parquet(tmp_path / "cross_meta.parquet")
+    env.update(EMBED_ARRAY_PATH=tmp_path / "cross_emb.npy", EMBED_METADATA_PATH=tmp_path / "cross_meta.parquet")
+
+
+def test_cross_note_full_analysis_joins_by_type_patient_and_report(extraction, monkeypatch, tmp_path, capsys):
+    env, scores = extraction
+    _write_cross_inputs(env, scores, tmp_path)
+    _fake_topic_modules(monkeypatch)
+    import matplotlib.pyplot as plt
+    monkeypatch.setattr(plt, "show", lambda: None)
+    for cell in json.loads(CROSS_NOTEBOOK.read_text())["cells"]:
+        if cell["cell_type"] == "code" and cell["id"] != "config":
+            _run_cross(env, cell["id"])
+    assert len(_FakeBERTopic.calls) == 1  # one shared topic vocabulary, no per-type refits
+    assert len(env["all_notes"]) == 60 and env["all_notes"]["rpt_key"].nunique() == 60
+    assert len(env["embed_docs"]) == 58 and set(env["embed_docs"]["NOTE_TYPE"]) == set(env["NOTE_TYPES"])
+    for row, embedding in zip(env["embed_docs"].itertuples(), env["report_embeddings"]):
+        assert np.argmax(embedding) == int("ductal" in row.RPT_TEXT)
+    composition = pd.read_csv(env["OUTPUT_DIR"] / "clinical_notes_topic_by_note_type.csv")
+    assert composition.groupby("note_type")["n_reports"].sum().to_dict() == {"Clinician": 19, "Imaging": 19, "Pathology": 20}
+    np.testing.assert_allclose(composition.groupby("note_type")["fraction_of_type_notes"].sum(), 1)
+    result = pd.read_csv(env["OUTPUT_DIR"] / "clinical_notes_topic_continuous_association.csv")
+    assert set(result["note_type"]) == {"All", *env["NOTE_TYPES"]}
+    assert result.loc[result["note_type"].eq("All"), "n_patients"].eq(20).all()
+    assert result.loc[result["note_type"].eq("Imaging"), "n_patients"].eq(19).all()
+    assert result.loc[result["note_type"].eq("Clinician"), "n_reports"].eq(19).all()
+    for _, sub in result.groupby("model"):
+        np.testing.assert_allclose(sub["q_value"], env["bh_qvalues"](sub["p_value"]), equal_nan=True)
+    coverage = pd.read_csv(env["OUTPUT_DIR"] / "clinical_notes_topic_continuous_coverage.csv")
+    assert len(coverage) == 12
+    assert coverage["patients_with_report"].eq(20).all()
+    enrichment = pd.read_csv(env["OUTPUT_DIR"] / "clinical_notes_topic_enrichment.csv")
+    assert set(enrichment["note_type"]) == {"All", *env["NOTE_TYPES"]}
+    for _, sub in enrichment.groupby(["group", "control"]):
+        np.testing.assert_allclose(sub["q_value"], env["bh_qvalues"](sub["p_value"]), equal_nan=True)
+    for name in ("term_enrichment", "lexicon_enrichment", "score_association", "text_classifier"):
+        assert (env["OUTPUT_DIR"] / f"clinical_notes_{name}.csv").exists()
+    # Embedding classifier now pools all eligible types, not just one overlapping RPT_ID.
+    ids, x = env["patient_embeddings"](0)
+    for pid in IDS:
+        rows = env["embed_docs"]["DFCI_MRN"].eq(pid).to_numpy()
+        np.testing.assert_allclose(x[ids.get_loc(pid)], env["report_embeddings"][rows].mean(axis=0), atol=1e-7)
+    for path in env["OUTPUT_DIR"].glob("*.csv"):
+        columns = pd.read_csv(path).columns
+        assert not {"DFCI_MRN", "RPT_TEXT", "RPT_ID", "rpt_key", "Representative_Docs"}.intersection(columns)
+    assert not any(str(pid) in capsys.readouterr().out for pid in IDS)
+
+
+def test_cross_note_runs_without_topic_packages(extraction, monkeypatch, tmp_path):
+    env, scores = extraction
+    _write_cross_inputs(env, scores, tmp_path)
+    for name in TOPIC_MODULES:
+        monkeypatch.setitem(sys.modules, name, None)
+    for cell in json.loads(CROSS_NOTEBOOK.read_text())["cells"]:
+        if cell["cell_type"] == "code" and cell["id"] != "config":
+            _run_cross(env, cell["id"])
+    assert len(env["all_notes"]) == 60
+    assert (env["OUTPUT_DIR"] / "clinical_notes_text_classifier.csv").exists()
+    assert not (env["OUTPUT_DIR"] / "clinical_notes_topics.csv").exists()
+
+
+def test_cross_note_missing_selected_source_and_ambiguous_embeddings_stop(extraction, monkeypatch, tmp_path):
+    env, scores = extraction
+    _write_cross_inputs(env, scores, tmp_path)
+    _fake_topic_modules(monkeypatch)
+    path = env["NOTE_PATHS"]["Imaging"]
+    env["NOTE_PATHS"]["Imaging"] = tmp_path / "missing.parquet"
+    _run_cross(env, "risk-scores")
+    with pytest.raises(FileNotFoundError, match="Selected Imaging notes not found"):
+        _run_cross(env, "reports")
+    env["NOTE_PATHS"]["Imaging"] = path
+    _run_cross(env, "reports", "term-enrichment")
+    metadata = pl.read_parquet(env["EMBED_METADATA_PATH"])
+    conflict = metadata.head(1).with_columns(pl.lit(999).cast(pl.Int64).alias("EMBEDDING_INDEX"))
+    pl.concat([metadata, conflict]).write_parquet(env["EMBED_METADATA_PATH"])
+    with pytest.raises(ValueError, match="Ambiguous embedding metadata"):
+        _run_cross(env, "topic-fit")
+
+
+def test_cross_note_adjusted_gee_includes_note_type(extraction, tmp_path, monkeypatch):
+    sm = pytest.importorskip("statsmodels.api")
+    env, scores = extraction
+    _write_cross_inputs(env, scores, tmp_path)
+    _run_cross(env, "risk-scores", "reports")
+    import importlib
+    env["optional_import"] = importlib.import_module
+    source = _cross_source("continuous-topics")
+    exec(source[:source.index("continuous_frames, curve_frames")], env)
+    docs, risk = _continuous_inputs()
+    # A different note mix by patient, with each type represented; no specimen fields required.
+    docs["NOTE_TYPE"] = ["Clinician", "Imaging", "Pathology"] * len(risk)
+    docs = docs.drop(columns="specimen_site")
+    seen = []
+    gee = sm.GEE
+    def record_design(endog, exog, **kwargs):
+        seen.append((list(exog.columns), kwargs["groups"].copy()))
+        return gee(endog, exog, **kwargs)
+    monkeypatch.setattr(sm, "GEE", record_design)
+    result, _ = env["continuous_topic_association"](docs, risk, 0, {})
+    assert result["status"].eq("ok").all()
+    assert any("note_type_Imaging" in columns and "note_type_Pathology" in columns for columns, _ in seen)
+    assert all(len(np.unique(groups)) == 160 for _, groups in seen)
+    seen.clear()
+    env["continuous_topic_association"](docs[docs["NOTE_TYPE"].eq("Imaging")], risk, 0, {})
+    assert all(not any(name.startswith("note_type_") for name in columns) for columns, _ in seen)

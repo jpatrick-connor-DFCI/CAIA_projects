@@ -61,9 +61,9 @@ lifelines==0.27.8        # unverified
 # Authors' source: https://github.com/MLforHealth/predictive_checklists
 # Commit: d205245b9f62dd2cfd977171f0e5073c13d6aebf
 
-# --- Optional: BERTopic on pathology reports ---
-# Only the last section of COMPASS/notebooks/patient_extraction/01_high_vs_low_risk_transfer_pxs.ipynb uses these;
-# it prints a skip message without them. Embeddings are the clinical_text_embedding_project's precomputed Clinical
+# --- Optional: BERTopic on clinical notes ---
+# COMPASS/notebooks/testing/{13_pathology,14_clinical_notes}_topics_vs_risk.ipynb use these;
+# they print a skip message without them. Embeddings are the clinical_text_embedding_project's precomputed Clinical
 # ModernBERT arrays, so no language model is loaded. `pip install bertopic` still pulls sentence-transformers (and
 # torch), so install in a separate environment if torch must stay out of this one. 0.16.x still supports Python
 # 3.8 (later releases may not); check the cluster before uncommenting.
@@ -71,6 +71,9 @@ lifelines==0.27.8        # unverified
 # umap-learn>=0.5
 # hdbscan>=0.8.29
 # zstandard>=0.21     # reads full_clinical_notes_embeddings_as_array.npy.zst
+
+# Optional: continuous note-level topic GEE (patient-clustered binomial models).
+# statsmodels>=0.14
 
 # --- Development / verification ---
 pytest>=7
