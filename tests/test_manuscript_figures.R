@@ -101,7 +101,9 @@ stopifnot(length(captions)==32,setequal(names(captions),c(local_keys,federated_k
   !grepl("Hazard ratios",captions[["federated_05_transfer_no_dfci__top_bottom_20_all_endpoints"]],fixed=TRUE),
   startsWith(captions[["federated_05_transfer_no_dfci__cox_hr_cohorts"]],"Supplementary Figure 9. Cox hazard ratios"),
   all(vapply(c("(a) ADT landmark cohort:","(b) ADT landmark cohort with Gleason score:","(c) Sequencing cohort:",
-    "(d) Sequencing cohort with Gleason score:"),grepl,logical(1),captions[["federated_05_transfer_no_dfci__cox_hr_cohorts"]],fixed=TRUE)))
+    "(d) Sequencing cohort with Gleason score:","(e) ADT landmark cohort sequenced before the landmark:"),
+    grepl,logical(1),captions[["federated_05_transfer_no_dfci__cox_hr_cohorts"]],fixed=TRUE)),
+  !grepl("somatic status was not used on the ADT clock",captions[["federated_05_transfer_no_dfci__cox_hr_cohorts"]],fixed=TRUE))
 caption_root <- tempfile("manuscript-caption-test-")
 caption_paths <- manuscript_write_captions(caption_root)
 stopifnot(length(caption_paths)==64,all(file.exists(caption_paths)))
@@ -319,6 +321,8 @@ km_patients_fixture <- function(n=900) {
   score <- rnorm(n); score[1:60] <- 0
   gleason <- sample(c(6:10,NA),n,TRUE)
   sequenced <- seq_len(n)%%2==0
+  # Sequenced before ADT + landmark (ADT_* columns, Supplementary Figure 9 e): every third patient.
+  adt_sequenced <- seq_len(n)%%3==0
   trio <- matrix(rbinom(3*n,1,.3),n,dimnames=list(NULL,c("TP53_ANY","RB1_ANY","PTEN_ANY")))
   bind_rows(lapply(c(adt="adt",sequencing="sequencing"),function(clock) {
     rows <- if(clock=="adt") seq_len(n) else which(sequenced)
@@ -334,7 +338,11 @@ km_patients_fixture <- function(n=900) {
           duration_days=pmin(t,censor),event=as.integer(t<=censor),GLEASON_SCORE=gleason,
           HAS_SEQUENCING=if(seq_clock) "True" else NA_character_,
           TP53_ANY=if(seq_clock) trio[,1] else NA_real_,RB1_ANY=if(seq_clock) trio[,2] else NA_real_,
-          PTEN_ANY=if(seq_clock) trio[,3] else NA_real_,SOMATIC_N_GENES_ALTERED=NA_real_)[rows,]}))
+          PTEN_ANY=if(seq_clock) trio[,3] else NA_real_,SOMATIC_N_GENES_ALTERED=NA_real_,
+          ADT_HAS_SEQUENCING=ifelse(!seq_clock & adt_sequenced,"True",NA_character_),
+          ADT_TP53_ANY=ifelse(!seq_clock & adt_sequenced,trio[,1],NA_real_),
+          ADT_RB1_ANY=ifelse(!seq_clock & adt_sequenced,trio[,2],NA_real_),
+          ADT_PTEN_ANY=ifelse(!seq_clock & adt_sequenced,trio[,3],NA_real_))[rows,]}))
     }))
   }))
 }
@@ -511,7 +519,10 @@ cells <- list(
   adt=filter(km_input,clock=="adt",endpoint=="platinum",model_family=="elastic_net_cox"),
   adt_gleason=filter(km_input,clock=="adt",endpoint=="platinum",model_family=="elastic_net_cox",!is.na(GLEASON_SCORE)),
   sequencing=filter(km_input,clock=="sequencing",endpoint=="platinum",model_family=="elastic_net_cox"),
-  sequencing_gleason=filter(km_input,clock=="sequencing",endpoint=="platinum",model_family=="elastic_net_cox",!is.na(GLEASON_SCORE)))
+  sequencing_gleason=filter(km_input,clock=="sequencing",endpoint=="platinum",model_family=="elastic_net_cox",!is.na(GLEASON_SCORE)),
+  # The ADT-anchored genes stand in for the trio columns in the direct fit.
+  adt_sequenced=filter(km_input,clock=="adt",endpoint=="platinum",model_family=="elastic_net_cox",!is.na(ADT_TP53_ANY)) %>%
+    mutate(TP53_ANY=ADT_TP53_ANY,RB1_ANY=ADT_RB1_ANY,PTEN_ANY=ADT_PTEN_ANY))
 formulas <- list(score=survival::Surv(duration_days,event)~as.vector(scale(risk_score)),
   gleason=survival::Surv(duration_days,event)~GLEASON_SCORE,
   tp53=survival::Surv(duration_days,event)~I(TP53_ANY>0),rb1=survival::Surv(duration_days,event)~I(RB1_ANY>0),
@@ -523,7 +534,11 @@ for(k in names(cohort_predictors)) for(x in cohort_predictors[[k]]) {
     identical(row$unit,FEDERATED_TRANSFER_COX_HR_PREDICTORS[[x]]$type))
 }
 stopifnot(hr_one("adt_gleason","score")$n<hr_one("adt","score")$n,
-  hr_one("sequencing_gleason","score")$n<hr_one("sequencing","score")$n)
+  hr_one("sequencing_gleason","score")$n<hr_one("sequencing","score")$n,
+  hr_one("adt_sequenced","score")$n==300L,is.numeric(km_input$ADT_TP53_ANY))
+# Older exports without the ADT_* columns drop only the ADT-sequenced cohort.
+hr_old <- federated_transfer_cox_hr(select(km_input,-starts_with("ADT_")))
+stopifnot(identical(unique(hr_old$cohort),setdiff(names(FEDERATED_TRANSFER_COX_HR_COHORTS),"adt_sequenced")))
 # Below the event floor the cell stays, with NA estimates labeled "Not estimable".
 hr_none <- federated_transfer_cox_hr(mutate(km_input,event=0L))
 hr_none_plot <- plot_federated_transfer_cox_hr(hr_none)
@@ -553,15 +568,17 @@ stopifnot(identical(levels(plot_federated_transfer_cox_hr(legacy)$data$predictor
   is.null(manuscript_federated_transfer_cox_hr_cohorts(legacy)))
 # Supplementary Figure 9: one stacked forest per cohort.
 hr_supp <- manuscript_federated_transfer_cox_hr_cohorts(cox_hr)
-stopifnot(inherits(hr_supp$plot,"gtable"),length(hr_supp$panels)==4L,
+stopifnot(inherits(hr_supp$plot,"gtable"),length(hr_supp$panels)==5L,
   identical(hr_supp$spec$key,"federated_05_transfer_no_dfci__cox_hr_cohorts"),
   identical(hr_supp$spec$titles,unname(vapply(FEDERATED_TRANSFER_COX_HR_COHORTS,`[[`,character(1),"title"))),
-  identical(as.vector(hr_supp$spec$layout),1:4),
+  identical(as.vector(hr_supp$spec$layout),1:5),
   identical(vapply(hr_supp$panels,function(p) nlevels(p$data$predictor_label),integer(1)),unname(lengths(cohort_predictors))),
   all(diff(hr_supp$spec$row_heights[c(1,2,3)])>0),abs(hr_supp$spec$height-sum(hr_supp$spec$row_heights))<1e-9,
   all(hr_supp$data$model_family=="xgboost_cox"),
   grepl("a: ADT landmark cohort (ADT clock); Score (per SD).",hr_supp$legend,fixed=TRUE),
   grepl("d: Sequencing cohort with Gleason score (sequencing clock); Score (per SD), Gleason (per point), TP53 MT vs WT, RB1 MT vs WT, PTEN MT vs WT.",
+    hr_supp$legend,fixed=TRUE),
+  grepl("e: ADT landmark cohort sequenced before the landmark (ADT clock); Score (per SD), TP53 MT vs WT, RB1 MT vs WT, PTEN MT vs WT.",
     hr_supp$legend,fixed=TRUE))
 fig5_hr <- manuscript_federated_transfer_no_dfci(transfer_metrics,NULL,km_tables,include=character(),
   key="federated_05_transfer_no_dfci__cox_hr",model_families="xgboost_cox",probability=TRUE,

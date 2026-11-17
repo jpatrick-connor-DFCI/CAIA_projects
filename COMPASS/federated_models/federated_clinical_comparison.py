@@ -243,6 +243,48 @@ def build_clinical_features(
     return pd.concat(frames, ignore_index=True)[cols]
 
 
+# ADT-clock somatic status for the Supplementary Figure 9 e Cox cohort: only for patients with a report
+# available before ADT + landmark. Separate ADT_* columns, so the ADT-clock strata and models never use them.
+ADT_SOMATIC_PREFIX = "ADT_"
+ADT_HAS_SEQUENCING = f"{ADT_SOMATIC_PREFIX}{HAS_SEQUENCING}"
+ADT_TRIO_FEATURES = tuple(f"{ADT_SOMATIC_PREFIX}{f}" for f in TRIO_FEATURES)
+
+
+def adt_anchored_somatic(
+    local: pd.DataFrame, landmarks, *, somatic: pd.DataFrame, somatic_features: list[str]
+) -> pd.DataFrame:
+    """Per patient × ADT landmark trio status from the report closest to, and available by, the landmark.
+
+    The cutoff is ADT start + landmark - 1 day, as for Gleason
+    (build_clinical_features), so the specimen is reported before the landmark.
+    Same-date reports are unioned with a maximum, and a sequenced patient's
+    uncalled genes are wild-type (0). Patients with no report by then are
+    absent (missing after the join). Returns ID_COL, landmark_days,
+    ADT_HAS_SEQUENCING and the ADT_* trio columns.
+    """
+    missing_trio = [f for f in TRIO_FEATURES if f not in somatic_features]
+    if missing_trio:
+        raise ValueError(f"Somatic matrix has no {missing_trio}; cannot build the ADT-anchored trio.")
+    pt = _patient_anchors(local)
+    cols = [ID_COL, "landmark_days", ADT_HAS_SEQUENCING, *ADT_TRIO_FEATURES]
+    frames = []
+    for lm in sorted({int(x) for x in landmarks}):
+        cutoff = pt["anchor"] + pd.to_timedelta(int(lm) - 1, unit="D")
+        cutoffs = pd.DataFrame({sg.ca.ID_COL: pt.index, "_landmark_date": cutoff.values})
+        s = sg.closest_available_by_landmark(
+            somatic, cutoffs, date_col=sg.SEQUENCING_DATE,
+            available_date_col=sg.SOMATIC_AVAILABLE_DATE, value_cols=list(TRIO_FEATURES),
+            combine_date_ties_with_max=True,
+        )
+        s = s.apply(pd.to_numeric, errors="coerce").fillna(0)
+        s.columns = list(ADT_TRIO_FEATURES)
+        s[ADT_HAS_SEQUENCING] = True
+        frames.append(s.rename_axis(sg.ca.ID_COL).reset_index()
+                      .rename(columns={sg.ca.ID_COL: ID_COL}).assign(landmark_days=int(lm)))
+    out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=cols)
+    return out[cols]
+
+
 # --------------------------------------------------------------------------- #
 # Local unpenalized Cox
 # --------------------------------------------------------------------------- #
@@ -599,24 +641,34 @@ def subpopulation_score_summary(scores: pd.DataFrame, clinical: pd.DataFrame,
 KM_PATIENTS_FILE = "transfer_km_patients.csv"
 KM_PATIENT_COLUMNS = ["clock", "endpoint", "bundle", "model_family", "landmark_days", ID_COL,
                       "risk_score", DURATION_COL, EVENT_COL, GLEASON_FEATURE, HAS_SEQUENCING,
-                      *TRIO_FEATURES, BURDEN_COL]
+                      *TRIO_FEATURES, BURDEN_COL, ADT_HAS_SEQUENCING, *ADT_TRIO_FEATURES]
 
 
-def km_patients(clocks: dict, config: str = "both") -> pd.DataFrame:
+def km_patients(clocks: dict, config: str = "both", *, adt_somatic: pd.DataFrame | None = None) -> pd.DataFrame:
     """Patient-level scores joined to clinical strata, for the R KM figures.
 
     ``clocks`` maps a clock name ("adt", "sequencing") to (scores, clinical)
     on that clock. Only ``config`` scores (the labs score) are kept. The R
     side assigns score groups, so cutpoints and figure styling stay in one
-    place. ADT-clock rows carry no somatic columns (build_clinical_features).
+    place. ADT-clock rows carry no trio/HAS_SEQUENCING values
+    (build_clinical_features); ``adt_somatic`` (adt_anchored_somatic) fills
+    the separate ADT_* columns on "adt" rows only, for the Cox HR supplement.
     """
     frames = []
     for clock, (scores, clinical) in clocks.items():
         sc = _normalize_ids(scores)
         sc = sc[sc["config"] == config]
         clin = _normalize_ids(clinical).drop(columns=AGE_COL)
-        frames.append(sc.merge(clin, on=[ID_COL, "landmark_days"], how="left").assign(clock=clock))
-    return pd.concat(frames, ignore_index=True)[KM_PATIENT_COLUMNS]
+        d = sc.merge(clin, on=[ID_COL, "landmark_days"], how="left").assign(clock=clock)
+        if clock == "adt" and adt_somatic is not None:
+            d = d.merge(_normalize_ids(adt_somatic), on=[ID_COL, "landmark_days"], how="left",
+                        validate="many_to_one")
+        frames.append(d)
+    out = pd.concat(frames, ignore_index=True)
+    for col in (ADT_HAS_SEQUENCING, *ADT_TRIO_FEATURES):
+        if col not in out:
+            out[col] = np.nan
+    return out[KM_PATIENT_COLUMNS]
 
 
 # Federated Figure 6: the frozen 1-year checklist from the +180-day landmark.

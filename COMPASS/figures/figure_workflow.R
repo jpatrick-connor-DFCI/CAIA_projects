@@ -1718,8 +1718,14 @@ load_federated_transfer_km <- function(directory) {
     warning("Federated transfer KM patients unavailable; missing: ",path)
     return(NULL)
   }
+  # The ADT_* somatic columns (Supplementary Figure 9 e; absent in older exports) are mostly empty,
+  # so pin their parsers rather than let a long NA run be guessed as logical.
+  header <- names(readr::read_csv(path,n_max=0,show_col_types=FALSE))
+  adt_types <- c(list(ADT_HAS_SEQUENCING=readr::col_character()),
+    stats::setNames(rep(list(readr::col_double()),3),paste0("ADT_",c("TP53","RB1","PTEN"),"_ANY")))
   d <- readr::read_csv(path,show_col_types=FALSE,
-    col_types=readr::cols(HAS_SEQUENCING=readr::col_character(),.default=readr::col_guess()))
+    col_types=do.call(readr::cols,c(list(HAS_SEQUENCING=readr::col_character()),
+      adt_types[names(adt_types) %in% header],list(.default=readr::col_guess()))))
   needed <- c("clock","endpoint","bundle","model_family","landmark_days","person_id","risk_score",
     "duration_days","event","GLEASON_SCORE","HAS_SEQUENCING","TP53_ANY","RB1_ANY","PTEN_ANY")
   missing <- setdiff(needed,names(d))
@@ -1842,7 +1848,7 @@ federated_transfer_km_tables <- function(km) {
 }
 
 # Unpenalized univariable Cox models of time to each endpoint from each landmark,
-# one per predictor, within four landmark cohorts. Every predictor in a cohort is fit
+# one per predictor, within five landmark cohorts. Every predictor in a cohort is fit
 # in the same patients, so the patients/events of a cell match across its predictors:
 #   adt                 ADT clock, everyone at risk: score;
 #   adt_gleason         ADT clock, valid (2-10) Gleason score before the landmark:
@@ -1850,8 +1856,13 @@ federated_transfer_km_tables <- function(km) {
 #   sequencing          sequencing clock, sequenced with known TP53/RB1/PTEN status:
 #                       score, TP53, RB1, PTEN;
 #   sequencing_gleason  the sequencing cohort with a valid Gleason score before
-#                       sequencing + landmark: score, Gleason, TP53, RB1, PTEN.
-# Somatic status never enters the ADT clock. The score is per SD (standardized within
+#                       sequencing + landmark: score, Gleason, TP53, RB1, PTEN;
+#   adt_sequenced       ADT clock, a sequencing report before ADT + landmark (the
+#                       ADT_* columns of transfer_km_patients.csv, from the report
+#                       closest to the landmark among those reported by then):
+#                       score, TP53, RB1, PTEN.
+# On the ADT clock somatic status comes only from those ADT_* columns, and only the
+# adt_sequenced cohort uses it (the KM strata never do). The score is per SD (standardized within
 # the cohort's patients at risk in each endpoint x bundle x landmark cell), Gleason a
 # continuous covariate per 1-point increase, each gene any alteration (MT) vs none (WT).
 # 95% Wald CIs and two-sided Wald P. Cells below the KM event floor, without predictor
@@ -1872,7 +1883,9 @@ FEDERATED_TRANSFER_COX_HR_COHORTS <- list(
   sequencing=list(clock="sequencing",gleason=FALSE,genes=TRUE,predictors=c("score","tp53","rb1","pten"),
     title="Sequencing cohort"),
   sequencing_gleason=list(clock="sequencing",gleason=TRUE,genes=TRUE,
-    predictors=c("score","gleason","tp53","rb1","pten"),title="Sequencing cohort with Gleason score"))
+    predictors=c("score","gleason","tp53","rb1","pten"),title="Sequencing cohort with Gleason score"),
+  adt_sequenced=list(clock="adt",gleason=FALSE,genes=TRUE,predictors=c("score","tp53","rb1","pten"),
+    title="ADT landmark cohort sequenced before the landmark"))
 # Alternative Figure 5 panel b.
 FEDERATED_TRANSFER_COX_HR_MAIN_COHORT <- "adt_gleason"
 federated_transfer_cox_hr_cell <- function(z, column="risk_score", type=c("per SD","per point","binary")) {
@@ -1902,8 +1915,14 @@ federated_transfer_cox_hr <- function(km) {
   d <- federated_transfer_km_groups(km)
   # Valid Gleason scores only (gleason_group is NA outside 2-10 and off the two clocks' cohorts).
   d$gleason_score <- ifelse(is.na(d$gleason_group),NA_real_,suppressWarnings(as.numeric(d$GLEASON_SCORE)))
+  # Gene status per clock: the sequencing specimen on the sequencing clock, the report
+  # available before ADT + landmark (ADT_* columns; absent in older exports) on the ADT clock.
+  adt <- d$clock=="adt"
   for(gene in c("TP53","RB1","PTEN")) {
-    x <- suppressWarnings(as.numeric(d[[paste0(gene,"_ANY")]]))
+    seq_x <- suppressWarnings(as.numeric(d[[paste0(gene,"_ANY")]]))
+    adt_col <- paste0("ADT_",gene,"_ANY")
+    adt_x <- if(adt_col %in% names(d)) suppressWarnings(as.numeric(d[[adt_col]])) else rep(NA_real_,nrow(d))
+    x <- ifelse(adt,adt_x,seq_x)
     d[[paste0(tolower(gene),"_mt")]] <- ifelse(is.finite(x),as.numeric(x>0),NA_real_)
   }
   genes_known <- is.finite(d$tp53_mt) & is.finite(d$rb1_mt) & is.finite(d$pten_mt)
@@ -1977,7 +1996,7 @@ plot_federated_transfer_cox_hr <- function(d, model_family=FEDERATED_TRANSFER_KM
     federated_transfer_theme() + theme(legend.position="none",strip.text.y.left=element_text(angle=0))
 }
 
-# Supplementary figure: one forest per cohort (a-d), stacked, each row as tall as its
+# Supplementary figure: one forest per cohort (a-e), stacked, each row as tall as its
 # predictor blocks need.
 FEDERATED_TRANSFER_COX_HR_COHORTS_KEY <- "federated_05_transfer_no_dfci__cox_hr_cohorts"
 manuscript_federated_transfer_cox_hr_cohorts <- function(cox_hr, model_family=FEDERATED_TRANSFER_KM_FIGURE$model_family,
@@ -2899,9 +2918,10 @@ manuscript_transfer_cox_hr_cohorts_caption <- function() paste(c(
     "(a) ADT landmark cohort: all patients at risk at each landmark after ADT initiation; transferred score.",
     "(b) ADT landmark cohort with Gleason score: patients with a Gleason score before the landmark; transferred score and Gleason score (as in panel b of the alternative Figure 5).",
     "(c) Sequencing cohort: sequenced patients with known TP53, RB1, and PTEN status, with landmarks measured from the sequencing date; transferred score and each of TP53, RB1, and PTEN.",
-    "(d) Sequencing cohort with Gleason score: the sequencing cohort restricted to patients with a Gleason score before the sequencing date plus the landmark; transferred score, Gleason score, and each gene."),
+    "(d) Sequencing cohort with Gleason score: the sequencing cohort restricted to patients with a Gleason score before the sequencing date plus the landmark; transferred score, Gleason score, and each gene.",
+    "(e) ADT landmark cohort sequenced before the landmark: patients at risk at each landmark after ADT initiation with a tumor sequencing report before ADT initiation plus the landmark, so that the score and the genes are compared on the same ADT clock in the same patients; transferred score and each of TP53, RB1, and PTEN."),
   paste("The score is expressed per standard deviation, standardized among each cohort's Dana-Farber patients at risk for each endpoint at each landmark; Gleason score is a continuous covariate per 1-point increase; gene status compares any mutation, deletion, amplification, or structural variant (MT) with none (WT).",
-    "On the sequencing clock, the transferred model was rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, and the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation; somatic status was not used on the ADT clock.",
+    "On the sequencing clock, the transferred model was rescored on laboratory values before the sequencing date plus the landmark, outcomes were measured from that point, and the sequencing date was the report date of the tumor sequencing test reported closest to ADT initiation. In (e), gene status came from the sequencing report closest to the landmark among those reported before it; somatic status was not used in the other ADT-clock cohorts.",
     "Cells with fewer than 5 events, without events in both gene groups, or whose model could not be fit are labeled not estimable, and competing risks were not modeled.",
     "ADT, androgen-deprivation therapy; AVPC, aggressive-variant prostate cancer; MT, altered; NEPC, neuroendocrine prostate cancer; WT, wild-type.")),
   collapse="\n\n")
