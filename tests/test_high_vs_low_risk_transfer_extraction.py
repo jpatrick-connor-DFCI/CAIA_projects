@@ -65,11 +65,10 @@ def extraction(tmp_path):
     env = dict(np=np, pd=pd, fet=fet, fs=fs, SCORES_PATH=tmp_path / "scores.csv",
                DATA_PATH=tmp_path / "local.csv", PATHOLOGY_PATH=tmp_path / "notes.parquet",
                OUTPUT_DIR=tmp_path / "out", MODEL_FAMILY="xgboost_cox",
-               SCORE_ENDPOINT="platinum", LANDMARKS=(0, 90, 180), DECILE=0.1,
+               SCORE_ENDPOINT="platinum", LANDMARKS=(0, 90, 180), DECILE=0.1, RISK_TAIL_FRACTION=0.1,
                ENDPOINTS=("avpc", "platinum", "nepc"),
                WINDOW_MAX_DAYS=3650,
-               TFIDF_SETTINGS=dict(min_patients=10, min_term_patients=2, n_permutations=99,
-                                   n_bootstrap=39, seed=42, block_size=8))
+               TFIDF_SETTINGS=dict(min_group_patients=2, block_size=8))
     return env, scores
 
 
@@ -213,9 +212,9 @@ def test_term_enrichment_contrasts_top_with_bottom_on_post_landmark_reports(extr
         assert sizes.loc[(lm, "bottom"), "reports"] == 4 and sizes.loc[(lm, "top"), "reports"] == 6   # undated cribriform dropped
 
     output = capsys.readouterr().out
-    assert "Landmark 0 · top decile vs bottom decile" in output
+    assert "Landmark 0 · top 10% vs bottom 10%" in output
     assert "vs middle" not in output
-    assert "Landmark 180 · bottom decile vs top decile" in output
+    assert "Landmark 180 · bottom 10% vs top 10%" in output
     assert not any(str(patient_id) in output for patient_id in ids)
     assert "neuroendocrine features present" not in output
 
@@ -249,7 +248,7 @@ def test_term_enrichment_handles_empty_patient_vocabulary(extraction, capsys):
 
     result = pd.read_csv(env["OUTPUT_DIR"] / "pathology_term_enrichment.csv")
     assert result.empty and list(result.columns) == env["ENRICHMENT_COLS"]
-    assert "Landmark 180 · top decile vs bottom decile: no terms" in capsys.readouterr().out
+    assert "Landmark 180 · top 10% vs bottom 10%: no terms" in capsys.readouterr().out
 
 
 TOPIC_MODULES = ("zstandard", "bertopic", "umap", "hdbscan")
@@ -388,7 +387,7 @@ def test_bertopic_enriches_topics_from_precomputed_embeddings_without_leaking_te
     out = capsys.readouterr().out
     assert "26 of 26 pathology reports have a precomputed embedding" in out
     assert "vs middle" not in out
-    assert "Landmark 0 · top decile vs bottom decile (topics)" in out
+    assert "Landmark 0 · top 10% vs bottom 10% (topics)" in out
     assert not any(str(patient_id) in out for patient_id in IDS)
     # Whole reports never print; two-word reports such as "ductal pattern" are also legitimate aggregate bigrams.
     assert [n[2] for n in notes if len(n[2].split()) > 2 and n[2] in out] == []
@@ -944,11 +943,12 @@ def test_pre_landmark_cross_note_notebooks_run_end_to_end(extraction, monkeypatc
 
 @pytest.mark.parametrize("notebook", [ANALYSIS_NOTEBOOK, PRE_NOTEBOOK, CROSS_NOTEBOOK, PRE_CROSS_NOTEBOOK])
 @pytest.mark.parametrize("constant_risk", [False, True])
-def test_continuous_tfidf_notebooks_use_all_patients_and_global_fdr(extraction, tmp_path, notebook, constant_risk):
+def test_group_tfidf_notebooks_exclude_middle_and_apply_global_fdr(extraction, tmp_path, notebook, constant_risk):
     from COMPASS.multivariable_models import text_tfidf_association as tfa
     env, scores = extraction
+    env["RISK_TAIL_FRACTION"] = 0.2
     if constant_risk:
-        scores["risk_score"] = 1.0  # no decile contrast exists; continuous output must still be well-defined
+        scores["risk_score"] = 1.0
     cross = "clinical_notes" in notebook.name
     if cross:
         _write_cross_inputs(env, scores, tmp_path)
@@ -956,20 +956,42 @@ def test_continuous_tfidf_notebooks_use_all_patients_and_global_fdr(extraction, 
         _write_term_inputs(env, scores)
     if notebook.parent == PRE_DIR:
         _set_anchor(env, "2022-01-01")
-    _run_analysis(env, "risk-scores", "reports", "term-enrichment", "tfidf-continuous", notebook=notebook)
+    _run_analysis(env, "risk-scores", "reports", "term-enrichment", "tfidf-groups", notebook=notebook)
     prefix = "clinical_notes" if cross else "pathology"
-    result = pd.read_csv(env["OUTPUT_DIR"] / f"{prefix}_tfidf_risk_association.csv")
+    result = pd.read_csv(env["OUTPUT_DIR"] / f"{prefix}_tfidf_high_vs_low.csv")
     assert list(result.columns) == tfa.RESULT_COLUMNS
-    assert result["n_patients"].eq(20).all()  # includes all sixteen middle-risk patients
-    assert set(result["method"]) == {"spearman", "ols_adjusted"}
     assert set(result["landmark"]) == {0, 90, 180}
     assert not {"DFCI_MRN", "RPT_ID", "RPT_TEXT"}.intersection(result.columns)
     if constant_risk:
-        assert result["status"].str.contains("constant risk").all()
+        assert result["n_high"].eq(0).all() and result["n_low"].eq(0).all()
         assert result["p_value"].isna().all() and result["q_value"].isna().all()
     else:
-        for _, sub in result.groupby("method"):
-            np.testing.assert_allclose(sub["q_value"], env["bh_qvalues"](sub["p_value"]), equal_nan=True)
-        assert result.query("method == 'spearman'")["status"].eq("ok").any()
-    coverage = pd.read_csv(env["OUTPUT_DIR"] / f"{prefix}_tfidf_risk_coverage.csv")
-    assert coverage["patients_with_report"].eq(20).all()
+        assert result["n_high"].eq(4).all() and result["n_low"].eq(4).all()
+        np.testing.assert_allclose(result["q_value"], env["bh_qvalues"](result["p_value"]), equal_nan=True)
+        assert result["status"].eq("ok").all()
+    coverage = pd.read_csv(env["OUTPUT_DIR"] / f"{prefix}_tfidf_group_coverage.csv")
+    assert coverage["tail_fraction"].eq(0.2).all()
+    assert not (env["OUTPUT_DIR"] / f"{prefix}_tfidf_risk_association.csv").exists()
+    source = notebook.read_text()
+    assert "tfidf-continuous" not in source and "n_permutations" not in source
+
+
+@pytest.mark.parametrize("folder", [ANALYSIS_DIR, PRE_DIR])
+@pytest.mark.parametrize("name", ["13_pathology_topics_vs_risk", "14_clinical_notes_topics_vs_risk",
+                                  "15_pathology_bertopic_vs_risk", "16_clinical_notes_bertopic_vs_risk"])
+def test_text_notebooks_default_to_twenty_percent_tails(extraction, folder, name):
+    import ast
+    notebook = folder / f"{name}.ipynb"
+    config = _cell_source((notebook,), "config")[1]
+    node = next(n for n in ast.parse(config).body if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "RISK_TAIL_FRACTION" for t in n.targets))
+    env, scores = extraction
+    env["RISK_TAIL_FRACTION"] = ast.literal_eval(node.value)
+    assert env["RISK_TAIL_FRACTION"] == 0.2
+    scores.to_csv(env["SCORES_PATH"], index=False)
+    _run_analysis(env, "risk-scores", notebook=notebook)
+    for g in env["by_lm"].values():
+        assert g["decile_group"].eq("top").sum() == 4
+        assert g["decile_group"].eq("bottom").sum() == 4
+        assert g.attrs["lo"] == pytest.approx(3.8)
+        assert g.attrs["hi"] == pytest.approx(15.2)
