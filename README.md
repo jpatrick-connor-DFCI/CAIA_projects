@@ -89,8 +89,14 @@ COMPASS/
 │   │   ├── 06_reviewer_suggestions.ipynb
 │   │   ├── 07_checklist_test.ipynb
 │   │   ├── 08_metastatic_transfer_test.ipynb
-│   │   ├── 13_pathology_topics_vs_risk.ipynb # pathology-only topic/term analyses + continuous risk
-│   │   └── 14_clinical_notes_topics_vs_risk.ipynb # shared topics across Clinician/Imaging/Pathology; pooled + per-type risk
+│   │   └── 09_cohort_sensitivity_testosterone_filter.ipynb
+│   ├── text_interpretability/            # what the clinical text says about the risk score
+│   │   ├── 11_LR_for_IHC.ipynb           # risk score -> future prostate IHC / NE-positive IHC
+│   │   ├── 12_review_false_pos.ipynb     # LLM NE gate audit: gated vs ungated labels, review sheets
+│   │   ├── 13_pathology_topics_vs_risk.ipynb # pathology terms/lexicon vs risk + TF-IDF classifier
+│   │   ├── 14_clinical_notes_topics_vs_risk.ipynb # same across Clinician/Imaging/Pathology notes
+│   │   ├── 15_pathology_bertopic_vs_risk.ipynb # BERTopic on pathology reports; topic enrichment + continuous risk
+│   │   └── 16_clinical_notes_bertopic_vs_risk.ipynb # shared BERTopic across note types; pooled + per-type risk
 │   ├── patient_extraction/               # data requests (PHI outputs go to the protected data root)
 │   │   └── 01_high_vs_low_risk_transfer_pxs.ipynb  # Elio request: high vs low risk patient manifest + pathology reports
 │   └── figures/                          # R entry scripts (code they source stays in COMPASS/figures/)

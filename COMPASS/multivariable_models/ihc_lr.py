@@ -1,6 +1,6 @@
 """Logistic regression of future prostate IHC (and NE-positive IHC) on the federated risk score.
 
-Backs ``notebooks/testing/11_LR_for_IHC.ipynb``. For each ADT landmark, the frozen
+Backs ``notebooks/text_interpretability/11_LR_for_IHC.ipynb``. For each ADT landmark, the frozen
 federated (no-DFCI) platinum-trained XGBoost score from notebook 04 (``endpoint ==
 "nepc"`` rows: patients with NEPC or censoring at/before the landmark are not at
 risk) is the only predictor, z-scored within each fit, in three unpenalized LRs:

@@ -1,6 +1,6 @@
 """Gated vs ungated NE-positive IHC notes: an audit of the LLM NE gate.
 
-Backs ``notebooks/testing/12_review_false_pos.ipynb``. Notebook 11 calls a qualifying
+Backs ``notebooks/text_interpretability/12_review_false_pos.ipynb``. Notebook 11 calls a qualifying
 IHC note NE-positive only when its report has an LLM NEPC finding that passes
 LCA's ``gate_findings`` (trial-context screen, then ``ne_gate.screen_ne_quote``).
 This module re-runs that per-finding screen, so every finding carries the step

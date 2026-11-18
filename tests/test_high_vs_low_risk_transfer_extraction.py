@@ -18,17 +18,32 @@ NOTEBOOK = Path(__file__).resolve().parents[1] / (
 )
 
 
-ANALYSIS_NOTEBOOK = NOTEBOOK.parents[1] / "testing/13_pathology_topics_vs_risk.ipynb"
+ANALYSIS_DIR = NOTEBOOK.parents[1] / "text_interpretability"
+ANALYSIS_NOTEBOOK = ANALYSIS_DIR / "13_pathology_topics_vs_risk.ipynb"
+TOPIC_NOTEBOOK = ANALYSIS_DIR / "15_pathology_bertopic_vs_risk.ipynb"   # BERTopic, split out of 13
+
+
+def _cell_source(notebooks, cell_id):
+    """Source of the first cell with this id, searching the notebooks in order."""
+    for notebook in notebooks:
+        for cell in json.loads(notebook.read_text())["cells"]:
+            if cell.get("id") == cell_id:
+                return notebook, "".join(cell["source"])
+    raise KeyError(cell_id)
+
+
+def _code_cell_ids(notebook):
+    return [c["id"] for c in json.loads(notebook.read_text())["cells"] if c["cell_type"] == "code" and c["id"] != "config"]
 
 
 def _analysis_source(cell_id):
-    cells = json.loads(ANALYSIS_NOTEBOOK.read_text())["cells"]
-    return "".join(next(c for c in cells if c.get("id") == cell_id)["source"])
+    return _cell_source((ANALYSIS_NOTEBOOK, TOPIC_NOTEBOOK), cell_id)[1]
 
 
-def _run_analysis(env, *cell_ids):
+def _run_analysis(env, *cell_ids, notebook=None):
     for cell_id in cell_ids:
-        exec(compile(_analysis_source(cell_id), f"{ANALYSIS_NOTEBOOK}:{cell_id}", "exec"), env)
+        path, src = _cell_source((notebook,) if notebook else (ANALYSIS_NOTEBOOK, TOPIC_NOTEBOOK), cell_id)
+        exec(compile(src, f"{path}:{cell_id}", "exec"), env)
 
 
 def _run_cells(env, *indices):
@@ -95,12 +110,17 @@ def test_extract_writes_manifest_and_multiline_reports(extraction, capsys):
         local[indicator] = [0] * 19 + [1]
         local[date] = "2020-12-31"
     local.to_csv(env["DATA_PATH"], index=False)
-    text = "synthetic\ttext\nsecond line"
+    text = 'synthetic\ttext\nsecond line with "quotes" and café'
     pl.DataFrame({"DFCI_MRN": ids, "EVENT_DATE": ["2021-01-01"] * 20,
                   "RPT_ID": list(range(20)), "RPT_TEXT": [text] * 20}).write_parquet(env["PATHOLOGY_PATH"])
     _run_cells(env, 4, 5, 7, 9, 11)
     manifest = pd.read_csv(env["OUTPUT_DIR"] / "patient_manifest.csv")
-    reports = pd.read_csv(env["OUTPUT_DIR"] / "pathology_reports.tsv", sep="\t")
+    records = json.loads((env["OUTPUT_DIR"] / "pathology_reports.json").read_text(encoding="utf-8"))
+    reports = pd.DataFrame(records)
+    assert not (env["OUTPUT_DIR"] / "pathology_reports.tsv").exists()
+    assert all(record["note_date"] == "2021-01-01T00:00:00.000" for record in records)
+    assert all(record["platinum_event"] is False and record["days_adt_to_platinum"] is None
+               for record in records if record["DFCI_MRN"] != 100020)
     assert set(manifest["DFCI_MRN"]) == {100001, 100002, 100019, 100020}
     assert len(reports) == manifest["n_pathology_notes"].sum() == 4
     assert reports["note_text"].eq(text).all()
@@ -484,40 +504,14 @@ def test_score_association_and_text_classifier(extraction, capsys, monkeypatch):
     assert clf["cv_auc"].isna().all() and clf["note"].str.startswith("skipped").all()
 
     out = capsys.readouterr().out
-    assert "Embedding classifier skipped (packages not installed: zstandard); TF-IDF only." in out
     assert not any(str(patient_id) in out for patient_id in IDS)
     assert [n[2] for n in notes if len(n[2].split()) > 2 and n[2] in out] == []
-
-
-def test_embedding_classifier_uses_precomputed_embeddings(extraction, capsys, monkeypatch, tmp_path):
-    env, scores = extraction
-    notes = _write_term_inputs(env, scores)
-    _fake_topic_modules(monkeypatch)
-    rows, meta = [], []
-    for rpt_id, (pid, _, text) in enumerate(notes):
-        meta.append({"RPT_ID": float(rpt_id), "NOTE_TYPE": "Pathology", "EMBEDDING_INDEX": len(rows)})
-        rows.append([1.0 if "neuroendocrine" in text else 0.0, 1.0 if "ductal" in text else 0.0, pid % 3 + 1.0])
-    np.save(tmp_path / "emb.npy", np.asarray(rows, dtype=np.float16))
-    pl.DataFrame(meta).write_parquet(tmp_path / "meta.parquet")
-    env.update(EMBED_METADATA_PATH=tmp_path / "meta.parquet", EMBED_ARRAY_PATH=tmp_path / "emb.npy",
-               TOPIC_MIN_SIZE=2, TOPIC_SEED=0)
-    _run_analysis(env, *TERM_CELLS, *TOPIC_CELLS, *EXTRA_CELLS)
-
-    ids, x = env["patient_embeddings"](0)
-    assert len(ids) == 20 and x.shape == (20, 3)
-    top_rows = ids.get_indexer(sorted(TOP))
-    np.testing.assert_allclose(x[top_rows, 0], 1 / 3)       # mean of the adenocarcinoma, NE and chromogranin reports
-    clf = pd.read_csv(env["OUTPUT_DIR"] / "pathology_text_classifier.csv")
-    emb = clf[clf["features"].eq("embedding")]
-    assert len(emb) == 9 and (emb["n_features"] == 3).all() and emb["cv_auc"].between(0, 1).all()
-    assert emb["top_terms_positive"].isna().all()
-    assert "Embedding classifier skipped" not in capsys.readouterr().out
 
 
 def _classifier_definitions(env):
     env.update(TERM_MIN_PATIENTS=2, TERM_NGRAMS=(1, 2), TEXT_C=1.0, TEXT_FOLDS=2,
                TEXT_PERMUTATIONS=2, TEXT_SEED=0, N_JOBS=1, CONTROL_GROUP="middle")
-    for index, stop in (("term-enrichment", "term_matrices = {}"), ("classifiers", "embed_pos =")):
+    for index, stop in (("term-enrichment", "term_matrices = {}"), ("classifiers", "clf_rows = []")):
         src = _analysis_source(index)
         exec(compile(src[:src.index(stop)], f"cell_{index}_defs", "exec"), env)
 
@@ -543,7 +537,7 @@ def test_classifier_fits_vocabulary_and_idf_inside_permutation_cv(extraction, mo
         return result
 
     monkeypatch.setattr(transformer, "fit", record_fit)
-    env["classify"](documents, y, "tfidf")
+    env["classify"](documents, y)
     # Two observed folds + two folds per permutation, followed by the separate descriptive full-data fit.
     assert [size for size, _, _ in fits] == [4] * 6 + [8]
     assert "unseen" not in fits[0][1] and "unseen" in fits[-1][1]
@@ -553,7 +547,7 @@ def test_classifier_fits_vocabulary_and_idf_inside_permutation_cv(extraction, mo
     for i in held_out:
         documents[i] = ["changed heldout vocabulary alpha alpha", "beta"]
     fits.clear()
-    env["classify"](documents, y, "tfidf")
+    env["classify"](documents, y)
     np.testing.assert_array_equal(fits[0][1], baseline[1])
     np.testing.assert_allclose(fits[0][2], baseline[2])
 
@@ -566,7 +560,7 @@ def test_classifier_empty_vocabulary_uses_intercept_only_predictions(extraction,
     documents = np.empty(6, dtype=object)
     # Repeated reports from one patient must not meet the minimum distinct-patient frequency.
     documents[:] = [[word, word] for word in ("alpha", "beta", "gamma", "delta", "epsilon", "zeta")]
-    result = env["classify"](documents, np.array([0, 1] * 3), "tfidf")
+    result = env["classify"](documents, np.array([0, 1] * 3))
     assert result["cv_auc"] == 0.5 and result["null_auc_mean"] == 0.5
     assert result["p_permutation"] == 1 and result["n_features"] == 0
     assert result["top_terms_positive"] == result["top_terms_negative"] == ""
@@ -653,12 +647,11 @@ def test_analysis_runs_standalone_without_export_or_local_endpoint_data(extracti
     _no_topic_modules(env, monkeypatch)
     env["DATA_PATH"].unlink()  # exploratory notebook needs scores/notes, not the extraction's endpoint table
     env.update(CONTINUOUS_MIN_PATIENTS=30, CONTINUOUS_MIN_TOPIC_PATIENTS=5, TOPIC_PERMUTATIONS=99)
-    notebook = json.loads(ANALYSIS_NOTEBOOK.read_text())
-    for cell in notebook["cells"]:
-        if cell["cell_type"] == "code" and cell["id"] != "config":
-            _run_analysis(env, cell["id"])
+    for notebook in (ANALYSIS_NOTEBOOK, TOPIC_NOTEBOOK):
+        _run_analysis(env, *_code_cell_ids(notebook), notebook=notebook)
     assert (env["OUTPUT_DIR"] / "pathology_term_enrichment.csv").exists()
     assert not (env["OUTPUT_DIR"] / "patient_manifest.csv").exists()
+    assert not (env["OUTPUT_DIR"] / "pathology_reports.json").exists()
     assert not (env["OUTPUT_DIR"] / "pathology_reports.tsv").exists()
 
 
@@ -699,17 +692,24 @@ def test_analysis_does_not_require_distinct_decile_cutoffs(extraction):
     assert all(g["decile_group"].isna().all() for g in env["by_lm"].values())
 
 
-CROSS_NOTEBOOK = ANALYSIS_NOTEBOOK.with_name("14_clinical_notes_topics_vs_risk.ipynb")
+CROSS_NOTEBOOK = ANALYSIS_DIR / "14_clinical_notes_topics_vs_risk.ipynb"
+CROSS_TOPIC_NOTEBOOK = ANALYSIS_DIR / "16_clinical_notes_bertopic_vs_risk.ipynb"   # BERTopic, split out of 14
 
 
 def _cross_source(cell_id):
-    cells = json.loads(CROSS_NOTEBOOK.read_text())["cells"]
-    return "".join(next(c for c in cells if c.get("id") == cell_id)["source"])
+    return _cell_source((CROSS_NOTEBOOK, CROSS_TOPIC_NOTEBOOK), cell_id)[1]
 
 
-def _run_cross(env, *cell_ids):
+def _run_cross(env, *cell_ids, notebook=None):
     for cell_id in cell_ids:
-        exec(compile(_cross_source(cell_id), f"{CROSS_NOTEBOOK}:{cell_id}", "exec"), env)
+        path, src = _cell_source((notebook,) if notebook else (CROSS_NOTEBOOK, CROSS_TOPIC_NOTEBOOK), cell_id)
+        exec(compile(src, f"{path}:{cell_id}", "exec"), env)
+
+
+def _run_cross_notebooks(env):
+    """Both cross-note notebooks end to end (configuration comes from the test), terms first."""
+    for notebook in (CROSS_NOTEBOOK, CROSS_TOPIC_NOTEBOOK):
+        _run_cross(env, *_code_cell_ids(notebook), notebook=notebook)
 
 
 def _write_cross_inputs(env, scores, tmp_path):
@@ -749,9 +749,7 @@ def test_cross_note_full_analysis_joins_by_type_patient_and_report(extraction, m
     _fake_topic_modules(monkeypatch)
     import matplotlib.pyplot as plt
     monkeypatch.setattr(plt, "show", lambda: None)
-    for cell in json.loads(CROSS_NOTEBOOK.read_text())["cells"]:
-        if cell["cell_type"] == "code" and cell["id"] != "config":
-            _run_cross(env, cell["id"])
+    _run_cross_notebooks(env)
     assert len(_FakeBERTopic.calls) == 1  # one shared topic vocabulary, no per-type refits
     assert len(env["all_notes"]) == 60 and env["all_notes"]["rpt_key"].nunique() == 60
     assert len(env["embed_docs"]) == 58 and set(env["embed_docs"]["NOTE_TYPE"]) == set(env["NOTE_TYPES"])
@@ -776,11 +774,6 @@ def test_cross_note_full_analysis_joins_by_type_patient_and_report(extraction, m
         np.testing.assert_allclose(sub["q_value"], env["bh_qvalues"](sub["p_value"]), equal_nan=True)
     for name in ("term_enrichment", "lexicon_enrichment", "score_association", "text_classifier"):
         assert (env["OUTPUT_DIR"] / f"clinical_notes_{name}.csv").exists()
-    # Embedding classifier now pools all eligible types, not just one overlapping RPT_ID.
-    ids, x = env["patient_embeddings"](0)
-    for pid in IDS:
-        rows = env["embed_docs"]["DFCI_MRN"].eq(pid).to_numpy()
-        np.testing.assert_allclose(x[ids.get_loc(pid)], env["report_embeddings"][rows].mean(axis=0), atol=1e-7)
     for path in env["OUTPUT_DIR"].glob("*.csv"):
         columns = pd.read_csv(path).columns
         assert not {"DFCI_MRN", "RPT_TEXT", "RPT_ID", "rpt_key", "Representative_Docs"}.intersection(columns)
@@ -792,9 +785,7 @@ def test_cross_note_runs_without_topic_packages(extraction, monkeypatch, tmp_pat
     _write_cross_inputs(env, scores, tmp_path)
     for name in TOPIC_MODULES:
         monkeypatch.setitem(sys.modules, name, None)
-    for cell in json.loads(CROSS_NOTEBOOK.read_text())["cells"]:
-        if cell["cell_type"] == "code" and cell["id"] != "config":
-            _run_cross(env, cell["id"])
+    _run_cross_notebooks(env)
     assert len(env["all_notes"]) == 60
     assert (env["OUTPUT_DIR"] / "clinical_notes_text_classifier.csv").exists()
     assert not (env["OUTPUT_DIR"] / "clinical_notes_topics.csv").exists()
