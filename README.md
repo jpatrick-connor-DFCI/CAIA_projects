@@ -91,9 +91,10 @@ COMPASS/
 │   │   ├── 08_metastatic_transfer_test.ipynb
 │   │   └── 09_cohort_sensitivity_testosterone_filter.ipynb
 │   ├── text_interpretability/            # what the clinical text says about the risk score
+│   │                                     # 13-16: post-landmark notes only (ADT + lm < date <= ADT + 10 y); outputs in post_landmark/
 │   │   ├── 11_LR_for_IHC.ipynb           # risk score -> future prostate IHC / NE-positive IHC
 │   │   ├── 12_review_false_pos.ipynb     # LLM NE gate audit: gated vs ungated labels, review sheets
-│   │   ├── 13_pathology_topics_vs_risk.ipynb # pathology terms/lexicon vs risk + TF-IDF classifier
+│   │   ├── 13_pathology_topics_vs_risk.ipynb # pathology terms/lexicon vs risk
 │   │   ├── 14_clinical_notes_topics_vs_risk.ipynb # same across Clinician/Imaging/Pathology notes
 │   │   ├── 15_pathology_bertopic_vs_risk.ipynb # BERTopic on pathology reports; topic enrichment + continuous risk
 │   │   └── 16_clinical_notes_bertopic_vs_risk.ipynb # shared BERTopic across note types; pooled + per-type risk

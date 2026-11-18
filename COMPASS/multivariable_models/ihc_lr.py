@@ -56,7 +56,7 @@ RISK_COL = nsl.RISK_COL
 ANCHOR_SOURCE_COL = "TREATMENT_ANCHOR_DATE"
 MAX_FOLLOWUP_DAYS = 3650
 SPECIMEN_HEADER_CHARS = 300
-IHC_REGEX_VERSION = "ihc-regex-v2"
+IHC_REGEX_VERSION = "ihc-regex-v3"
 NE_REVIEW_COMPLETE = {"ok", "no_trigger_notes"}
 
 NOTE_COLUMNS = ["RPT_ID", LOCAL_ID_COL, "EVENT_DATE", "PROC_DESC", "RPT_TEXT"]
@@ -209,6 +209,7 @@ class IHCPatterns:
     generic_negated_before: re.Pattern
     not_resulted_after: re.Pattern
     markers: dict                 # panel -> {label: compiled}
+    unperformed_markers: re.Pattern
     stain_cue: re.Pattern
     exclude_before: dict
     exclude_after: dict
@@ -225,11 +226,18 @@ def build_patterns(ne_marker: str) -> IHCPatterns:
     c = lambda p: re.compile(p, _FLAGS)  # noqa: E731
     markers = {NE_PANEL: {NE_PANEL: c(ne_marker)}}
     markers.update({panel: {k: c(v) for k, v in pats.items()} for panel, pats in MARKERS.items()})
+    # Scope "no ... performed" over the entire coordinated marker list. Requiring
+    # an explicit workup verb keeps completed negative results ("no expression") valid.
+    marker = "(?:" + "|".join(rx.pattern for panel in markers.values() for rx in panel.values()) + ")"
+    separator = r"\s*(?:,\s*(?:(?:and|or|nor)\s+)?|(?:and|or|nor)\s+|/\s*)"
+    unperformed = (rf"\bno\s+(?:stains?\s+for\s+)?{marker}(?:{separator}{marker})*"
+                   r"\s*(?:stains?|staining|testing)?\s*(?:was|were|is|are)?\s*(?:performed|done|ordered)\b")
     return IHCPatterns(
         generic=c(IHC_GENERIC),
         generic_negated_before=c(GENERIC_NEGATED_BEFORE),
         not_resulted_after=c(NOT_RESULTED_AFTER),
         markers=markers,
+        unperformed_markers=c(unperformed),
         stain_cue=c(STAIN_CUE),
         exclude_before={k: c(v) for k, v in MARKER_EXCLUDE_BEFORE.items()},
         exclude_after={k: c(v) for k, v in MARKER_EXCLUDE_AFTER.items()},
@@ -272,9 +280,12 @@ def generic_ihc(text: str, pats: IHCPatterns) -> bool:
 def marker_hits(text: str, pats: IHCPatterns) -> dict:
     """Panel -> sorted marker labels with at least one stain mention (negative results count)."""
     hits = {}
+    unperformed = [(m.start(), m.end()) for m in pats.unperformed_markers.finditer(text)]
     for panel, markers in pats.markers.items():
         for label, rx in markers.items():
             for m in rx.finditer(text):
+                if any(start <= m.start() < end for start, end in unperformed):
+                    continue
                 before, after = _clause_before(text, m.start()), _clause_after(text, m.end())
                 if PROSPECTIVE_BEFORE.search(_clause_before(text, m.start(), 100)):
                     continue

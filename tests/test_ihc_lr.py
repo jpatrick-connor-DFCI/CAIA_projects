@@ -47,6 +47,10 @@ def test_marker_mentions_count(text, markers):
     "Immunohistochemical stains are recommended if clinically indicated.",
     "TMPRSS2-ERG fusion reported by outside molecular testing.",
     "No synaptophysin stain was performed.",
+    "No synaptophysin or chromogranin stains were performed.",
+    "No synaptophysin, chromogranin, or CD56 stains were performed.",
+    "No p63 and HMWCK stains were done.",
+    "No stains for synaptophysin or chromogranin were performed.",
     "Recommend synaptophysin and chromogranin stains.",
     "Pending immunohistochemistry.",
     "Awaiting synaptophysin staining.",
@@ -63,6 +67,18 @@ def test_generic_term_counts_and_negative_stain_counts():
     assert tag("Immunohistochemistry was performed on block A1.")["ihc_generic"]
     r = tag("No synaptophysin expression is seen.")
     assert r["ihc_markers"] == "synaptophysin"
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("No synaptophysin or chromogranin expression is seen.", "chromogranin;synaptophysin"),
+    ("No synaptophysin or chromogranin stains were performed. CD56 is negative.", "CD56"),
+    ("No synaptophysin or chromogranin stains were performed, but synaptophysin was positive previously.",
+     "synaptophysin"),
+])
+def test_unperformed_lists_do_not_suppress_completed_stains(text, expected):
+    result = tag(text)
+    assert result["qualifies"]
+    assert result["ihc_markers"] == expected
 
 
 def test_specimen_rule():

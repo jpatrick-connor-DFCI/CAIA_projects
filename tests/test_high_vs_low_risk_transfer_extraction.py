@@ -1,5 +1,6 @@
 """Exercise the separate extraction and exploratory notebooks with synthetic data only."""
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -63,7 +64,8 @@ def extraction(tmp_path):
                DATA_PATH=tmp_path / "local.csv", PATHOLOGY_PATH=tmp_path / "notes.parquet",
                OUTPUT_DIR=tmp_path / "out", MODEL_FAMILY="xgboost_cox",
                SCORE_ENDPOINT="platinum", LANDMARKS=(0, 90, 180), DECILE=0.1,
-               ENDPOINTS=("avpc", "platinum", "nepc"))
+               ENDPOINTS=("avpc", "platinum", "nepc"),
+               WINDOW_MAX_DAYS=3650)   # 13-16 use post-landmark notes only
     return env, scores
 
 
@@ -137,12 +139,12 @@ TOP, BOTTOM = {100019, 100020}, {100001, 100002}
 
 
 def _write_term_inputs(env, scores):
-    """ADT start 2020-01-01 for all; pathology reports that separate the deciles from the middle."""
+    """ADT start 2018-01-01 for all, so every dated report is post-landmark; reports separate the deciles from the middle."""
     ids, top, bottom = IDS, TOP, BOTTOM
     scores.to_csv(env["SCORES_PATH"], index=False)
     local = pd.DataFrame({col: [0] * 20 for col in fet.LOCAL_COLUMNS})
     local["DFCI_MRN"] = ids
-    local["TREATMENT_ANCHOR_DATE"] = "2020-01-01"
+    local["TREATMENT_ANCHOR_DATE"] = "2018-01-01"
     for indicator, date in fet.ENDPOINT_SOURCES.values():
         local[indicator] = 0
         local[date] = "2020-12-31"
@@ -150,24 +152,23 @@ def _write_term_inputs(env, scores):
 
     notes = []
     for pid in ids:
-        notes.append((pid, "2019-06-01", "adenocarcinoma of the prostate"))   # pre-ADT: every landmark
+        notes.append((pid, "2019-06-01", "adenocarcinoma of the prostate"))   # post-landmark at every landmark
         if pid in top:
             notes.append((pid, "2019-06-01", "neuroendocrine features present"))  # separate report
         if pid in top:
-            notes.append((pid, "2021-01-01", "chromogranin positive"))       # after every landmark: still used
+            notes.append((pid, "2021-01-01", "chromogranin positive"))       # post-landmark at every landmark
         if pid in bottom:
-            notes.append((pid, "2020-05-01", "ductal pattern"))              # after the 90-day landmark
-            notes.append((pid, None, "undated cribriform"))                  # undated: still used
+            notes.append((pid, "2020-05-01", "ductal pattern"))              # post-landmark at every landmark
+            notes.append((pid, None, "undated cribriform"))                  # undated: dropped
     pl.DataFrame({"DFCI_MRN": [n[0] for n in notes], "EVENT_DATE": [n[1] for n in notes],
                   "RPT_ID": list(range(len(notes))), "RPT_TEXT": [n[2] for n in notes]}
                  ).write_parquet(env["PATHOLOGY_PATH"])
     env.update(TERM_MIN_PATIENTS=2, TERM_NGRAMS=(1, 2), TERM_FDR=0.05, TERM_TOP_N=5,
-               ADJUST_REPORT_BANDS=(1, 2, 4), SPECIMEN_HEADER_CHARS=300,
-               TEXT_C=1.0, TEXT_FOLDS=2, TEXT_PERMUTATIONS=5, TEXT_SEED=0, N_JOBS=1)
+               ADJUST_REPORT_BANDS=(1, 2, 4), SPECIMEN_HEADER_CHARS=300)
     return notes
 
 
-def test_term_enrichment_contrasts_deciles_with_middle_on_all_reports(extraction, capsys):
+def test_term_enrichment_contrasts_deciles_with_middle_on_post_landmark_reports(extraction, capsys):
     env, scores = extraction
     ids = IDS
     _write_term_inputs(env, scores)
@@ -188,10 +189,11 @@ def test_term_enrichment_contrasts_deciles_with_middle_on_all_reports(extraction
         assert t.loc["prostate", "pct_control"] == 1
         # Bigrams stay within one report: "prostate neuroendocrine" would span two.
         assert "prostate neuroendocrine" not in t.index and "neuroendocrine features" in t.index
-    # Reports after the landmark and undated reports are used at every landmark.
-    for term, group in (("chromogranin", "top"), ("cribriform", "bottom"), ("ductal", "bottom")):
+    # Post-landmark reports are used at every landmark; undated reports never are.
+    for term, group in (("chromogranin", "top"), ("ductal", "bottom")):
         hit = res[res["term"].eq(term) & res["group"].eq(group)]
         assert set(hit["landmark"]) == {0, 90, 180} and hit["pct_group"].eq(1).all()
+    assert "cribriform" not in set(all_res["term"])
 
     # Top vs bottom, one-sided in each direction: 2/2 vs 0/2 gives p = 1 / C(4, 2).
     def contrast(lm, group, control):
@@ -206,7 +208,7 @@ def test_term_enrichment_contrasts_deciles_with_middle_on_all_reports(extraction
     sizes = env["group_sizes"]
     assert sizes.loc[(0, "middle"), "patients_scored"] == 16
     for lm in (0, 90, 180):
-        assert sizes.loc[(lm, "bottom"), "reports"] == 6 and sizes.loc[(lm, "top"), "reports"] == 6
+        assert sizes.loc[(lm, "bottom"), "reports"] == 4 and sizes.loc[(lm, "top"), "reports"] == 6   # undated cribriform dropped
 
     output = capsys.readouterr().out
     assert "Landmark 0 · top decile vs middle" in output
@@ -292,6 +294,14 @@ class _FakeBERTopic:
 
     def fit_transform(self, documents, embeddings=None):
         assert self.kwargs["embedding_model"] is None and embeddings is not None
+        # Real BERTopic fits its class TF-IDF on text with [^A-Za-z0-9 ] deleted, then scores representative
+        # documents on the text as passed: a vocabulary term only in the latter has an infinite IDF.
+        vec = self.kwargs["vectorizer_model"]
+        cleaned = [re.sub(r"[^A-Za-z0-9 ]+", "", d.replace("\n", " ").replace("\t", " ")) for d in documents]
+        fitted = np.asarray(vec.fit_transform(cleaned).sum(axis=0)).ravel()
+        raw = np.asarray(vec.transform(list(documents)).sum(axis=0)).ravel()
+        if np.any((raw > 0) & (fitted == 0)):
+            raise ValueError("Input contains infinity or a value too large for dtype('float64').")
         _FakeBERTopic.calls.append((list(documents), embeddings, self.kwargs))
         self.topics = [int(np.argmax(e)) if np.any(e) else -1 for e in embeddings]
         self.docs = list(documents)
@@ -322,6 +332,10 @@ def test_bertopic_enriches_topics_from_precomputed_embeddings_without_leaking_te
                                                                                    tmp_path):
     env, scores = extraction
     notes = _write_term_inputs(env, scores)
+    # Hyphenated text: BERTopic's own cleaning would merge it ("neuroendocrinefeatures") and fail the fit.
+    path = pd.read_parquet(env["PATHOLOGY_PATH"])
+    path["RPT_TEXT"] = path["RPT_TEXT"].str.replace("neuroendocrine features", "neuroendocrine-features")
+    pl.from_pandas(path).write_parquet(env["PATHOLOGY_PATH"])
     mods = _fake_topic_modules(monkeypatch)
 
     # One embedding per pathology report (RPT_ID = note position), in reverse order, with an imaging note that
@@ -335,9 +349,9 @@ def test_bertopic_enriches_topics_from_precomputed_embeddings_without_leaking_te
     rows, meta = [], []
     for rpt_id in reversed(range(len(notes))):
         pid, _, text = notes[rpt_id]
-        meta.append({"RPT_ID": float(rpt_id), "NOTE_TYPE": "Pathology", "EMBEDDING_INDEX": len(rows)})
+        meta.append({"DFCI_MRN": pid, "RPT_ID": float(rpt_id), "NOTE_TYPE": "Pathology", "EMBEDDING_INDEX": len(rows)})
         rows.append(axis(rpt_id, text, pid))
-        meta.append({"RPT_ID": float(rpt_id), "NOTE_TYPE": "Imaging", "EMBEDDING_INDEX": len(rows)})
+        meta.append({"DFCI_MRN": pid, "RPT_ID": float(rpt_id), "NOTE_TYPE": "Imaging", "EMBEDDING_INDEX": len(rows)})
         rows.append([1, 0, 0])
     array_path = tmp_path / "emb.npy"
     np.save(array_path, np.asarray(rows, dtype=np.float16))
@@ -347,8 +361,8 @@ def test_bertopic_enriches_topics_from_precomputed_embeddings_without_leaking_te
     _run_analysis(env, *TERM_CELLS, *TOPIC_CELLS)
 
     (docs, embeddings, kwargs), = _FakeBERTopic.calls
-    assert len(docs) == 28 and embeddings.dtype == np.float32      # every report, whatever its date
-    assert sum("chromogranin" in d for d in docs) == 2 and sum("cribriform" in d for d in docs) == 2
+    assert len(docs) == 26 and embeddings.dtype == np.float32      # every dated (post-landmark) report
+    assert sum("chromogranin" in d for d in docs) == 2 and sum("cribriform" in d for d in docs) == 0
     assert sum(e[0] == 1 for e in embeddings) == 2                  # no imaging row leaked in
     vocab = kwargs["vectorizer_model"].vocabulary
     assert "neuroendocrine" in vocab and "prostate" in vocab and kwargs["umap_model"][1]["random_state"] == 0
@@ -372,7 +386,7 @@ def test_bertopic_enriches_topics_from_precomputed_embeddings_without_leaking_te
     assert -1 not in set(res["topic"])
 
     out = capsys.readouterr().out
-    assert "28 of 28 pathology reports have a precomputed embedding" in out
+    assert "26 of 26 pathology reports have a precomputed embedding" in out
     assert "Landmark 0 · top decile vs middle (topics)" in out
     assert "Landmark 0 · top decile vs bottom decile (topics)" in out
     assert not any(str(patient_id) in out for patient_id in IDS)
@@ -386,7 +400,7 @@ def test_bertopic_enriches_topics_from_precomputed_embeddings_without_leaking_te
 
 
 # --- Sensitivity and complementary analyses ---
-EXTRA_CELLS = ("lexicon", "score-association", "classifiers")
+EXTRA_CELLS = ("lexicon", "score-association")
 
 
 def _no_topic_modules(env, monkeypatch):
@@ -415,7 +429,7 @@ def _write_extra_inputs(env, scores):
     return notes
 
 
-def test_lexicon_enrichment_uses_all_reports(extraction, capsys, monkeypatch):
+def test_lexicon_enrichment_uses_post_landmark_reports(extraction, capsys, monkeypatch):
     env, scores = extraction
     _write_extra_inputs(env, scores)
     _no_topic_modules(env, monkeypatch)
@@ -438,7 +452,7 @@ def test_lexicon_enrichment_uses_all_reports(extraction, capsys, monkeypatch):
         assert "Gleason max 7" not in x.index and "sarcomatoid" not in x.index      # unseen features are not tested
         assert "small cell" not in x.index                                      # "non-small cell" is not a mention
         b = lex[(lex["landmark"] == lm) & (lex["group"] == "bottom") & (lex["control"] == "middle")].set_index("feature")
-        assert b.loc["cribriform", "group_with_feature"] == 2 and b.loc["ductal", "group_with_feature"] == 2
+        assert "cribriform" not in b.index and b.loc["ductal", "group_with_feature"] == 2   # undated: dropped
     assert "Landmark 0 · curated lexicon" in capsys.readouterr().out
 
 
@@ -473,7 +487,7 @@ def test_mantel_haenszel_adjusts_for_strata(extraction):
     assert run([1, 1, 0, 0], ["top", "top", "middle", "middle"], None)[["odds_ratio_mh", "p_value_mh"]].isna().all()
 
 
-def test_score_association_and_text_classifier(extraction, capsys, monkeypatch):
+def test_score_association(extraction, capsys, monkeypatch):
     env, scores = extraction
     notes = _write_extra_inputs(env, scores)
     _no_topic_modules(env, monkeypatch)
@@ -490,80 +504,11 @@ def test_score_association_and_text_classifier(extraction, capsys, monkeypatch):
         assert a.loc["ductal", "auc"] == 0 and a.loc["ductal", "mean_percentile_with"] < 0.1
     assert ((assoc["n_with_feature"] > 0) & (assoc["n_with_feature"] < assoc["n_patients"])).all()
 
-    clf = pd.read_csv(env["OUTPUT_DIR"] / "pathology_text_classifier.csv")
-    assert list(clf.columns) == env["CLASSIFIER_COLS"]
-    assert set(clf["features"]) == {"tfidf"} and len(clf) == 9
-    assert clf["cv_auc"].between(0, 1).all() and clf["p_permutation"].between(0, 1).all()
-    row = clf[(clf["landmark"] == 180) & (clf["positive_group"] == "bottom")].iloc[0]
-    assert row["negative_group"] == "middle" and row["n_positive"] == 2 and row["n_negative"] == 16
-
-    # Too few patients for the folds: skipped with a note, not an error.
-    env["TEXT_FOLDS"] = 3
-    _run_analysis(env, 'classifiers')
-    clf = pd.read_csv(env["OUTPUT_DIR"] / "pathology_text_classifier.csv")
-    assert clf["cv_auc"].isna().all() and clf["note"].str.startswith("skipped").all()
+    assert not (env["OUTPUT_DIR"] / "pathology_text_classifier.csv").exists()   # classifier removed
 
     out = capsys.readouterr().out
     assert not any(str(patient_id) in out for patient_id in IDS)
     assert [n[2] for n in notes if len(n[2].split()) > 2 and n[2] in out] == []
-
-
-def _classifier_definitions(env):
-    env.update(TERM_MIN_PATIENTS=2, TERM_NGRAMS=(1, 2), TEXT_C=1.0, TEXT_FOLDS=2,
-               TEXT_PERMUTATIONS=2, TEXT_SEED=0, N_JOBS=1, CONTROL_GROUP="middle")
-    for index, stop in (("term-enrichment", "term_matrices = {}"), ("classifiers", "clf_rows = []")):
-        src = _analysis_source(index)
-        exec(compile(src[:src.index(stop)], f"cell_{index}_defs", "exec"), env)
-
-
-def test_classifier_fits_vocabulary_and_idf_inside_permutation_cv(extraction, monkeypatch):
-    env, _ = extraction
-    _classifier_definitions(env)
-    y = np.array([0, 1] * 4)
-    cv = env["StratifiedKFold"](2, shuffle=True, random_state=0)
-    train, held_out = next(cv.split(np.zeros(len(y)), y))
-    documents = np.empty(len(y), dtype=object)
-    documents[:] = [["common alpha", "beta"] for _ in y]
-    for i in held_out:
-        documents[i] = ["common unseen", "beta"]
-
-    fits = []
-    transformer = env["PatientTfidf"]
-    original_fit = transformer.fit
-
-    def record_fit(self, X, y=None):
-        result = original_fit(self, X, y)
-        fits.append((len(X), self.get_feature_names_out(), self.transform(documents[train]).toarray()))
-        return result
-
-    monkeypatch.setattr(transformer, "fit", record_fit)
-    env["classify"](documents, y)
-    # Two observed folds + two folds per permutation, followed by the separate descriptive full-data fit.
-    assert [size for size, _, _ in fits] == [4] * 6 + [8]
-    assert "unseen" not in fits[0][1] and "unseen" in fits[-1][1]
-    assert "alpha beta" not in fits[0][1]  # the bigram would cross two reports
-
-    baseline = fits[0]
-    for i in held_out:
-        documents[i] = ["changed heldout vocabulary alpha alpha", "beta"]
-    fits.clear()
-    env["classify"](documents, y)
-    np.testing.assert_array_equal(fits[0][1], baseline[1])
-    np.testing.assert_allclose(fits[0][2], baseline[2])
-
-
-@pytest.mark.parametrize("n_jobs", [1, 2])
-def test_classifier_empty_vocabulary_uses_intercept_only_predictions(extraction, n_jobs):
-    env, _ = extraction
-    _classifier_definitions(env)
-    env["N_JOBS"] = n_jobs
-    documents = np.empty(6, dtype=object)
-    # Repeated reports from one patient must not meet the minimum distinct-patient frequency.
-    documents[:] = [[word, word] for word in ("alpha", "beta", "gamma", "delta", "epsilon", "zeta")]
-    result = env["classify"](documents, np.array([0, 1] * 3))
-    assert result["cv_auc"] == 0.5 and result["null_auc_mean"] == 0.5
-    assert result["p_permutation"] == 1 and result["n_features"] == 0
-    assert result["top_terms_positive"] == result["top_terms_negative"] == ""
 
 
 # Continuous topic models use raw scores and keep patients (not notes) as independent units.
@@ -645,7 +590,8 @@ def test_analysis_runs_standalone_without_export_or_local_endpoint_data(extracti
     env, scores = extraction
     _write_term_inputs(env, scores)
     _no_topic_modules(env, monkeypatch)
-    env["DATA_PATH"].unlink()  # exploratory notebook needs scores/notes, not the extraction's endpoint table
+    # The exploratory notebooks need scores, notes and ADT anchors, not the extraction's endpoint table.
+    pd.read_csv(env["DATA_PATH"])[["DFCI_MRN", "TREATMENT_ANCHOR_DATE"]].to_csv(env["DATA_PATH"], index=False)
     env.update(CONTINUOUS_MIN_PATIENTS=30, CONTINUOUS_MIN_TOPIC_PATIENTS=5, TOPIC_PERMUTATIONS=99)
     for notebook in (ANALYSIS_NOTEBOOK, TOPIC_NOTEBOOK):
         _run_analysis(env, *_code_cell_ids(notebook), notebook=notebook)
@@ -666,7 +612,7 @@ def test_continuous_topics_write_aggregate_results_with_global_fdr(extraction, m
     env.update(topic_docs=docs, topic_table=pd.DataFrame({"topic": [0, 1], "top_words": ["positive", "negative"]}),
                by_lm={lm: pd.DataFrame({fs.ID_COL: risk.index, "risk_score": risk.values}) for lm in env["LANDMARKS"]},
                reports_by_lm={lm: docs for lm in env["LANDMARKS"]},
-               optional_import=importlib.import_module, rpt_key=lambda values: values.astype(str),
+               optional_import=importlib.import_module, pathology_keys=lambda frame: frame["rpt_key"],
                CONTINUOUS_MIN_PATIENTS=30, CONTINUOUS_MIN_TOPIC_PATIENTS=5, TOPIC_PERMUTATIONS=99,
                TOPIC_SEED=42, TERM_FDR=0.05, TERM_TOP_N=5, display=lambda *args: None)
     # Reuse the existing tested BH implementation without running term enrichment.
@@ -714,11 +660,11 @@ def _run_cross_notebooks(env):
 
 def _write_cross_inputs(env, scores, tmp_path):
     scores.to_csv(env["SCORES_PATH"], index=False)
+    pd.DataFrame({"DFCI_MRN": IDS, "TREATMENT_ANCHOR_DATE": "2020-01-01"}).to_csv(env["DATA_PATH"], index=False)
     kinds = ("Clinician", "Imaging", "Pathology")
     env.update(Path=Path, NOTE_TYPES=kinds, NOTE_PATHS={},
                TERM_MIN_PATIENTS=2, TERM_NGRAMS=(1, 2), TERM_FDR=0.05, TERM_TOP_N=3,
-               ADJUST_REPORT_BANDS=(1, 2, 4), TEXT_C=1.0, TEXT_FOLDS=2, TEXT_PERMUTATIONS=2,
-               TEXT_SEED=0, N_JOBS=1, TOPIC_MIN_SIZE=2, TOPIC_SEED=0,
+               ADJUST_REPORT_BANDS=(1, 2, 4), TOPIC_MIN_SIZE=2, TOPIC_SEED=0,
                CONTINUOUS_MIN_PATIENTS=10, CONTINUOUS_MIN_TOPIC_PATIENTS=2, TOPIC_PERMUTATIONS=19)
     rows, meta = [], []
     for k, kind in enumerate(kinds):
@@ -726,7 +672,8 @@ def _write_cross_inputs(env, scores, tmp_path):
         for i, pid in enumerate(IDS):
             # Same report ID across patients AND across note types: only the full identity is unique.
             topic = int((i + k) % 4 == 0 or i < 10)
-            records.append(dict(DFCI_MRN=pid, RPT_ID=7, RPT_TEXT=("ductal pattern" if topic else "neuroendocrine features present")))
+            records.append(dict(DFCI_MRN=pid, RPT_ID=7, EVENT_DATE="2021-01-01",   # post-landmark at every landmark
+                                RPT_TEXT=("ductal pattern" if topic else "neuroendocrine features present")))
             # One missing embedding in each of two types; never treat them as topic-negative notes.
             if (kind, i) in (("Imaging", 0), ("Clinician", 19)):
                 continue
@@ -772,8 +719,9 @@ def test_cross_note_full_analysis_joins_by_type_patient_and_report(extraction, m
     assert set(enrichment["note_type"]) == {"All", *env["NOTE_TYPES"]}
     for _, sub in enrichment.groupby(["group", "control"]):
         np.testing.assert_allclose(sub["q_value"], env["bh_qvalues"](sub["p_value"]), equal_nan=True)
-    for name in ("term_enrichment", "lexicon_enrichment", "score_association", "text_classifier"):
+    for name in ("term_enrichment", "lexicon_enrichment", "score_association"):
         assert (env["OUTPUT_DIR"] / f"clinical_notes_{name}.csv").exists()
+    assert not (env["OUTPUT_DIR"] / "clinical_notes_text_classifier.csv").exists()   # classifier removed
     for path in env["OUTPUT_DIR"].glob("*.csv"):
         columns = pd.read_csv(path).columns
         assert not {"DFCI_MRN", "RPT_TEXT", "RPT_ID", "rpt_key", "Representative_Docs"}.intersection(columns)
@@ -787,7 +735,7 @@ def test_cross_note_runs_without_topic_packages(extraction, monkeypatch, tmp_pat
         monkeypatch.setitem(sys.modules, name, None)
     _run_cross_notebooks(env)
     assert len(env["all_notes"]) == 60
-    assert (env["OUTPUT_DIR"] / "clinical_notes_text_classifier.csv").exists()
+    assert (env["OUTPUT_DIR"] / "clinical_notes_score_association.csv").exists()
     assert not (env["OUTPUT_DIR"] / "clinical_notes_topics.csv").exists()
 
 
@@ -835,3 +783,80 @@ def test_cross_note_adjusted_gee_includes_note_type(extraction, tmp_path, monkey
     seen.clear()
     env["continuous_topic_association"](docs[docs["NOTE_TYPE"].eq("Imaging")], risk, 0, {})
     assert all(not any(name.startswith("note_type_") for name in columns) for columns, _ in seen)
+
+
+def _write_pathology_topic_inputs(env, scores, tmp_path):
+    _write_cross_inputs(env, scores, tmp_path)
+    env.update(PATHOLOGY_PATH=env["NOTE_PATHS"]["Pathology"], SPECIMEN_HEADER_CHARS=300)
+    notes = pl.read_parquet(env["PATHOLOGY_PATH"])
+    # All patients share RPT_ID=7, but one patient's report stops being eligible at +180.
+    notes = notes.with_columns(pl.when(pl.col("DFCI_MRN") == IDS[0]).then(pl.lit("2020-04-30"))
+                              .otherwise(pl.col("EVENT_DATE")).alias("EVENT_DATE"))
+    notes.write_parquet(env["PATHOLOGY_PATH"])
+
+
+def test_pathology_topics_keep_patient_identity_across_landmarks(extraction, monkeypatch, tmp_path):
+    env, scores = extraction
+    _write_pathology_topic_inputs(env, scores, tmp_path)
+    _fake_topic_modules(monkeypatch)
+    _run_analysis(env, *_code_cell_ids(TOPIC_NOTEBOOK), notebook=TOPIC_NOTEBOOK)
+    assert len(env["embed_docs"]) == 20
+    assert env["embed_docs"]["rpt_key"].nunique() == 20
+    for row, embedding in zip(env["embed_docs"].itertuples(), env["report_embeddings"]):
+        assert np.argmax(embedding) == int("ductal" in row.RPT_TEXT)
+    coverage = pd.read_csv(env["OUTPUT_DIR"] / "pathology_topic_continuous_coverage.csv")
+    assert coverage["patients_with_embedded_report"].tolist() == [20, 20, 19]
+    enrichment = pd.read_csv(env["OUTPUT_DIR"] / "pathology_topic_enrichment.csv")
+    bottom = enrichment[enrichment["group"].eq("bottom") & enrichment["control"].eq("middle")]
+    assert bottom.groupby("landmark")["n_group"].first().to_dict() == {0: 2, 90: 2, 180: 1}
+
+
+@pytest.mark.parametrize("conflict", ["identity", "embedding_row", "fractional_index"])
+def test_pathology_topics_reject_ambiguous_embeddings(extraction, monkeypatch, tmp_path, conflict):
+    env, scores = extraction
+    _write_pathology_topic_inputs(env, scores, tmp_path)
+    _fake_topic_modules(monkeypatch)
+    meta = pd.read_parquet(env["EMBED_METADATA_PATH"])
+    rows = meta.index[meta["NOTE_TYPE"].eq("Pathology")]
+    if conflict == "identity":
+        extra = meta.loc[[rows[0]]].assign(EMBEDDING_INDEX=999)
+        meta = pd.concat([meta, extra], ignore_index=True)
+    elif conflict == "embedding_row":
+        meta.loc[rows[1], "EMBEDDING_INDEX"] = meta.loc[rows[0], "EMBEDDING_INDEX"]
+    else:
+        meta["EMBEDDING_INDEX"] = meta["EMBEDDING_INDEX"].astype(float)
+        meta.loc[rows[0], "EMBEDDING_INDEX"] = 0.5
+    meta.to_parquet(env["EMBED_METADATA_PATH"], index=False)
+    _run_analysis(env, "risk-scores", "reports", "term-definitions", notebook=TOPIC_NOTEBOOK)
+    with pytest.raises(ValueError, match="Ambiguous embedding metadata|finite nonnegative integers"):
+        _run_analysis(env, "topic-fit", notebook=TOPIC_NOTEBOOK)
+
+
+@pytest.mark.parametrize("notebook", [CROSS_NOTEBOOK, CROSS_TOPIC_NOTEBOOK])
+@pytest.mark.parametrize("undated_first", [True, False])
+def test_cross_note_duplicate_dates_preserve_landmark_membership(extraction, tmp_path, notebook, undated_first):
+    env, scores = extraction
+    _write_cross_inputs(env, scores, tmp_path)
+    path = env["NOTE_PATHS"]["Clinician"]
+    notes = pl.read_parquet(path)
+    dated = notes.head(1).with_columns(pl.lit("2020-04-30").alias("EVENT_DATE"))
+    undated = dated.with_columns(pl.lit(None).cast(pl.String).alias("EVENT_DATE"))
+    copies = [undated, dated] if undated_first else [dated, undated]
+    pl.concat([*copies, notes.slice(1)]).write_parquet(path)
+    _run_cross(env, "risk-scores", "reports", notebook=notebook)
+    for lm, expected in ((0, 1), (90, 1), (180, 0)):
+        reports = env["reports_by_lm"][lm]
+        assert ((reports["DFCI_MRN"] == IDS[0]) & reports["NOTE_TYPE"].eq("Clinician")).sum() == expected
+
+
+@pytest.mark.parametrize("notebook", [CROSS_NOTEBOOK, CROSS_TOPIC_NOTEBOOK])
+def test_cross_note_duplicate_conflicting_dates_stop(extraction, tmp_path, notebook):
+    env, scores = extraction
+    _write_cross_inputs(env, scores, tmp_path)
+    path = env["NOTE_PATHS"]["Clinician"]
+    notes = pl.read_parquet(path)
+    conflict = notes.head(1).with_columns(pl.lit("2019-01-01").alias("EVENT_DATE"))
+    pl.concat([conflict, notes]).write_parquet(path)
+    _run_cross(env, "risk-scores", notebook=notebook)
+    with pytest.raises(ValueError, match="Conflicting note dates"):
+        _run_cross(env, "reports", notebook=notebook)
