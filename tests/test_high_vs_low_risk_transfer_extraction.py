@@ -19,7 +19,9 @@ NOTEBOOK = Path(__file__).resolve().parents[1] / (
 )
 
 
-ANALYSIS_DIR = NOTEBOOK.parents[1] / "text_interpretability"
+TEXT_DIR = NOTEBOOK.parents[1] / "text_interpretability"
+ANALYSIS_DIR = TEXT_DIR / "post_landmark"   # 13-16 on notes after each landmark
+PRE_DIR = TEXT_DIR / "pre_landmark"         # the same four notebooks on notes up to each landmark
 ANALYSIS_NOTEBOOK = ANALYSIS_DIR / "13_pathology_topics_vs_risk.ipynb"
 TOPIC_NOTEBOOK = ANALYSIS_DIR / "15_pathology_bertopic_vs_risk.ipynb"   # BERTopic, split out of 13
 
@@ -860,3 +862,83 @@ def test_cross_note_duplicate_conflicting_dates_stop(extraction, tmp_path, noteb
     _run_cross(env, "risk-scores", notebook=notebook)
     with pytest.raises(ValueError, match="Conflicting note dates"):
         _run_cross(env, "reports", notebook=notebook)
+
+
+# --- Pre-landmark copies of 13-16: notes dated at or before ADT + landmark (pre-ADT included, undated dropped) ---
+PRE_NOTEBOOK = PRE_DIR / "13_pathology_topics_vs_risk.ipynb"
+PRE_TOPIC_NOTEBOOK = PRE_DIR / "15_pathology_bertopic_vs_risk.ipynb"
+PRE_CROSS_NOTEBOOK = PRE_DIR / "14_clinical_notes_topics_vs_risk.ipynb"
+PRE_CROSS_TOPIC_NOTEBOOK = PRE_DIR / "16_clinical_notes_bertopic_vs_risk.ipynb"
+
+
+def _set_anchor(env, date):
+    pd.DataFrame({"DFCI_MRN": IDS, "TREATMENT_ANCHOR_DATE": date}).to_csv(env["DATA_PATH"], index=False)
+
+
+def _run_pre(env, *cell_ids):
+    for cell_id in cell_ids:
+        path, src = _cell_source((PRE_NOTEBOOK, PRE_TOPIC_NOTEBOOK), cell_id)
+        exec(compile(src, f"{path}:{cell_id}", "exec"), env)
+
+
+def test_pre_landmark_window_boundaries(extraction):
+    env, scores = extraction
+    notes = _write_term_inputs(env, scores)
+    _set_anchor(env, "2019-03-01")
+    # 2018-06-01 is before ADT start (day -273): used at every landmark. 2019-06-01 is day 92: only at +180.
+    # 2020-05-01 and 2021-01-01 are later than every landmark; the undated note is never used.
+    notes += [(pid, "2018-06-01", "prior biopsy") for pid in IDS]
+    _write_notes(env, notes)
+    _run_pre(env, "risk-scores", "reports")
+    reports = env["reports_by_lm"]
+    assert [len(reports[lm]) for lm in (0, 90, 180)] == [20, 20, 42]
+    assert set(reports[0]["RPT_TEXT"]) == {"prior biopsy"}
+    assert not any("ductal" in t or "chromogranin" in t or "cribriform" in t for t in reports[180]["RPT_TEXT"])
+    assert [r["in_window"] for r in env["window_rows"]] == [20, 20, 42]
+    assert [r["undated"] for r in env["window_rows"]] == [2, 2, 2]
+
+
+def test_pre_landmark_term_enrichment_runs_on_pre_adt_notes(extraction, capsys):
+    env, scores = extraction
+    _write_term_inputs(env, scores)
+    _set_anchor(env, "2022-01-01")   # every dated note precedes ADT start, so all are pre-landmark at every landmark
+    _run_pre(env, *TERM_CELLS)
+    all_res = pd.read_csv(env["OUTPUT_DIR"] / "pathology_term_enrichment.csv")
+    assert {"neuroendocrine", "chromogranin", "ductal"} <= set(all_res["term"])
+    assert "cribriform" not in set(all_res["term"])   # undated: dropped
+    sizes = env["group_sizes"]
+    for lm in (0, 90, 180):
+        assert sizes.loc[(lm, "bottom"), "reports"] == 4 and sizes.loc[(lm, "top"), "reports"] == 6
+    assert "Pre-landmark notes (note date <= ADT + landmark; undated notes dropped):" in capsys.readouterr().out
+
+
+def test_pre_landmark_notebooks_are_the_post_notebooks_with_the_window_flipped():
+    for name in ("13_pathology_topics_vs_risk", "14_clinical_notes_topics_vs_risk",
+                 "15_pathology_bertopic_vs_risk", "16_clinical_notes_bertopic_vs_risk"):
+        post = {c["id"]: "".join(c["source"]) for c in json.loads((ANALYSIS_DIR / f"{name}.ipynb").read_text())["cells"]}
+        pre = {c["id"]: "".join(c["source"]) for c in json.loads((PRE_DIR / f"{name}.ipynb").read_text())["cells"]}
+        assert post.keys() == pre.keys()
+        assert "days.gt(lm) & days.le(WINDOW_MAX_DAYS)" in post["reports"] and "days.le(lm)" in pre["reports"]
+        assert 'OUTPUT_DIR / "post_landmark"' in post["config"] and 'OUTPUT_DIR / "pre_landmark"' in pre["config"]
+        assert "WINDOW_MAX_DAYS" not in "".join(pre.values())
+        for cell_id in pre:   # every analysis cell outside the window logic is identical
+            if cell_id not in ("overview", "config", "reports", "term-description", "continuous-description",
+                               "topic-description", "sensitivity-description", "reports-description", "topic-fit"):
+                assert pre[cell_id] == post[cell_id], (name, cell_id)
+        assert "post-landmark" not in "".join(pre.values()).lower().replace("dated after adt", "")
+
+
+def test_pre_landmark_cross_note_notebooks_run_end_to_end(extraction, monkeypatch, tmp_path):
+    env, scores = extraction
+    _write_cross_inputs(env, scores, tmp_path)
+    _set_anchor(env, "2022-01-01")   # the cross-note fixture's notes (2021-01-01) all precede ADT start
+    _fake_topic_modules(monkeypatch)
+    import matplotlib.pyplot as plt
+    monkeypatch.setattr(plt, "show", lambda: None)
+    for notebook in (PRE_CROSS_NOTEBOOK, PRE_CROSS_TOPIC_NOTEBOOK):
+        _run_cross(env, *_code_cell_ids(notebook), notebook=notebook)
+    assert len(env["all_notes"]) == 60 and len(env["embed_docs"]) == 58
+    for lm in (0, 90, 180):
+        assert len(env["reports_by_lm"][lm]) == 60
+    for name in ("term_enrichment", "lexicon_enrichment", "score_association", "topic_continuous_association"):
+        assert (env["OUTPUT_DIR"] / f"clinical_notes_{name}.csv").exists()
