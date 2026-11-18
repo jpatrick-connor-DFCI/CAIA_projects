@@ -946,7 +946,7 @@ def test_pre_landmark_cross_note_notebooks_run_end_to_end(extraction, monkeypatc
 def test_group_tfidf_notebooks_exclude_middle_and_apply_global_fdr(extraction, tmp_path, notebook, constant_risk):
     from COMPASS.multivariable_models import text_tfidf_association as tfa
     env, scores = extraction
-    env["RISK_TAIL_FRACTION"] = 0.2
+    env["RISK_TAIL_FRACTION"] = 0.1
     if constant_risk:
         scores["risk_score"] = 1.0
     cross = "clinical_notes" in notebook.name
@@ -966,11 +966,11 @@ def test_group_tfidf_notebooks_exclude_middle_and_apply_global_fdr(extraction, t
         assert result["n_high"].eq(0).all() and result["n_low"].eq(0).all()
         assert result["p_value"].isna().all() and result["q_value"].isna().all()
     else:
-        assert result["n_high"].eq(4).all() and result["n_low"].eq(4).all()
+        assert result["n_high"].eq(2).all() and result["n_low"].eq(2).all()
         np.testing.assert_allclose(result["q_value"], env["bh_qvalues"](result["p_value"]), equal_nan=True)
         assert result["status"].eq("ok").all()
     coverage = pd.read_csv(env["OUTPUT_DIR"] / f"{prefix}_tfidf_group_coverage.csv")
-    assert coverage["tail_fraction"].eq(0.2).all()
+    assert coverage["tail_fraction"].eq(0.1).all()
     assert not (env["OUTPUT_DIR"] / f"{prefix}_tfidf_risk_association.csv").exists()
     source = notebook.read_text()
     assert "tfidf-continuous" not in source and "n_permutations" not in source
@@ -979,7 +979,7 @@ def test_group_tfidf_notebooks_exclude_middle_and_apply_global_fdr(extraction, t
 @pytest.mark.parametrize("folder", [ANALYSIS_DIR, PRE_DIR])
 @pytest.mark.parametrize("name", ["13_pathology_topics_vs_risk", "14_clinical_notes_topics_vs_risk",
                                   "15_pathology_bertopic_vs_risk", "16_clinical_notes_bertopic_vs_risk"])
-def test_text_notebooks_default_to_twenty_percent_tails(extraction, folder, name):
+def test_text_notebooks_default_to_top_and_bottom_deciles(extraction, folder, name):
     import ast
     notebook = folder / f"{name}.ipynb"
     config = _cell_source((notebook,), "config")[1]
@@ -987,11 +987,11 @@ def test_text_notebooks_default_to_twenty_percent_tails(extraction, folder, name
                 and any(isinstance(t, ast.Name) and t.id == "RISK_TAIL_FRACTION" for t in n.targets))
     env, scores = extraction
     env["RISK_TAIL_FRACTION"] = ast.literal_eval(node.value)
-    assert env["RISK_TAIL_FRACTION"] == 0.2
+    assert env["RISK_TAIL_FRACTION"] == 0.1
     scores.to_csv(env["SCORES_PATH"], index=False)
     _run_analysis(env, "risk-scores", notebook=notebook)
     for g in env["by_lm"].values():
-        assert g["decile_group"].eq("top").sum() == 4
-        assert g["decile_group"].eq("bottom").sum() == 4
-        assert g.attrs["lo"] == pytest.approx(3.8)
-        assert g.attrs["hi"] == pytest.approx(15.2)
+        assert g["decile_group"].eq("top").sum() == 2
+        assert g["decile_group"].eq("bottom").sum() == 2
+        assert g.attrs["lo"] == pytest.approx(1.9)
+        assert g.attrs["hi"] == pytest.approx(17.1)
