@@ -67,7 +67,9 @@ def extraction(tmp_path):
                OUTPUT_DIR=tmp_path / "out", MODEL_FAMILY="xgboost_cox",
                SCORE_ENDPOINT="platinum", LANDMARKS=(0, 90, 180), DECILE=0.1,
                ENDPOINTS=("avpc", "platinum", "nepc"),
-               WINDOW_MAX_DAYS=3650)   # 13-16 use post-landmark notes only
+               WINDOW_MAX_DAYS=3650,
+               TFIDF_SETTINGS=dict(min_patients=10, min_term_patients=2, n_permutations=99,
+                                   n_bootstrap=39, seed=42, block_size=8))
     return env, scores
 
 
@@ -170,7 +172,7 @@ def _write_term_inputs(env, scores):
     return notes
 
 
-def test_term_enrichment_contrasts_deciles_with_middle_on_post_landmark_reports(extraction, capsys):
+def test_term_enrichment_contrasts_top_with_bottom_on_post_landmark_reports(extraction, capsys):
     env, scores = extraction
     ids = IDS
     _write_term_inputs(env, scores)
@@ -178,15 +180,13 @@ def test_term_enrichment_contrasts_deciles_with_middle_on_post_landmark_reports(
 
     all_res = pd.read_csv(env["OUTPUT_DIR"] / "pathology_term_enrichment.csv")
     assert set(zip(all_res["group"], all_res["control"])) == {
-        ("top", "middle"), ("bottom", "middle"), ("top", "bottom"), ("bottom", "top")}
-    assert (all_res["n_group"] == 2).all()
-    vs_middle = all_res["control"].eq("middle")
-    assert (all_res.loc[vs_middle, "n_control"] == 16).all() and (all_res.loc[~vs_middle, "n_control"] == 2).all()
-    res = all_res[vs_middle]
+        ("top", "bottom"), ("bottom", "top")}          # no comparison against the middle 80%
+    assert (all_res["n_group"] == 2).all() and (all_res["n_control"] == 2).all()
+    res = all_res
     for lm in (0, 90, 180):
         t = res[(res["landmark"] == lm) & (res["group"] == "top")].set_index("term")
         assert t.loc["neuroendocrine", "pct_group"] == 1 and t.loc["neuroendocrine", "pct_control"] == 0
-        assert t.loc["neuroendocrine", "p_value"] == pytest.approx(1 / 153)   # 1 / C(18, 2)
+        assert t.loc["neuroendocrine", "p_value"] == pytest.approx(1 / 6)   # 1 / C(4, 2)
         assert t["p_value"].min() == t.loc["neuroendocrine", "p_value"]
         assert t.loc["prostate", "pct_control"] == 1
         # Bigrams stay within one report: "prostate neuroendocrine" would span two.
@@ -208,12 +208,13 @@ def test_term_enrichment_contrasts_deciles_with_middle_on_post_landmark_reports(
     for lm in (0, 90, 180):
         assert contrast(lm, "bottom", "top").loc["ductal", "p_value"] == pytest.approx(1 / 6)
     sizes = env["group_sizes"]
-    assert sizes.loc[(0, "middle"), "patients_scored"] == 16
+    assert (0, "middle") not in sizes.index      # patients in neither decile are labelled but never analysed
     for lm in (0, 90, 180):
         assert sizes.loc[(lm, "bottom"), "reports"] == 4 and sizes.loc[(lm, "top"), "reports"] == 6   # undated cribriform dropped
 
     output = capsys.readouterr().out
-    assert "Landmark 0 · top decile vs middle" in output
+    assert "Landmark 0 · top decile vs bottom decile" in output
+    assert "vs middle" not in output
     assert "Landmark 180 · bottom decile vs top decile" in output
     assert not any(str(patient_id) in output for patient_id in ids)
     assert "neuroendocrine features present" not in output
@@ -248,7 +249,7 @@ def test_term_enrichment_handles_empty_patient_vocabulary(extraction, capsys):
 
     result = pd.read_csv(env["OUTPUT_DIR"] / "pathology_term_enrichment.csv")
     assert result.empty and list(result.columns) == env["ENRICHMENT_COLS"]
-    assert "Landmark 180 · top decile vs middle: no terms" in capsys.readouterr().out
+    assert "Landmark 180 · top decile vs bottom decile: no terms" in capsys.readouterr().out
 
 
 TOPIC_MODULES = ("zstandard", "bertopic", "umap", "hdbscan")
@@ -374,22 +375,19 @@ def test_bertopic_enriches_topics_from_precomputed_embeddings_without_leaking_te
     assert topics.set_index("topic").loc[-1, "n_reports"] == 1
     res = pd.read_csv(env["OUTPUT_DIR"] / "pathology_topic_enrichment.csv")
     assert not any("Representative" in c for c in topics.columns.tolist() + res.columns.tolist())
-    vs_middle = res["control"].eq("middle")
-    assert (res.loc[vs_middle, "n_control"] == 16).all()   # outlier patient stays in the denominator
-    assert (res["n_group"] == 2).all() and (res.loc[~vs_middle, "n_control"] == 2).all()
+    assert set(zip(res["group"], res["control"])) == {("top", "bottom"), ("bottom", "top")}
+    assert (res["n_group"] == 2).all() and (res["n_control"] == 2).all()
     for lm in (0, 90, 180):
         tvb = res[(res["landmark"] == lm) & (res["group"] == "top") & (res["control"] == "bottom")].set_index("topic")
         assert tvb.loc[0, "p_value"] == pytest.approx(1 / 6)
-        top = res[(res["landmark"] == lm) & (res["group"] == "top") & vs_middle].set_index("topic")
-        assert top.loc[0, "top_words"] == "neuroendocrine" and top.loc[0, "pct_group"] == 1
-        assert top.loc[0, "p_value"] == pytest.approx(1 / 153)
-        assert top.loc[2, "pct_control"] == pytest.approx(15 / 16)
+        assert tvb.loc[0, "top_words"] == "neuroendocrine" and tvb.loc[0, "pct_group"] == 1
+        assert tvb.loc[2, "pct_control"] == 1
     assert set(res.loc[res["topic"].eq(1), "landmark"]) == {0, 90, 180}   # post-landmark ductal reports count
     assert -1 not in set(res["topic"])
 
     out = capsys.readouterr().out
     assert "26 of 26 pathology reports have a precomputed embedding" in out
-    assert "Landmark 0 · top decile vs middle (topics)" in out
+    assert "vs middle" not in out
     assert "Landmark 0 · top decile vs bottom decile (topics)" in out
     assert not any(str(patient_id) in out for patient_id in IDS)
     # Whole reports never print; two-word reports such as "ductal pattern" are also legitimate aggregate bigrams.
@@ -446,14 +444,14 @@ def test_lexicon_enrichment_uses_post_landmark_reports(extraction, capsys, monke
     assert list(lex.columns) == env["LEXICON_COLS"]
     assert not lex["feature"].str.contains("negated").any()
     for lm in (0, 90, 180):
-        x = lex[(lex["landmark"] == lm) & (lex["group"] == "top") & (lex["control"] == "middle")].set_index("feature")
+        x = lex[(lex["landmark"] == lm) & (lex["group"] == "top") & (lex["control"] == "bottom")].set_index("feature")
         assert x.loc["NE term (any)", "group_with_feature"] == 2 and x.loc["NE term (any)", "control_with_feature"] == 0
         assert x.loc["chromogranin", "group_with_feature"] == 2       # report dated after every landmark
         assert x.loc["Gleason max 8-10", "group_with_feature"] == 2
-        assert x.loc["Gleason max 8-10", "p_value"] == pytest.approx(1 / 153)
+        assert x.loc["Gleason max 8-10", "p_value"] == pytest.approx(1 / 6)   # 2/2 top vs 0/2 bottom
         assert "Gleason max 7" not in x.index and "sarcomatoid" not in x.index      # unseen features are not tested
         assert "small cell" not in x.index                                      # "non-small cell" is not a mention
-        b = lex[(lex["landmark"] == lm) & (lex["group"] == "bottom") & (lex["control"] == "middle")].set_index("feature")
+        b = lex[(lex["landmark"] == lm) & (lex["group"] == "bottom") & (lex["control"] == "top")].set_index("feature")
         assert "cribriform" not in b.index and b.loc["ductal", "group_with_feature"] == 2   # undated: dropped
     assert "Landmark 0 · curated lexicon" in capsys.readouterr().out
 
@@ -470,23 +468,23 @@ def test_mantel_haenszel_adjusts_for_strata(extraction):
     def run(present, label, strata):
         res = env["fisher_enrichment"](sparse.csr_matrix(np.array(present).reshape(-1, 1)), np.array(label),
                                        np.array(["f"], dtype=object), 0, None if strata is None else np.array(strata))
-        return res[(res["group"] == "top") & (res["control"] == "middle")].iloc[0]
+        return res[(res["group"] == "top") & (res["control"] == "bottom")].iloc[0]
 
     # One stratum: MH odds ratio = the Haldane-corrected odds ratio (zero cell), p from the continuity-corrected MH.
-    one = run([1, 1, 0, 0, 0, 0], ["top", "top", "middle", "middle", "middle", "middle"], [0] * 6)
+    one = run([1, 1, 0, 0, 0, 0], ["top", "top", "bottom", "bottom", "bottom", "bottom"], [0] * 6)
     assert one["odds_ratio_mh"] == pytest.approx(one["odds_ratio"])
     # Confounding: within each stratum the feature rate is the same in both groups (8/16 vs 2/4, then 0/4 vs 0/16),
     # but top sits mostly in the stratum where the feature is common, so the pooled Fisher test is significant.
-    label = ["top"] * 16 + ["middle"] * 4 + ["top"] * 4 + ["middle"] * 16
+    label = ["top"] * 16 + ["bottom"] * 4 + ["top"] * 4 + ["bottom"] * 16
     strata = [0] * 20 + [1] * 20
     present = [1] * 8 + [0] * 8 + [1] * 2 + [0] * 2 + [0] * 20
     res = run(present, label, strata)
     assert res["p_value"] < 0.05
     assert res["p_value_mh"] > 0.5 and res["odds_ratio_mh"] < res["odds_ratio"] / 3
     # Strata that never contain both groups carry no information.
-    confounded = run([1, 1, 0, 0], ["top", "top", "middle", "middle"], [0, 0, 1, 1])
+    confounded = run([1, 1, 0, 0], ["top", "top", "bottom", "bottom"], [0, 0, 1, 1])
     assert np.isnan(confounded["odds_ratio_mh"]) and np.isnan(confounded["p_value_mh"])
-    assert run([1, 1, 0, 0], ["top", "top", "middle", "middle"], None)[["odds_ratio_mh", "p_value_mh"]].isna().all()
+    assert run([1, 1, 0, 0], ["top", "top", "bottom", "bottom"], None)[["odds_ratio_mh", "p_value_mh"]].isna().all()
 
 
 def test_score_association(extraction, capsys, monkeypatch):
@@ -809,7 +807,7 @@ def test_pathology_topics_keep_patient_identity_across_landmarks(extraction, mon
     coverage = pd.read_csv(env["OUTPUT_DIR"] / "pathology_topic_continuous_coverage.csv")
     assert coverage["patients_with_embedded_report"].tolist() == [20, 20, 19]
     enrichment = pd.read_csv(env["OUTPUT_DIR"] / "pathology_topic_enrichment.csv")
-    bottom = enrichment[enrichment["group"].eq("bottom") & enrichment["control"].eq("middle")]
+    bottom = enrichment[enrichment["group"].eq("bottom") & enrichment["control"].eq("top")]
     assert bottom.groupby("landmark")["n_group"].first().to_dict() == {0: 2, 90: 2, 180: 1}
 
 
@@ -942,3 +940,36 @@ def test_pre_landmark_cross_note_notebooks_run_end_to_end(extraction, monkeypatc
         assert len(env["reports_by_lm"][lm]) == 60
     for name in ("term_enrichment", "lexicon_enrichment", "score_association", "topic_continuous_association"):
         assert (env["OUTPUT_DIR"] / f"clinical_notes_{name}.csv").exists()
+
+
+@pytest.mark.parametrize("notebook", [ANALYSIS_NOTEBOOK, PRE_NOTEBOOK, CROSS_NOTEBOOK, PRE_CROSS_NOTEBOOK])
+@pytest.mark.parametrize("constant_risk", [False, True])
+def test_continuous_tfidf_notebooks_use_all_patients_and_global_fdr(extraction, tmp_path, notebook, constant_risk):
+    from COMPASS.multivariable_models import text_tfidf_association as tfa
+    env, scores = extraction
+    if constant_risk:
+        scores["risk_score"] = 1.0  # no decile contrast exists; continuous output must still be well-defined
+    cross = "clinical_notes" in notebook.name
+    if cross:
+        _write_cross_inputs(env, scores, tmp_path)
+    else:
+        _write_term_inputs(env, scores)
+    if notebook.parent == PRE_DIR:
+        _set_anchor(env, "2022-01-01")
+    _run_analysis(env, "risk-scores", "reports", "term-enrichment", "tfidf-continuous", notebook=notebook)
+    prefix = "clinical_notes" if cross else "pathology"
+    result = pd.read_csv(env["OUTPUT_DIR"] / f"{prefix}_tfidf_risk_association.csv")
+    assert list(result.columns) == tfa.RESULT_COLUMNS
+    assert result["n_patients"].eq(20).all()  # includes all sixteen middle-risk patients
+    assert set(result["method"]) == {"spearman", "ols_adjusted"}
+    assert set(result["landmark"]) == {0, 90, 180}
+    assert not {"DFCI_MRN", "RPT_ID", "RPT_TEXT"}.intersection(result.columns)
+    if constant_risk:
+        assert result["status"].str.contains("constant risk").all()
+        assert result["p_value"].isna().all() and result["q_value"].isna().all()
+    else:
+        for _, sub in result.groupby("method"):
+            np.testing.assert_allclose(sub["q_value"], env["bh_qvalues"](sub["p_value"]), equal_nan=True)
+        assert result.query("method == 'spearman'")["status"].eq("ok").any()
+    coverage = pd.read_csv(env["OUTPUT_DIR"] / f"{prefix}_tfidf_risk_coverage.csv")
+    assert coverage["patients_with_report"].eq(20).all()

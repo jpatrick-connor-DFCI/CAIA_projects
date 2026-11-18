@@ -94,8 +94,8 @@ COMPASS/
 │   │   ├── post_landmark/                # 11-12 plus 13-16 on notes AFTER each landmark (ADT + lm < date <= ADT + 10 y)
 │   │   │   ├── 11_LR_for_IHC.ipynb           # risk score -> future prostate IHC / NE-positive IHC
 │   │   │   ├── 12_review_false_pos.ipynb     # LLM NE gate audit: gated vs ungated labels, review sheets
-│   │   │   ├── 13_pathology_topics_vs_risk.ipynb # pathology terms/lexicon vs risk
-│   │   │   ├── 14_clinical_notes_topics_vs_risk.ipynb # same across Clinician/Imaging/Pathology notes
+│   │   │   ├── 13_pathology_topics_vs_risk.ipynb # continuous TF-IDF vs risk; supplementary decile/lexicon comparisons
+│   │   │   ├── 14_clinical_notes_topics_vs_risk.ipynb # same on pooled Clinician/Imaging/Pathology notes
 │   │   │   ├── 15_pathology_bertopic_vs_risk.ipynb # BERTopic on pathology reports; topic enrichment + continuous risk
 │   │   │   └── 16_clinical_notes_bertopic_vs_risk.ipynb # shared BERTopic across note types; pooled + per-type risk
 │   │   └── pre_landmark/                 # 13-16 again on notes UP TO each landmark (date <= ADT + lm, pre-ADT included)
