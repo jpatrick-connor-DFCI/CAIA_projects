@@ -171,51 +171,29 @@ def _write_term_inputs(env, scores):
     return notes
 
 
-def test_term_enrichment_contrasts_top_with_bottom_on_post_landmark_reports(extraction, capsys):
+def test_term_matrices_use_post_landmark_reports(extraction, capsys):
     env, scores = extraction
-    ids = IDS
     _write_term_inputs(env, scores)
-    _run_analysis(env, 'risk-scores', 'reports', 'term-enrichment', 'term-display')
+    _run_analysis(env, 'risk-scores', 'reports', 'term-enrichment')
 
-    all_res = pd.read_csv(env["OUTPUT_DIR"] / "pathology_term_enrichment.csv")
-    assert set(zip(all_res["group"], all_res["control"])) == {
-        ("top", "bottom"), ("bottom", "top")}          # no comparison against the middle 80%
-    assert (all_res["n_group"] == 2).all() and (all_res["n_control"] == 2).all()
-    res = all_res
+    assert not (env["OUTPUT_DIR"] / "pathology_term_enrichment.csv").exists()   # Fisher / MH enrichment removed
     for lm in (0, 90, 180):
-        t = res[(res["landmark"] == lm) & (res["group"] == "top")].set_index("term")
-        assert t.loc["neuroendocrine", "pct_group"] == 1 and t.loc["neuroendocrine", "pct_control"] == 0
-        assert t.loc["neuroendocrine", "p_value"] == pytest.approx(1 / 6)   # 1 / C(4, 2)
-        assert t["p_value"].min() == t.loc["neuroendocrine", "p_value"]
-        assert t.loc["prostate", "pct_control"] == 1
+        ids, terms, present, tfidf = env["term_matrices"][lm]
+        assert len(ids) == 20 and present.shape == tfidf.shape == (20, len(terms))
+        col = {t: i for i, t in enumerate(terms)}
+        has = lambda term: set(ids[np.flatnonzero(present[:, col[term]].toarray().ravel())])
+        assert has("neuroendocrine") == TOP and has("chromogranin") == TOP    # post-landmark at every landmark
+        assert has("ductal") == BOTTOM and "cribriform" not in col            # undated: dropped
+        assert len(has("prostate")) == 20
         # Bigrams stay within one report: "prostate neuroendocrine" would span two.
-        assert "prostate neuroendocrine" not in t.index and "neuroendocrine features" in t.index
-    # Post-landmark reports are used at every landmark; undated reports never are.
-    for term, group in (("chromogranin", "top"), ("ductal", "bottom")):
-        hit = res[res["term"].eq(term) & res["group"].eq(group)]
-        assert set(hit["landmark"]) == {0, 90, 180} and hit["pct_group"].eq(1).all()
-    assert "cribriform" not in set(all_res["term"])
-
-    # Top vs bottom, one-sided in each direction: 2/2 vs 0/2 gives p = 1 / C(4, 2).
-    def contrast(lm, group, control):
-        return all_res[(all_res["landmark"] == lm) & (all_res["group"] == group)
-                       & (all_res["control"] == control)].set_index("term")
-    for lm in (0, 90, 180):
-        assert contrast(lm, "top", "bottom").loc["neuroendocrine", "p_value"] == pytest.approx(1 / 6)
-        assert contrast(lm, "bottom", "top").loc["neuroendocrine", "p_value"] == pytest.approx(1)
-        assert contrast(lm, "top", "bottom").loc["prostate", "pct_control"] == 1
-    for lm in (0, 90, 180):
-        assert contrast(lm, "bottom", "top").loc["ductal", "p_value"] == pytest.approx(1 / 6)
+        assert "prostate neuroendocrine" not in col and "neuroendocrine features" in col
     sizes = env["group_sizes"]
     assert (0, "middle") not in sizes.index      # patients in neither decile are labelled but never analysed
     for lm in (0, 90, 180):
         assert sizes.loc[(lm, "bottom"), "reports"] == 4 and sizes.loc[(lm, "top"), "reports"] == 6   # undated cribriform dropped
 
     output = capsys.readouterr().out
-    assert "Landmark 0 · top 10% vs bottom 10%" in output
-    assert "vs middle" not in output
-    assert "Landmark 180 · bottom 10% vs top 10%" in output
-    assert not any(str(patient_id) in output for patient_id in ids)
+    assert not any(str(patient_id) in output for patient_id in IDS)
     assert "neuroendocrine features present" not in output
 
 
@@ -237,23 +215,23 @@ def test_manifest_flags_are_false_for_middle_and_absent_landmarks(extraction):
     assert patient[flags].eq(False).all()
 
 
-def test_term_enrichment_handles_empty_patient_vocabulary(extraction, capsys):
+def test_term_matrices_handle_empty_patient_vocabulary(extraction, capsys):
     env, scores = extraction
     _write_term_inputs(env, scores)
     env["TERM_MIN_PATIENTS"] = 5
     # Five reports pass min_df, but one distinct patient cannot pass the patient threshold.
     pl.DataFrame({"DFCI_MRN": [IDS[0]] * 5, "EVENT_DATE": ["2019-06-01"] * 5,
                   "RPT_TEXT": ["adenocarcinoma prostate"] * 5}).write_parquet(env["PATHOLOGY_PATH"])
-    _run_analysis(env, 'risk-scores', 'reports', 'term-enrichment', 'term-display')
+    _run_analysis(env, 'risk-scores', 'reports', 'term-enrichment')
 
-    result = pd.read_csv(env["OUTPUT_DIR"] / "pathology_term_enrichment.csv")
-    assert result.empty and list(result.columns) == env["ENRICHMENT_COLS"]
-    assert "Landmark 180 · top 10% vs bottom 10%: no terms" in capsys.readouterr().out
+    assert all(len(env["term_matrices"][lm][1]) == 0 for lm in (0, 90, 180))
+    assert "0 terms kept" in capsys.readouterr().out
 
 
 TOPIC_MODULES = ("zstandard", "bertopic", "umap", "hdbscan")
-TERM_CELLS = ("risk-scores", "reports", "term-enrichment", "term-display")
+TERM_CELLS = ("risk-scores", "reports", "term-enrichment")
 TOPIC_CELLS = ("topic-fit", "topic-enrichment")
+TOPIC_TERM_CELLS = ("risk-scores", "reports", "term-definitions")   # notebook 15's own copies of the shared cells
 
 
 def test_bertopic_section_skips_cleanly_without_packages(extraction, capsys, monkeypatch):
@@ -263,10 +241,10 @@ def test_bertopic_section_skips_cleanly_without_packages(extraction, capsys, mon
         monkeypatch.setitem(sys.modules, name, None)      # import raises ImportError
     env.update(EMBED_METADATA_PATH=Path("/nonexistent/meta.parquet"), EMBED_ARRAY_PATH=Path("/nonexistent/a.npy.zst"),
                TOPIC_MIN_SIZE=2, TOPIC_SEED=0)
-    _run_analysis(env, *TERM_CELLS, *TOPIC_CELLS)
+    _run_analysis(env, *TOPIC_TERM_CELLS, *TOPIC_CELLS, notebook=TOPIC_NOTEBOOK)
     out = capsys.readouterr().out
     assert "BERTopic section skipped (packages not installed: zstandard, bertopic, umap-learn, hdbscan)" in out
-    assert (env["OUTPUT_DIR"] / "pathology_term_enrichment.csv").exists()
+    assert env["reports_by_lm"]
     assert not (env["OUTPUT_DIR"] / "pathology_topics.csv").exists()
     assert not (env["OUTPUT_DIR"] / "pathology_topic_enrichment.csv").exists()
 
@@ -360,7 +338,7 @@ def test_bertopic_enriches_topics_from_precomputed_embeddings_without_leaking_te
     pl.DataFrame(meta).write_parquet(tmp_path / "meta.parquet")
     env.update(EMBED_METADATA_PATH=tmp_path / "meta.parquet", EMBED_ARRAY_PATH=array_path,
                TOPIC_MIN_SIZE=2, TOPIC_SEED=0)
-    _run_analysis(env, *TERM_CELLS, *TOPIC_CELLS)
+    _run_analysis(env, *TOPIC_TERM_CELLS, *TOPIC_CELLS, notebook=TOPIC_NOTEBOOK)
 
     (docs, embeddings, kwargs), = _FakeBERTopic.calls
     assert len(docs) == 26 and embeddings.dtype == np.float32      # every dated (post-landmark) report
@@ -432,65 +410,30 @@ def test_lexicon_enrichment_uses_post_landmark_reports(extraction, capsys, monke
     env, scores = extraction
     _write_extra_inputs(env, scores)
     _no_topic_modules(env, monkeypatch)
-    _run_analysis(env, *TERM_CELLS, *TOPIC_CELLS, 'lexicon')
+    _run_analysis(env, *TERM_CELLS, 'lexicon')
 
     hits = env["lexicon_hits"]("Negative for synaptophysin, chromogranin positive.")
     assert hits == {"NE marker (any)": True, "synaptophysin": True, "chromogranin": True}
     assert "small cell" not in env["lexicon_hits"]("non-small cell carcinoma")
     assert env["lexicon_hits"]("Gleason 3+4=7, grade group 4")["gleason_max"] == 8
 
-    lex = pd.read_csv(env["OUTPUT_DIR"] / "pathology_lexicon_enrichment.csv")
-    assert list(lex.columns) == env["LEXICON_COLS"]
-    assert not lex["feature"].str.contains("negated").any()
+    assert not (env["OUTPUT_DIR"] / "pathology_lexicon_enrichment.csv").exists()   # lexicon enrichment removed
     for lm in (0, 90, 180):
-        x = lex[(lex["landmark"] == lm) & (lex["group"] == "top") & (lex["control"] == "bottom")].set_index("feature")
-        assert x.loc["NE term (any)", "group_with_feature"] == 2 and x.loc["NE term (any)", "control_with_feature"] == 0
-        assert x.loc["chromogranin", "group_with_feature"] == 2       # report dated after every landmark
-        assert x.loc["Gleason max 8-10", "group_with_feature"] == 2
-        assert x.loc["Gleason max 8-10", "p_value"] == pytest.approx(1 / 6)   # 2/2 top vs 0/2 bottom
-        assert "Gleason max 7" not in x.index and "sarcomatoid" not in x.index      # unseen features are not tested
-        assert "small cell" not in x.index                                      # "non-small cell" is not a mention
-        b = lex[(lex["landmark"] == lm) & (lex["group"] == "bottom") & (lex["control"] == "top")].set_index("feature")
-        assert "cribriform" not in b.index and b.loc["ductal", "group_with_feature"] == 2   # undated: dropped
-    assert "Landmark 0 · curated lexicon" in capsys.readouterr().out
-
-
-def test_mantel_haenszel_adjusts_for_strata(extraction):
-    env, _ = extraction
-    env.update(TERM_NGRAMS=(1, 2), TERM_MIN_PATIENTS=2)
-    for i in ("reports", "term-enrichment"):
-        src = _analysis_source(i)
-        cut = src.index("# Per-landmark group") if i == "reports" else src.index("term_matrices = {}")
-        exec(compile(src[:cut], f"cell_{i}_defs", "exec"), env)
-    from scipy import sparse
-
-    def run(present, label, strata):
-        res = env["fisher_enrichment"](sparse.csr_matrix(np.array(present).reshape(-1, 1)), np.array(label),
-                                       np.array(["f"], dtype=object), 0, None if strata is None else np.array(strata))
-        return res[(res["group"] == "top") & (res["control"] == "bottom")].iloc[0]
-
-    # One stratum: MH odds ratio = the Haldane-corrected odds ratio (zero cell), p from the continuity-corrected MH.
-    one = run([1, 1, 0, 0, 0, 0], ["top", "top", "bottom", "bottom", "bottom", "bottom"], [0] * 6)
-    assert one["odds_ratio_mh"] == pytest.approx(one["odds_ratio"])
-    # Confounding: within each stratum the feature rate is the same in both groups (8/16 vs 2/4, then 0/4 vs 0/16),
-    # but top sits mostly in the stratum where the feature is common, so the pooled Fisher test is significant.
-    label = ["top"] * 16 + ["bottom"] * 4 + ["top"] * 4 + ["bottom"] * 16
-    strata = [0] * 20 + [1] * 20
-    present = [1] * 8 + [0] * 8 + [1] * 2 + [0] * 2 + [0] * 20
-    res = run(present, label, strata)
-    assert res["p_value"] < 0.05
-    assert res["p_value_mh"] > 0.5 and res["odds_ratio_mh"] < res["odds_ratio"] / 3
-    # Strata that never contain both groups carry no information.
-    confounded = run([1, 1, 0, 0], ["top", "top", "bottom", "bottom"], [0, 0, 1, 1])
-    assert np.isnan(confounded["odds_ratio_mh"]) and np.isnan(confounded["p_value_mh"])
-    assert run([1, 1, 0, 0], ["top", "top", "bottom", "bottom"], None)[["odds_ratio_mh", "p_value_mh"]].isna().all()
+        ids, present = env["lexicon_matrices"][lm]
+        df = pd.DataFrame(present.toarray(), index=ids, columns=env["LEXICON_FEATURES"])
+        top, bottom = df.loc[sorted(TOP)], df.loc[sorted(BOTTOM)]
+        assert top["NE term (any)"].sum() == 2 and bottom["NE term (any)"].sum() == 0
+        assert top["chromogranin"].sum() == 2                          # report dated after every landmark
+        assert top["Gleason max 8-10"].sum() == 2 and bottom["Gleason max 8-10"].sum() == 0
+        assert df["small cell"].sum() == 0                             # "non-small cell" is not a mention
+        assert bottom["ductal"].sum() == 2 and df["cribriform"].sum() == 0   # undated: dropped
 
 
 def test_score_association(extraction, capsys, monkeypatch):
     env, scores = extraction
     notes = _write_extra_inputs(env, scores)
     _no_topic_modules(env, monkeypatch)
-    _run_analysis(env, *TERM_CELLS, *TOPIC_CELLS, *EXTRA_CELLS)
+    _run_analysis(env, *TERM_CELLS, *EXTRA_CELLS)
 
     assoc = pd.read_csv(env["OUTPUT_DIR"] / "pathology_score_association.csv")
     assert list(assoc.columns) == env["ASSOC_COLS"]
@@ -594,7 +537,10 @@ def test_analysis_runs_standalone_without_export_or_local_endpoint_data(extracti
     env.update(CONTINUOUS_MIN_PATIENTS=30, CONTINUOUS_MIN_TOPIC_PATIENTS=5, TOPIC_PERMUTATIONS=99)
     for notebook in (ANALYSIS_NOTEBOOK, TOPIC_NOTEBOOK):
         _run_analysis(env, *_code_cell_ids(notebook), notebook=notebook)
-    assert (env["OUTPUT_DIR"] / "pathology_term_enrichment.csv").exists()
+    for name in ("tfidf_high_vs_low", "tfidf_group_coverage", "score_association"):
+        assert (env["OUTPUT_DIR"] / f"pathology_{name}.csv").exists()
+    for name in ("term_enrichment", "lexicon_enrichment"):
+        assert not (env["OUTPUT_DIR"] / f"pathology_{name}.csv").exists()
     assert not (env["OUTPUT_DIR"] / "patient_manifest.csv").exists()
     assert not (env["OUTPUT_DIR"] / "pathology_reports.json").exists()
     assert not (env["OUTPUT_DIR"] / "pathology_reports.tsv").exists()
@@ -718,8 +664,10 @@ def test_cross_note_full_analysis_joins_by_type_patient_and_report(extraction, m
     assert set(enrichment["note_type"]) == {"All", *env["NOTE_TYPES"]}
     for _, sub in enrichment.groupby(["group", "control"]):
         np.testing.assert_allclose(sub["q_value"], env["bh_qvalues"](sub["p_value"]), equal_nan=True)
-    for name in ("term_enrichment", "lexicon_enrichment", "score_association"):
+    for name in ("tfidf_high_vs_low", "score_association"):
         assert (env["OUTPUT_DIR"] / f"clinical_notes_{name}.csv").exists()
+    for name in ("term_enrichment", "lexicon_enrichment"):
+        assert not (env["OUTPUT_DIR"] / f"clinical_notes_{name}.csv").exists()
     assert not (env["OUTPUT_DIR"] / "clinical_notes_text_classifier.csv").exists()   # classifier removed
     for path in env["OUTPUT_DIR"].glob("*.csv"):
         columns = pd.read_csv(path).columns
@@ -900,9 +848,9 @@ def test_pre_landmark_term_enrichment_runs_on_pre_adt_notes(extraction, capsys):
     _write_term_inputs(env, scores)
     _set_anchor(env, "2022-01-01")   # every dated note precedes ADT start, so all are pre-landmark at every landmark
     _run_pre(env, *TERM_CELLS)
-    all_res = pd.read_csv(env["OUTPUT_DIR"] / "pathology_term_enrichment.csv")
-    assert {"neuroendocrine", "chromogranin", "ductal"} <= set(all_res["term"])
-    assert "cribriform" not in set(all_res["term"])   # undated: dropped
+    terms = set(env["term_matrices"][180][1])
+    assert {"neuroendocrine", "chromogranin", "ductal"} <= terms
+    assert "cribriform" not in terms   # undated: dropped
     sizes = env["group_sizes"]
     for lm in (0, 90, 180):
         assert sizes.loc[(lm, "bottom"), "reports"] == 4 and sizes.loc[(lm, "top"), "reports"] == 6
@@ -937,7 +885,7 @@ def test_pre_landmark_cross_note_notebooks_run_end_to_end(extraction, monkeypatc
     assert len(env["all_notes"]) == 60 and len(env["embed_docs"]) == 58
     for lm in (0, 90, 180):
         assert len(env["reports_by_lm"][lm]) == 60
-    for name in ("term_enrichment", "lexicon_enrichment", "score_association", "topic_continuous_association"):
+    for name in ("tfidf_high_vs_low", "score_association", "topic_continuous_association"):
         assert (env["OUTPUT_DIR"] / f"clinical_notes_{name}.csv").exists()
 
 
