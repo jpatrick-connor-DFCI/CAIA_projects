@@ -10,7 +10,7 @@ import reviewer_sources as src
 import reviewer_specificity as spec
 
 ENDPOINTS = ('avpc', 'nepc')
-FAMILIES = ('xgboost_cox', 'elastic_net_cox', 'predictive_checklist')
+FAMILIES = ('xgboost_cox', 'predictive_checklist')
 PRIMARY_VARIABLES = ('full_cohort', 'metastatic_at_landmark', 'mcrpc_at_landmark')
 EVER_VARIABLES = ('full_cohort', 'metastatic_ever', 'mcrpc_ever')
 IDENTITY = ['endpoint', 'model_family', 'bundle', 'landmark_days', 'config', 'model_horizon_days']
@@ -92,23 +92,20 @@ def select_scores(scores, endpoints=ENDPOINTS, families=FAMILIES, config='both')
     return d
 
 
-def run(scores, meta, variables, n_boot=1000, seed=0):
-    """Subgroup metrics and interaction tests for every endpoint × family × bundle × landmark × horizon."""
+def run(scores, meta, variables, n_boot=50, seed=0):
+    """Subgroup metrics for every endpoint × family × bundle × landmark × horizon."""
     keys = [c for c in IDENTITY if c in scores]
     status = {lm: landmark_subgroups(meta, lm) for lm in sorted(scores.landmark_days.unique())}
-    tables, inters = [], []
+    tables = []
     for key, g in scores.groupby(keys, dropna=False, sort=True):
         ident = dict(zip(keys, key))
         if g.person_id.duplicated().any(): raise ValueError(f'Duplicate patients for {ident}')
         d = g.merge(status[ident['landmark_days']], on='person_id', how='left', validate='one_to_one')
         for v in variables:
             d[v] = d[v].fillna('missing')
-        table, inter = ext.subgroup_metrics(d, list(variables), n_boot=n_boot, seed=seed)
-        tables.append(table.assign(**ident)); inters.append(inter.assign(**ident))
-    metrics = pd.concat(tables, ignore_index=True)
-    interactions = pd.concat(inters, ignore_index=True)
-    interactions = interactions[~interactions.variable.eq('full_cohort')].reset_index(drop=True)
-    return metrics, interactions
+        table, _ = ext.subgroup_metrics(d, list(variables), n_boot=n_boot, seed=seed)
+        tables.append(table.assign(**ident))
+    return pd.concat(tables, ignore_index=True)
 
 
 def counts(scores, meta):

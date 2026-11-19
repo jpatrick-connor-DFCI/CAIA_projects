@@ -82,14 +82,13 @@ def _big_meta(n=60):
 
 def test_run_one_row_per_level_and_identity():
     s, m = _scores(), _big_meta()
-    metrics, inter = st.run(st.select_scores(s), m, st.PRIMARY_VARIABLES, n_boot=3)
+    metrics = st.run(st.select_scores(s), m, st.PRIMARY_VARIABLES, n_boot=3)
     lm0 = metrics[metrics.landmark_days.eq(0)]
     assert set(lm0.variable) == set(st.PRIMARY_VARIABLES)
     assert lm0.loc[lm0.variable.eq('full_cohort'), 'n'].item() == 60
     # Levels partition the frame for every variable and landmark.
     assert (metrics.groupby(['landmark_days', 'variable']).n.sum() == 60).all()
     assert metrics.loc[metrics.landmark_days.eq(90) & metrics.variable.eq('mcrpc_at_landmark') & metrics.level.eq('yes'), 'n'].item() == 15
-    assert 'full_cohort' not in set(inter.variable)
 
 
 def test_select_scores_rejects_duplicates():
