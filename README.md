@@ -93,7 +93,7 @@ COMPASS/
 │   ├── text_interpretability/            # what the clinical text says about the risk score
 │   │   ├── post_landmark/                # 11-12 plus 13-16 on notes AFTER each landmark (ADT + lm < date <= ADT + 10 y)
 │   │   │   ├── 11_LR_for_IHC.ipynb           # risk score -> future prostate IHC / NE-positive IHC
-│   │   │   ├── 12_review_false_pos.ipynb     # LLM NE gate audit: gated vs ungated labels, review sheets
+│   │   │   ├── 12_lexicon_note_review.ipynb  # lexicon-matching post-landmark notes + patient risk table, for reading
 │   │   │   ├── 13_pathology_topics_vs_risk.ipynb # TF-IDF: top vs bottom decile; term/lexicon comparisons
 │   │   │   ├── 14_clinical_notes_topics_vs_risk.ipynb # same on pooled Clinician/Imaging/Pathology notes
 │   │   │   ├── 15_pathology_bertopic_vs_risk.ipynb # BERTopic on pathology reports; topic enrichment + continuous risk
