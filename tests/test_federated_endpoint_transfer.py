@@ -39,6 +39,17 @@ def _local(n=60, seed=0) -> pd.DataFrame:
             "NEPC_DATE": ANCHOR + pd.Timedelta(days=nepc_day) if nepc else pd.NaT,
             "AVPC": 0,
             "AVPC_DATE": pd.NaT,
+            # Union endpoints (Stage 1): tiers mirror broad NEPC here, except
+            # t1 alone, which keeps only every fourth patient.
+            "NEPC_T1": int(nepc and pid % 4 == 0),
+            "NEPC_T1_DATE": (ANCHOR + pd.Timedelta(days=nepc_day)
+                             if nepc and pid % 4 == 0 else pd.NaT),
+            "NEPC_T1_T2": int(nepc),
+            "NEPC_T1_T2_DATE": ANCHOR + pd.Timedelta(days=nepc_day) if nepc else pd.NaT,
+            "NEPC_T1_T2_T3": int(nepc),
+            "NEPC_T1_T2_T3_DATE": ANCHOR + pd.Timedelta(days=nepc_day) if nepc else pd.NaT,
+            "AVPC_OR_ADJACENT": 0,
+            "AVPC_OR_ADJACENT_DATE": pd.NaT,
         }
         for day in (-30, -10):
             rows.append({**base, "LAB_DATE": ANCHOR + pd.Timedelta(days=day),
@@ -201,7 +212,44 @@ def test_cli_writes_all_outputs(tmp_path):
     for name in ("scores", "metrics", "coverage", "unit_check"):
         assert (out / f"transfer_{name}.csv").exists()
     run = json.loads((out / "transfer_run.json").read_text())
-    assert run["endpoints"] == ["nepc", "avpc", "platinum"]
+    assert run["endpoints"] == list(fet.DEFAULT_ENDPOINTS)
+
+
+def test_default_endpoints_are_tiers_and_avpc_variants():
+    assert fet.DEFAULT_ENDPOINTS == (
+        "nepc_t1", "nepc_t1_t2", "nepc_t1_t2_t3", "avpc", "avpc_or_adjacent", "platinum",
+    )
+    # Broad NEPC is dropped from the defaults but still resolvable.
+    assert "nepc" not in fet.DEFAULT_ENDPOINTS
+    assert fet.ENDPOINT_SOURCES["nepc"] == ("NEPC", "NEPC_DATE")
+    assert fet.ENDPOINT_SOURCES["nepc_t1_t2_t3"] == ("NEPC_T1_T2_T3", "NEPC_T1_T2_T3_DATE")
+    assert fet.ENDPOINT_SOURCES["avpc_or_adjacent"] == (
+        "AVPC_OR_ADJACENT", "AVPC_OR_ADJACENT_DATE",
+    )
+    assert set(fet.DEFAULT_ENDPOINTS) <= set(fet.ENDPOINT_LABELS)
+
+
+def test_tier_endpoint_events_follow_their_own_columns():
+    local = _local()
+    first = {
+        ep: fet.to_federated_long(local, ep, MAPPING)[0]
+        .drop_duplicates(fs.ID_COL).set_index(fs.ID_COL)
+        for ep in ("nepc", "nepc_t1", "nepc_t1_t2_t3")
+    }
+    events = {ep: set(df.index[df[fs.PLATINUM_DATE_COL].notna()]) for ep, df in first.items()}
+    assert events["nepc_t1_t2_t3"] == events["nepc"]
+    assert events["nepc_t1"] and events["nepc_t1"] < events["nepc_t1_t2_t3"]
+    assert all((pid - 1000) % 4 == 0 for pid in events["nepc_t1"])
+
+
+def test_undated_union_positive_is_excluded_from_that_endpoint_only():
+    local = _local()
+    pid = 1000  # NEPC_T1 positive in the fixture
+    local.loc[local["DFCI_MRN"].eq(pid), "NEPC_T1_DATE"] = pd.NaT
+    t1, _ = fet.to_federated_long(local, "nepc_t1", MAPPING)
+    t12, _ = fet.to_federated_long(local, "nepc_t1_t2", MAPPING)
+    assert pid not in set(t1[fs.ID_COL])
+    assert pid in set(t12[fs.ID_COL])
 
 
 def test_missing_endpoint_columns_fail_loudly(tmp_path):

@@ -1,4 +1,7 @@
-"""Federated platinum score on AVPC / NEPC within metastatic and mCRPC subgroups (testing notebook 10).
+"""Federated platinum score on NEPC tiers / AVPC within metastatic and mCRPC subgroups (testing notebook 10).
+
+Endpoints: NEPC pathology-tier sets t1, t1-t2, t1-t3; strict AVPC; AVPC or AVPC-adjacent (see
+survival_common.federated_endpoint_transfer.ENDPOINT_SOURCES).
 
 Subgroup status is judged at each landmark date (ADT anchor + landmark) or, as a retrospective
 sensitivity, ever. Metrics come from `reviewer_extended.subgroup_metrics`; nothing is refit.
@@ -9,7 +12,7 @@ import reviewer_extended as ext
 import reviewer_sources as src
 import reviewer_specificity as spec
 
-ENDPOINTS = ('avpc', 'nepc')
+ENDPOINTS = ('nepc_t1', 'nepc_t1_t2', 'nepc_t1_t2_t3', 'avpc', 'avpc_or_adjacent')
 FAMILIES = ('xgboost_cox', 'predictive_checklist')
 PRIMARY_VARIABLES = ('full_cohort', 'metastatic_at_landmark', 'mcrpc_at_landmark')
 EVER_VARIABLES = ('full_cohort', 'metastatic_ever', 'mcrpc_ever')

@@ -28,7 +28,8 @@ search over item set and M finds the exact optimum without a solver.
 
 **Cross-fitting.** A single patient-level K-fold split is shared by every cohort, clock, landmark and horizon, so
 the cohorts nest fold by fold. Each fold's rule is learned on the other folds' platinum rows, then applied to that
-fold for platinum, AVPC and NEPC. A training fold with fewer than ``MIN_CASES`` cases or ``MIN_CONTROLS`` controls
+fold for platinum and every transfer endpoint in the frozen scores (by default the NEPC tier sets t1, t1-t2 and
+t1-t3, AVPC and AVPC + adjacent; fet.DEFAULT_ENDPOINTS). A training fold with fewer than ``MIN_CASES`` cases or ``MIN_CONTROLS`` controls
 at the horizon, or a horizon its censoring curve cannot support, fails the gate. Its patients then get no trained
 flag, so they leave the paired comparison; no other fold's rule is borrowed for them. A refit on the whole cohort
 (``fold == "all"``) gives the rule one would report. It is descriptive only.
@@ -36,8 +37,8 @@ flag, so they leave the paired comparison; no other fold's rule is borrowed for 
 **Evaluation** is the Figure 6 b metric: horizon AUC of a yes/no rule (the IPCW balanced accuracy,
 fet.fixed_horizon_mean_auc). Intervals come from a joint patient bootstrap, so the deltas against the labs checklist
 are paired. The bootstrap conditions on the out-of-fold flags, so the intervals leave out the uncertainty of
-re-learning the internal checklists. Platinum is the training endpoint (still held out); AVPC and NEPC are transfer
-endpoints.
+re-learning the internal checklists. Platinum is the training endpoint (still held out); the NEPC tier and AVPC
+endpoints are transfer endpoints.
 """
 
 from __future__ import annotations
@@ -493,13 +494,14 @@ def write_extension(out_dir, comparison, rules, patients) -> Path:
     return out_dir
 
 
-def plot_extension(comparison: pd.DataFrame, landmark: int, endpoints=("platinum", "avpc", "nepc")):
+def plot_extension(comparison: pd.DataFrame, landmark: int, endpoints=fet.DEFAULT_ENDPOINTS):
     """Quick look: AUC (95% CI) of every rule, rows = endpoint, columns = cohort, one marker per horizon."""
     import matplotlib.pyplot as plt
 
     d = comparison[comparison["landmark_days"].eq(landmark)]
     cohorts = [c for c in COHORTS if c in set(d["cohort"])]
-    endpoints = [e for e in endpoints if e in set(d["endpoint"])]
+    # Training endpoint first, then the transfer endpoints in their default order.
+    endpoints = sorted((e for e in endpoints if e in set(d["endpoint"])), key=lambda e: e != "platinum")
     horizons = sorted(d["horizon_days"].unique())
     fig, axes = plt.subplots(len(endpoints), len(cohorts), squeeze=False, sharey=True,
                              figsize=(4.2 * len(cohorts), 2.8 * len(endpoints)))
@@ -518,7 +520,7 @@ def plot_extension(comparison: pd.DataFrame, landmark: int, endpoints=("platinum
             if i == 0:
                 ax.set_title(COHORTS[cohort]["label"], fontsize=9)
             if j == 0:
-                ax.set_ylabel(f"{endpoint.upper()} AUC")
+                ax.set_ylabel(f"{fet.ENDPOINT_LABELS.get(endpoint, endpoint.upper())} AUC", fontsize=8)
     axes[0][0].legend(fontsize=7, frameon=False)
     fig.suptitle(f"Labs checklist flag + Gleason / TSG, landmark +{landmark} days "
                  "(internal checklists out of fold, trained on platinum)", fontsize=10)

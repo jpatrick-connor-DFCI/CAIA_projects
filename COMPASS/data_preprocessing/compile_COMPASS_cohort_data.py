@@ -48,9 +48,10 @@ PROFILE_data_processing -- see data_preprocessing_common/oncdrs_sources.py):
                                               birth date, sex, death/last-alive
   * OUTPT_LAB_RESULTS_LABS.csv (--labs-csv)   broad PSA-count flag
   * primary_subtype_labels.parquet (--subtype-labels)
-                                              LLM NEPC/AVPC labels + dates
-                                              (LLM_clinical_annotations
-                                              tasks/nepc + tasks/avpc)
+                                              LLM NEPC (broad + t1-t3 tiers),
+                                              AVPC and AVPC-adjacent labels +
+                                              dates (LLM_clinical_annotations
+                                              tasks/primary_subtype.py)
 
 Outputs (in --out-dir, default NEPC_PROJ_PATH):
   * prostate_icd_data.csv                        (ICD inclusion/exclusion record)
@@ -114,14 +115,19 @@ PROFILE_PATH = '/data/gusev/PROFILE/CLINICAL/'
 ONCDRS_PATH = os.path.join(PROFILE_PATH, 'OncDRS/ALL_2025_03/')
 
 # Per-patient primary-subtype labels from the LLM_clinical_annotations repo
-# (notebooks/primary_subtype.ipynb): a full join of the per-note NEPC
-# (tasks/nepc -> nepc_labels.parquet) and AVPC (tasks/avpc ->
-# avpc_labels.parquet) pipelines, one row per patient, plus primary_label
-# (nepc > avpc > conventional). Supplies all three label-derived endpoints:
-#   nepc_status == "nepc" / nepc_date -> "nepc" endpoint
+# (notebooks/primary_subtype.ipynb, tasks/primary_subtype.py): a full join of
+# the per-note NEPC (nepc_labels.parquet), AVPC (avpc_labels.parquet) and
+# AVPC-adjacent (avpc_adjacent_labels.parquet) pipelines, one row per patient,
+# plus primary_label. Supplies the label-derived endpoints:
+#   nepc_status == "nepc" / nepc_date -> "nepc" (broad; internal DFCI models)
+#   nepc_t1                           -> "nepc_t1"       (pure NEPC)
+#   nepc_t1 | nepc_t2                 -> "nepc_t1_t2"
+#   nepc_t1 | nepc_t2 | nepc_t3       -> "nepc_t1_t2_t3"
 #   is_avpc / avpc_date               -> "avpc" endpoint (taken as-is from the
 #                                        AVPC runner; no criteria-count gate here)
-#   union of the two                  -> AVPC_NEPC joint audit fields
+#   is_avpc | is_avpc_adjacent        -> "avpc_or_adjacent"
+#   NEPC | AVPC                       -> AVPC_NEPC joint audit fields
+# Union endpoints are dated at their earliest dated positive component.
 LLM_ANNOTATIONS_PATH = os.path.join(DATA_PATH, 'LLM_annotations/')
 # *_DATE_SOURCE value for an event date taken from stated_nepc_dx_date because
 # the runner's own date was missing or unparseable.
@@ -686,15 +692,73 @@ def compute_first_platinum(meds: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+# Union endpoints built from the primary-subtype label components. Each
+# component is (flag column, date column, date-precision column, source tag);
+# the tag is what lands in {NAME}_DATE_SOURCE when that component dates the
+# union. AVPC_OR_ADJACENT is independent of every NEPC column.
+_NEPC_T1 = ("nepc_t1", "nepc_t1_date", "nepc_t1_date_precision", "nepc_t1")
+_NEPC_T2 = ("nepc_t2", "nepc_t2_date", "nepc_t2_date_precision", "nepc_t2")
+_NEPC_T3 = ("nepc_t3", "nepc_t3_date", "nepc_t3_date_precision", "nepc_t3")
+UNION_ENDPOINTS = {
+    "NEPC_T1": (_NEPC_T1,),
+    "NEPC_T1_T2": (_NEPC_T1, _NEPC_T2),
+    "NEPC_T1_T2_T3": (_NEPC_T1, _NEPC_T2, _NEPC_T3),
+    "AVPC_OR_ADJACENT": (
+        ("is_avpc", "avpc_date", "avpc_date_precision", "avpc"),
+        ("is_avpc_adjacent", "avpc_adjacent_date",
+         "avpc_adjacent_date_precision", "avpc_adjacent"),
+    ),
+}
+
+
+def union_endpoint(components, name: str) -> list[pl.Expr]:
+    """Expressions for a union endpoint ``name`` over label ``components``.
+
+    ``components`` is a sequence of (flag, date, precision, tag) column/tag
+    tuples. Returns ``{name}`` (1 if any flag is True; null flags count as not
+    positive), ``{name}_DATE`` (the earliest parsed date among the *positive*
+    components; a negative component's date is ignored), and
+    ``{name}_DATE_SOURCE`` / ``{name}_DATE_PRECISION`` (the tag / precision of
+    the component supplying that date; ties go to the first listed). A
+    positive union whose positive components are all undated gets a null
+    date here and is handled by the stated-dx fallback afterwards.
+    """
+    positive = [
+        pl.col(flag).cast(pl.Boolean, strict=False).fill_null(False)
+        for flag, *_ in components
+    ]
+    dated = [
+        pl.when(is_pos).then(parse_mixed_datetime_expr(date_col))
+        .otherwise(pl.lit(None, dtype=pl.Datetime))
+        for is_pos, (_flag, date_col, _prec, _tag) in zip(positive, components)
+    ]
+    earliest = pl.min_horizontal(dated)
+    source = pl.lit(None, dtype=pl.Utf8)
+    precision = pl.lit(None, dtype=pl.Utf8)
+    # Build the when-chain back to front so the first listed component wins ties.
+    for date_expr, (_flag, _date, prec_col, tag) in reversed(list(zip(dated, components))):
+        supplies = date_expr.is_not_null() & (date_expr == earliest)
+        source = pl.when(supplies).then(pl.lit(tag)).otherwise(source)
+        precision = (
+            pl.when(supplies).then(pl.col(prec_col).cast(pl.Utf8)).otherwise(precision)
+        )
+    return [
+        pl.any_horizontal(positive).cast(pl.Int64).alias(name),
+        earliest.alias(f"{name}_DATE"),
+        source.alias(f"{name}_DATE_SOURCE"),
+        precision.alias(f"{name}_DATE_PRECISION"),
+    ]
+
+
 def load_subtype_labels(path) -> pl.DataFrame:
     """Load the LLM NEPC / AVPC / primary-subtype labels keyed by patient.
 
     Written by LLM_clinical_annotations notebooks/primary_subtype.ipynb, which
-    full-joins the per-note pipelines' ``nepc_labels.parquet`` (tasks/nepc) and
-    ``avpc_labels.parquet`` (tasks/avpc) into one row per patient and adds
-    ``primary_label`` (nepc > avpc > conventional). Both endpoints take their
-    diagnosis and date directly from those runners; no criteria-count threshold
-    or other re-gating is applied here:
+    full-joins the per-note pipelines' ``nepc_labels.parquet`` (tasks/nepc),
+    ``avpc_labels.parquet`` (tasks/avpc) and ``avpc_adjacent_labels.parquet``
+    into one row per patient and adds ``primary_label``. Every endpoint takes
+    its diagnosis and date directly from those runners; no criteria-count
+    threshold or other re-gating is applied here:
 
       nepc_status == "nepc" -> NEPC                 (any gated NE finding)
       nepc_date             -> NEPC_DATE
@@ -711,6 +775,22 @@ def load_subtype_labels(path) -> pl.DataFrame:
       avpc_criteria         -> AVPC_CRITERIA        (comma-joined, audit only)
       primary_label         -> PRIMARY_LABEL        (audit only)
 
+    Union endpoints over the NEPC pathology tiers (t1 definitive small-cell /
+    large-cell / high-grade NE carcinoma; t2 poorly differentiated carcinoma
+    with NE features; t3 adenocarcinoma with NE differentiation) and the AVPC
+    arms, built by ``union_endpoint``:
+
+      nepc_t1                     -> NEPC_T1           (+ _DATE/_DATE_SOURCE/
+      nepc_t1 | nepc_t2           -> NEPC_T1_T2           _DATE_PRECISION)
+      nepc_t1 | nepc_t2 | nepc_t3 -> NEPC_T1_T2_T3
+      is_avpc | is_avpc_adjacent  -> AVPC_OR_ADJACENT  (independent of NEPC)
+      avpc_adj_review_status      -> AVPC_ADJ_LABEL_SOURCE
+
+    A union is positive when any component is True; its date is the earliest
+    *dated* positive component, and its date source / precision are that
+    component's (``*_DATE_SOURCE`` holds the component name, e.g. "nepc_t2").
+    A null (unresolved) component counts as not positive, i.e. censored.
+
     ``date_source`` ("stated" vs the note-date fallback, which records earliest
     *documentation* rather than onset) and ``date_precision`` (partial stated
     dates are normalized upstream to the period start) ride through unfiltered
@@ -721,7 +801,8 @@ def load_subtype_labels(path) -> pl.DataFrame:
     it is censored as 0 rather than dropped; the review status is kept in
     ``*_LABEL_SOURCE`` so a sensitivity analysis can exclude them.
 
-    A positive whose own date is missing or unparseable falls back to
+    A positive whose own date is missing or unparseable (for a union: none of
+    its positive components is dated) falls back to
     ``stated_nepc_dx_date`` (the only stated-diagnosis date upstream; the AVPC
     runner records none of its own), with ``*_DATE_SOURCE`` set to
     ``STATED_DX_FALLBACK_SOURCE``. A positive still undated after the fallback
@@ -751,6 +832,17 @@ def load_subtype_labels(path) -> pl.DataFrame:
             "AVPC_LABEL_SOURCE": pl.Utf8,
             "AVPC_N_CRITERIA": pl.Int64,
             "AVPC_CRITERIA": pl.Utf8,
+            **{
+                f"{name}{suffix}": dtype
+                for name in UNION_ENDPOINTS
+                for suffix, dtype in (
+                    ("", pl.Int64),
+                    ("_DATE", pl.Datetime),
+                    ("_DATE_SOURCE", pl.Utf8),
+                    ("_DATE_PRECISION", pl.Utf8),
+                )
+            },
+            "AVPC_ADJ_LABEL_SOURCE": pl.Utf8,
             "PRIMARY_LABEL": pl.Utf8,
         }
     )
@@ -766,12 +858,20 @@ def load_subtype_labels(path) -> pl.DataFrame:
 
     labels = pl.read_parquet(path)
     required = {ID_COL, "nepc_status", "nepc_date", "is_avpc", "avpc_date"}
+    required |= {
+        col
+        for components in UNION_ENDPOINTS.values()
+        for flag, date_col, _precision, _tag in components
+        for col in (flag, date_col)
+    }
     missing = required - set(labels.columns)
     if missing:
         raise ValueError(
             f"{path} is missing expected columns: {sorted(missing)}. Expected the "
             "primary_subtype_labels.parquet schema from LLM_clinical_annotations "
-            "notebooks/primary_subtype.ipynb."
+            "notebooks/primary_subtype.ipynb. The NEPC tier (nepc_t1..t3) and "
+            "AVPC-adjacent columns require labels built at or after "
+            "LLM_clinical_annotations commit 1ee501e; re-run primary_subtype.ipynb."
         )
 
     # Match the upstream writer's exact-integer MRN handling: cast via Float64
@@ -799,6 +899,12 @@ def load_subtype_labels(path) -> pl.DataFrame:
         ("n_avpc_criteria", pl.Int64),
         ("avpc_criteria", pl.Utf8),
         ("primary_label", pl.Utf8),
+        ("avpc_adj_review_status", pl.Utf8),
+        ("nepc_t1_date_precision", pl.Utf8),
+        ("nepc_t2_date_precision", pl.Utf8),
+        ("nepc_t3_date_precision", pl.Utf8),
+        ("avpc_adjacent_date_precision", pl.Utf8),
+        ("avpc_date_precision", pl.Utf8),
     ):
         if optional not in labels.columns:
             labels = labels.with_columns(pl.lit(None, dtype=dtype).alias(optional))
@@ -812,6 +918,7 @@ def load_subtype_labels(path) -> pl.DataFrame:
     for flag, status_col, name in (
         ("nepc_status", "nepc_review_status", "nepc"),
         ("is_avpc", "avpc_review_status", "avpc"),
+        ("is_avpc_adjacent", "avpc_adj_review_status", "avpc_adjacent"),
     ):
         unresolved = labels.filter(pl.col(flag).is_null())
         if len(unresolved):
@@ -837,6 +944,8 @@ def load_subtype_labels(path) -> pl.DataFrame:
         .fill_null(False).cast(pl.Int64).alias("AVPC"),
         pl.col("n_avpc_criteria").cast(pl.Int64, strict=False).alias("AVPC_N_CRITERIA"),
     )
+    for name, components in UNION_ENDPOINTS.items():
+        labels = labels.with_columns(union_endpoint(components, name))
 
     # Positives whose own date is missing/unparseable fall back to the stated
     # NEPC diagnosis date (the only stated-diagnosis date upstream, used for
@@ -853,6 +962,11 @@ def load_subtype_labels(path) -> pl.DataFrame:
     for event, date_col, source_col, precision_col, name in (
         ("NEPC", "NEPC_DATE", "nepc_date_source", "nepc_date_precision", "nepc"),
         ("AVPC", "AVPC_DATE", "avpc_date_source", None, "avpc"),
+        *(
+            (name, f"{name}_DATE", f"{name}_DATE_SOURCE",
+             f"{name}_DATE_PRECISION", name.lower())
+            for name in UNION_ENDPOINTS
+        ),
     ):
         needs_fallback = pl.col(event).eq(1) & pl.col(date_col).is_null()
         fillable = needs_fallback & stated_dx_date.is_not_null()
@@ -896,6 +1010,12 @@ def load_subtype_labels(path) -> pl.DataFrame:
             pl.col("avpc_review_status").cast(pl.Utf8).alias("AVPC_LABEL_SOURCE"),
             "AVPC_N_CRITERIA",
             pl.col("avpc_criteria").cast(pl.Utf8).alias("AVPC_CRITERIA"),
+            *(
+                f"{name}{suffix}"
+                for name in UNION_ENDPOINTS
+                for suffix in ("", "_DATE", "_DATE_SOURCE", "_DATE_PRECISION")
+            ),
+            pl.col("avpc_adj_review_status").cast(pl.Utf8).alias("AVPC_ADJ_LABEL_SOURCE"),
             pl.col("primary_label").cast(pl.Utf8).alias("PRIMARY_LABEL"),
         ]
     )
@@ -1031,6 +1151,8 @@ def build_survival_cohort(
         pl.col('AVPC').fill_null(0).cast(pl.Int64),
         pl.col('NEPC_LABEL_SOURCE').fill_null('missing_from_labels'),
         pl.col('AVPC_LABEL_SOURCE').fill_null('missing_from_labels'),
+        pl.col('AVPC_ADJ_LABEL_SOURCE').fill_null('missing_from_labels'),
+        *(pl.col(name).fill_null(0).cast(pl.Int64) for name in UNION_ENDPOINTS),
     )
 
     # AVPC_NEPC is the union of the two modeled endpoints (audit only, not a
@@ -1161,6 +1283,14 @@ def build_survival_cohort(
             'AVPC_LABEL_SOURCE',
             'AVPC_N_CRITERIA',
             'AVPC_CRITERIA',
+            # Tier / adjacent union endpoints (federated transfer only; no
+            # TT_* since the transfer derives durations from the dates).
+            *(
+                f'{name}{suffix}'
+                for name in UNION_ENDPOINTS
+                for suffix in ('', '_DATE', '_DATE_SOURCE', '_DATE_PRECISION')
+            ),
+            'AVPC_ADJ_LABEL_SOURCE',
             'PRIMARY_LABEL',
         ]
     )
@@ -1301,10 +1431,14 @@ def summarize_survival_cohort(cohort: pl.DataFrame, label="cohort"):
                 "the anchor (prevalent, not incident); the t_avpc > 0 "
                 "landmark filter will exclude them."
             )
+    for name in UNION_ENDPOINTS:
+        if name in cohort.columns:
+            print(f"{name} (transfer endpoint): {int(cohort[name].sum())}")
     # Positives still undated after the stated-dx fallback have a null TT_*
     # and are excluded from that endpoint's analysis (not censored).
     for event_col, date_col in (
         ('NEPC', 'NEPC_DATE'), ('AVPC', 'AVPC_DATE'), ('AVPC_NEPC', 'AVPC_NEPC_DATE'),
+        *((name, f'{name}_DATE') for name in UNION_ENDPOINTS),
     ):
         if event_col not in cohort.columns or date_col not in cohort.columns:
             continue
@@ -1578,7 +1712,11 @@ def main():
         print(
             f"Loaded {len(subtype_df)} primary-subtype labels "
             f"({int(subtype_df['NEPC'].sum())} NEPC positive, "
-            f"{int(subtype_df['AVPC'].sum())} AVPC positive) from "
+            f"{int(subtype_df['AVPC'].sum())} AVPC positive; "
+            + ", ".join(
+                f"{int(subtype_df[name].sum())} {name}" for name in UNION_ENDPOINTS
+            )
+            + ") from "
             f"{args.subtype_labels}"
         )
 

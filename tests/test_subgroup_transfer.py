@@ -94,3 +94,9 @@ def test_run_one_row_per_level_and_identity():
 def test_select_scores_rejects_duplicates():
     s = _scores()
     with pytest.raises(ValueError): st.select_scores(pd.concat([s, s.iloc[:1]]))
+
+
+def test_endpoints_are_tier_and_avpc_transfer_endpoints():
+    from survival_common import federated_endpoint_transfer as fet
+    assert st.ENDPOINTS == ('nepc_t1', 'nepc_t1_t2', 'nepc_t1_t2_t3', 'avpc', 'avpc_or_adjacent')
+    assert set(st.ENDPOINTS) <= set(fet.ENDPOINT_SOURCES)

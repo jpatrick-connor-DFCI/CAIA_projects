@@ -41,3 +41,23 @@ stopifnot(setequal(as.character(score$group),c("Bottom 10%","Top 10%")),
   is.na(score$n[score$group=="Top 10%"]),
   "No patients" %in% suppressMessages(ggplot2::ggplot_build(p))$data[[4]]$label)
 cat("Figure 5 vertical accuracy and visible score deciles passed.\n")
+
+# Notebook 04's six-endpoint export must survive loading and plotting intact.
+metrics <- tidyr::expand_grid(endpoint=FEDERATED_TRANSFER_DEFAULT_ENDPOINTS,landmark_days=c(0,90,180)) %>%
+  mutate(bundle="xgb",model_family="xgboost_cox",config="both",
+    n_patients=1000,n_events=30,mean_auc=.7,mean_auc_lo=.6,mean_auc_hi=.8)
+directory <- tempfile("transfer-endpoints-")
+dir.create(directory)
+readr::write_csv(metrics,file.path(directory,"transfer_metrics.csv"))
+loaded <- load_federated_transfer(directory)
+stopifnot(nrow(loaded)==nrow(metrics),setequal(loaded$endpoint,FEDERATED_TRANSFER_DEFAULT_ENDPOINTS))
+fig <- manuscript_federated_transfer_no_dfci(loaded,include=character(),model_families="xgboost_cox")
+stopifnot(!anyNA(fig$panels[[1]]$data$endpoint_label),
+  length(unique(fig$panels[[1]]$data$endpoint_label))==6L,fig$spec$width>=18)
+
+# A complete six-endpoint checklist grid must no longer be rejected as incomplete.
+full <- tidyr::crossing(endpoint=FEDERATED_TRANSFER_DEFAULT_ENDPOINTS,FEDERATED_CHECKLIST_GRID) %>%
+  mutate(auc=.7,auc_lo=.6,auc_hi=.8)
+stopifnot(!is.null(manuscript_full_checklist_transfer(full,full)),
+  is.null(manuscript_full_checklist_transfer(filter(full,endpoint!="nepc_t1"),full)))
+cat("Six-endpoint transfer loading, discrimination and checklist grids passed.\n")

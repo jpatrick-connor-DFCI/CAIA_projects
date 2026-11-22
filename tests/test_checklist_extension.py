@@ -33,10 +33,10 @@ def _patients(n=400, seed=1):
 
 
 def _scores(pt, seed=2):
-    """Frozen checklist rows for platinum / AVPC / NEPC whose hazard rises with count, Gleason and TP53."""
+    """Frozen checklist rows for platinum / AVPC + adjacent / NEPC t1 whose hazard rises with count, Gleason and TP53."""
     rng = np.random.default_rng(seed)
     rows = []
-    for landmark, horizon, endpoint in product(LANDMARKS, HORIZONS, ("platinum", "avpc", "nepc")):
+    for landmark, horizon, endpoint in product(LANDMARKS, HORIZONS, ("platinum", "avpc_or_adjacent", "nepc_t1")):
         lin = (0.6 * pt["count"] + 0.8 * pt["gleason"].fillna(7).ge(8) + 1.0 * pt["TP53_ANY"]).to_numpy()
         p = 1 / (1 + np.exp(-(lin - 3.0)))
         case = rng.random(len(pt)) < p
@@ -257,3 +257,10 @@ def test_comparison_end_to_end(tmp_path):
     out = ce.write_extension(tmp_path, comparison, rules, patients)
     assert sorted(p.name for p in out.iterdir()) == sorted([ce.COMPARISON_FILE, ce.RULES_FILE, ce.PATIENTS_FILE])
     assert len(pd.read_csv(out / ce.COMPARISON_FILE)) == len(comparison)
+
+
+def test_plot_extension_defaults_to_transfer_endpoints():
+    import inspect
+    default = inspect.signature(ce.plot_extension).parameters["endpoints"].default
+    assert default == ce.fet.DEFAULT_ENDPOINTS
+    assert "nepc" not in default

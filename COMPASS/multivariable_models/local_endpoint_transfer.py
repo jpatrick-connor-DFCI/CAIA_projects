@@ -2,8 +2,8 @@
 
 Compares nested-CV out-of-fold (``cv_oof``) XGBoost risk scores from platinum
 fits trained on the metastatic ADT cohort (arm A) and on the full ADT cohort
-(arms B/C), plus optionally the frozen federated no-DFCI XGBoost (arm F) and
-endpoint-trained fits (arm N, the local ceiling).  Outcomes come from the same
+(arms B/C), plus optionally the frozen federated no-DFCI XGBoost (arm F),
+on the transfer endpoints (NEPC tier sets, AVPC, AVPC + adjacent).  Outcomes come from the same
 chain the federated transfer uses (``federated_endpoint_transfer.to_federated_long``
 + ``federated_scoring.build_landmark_frame``), so numbers are comparable to
 notebook 04.  Arms in one comparison are cut to their shared patients and share
@@ -128,17 +128,15 @@ def compare(outcome: pd.DataFrame, arms: dict[str, pd.Series], *, ref: str | Non
 def evaluate_metastatic_transfer(
     local: pd.DataFrame, lab_mapping: dict, *, landmarks, endpoints,
     met_paths: dict, all_paths: dict, federated_scores_path=None,
-    ceiling_paths: dict | None = None, n_bootstrap: int = 200, seed: int = 0,
+    n_bootstrap: int = 200, seed: int = 0,
 ) -> pd.DataFrame:
-    """Run arms A/B/C/F (and N) for every endpoint x landmark.
+    """Run arms A/B/C/F for every endpoint x landmark.
 
     ``met_paths`` / ``all_paths``: ``{(landmark, config): risk-file path}`` for the
     platinum fit on the metastatic / full cohort (config "both" or "baseline").
-    ``ceiling_paths``: ``{(cohort, landmark, config): path}`` for endpoint-trained
-    NEPC fits, scored on their own endpoint only.
 
     ``comparison`` separates local A/B and C results from optional federated
-    comparisons on their own shared patients and the NEPC ceiling results.
+    comparisons on their own shared patients.
     """
     tables = []
 
@@ -179,17 +177,4 @@ def evaluate_metastatic_transfer(
                 add(compare(out, {**c, **fed}, ref="F",
                             n_bootstrap=n_bootstrap, seed=seed),
                     population="full", comparison="federated", **tag)
-    if ceiling_paths:
-        for cohort in sorted({c for c, _, _ in ceiling_paths}):
-            for lm in landmarks:
-                n_arms = {("N" if cfg == "both" else "N" + BASELINE_SUFFIX):
-                          load_oof_scores(p, "nepc")
-                          for (c, l, cfg), p in ceiling_paths.items() if c == cohort and l == lm}
-                if not n_arms:
-                    continue
-                out = endpoint_outcomes(local, "nepc", lm, lab_mapping)
-                add(compare(out, n_arms, n_bootstrap=n_bootstrap, seed=seed),
-                    endpoint="nepc", landmark=lm, population=f"{cohort} (own cohort)",
-                    comparison="ceiling",
-                    n_endpoint_cohort=len(out), n_in_met_cohort=np.nan, events_in_met_cohort=np.nan)
     return pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()

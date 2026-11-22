@@ -7,7 +7,8 @@ would silently corrupt the join: MRN normalization (labels arrive as strings,
 sometimes with a trailing ".0" from a float round-trip), unresolved labels
 being censored rather than dropped, undated positives falling back to the
 stated NEPC diagnosis date and otherwise being excluded from that endpoint
-(null TT_*) rather than censored, AVPC taken as-is from
+(null TT_*) rather than censored, the NEPC-tier and AVPC + adjacent union
+endpoints (earliest dated positive component), AVPC taken as-is from
 the runner (no criteria-count gate), and the non-fatal missing-file path that
 keeps the platinum pipeline working when the LLM annotations are not mounted.
 """
@@ -39,8 +40,33 @@ EXPECTED_COLUMNS = [
     "AVPC_LABEL_SOURCE",
     "AVPC_N_CRITERIA",
     "AVPC_CRITERIA",
+    *(
+        f"{name}{suffix}"
+        for name in ("NEPC_T1", "NEPC_T1_T2", "NEPC_T1_T2_T3", "AVPC_OR_ADJACENT")
+        for suffix in ("", "_DATE", "_DATE_SOURCE", "_DATE_PRECISION")
+    ),
+    "AVPC_ADJ_LABEL_SOURCE",
     "PRIMARY_LABEL",
 ]
+
+# Columns introduced by LLM_clinical_annotations 1ee501e (NEPC tiers and the
+# AVPC-adjacent pipeline); the flags and dates are required by the reader.
+_TIER_ADJ_NEGATIVE = {
+    "nepc_t1": [False],
+    "nepc_t1_date": [None],
+    "nepc_t1_date_precision": [None],
+    "nepc_t2": [False],
+    "nepc_t2_date": [None],
+    "nepc_t2_date_precision": [None],
+    "nepc_t3": [False],
+    "nepc_t3_date": [None],
+    "nepc_t3_date_precision": [None],
+    "avpc_date_precision": [None],
+    "avpc_adj_review_status": ["ok"],
+    "is_avpc_adjacent": [False],
+    "avpc_adjacent_date": [None],
+    "avpc_adjacent_date_precision": [None],
+}
 
 
 def _label_rows(**overrides) -> dict:
@@ -60,6 +86,7 @@ def _label_rows(**overrides) -> dict:
         "avpc_date": [None],
         "n_avpc_criteria": [0],
         "avpc_criteria": [[]],
+        **_TIER_ADJ_NEGATIVE,
     }
     row.update(overrides)
     return row
@@ -83,6 +110,10 @@ def _write_labels(tmp_path, rows: dict):
         "avpc_date": pl.Utf8,
         "n_avpc_criteria": pl.Int64,
         "avpc_criteria": pl.List(pl.Utf8),
+        **{
+            k: (pl.Boolean if k.startswith(("nepc_t", "is_")) and "date" not in k else pl.Utf8)
+            for k in _TIER_ADJ_NEGATIVE
+        },
     }
     assert all(len(v) == n for v in rows.values())
     pl.DataFrame(rows, schema={k: schema[k] for k in rows}).write_parquet(path)
@@ -255,13 +286,147 @@ class TestLoadSubtypeLabels:
                 "nepc_date": ["2021-06-15"],
                 "is_avpc": [False],
                 "avpc_date": [None],
+                "nepc_t1": [True],
+                "nepc_t1_date": ["2021-06-15"],
+                "nepc_t2": [False],
+                "nepc_t2_date": [None],
+                "nepc_t3": [False],
+                "nepc_t3_date": [None],
+                "is_avpc_adjacent": [False],
+                "avpc_adjacent_date": [None],
             },
-            schema_overrides={"avpc_date": pl.Utf8},
+            schema_overrides={
+                c: pl.Utf8
+                for c in ("avpc_date", "nepc_t2_date", "nepc_t3_date", "avpc_adjacent_date")
+            },
         ).write_parquet(path)
         out = load_subtype_labels(path)
         assert out.columns == EXPECTED_COLUMNS
         assert out["NEPC"].to_list() == [1]
         assert out["NEPC_STATED_DX"].to_list() == [None]
+        assert out["NEPC_T1"].to_list() == [1]
+        assert out["NEPC_T1_DATE_PRECISION"].to_list() == [None]
+        assert out["AVPC_ADJ_LABEL_SOURCE"].to_list() == [None]
+
+    @pytest.mark.parametrize("col", ["nepc_t1", "nepc_t2_date", "is_avpc_adjacent"])
+    def test_missing_tier_or_adjacent_column_raises(self, tmp_path, col):
+        """Pre-1ee501e label files must fail loudly, not silently zero the tiers."""
+        rows = _label_rows()
+        del rows[col]
+        with pytest.raises(ValueError, match="1ee501e"):
+            load_subtype_labels(_write_labels(tmp_path, rows))
+
+
+class TestUnionEndpoints:
+    """NEPC tier unions and AVPC + adjacent: OR of components, dated at the
+    earliest dated positive component, with that component's source/precision."""
+
+    def _load(self, tmp_path, **overrides):
+        return load_subtype_labels(
+            _write_labels(tmp_path, _label_rows(**overrides))
+        ).row(0, named=True)
+
+    def test_t1_only_patient_positive_in_every_tier_set(self, tmp_path):
+        row = self._load(
+            tmp_path, nepc_t1=[True], nepc_t1_date=["2021-03-01"],
+            nepc_t1_date_precision=["day"],
+        )
+        for name in ("NEPC_T1", "NEPC_T1_T2", "NEPC_T1_T2_T3"):
+            assert row[name] == 1
+            assert row[f"{name}_DATE"] == dt.datetime(2021, 3, 1)
+            assert row[f"{name}_DATE_SOURCE"] == "nepc_t1"
+            assert row[f"{name}_DATE_PRECISION"] == "day"
+        assert row["AVPC_OR_ADJACENT"] == 0
+
+    def test_t3_only_patient_only_in_widest_set(self, tmp_path):
+        row = self._load(tmp_path, nepc_t3=[True], nepc_t3_date=["2021-05-01"])
+        assert row["NEPC_T1"] == 0 and row["NEPC_T1_DATE"] is None
+        assert row["NEPC_T1_T2"] == 0 and row["NEPC_T1_T2_DATE"] is None
+        assert row["NEPC_T1_T2_T3"] == 1
+        assert row["NEPC_T1_T2_T3_DATE"] == dt.datetime(2021, 5, 1)
+        assert row["NEPC_T1_T2_T3_DATE_SOURCE"] == "nepc_t3"
+
+    def test_earliest_positive_component_dates_the_union(self, tmp_path):
+        row = self._load(
+            tmp_path,
+            nepc_t1=[True], nepc_t1_date=["2021-09-01"], nepc_t1_date_precision=["day"],
+            nepc_t2=[True], nepc_t2_date=["2021-02-01"], nepc_t2_date_precision=["month"],
+        )
+        assert row["NEPC_T1_DATE"] == dt.datetime(2021, 9, 1)
+        assert row["NEPC_T1_T2_DATE"] == dt.datetime(2021, 2, 1)
+        assert row["NEPC_T1_T2_DATE_SOURCE"] == "nepc_t2"
+        assert row["NEPC_T1_T2_DATE_PRECISION"] == "month"
+
+    def test_negative_component_date_is_ignored(self, tmp_path):
+        row = self._load(
+            tmp_path,
+            nepc_t1=[True], nepc_t1_date=["2021-09-01"],
+            nepc_t2=[False], nepc_t2_date=["2020-01-01"],
+        )
+        assert row["NEPC_T1_T2_DATE"] == dt.datetime(2021, 9, 1)
+        assert row["NEPC_T1_T2_DATE_SOURCE"] == "nepc_t1"
+
+    def test_undated_component_defers_to_dated_positive(self, tmp_path):
+        row = self._load(
+            tmp_path,
+            nepc_t1=[True], nepc_t1_date=[None],
+            nepc_t2=[True], nepc_t2_date=["2021-04-01"],
+        )
+        assert row["NEPC_T1"] == 1
+        assert row["NEPC_T1_T2_DATE"] == dt.datetime(2021, 4, 1)
+        assert row["NEPC_T1_T2_DATE_SOURCE"] == "nepc_t2"
+
+    def test_all_undated_falls_back_to_stated_dx_then_null(self, tmp_path):
+        rows = {k: v * 2 for k, v in _label_rows().items()}
+        rows.update(
+            DFCI_MRN=["1001", "1002"],
+            nepc_t1=[True, True],
+            nepc_t1_date=[None, None],
+            nepc_t1_date_precision=["day", "day"],
+            stated_nepc_dx_date=["2021-08-01", None],
+            is_avpc_adjacent=[True, True],
+        )
+        out = load_subtype_labels(_write_labels(tmp_path, rows))
+        by_mrn = {r["DFCI_MRN"]: r for r in out.iter_rows(named=True)}
+        filled, undated = by_mrn[1001], by_mrn[1002]
+        assert filled["NEPC_T1_DATE"] == dt.datetime(2021, 8, 1)
+        assert filled["NEPC_T1_DATE_SOURCE"] == "stated_dx_fallback"
+        assert filled["NEPC_T1_DATE_PRECISION"] is None
+        assert filled["AVPC_OR_ADJACENT_DATE_SOURCE"] == "stated_dx_fallback"
+        for name in ("NEPC_T1", "NEPC_T1_T2", "NEPC_T1_T2_T3", "AVPC_OR_ADJACENT"):
+            assert undated[name] == 1 and undated[f"{name}_DATE"] is None
+
+    def test_null_components_are_censored(self, tmp_path):
+        row = self._load(
+            tmp_path, nepc_t1=[None], nepc_t2=[None], nepc_t3=[None],
+            is_avpc=[None], is_avpc_adjacent=[None],
+            avpc_adj_review_status=["failed"],
+        )
+        for name in ("NEPC_T1", "NEPC_T1_T2", "NEPC_T1_T2_T3", "AVPC_OR_ADJACENT"):
+            assert row[name] == 0 and row[f"{name}_DATE"] is None
+        assert row["AVPC_ADJ_LABEL_SOURCE"] == "failed"
+
+    def test_avpc_or_adjacent_union_independent_of_nepc(self, tmp_path):
+        row = self._load(
+            tmp_path,
+            nepc_status=["nepc"], nepc_date=["2019-01-01"],
+            nepc_t1=[True], nepc_t1_date=["2019-01-01"],
+            is_avpc=[True], avpc_date=["2021-06-01"], avpc_date_precision=["day"],
+            is_avpc_adjacent=[True], avpc_adjacent_date=["2020-06-01"],
+            avpc_adjacent_date_precision=["month"],
+        )
+        assert row["AVPC"] == 1 and row["AVPC_DATE"] == dt.datetime(2021, 6, 1)
+        assert row["AVPC_OR_ADJACENT"] == 1
+        assert row["AVPC_OR_ADJACENT_DATE"] == dt.datetime(2020, 6, 1)
+        assert row["AVPC_OR_ADJACENT_DATE_SOURCE"] == "avpc_adjacent"
+        assert row["AVPC_OR_ADJACENT_DATE_PRECISION"] == "month"
+
+    def test_adjacent_only_patient_is_not_strict_avpc(self, tmp_path):
+        row = self._load(
+            tmp_path, is_avpc_adjacent=[True], avpc_adjacent_date=["2020-06-01"],
+        )
+        assert row["AVPC"] == 0
+        assert row["AVPC_OR_ADJACENT"] == 1
 
 
 class TestBuildSurvivalCohortLabels:
@@ -306,6 +471,9 @@ class TestBuildSurvivalCohortLabels:
         assert by_mrn[1002]["TT_NEPC"] == 731
         assert by_mrn[1002]["TT_AVPC"] == 731
         assert by_mrn[1001]["NEPC_LABEL_SOURCE"] == "ok"
+        for col in ("NEPC_T1", "NEPC_T1_T2", "NEPC_T1_T2_T3", "AVPC_OR_ADJACENT"):
+            assert by_mrn[1002][col] == 0
+        assert by_mrn[1002]["AVPC_ADJ_LABEL_SOURCE"] == "missing_from_labels"
 
     def test_event_times_for_nepc_and_avpc(self, tmp_path):
         rows = {k: v * 2 for k, v in _label_rows().items()}
@@ -398,6 +566,8 @@ class TestBuildSurvivalCohortLabels:
         assert row["AVPC"] == 0
         assert row["AVPC_NEPC"] == 0
         assert row["NEPC_LABEL_SOURCE"] == "missing_from_labels"
+        assert row["NEPC_T1_T2_T3"] == 0
+        assert row["AVPC_OR_ADJACENT"] == 0
 
     def test_output_schema_carries_label_columns(self, tmp_path):
         by_mrn = self._cohort(tmp_path, [4001], _label_rows(DFCI_MRN=["4001"]))
@@ -409,8 +579,59 @@ class TestBuildSurvivalCohortLabels:
             "AVPC_NEPC_LABEL_SOURCE", "AVPC_DATE", "TT_AVPC", "AVPC",
             "AVPC_DATE_SOURCE",
             "AVPC_LABEL_SOURCE", "AVPC_N_CRITERIA", "AVPC_CRITERIA",
-            "PRIMARY_LABEL",
+            "PRIMARY_LABEL", "AVPC_ADJ_LABEL_SOURCE",
+            *(
+                f"{name}{suffix}"
+                for name in ("NEPC_T1", "NEPC_T1_T2", "NEPC_T1_T2_T3", "AVPC_OR_ADJACENT")
+                for suffix in ("", "_DATE", "_DATE_SOURCE", "_DATE_PRECISION")
+            ),
         }
         missing = expected - set(by_mrn[4001])
         assert not missing, f"build_survival_cohort dropped label columns: {sorted(missing)}"
         assert not any("TIMELINE" in c for c in by_mrn[4001])
+
+
+def test_union_endpoints_propagate_through_stage2(tmp_path):
+    """Stage 1 cohort CSV -> Stage 2 long frame keeps the union indicators
+    (as int) and dates (as datetimes); no t_* is derived for them."""
+    import numpy as np
+    import pandas as pd
+
+    from COMPASS.data_preprocessing import longitudinal_data_processing as ldp
+
+    rows = {k: v * 2 for k, v in _label_rows().items()}
+    rows.update(
+        DFCI_MRN=["5001", "5002"],
+        nepc_t2=[True, False], nepc_t2_date=["2020-05-01", None],
+        is_avpc_adjacent=[False, True], avpc_adjacent_date=[None, "2020-07-01"],
+    )
+    mrns = [5001, 5002]
+    status_df, anchor_df, platinum_df = TestBuildSurvivalCohortLabels()._base_cohort_frames(mrns)
+    cohort = build_survival_cohort(
+        mrns, anchor_df, platinum_df, status_df,
+        load_subtype_labels(_write_labels(tmp_path, rows)),
+    )
+    cohort.write_csv(tmp_path / "cohort.csv")
+    death_df = ldp.load_death_df_from_survival_cohort(tmp_path / "cohort.csv")
+    pred, _ = ldp.build_longitudinal_prediction_data(
+        pd.DataFrame({
+            "DFCI_MRN": mrns, "DATE": pd.to_datetime(["2019-12-01"] * 2),
+            "collapsed_measurement": "Hemoglobin",
+            "numeric_result_standardized": np.array([11.0, 12.0]), "RAW_TEST_CODE": "HGB",
+        }),
+        pd.DataFrame({"DFCI_MRN": mrns, "DIAGNOSIS_DATE": pd.to_datetime(["2015-01-01"] * 2)}),
+        death_df,
+        pd.DataFrame({"DFCI_MRN": pd.Series([], dtype=int), "medication": [],
+                      "medication_start_time": []}),
+        pd.DataFrame({"DFCI_MRN": mrns,
+                      "TREATMENT_ANCHOR_DATE": pd.to_datetime(["2020-01-01"] * 2)}),
+    )
+    pt = pred.drop_duplicates("DFCI_MRN").set_index("DFCI_MRN")
+    assert set(ldp.TRANSFER_UNION_COLS) <= set(pred.columns)
+    assert pt.loc[5001, "NEPC_T1_T2"] == 1 and pt.loc[5001, "NEPC_T1"] == 0
+    assert pt.loc[5001, "NEPC_T1_T2_DATE"] == pd.Timestamp("2020-05-01")
+    assert pt.loc[5001, "NEPC_T1_T2_DATE_SOURCE"] == "nepc_t2"
+    assert pt.loc[5002, "AVPC_OR_ADJACENT"] == 1 and pt.loc[5002, "AVPC"] == 0
+    assert pt.loc[5002, "AVPC_OR_ADJACENT_DATE"] == pd.Timestamp("2020-07-01")
+    assert pred["NEPC_T1_T2_T3"].dtype.kind == "i"
+    assert not any(c.lower().startswith(("t_nepc_t", "t_avpc_or")) for c in pred.columns)

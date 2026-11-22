@@ -31,6 +31,15 @@ from data_preprocessing_common.projects.compass_profile import (  # noqa: E402
 
 ID_COL = "DFCI_MRN"
 AGE_COL = "AGE_AT_TREATMENTSTART"
+# Stage-1 union endpoints (NEPC pathology tiers; strict AVPC OR AVPC-adjacent)
+# used only by the federated transfer; see compile_COMPASS_cohort_data
+# UNION_ENDPOINTS. Carried through as indicator/date/date-source/precision.
+TRANSFER_UNION_ENDPOINTS = ("NEPC_T1", "NEPC_T1_T2", "NEPC_T1_T2_T3", "AVPC_OR_ADJACENT")
+TRANSFER_UNION_COLS = tuple(
+    f"{name}{suffix}"
+    for name in TRANSFER_UNION_ENDPOINTS
+    for suffix in ("", "_DATE", "_DATE_SOURCE", "_DATE_PRECISION")
+)
 
 DATA_ROOT = Path("/data/gusev/USERS/jpconnor/data")
 EMBED_PROJ_PATH = DATA_ROOT / "clinical_text_embedding_project"
@@ -236,6 +245,7 @@ def load_death_df_from_survival_cohort(survival_cohort_csv: Path) -> pd.DataFram
             "NEPC_LABEL_SOURCE",
             "AVPC",
             "AVPC_DATE",
+            *TRANSFER_UNION_COLS,
         )
         if col in death_df.columns
     )
@@ -564,6 +574,10 @@ def build_longitudinal_prediction_data(
         date_cols.append("NEPC_DATE")
     if "AVPC_DATE" in pred_df.columns:
         date_cols.append("AVPC_DATE")
+    date_cols.extend(
+        f"{name}_DATE" for name in TRANSFER_UNION_ENDPOINTS
+        if f"{name}_DATE" in pred_df.columns
+    )
     for col in date_cols:
         pred_df[col] = coerce_mixed_datetime(pred_df[col]).dt.floor("D")
 
@@ -678,6 +692,15 @@ def build_longitudinal_prediction_data(
             pred_df["AVPC"].eq(1), pred_df["t_avpc"].fillna(pred_df["t_last_contact"])
         )
 
+    # NEPC-tier and AVPC + adjacent union endpoints (federated transfer only):
+    # indicator + date carried through; no t_* since no internal model uses
+    # them and the transfer derives durations from the dates itself.
+    for name in TRANSFER_UNION_ENDPOINTS:
+        if name in pred_df.columns:
+            pred_df[name] = (
+                pd.to_numeric(pred_df[name], errors="coerce").fillna(0).astype(int)
+            )
+
     # Patients who never received a highlighted drug have no anchor date, so every
     # anchor-relative duration is NaN and they are dropped by the outcome builder's
     # notna() validity checks. No separate anchor index column is emitted: the
@@ -720,6 +743,8 @@ def build_longitudinal_prediction_data(
     # AVPC endpoint columns, same append-only-if-present contract as NEPC.
     avpc_cols = ["AVPC", "AVPC_DATE", "t_avpc"]
     ordered_cols.extend(col for col in avpc_cols if col in pred_df.columns)
+    # Union transfer endpoints, same append-only-if-present contract.
+    ordered_cols.extend(col for col in TRANSFER_UNION_COLS if col in pred_df.columns)
     return pred_df[ordered_cols].copy(), attrition
 
 

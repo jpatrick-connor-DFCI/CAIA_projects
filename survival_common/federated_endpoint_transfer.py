@@ -6,6 +6,11 @@ DFCI has fine-grained LLM-derived NEPC and AVPC labels and dates, so this module
 asks: does the platinum-trained risk score also rank patients by time to NEPC
 and time to AVPC on the full local ADT cohort?
 
+Default endpoints (``DEFAULT_ENDPOINTS``): pure NEPC (pathology tier t1), NEPC
+t1 or t2, NEPC t1, t2 or t3, strict AVPC, strict AVPC or AVPC-adjacent, and
+platinum.  The broad ``nepc`` endpoint stays in ``ENDPOINT_SOURCES`` but is not
+run by default.
+
 Pipeline:
 
 1. Read the Stage-2 ADT long frame (``longitudinal_prediction_data_adt.csv``)
@@ -89,10 +94,34 @@ LOCAL_COLUMNS = {
 # masked by its indicator before use.
 ENDPOINT_SOURCES = {
     "platinum": ("PLATINUM", "PLATINUM_DATE"),
+    # Broad NEPC (any gated NE finding). Kept resolvable for old outputs and
+    # ad-hoc runs; no longer a default transfer endpoint.
     "nepc": ("NEPC", "NEPC_DATE"),
+    # NEPC pathology tiers: t1 definitive small-cell / large-cell / high-grade
+    # NE carcinoma; t2 poorly differentiated carcinoma with NE features; t3
+    # adenocarcinoma with NE differentiation.  Unions dated at the earliest
+    # dated positive tier (Stage 1, compile_COMPASS_cohort_data.union_endpoint).
+    "nepc_t1": ("NEPC_T1", "NEPC_T1_DATE"),
+    "nepc_t1_t2": ("NEPC_T1_T2", "NEPC_T1_T2_DATE"),
+    "nepc_t1_t2_t3": ("NEPC_T1_T2_T3", "NEPC_T1_T2_T3_DATE"),
+    # Strict AVPC (the AVPC runner's is_avpc), and strict AVPC OR AVPC-adjacent.
+    # Both independent of NEPC status.
     "avpc": ("AVPC", "AVPC_DATE"),
+    "avpc_or_adjacent": ("AVPC_OR_ADJACENT", "AVPC_OR_ADJACENT_DATE"),
 }
-DEFAULT_ENDPOINTS = ("nepc", "avpc", "platinum")
+DEFAULT_ENDPOINTS = (
+    "nepc_t1", "nepc_t1_t2", "nepc_t1_t2_t3", "avpc", "avpc_or_adjacent", "platinum",
+)
+# Display labels for the transfer endpoints (tables / plot titles).
+ENDPOINT_LABELS = {
+    "platinum": "Platinum",
+    "nepc": "NEPC (broad)",
+    "nepc_t1": "NEPC (t1)",
+    "nepc_t1_t2": "NEPC (t1\u2013t2)",
+    "nepc_t1_t2_t3": "NEPC (t1\u2013t3)",
+    "avpc": "AVPC",
+    "avpc_or_adjacent": "AVPC + adjacent",
+}
 # Checklist model horizons to evaluate (days).  Every other family is graded on
 # the federated week grid instead (auc_horizon_grid).
 DEFAULT_HORIZONS_DAYS = (365, 730, 1095, 1825)
@@ -133,7 +162,10 @@ def read_local_frame(path, endpoints) -> pd.DataFrame:
     if missing:
         raise ValueError(
             f"{path} is missing {missing}. NEPC/AVPC columns are only written when "
-            "Stage 1 ran with the AVPC/NEPC timeline labels mounted."
+            "Stage 1 ran with the primary-subtype labels mounted; the NEPC-tier "
+            "(NEPC_T1*) and AVPC_OR_ADJACENT columns additionally need Stage 1 "
+            "and Stage 2 rebuilt from labels at/after LLM_clinical_annotations "
+            "1ee501e."
         )
     return df
 
