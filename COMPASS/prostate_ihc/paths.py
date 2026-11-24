@@ -42,8 +42,8 @@ def check_version(directory, what: str) -> None:
     if found != EXTRACTION_VERSION:
         raise ValueError(
             f"{what} in {directory} were written by extraction version {found or 'unstamped'}, "
-            f"expected {EXTRACTION_VERSION}. Rerun notebooks/testing/11_prostate_ihc_extraction.ipynb "
-            f"with RERUN_EXTRACTION=True.")
+            f"expected {EXTRACTION_VERSION}. Rerun python -m COMPASS.prostate_ihc.extract_prostate_ihc "
+            f"&& python -m COMPASS.prostate_ihc.oncopanel_ihc.")
 
 
 @dataclass(frozen=True)

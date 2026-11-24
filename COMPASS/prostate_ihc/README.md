@@ -46,30 +46,21 @@ The specimen table carries every flag needed to apply any of these.
 and `PROFILE_DATA/parquet/` (`CDM_SPEC_CON_ids`, `IDM_CARG_DIAGNOSIS`). Override with `COMPASS_IHC_EXTRACTION_ROOT`,
 `PROFILE_PATHOLOGY_EXTRACTS` and `PROFILE_PARQUET_DIR`.
 
-**Rerun** from the repository root (about 1 min in total; needs polars >= 1.24), or set `RERUN_EXTRACTION = True` in
-`COMPASS/notebooks/testing/11_prostate_ihc_extraction.ipynb`:
+**Pipeline use.** The COMPASS notebooks do not run this code or read any raw data. Testing notebook
+`COMPASS/notebooks/testing/11_prostate_ihc_extraction.ipynb` and `ihc_lr.py` (notebook
+`text_interpretability/post_landmark/11_LR_for_IHC.ipynb`) read only the two pre-existing step-2 CSVs in
+`ihc_extraction/results/`, written by the original scripts. The LR outcomes are `ihc_any` (>=1 lesional row in the
+long CSV, so Ki-67-only workups count), `ne_pos` (`NE_any_pos`) and `nepc_like` (`NEPC_ihc`), matched specimens only,
+dated by the earliest lesional `specimen_date`.
+
+The modules here also contain later corrections (patient-keyed joins, discordant calls as both positive and negative,
+OncoPanel patients in the cohort, supplement-polarity fixes; `paths.EXTRACTION_VERSION`). They are **not reflected in
+the pre-existing CSVs**: in those, a discordant NE marker is not NE-positive and supplement calls use the original
+polarity rules. To use them, rerun from the repository root (needs polars >= 1.24), which overwrites `intermediate/`
+and `results/`:
 ```bash
 python -m COMPASS.prostate_ihc.extract_prostate_ihc && python -m COMPASS.prostate_ihc.oncopanel_ihc
 ```
-
-**Downstream.** `COMPASS/multivariable_models/ihc_lr.py` (notebook
-`text_interpretability/post_landmark/11_LR_for_IHC.ipynb`) uses the two CSVs as outcomes for the federated risk
-score: `ihc_any` (>=1 lesional stain call), `ne_pos` (`NE_any_pos`) and `nepc_like` (`NEPC_ihc`), matched specimens
-only, dated by the earliest lesional `specimen_date`.
-
-The v2 outcome logic includes Ki-67-only lesional workups in `ihc_any`. Discordant marker calls retain
-both positive and negative evidence: a discordant NE marker counts as NE-positive, and a discordant
-AR-axis marker prevents an NEPC-like call. Marker-frequency positive counts also include discordant
-calls. Supplement parsing distinguishes the word "staining" from its reported result after the marker
-("PSMA staining is negative"), while asserted stain / expression phrases before it read as positive ("strong
-expression of PSMA", "stained by AMACR"). In v3, negation is preserved through assay modifiers ("loss of
-cytoplasmic expression of PTEN", "no significant expression of PSMA"). Planned, pending, or merely
-ordered stains do not supply result calls or borrow a preceding marker's result. In v4 this also covers coordinated marker lists ("stains for PSMA and AMACR were ordered", "…, results to follow"), while a result word attached to the marker itself still counts ("positive staining for AMACR was performed"). Patient IDs are retained in specimen, stain, and context joins,
-including when accessions are shared across patients.
-Existing intermediate files and CSVs must be rebuilt for these corrections to take effect: each step writes
-`extraction_version.txt` (`paths.EXTRACTION_VERSION`, now `v4`) next to its outputs. Both extraction loaders,
-step 2's intermediate reader, and the LR CSV loader reject another (or missing) stamp. This includes v2 and v3
-outputs: rerun both extraction steps before loading them or rerunning the LR notebook.
 
 **Marker calls:** positive, negative, discordant (both on the same report) or equivocal; RB1 and PTEN use retained / lost. Only tumour (lesional) IHC stains count, and all parts of the matched report are combined. The markers are:
 - **AR axis:** AR, PSA, NKX3.1, PSAP, PSMA, prostein, ERG

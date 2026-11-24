@@ -36,7 +36,6 @@ import numpy as np
 import pandas as pd
 
 from COMPASS.multivariable_models import nepc_subtyping_lr as nsl
-from COMPASS.prostate_ihc import paths as ihc_paths
 
 ID_COL = nsl.ID_COL                     # "person_id" (scores / LR frame)
 LOCAL_ID_COL = nsl.LOCAL_ID_COL         # "DFCI_MRN" (== MRN_INT in the prostate_ihc outputs)
@@ -45,7 +44,7 @@ SPECIMEN_ID_COL = "UNIQUE_SAMPLE_ID"
 RISK_COL = nsl.RISK_COL
 ANCHOR_SOURCE_COL = "TREATMENT_ANCHOR_DATE"
 MAX_FOLLOWUP_DAYS = 3650
-IHC_SOURCE_VERSION = f"prostate-ihc-oncopanel-{ihc_paths.EXTRACTION_VERSION}"  # CSVs must carry this stamp
+IHC_SOURCE_VERSION = "prostate-ihc-oncopanel-original-csv"  # pre-existing step-2 CSVs from the original scripts
 
 # Marker call columns of oncopanel_prostate_specimen_ihc.csv (lesional calls; null = not stained).
 MARKER_COLUMNS = ['AR', 'PSA', 'NKX3.1', 'PSAP', 'PSMA', 'Prostein/P501S', 'ERG', 'Synaptophysin', 'Chromogranin',
@@ -110,8 +109,7 @@ def _read(obj, what) -> pd.DataFrame:
         return obj.to_pandas()
     path = Path(obj)
     if not path.exists():
-        raise FileNotFoundError(f"Missing {what}: {path}. Run notebooks/testing/11_prostate_ihc_extraction.ipynb.")
-    ihc_paths.check_version(path.parent, what)
+        raise FileNotFoundError(f"Missing {what}: {path}. Expected the pre-existing step-2 CSV in ihc_extraction/results/.")
     return pd.read_csv(path, low_memory=False)
 
 

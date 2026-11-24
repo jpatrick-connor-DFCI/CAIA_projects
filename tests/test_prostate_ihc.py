@@ -311,9 +311,9 @@ def test_all_disk_loaders_reject_stale_extraction_outputs(inputs, stamp):
         else:
             version_file.write_text(stamp + "\n")
     for loader, directory in ((ex.load, inter), (op.load, res)):
-        with pytest.raises(ValueError, match="RERUN_EXTRACTION=True"):
+        with pytest.raises(ValueError, match="expected v"):
             loader(directory)
-    with pytest.raises(ValueError, match="RERUN_EXTRACTION=True"):
+    with pytest.raises(ValueError, match="expected v"):
         op.run(pq_dir, path_dir, inter, res, write=False)
 
 

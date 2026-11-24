@@ -8,7 +8,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from COMPASS.multivariable_models import ihc_lr as il  # noqa: E402
-from COMPASS.prostate_ihc import paths as ihc_paths  # noqa: E402
 
 ANCHOR = pd.Timestamp("2020-01-01")
 
@@ -86,12 +85,7 @@ def test_load_oncopanel_ihc_rejects_bad_inputs():
 def test_load_oncopanel_ihc_reads_csv(tmp_path):
     specimen, long = _tables([(1, "a", 100, "ne")])
     specimen.to_csv(tmp_path / "s.csv", index=False); long.to_csv(tmp_path / "l.csv", index=False)
-    with pytest.raises(ValueError, match="unstamped"):
-        il.load_oncopanel_ihc(tmp_path / "s.csv", tmp_path / "l.csv")
-    (tmp_path / ihc_paths.VERSION_FILE).write_text("v1\n")
-    with pytest.raises(ValueError, match="version v1"):
-        il.load_oncopanel_ihc(tmp_path / "s.csv", tmp_path / "l.csv")
-    ihc_paths.write_version(tmp_path)
+    # Pre-existing CSVs from the original scripts carry no version stamp; they are read as is.
     out = il.load_oncopanel_ihc(tmp_path / "s.csv", tmp_path / "l.csv")
     assert out["ne_pos"].tolist() == [True] and out["DFCI_MRN"].tolist() == [1]
 
