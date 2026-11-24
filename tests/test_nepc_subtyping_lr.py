@@ -366,3 +366,16 @@ def test_raw_score_auc_on_risk_rows_only_and_independent_of_cv(monkeypatch):
     assert np.isnan(row["auc"]) and np.isnan(row["auc_lo"])
     assert row["auc_raw_score"] == pytest.approx(available["auc_raw_score"])
     assert np.isfinite([row["auc_raw_score_lo"], row["auc_raw_score_hi"]]).all()
+
+
+def test_irls_converges_when_rounding_holds_step_above_tol():
+    # Regression: this fold's Newton step stalled just above tol at the optimum and was reported
+    # as non-converged, suppressing a valid OOF AUC.
+    rng = np.random.default_rng(3)
+    x = rng.normal(size=480)
+    y = rng.binomial(1, 1 / (1 + np.exp(-(-2.6 + 1.6 * x)))).astype(float)
+    A = np.column_stack([np.ones(len(y)), x])
+    beta, _, converged = nsl._irls(y, A)
+    assert converged and np.all(np.abs(beta) < 5)
+    sep = (x > 0).astype(float)                       # perfect separation still flagged
+    assert not nsl.fit_logistic(sep, pd.DataFrame({"x": x}))["converged"]

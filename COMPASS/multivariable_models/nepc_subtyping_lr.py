@@ -1,7 +1,7 @@
 """Logistic regression for incident NEPC: federated risk score vs Gleason vs TP53/PTEN/RB1.
 
 Its notebook (10_LR_for_subtyping) was removed on 2026-11-17. The LR machinery
-(CV AUC, bootstrap, calibration) is still used by ``ihc_lr`` (notebooks 11-12). For each subcohort and
+(CV AUC, bootstrap, calibration) is still used by ``ihc_lr`` (notebook 11). For each subcohort and
 ADT landmark, three predictor sets are fit as separate unpenalized logistic
 regressions of incident NEPC (first NEPC after ADT + landmark):
 
@@ -189,8 +189,12 @@ def _irls(y: np.ndarray, A: np.ndarray, *, max_iter: int = 100, tol: float = 1e-
             break
         if not np.isfinite(step).all():
             break
-        # Test the undamped step: a tiny line-search step is not convergence.
-        if np.max(np.abs(step)) < tol:
+        # Test the undamped step: a tiny line-search step is not convergence. At the optimum float
+        # rounding can hold the step just above tol forever, so a small step (1e-6) with a ~zero
+        # score vector also counts; under separation the score vanishes but steps stay O(1).
+        max_step = np.max(np.abs(step))
+        score = np.max(np.abs(A.T @ (y - p)))
+        if max_step < tol or (max_step < 1e-6 and score < 1e-6 * max(1.0, len(y))):
             beta = beta + step
             converged = True
             break

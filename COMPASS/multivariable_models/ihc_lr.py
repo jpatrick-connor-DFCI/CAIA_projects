@@ -1,72 +1,66 @@
-"""Logistic regression of future prostate IHC (and NE-positive IHC) on the federated risk score.
+"""Logistic regression of future prostate OncoPanel IHC (and NE / NEPC-like IHC) on the federated risk score.
 
 Backs ``notebooks/text_interpretability/post_landmark/11_LR_for_IHC.ipynb``. For each ADT landmark, the frozen
-federated (no-DFCI) platinum-trained XGBoost score from notebook 04 (``endpoint ==
-"nepc"`` rows: patients with NEPC or censoring at/before the landmark are not at
-risk) is the only predictor, z-scored within each fit, in three unpenalized LRs:
+federated (no-DFCI) platinum-trained XGBoost score from notebook 04 (``endpoint == "nepc"`` rows: patients
+with NEPC or censoring at/before the landmark are not at risk) is the only predictor, z-scored within each
+fit, in three unpenalized LRs:
 
-* ``ihc_any``          -- any qualifying IHC note after ADT + landmark; all at-risk patients.
-* ``ne_pos_all``       -- any NE-positive qualifying IHC note after ADT + landmark;
-                          at-risk patients without an NE-positive IHC note at/before it.
-* ``ne_pos_given_ihc`` -- same event, among patients with >=1 qualifying future IHC note
-                          (and no prior NE-positive one).
+* ``ihc_any``   -- a future sequenced specimen whose matched pathology report has >=1 lesional stain call;
+                   all at-risk patients.
+* ``ne_pos``    -- a future sequenced specimen that is NE-positive (``NE_any_pos``: synaptophysin,
+                   chromogranin, INSM1 or CD56 positive); at-risk patients without a prior NE-positive one.
+* ``nepc_like`` -- a future sequenced specimen that is NEPC-like (``NEPC_ihc``: NE-positive, AR axis
+                   negative, no AR-axis marker positive); same population as ``ne_pos``.
 
-**IHC notes** come from a regex over raw pathology ``RPT_TEXT``: a generic IHC term
-or a named marker (NE, prostate lineage, basal-cell/diagnostic, other). A note
-*qualifies* when it has IHC and the specimen is prostate cancer: the first site named
-in ``PROC_DESC`` + the report's opening is prostate, or the text states prostatic
-origin; a note naming a non-prostate primary is excluded unless it also states
-prostatic origin.
+**IHC source.** The prostate_ihc extraction (``COMPASS/prostate_ihc``), step 2:
+``oncopanel_prostate_specimen_ihc.csv`` (one row per OncoPanel prostate specimen) and
+``oncopanel_prostate_ihc_long.csv`` (stain mentions on the matched reports). Only specimens matched to a
+pathology report (``path_matched``) can be events; unmatched ones are counted for attrition only. No LLM
+findings are used.
 
-**NE-positive** = a qualifying IHC note whose report (``DFCI_MRN`` + ``RPT_ID``) has at
-least one LLM NEPC finding (any of the four evidence types) that passes the same gate
-``nepc_labels.parquet`` uses (ne_gate + trial-context screen, final attempts only). The
-gate is imported read-only from the LLM_clinical_annotations repo. A note without a
-gated finding is NE-negative only with complete patient-level LLM review (or a
-validated no-trigger status). Incomplete or absent review excludes the patient
-from both NE outcomes, including when some positive findings are already known.
+**Timing.** A specimen is dated by its pathology ``specimen_date``: the earliest lesional-stain
+``specimen_date`` in the long table for that ``UNIQUE_SAMPLE_ID``. "Future" = ADT + landmark < date <=
+ADT + MAX_FOLLOWUP_DAYS (the models' 10-year cap); the label is "ever during that window", not
+fixed-horizon. Prior IHC excludes no one; a prior NE-positive specimen (at or before ADT + landmark)
+excludes the patient from both NE outcomes (NEPC-like is a subset of NE-positive).
 
-**Timing.** Notes are dated by their report ``EVENT_DATE``. "Future" = ADT + landmark <
-note date <= ADT + MAX_FOLLOWUP_DAYS (the models' 10-year cap); the label is "ever
-during that window", not fixed-horizon. Prior IHC notes do not exclude anyone; prior
-NE-positive IHC notes exclude the patient from both NE outcomes.
-
-AUC is from out-of-fold predictions (stratified K-fold) with a patient bootstrap 95%
-CI; odds ratios (per SD), Wald CIs and LRT p-values come from the full-population fit.
-``run_ihc_lr(..., return_predictions=True)`` also returns each patient's out-of-fold
-probability (the fold that held the patient out), so every fit patient has a held-out
-prediction. The LR machinery is reused from ``nepc_subtyping_lr``.
+AUC is from out-of-fold predictions (stratified K-fold) with a patient bootstrap 95% CI, plus the AUC of
+the untransformed score (``auc_raw_score``, preferred). Odds ratios (per SD), Wald CIs and LRT p-values
+come from the full-population fit. The LR machinery is reused from ``nepc_subtyping_lr``.
 """
 from __future__ import annotations
 
-import re
-import subprocess
-import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from COMPASS.multivariable_models import nepc_subtyping_lr as nsl
+from COMPASS.prostate_ihc import paths as ihc_paths
 
 ID_COL = nsl.ID_COL                     # "person_id" (scores / LR frame)
-LOCAL_ID_COL = nsl.LOCAL_ID_COL         # "DFCI_MRN" (notes, LLM findings, local frame)
+LOCAL_ID_COL = nsl.LOCAL_ID_COL         # "DFCI_MRN" (== MRN_INT in the prostate_ihc outputs)
+SOURCE_ID_COL = "MRN_INT"
+SPECIMEN_ID_COL = "UNIQUE_SAMPLE_ID"
 RISK_COL = nsl.RISK_COL
 ANCHOR_SOURCE_COL = "TREATMENT_ANCHOR_DATE"
 MAX_FOLLOWUP_DAYS = 3650
-SPECIMEN_HEADER_CHARS = 300
-IHC_REGEX_VERSION = "ihc-regex-v3"
-NE_REVIEW_COMPLETE = {"ok", "no_trigger_notes"}
+IHC_SOURCE_VERSION = f"prostate-ihc-oncopanel-{ihc_paths.EXTRACTION_VERSION}"  # CSVs must carry this stamp
 
-NOTE_COLUMNS = ["RPT_ID", LOCAL_ID_COL, "EVENT_DATE", "PROC_DESC", "RPT_TEXT"]
+# Marker call columns of oncopanel_prostate_specimen_ihc.csv (lesional calls; null = not stained).
+MARKER_COLUMNS = ['AR', 'PSA', 'NKX3.1', 'PSAP', 'PSMA', 'Prostein/P501S', 'ERG', 'Synaptophysin', 'Chromogranin',
+                  'INSM1', 'CD56', 'ASCL1', 'NEUROD1', 'DLL3', 'SSTR2', 'TTF-1', 'YAP1', 'SOX2', 'RB1', 'p53', 'PTEN',
+                  'p63', 'HMWCK (34bE12)', 'CK5/6', 'PIN4 cocktail', 'AMACR', 'GATA3', 'CK7', 'CK20']
+SPECIMEN_REQUIRED = [SOURCE_ID_COL, SPECIMEN_ID_COL, "path_matched", "NE_any_pos", "NEPC_ihc", "collection_date"]
+LONG_REQUIRED = [SPECIMEN_ID_COL, "specimen_date", "target"]
 
 # Outcome -> event column; the population is set by outcome_population().
 OUTCOMES = {
     "ihc_any": "ihc_future",
-    "ne_pos_all": "ne_pos_future",
-    "ne_pos_given_ihc": "ne_pos_future",
+    "ne_pos": "ne_pos_future",
+    "nepc_like": "nepc_like_future",
 }
+NE_OUTCOMES = ("ne_pos", "nepc_like")
 
 MODEL_COLUMNS = [
     "cohort", "landmark_days", "outcome", "n", "events", "lrt_stat", "lrt_df", "p_lrt",
@@ -79,399 +73,94 @@ COEF_COLUMNS = [
 ]
 COUNT_COLUMNS = [
     "cohort", "landmark_days", "n_cohort_list", "n_at_risk",
-    "n_ne_review_complete", "n_ne_review_excluded",
-    "n_any_ihc_mention_future", "n_ihc_future", "n_ne_pos_future", "n_prior_ne_pos",
-    "n_ne_pos_all", "events_ne_pos_all", "n_ne_pos_given_ihc", "events_ne_pos_given_ihc",
-    "n_ne_gated_ihc_lost_to_specimen", "n_ne_gated_without_ihc_future",
+    "n_ihc_future", "n_ne_pos_future", "n_nepc_like_future", "n_prior_ne_pos",
+    "n_ne_pos", "events_ne_pos", "n_nepc_like", "events_nepc_like",
+    "n_unmatched_specimen_future", "n_undated_ihc_specimen",
 ]
 AUDIT_COLUMNS = [
-    LOCAL_ID_COL, "RPT_ID", "note_date", "days_from_adt", "ihc_any", "ihc_generic",
-    "ihc_markers", "ihc_panels", "specimen_site", "prostate_site", "prostatic_origin",
-    "non_prostate_primary", "qualifies", "gated_evidence_types", "ne_gated", "ne_positive",
-    "ne_review_status",
+    LOCAL_ID_COL, SPECIMEN_ID_COL, "specimen_date", "days_from_adt", "collection_date",
+    "path_matched", "ihc_any", "ne_pos", "nepc_like", "ihc_phenotype",
 ]
 # Per-patient OOF predictions; ``event`` is that outcome's label (OUTCOMES[outcome]).
 PREDICTION_COLUMNS = ["cohort", "landmark_days", "outcome", *nsl.PREDICTION_KEY_COLUMNS]
 
 
 # --------------------------------------------------------------------------- #
-# Regex
-# --------------------------------------------------------------------------- #
-_FLAGS = re.IGNORECASE
-_CLAUSE_BREAK = re.compile(r"[.;\n]")
-_WINDOW = 40
-
-IHC_GENERIC = r"\b(?:immunohistochem\w*|ihc|immuno-?stain\w*|immunoperoxidase|immunoreactiv\w*)\b"
-# A generic term that says IHC was not done / not resulted / only suggested.
-GENERIC_NEGATED_BEFORE = (r"\b(?:no|pending|awaiting|planned|recommend\w*|suggest\w*|consider\w*|could|may|might|can|if)"
-                          r"\s+(?:\w+\s+){0,2}$")
-NOT_RESULTED_AFTER = (r"^\W*(?:\w+\W+){0,4}?(?:not\s+(?:been\s+)?(?:performed|done|obtained|available|"
-                      r"indicated|required|attempted)|pending|to\s+follow|deferred|cancel\w*|"
-                      r"will\s+be\s+(?:reported|issued|performed)|(?:is|are)\s+recommended|"
-                      r"may\s+be\s+(?:performed|considered|helpful))\b")
-
-# Apply prospective cues to marker lists as well as generic IHC mentions.
-PROSPECTIVE_BEFORE = re.compile(
-    r"\b(?:recommend\w*|suggest\w*|consider\w*|pending|awaiting|planned)\b[^.;\n]*$", _FLAGS)
-NO_BEFORE = re.compile(r"\bno\s+(?:\w+\s+){0,2}$", _FLAGS)
-PERFORMED_AFTER = re.compile(
-    r"^\s*(?:stains?|staining|testing)?\s*(?:was|were|is|are)?\s*(?:performed|done|ordered)\b", _FLAGS)
-PSMA_IMAGING = re.compile(r"\b(?:pet|imaging|scan|radioligand)\b", _FLAGS)
-
-
-# Panel -> {marker label: pattern}. The NE panel is ne_gate's NE_MARKER, filled in by
-# build_patterns so it stays identical to the gate the labels use.
-NE_PANEL = "neuroendocrine"
-MARKERS = {
-    "lineage": {
-        "NKX3.1": r"\bnkx\s?3[.\s-]?1\b",
-        "AR": r"\b(?:androgen\s+receptor|ar)\b",
-        "PSA": r"\b(?:psa|prostate[\s-]specific\s+antigen)\b",
-        "PSMA": r"\b(?:psma|prostate[\s-]specific\s+membrane\s+antigen)\b",
-        "PSAP": r"\b(?:psap|prostatic\s+acid\s+phosphatase)\b",
-        "prostein": r"\b(?:prostein|p501s)\b",
-    },
-    "basal_diagnostic": {
-        "p63": r"\bp\s?63\b",
-        "HMWCK": (r"\b(?:hmw[\s-]?ck|high[\s-]molecular[\s-]weight\s+(?:cyto)?keratins?|"
-                  r"34\s?(?:β|beta|b)\s?e\s?12|ck\s?903)\b"),
-        "CK5/6": r"\b(?:ck|cytokeratin)\s?5\s?/\s?6\b",
-        "AMACR": r"\b(?:amacr|p504s|racemase)\b",
-        "PIN4": r"\bpin[\s-]?4\b",
-    },
-    "other": {
-        "ERG": r"\berg\b",
-        "Ki-67": r"\b(?:ki[\s-]?67|mib[\s-]?1)\b",
-        "TTF-1": r"\bttf[\s-]?1\b",
-        "GATA3": r"\bgata[\s-]?3\b",
-        "CK7": r"\b(?:ck|cytokeratin)\s?7\b",
-        "CK20": r"\b(?:ck|cytokeratin)\s?20\b",
-        "p53": r"\bp\s?53\b",
-        "RB1": r"\b(?:rb1?|retinoblastoma(?:\s+protein)?)\b",
-        "PTEN": r"\bpten\b",
-    },
-}
-# Short or dual-use tokens count only with a stain cue in the same clause (+/-40 chars).
-CONTEXT_REQUIRED = {"AR", "PSA", "PSMA", "ERG", "RB1", "PTEN"}
-STAIN_CUE = (r"(?:\b(?:stain\w*|immuno\w*|ihc|positiv\w*|negativ\w*|pos|neg|reactiv\w*|express\w*|"
-             r"retained|intact|loss|lost|patchy|diffuse\w*|focal\w*|labell?\w*|highlight\w*)\b|"
-             r"\(\s*[+-]\s*\)|(?<=\w)\+)")
-# Per-marker mentions that are not stains: serum PSA values, PSMA imaging.
-MARKER_EXCLUDE_BEFORE = {"PSA": r"\b(?:serum|rising|nadir|doubling)\s+$"}
-MARKER_EXCLUDE_AFTER = {
-    "PSA": r"^\s*(?:level|value|velocity|doubling|nadir|of|was|is|=|:|\(ng)?\s*[<>≤≥]?\s*\d",
-    "PSMA": r"^\s*-?\s*(?:pet|scan|avid|imaging|ct|targeted|radioligand|lu)\b",
-}
-
-# Specimen. The prostate/non-prostate site patterns are the ones in
-# notebooks/patient_extraction/01_high_vs_low_risk_transfer_pxs.ipynb (cell 13).
-SPECIMEN_SITES = (
-    ("prostate", r"\b(?:prostat\w*|turp|transurethral|seminal\s+vesicles?)\b"),
-    ("non-prostate", r"\b(?:bone|marrow|liver|hepatic|lymph|nodes?|nodal|lung|pulmonary|pleura\w*|adrenal"
-                     r"|brain|dura\w*|spine|spinal|vertebra\w*|soft\s+tissue|peritone\w*|omentum|omental)\b"),
-)
-PROSTATIC_ORIGIN = (
-    r"\bmetasta\w*\s+(?:[\w-]+\s+){0,3}?prostat\w*\s+(?:adeno)?carcinoma\b"
-    r"|\bprostat\w*\s+(?:origin|primary)\b"
-    r"|\b(?:origin|primary)\s+(?:in|from)\s+(?:the\s+)?prostate\b"
-    r"|\b(?:consistent|compatible)\s+with\s+(?:[\w-]+\s+){0,3}?prostat\w*\s+(?:adeno)?carcinoma\b"
-)
-# Non-prostate primaries. Built from ne_gate's NON_PROSTATE_NE terms, except that bare
-# "urothelial" (which also matches benign urothelial mucosa in TURP / prostatic-urethra
-# specimens) is narrowed to urothelial carcinoma.
-NON_PROSTATE_PRIMARY = (
-    r"\b(?:sclc|small[\s-]?cell\s+lung|merkel|carcinoid|pulmonary\s+(?:origin|primary|small)|"
-    r"lung\s+(?:origin|primary)|urothelial\s+(?:[\w-]+\s+){0,2}?carcinoma|"
-    r"bladder\s+(?:primary|origin|cancer|carcinoma|tumou?r)|pancreatic\s+(?:net|neuroendocrine)|pnet|"
-    r"gep[\s-]?nets?|well[\s-]differentiated\s+neuroendocrine\s+tumou?r|"
-    r"renal\s+cell\s+carcinoma|rcc|colorectal\s+(?:adeno)?carcinoma|colonic\s+adenocarcinoma|"
-    r"colon\s+(?:adeno)?carcinoma|(?:lung|pulmonary)\s+(?:adenocarcinoma|squamous)|"
-    r"non[\s-]small[\s-]cell|melanoma|lymphoma|hepatocellular|hcc)\b"
-)
-# A specimen phrase preceded by one of these (same clause, 60 chars) is not asserted.
-# "History of ..." vetoes a non-prostate primary (a prior other cancer is not this
-# specimen) but not prostatic origin ("history of prostate cancer: metastatic ...").
-_NEGATION_CUES = (r"no|not|negative|without|rule\s+out|r/o|exclude\w*|versus|vs|differential"
-                  r"|unlikely|against")
-ORIGIN_NOT_ASSERTED_BEFORE = rf"\b(?:{_NEGATION_CUES})\b[^.;:\n]{{0,60}}$"
-PRIMARY_NOT_ASSERTED_BEFORE = (rf"\b(?:{_NEGATION_CUES}|history|hx|h/o|prior|previous|remote)\b"
-                               r"[^.;:\n]{0,60}$")
-# ne_gate.NE_MARKER alternatives -> per-marker labels (applied to the matched text).
-NE_MARKER_LABELS = (
-    ("synaptophysin", r"synaptophysin"), ("chromogranin", r"chromogranin"), ("CD56", r"cd\s?56"),
-    ("INSM1", r"insm"), ("NSE", r"enolase|nse"),
-)
-
-
-@dataclass(frozen=True)
-class IHCPatterns:
-    generic: re.Pattern
-    generic_negated_before: re.Pattern
-    not_resulted_after: re.Pattern
-    markers: dict                 # panel -> {label: compiled}
-    unperformed_markers: re.Pattern
-    stain_cue: re.Pattern
-    exclude_before: dict
-    exclude_after: dict
-    sites: tuple
-    prostatic_origin: re.Pattern
-    non_prostate_primary: re.Pattern
-    origin_not_asserted_before: re.Pattern
-    primary_not_asserted_before: re.Pattern
-    ne_labels: tuple
-
-
-def build_patterns(ne_marker: str) -> IHCPatterns:
-    """Compile every pattern; ``ne_marker`` is ne_gate.NE_MARKER's source pattern."""
-    c = lambda p: re.compile(p, _FLAGS)  # noqa: E731
-    markers = {NE_PANEL: {NE_PANEL: c(ne_marker)}}
-    markers.update({panel: {k: c(v) for k, v in pats.items()} for panel, pats in MARKERS.items()})
-    # Scope "no ... performed" over the entire coordinated marker list. Requiring
-    # an explicit workup verb keeps completed negative results ("no expression") valid.
-    marker = "(?:" + "|".join(rx.pattern for panel in markers.values() for rx in panel.values()) + ")"
-    separator = r"\s*(?:,\s*(?:(?:and|or|nor)\s+)?|(?:and|or|nor)\s+|/\s*)"
-    unperformed = (rf"\bno\s+(?:stains?\s+for\s+)?{marker}(?:{separator}{marker})*"
-                   r"\s*(?:stains?|staining|testing)?\s*(?:was|were|is|are)?\s*(?:performed|done|ordered)\b")
-    return IHCPatterns(
-        generic=c(IHC_GENERIC),
-        generic_negated_before=c(GENERIC_NEGATED_BEFORE),
-        not_resulted_after=c(NOT_RESULTED_AFTER),
-        markers=markers,
-        unperformed_markers=c(unperformed),
-        stain_cue=c(STAIN_CUE),
-        exclude_before={k: c(v) for k, v in MARKER_EXCLUDE_BEFORE.items()},
-        exclude_after={k: c(v) for k, v in MARKER_EXCLUDE_AFTER.items()},
-        sites=tuple((site, c(p)) for site, p in SPECIMEN_SITES),
-        prostatic_origin=c(PROSTATIC_ORIGIN),
-        non_prostate_primary=c(NON_PROSTATE_PRIMARY),
-        origin_not_asserted_before=c(ORIGIN_NOT_ASSERTED_BEFORE),
-        primary_not_asserted_before=c(PRIMARY_NOT_ASSERTED_BEFORE),
-        ne_labels=tuple((label, c(p)) for label, p in NE_MARKER_LABELS),
-    )
-
-
-def _clause_before(text: str, start: int, window: int = _WINDOW) -> str:
-    seg = text[max(0, start - window):start]
-    return _CLAUSE_BREAK.split(seg)[-1]
-
-
-def _clause_after(text: str, end: int, window: int = _WINDOW) -> str:
-    seg = text[end:end + window]
-    return _CLAUSE_BREAK.split(seg)[0]
-
-
-def _not_resulted(text, m, pats: IHCPatterns) -> bool:
-    return bool(pats.not_resulted_after.search(_clause_after(text, m.end(), 60)))
-
-
-def generic_ihc(text: str, pats: IHCPatterns) -> bool:
-    """A generic IHC term that is not negated, not pending, and not only suggested."""
-    for m in pats.generic.finditer(text):
-        if pats.generic_negated_before.search(_clause_before(text, m.start())):
-            continue
-        if PROSPECTIVE_BEFORE.search(_clause_before(text, m.start(), 100)):
-            continue
-        if _not_resulted(text, m, pats):
-            continue
-        return True
-    return False
-
-
-def marker_hits(text: str, pats: IHCPatterns) -> dict:
-    """Panel -> sorted marker labels with at least one stain mention (negative results count)."""
-    hits = {}
-    unperformed = [(m.start(), m.end()) for m in pats.unperformed_markers.finditer(text)]
-    for panel, markers in pats.markers.items():
-        for label, rx in markers.items():
-            for m in rx.finditer(text):
-                if any(start <= m.start() < end for start, end in unperformed):
-                    continue
-                before, after = _clause_before(text, m.start()), _clause_after(text, m.end())
-                if PROSPECTIVE_BEFORE.search(_clause_before(text, m.start(), 100)):
-                    continue
-                # "No ... expression" is a completed negative stain; "No ...
-                # stain was performed" is not a completed workup.
-                if NO_BEFORE.search(before) and PERFORMED_AFTER.search(after):
-                    continue
-                if label == "PSMA" and PSMA_IMAGING.search(before + " " + after):
-                    continue
-                if label in pats.exclude_before and pats.exclude_before[label].search(before):
-                    continue
-                if label in pats.exclude_after and pats.exclude_after[label].search(after):
-                    continue
-                if label in CONTEXT_REQUIRED and not (pats.stain_cue.search(before)
-                                                      or pats.stain_cue.search(after)):
-                    continue
-                if _not_resulted(text, m, pats):
-                    continue
-                if panel == NE_PANEL:
-                    label_m = next((lab for lab, lrx in pats.ne_labels if lrx.search(m.group(0))),
-                                   NE_PANEL)
-                    hits.setdefault(panel, []).append(label_m)
-                    continue                      # keep scanning: several NE markers per note
-                hits.setdefault(panel, []).append(label)
-                break
-    return {p: sorted(set(v)) for p, v in hits.items()}
-
-
-def specimen_site(header: str, pats: IHCPatterns) -> str:
-    """'prostate', 'non-prostate' or 'unspecified': whichever site is named first."""
-    found = [(m.start(), site) for site, rx in pats.sites for m in [rx.search(header)] if m]
-    return min(found)[1] if found else "unspecified"
-
-
-def _asserted(rx: re.Pattern, veto: re.Pattern, text: str) -> bool:
-    """Any match of ``rx`` whose preceding 60 characters (same clause) lack a ``veto`` cue."""
-    return any(not veto.search(text[max(0, m.start() - 60):m.start()]) for m in rx.finditer(text))
-
-
-def tag_note(text: str, proc_desc: str, pats: IHCPatterns) -> dict:
-    text = text or ""
-    header = f"{proc_desc or ''} {text[:SPECIMEN_HEADER_CHARS]}"
-    generic = generic_ihc(text, pats)
-    markers = marker_hits(text, pats)
-    site = specimen_site(header, pats)
-    origin = _asserted(pats.prostatic_origin, pats.origin_not_asserted_before, text)
-    other_primary = _asserted(pats.non_prostate_primary, pats.primary_not_asserted_before, text)
-    ihc_any = generic or bool(markers)
-    prostate_site = site == "prostate"
-    qualifies = ihc_any and (prostate_site or origin) and not (other_primary and not origin)
-    return {
-        "ihc_any": ihc_any, "ihc_generic": generic,
-        "ihc_markers": ";".join(sorted({m for v in markers.values() for m in v})),
-        "ihc_panels": ";".join(sorted(markers)),
-        "specimen_site": site, "prostate_site": prostate_site, "prostatic_origin": origin,
-        "non_prostate_primary": other_primary, "qualifies": qualifies,
-    }
-
-
-# --------------------------------------------------------------------------- #
 # Inputs
 # --------------------------------------------------------------------------- #
-def load_pathology_notes(path, mrns=None) -> pd.DataFrame:
-    """Pathology reports (``RPT_ID`` as Utf8, the same cast LCA uses for note_uid)."""
-    import polars as pl
-    path = Path(path)
+_TRUE = {"true": True, "false": False, "1": True, "0": False, "1.0": True, "0.0": False}
+
+
+def _as_bool(s: pd.Series, name: str) -> pd.Series:
+    """CSV booleans (polars writes true/false) -> bool; missing -> False; anything else raises."""
+    if s.dtype == bool:
+        return s
+    mapped = s.map(lambda v: v if isinstance(v, (bool, np.bool_)) else
+                   (False if pd.isna(v) else _TRUE.get(str(v).strip().lower())))
+    bad = mapped.isna()
+    if bad.any():
+        raise ValueError(f"Column {name!r} has non-boolean values: {sorted(s[bad].astype(str).unique())[:5]}")
+    return mapped.astype(bool)
+
+
+def _read(obj, what) -> pd.DataFrame:
+    if isinstance(obj, pd.DataFrame):
+        return obj.copy()
+    if hasattr(obj, "to_pandas"):            # polars
+        return obj.to_pandas()
+    path = Path(obj)
     if not path.exists():
-        raise FileNotFoundError(f"Missing pathology notes: {path} (set PROFILE_PATHOLOGY_NOTES).")
-    lazy = pl.scan_parquet(path)
-    names = lazy.collect_schema().names()
-    missing = [c for c in NOTE_COLUMNS if c not in names and c != "PROC_DESC"]
-    if missing:
-        raise ValueError(f"{path} lacks columns {missing}")
-    lazy = lazy.select(
-        pl.col("RPT_ID").cast(pl.Utf8),
-        pl.col(LOCAL_ID_COL).cast(pl.Int64, strict=False),
-        pl.col("EVENT_DATE").cast(pl.Utf8).str.extract(r"^(\d{4}-\d{2}-\d{2})", 1).alias("note_date"),
-        (pl.col("PROC_DESC").cast(pl.Utf8) if "PROC_DESC" in names else pl.lit(None, dtype=pl.Utf8))
-        .alias("PROC_DESC"),
-        pl.col("RPT_TEXT").cast(pl.Utf8).fill_null(""),
-    ).filter(pl.col(LOCAL_ID_COL).is_not_null())
-    if mrns is not None:
-        lazy = lazy.filter(pl.col(LOCAL_ID_COL).is_in([int(m) for m in mrns]))
-    out = lazy.collect().to_pandas()
-    out[LOCAL_ID_COL] = out[LOCAL_ID_COL].astype(int)
-    out["note_date"] = pd.to_datetime(out["note_date"], errors="coerce")
-    return out
+        raise FileNotFoundError(f"Missing {what}: {path}. Run notebooks/testing/11_prostate_ihc_extraction.ipynb.")
+    ihc_paths.check_version(path.parent, what)
+    return pd.read_csv(path, low_memory=False)
 
 
-def tag_ihc_notes(notes: pd.DataFrame, pats: IHCPatterns) -> pd.DataFrame:
-    """One row per note with the regex tags (no text)."""
-    tags = pd.DataFrame([tag_note(t, p, pats) for t, p in
-                         zip(notes["RPT_TEXT"].to_numpy(), notes["PROC_DESC"].to_numpy())],
-                        index=notes.index)
-    if tags.empty:
-        tags = pd.DataFrame(columns=list(tag_note("", "", pats)), index=notes.index)
-    return pd.concat([notes[[LOCAL_ID_COL, "RPT_ID", "note_date"]], tags], axis=1)
+def load_oncopanel_ihc(specimen, long) -> pd.DataFrame:
+    """One row per OncoPanel prostate specimen with the outcome flags and its pathology date.
 
-
-def import_lca(lca_root):
-    """Read-only import of the LLM_clinical_annotations modules the gate needs."""
-    lca_root = Path(lca_root)
-    if not (lca_root / "tasks" / "nepc" / "ne_gate.py").exists():
-        raise FileNotFoundError(
-            f"LLM_clinical_annotations not found at {lca_root}; set COMPASS_LCA_ROOT.")
-    if str(lca_root) not in sys.path:
-        sys.path.insert(0, str(lca_root))
-    from tasks import note_extraction
-    from tasks.nepc import ne_gate, run_nepc_extraction
-    return {"note_extraction": note_extraction, "ne_gate": ne_gate, "nepc": run_nepc_extraction}
-
-
-def lca_commit(lca_root) -> str:
-    try:
-        return subprocess.run(["git", "-C", str(lca_root), "rev-parse", "HEAD"], check=True,
-                              capture_output=True, text=True).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        return "unknown"
-
-
-def parse_note_uid(note_uid):
-    """Split a note UID without discarding LCA's collision suffix."""
-    if not isinstance(note_uid, str) or ":" not in note_uid:
-        return None, None
-    note_type, rest = note_uid.split(":", 1)
-    return note_type, rest
-
-
-def gated_rows_to_notes(gated: dict) -> pd.DataFrame:
-    """``gate_findings`` output -> one row per gated pathology report with its evidence types."""
-    rows = []
-    for mrn, findings in gated.items():
-        for f in findings:
-            note_type, rpt_id = parse_note_uid(f.get("note_uid"))
-            if note_type != "Pathology" or rpt_id in (None, "", "None"):
-                continue
-            if re.search(r"#\d+$", rpt_id):
-                raise ValueError("Ambiguous pathology note UID: collision suffix cannot be mapped "
-                                 "to RPT_ID safely. Resolve report identity before fitting.")
-            rows.append({LOCAL_ID_COL: int(mrn), "RPT_ID": rpt_id, "evidence_type": f["evidence_type"]})
-    if not rows:
-        return pd.DataFrame(columns=[LOCAL_ID_COL, "RPT_ID", "gated_evidence_types"])
-    df = pd.DataFrame(rows)
-    return (df.groupby([LOCAL_ID_COL, "RPT_ID"])["evidence_type"]
-              .agg(lambda s: ";".join(sorted(set(s)))).rename("gated_evidence_types").reset_index())
-
-
-def load_gated_ne_notes(lca, llm_nepc_dir, *, mrns=None):
-    """Return gated reports and patient review status from the same LCA snapshot.
-
-    Fail on collision-suffixed pathology UIDs even when that note has no gated
-    finding: otherwise an unsuffixed positive could be assigned to its sibling.
-    ``mrns`` scopes validation to the patients included in this analysis.
+    ``specimen`` / ``long`` are the two step-2 CSVs (paths or frames). Returns ``DFCI_MRN,
+    UNIQUE_SAMPLE_ID, path_matched, specimen_date, collection_date, ihc_any, ne_pos, nepc_like,
+    ihc_phenotype``. Flags are False for unmatched specimens.
     """
-    inputs = lca["note_extraction"].load_label_inputs(lca["nepc"].SPEC, Path(llm_nepc_dir))
-    selected = None if mrns is None else set(map(int, mrns))
-    for mrn, uid in inputs["notes"]:
-        if selected is not None and int(mrn) not in selected:
-            continue
-        note_type, report_id = parse_note_uid(uid)
-        if note_type == "Pathology" and re.search(r"#\d+$", report_id):
-            raise ValueError("Ambiguous pathology note UID in LCA evidence; resolve report "
-                             "identity before fitting.")
-    gated, _ = lca["nepc"].gate_findings(inputs["findings"])
-    if selected is not None:
-        gated = {m: f for m, f in gated.items() if int(m) in selected}
-    status = {int(m): s for m, s in inputs["status"].items()
-              if selected is None or int(m) in selected}
-    return gated_rows_to_notes(gated), status
+    spec = _read(specimen, "OncoPanel specimen IHC table")
+    lng = _read(long, "OncoPanel IHC long table")
+    for df, req, what in ((spec, SPECIMEN_REQUIRED, "specimen"), (lng, LONG_REQUIRED, "long")):
+        missing = [c for c in req if c not in df.columns]
+        if missing:
+            raise ValueError(f"OncoPanel {what} table lacks columns {missing}")
+    if spec[SPECIMEN_ID_COL].isna().any() or spec[SPECIMEN_ID_COL].duplicated().any():
+        raise ValueError(f"Missing or duplicate {SPECIMEN_ID_COL} in the OncoPanel specimen table.")
 
+    out = pd.DataFrame({
+        LOCAL_ID_COL: pd.to_numeric(spec[SOURCE_ID_COL], errors="raise").astype(int),
+        SPECIMEN_ID_COL: spec[SPECIMEN_ID_COL].astype(str),
+        "path_matched": _as_bool(spec["path_matched"], "path_matched"),
+    })
+    # The long table also contains stains (e.g. Ki-67) without a marker-call
+    # column in the specimen CSV. Any lesional stain mention counts.
+    les = lng[lng["target"].astype(str).eq("lesional")].copy()
+    out["ihc_any"] = out["path_matched"] & out[SPECIMEN_ID_COL].isin(les[SPECIMEN_ID_COL].astype(str))
+    out["ne_pos"] = out["path_matched"] & _as_bool(spec["NE_any_pos"], "NE_any_pos").to_numpy()
+    out["nepc_like"] = out["path_matched"] & _as_bool(spec["NEPC_ihc"], "NEPC_ihc").to_numpy()
+    out["ihc_phenotype"] = spec["ihc_phenotype"].to_numpy() if "ihc_phenotype" in spec.columns else None
+    out["collection_date"] = _dates(spec["collection_date"], "collection_date")
 
-def merge_ne_positive(ihc_notes: pd.DataFrame, gated_notes: pd.DataFrame,
-                      review_status: dict) -> pd.DataFrame:
-    keys = [LOCAL_ID_COL, "RPT_ID"]
-    if ihc_notes[keys].isna().any().any() or ihc_notes.duplicated(keys).any():
-        raise ValueError("Missing or ambiguous pathology report IDs; resolve report identity "
-                         "before attaching LLM findings.")
-    out = ihc_notes.merge(gated_notes, on=keys, how="left", validate="one_to_one")
-    out["ne_review_status"] = out[LOCAL_ID_COL].map(review_status).fillna("unknown")
-    out["gated_evidence_types"] = out["gated_evidence_types"].fillna("")
-    out["ne_gated"] = out["gated_evidence_types"].ne("")
-    out["ne_positive"] = (out["qualifies"].astype(bool) & out["ne_gated"]).astype("boolean")
-    unknown = (out["qualifies"].astype(bool) & ~out["ne_gated"]
-               & ~out["ne_review_status"].isin(NE_REVIEW_COMPLETE))
-    out.loc[unknown, "ne_positive"] = pd.NA
+    les["specimen_date"] = _dates(les["specimen_date"], "specimen_date")
+    first = les.groupby(les[SPECIMEN_ID_COL].astype(str))["specimen_date"].min()
+    out["specimen_date"] = out[SPECIMEN_ID_COL].map(first)
+    out.loc[~out["path_matched"], "specimen_date"] = pd.NaT
+    if (out["ne_pos"] & ~out["ihc_any"]).any() or (out["nepc_like"] & ~out["ne_pos"]).any():
+        raise ValueError("Inconsistent flags: NE-positive without a stain call, or NEPC-like without NE-positive.")
     return out
+
+
+def _dates(s: pd.Series, name: str) -> pd.Series:
+    raw = s.astype("string").str.slice(0, 10)
+    parsed = pd.to_datetime(raw, errors="coerce", format="%Y-%m-%d")
+    bad = raw.notna() & raw.str.strip().ne("") & parsed.isna()
+    if bad.any():
+        raise ValueError(f"Unparseable {name} values, e.g. {raw[bad].iloc[0]!r}")
+    return parsed
 
 
 def load_anchor_dates(path) -> pd.Series:
@@ -498,61 +187,58 @@ def anchor_dates(local: pd.DataFrame) -> pd.Series:
 # Patient x landmark frame
 # --------------------------------------------------------------------------- #
 def validate_anchor_coverage(scores: pd.DataFrame, anchors: pd.Series):
-    """Require an ADT date for every scored patient, even those without notes."""
+    """Require an ADT date for every scored patient, even those without specimens."""
     missing = scores[ID_COL].drop_duplicates().map(anchors).isna().sum()
     if missing:
         raise ValueError(f"{missing} scored patients lack an ADT anchor; reconcile scores "
                          "and longitudinal data before constructing IHC outcomes.")
 
 
-def add_days_from_adt(notes: pd.DataFrame, anchors: pd.Series) -> pd.DataFrame:
-    out = notes.copy()
-    out["days_from_adt"] = (out["note_date"] - out[LOCAL_ID_COL].map(anchors)).dt.days
+def add_days_from_adt(specimens: pd.DataFrame, anchors: pd.Series) -> pd.DataFrame:
+    """``days_from_adt`` (pathology date) and ``collection_days_from_adt`` (OncoPanel date)."""
+    out = specimens.copy()
+    anchor = out[LOCAL_ID_COL].map(anchors)
+    out["days_from_adt"] = (out["specimen_date"] - anchor).dt.days
+    out["collection_days_from_adt"] = (out["collection_date"] - anchor).dt.days
     return out
 
 
-def build_ihc_frame(scores: pd.DataFrame, notes: pd.DataFrame, landmarks, *,
-                    anchors: pd.Series, review_status: dict, max_days: int = MAX_FOLLOWUP_DAYS) -> pd.DataFrame:
+def build_ihc_frame(scores: pd.DataFrame, specimens: pd.DataFrame, landmarks, *,
+                    anchors: pd.Series, max_days: int = MAX_FOLLOWUP_DAYS) -> pd.DataFrame:
     """One row per scored patient x landmark with the IHC outcome flags.
 
-    ``notes`` is the merged note table; offsets are recomputed from the validated
-    ``anchors``. Incomplete review makes both NE flags missing and excludes the
-    patient from NE fits, while IHC occurrence remains evaluable. Patient flags:
-    ``any_ihc_mention_future`` (IHC regardless of specimen), ``ihc_future``
-    (qualifying), ``ne_pos_future``, ``prior_ne_pos`` (NE-positive note dated at or
-    before ADT + landmark), ``ne_gated_ihc_lost_to_specimen`` (future IHC note with a
-    gated finding that fails the specimen rule, and no NE-positive future note) and
-    ``ne_gated_without_ihc_future`` (future gated report with no IHC regex hit).
+    Flags: ``ihc_future``, ``ne_pos_future``, ``nepc_like_future`` (matched specimen dated in
+    (ADT + landmark, ADT + max_days]), ``prior_ne_pos`` (NE-positive specimen dated at or before
+    ADT + landmark), plus attrition: ``unmatched_specimen_future`` (an unmatched sequenced
+    specimen collected in the window) and ``undated_ihc_specimen`` (a stained specimen with no
+    pathology date, never counted).
     """
     validate_anchor_coverage(scores, anchors)
-    notes = add_days_from_adt(notes, anchors)
-    dated = notes.dropna(subset=["days_from_adt"])
+    s = add_days_from_adt(specimens, anchors)
+    undated = set(s.loc[s["ihc_any"] & s["days_from_adt"].isna(), LOCAL_ID_COL].astype(int))
     rows = []
     for lm in landmarks:
-        sc = scores[scores["landmark_days"].eq(int(lm))][[ID_COL, "landmark_days", RISK_COL]]
-        d = dated["days_from_adt"]
-        fut = dated[(d > int(lm)) & (d <= max_days)]
-        prior = dated[d <= int(lm)]
+        lm = int(lm)
+        sc = scores[scores["landmark_days"].eq(lm)][[ID_COL, "landmark_days", RISK_COL]].copy()
+        d = s["days_from_adt"]
+        fut = s[(d > lm) & (d <= max_days)]
+        prior = s[d <= lm]
+        cd = s["collection_days_from_adt"]
+        unmatched = s[~s["path_matched"] & (cd > lm) & (cd <= max_days)]
 
-        def ids(mask_df):
-            return set(mask_df[LOCAL_ID_COL].astype(int))
+        def ids(df):
+            return set(df[LOCAL_ID_COL].astype(int))
 
         flags = {
-            "any_ihc_mention_future": ids(fut[fut["ihc_any"].astype(bool)]),
-            "ihc_future": ids(fut[fut["qualifies"].astype(bool)]),
-            "ne_pos_future": ids(fut[fut["ne_positive"].fillna(False)]),
-            "prior_ne_pos": ids(prior[prior["ne_positive"].fillna(False)]),
-            "ne_gated_without_ihc_future": ids(fut[fut["ne_gated"] & ~fut["ihc_any"].astype(bool)]),
+            "ihc_future": ids(fut[fut["ihc_any"]]),
+            "ne_pos_future": ids(fut[fut["ne_pos"]]),
+            "nepc_like_future": ids(fut[fut["nepc_like"]]),
+            "prior_ne_pos": ids(prior[prior["ne_pos"]]),
+            "unmatched_specimen_future": ids(unmatched),
+            "undated_ihc_specimen": undated,
         }
-        lost = ids(fut[fut["ne_gated"] & fut["ihc_any"].astype(bool) & ~fut["qualifies"].astype(bool)])
-        flags["ne_gated_ihc_lost_to_specimen"] = lost - flags["ne_pos_future"]
-        sc = sc.copy()
-        for name, s in flags.items():
-            sc[name] = sc[ID_COL].isin(s).astype(int)
-        sc["ne_review_status"] = sc[ID_COL].map(review_status).fillna("unknown")
-        sc["ne_review_complete"] = sc["ne_review_status"].isin(NE_REVIEW_COMPLETE)
-        for col in ("ne_pos_future", "prior_ne_pos"):
-            sc[col] = sc[col].astype(float).where(sc["ne_review_complete"])
+        for name, members in flags.items():
+            sc[name] = sc[ID_COL].isin(members).astype(int)
         rows.append(sc)
     return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
@@ -563,10 +249,8 @@ def build_ihc_frame(scores: pd.DataFrame, notes: pd.DataFrame, landmarks, *,
 def outcome_population(sub: pd.DataFrame, outcome: str) -> pd.DataFrame:
     if outcome == "ihc_any":
         return sub
-    if outcome == "ne_pos_all":
-        return sub[sub["ne_review_complete"] & sub["prior_ne_pos"].eq(0)]
-    if outcome == "ne_pos_given_ihc":
-        return sub[sub["ne_review_complete"] & sub["prior_ne_pos"].eq(0) & sub["ihc_future"].eq(1)]
+    if outcome in NE_OUTCOMES:
+        return sub[sub["prior_ne_pos"].eq(0)]
     raise ValueError(f"Unknown outcome {outcome!r}")
 
 
@@ -598,24 +282,22 @@ def _fit_outcome(pop, outcome, tags, *, min_events, n_folds, n_bootstrap, seed):
     if n_bootstrap:
         draws = nsl.bootstrap_auc(y, {outcome: raw}, n_bootstrap=n_bootstrap, seed=seed)
         row["auc_raw_score_lo"], row["auc_raw_score_hi"] = nsl._ci(draws[outcome])
-    coefs =[{**base, **r, "note": fit["note"]} for r in fit["terms"].to_dict("records")]
+    coefs = [{**base, **r, "note": fit["note"]} for r in fit["terms"].to_dict("records")]
     return row, coefs, predictions
 
 
 def _counts(sub: pd.DataFrame, tags: dict, n_list) -> dict:
-    ne_all = outcome_population(sub, "ne_pos_all")
-    ne_ihc = outcome_population(sub, "ne_pos_given_ihc")
     s = lambda col: int(sub[col].sum())  # noqa: E731
-    return {**tags, "n_cohort_list": n_list, "n_at_risk": len(sub),
-            "n_ne_review_complete": int(sub["ne_review_complete"].sum()),
-            "n_ne_review_excluded": int((~sub["ne_review_complete"]).sum()),
-            "n_any_ihc_mention_future": s("any_ihc_mention_future"), "n_ihc_future": s("ihc_future"),
-            "n_ne_pos_future": s("ne_pos_future"), "n_prior_ne_pos": s("prior_ne_pos"),
-            "n_ne_pos_all": len(ne_all), "events_ne_pos_all": int(ne_all["ne_pos_future"].sum()),
-            "n_ne_pos_given_ihc": len(ne_ihc),
-            "events_ne_pos_given_ihc": int(ne_ihc["ne_pos_future"].sum()),
-            "n_ne_gated_ihc_lost_to_specimen": s("ne_gated_ihc_lost_to_specimen"),
-            "n_ne_gated_without_ihc_future": s("ne_gated_without_ihc_future")}
+    out = {**tags, "n_cohort_list": n_list, "n_at_risk": len(sub),
+           "n_ihc_future": s("ihc_future"), "n_ne_pos_future": s("ne_pos_future"),
+           "n_nepc_like_future": s("nepc_like_future"), "n_prior_ne_pos": s("prior_ne_pos"),
+           "n_unmatched_specimen_future": s("unmatched_specimen_future"),
+           "n_undated_ihc_specimen": s("undated_ihc_specimen")}
+    for outcome in NE_OUTCOMES:
+        pop = outcome_population(sub, outcome)
+        out[f"n_{outcome}"] = len(pop)
+        out[f"events_{outcome}"] = int(pop[OUTCOMES[outcome]].sum())
+    return out
 
 
 def run_ihc_lr(frame: pd.DataFrame, members: dict, landmarks, *, outcomes=tuple(OUTCOMES),
@@ -654,15 +336,19 @@ def run_ihc_lr(frame: pd.DataFrame, members: dict, landmarks, *, outcomes=tuple(
     return (*out, predictions.reindex(columns=PREDICTION_COLUMNS))
 
 
-def marker_frequency(notes: pd.DataFrame) -> pd.DataFrame:
-    """Qualifying IHC notes per marker, overall and among NE-positive notes."""
-    q = notes[notes["qualifies"].astype(bool)]
+def marker_frequency(specimen) -> pd.DataFrame:
+    """Matched sequenced specimens per marker: stained, positive (or retained), and stained among NE-positive."""
+    spec = _read(specimen, "OncoPanel specimen IHC table")
+    spec = spec[_as_bool(spec["path_matched"], "path_matched")]
+    ne = _as_bool(spec["NE_any_pos"], "NE_any_pos")
     rows = []
-    for markers, ne in zip(q["ihc_markers"], q["ne_positive"].fillna(False)):
-        for m in filter(None, str(markers).split(";")):
-            rows.append({"marker": m, "ne_positive": bool(ne)})
+    for m in (c for c in MARKER_COLUMNS if c in spec.columns):
+        call = spec[m]
+        if call.notna().sum() == 0:
+            continue
+        rows.append({"marker": m, "specimens_stained": int(call.notna().sum()),
+                     "specimens_positive": int(call.isin(["positive", "retained", "discordant"]).sum()),
+                     "stained_among_ne_pos": int((call.notna() & ne).sum())})
     if not rows:
-        return pd.DataFrame(columns=["marker", "notes", "ne_positive_notes"])
-    df = pd.DataFrame(rows)
-    return (df.groupby("marker").agg(notes=("ne_positive", "size"), ne_positive_notes=("ne_positive", "sum"))
-              .sort_values("notes", ascending=False).reset_index())
+        return pd.DataFrame(columns=["marker", "specimens_stained", "specimens_positive", "stained_among_ne_pos"])
+    return pd.DataFrame(rows).sort_values("specimens_stained", ascending=False).reset_index(drop=True)

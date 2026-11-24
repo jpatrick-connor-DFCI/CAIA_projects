@@ -89,10 +89,12 @@ COMPASS/
 │   │   ├── 06_reviewer_suggestions.ipynb
 │   │   ├── 07_checklist_test.ipynb
 │   │   ├── 08_metastatic_transfer_test.ipynb
-│   │   └── 09_cohort_sensitivity_testosterone_filter.ipynb
+│   │   ├── 09_cohort_sensitivity_testosterone_filter.ipynb
+│   │   ├── 10_subgroup_mcrpc_transfer.ipynb
+│   │   └── 11_prostate_ihc_extraction.ipynb # run/load prostate_ihc steps 1-2 (RERUN_EXTRACTION flag)
 │   ├── text_interpretability/            # what the clinical text says about the risk score
 │   │   ├── post_landmark/                # 11-12 plus 13-16 on notes AFTER each landmark (ADT + lm < date <= ADT + 10 y)
-│   │   │   ├── 11_LR_for_IHC.ipynb           # risk score -> future prostate IHC / NE-positive IHC
+│   │   │   ├── 11_LR_for_IHC.ipynb           # risk score -> future OncoPanel prostate IHC / NE+ / NEPC-like (prostate_ihc)
 │   │   │   ├── 12_lexicon_note_review.ipynb  # lexicon-matching post-landmark notes + patient risk table, for reading
 │   │   │   ├── 13_pathology_topics_vs_risk.ipynb # TF-IDF: top vs bottom decile; term/lexicon comparisons
 │   │   │   ├── 14_clinical_notes_topics_vs_risk.ipynb # same on pooled Clinician/Imaging/Pathology notes
@@ -106,6 +108,9 @@ COMPASS/
 │       ├── final_figure_data_prep.R
 │       ├── run_figure_render.R
 │       └── ESMO_AI_Figures.R
+├── prostate_ihc/                         # rule-based IHC calls for OncoPanel prostate specimens (outcomes for 11)
+│   ├── extract_prostate_ihc.py           # step 1 -> ihc_extraction/intermediate/*.parquet
+│   └── oncopanel_ihc.py                  # step 2 -> ihc_extraction/results/oncopanel_prostate_*.csv
 ├── federated_models/                     # 04
 │   └── federated_clinical_comparison.py  # clinical comparison and transfer tables
 └── figures/                              # 05 prep + R figures
