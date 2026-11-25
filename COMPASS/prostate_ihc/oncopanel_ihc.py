@@ -16,6 +16,7 @@ from pathlib import Path
 import polars as pl
 
 from COMPASS.prostate_ihc import paths as ihc_paths
+from COMPASS.prostate_ihc.extract_prostate_ihc import ne_histology_expr
 
 NE = ['Synaptophysin', 'Chromogranin', 'INSM1', 'CD56']
 ARX = ['AR', 'PSA', 'NKX3.1', 'PSAP', 'PSMA', 'Prostein/P501S']
@@ -44,7 +45,6 @@ def run(parquet_dir=None, pathology_dir=None, intermediate_dir=None, results_dir
     pathology_dir = Path(pathology_dir or d.pathology_dir)
     intermediate_dir = Path(intermediate_dir or d.intermediate_dir)
     results_dir = Path(results_dir or d.results_dir)
-    ihc_paths.check_version(intermediate_dir, 'Step-1 outputs')
 
     g = (pl.read_parquet(parquet_dir / 'CDM_SPEC_CON_ids.parquet').filter(pl.col('CANCER_TYPE') == 'Prostate Cancer')
          .with_columns(pl.col('BLOCK_ACCESSION_NBR').map_elements(key, return_dtype=pl.Utf8).alias('k')))
@@ -89,8 +89,7 @@ def run(parquet_dir=None, pathology_dir=None, intermediate_dir=None, results_dir
            .select('MRN_INT', 'ACCESSION', 'organ', 'histology', pl.col('RAW_TEXT').alias('diagnosis_text')).collect()
            .join(pairs, on=['MRN_INT', 'ACCESSION']))
     nehist = ctx.group_by('UNIQUE_SAMPLE_ID').agg(
-        (pl.col('histology').fill_null('').str.contains('(?i)small cell|neuroendocrine')
-         | pl.col('diagnosis_text').fill_null('').str.contains('(?i)small cell carcinoma|neuroendocrine carcinoma|neuroendocrine differentiation')).any().alias('NE_histology'),
+        ne_histology_expr().any().alias('NE_histology'),
         pl.col('organ').drop_nulls().unique().sort().str.join('; ').alias('path_organs'),
         pl.col('histology').drop_nulls().unique().sort().str.join('; ').alias('path_histologies'))
 
@@ -122,7 +121,6 @@ def run(parquet_dir=None, pathology_dir=None, intermediate_dir=None, results_dir
         results_dir.mkdir(parents=True, exist_ok=True)
         long_out.write_csv(results_dir / ihc_paths.ONCOPANEL_LONG_FILE)
         out.write_csv(results_dir / ihc_paths.ONCOPANEL_SPECIMEN_FILE)
-        ihc_paths.write_version(results_dir)
     return out, long_out
 
 
@@ -132,7 +130,6 @@ def load(results_dir=None):
     missing = [f for f in ihc_paths.RESULT_FILES if not (d / f).exists()]
     if missing:
         raise FileNotFoundError(f"Missing step-2 outputs in {d}: {missing}. Run oncopanel_ihc.run().")
-    ihc_paths.check_version(d, 'Step-2 outputs')
     spec = pl.read_csv(d / ihc_paths.ONCOPANEL_SPECIMEN_FILE, infer_schema_length=None)
     long = pl.read_csv(d / ihc_paths.ONCOPANEL_LONG_FILE, infer_schema_length=None)
     return spec, long

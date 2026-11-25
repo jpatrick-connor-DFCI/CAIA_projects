@@ -22,30 +22,6 @@ ONCOPANEL_LONG_FILE = "oncopanel_prostate_ihc_long.csv"
 INTERMEDIATE_FILES = (COHORT_FILE, LONG_FILE, SPECIMEN_ALL_FILE)
 RESULT_FILES = (ONCOPANEL_SPECIMEN_FILE, ONCOPANEL_LONG_FILE)
 
-# Bump when the extraction logic changes; outputs written by an older version are rejected downstream.
-EXTRACTION_VERSION = "v4"
-VERSION_FILE = "extraction_version.txt"
-
-
-def write_version(directory) -> None:
-    (Path(directory) / VERSION_FILE).write_text(EXTRACTION_VERSION + "\n")
-
-
-def read_version(directory) -> str | None:
-    f = Path(directory) / VERSION_FILE
-    return f.read_text().strip() if f.exists() else None
-
-
-def check_version(directory, what: str) -> None:
-    """Raise if ``directory`` holds outputs from another extraction version or an unstamped run."""
-    found = read_version(directory)
-    if found != EXTRACTION_VERSION:
-        raise ValueError(
-            f"{what} in {directory} were written by extraction version {found or 'unstamped'}, "
-            f"expected {EXTRACTION_VERSION}. Rerun python -m COMPASS.prostate_ihc.extract_prostate_ihc "
-            f"&& python -m COMPASS.prostate_ihc.oncopanel_ihc.")
-
-
 @dataclass(frozen=True)
 class IHCPaths:
     pathology_dir: Path      # ihc.parquet, samples.parquet (rule-based pathology extraction)

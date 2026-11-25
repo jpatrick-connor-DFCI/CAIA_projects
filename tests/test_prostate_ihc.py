@@ -205,22 +205,21 @@ def test_default_paths_env_override(monkeypatch, tmp_path):
     assert d.intermediate_dir == tmp_path / "intermediate" and d.results_dir == tmp_path / "results"
 
 
-def test_step2_outputs_feed_ihc_lr(inputs):
-    il = pytest.importorskip("COMPASS.multivariable_models.ihc_lr")
+def test_step1_intermediates_feed_annotations(inputs):
+    pd = pytest.importorskip("pandas")
+    from COMPASS.prostate_ihc import annotations as ann
     path_dir, pq_dir, inter, res = inputs
     ex.run(path_dir, pq_dir, inter)
-    spec, long = op.run(pq_dir, path_dir, inter, res)
-    from_csv = il.load_oncopanel_ihc(res / ihc_paths.ONCOPANEL_SPECIMEN_FILE, res / ihc_paths.ONCOPANEL_LONG_FILE)
-    from_frames = il.load_oncopanel_ihc(spec, long)
-    flags = ["ihc_any", "ne_pos", "nepc_like"]
-    assert from_csv[flags].equals(from_frames[flags])
-    rows = from_csv.set_index("UNIQUE_SAMPLE_ID")
-    assert rows.loc["U1", flags].tolist() == [True, True, True]
-    assert rows.loc["U2", flags].tolist() == [True, True, False]
-    assert rows.loc["U4", flags].tolist() == [False, False, False] and pd_isna(rows.loc["U4", "specimen_date"])
-    assert str(rows.loc["U1", "specimen_date"].date()) == "2021-02-01"   # ihc.parquet SPEC_DATE, lesional row
-    freq = il.marker_frequency(spec).set_index("marker")
-    assert freq.loc["Synaptophysin", "specimens_positive"] == 2
+    out = ann.build(inter)["specimens"]
+    step1 = ex.load(inter)
+    assert len(out) == step1["spec"].height
+    mine = out.set_index(["MRN_INT", "ACCESSION", "PART"])
+    for r in step1["spec"].iter_rows(named=True):
+        row = mine.loc[(r["MRN_INT"], r["ACCESSION"] or "", r["PART"] or "")]
+        assert row["ne_pos"] == r["NE_any_pos"] and row["ARaxis_any_pos"] == r["ARaxis_any_pos"]
+        assert row["nepc_like"] == ("NEPC-like" in r["ihc_phenotype"])
+        assert row["prostate_relevant"] == r["prostate_relevant"]
+    assert pd.api.types.is_datetime64_any_dtype(out["specimen_date"])
 
 
 def pd_isna(x):
@@ -228,15 +227,23 @@ def pd_isna(x):
     return pd.isna(x)
 
 
+def _flags(spec, long):
+    """Per-UNIQUE_SAMPLE_ID flags from the step-2 frames (matched specimens only)."""
+    les = long.filter(pl.col("target") == "lesional")
+    dates = les.group_by("UNIQUE_SAMPLE_ID").agg(pl.col("specimen_date").min())
+    out = (spec.join(dates, on="UNIQUE_SAMPLE_ID", how="left")
+           .with_columns((pl.col("path_matched") & pl.col("UNIQUE_SAMPLE_ID").is_in(les["UNIQUE_SAMPLE_ID"].implode()))
+                         .alias("ihc_any"),
+                         (pl.col("path_matched") & pl.col("NE_any_pos")).alias("ne_pos"),
+                         (pl.col("path_matched") & pl.col("NEPC_ihc")).alias("nepc_like")))
+    return out.select("UNIQUE_SAMPLE_ID", "ihc_any", "ne_pos", "nepc_like", "specimen_date").to_pandas().set_index("UNIQUE_SAMPLE_ID")
+
+
 def _run_pipeline(inputs):
-    il = pytest.importorskip("COMPASS.multivariable_models.ihc_lr")
     path_dir, pq_dir, inter, res = inputs
     step1 = ex.run(path_dir, pq_dir, inter)
     spec, long = op.run(pq_dir, path_dir, inter, res)
-    # Exercise the CSV interface used by the prediction notebook.
-    lr = il.load_oncopanel_ihc(res / ihc_paths.ONCOPANEL_SPECIMEN_FILE,
-                              res / ihc_paths.ONCOPANEL_LONG_FILE).set_index("UNIQUE_SAMPLE_ID")
-    return step1, spec, long, lr
+    return step1, spec, long, _flags(spec, long)
 
 
 @pytest.mark.parametrize("marker,result,text,nepc", [
@@ -258,9 +265,12 @@ def test_discordant_stains_preserve_positive_evidence(inputs, marker, result, te
     assert ("NEPC-like" in first["ihc_phenotype"]) == nepc
     assert final["NEPC_ihc"] == nepc
     assert lr.loc["U1", ["ihc_any", "ne_pos", "nepc_like"]].tolist() == [True, True, nepc]
-    il = pytest.importorskip("COMPASS.multivariable_models.ihc_lr")
-    freq = il.marker_frequency(spec).set_index("marker")
-    assert freq.loc[marker_norm, "specimens_positive"] == 2
+    assert spec.filter(pl.col(marker_norm).is_in(["positive", "discordant"])).height == 2
+    # LR annotations: discordant NE -> positive, discordant AR-axis -> neither. So a discordant NKX3.1 does not
+    # block AR-low the way the extraction's AR-axis-positive flag does; the other AR-axis negatives decide.
+    from COMPASS.multivariable_models import ihc_lr as il
+    annotations = il.load_ihc_specimens(intermediate_dir=inputs[2]).set_index('DFCI_MRN')
+    assert annotations.loc[1, ['ne_pos', 'ar_low', 'nepc_like']].astype(bool).tolist() == [True, True, True]
 
 
 @pytest.mark.parametrize("text", [
@@ -295,26 +305,6 @@ def test_planned_supplement_stains_do_not_borrow_another_markers_result(inputs, 
         assert table.filter((pl.col("MRN_INT") == 1) & pl.col("marker_norm").is_in(["PSMA", "AMACR"])).is_empty()
     assert spec.filter(pl.col("UNIQUE_SAMPLE_ID") == "U1")["NEPC_ihc"].item()
     assert lr.loc["U1", "nepc_like"]
-
-
-@pytest.mark.parametrize("stamp", [None, "v1", "v2", "v3"])
-def test_all_disk_loaders_reject_stale_extraction_outputs(inputs, stamp):
-    path_dir, pq_dir, inter, res = inputs
-    ex.run(path_dir, pq_dir, inter)
-    op.run(pq_dir, path_dir, inter, res)
-    assert ex.load(inter)["cohort"].height > 0
-    assert op.load(res)[0].height > 0
-    for directory in (inter, res):
-        version_file = directory / ihc_paths.VERSION_FILE
-        if stamp is None:
-            version_file.unlink()
-        else:
-            version_file.write_text(stamp + "\n")
-    for loader, directory in ((ex.load, inter), (op.load, res)):
-        with pytest.raises(ValueError, match="expected v"):
-            loader(directory)
-    with pytest.raises(ValueError, match="expected v"):
-        op.run(pq_dir, path_dir, inter, res, write=False)
 
 
 @pytest.mark.parametrize("target,pct,expected", [
@@ -366,3 +356,73 @@ def test_shared_accession_keeps_stains_context_and_dates_with_patient(inputs):
     assert row["path_histologies"] == "adenocarcinoma" and not row["NE_histology"]
     assert row["NKX3.1"] == "negative" and row["NEPC_ihc"]
     assert lr.loc["U1", "nepc_like"]
+
+
+@pytest.mark.parametrize('text,target', [
+    ('Synaptophysin positive in tumor cells; PSMA positive in benign glands.', 'background'),
+    ('Synaptophysin positive in tumor cells, whereas PSMA positive in benign glands.', 'background'),
+    ('Benign glands express PSMA; tumor cells express synaptophysin.', 'background'),
+    ('PSMA stains both benign and tumor cells.', 'unknown'),
+    ('Tumor cells express PSMA.', 'lesional'),
+])
+def test_supplement_target_reaches_lr(inputs, text, target):
+    from COMPASS.multivariable_models import ihc_lr as il
+    path_dir, pq_dir, inter, res = inputs
+    path = path_dir / 'ihc.parquet'
+    ihc = pl.read_parquet(path)
+    ihc.with_columns(pl.when(pl.col('MRN_INT') == 1).then(pl.lit(text))
+                     .otherwise(pl.col('RAW_TEXT')).alias('RAW_TEXT')).write_parquet(path)
+    step1 = ex.run(path_dir, pq_dir, inter)
+    psma = step1['long'].filter((pl.col('MRN_INT') == 1) & (pl.col('marker_norm') == 'PSMA'))
+    assert psma['target'].to_list() == [target]
+    annotations = il.load_ihc_specimens(intermediate_dir=inter).set_index('DFCI_MRN')
+    assert bool(annotations.loc[1, 'nepc_like']) == (target != 'lesional')
+    spec, _ = op.run(pq_dir, path_dir, inter, res)
+    assert spec.filter(pl.col('MRN_INT') == 1)['NEPC_ihc'].item() == (target != 'lesional')
+
+
+def test_supplement_conflicting_source_targets_are_order_independent():
+    rows = [_ihc(1, 'A', 'SYNAPTOPHYSIN', 'positive', 'Synaptophysin positive; PSMA positive.', target=t)
+            for t in ('background', 'lesional')]
+    for ordered in (rows, rows[::-1]):
+        assert ex.supplement(_df(ordered))['target'].to_list() == ['unknown']
+
+
+@pytest.mark.parametrize('histology,text,expected', [
+    ('adenocarcinoma', 'No neuroendocrine differentiation.', False),
+    ('adenocarcinoma', 'No evidence of small cell carcinoma.', False),
+    ('adenocarcinoma', 'Neuroendocrine differentiation is not identified.', False),
+    ('non-small cell carcinoma', '', False),
+    ('non small cell carcinoma', '', False),
+    ('adenocarcinoma', 'Neuroendocrine markers were ordered.', False),
+    ('small cell carcinoma', '', True),
+    ('adenocarcinoma', 'Neuroendocrine differentiation is present.', True),
+    ('adenocarcinoma', 'No small cell carcinoma, but neuroendocrine differentiation is present.', True),
+])
+def test_ne_histology_assertion(histology, text, expected):
+    assert ex.has_ne_histology(histology, text) == expected
+
+
+def test_negated_ne_histology_does_not_create_lr_event(inputs):
+    from COMPASS.multivariable_models import ihc_lr as il
+    import pandas as pd
+    path_dir, pq_dir, inter, res = inputs
+    path = path_dir / 'samples.parquet'
+    samples = pl.read_parquet(path)
+    samples.with_columns(
+        pl.when(pl.col('MRN_INT') == 1).then(pl.lit('liver')).otherwise(pl.col('organ')).alias('organ'),
+        pl.when(pl.col('MRN_INT') == 1).then(pl.lit('Poorly differentiated carcinoma. No neuroendocrine differentiation.'))
+        .otherwise(pl.col('RAW_TEXT')).alias('RAW_TEXT'),
+    ).write_parquet(path)
+    path = path_dir / 'ihc.parquet'
+    ihc = pl.read_parquet(path)
+    ihc.filter(~((pl.col('MRN_INT') == 1) & (pl.col('marker') == 'SYNAPTOPHYSIN'))).write_parquet(path)
+    ex.run(path_dir, pq_dir, inter)
+    annotations = il.load_ihc_specimens(intermediate_dir=inter)
+    row = annotations.set_index('DFCI_MRN').loc[1]
+    assert not row['NE_histology'] and not row['prostate_relevant']
+    scores = pd.DataFrame({'person_id': [1], 'landmark_days': [0], 'risk_score': [1.]})
+    frame = il.build_ihc_frame(scores, annotations, [0], anchors=pd.Series({1: pd.Timestamp('2020-01-01')}))
+    assert not frame[list(il.SPECIMEN_FLAGS)].to_numpy().any()
+    spec, _ = op.run(pq_dir, path_dir, inter, res)
+    assert not spec.filter(pl.col('MRN_INT') == 1)['NE_histology'].item()

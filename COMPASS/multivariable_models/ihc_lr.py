@@ -1,28 +1,29 @@
-"""Logistic regression of future prostate OncoPanel IHC (and NE / NEPC-like IHC) on the federated risk score.
+"""Logistic regression of future prostate IHC (NE-positive, NEPC-like, AR-low) on the federated risk score.
 
 Backs ``notebooks/text_interpretability/post_landmark/11_LR_for_IHC.ipynb``. For each ADT landmark, the frozen
 federated (no-DFCI) platinum-trained XGBoost score from notebook 04 (``endpoint == "nepc"`` rows: patients
 with NEPC or censoring at/before the landmark are not at risk) is the only predictor, z-scored within each
-fit, in three unpenalized LRs:
+fit, in four unpenalized LRs:
 
-* ``ihc_any``   -- a future sequenced specimen whose matched pathology report has >=1 lesional stain call;
-                   all at-risk patients.
-* ``ne_pos``    -- a future sequenced specimen that is NE-positive (``NE_any_pos``: synaptophysin,
-                   chromogranin, INSM1 or CD56 positive); at-risk patients without a prior NE-positive one.
-* ``nepc_like`` -- a future sequenced specimen that is NEPC-like (``NEPC_ihc``: NE-positive, AR axis
-                   negative, no AR-axis marker positive); same population as ``ne_pos``.
+* ``ihc_any``   -- a future prostate-relevant specimen with >= 1 lesional stain row; all at-risk patients.
+* ``ne_pos``    -- a future prostate-relevant specimen that is NE-positive (synaptophysin, chromogranin, INSM1
+                   or CD56 positive); at-risk patients without a prior NE-positive one.
+* ``nepc_like`` -- NE-positive, >= 1 AR-axis marker negative and none positive; same population as ``ne_pos``.
+* ``ar_low``    -- AR-axis negative (>= 1 of AR, PSA, NKX3.1, PSAP, PSMA, prostein negative, none positive),
+                   whatever the NE stains show; at-risk patients without a prior AR-low specimen.
 
-**IHC source.** The prostate_ihc extraction (``COMPASS/prostate_ihc``), step 2:
-``oncopanel_prostate_specimen_ihc.csv`` (one row per OncoPanel prostate specimen) and
-``oncopanel_prostate_ihc_long.csv`` (stain mentions on the matched reports). Only specimens matched to a
-pathology report (``path_matched``) can be events; unmatched ones are counted for attrition only. No LLM
-findings are used.
+**IHC source.** ``COMPASS.prostate_ihc.annotations``: specimen flags recomputed from the pre-existing step-1
+intermediates (``prostate_ihc_long`` + ``prostate_ihc_specimen_all``), no raw reads. Every stained pathology
+specimen with ``prostate_relevant`` (evidence tiers 1-4) can be an event, sequenced or not; other specimens are
+ignored. A discordant marker call (positive and negative on the same part) counts as positive for NE markers and
+as neither for AR-axis markers.
+No LLM findings are used.
 
-**Timing.** A specimen is dated by its pathology ``specimen_date``: the earliest lesional-stain
-``specimen_date`` in the long table for that ``UNIQUE_SAMPLE_ID``. "Future" = ADT + landmark < date <=
-ADT + MAX_FOLLOWUP_DAYS (the models' 10-year cap); the label is "ever during that window", not
-fixed-horizon. Prior IHC excludes no one; a prior NE-positive specimen (at or before ADT + landmark)
-excludes the patient from both NE outcomes (NEPC-like is a subset of NE-positive).
+**Timing.** A specimen is dated by the earliest lesional ``specimen_date`` in the long table. "Future" =
+ADT + landmark < date <= ADT + MAX_FOLLOWUP_DAYS (the models' 10-year cap); the label is "ever during that
+window", not fixed-horizon. Prior IHC excludes no one; a prior NE-positive specimen (at or before ADT +
+landmark) excludes the patient from both NE outcomes (NEPC-like is a subset of NE-positive); a prior AR-low
+specimen excludes the patient from ``ar_low``. Undated specimens are never events (counted).
 
 AUC is from out-of-fold predictions (stratified K-fold) with a patient bootstrap 95% CI, plus the AUC of
 the untransformed score (``auc_raw_score``, preferred). Odds ratios (per SD), Wald CIs and LRT p-values
@@ -30,36 +31,32 @@ come from the full-population fit. The LR machinery is reused from ``nepc_subtyp
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
 from COMPASS.multivariable_models import nepc_subtyping_lr as nsl
+from COMPASS.prostate_ihc import annotations as ann
 
 ID_COL = nsl.ID_COL                     # "person_id" (scores / LR frame)
-LOCAL_ID_COL = nsl.LOCAL_ID_COL         # "DFCI_MRN" (== MRN_INT in the prostate_ihc outputs)
+LOCAL_ID_COL = nsl.LOCAL_ID_COL         # "DFCI_MRN" (== MRN_INT in the prostate_ihc intermediates)
 SOURCE_ID_COL = "MRN_INT"
-SPECIMEN_ID_COL = "UNIQUE_SAMPLE_ID"
+SPECIMEN_ID_COL = "SPECIMEN_ID"         # MRN|ACCESSION|PART
 RISK_COL = nsl.RISK_COL
 ANCHOR_SOURCE_COL = "TREATMENT_ANCHOR_DATE"
 MAX_FOLLOWUP_DAYS = 3650
-IHC_SOURCE_VERSION = "prostate-ihc-oncopanel-original-csv"  # pre-existing step-2 CSVs from the original scripts
+IHC_SOURCE_VERSION = ann.SOURCE_VERSION
 
-# Marker call columns of oncopanel_prostate_specimen_ihc.csv (lesional calls; null = not stained).
-MARKER_COLUMNS = ['AR', 'PSA', 'NKX3.1', 'PSAP', 'PSMA', 'Prostein/P501S', 'ERG', 'Synaptophysin', 'Chromogranin',
-                  'INSM1', 'CD56', 'ASCL1', 'NEUROD1', 'DLL3', 'SSTR2', 'TTF-1', 'YAP1', 'SOX2', 'RB1', 'p53', 'PTEN',
-                  'p63', 'HMWCK (34bE12)', 'CK5/6', 'PIN4 cocktail', 'AMACR', 'GATA3', 'CK7', 'CK20']
-SPECIMEN_REQUIRED = [SOURCE_ID_COL, SPECIMEN_ID_COL, "path_matched", "NE_any_pos", "NEPC_ihc", "collection_date"]
-LONG_REQUIRED = [SPECIMEN_ID_COL, "specimen_date", "target"]
-
-# Outcome -> event column; the population is set by outcome_population().
+# Outcome -> (event column, prior-exclusion column or None); the population is set by outcome_population().
 OUTCOMES = {
     "ihc_any": "ihc_future",
     "ne_pos": "ne_pos_future",
     "nepc_like": "nepc_like_future",
+    "ar_low": "ar_low_future",
 }
-NE_OUTCOMES = ("ne_pos", "nepc_like")
+PRIOR_EXCLUSION = {"ihc_any": None, "ne_pos": "prior_ne_pos", "nepc_like": "prior_ne_pos", "ar_low": "prior_ar_low"}
+SPECIMEN_FLAGS = {"ihc_future": "ihc_any", "ne_pos_future": "ne_pos", "nepc_like_future": "nepc_like",
+                  "ar_low_future": "ar_low"}
+PRIOR_FLAGS = {"prior_ne_pos": "ne_pos", "prior_ar_low": "ar_low"}
 
 MODEL_COLUMNS = [
     "cohort", "landmark_days", "outcome", "n", "events", "lrt_stat", "lrt_df", "p_lrt",
@@ -72,13 +69,15 @@ COEF_COLUMNS = [
 ]
 COUNT_COLUMNS = [
     "cohort", "landmark_days", "n_cohort_list", "n_at_risk",
-    "n_ihc_future", "n_ne_pos_future", "n_nepc_like_future", "n_prior_ne_pos",
-    "n_ne_pos", "events_ne_pos", "n_nepc_like", "events_nepc_like",
-    "n_unmatched_specimen_future", "n_undated_ihc_specimen",
+    "n_ihc_future", "n_ne_pos_future", "n_nepc_like_future", "n_ar_low_future",
+    "n_prior_ne_pos", "n_prior_ar_low",
+    "n_ne_pos", "events_ne_pos", "n_nepc_like", "events_nepc_like", "n_ar_low", "events_ar_low",
+    "n_undated_ihc_specimen",
 ]
 AUDIT_COLUMNS = [
-    LOCAL_ID_COL, SPECIMEN_ID_COL, "specimen_date", "days_from_adt", "collection_date",
-    "path_matched", "ihc_any", "ne_pos", "nepc_like", "ihc_phenotype",
+    LOCAL_ID_COL, SPECIMEN_ID_COL, "ACCESSION", "PART", "specimen_date", "days_from_adt",
+    "prostate_relevant", "prostate_evidence", "ihc_phenotype",
+    "ihc_any", "ne_pos", "nepc_like", "ar_low",
 ]
 # Per-patient OOF predictions; ``event`` is that outcome's label (OUTCOMES[outcome]).
 PREDICTION_COLUMNS = ["cohort", "landmark_days", "outcome", *nsl.PREDICTION_KEY_COLUMNS]
@@ -87,78 +86,20 @@ PREDICTION_COLUMNS = ["cohort", "landmark_days", "outcome", *nsl.PREDICTION_KEY_
 # --------------------------------------------------------------------------- #
 # Inputs
 # --------------------------------------------------------------------------- #
-_TRUE = {"true": True, "false": False, "1": True, "0": False, "1.0": True, "0.0": False}
+def load_ihc_specimens(long=None, spec_all=None, *, intermediate_dir=None) -> pd.DataFrame:
+    """One row per stained specimen (``ann.ANNOTATION_COLUMNS`` with ``DFCI_MRN`` for ``MRN_INT``).
 
-
-def _as_bool(s: pd.Series, name: str) -> pd.Series:
-    """CSV booleans (polars writes true/false) -> bool; missing -> False; anything else raises."""
-    if s.dtype == bool:
-        return s
-    mapped = s.map(lambda v: v if isinstance(v, (bool, np.bool_)) else
-                   (False if pd.isna(v) else _TRUE.get(str(v).strip().lower())))
-    bad = mapped.isna()
-    if bad.any():
-        raise ValueError(f"Column {name!r} has non-boolean values: {sorted(s[bad].astype(str).unique())[:5]}")
-    return mapped.astype(bool)
-
-
-def _read(obj, what) -> pd.DataFrame:
-    if isinstance(obj, pd.DataFrame):
-        return obj.copy()
-    if hasattr(obj, "to_pandas"):            # polars
-        return obj.to_pandas()
-    path = Path(obj)
-    if not path.exists():
-        raise FileNotFoundError(f"Missing {what}: {path}. Expected the pre-existing step-2 CSV in ihc_extraction/results/.")
-    return pd.read_csv(path, low_memory=False)
-
-
-def load_oncopanel_ihc(specimen, long) -> pd.DataFrame:
-    """One row per OncoPanel prostate specimen with the outcome flags and its pathology date.
-
-    ``specimen`` / ``long`` are the two step-2 CSVs (paths or frames). Returns ``DFCI_MRN,
-    UNIQUE_SAMPLE_ID, path_matched, specimen_date, collection_date, ihc_any, ne_pos, nepc_like,
-    ihc_phenotype``. Flags are False for unmatched specimens.
+    Pass the long / specimen_all frames, or neither to read them from ``intermediate_dir`` (default:
+    ``ihc_extraction/intermediate``). Non-relevant specimens are kept here (for audit) and dropped in
+    ``build_ihc_frame``.
     """
-    spec = _read(specimen, "OncoPanel specimen IHC table")
-    lng = _read(long, "OncoPanel IHC long table")
-    for df, req, what in ((spec, SPECIMEN_REQUIRED, "specimen"), (lng, LONG_REQUIRED, "long")):
-        missing = [c for c in req if c not in df.columns]
-        if missing:
-            raise ValueError(f"OncoPanel {what} table lacks columns {missing}")
-    if spec[SPECIMEN_ID_COL].isna().any() or spec[SPECIMEN_ID_COL].duplicated().any():
-        raise ValueError(f"Missing or duplicate {SPECIMEN_ID_COL} in the OncoPanel specimen table.")
-
-    out = pd.DataFrame({
-        LOCAL_ID_COL: pd.to_numeric(spec[SOURCE_ID_COL], errors="raise").astype(int),
-        SPECIMEN_ID_COL: spec[SPECIMEN_ID_COL].astype(str),
-        "path_matched": _as_bool(spec["path_matched"], "path_matched"),
-    })
-    # The long table also contains stains (e.g. Ki-67) without a marker-call
-    # column in the specimen CSV. Any lesional stain mention counts.
-    les = lng[lng["target"].astype(str).eq("lesional")].copy()
-    out["ihc_any"] = out["path_matched"] & out[SPECIMEN_ID_COL].isin(les[SPECIMEN_ID_COL].astype(str))
-    out["ne_pos"] = out["path_matched"] & _as_bool(spec["NE_any_pos"], "NE_any_pos").to_numpy()
-    out["nepc_like"] = out["path_matched"] & _as_bool(spec["NEPC_ihc"], "NEPC_ihc").to_numpy()
-    out["ihc_phenotype"] = spec["ihc_phenotype"].to_numpy() if "ihc_phenotype" in spec.columns else None
-    out["collection_date"] = _dates(spec["collection_date"], "collection_date")
-
-    les["specimen_date"] = _dates(les["specimen_date"], "specimen_date")
-    first = les.groupby(les[SPECIMEN_ID_COL].astype(str))["specimen_date"].min()
-    out["specimen_date"] = out[SPECIMEN_ID_COL].map(first)
-    out.loc[~out["path_matched"], "specimen_date"] = pd.NaT
-    if (out["ne_pos"] & ~out["ihc_any"]).any() or (out["nepc_like"] & ~out["ne_pos"]).any():
-        raise ValueError("Inconsistent flags: NE-positive without a stain call, or NEPC-like without NE-positive.")
-    return out
-
-
-def _dates(s: pd.Series, name: str) -> pd.Series:
-    raw = s.astype("string").str.slice(0, 10)
-    parsed = pd.to_datetime(raw, errors="coerce", format="%Y-%m-%d")
-    bad = raw.notna() & raw.str.strip().ne("") & parsed.isna()
-    if bad.any():
-        raise ValueError(f"Unparseable {name} values, e.g. {raw[bad].iloc[0]!r}")
-    return parsed
+    if (long is None) != (spec_all is None):
+        raise ValueError("Pass both long and spec_all, or neither.")
+    if long is None:
+        t = ann.load_intermediates(intermediate_dir)
+        long, spec_all = t["long"], t["spec"]
+    return ann.specimen_annotations(long, spec_all).rename(
+        columns={SOURCE_ID_COL: LOCAL_ID_COL})
 
 
 def load_anchor_dates(path) -> pd.Series:
@@ -193,11 +134,9 @@ def validate_anchor_coverage(scores: pd.DataFrame, anchors: pd.Series):
 
 
 def add_days_from_adt(specimens: pd.DataFrame, anchors: pd.Series) -> pd.DataFrame:
-    """``days_from_adt`` (pathology date) and ``collection_days_from_adt`` (OncoPanel date)."""
+    """``days_from_adt``: pathology specimen date minus the patient's ADT anchor."""
     out = specimens.copy()
-    anchor = out[LOCAL_ID_COL].map(anchors)
-    out["days_from_adt"] = (out["specimen_date"] - anchor).dt.days
-    out["collection_days_from_adt"] = (out["collection_date"] - anchor).dt.days
+    out["days_from_adt"] = (out["specimen_date"] - out[LOCAL_ID_COL].map(anchors)).dt.days
     return out
 
 
@@ -205,14 +144,13 @@ def build_ihc_frame(scores: pd.DataFrame, specimens: pd.DataFrame, landmarks, *,
                     anchors: pd.Series, max_days: int = MAX_FOLLOWUP_DAYS) -> pd.DataFrame:
     """One row per scored patient x landmark with the IHC outcome flags.
 
-    Flags: ``ihc_future``, ``ne_pos_future``, ``nepc_like_future`` (matched specimen dated in
-    (ADT + landmark, ADT + max_days]), ``prior_ne_pos`` (NE-positive specimen dated at or before
-    ADT + landmark), plus attrition: ``unmatched_specimen_future`` (an unmatched sequenced
-    specimen collected in the window) and ``undated_ihc_specimen`` (a stained specimen with no
-    pathology date, never counted).
+    Only ``prostate_relevant`` specimens are used. Flags: ``ihc_future``, ``ne_pos_future``,
+    ``nepc_like_future``, ``ar_low_future`` (specimen dated in (ADT + landmark, ADT + max_days]),
+    ``prior_ne_pos`` / ``prior_ar_low`` (such a specimen dated at or before ADT + landmark), and
+    ``undated_ihc_specimen`` (a relevant stained specimen with no date; never counted).
     """
     validate_anchor_coverage(scores, anchors)
-    s = add_days_from_adt(specimens, anchors)
+    s = add_days_from_adt(specimens[specimens["prostate_relevant"].astype(bool)], anchors)
     undated = set(s.loc[s["ihc_any"] & s["days_from_adt"].isna(), LOCAL_ID_COL].astype(int))
     rows = []
     for lm in landmarks:
@@ -221,20 +159,13 @@ def build_ihc_frame(scores: pd.DataFrame, specimens: pd.DataFrame, landmarks, *,
         d = s["days_from_adt"]
         fut = s[(d > lm) & (d <= max_days)]
         prior = s[d <= lm]
-        cd = s["collection_days_from_adt"]
-        unmatched = s[~s["path_matched"] & (cd > lm) & (cd <= max_days)]
 
         def ids(df):
             return set(df[LOCAL_ID_COL].astype(int))
 
-        flags = {
-            "ihc_future": ids(fut[fut["ihc_any"]]),
-            "ne_pos_future": ids(fut[fut["ne_pos"]]),
-            "nepc_like_future": ids(fut[fut["nepc_like"]]),
-            "prior_ne_pos": ids(prior[prior["ne_pos"]]),
-            "unmatched_specimen_future": ids(unmatched),
-            "undated_ihc_specimen": undated,
-        }
+        flags = {name: ids(fut[fut[col]]) for name, col in SPECIMEN_FLAGS.items()}
+        flags.update({name: ids(prior[prior[col]]) for name, col in PRIOR_FLAGS.items()})
+        flags["undated_ihc_specimen"] = undated
         for name, members in flags.items():
             sc[name] = sc[ID_COL].isin(members).astype(int)
         rows.append(sc)
@@ -245,11 +176,10 @@ def build_ihc_frame(scores: pd.DataFrame, specimens: pd.DataFrame, landmarks, *,
 # LR driver
 # --------------------------------------------------------------------------- #
 def outcome_population(sub: pd.DataFrame, outcome: str) -> pd.DataFrame:
-    if outcome == "ihc_any":
-        return sub
-    if outcome in NE_OUTCOMES:
-        return sub[sub["prior_ne_pos"].eq(0)]
-    raise ValueError(f"Unknown outcome {outcome!r}")
+    if outcome not in PRIOR_EXCLUSION:
+        raise ValueError(f"Unknown outcome {outcome!r}")
+    prior = PRIOR_EXCLUSION[outcome]
+    return sub if prior is None else sub[sub[prior].eq(0)]
 
 
 def _fit_outcome(pop, outcome, tags, *, min_events, n_folds, n_bootstrap, seed):
@@ -287,11 +217,11 @@ def _fit_outcome(pop, outcome, tags, *, min_events, n_folds, n_bootstrap, seed):
 def _counts(sub: pd.DataFrame, tags: dict, n_list) -> dict:
     s = lambda col: int(sub[col].sum())  # noqa: E731
     out = {**tags, "n_cohort_list": n_list, "n_at_risk": len(sub),
-           "n_ihc_future": s("ihc_future"), "n_ne_pos_future": s("ne_pos_future"),
-           "n_nepc_like_future": s("nepc_like_future"), "n_prior_ne_pos": s("prior_ne_pos"),
-           "n_unmatched_specimen_future": s("unmatched_specimen_future"),
+           **{f"n_{col}": s(col) for col in (*SPECIMEN_FLAGS, *PRIOR_FLAGS)},
            "n_undated_ihc_specimen": s("undated_ihc_specimen")}
-    for outcome in NE_OUTCOMES:
+    for outcome, prior in PRIOR_EXCLUSION.items():
+        if prior is None:
+            continue
         pop = outcome_population(sub, outcome)
         out[f"n_{outcome}"] = len(pop)
         out[f"events_{outcome}"] = int(pop[OUTCOMES[outcome]].sum())
@@ -334,19 +264,6 @@ def run_ihc_lr(frame: pd.DataFrame, members: dict, landmarks, *, outcomes=tuple(
     return (*out, predictions.reindex(columns=PREDICTION_COLUMNS))
 
 
-def marker_frequency(specimen) -> pd.DataFrame:
-    """Matched sequenced specimens per marker: stained, positive (or retained), and stained among NE-positive."""
-    spec = _read(specimen, "OncoPanel specimen IHC table")
-    spec = spec[_as_bool(spec["path_matched"], "path_matched")]
-    ne = _as_bool(spec["NE_any_pos"], "NE_any_pos")
-    rows = []
-    for m in (c for c in MARKER_COLUMNS if c in spec.columns):
-        call = spec[m]
-        if call.notna().sum() == 0:
-            continue
-        rows.append({"marker": m, "specimens_stained": int(call.notna().sum()),
-                     "specimens_positive": int(call.isin(["positive", "retained", "discordant"]).sum()),
-                     "stained_among_ne_pos": int((call.notna() & ne).sum())})
-    if not rows:
-        return pd.DataFrame(columns=["marker", "specimens_stained", "specimens_positive", "stained_among_ne_pos"])
-    return pd.DataFrame(rows).sort_values("specimens_stained", ascending=False).reset_index(drop=True)
+def marker_frequency(calls: pd.DataFrame, specimens: pd.DataFrame) -> pd.DataFrame:
+    """Prostate-relevant specimens per marker: stained, positive, negative, discordant, stained among NE-positive."""
+    return ann.marker_frequency(calls, specimens.rename(columns={LOCAL_ID_COL: SOURCE_ID_COL}))

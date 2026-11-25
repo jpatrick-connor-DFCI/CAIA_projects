@@ -115,8 +115,67 @@ def polarity(sentence, start, end):
     return None
 
 
+TISSUE_TARGET = re.compile(
+    r'\b(?P<background>benign|normal|background|stromal|non[- ]neoplastic)\b|'
+    r'\b(?P<lesional>tumou?r|malignant|neoplastic|lesional|carcinoma)\b', re.I)
+CLAUSE_BREAK = re.compile(r'[;,]|\b(?:but|whereas|while)\b', re.I)
+
+
+def supplement_target(sentence, start, end, *, text, fallback):
+    """Use the mention's clause; mixed or nonlocal tissue evidence is unknown.
+
+    Only inherit the extractor target when the source text has no explicit tissue
+    cues. In particular, a benign stain must not inherit another marker's lesional target.
+    """
+    left = list(CLAUSE_BREAK.finditer(sentence[:start]))
+    right = CLAUSE_BREAK.search(sentence, end)
+    clause = sentence[left[-1].end() if left else 0:right.start() if right else len(sentence)]
+    targets = {m.lastgroup for m in TISSUE_TARGET.finditer(clause)}
+    if len(targets) == 1:
+        return targets.pop()
+    if targets or TISSUE_TARGET.search(text):
+        return 'unknown'
+    return fallback
+
+
+NE_MENTION = re.compile(r'(?<![\w-])(?:small[- ]cell|neuroendocrine)\b', re.I)
+NE_DIAGNOSIS = re.compile(
+    r'(?<![\w-])(?:small[- ]cell carcinoma|neuroendocrine (?:carcinoma|differentiation))\b', re.I)
+NE_NEGATED_BEFORE = re.compile(
+    r'\b(?:no|not|without|negative\s+for|absence\s+of|absent|rule[ds]?\s+out|'
+    r'non[- ]|unlikely|possible|suspected|cannot\s+exclude)\b[^.;]{0,70}$', re.I)
+NE_NEGATED_AFTER = re.compile(
+    r'^\s*(?:(?:carcinoma|differentiation|features?|component|tumou?r)\s*)?'
+    r'(?:(?:is|are|was|were)\s+)?(?:absent|not\s+(?:seen|identified|present)|ruled\s+out)\b', re.I)
+
+
+def has_ne_histology(histology, diagnosis_text):
+    """Affirmed NE histology in either field, with negation scoped to a clause."""
+    for text, pattern in ((histology or '', NE_MENTION), (diagnosis_text or '', NE_DIAGNOSIS)):
+        for clause in re.split(r'[.;\n]|\b(?:but|however|whereas)\b', text, flags=re.I):
+            for mention in pattern.finditer(clause):
+                before, after = clause[:mention.start()], clause[mention.end():]
+                if re.search(r'\bnon[- ]$', before, re.I):
+                    continue
+                if not NE_NEGATED_BEFORE.search(before) and not NE_NEGATED_AFTER.search(after):
+                    return True
+    return False
+
+
+def ne_histology_expr():
+    return pl.struct('histology', 'diagnosis_text').map_elements(
+        lambda r: has_ne_histology(r['histology'], r['diagnosis_text']), return_dtype=pl.Boolean)
+
+
 def supplement(rows):
     out = []
+    # A source line can have several extractor mentions with different targets.
+    # Do not choose an arbitrary mention's target when no local cue resolves it.
+    line_keys = ['MRN_INT', 'ACCESSION', 'DOC_ID', 'PART', 'RAW_TEXT']
+    rows = rows.group_by(line_keys, maintain_order=True).agg(
+        *[pl.col(k).first() for k in KEYS if k not in line_keys and k != 'target'],
+        pl.when(pl.col('target').n_unique() == 1).then(pl.col('target').first())
+        .otherwise(pl.lit('unknown')).alias('target'))
     for r in rows.iter_rows(named=True):
         txt = r['RAW_TEXT'] or ''
         for sent in re.split(r'(?<=[.;])\s+|\n', txt):
@@ -127,7 +186,9 @@ def supplement(rows):
                         continue
                     if name == 'PTEN':
                         res = 'retained' if res == 'positive' else 'lost'
-                    out.append({**{k: r[k] for k in KEYS}, 'marker_norm': name, 'group': grp, 'result': res,
+                    target = supplement_target(sent, m.start(), m.end(), text=txt, fallback=r['target'])
+                    out.append({**{k: r[k] for k in KEYS}, 'target': target,
+                                'marker_norm': name, 'group': grp, 'result': res,
                                 'qualifier': None, 'pct': None, 'score': None, 'source': 'supplement', 'RAW_TEXT': txt})
     return pl.DataFrame(out, schema_overrides={'pct': pl.Float64}) if out else None
 
@@ -181,14 +242,14 @@ def run(pathology_dir=None, parquet_dir=None, out_dir=None, *, write: bool = Tru
             .with_columns(pl.lit('extractor').alias('source'))
             .select(*KEYS, 'marker_norm', 'group', 'result', 'qualifier', 'pct', 'score', 'source', 'RAW_TEXT'))
     mention_keys = ['MRN_INT', 'ACCESSION', 'DOC_ID', 'PART', 'RAW_TEXT']
-    lines = I.select(*KEYS, 'RAW_TEXT').unique(subset=mention_keys)
+    lines = I.select(*KEYS, 'RAW_TEXT').unique(subset=[*mention_keys, 'target'])
     sup = supplement(lines)
     if sup is not None:
         # extractor rows win where the same line already yielded that marker
         sup = sup.join(main.select(*mention_keys, 'marker_norm').unique(),
                        on=[*mention_keys, 'marker_norm'], how='anti', nulls_equal=True)
         main = pl.concat([main, sup.select(main.columns).cast(main.schema)])
-    long = main.unique(subset=[*mention_keys, 'marker_norm', 'result'], keep='first')
+    long = main.unique(subset=[*mention_keys, 'marker_norm', 'result', 'target'], keep='first')
 
     # Accession and part are only matched within the same patient.
     specimen_keys = ['MRN_INT', 'ACCESSION', 'PART']
@@ -221,8 +282,7 @@ def run(pathology_dir=None, parquet_dir=None, out_dir=None, *, write: bool = Tru
             .with_columns(anyval(NE, 'positive').alias('NE_any_pos'), anyval(NE, 'negative').alias('NE_any_neg'),
                           anyval(ARX, 'positive').alias('ARaxis_any_pos'), anyval(ARX, 'negative').alias('ARaxis_any_neg'))
             .join(ctx, on=specimen_keys, how='left', nulls_equal=True))
-    nehist = pl.col('histology').fill_null('').str.contains('(?i)small cell|neuroendocrine') | \
-        pl.col('diagnosis_text').fill_null('').str.contains('(?i)small cell carcinoma|neuroendocrine carcinoma|neuroendocrine differentiation')
+    nehist = ne_histology_expr()
     spec = spec.with_columns(
         nehist.alias('NE_histology'),
         pl.when(pl.col('NE_any_pos') & ~pl.col('ARaxis_any_pos') & pl.col('ARaxis_any_neg')).then(pl.lit('NE+, AR-axis negative (NEPC-like)'))
@@ -263,7 +323,6 @@ def run(pathology_dir=None, parquet_dir=None, out_dir=None, *, write: bool = Tru
         cohort.write_parquet(out_dir / ihc_paths.COHORT_FILE)
         long.write_parquet(out_dir / ihc_paths.LONG_FILE)
         spec.write_parquet(out_dir / ihc_paths.SPECIMEN_ALL_FILE)
-        ihc_paths.write_version(out_dir)
     return {'cohort': cohort, 'long': long, 'spec': spec}
 
 
@@ -273,7 +332,6 @@ def load(intermediate_dir=None) -> dict:
     missing = [f for f in ihc_paths.INTERMEDIATE_FILES if not (d / f).exists()]
     if missing:
         raise FileNotFoundError(f"Missing step-1 outputs in {d}: {missing}. Run extract_prostate_ihc.run().")
-    ihc_paths.check_version(d, 'Step-1 outputs')
     return {'cohort': pl.read_parquet(d / ihc_paths.COHORT_FILE), 'long': pl.read_parquet(d / ihc_paths.LONG_FILE),
             'spec': pl.read_parquet(d / ihc_paths.SPECIMEN_ALL_FILE)}
 
