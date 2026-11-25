@@ -308,3 +308,15 @@ def test_marker_frequency_relevant_only():
     out = il.marker_frequency(il.ann.marker_calls(long), spec).set_index("marker")
     assert out.loc["p63", "specimens_stained"] == 1
     assert out.loc["NKX3.1"].tolist() == [1, 0, 1, 0, 1]
+
+
+def test_load_oncopanel_patients(tmp_path):
+    p = tmp_path / ihc_paths.ONCOPANEL_SPECIMEN_FILE
+    pd.DataFrame({"MRN_INT": [3, 3, 7, None], "UNIQUE_SAMPLE_ID": ["a", "b", "c", "d"],
+                  "path_matched": [True, False, True, False]}).to_csv(p, index=False)
+    assert il.load_oncopanel_patients(p) == {3, 7}          # matched or not; one row per specimen
+    with pytest.raises(FileNotFoundError, match="step-2"):
+        il.load_oncopanel_patients(tmp_path / "missing.csv")
+    pd.DataFrame({"MRN_INT": []}).to_csv(p, index=False)
+    with pytest.raises(ValueError, match="No patients"):
+        il.load_oncopanel_patients(p)

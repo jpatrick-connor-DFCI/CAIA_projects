@@ -19,6 +19,9 @@ ignored. A discordant marker call (positive and negative on the same part) count
 as neither for AR-axis markers.
 No LLM findings are used.
 
+**Population.** Notebook 11 restricts the scored patients to the prostate OncoPanel cohort of the original step-2
+output (``load_oncopanel_patients``); their events can come from any prostate-relevant specimen, sequenced or not.
+
 **Timing.** A specimen is dated by the earliest lesional ``specimen_date`` in the long table. "Future" =
 ADT + landmark < date <= ADT + MAX_FOLLOWUP_DAYS (the models' 10-year cap); the label is "ever during that
 window", not fixed-horizon. Prior IHC excludes no one; a prior NE-positive specimen (at or before ADT +
@@ -100,6 +103,25 @@ def load_ihc_specimens(long=None, spec_all=None, *, intermediate_dir=None) -> pd
         long, spec_all = t["long"], t["spec"]
     return ann.specimen_annotations(long, spec_all).rename(
         columns={SOURCE_ID_COL: LOCAL_ID_COL})
+
+
+def load_oncopanel_patients(path=None) -> set[int]:
+    """Prostate OncoPanel patients: ``MRN_INT`` of the step-2 ``oncopanel_prostate_specimen_ihc.csv``.
+
+    That table has one row per sequenced prostate specimen (``CANCER_TYPE == 'Prostate Cancer'``), matched to a
+    pathology report or not, so its patients are the original scripts' OncoPanel prostate cohort. Only the MRN
+    column is read.
+    """
+    from COMPASS.prostate_ihc import paths as ihc_paths
+    path = path or ihc_paths.default_paths().results_dir / ihc_paths.ONCOPANEL_SPECIMEN_FILE
+    try:
+        mrn = pd.read_csv(path, usecols=[SOURCE_ID_COL])[SOURCE_ID_COL]
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"Missing OncoPanel specimen table {path} (step-2 output).") from exc
+    mrn = pd.to_numeric(mrn.dropna(), errors="raise").astype(int)
+    if mrn.empty:
+        raise ValueError(f"No patients in {path}.")
+    return set(mrn)
 
 
 def load_anchor_dates(path) -> pd.Series:

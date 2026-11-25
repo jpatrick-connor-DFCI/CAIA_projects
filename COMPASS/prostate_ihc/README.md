@@ -52,7 +52,10 @@ rebuilds the LR outcomes from the three pre-existing step-1 intermediates in `ih
 and testing notebook `COMPASS/notebooks/testing/11_prostate_ihc_extraction.ipynb`
 summarises them. `ihc_lr.py` (notebook `text_interpretability/post_landmark/11_LR_for_IHC.ipynb`) uses them:
 - **Specimen** = pathology part (MRN, accession, part) with >=1 lesional stain row, restricted to `prostate_relevant`
-  (evidence tiers 1-4), sequenced or not. The step-2 OncoPanel CSVs are no longer used.
+  (evidence tiers 1-4), sequenced or not.
+- **Population** (default `ONCOPANEL_ONLY = True`): only scored patients in the prostate OncoPanel cohort of the
+  original step-2 output, i.e. the `MRN_INT`s of `results/oncopanel_prostate_specimen_ihc.csv` (the only column read
+  from it). Their events can come from any prostate-relevant specimen above, not just the sequenced one.
 - **Calls** are recomputed per part from the lesional long rows. A discordant NE marker counts as positive; a
   discordant AR-axis marker counts as neither positive nor negative. `prostate_ihc_specimen_all`'s
   `NE_any_pos` / `ARaxis_any_pos` must agree with the recomputed calls except where a marker is discordant (either
