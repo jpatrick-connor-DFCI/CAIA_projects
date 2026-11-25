@@ -6,8 +6,7 @@ Built 2026-11-17. Synthetic data with synthetic identifiers.
 
 ## Results
 
-These are historical counts from the original extraction, before the corrections below. Rerun both
-extraction steps and the LR notebook to regenerate results; these counts have not been recomputed.
+These counts come from the original extraction, which is the logic in this folder.
 
 | Step | Specimens | Patients |
 |---|---|---|
@@ -35,9 +34,8 @@ The specimen table carries every flag needed to apply any of these.
 |---|---|---|
 | `oncopanel_prostate_specimen_ihc.csv` | sequenced specimen (1,095) | SAMPLE_ID, block and matched pathology accession, `path_matched`, OncoPanel diagnosis and `NE_label_oncopanel`, pathology organ / histology, `ihc_phenotype`, flags (`NEPC_ihc`, `amphicrine_ihc`, `NE_stained`, `NE_any_pos`, `ARaxis_any_pos`, `ARaxis_any_neg`, `NE_histology`), Ki-67 %, and one call per marker (see below) |
 | `oncopanel_prostate_ihc_long.csv` | stain mention on a matched report (1,013) | marker, result, qualifier, %, lesional / background target, and `RAW_TEXT`, the source sentence, for checking each call |
-| `extract_prostate_ihc.py` | | Step 1: extracts prostate and NE IHC for patients with registry C61, malignant prostate pathology, or prostate OncoPanel specimens, and writes `intermediate/` |
+| `extract_prostate_ihc.py` | | Step 1: extracts prostate and NE IHC for patients with registry C61 or malignant prostate pathology, and writes `intermediate/` |
 | `oncopanel_ihc.py` | | Step 2: matches OncoPanel specimens to their pathology report and builds the two CSVs in `results/` |
-| `annotations.py` | | Specimen outcome flags (incl. AR-low) rebuilt from `intermediate/`; used by the IHC LR |
 | `paths.py` | | Default input / output locations (cluster layout) and their environment overrides |
 | `intermediate/` | | Step 1 output for all prostate cancer patients and all stained specimens, kept for re-use |
 
@@ -47,32 +45,30 @@ The specimen table carries every flag needed to apply any of these.
 and `PROFILE_DATA/parquet/` (`CDM_SPEC_CON_ids`, `IDM_CARG_DIAGNOSIS`). Override with `COMPASS_IHC_EXTRACTION_ROOT`,
 `PROFILE_PATHOLOGY_EXTRACTS` and `PROFILE_PARQUET_DIR`.
 
-**Pipeline use.** The COMPASS notebooks do not run the extraction code or read any raw data. `annotations.py`
-rebuilds the LR outcomes from the three pre-existing step-1 intermediates in `ihc_extraction/intermediate/`
-and testing notebook `COMPASS/notebooks/testing/11_prostate_ihc_extraction.ipynb`
-summarises them. `ihc_lr.py` (notebook `text_interpretability/post_landmark/11_LR_for_IHC.ipynb`) uses them:
-- **Specimen** = pathology part (MRN, accession, part) with >=1 lesional stain row, restricted to `prostate_relevant`
-  (evidence tiers 1-4), sequenced or not.
-- **Population** (default `ONCOPANEL_ONLY = True`): only scored patients in the prostate OncoPanel cohort of the
-  original step-2 output, i.e. the `MRN_INT`s of `results/oncopanel_prostate_specimen_ihc.csv` (the only column read
-  from it). Their events can come from any prostate-relevant specimen above, not just the sequenced one.
-- **Calls** are recomputed per part from the lesional long rows. A discordant NE marker counts as positive; a
-  discordant AR-axis marker counts as neither positive nor negative. `prostate_ihc_specimen_all`'s
-  `NE_any_pos` / `ARaxis_any_pos` must agree with the recomputed calls except where a marker is discordant (either
-  reading is accepted there), or loading raises. The annotations are therefore the same whichever extraction built the
-  intermediates, as long as the long rows are the same.
-- **Outcomes:** `ihc_any` (Ki-67-only workups count), `ne_pos`, `nepc_like` (NE+, AR axis negative, none positive), and
-  `ar_low` (>=1 AR-axis marker negative, none positive, whatever the NE stains show), dated by the earliest lesional
-  `specimen_date`.
+**Pipeline use.** The COMPASS notebooks do not run this code or read any raw data. Testing notebook
+`COMPASS/notebooks/testing/11_prostate_ihc_extraction.ipynb` and `ihc_lr.py` (notebook
+`text_interpretability/post_landmark/11_LR_for_IHC.ipynb`) read only the two pre-existing step-2 CSVs in
+`ihc_extraction/results/`. The LR outcomes come from matched specimens only, dated by the earliest lesional
+`specimen_date`:
+- `ihc_any`: >=1 lesional row in the long CSV, so Ki-67-only workups count;
+- `ne_pos`: `NE_any_pos`;
+- `nepc_like`: `NEPC_ihc`;
+- `ar_low`: `ARaxis_any_neg & ~ARaxis_any_pos`, i.e. >=1 AR-axis marker negative and none positive, whatever the NE
+  stains show. A prior AR-low specimen excludes the patient from this fit, as a prior NE-positive one does from the
+  two NE fits.
 
-The modules here also contain later corrections (patient-keyed joins, discordant calls as both positive and negative,
-OncoPanel patients in the cohort, supplement-polarity fixes). The extractor also assigns
-supplemental markers their own tissue target and handles negated NE histology in both extraction steps.
-Mixed or nonlocal tissue cues give an `unknown` target and do not contribute lesional calls.
-These corrections are **not reflected in
-the pre-existing intermediates or CSVs**: in those, a discordant NE marker is not NE-positive and supplement calls use the original
-polarity rules. To use them, rerun from the repository root (needs polars >= 1.24), which overwrites `intermediate/`
-and `results/`:
+By default (`ONCOPANEL_ONLY = True`) the LR analyses only scored patients in the prostate OncoPanel cohort, i.e. the
+`MRN_INT`s of `oncopanel_prostate_specimen_ihc.csv`, matched to a report or not.
+
+The two modules are the original scripts, logic unchanged, wrapped in `run()` functions with configurable paths.
+The only additions are guards against an empty supplement re-parse and missing marker columns. So the pre-existing
+CSVs and the counts above are what this code produces. Known limits of the original logic, kept on purpose:
+- the supplement parser reads "staining" / "expression" right after a marker as positive. For example, "PSMA
+  staining is negative" is read as positive, and so is "Loss of PTEN expression";
+- a discordant marker counts as neither positive nor negative in the NE / AR-axis flags;
+- the NE histology flag is a plain text match, so "non-small cell" and negated phrases also match.
+
+To rerun from the repository root (needs polars >= 1.24; this overwrites `intermediate/` and `results/`):
 ```bash
 python -m COMPASS.prostate_ihc.extract_prostate_ihc && python -m COMPASS.prostate_ihc.oncopanel_ihc
 ```

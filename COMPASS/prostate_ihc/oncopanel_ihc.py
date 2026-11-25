@@ -6,6 +6,8 @@ Outputs (``results_dir``):
   oncopanel_prostate_specimen_ihc.csv  one row per sequenced specimen: match status, NE / AR-axis flags, call per marker
   oncopanel_prostate_ihc_long.csv      one row per stain mention on the matched pathology specimens, with source sentence
 
+The original step-2 script (``prostate_ihc/2_oncopanel_ihc.py``), logic unchanged, wrapped in ``run()``.
+
 Run: ``python -m COMPASS.prostate_ihc.oncopanel_ihc`` from the repo root, after step 1.
 """
 from __future__ import annotations
@@ -16,7 +18,6 @@ from pathlib import Path
 import polars as pl
 
 from COMPASS.prostate_ihc import paths as ihc_paths
-from COMPASS.prostate_ihc.extract_prostate_ihc import ne_histology_expr
 
 NE = ['Synaptophysin', 'Chromogranin', 'INSM1', 'CD56']
 ARX = ['AR', 'PSA', 'NKX3.1', 'PSAP', 'PSMA', 'Prostein/P501S']
@@ -53,10 +54,10 @@ def run(parquet_dir=None, pathology_dir=None, intermediate_dir=None, results_dir
     S = pl.concat([S.with_columns(pl.col('ACCESSION').map_elements(key, return_dtype=pl.Utf8).alias('k')),
                    S.with_columns(pl.col('OUTSIDE_SPECIMEN_ID').map_elements(key, return_dtype=pl.Utf8).alias('k'))]).drop_nulls('k')
     m = g.join(S.select('MRN_INT', 'k', 'ACCESSION').unique(), on=['MRN_INT', 'k'], how='left')
-    pairs = m.select('MRN_INT', 'UNIQUE_SAMPLE_ID', 'ACCESSION').drop_nulls().unique()
+    pairs = m.select('UNIQUE_SAMPLE_ID', 'ACCESSION').drop_nulls().unique()
 
     # ---- stain-level rows for the matched pathology specimens ----
-    long = (pl.read_parquet(intermediate_dir / ihc_paths.LONG_FILE).join(pairs, on=['MRN_INT', 'ACCESSION'])
+    long = (pl.read_parquet(intermediate_dir / ihc_paths.LONG_FILE).join(pairs, on='ACCESSION')
             .join(g.select('UNIQUE_SAMPLE_ID', 'SAMPLE_ID'), on='UNIQUE_SAMPLE_ID'))
     long_out = long.select(*LONG_COLUMNS).sort('MRN_INT', 'SAMPLE_ID', 'group', 'marker_norm')
 
@@ -75,9 +76,7 @@ def run(parquet_dir=None, pathology_dir=None, intermediate_dir=None, results_dir
 
     def anyv(cols, v):
         cols = has(cols)
-        # A discordant marker has both kinds of evidence; its positive call must
-        # still count for NE positivity and veto an AR-axis-negative phenotype.
-        return pl.any_horizontal([pl.col(c).is_in([v, 'discordant']) for c in cols]).fill_null(False) if cols else pl.lit(False)
+        return pl.any_horizontal([pl.col(c) == v for c in cols]).fill_null(False) if cols else pl.lit(False)
 
     ne_cols = has(NE)
     ne_stained = pl.any_horizontal([pl.col(c).is_not_null() for c in ne_cols]) if ne_cols else pl.lit(False)
@@ -86,10 +85,11 @@ def run(parquet_dir=None, pathology_dir=None, intermediate_dir=None, results_dir
                              anyv(ARX, 'negative').alias('ARaxis_any_neg'))
 
     ctx = (pl.scan_parquet(pathology_dir / 'samples.parquet').filter(pl.col('LATEST_VERSION'))
-           .select('MRN_INT', 'ACCESSION', 'organ', 'histology', pl.col('RAW_TEXT').alias('diagnosis_text')).collect()
-           .join(pairs, on=['MRN_INT', 'ACCESSION']))
+           .select('ACCESSION', 'organ', 'histology', pl.col('RAW_TEXT').alias('diagnosis_text')).collect()
+           .join(pairs, on='ACCESSION'))
     nehist = ctx.group_by('UNIQUE_SAMPLE_ID').agg(
-        ne_histology_expr().any().alias('NE_histology'),
+        (pl.col('histology').fill_null('').str.contains('(?i)small cell|neuroendocrine')
+         | pl.col('diagnosis_text').fill_null('').str.contains('(?i)small cell carcinoma|neuroendocrine carcinoma|neuroendocrine differentiation')).any().alias('NE_histology'),
         pl.col('organ').drop_nulls().unique().sort().str.join('; ').alias('path_organs'),
         pl.col('histology').drop_nulls().unique().sort().str.join('; ').alias('path_histologies'))
 

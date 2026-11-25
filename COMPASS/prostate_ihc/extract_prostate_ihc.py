@@ -1,8 +1,11 @@
 """IHC calls for prostate cancer patients (for the neuroendocrine prostate cancer project).
 
+This is the original step-1 script (``prostate_ihc/1_extract_prostate_ihc.py``), logic unchanged, wrapped in ``run()``
+so paths come from ``paths.default_paths``. The only additions are guards for an empty supplement re-parse and for
+marker groups with no stained column, where the script would otherwise crash.
+
 Cohort  = registry prostate primary (IDM_CARG_DIAGNOSIS SITE_CD C61*)  OR  a pathology specimen part with
-          organ == prostate, category == malignant and non-urothelial / non-heme histology,
-          OR an OncoPanel specimen with CANCER_TYPE == 'Prostate Cancer'.
+          organ == prostate, category == malignant and non-urothelial / non-heme histology.
 Markers = prostate lineage / AR axis, neuroendocrine, tumour suppressor, basal-cell and proliferation stains,
           taken from pathology_extracts/ihc.parquet (rule-based extraction), plus a supplementary re-parse of the
           same source lines for AMACR / PSMA / PTEN / spelled-out PSA, which the extractor does not name.
@@ -11,7 +14,7 @@ Step 1 of 2. Intermediate outputs (``intermediate_dir``), read by ``oncopanel_ih
   prostate_ihc_specimen_all.parquet  one row per specimen part: call per marker, NE / AR-axis phenotype, prostate_evidence
   prostate_cohort.parquet            cohort patients with source flags and first prostate diagnosis date
 
-Run: ``python -m COMPASS.prostate_ihc.extract_prostate_ihc`` from the repo root (paths from ``paths.default_paths``).
+Run: ``python -m COMPASS.prostate_ihc.extract_prostate_ihc`` from the repo root.
 """
 from __future__ import annotations
 
@@ -42,43 +45,10 @@ SUPP = {  # re-parsed from RAW_TEXT: regex -> (normalised name, group)
     r'\bPTEN\b': ('PTEN', 'tumour suppressor'),
     r'prostate[- ]specific antigen': ('PSA', 'AR axis'),
 }
-POS = r'positiv\w*|express(?:es|ed|ing)?\b|retained|intact|reactive'
-# Consume the entire negated assay phrase so a later "expression of" cannot
-# override it. Limit intervening words to assay modifiers, not other markers.
-ASSAY_MODIFIERS = (r'(?:(?:significant|detectable|convincing|appreciable|definite|any|'
-                   r'nuclear|cytoplasmic|membranous|protein|tumou?r|cell|strong|weak|focal|diffuse)\s+)*')
-NEG = (rf'\b(?:(?:loss|lack|absence)\s+of|no|without)\s+{ASSAY_MODIFIERS}'
-       rf'(?:staining|expression)\b(?:\s+of\b)?|negativ\w*|lost|loss|absent|non-?reactive|'
-       rf'not\s+{ASSAY_MODIFIERS}(?:express\w*|stain\w*)')
-# Before the marker, verbal stain / expression phrases are positive ("strong expression of PSMA", "stained by AMACR");
-# after it they only name the assay ("PSMA staining is negative"), so FOLLOW needs a polarity word.
-# ``spos`` phrases assert staining but are not result words; ``pos`` / ``neg`` are.
-STAIN_PHRASE = r'\bexpression of\b|\bstained\b(?:\s+(?:for|with|by)\b)?|\bstains?\s+(?:positively\s+)?(?:for|with)\b'
-POS_BEFORE = rf'{POS}|{STAIN_PHRASE}'
-POL = re.compile(rf'(?P<neg>{NEG})|(?P<pos>{POS})|(?P<spos>{STAIN_PHRASE})', re.I)
-# Between a result word and its own marker only assay wording may intervene ("positive staining for AMACR").
-OWN_RESULT_GAP = re.compile(r'^\s*(?:(?:immuno)?(?:staining|stains?|stained|expression)\s+)?'
-                            r'(?:(?:for|of|with|by)\s+)?(?:the\s+)?$', re.I)
-# "Staining" and "expression" name the assay, not its polarity.
-FOLLOW = re.compile(
-    rf'^\s*(?:\([^)]*\))?\s*[:\-–(]?\s*'
-    rf'(?:(?:stains?|stained|staining|expression)\b\s*)?'
-    rf'(?:(?:is|are|was|were|shows?)\b\s*)?'
-    rf'(?:(?P<neg>{NEG})|(?P<pos>{POS}))'
-    # Accept "stains" as a verb only with an observed cellular/tissue object.
-    rf'|^\s*(?P<vpos>stains\s+(?:(?:the|these|both|and|benign|malignant|tumou?r|'
-    rf'neoplastic|lesional|epithelial|strongly|weakly|diffusely|focally)\s+)*'
-    rf'(?:cells|glands|tissue)\b)', re.I)
-# Optionally skip a coordinated marker list first ("PSMA and AMACR were ordered", "PSMA, AMACR, results to follow").
-MARKER_LIST = r'(?:\s*(?:,|/|&|\band\b|\bor\b)\s*(?:(?:and|or)\s+)?[\w.+/-]+){0,4}'
-UNRESULTED_AFTER = re.compile(
-    rf'^{MARKER_LIST}\s*(?:(?:stains?|staining|expression|immunostains?)\s*)?'
-    r'(?:(?:(?:is|are|was|were|has|have|had|been|being)\s+)*'
-    r'(?:will|would|may|might|can|could|should|pending|planned|ordered|requested|recommended|performed|done)\b'
-    r'|[,:;(]?\s*(?:results?\s+)?(?:to\s+follow|pending|forthcoming)\b)', re.I)
-UNRESULTED_BEFORE = re.compile(
-    r'\b(?:pending|planned|order(?:ed)?|request(?:ed)?|recommend(?:ed)?)\s+'
-    r'(?:(?:an?|the|additional)\s+)?(?:(?:stains?|staining)\s+for\s+)?$', re.I)
+POS = r'positiv\w*|express\w*|retained|intact|reactive|stain(?:s|ed|ing)?\b'
+NEG = r'negativ\w*|lost|loss|absent|non-?reactive|not (?:express\w*|stain\w*)|no (?:staining|expression)'
+POL = re.compile(rf'(?P<neg>{NEG})|(?P<pos>{POS})', re.I)
+FOLLOW = re.compile(rf'^\s*(?:\([^)]*\))?\s*[:\-–(]?\s*(?:is|are|was|were|shows?)?\s*(?:(?P<neg>{NEG})|(?P<pos>{POS}))', re.I)
 
 NONPROS = 'urothelial|lymphoma|leukemia|myelo|ductal carcinoma|melanoma|squamous'
 KEYS = ['MRN_INT', 'DFCI_MRN', 'ACCESSION', 'PART', 'SPEC_DATE', 'OUTSIDE_SPECIMEN_DATE', 'RPT_DATE', 'DOC_ID', 'method', 'target']
@@ -96,86 +66,17 @@ MARKER_ORDER = ['AR', 'PSA', 'NKX3.1', 'PSAP', 'PSMA', 'Prostein/P501S', 'ERG', 
 
 def polarity(sentence, start, end):
     """Result for a marker mention at [start, end): a polarity word right after it, else the last one before it."""
-    if UNRESULTED_BEFORE.search(sentence[:start]):
-        return None
     m = FOLLOW.match(sentence[end:end + 40])
     if m:
         return 'negative' if m.group('neg') else 'positive'
     prev = [p for p in POL.finditer(sentence[:start])]
-    last = prev[-1] if prev else None
-    # Do not borrow another marker's earlier result for an unresulted assay; a result word that belongs to this
-    # marker ("positive staining for AMACR was performed") still counts.
-    if UNRESULTED_AFTER.match(sentence[end:]):
-        own = (last is not None and (last.group('neg') or last.group('pos'))
-               and OWN_RESULT_GAP.match(sentence[last.end():start]))
-        if not own:
-            return None
-    if last is not None:
-        return 'negative' if last.group('neg') else 'positive'
+    if prev:
+        return 'negative' if prev[-1].group('neg') else 'positive'
     return None
-
-
-TISSUE_TARGET = re.compile(
-    r'\b(?P<background>benign|normal|background|stromal|non[- ]neoplastic)\b|'
-    r'\b(?P<lesional>tumou?r|malignant|neoplastic|lesional|carcinoma)\b', re.I)
-CLAUSE_BREAK = re.compile(r'[;,]|\b(?:but|whereas|while)\b', re.I)
-
-
-def supplement_target(sentence, start, end, *, text, fallback):
-    """Use the mention's clause; mixed or nonlocal tissue evidence is unknown.
-
-    Only inherit the extractor target when the source text has no explicit tissue
-    cues. In particular, a benign stain must not inherit another marker's lesional target.
-    """
-    left = list(CLAUSE_BREAK.finditer(sentence[:start]))
-    right = CLAUSE_BREAK.search(sentence, end)
-    clause = sentence[left[-1].end() if left else 0:right.start() if right else len(sentence)]
-    targets = {m.lastgroup for m in TISSUE_TARGET.finditer(clause)}
-    if len(targets) == 1:
-        return targets.pop()
-    if targets or TISSUE_TARGET.search(text):
-        return 'unknown'
-    return fallback
-
-
-NE_MENTION = re.compile(r'(?<![\w-])(?:small[- ]cell|neuroendocrine)\b', re.I)
-NE_DIAGNOSIS = re.compile(
-    r'(?<![\w-])(?:small[- ]cell carcinoma|neuroendocrine (?:carcinoma|differentiation))\b', re.I)
-NE_NEGATED_BEFORE = re.compile(
-    r'\b(?:no|not|without|negative\s+for|absence\s+of|absent|rule[ds]?\s+out|'
-    r'non[- ]|unlikely|possible|suspected|cannot\s+exclude)\b[^.;]{0,70}$', re.I)
-NE_NEGATED_AFTER = re.compile(
-    r'^\s*(?:(?:carcinoma|differentiation|features?|component|tumou?r)\s*)?'
-    r'(?:(?:is|are|was|were)\s+)?(?:absent|not\s+(?:seen|identified|present)|ruled\s+out)\b', re.I)
-
-
-def has_ne_histology(histology, diagnosis_text):
-    """Affirmed NE histology in either field, with negation scoped to a clause."""
-    for text, pattern in ((histology or '', NE_MENTION), (diagnosis_text or '', NE_DIAGNOSIS)):
-        for clause in re.split(r'[.;\n]|\b(?:but|however|whereas)\b', text, flags=re.I):
-            for mention in pattern.finditer(clause):
-                before, after = clause[:mention.start()], clause[mention.end():]
-                if re.search(r'\bnon[- ]$', before, re.I):
-                    continue
-                if not NE_NEGATED_BEFORE.search(before) and not NE_NEGATED_AFTER.search(after):
-                    return True
-    return False
-
-
-def ne_histology_expr():
-    return pl.struct('histology', 'diagnosis_text').map_elements(
-        lambda r: has_ne_histology(r['histology'], r['diagnosis_text']), return_dtype=pl.Boolean)
 
 
 def supplement(rows):
     out = []
-    # A source line can have several extractor mentions with different targets.
-    # Do not choose an arbitrary mention's target when no local cue resolves it.
-    line_keys = ['MRN_INT', 'ACCESSION', 'DOC_ID', 'PART', 'RAW_TEXT']
-    rows = rows.group_by(line_keys, maintain_order=True).agg(
-        *[pl.col(k).first() for k in KEYS if k not in line_keys and k != 'target'],
-        pl.when(pl.col('target').n_unique() == 1).then(pl.col('target').first())
-        .otherwise(pl.lit('unknown')).alias('target'))
     for r in rows.iter_rows(named=True):
         txt = r['RAW_TEXT'] or ''
         for sent in re.split(r'(?<=[.;])\s+|\n', txt):
@@ -186,11 +87,17 @@ def supplement(rows):
                         continue
                     if name == 'PTEN':
                         res = 'retained' if res == 'positive' else 'lost'
-                    target = supplement_target(sent, m.start(), m.end(), text=txt, fallback=r['target'])
-                    out.append({**{k: r[k] for k in KEYS}, 'target': target,
-                                'marker_norm': name, 'group': grp, 'result': res,
+                    out.append({**{k: r[k] for k in KEYS}, 'marker_norm': name, 'group': grp, 'result': res,
                                 'qualifier': None, 'pct': None, 'score': None, 'source': 'supplement', 'RAW_TEXT': txt})
     return pl.DataFrame(out, schema_overrides={'pct': pl.Float64}) if out else None
+
+
+def load_samples(pathology_dir):
+    return (pl.scan_parquet(f'{pathology_dir}/samples.parquet').filter(pl.col('LATEST_VERSION'))
+            .select('MRN_INT', 'DFCI_MRN', 'ACCESSION', 'PART', 'SPEC_DATE', 'OUTSIDE_SPECIMEN_DATE', 'site', 'organ',
+                    'procedure', 'category', 'histology', 'metastatic', 'grade_gleason', 'grade_grade_group',
+                    pl.col('RAW_TEXT').alias('diagnosis_text'))
+            .collect())
 
 
 def build_cohort(parquet_dir, S):
@@ -204,58 +111,42 @@ def build_cohort(parquet_dir, S):
                           & ~pl.col('histology').fill_null('').str.contains(NONPROS))
     path_pts = pros_parts.group_by('MRN_INT').agg(
         pl.coalesce('OUTSIDE_SPECIMEN_DATE', 'SPEC_DATE').min().str.slice(0, 10).alias('path_first_prostate_ca'))
-    onco_pts = (pl.scan_parquet(f'{parquet_dir}/CDM_SPEC_CON_ids.parquet')
-                .filter(pl.col('CANCER_TYPE') == 'Prostate Cancer')
-                .select('MRN_INT').unique().collect()
-                .with_columns(pl.lit(True).alias('in_oncopanel')))
     return (reg_pts.join(path_pts, on='MRN_INT', how='full', coalesce=True)
-            .join(onco_pts, on='MRN_INT', how='full', coalesce=True)
             .with_columns(pl.col('registry_dx_date').is_not_null().alias('in_registry'),
-                          pl.col('path_first_prostate_ca').is_not_null().alias('in_pathology'),
-                          pl.col('in_oncopanel').fill_null(False)))
-
-
-def load_samples(pathology_dir):
-    return (pl.scan_parquet(f'{pathology_dir}/samples.parquet').filter(pl.col('LATEST_VERSION'))
-            .select('MRN_INT', 'DFCI_MRN', 'ACCESSION', 'PART', 'SPEC_DATE', 'OUTSIDE_SPECIMEN_DATE', 'site', 'organ',
-                    'procedure', 'category', 'histology', 'metastatic', 'grade_gleason', 'grade_grade_group',
-                    pl.col('RAW_TEXT').alias('diagnosis_text'))
-            .collect())
+                          pl.col('path_first_prostate_ca').is_not_null().alias('in_pathology')))
 
 
 def run(pathology_dir=None, parquet_dir=None, out_dir=None, *, write: bool = True) -> dict:
     """Build the step-1 tables; returns {'cohort', 'long', 'spec'} and writes them to ``out_dir``."""
     d = ihc_paths.default_paths()
-    pathology_dir = Path(pathology_dir or d.pathology_dir)
+    PX = Path(pathology_dir or d.pathology_dir)
     parquet_dir = Path(parquet_dir or d.parquet_dir)
     out_dir = Path(out_dir or d.intermediate_dir)
 
     # ---------------- cohort ----------------
-    S = load_samples(pathology_dir)
+    S = load_samples(PX)
     cohort = build_cohort(parquet_dir, S)
 
     # ---------------- marker rows ----------------
-    I = (pl.scan_parquet(f'{pathology_dir}/ihc.parquet').filter(pl.col('LATEST_VERSION') & (pl.col('method') == 'ihc'))
+    I = (pl.scan_parquet(f'{PX}/ihc.parquet').filter(pl.col('LATEST_VERSION') & (pl.col('method') == 'ihc'))
          .join(cohort.select('MRN_INT').lazy(), on='MRN_INT').collect())
     mp = pl.DataFrame({'marker': list(PANEL), 'marker_norm': [v[0] for v in PANEL.values()], 'group': [v[1] for v in PANEL.values()]})
     main = (I.join(mp, on='marker')
             .with_columns(pl.lit('extractor').alias('source'))
             .select(*KEYS, 'marker_norm', 'group', 'result', 'qualifier', 'pct', 'score', 'source', 'RAW_TEXT'))
-    mention_keys = ['MRN_INT', 'ACCESSION', 'DOC_ID', 'PART', 'RAW_TEXT']
-    lines = I.select(*KEYS, 'RAW_TEXT').unique(subset=[*mention_keys, 'target'])
+    lines = I.select(*KEYS, 'RAW_TEXT').unique(subset=['DOC_ID', 'PART', 'RAW_TEXT'])
     sup = supplement(lines)
     if sup is not None:
         # extractor rows win where the same line already yielded that marker
-        sup = sup.join(main.select(*mention_keys, 'marker_norm').unique(),
-                       on=[*mention_keys, 'marker_norm'], how='anti', nulls_equal=True)
+        sup = sup.join(main.select('DOC_ID', 'PART', 'RAW_TEXT', 'marker_norm').unique(),
+                       on=['DOC_ID', 'PART', 'RAW_TEXT', 'marker_norm'], how='anti', nulls_equal=True)
         main = pl.concat([main, sup.select(main.columns).cast(main.schema)])
-    long = main.unique(subset=[*mention_keys, 'marker_norm', 'result', 'target'], keep='first')
+    long = main.unique(subset=['DOC_ID', 'PART', 'marker_norm', 'result', 'RAW_TEXT'], keep='first')
 
-    # Accession and part are only matched within the same patient.
-    specimen_keys = ['MRN_INT', 'ACCESSION', 'PART']
-    ctx = S.select(*specimen_keys, 'site', 'organ', 'procedure', 'category', 'histology', 'metastatic',
-                   'grade_gleason', 'grade_grade_group', 'diagnosis_text').unique(subset=specimen_keys)
-    long = (long.join(ctx, on=specimen_keys, how='left', nulls_equal=True)
+    # attach specimen context (part-level, else first part of the accession)
+    ctx = S.select('ACCESSION', 'PART', 'site', 'organ', 'procedure', 'category', 'histology', 'metastatic',
+                   'grade_gleason', 'grade_grade_group', 'diagnosis_text').unique(subset=['ACCESSION', 'PART'])
+    long = (long.join(ctx, on=['ACCESSION', 'PART'], how='left', nulls_equal=True)
             .join(cohort.select('MRN_INT', 'registry_dx_date', 'path_first_prostate_ca'), on='MRN_INT', how='left')
             .with_columns(pl.coalesce('OUTSIDE_SPECIMEN_DATE', 'SPEC_DATE').str.slice(0, 10).alias('specimen_date'))
             .sort('MRN_INT', 'specimen_date', 'ACCESSION', 'PART', 'group', 'marker_norm'))
@@ -275,14 +166,14 @@ def run(pathology_dir=None, parquet_dir=None, out_dir=None, *, write: bool = Tru
 
     def anyval(cols, v):
         cols = [c for c in cols if c in wide.columns]
-        # Discordant retains both positive and negative evidence.
-        return pl.any_horizontal([pl.col(c).is_in([v, 'discordant']) for c in cols]).fill_null(False) if cols else pl.lit(False)
+        return pl.any_horizontal([pl.col(c) == v for c in cols]).fill_null(False) if cols else pl.lit(False)
 
     spec = (wide.join(ki, on=['MRN_INT', 'ACCESSION', 'PART'], how='left', nulls_equal=True)
             .with_columns(anyval(NE, 'positive').alias('NE_any_pos'), anyval(NE, 'negative').alias('NE_any_neg'),
                           anyval(ARX, 'positive').alias('ARaxis_any_pos'), anyval(ARX, 'negative').alias('ARaxis_any_neg'))
-            .join(ctx, on=specimen_keys, how='left', nulls_equal=True))
-    nehist = ne_histology_expr()
+            .join(ctx, on=['ACCESSION', 'PART'], how='left', nulls_equal=True))
+    nehist = pl.col('histology').fill_null('').str.contains('(?i)small cell|neuroendocrine') | \
+        pl.col('diagnosis_text').fill_null('').str.contains('(?i)small cell carcinoma|neuroendocrine carcinoma|neuroendocrine differentiation')
     spec = spec.with_columns(
         nehist.alias('NE_histology'),
         pl.when(pl.col('NE_any_pos') & ~pl.col('ARaxis_any_pos') & pl.col('ARaxis_any_neg')).then(pl.lit('NE+, AR-axis negative (NEPC-like)'))
@@ -308,8 +199,8 @@ def run(pathology_dir=None, parquet_dir=None, out_dir=None, *, write: bool = Tru
         .when((pl.col('NE_any_pos') | nehist) & (pl.col('category').fill_null('malignant') == 'malignant')).then(pl.lit('4 NE tumour, origin not stated (review)'))
         .otherwise(pl.lit('unrelated / unclear')).alias('prostate_evidence'))
     spec = (spec.with_columns(pl.col('prostate_evidence').str.contains('^[1-4]').alias('prostate_relevant'))
-            .join(S.select(*specimen_keys, pl.coalesce('OUTSIDE_SPECIMEN_DATE', 'SPEC_DATE').str.slice(0, 10).alias('specimen_date'))
-                  .unique(subset=specimen_keys), on=specimen_keys, how='left', nulls_equal=True)
+            .join(S.select('ACCESSION', 'PART', pl.coalesce('OUTSIDE_SPECIMEN_DATE', 'SPEC_DATE').str.slice(0, 10).alias('specimen_date'))
+                  .unique(subset=['ACCESSION', 'PART']), on=['ACCESSION', 'PART'], how='left', nulls_equal=True)
             .join(cohort.select('MRN_INT', 'registry_dx_date', 'path_first_prostate_ca'), on='MRN_INT', how='left'))
     first = ['MRN_INT', 'ACCESSION', 'PART', 'specimen_date', 'registry_dx_date', 'path_first_prostate_ca', 'site', 'organ',
              'procedure', 'category', 'histology', 'metastatic', 'grade_grade_group', 'prostate_evidence', 'prostate_relevant', 'NE_histology',
@@ -317,6 +208,7 @@ def run(pathology_dir=None, parquet_dir=None, out_dir=None, *, write: bool = Tru
     order = [c for c in MARKER_ORDER if c in spec.columns]
     spec = spec.select(first + order + ['diagnosis_text']).sort('MRN_INT', 'specimen_date', 'ACCESSION', 'PART')
 
+    # ---------------- write ----------------
     cohort = cohort.with_columns(pl.col('MRN_INT').is_in(long['MRN_INT'].unique().implode()).alias('has_panel_ihc'))
     if write:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -343,7 +235,6 @@ def summary_tables(out: dict) -> dict:
     return {
         'cohort': pl.DataFrame({'cohort': [cohort.height], 'registry': [int(cohort['in_registry'].sum())],
                                 'pathology': [int(cohort['in_pathology'].sum())],
-                                'oncopanel': [int(cohort['in_oncopanel'].sum())],
                                 'with_panel_ihc': [int(cohort['has_panel_ihc'].sum())],
                                 'long_rows': [long.height],
                                 'supplement_rows': [int((long['source'] == 'supplement').sum())]}),
